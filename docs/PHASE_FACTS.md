@@ -89,6 +89,11 @@ whole value, so the copy sites (the implementation copy in `ir/clone.rs`, the sp
 pass in metadata handoff, the suspend-impl split) no longer list the tables. A column keyed by
 `FunId` rather than a field of `IrFunction` keeps each function's facts in one value without
 editing every site that builds an `IrFunction`. The later `fn_*` families join it the same way.
+The declared parameter facts (`fn_param_declared_nullable`, `fn_param_annotations`,
+`fn_param_no_infer`, `fn_varargs`, `fn_context_counts`) are one `IrDeclaredParameters` per function
+(`src/ir/declared_parameters.rs`). A pass that reshapes a function's parameters (the inline capture
+transfer, the suspend-impl split) cuts and splices that value through its own operations, so the
+per-parameter lists stay parallel without each site naming them.
 
 Positions come first although types were patched more often, because positions are what the JVM
 line-number work is waiting on: once every node has offsets, kotlinc's line-marking rule is ported

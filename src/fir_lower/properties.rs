@@ -184,6 +184,11 @@ pub(super) fn predeclare_properties(
                     property.id,
                     IrCheckedProperty {
                         declaration,
+                        declaration_source: None,
+                        annotations: index
+                            .declaration_annotations(declaration)
+                            .to_vec()
+                            .into_boxed_slice(),
                         diagnostic_span: None,
                         getter_diagnostic_span: None,
                         setter_diagnostic_span: None,
@@ -1055,7 +1060,7 @@ fn attach_declared_accessor_annotations(ir: &mut IrFile) {
             if let Some(value) = parameters.last_mut() {
                 *value = annotations.setter_parameter;
             }
-            ir.fn_param_annotations.insert(setter, parameters);
+            ir.declared_parameters_mut(setter).annotations = parameters;
         }
     }
 }

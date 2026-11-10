@@ -18,13 +18,15 @@
 //! implementations (`super::super::interface_dispatch`, `super::interface_implementations`).
 //!
 //! **Refusals.** Anything this form does not cover declines by name: a class kind other than an
-//! ordinary class, interface or `object`, a superclass declared in another file, and an override
-//! whose function-type or accessor signature needs a bridge in a class table.
+//! ordinary class, interface or `object`, a superclass declared in another file, and an `invoke`
+//! whose function-type signature needs a bridge in a class table.
 //!
 //! **Bridges.** An override whose representation differs from the base member it overrides
 //! (`Derived : Base<Int>` returning an `i32` where `Base<T>` returns a reference) stands in the
 //! base's slot through a bridge: a function of the base's signature that converts each operand
-//! and dispatches through the override's own slot (see `Slot::Bridge`).
+//! and dispatches through the override's own slot (see `Slot::Bridge`). A property accessor is
+//! bridged the same way (`Slot::AccessorBridge`): `override val value: String` stands in for
+//! `Holder<String?>.value: T & Any`, whose getter answers a reference.
 
 use krusty::fx_hash::HashMap;
 
@@ -34,6 +36,7 @@ use krusty::backend::class_tables::{
     self, AnyMember, NumberedClassTables, Representation, Slot, SlotKey, ANY_SLOTS,
 };
 use krusty::backend::local_properties::RealizedLocalPropertyAccess;
+use krusty::backend::BackendClassifierSource;
 use krusty::fir::{PropertyId, ResolvedPropertyOverrideTarget};
 use krusty::ir::{ClassId, FunId, IrClass, IrExpr, IrFile, IrLocalPropertyLayout};
 use krusty::types::{Ty, TypeName};
@@ -41,8 +44,10 @@ use krusty::types::{Ty, TypeName};
 use super::super::encode::{
     Code, CompositeType, FieldType, HeapType, Module, StorageType, SubType, ValType,
 };
+use super::super::exception_transport::ExceptionTransport;
 use super::super::interface_dispatch::ClassRef;
 use super::super::objects::{immutable, ObjectRoot, ITABLE_FIELD, REFERENCE};
+use super::super::runtime::Runtime;
 use super::lower::{carrier, parameter_carrier, Unsupported, STRING};
 
 mod constructor_prefix;
@@ -55,9 +60,11 @@ mod companion_construction_tests;
 mod constructor_prefix_tests;
 
 /// How the WasmGC form carries values, as the shared tables ask it.
-struct WasmRepresentation;
+struct WasmRepresentation<'a> {
+    classifiers: &'a dyn BackendClassifierSource,
+}
 
-impl Representation for WasmRepresentation {
+impl Representation for WasmRepresentation<'_> {
     fn same(&self, a: Ty, b: Ty) -> bool {
         a == b
             || match (carrier(a), carrier(b)) {
@@ -71,10 +78,34 @@ impl Representation for WasmRepresentation {
     }
 
     /// `kotlin.Enum` is a base no file declares: its `name` and `ordinal` are the `$Enum` struct's
-    /// ([`ObjectRoot::enum_base`]).
+    /// ([`ObjectRoot::enum_base`]). So is a runtime exception class: its message and cause are its
+    /// runtime struct's ([`super::super::exception_transport`]).
     fn owns_base(&self, superclass: TypeName) -> bool {
         superclass == krusty::types::wk::kotlin_enum()
+            || is_runtime_exception(self.classifiers, superclass)
     }
+}
+
+/// Whether `classifier` is a runtime exception class: one whose authenticated declaration gives it
+/// the runtime's Throwable storage.
+pub(super) fn is_runtime_exception(
+    classifiers: &dyn BackendClassifierSource,
+    classifier: TypeName,
+) -> bool {
+    classifiers
+        .classifier(classifier)
+        .is_some_and(|fact| fact.runtime_exception.is_some())
+}
+
+/// The base no file declares that a class's struct extends, through its superclasses of this file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OwnedBase {
+    /// `kotlin.Any`: only the dispatch table.
+    None,
+    /// `kotlin.Enum`: `$Enum`'s `name` and `ordinal`.
+    Enum,
+    /// A runtime exception class, by its runtime struct: its message and cause.
+    Exception(u32),
 }
 
 /// A synthesized property accessor a table slot holds: the field it reads or writes.
@@ -85,14 +116,63 @@ pub(super) struct Accessor {
     pub(super) setter: bool,
 }
 
-/// A representation bridge a table slot holds (see [`Slot::Bridge`]): `class` is the class that
-/// introduced it, whose table type every receiver reaching the bridge has.
+/// A representation bridge a table slot holds (see [`Slot::Bridge`] and [`Slot::AccessorBridge`]):
+/// `class` is the class that introduced it, whose table type every receiver reaching the bridge
+/// has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct OverrideBridge {
     pub(super) class: ClassId,
-    pub(super) declared: FunId,
-    pub(super) target_slot: Option<u32>,
-    pub(super) target: FunId,
+    pub(super) member: BridgedMember,
+}
+
+/// The member a bridge wears the base's signature of, and where it forwards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum BridgedMember {
+    /// A method: the base method `declared`, forwarded through `target_slot` (see
+    /// [`Slot::Bridge`]) to `target`.
+    Method {
+        declared: FunId,
+        target_slot: Option<u32>,
+        target: FunId,
+    },
+    /// A property accessor: the property type as the base declares it and as the implementation
+    /// has it, forwarded through `target_slot` (see [`Slot::AccessorBridge`]).
+    Accessor {
+        declared: Ty,
+        implemented: Ty,
+        setter: bool,
+        target_slot: u32,
+    },
+}
+
+impl BridgedMember {
+    /// The bridge `entry` stands for, or `None` for an entry that is not one this form carries.
+    fn of(entry: &Slot) -> Option<Self> {
+        match *entry {
+            Slot::Bridge {
+                declared,
+                target_slot,
+                target,
+            } => Some(Self::Method {
+                declared,
+                target_slot,
+                target,
+            }),
+            Slot::AccessorBridge {
+                declared,
+                implemented,
+                receiver: None,
+                setter,
+                target_slot,
+            } => Some(Self::Accessor {
+                declared,
+                implemented,
+                setter,
+                target_slot,
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// The lazily constructed instance of an `object` declaration.
@@ -140,9 +220,9 @@ pub(super) struct FileClasses {
     pub(super) bridges: Vec<(OverrideBridge, u32, u32)>,
     /// The checked property each realized member read or write (by expression) selected.
     properties: HashMap<u32, PropertyId>,
-    /// Whether each class extends `kotlin.Enum`, itself or through a superclass of this file, so
-    /// its struct leads with `$Enum`'s two fields.
-    enum_rooted: Vec<bool>,
+    /// The base no file declares that each class extends, itself or through a superclass of this
+    /// file, whose fields lead its struct after the dispatch table.
+    bases: Vec<OwnedBase>,
 }
 
 impl FileClasses {
@@ -160,12 +240,26 @@ impl FileClasses {
     }
 
     /// How many fields of `class`'s struct, after the dispatch table, a base no file declares
-    /// contributes: `kotlin.Enum`'s `name` and `ordinal`.
+    /// contributes: `kotlin.Enum`'s `name` and `ordinal`, or a runtime exception's message and
+    /// cause.
     pub(super) fn base_fields(&self, class: ClassId) -> u32 {
-        if self.enum_rooted[class as usize] {
-            ENUM_BASE_FIELDS
-        } else {
-            0
+        match self.bases[class as usize] {
+            OwnedBase::None => 0,
+            OwnedBase::Enum => ENUM_BASE_FIELDS,
+            OwnedBase::Exception(_) => EXCEPTION_BASE_FIELDS,
+        }
+    }
+
+    /// Whether `class`'s struct extends `kotlin.Enum`'s.
+    pub(super) fn is_enum_rooted(&self, class: ClassId) -> bool {
+        self.bases[class as usize] == OwnedBase::Enum
+    }
+
+    /// The runtime exception struct `class`'s struct extends, if it extends one.
+    pub(super) fn exception_base(&self, class: ClassId) -> Option<u32> {
+        match self.bases[class as usize] {
+            OwnedBase::Exception(structure) => Some(structure),
+            OwnedBase::None | OwnedBase::Enum => None,
         }
     }
 
@@ -185,6 +279,9 @@ impl FileClasses {
 /// `kotlin.Enum`'s `name` and `ordinal`: fields 1 and 2 of `$Enum`.
 pub(super) const ENUM_BASE_FIELDS: u32 = 2;
 
+/// A runtime exception's message and cause: fields 1 and 2 of its runtime struct.
+const EXCEPTION_BASE_FIELDS: u32 = 2;
+
 /// The wasm signature of a method of the file: the receiver, then its parameters.
 pub(super) fn method_type(
     module: &mut Module,
@@ -203,10 +300,24 @@ pub(super) fn method_type(
     Ok(module.func_type(params, results))
 }
 
+/// The function type of an accessor of a property of type `ty`, as a class table carries it: the
+/// receiver, then the value a setter takes; a getter answers the value.
+fn accessor_type(module: &mut Module, ty: Ty, setter: bool) -> Result<u32, Unsupported> {
+    let value = carrier(ty)?.ok_or_else(|| "a `Unit` property".to_string())?;
+    Ok(if setter {
+        module.func_type(vec![REFERENCE, value], Vec::new())
+    } else {
+        module.func_type(vec![REFERENCE], vec![value])
+    })
+}
+
 /// The module-wide numbering of the interface members of `classes`, as every file of the module
 /// reads it.
-pub(super) fn module_plan(classes: &ModuleClasses) -> ModuleSlotPlan {
-    ModuleSlotPlan::interfaces_only(classes, &WasmRepresentation)
+pub(super) fn module_plan(
+    classes: &ModuleClasses,
+    classifiers: &dyn BackendClassifierSource,
+) -> ModuleSlotPlan {
+    ModuleSlotPlan::interfaces_only(classes, &WasmRepresentation { classifiers })
 }
 
 /// Reject, by name, a class this form does not lay out.
@@ -224,8 +335,6 @@ fn check_supported(ir: &IrFile, id: ClassId) -> Result<(), Unsupported> {
         "a callable reference"
     } else if class.lambda.is_some() || class.sam_wrapper.is_some() {
         "a function value's class"
-    } else if class.is_value {
-        "a value class"
     // An inner class's enclosing instance is already an ordinary constructor-prefix argument and
     // field in checked IR, which this object form can carry like every other reference field.
     // Anonymous superclass operands are also ordinary parameters, without capture storage.
@@ -244,6 +353,31 @@ fn check_supported(ir: &IrFile, id: ClassId) -> Result<(), Unsupported> {
     Err(format!("{construct} (`{name}`)"))
 }
 
+/// Reject a class overriding a runtime exception's property. Its message and cause are fields the
+/// runtime reads directly, so an override has no slot that reading would reach.
+fn check_exception_storage(
+    ir: &IrFile,
+    classifiers: &dyn BackendClassifierSource,
+    id: ClassId,
+) -> Result<(), Unsupported> {
+    let class = &ir.classes[id as usize];
+    let overrides = ir
+        .property_overrides
+        .get(&class.fq_name)
+        .is_some_and(|edges| {
+            edges
+                .iter()
+                .any(|edge| is_runtime_exception(classifiers, edge.overridden_owner))
+        });
+    if overrides {
+        return Err(format!(
+            "an override of a runtime exception's property (`{}`)",
+            class.fq_name()
+        ));
+    }
+    Ok(())
+}
+
 /// Whether a body `ir` emits constructs the class named `name`. Orphan expressions and
 /// cloning-only inline templates are not emitted, so a construction there is no obligation.
 fn constructs(ir: &IrFile, name: TypeName) -> bool {
@@ -260,26 +394,39 @@ fn constructs(ir: &IrFile, name: TypeName) -> bool {
 pub(super) fn declare(
     ir: &IrFile,
     module: &mut Module,
-    objects: &mut ObjectRoot,
+    runtime: &mut Runtime,
+    classifiers: &dyn BackendClassifierSource,
     functions: &[Option<u32>],
     properties: &RealizedProperties,
     plan: &ModuleSlotPlan,
 ) -> Result<FileClasses, Unsupported> {
     for class in 0..ir.classes.len() {
         check_supported(ir, class as ClassId)?;
+        check_exception_storage(ir, classifiers, class as ClassId)?;
     }
-    let tables = class_tables::build_numbered(&WasmRepresentation, ir, plan)?;
-    let slot_types = slot_types(ir, module, objects, &tables)?;
+    let tables = class_tables::build_numbered(&WasmRepresentation { classifiers }, ir, plan)?;
+    let slot_types = slot_types(ir, module, &runtime.objects, &tables)?;
 
-    let enum_rooted: Vec<bool> = (0..ir.classes.len())
-        .map(|class| {
-            let mut root = class as ClassId;
-            while let Some(parent) = tables.table(root).superclass {
-                root = parent;
-            }
-            ir.classes[root as usize].superclass == krusty::types::wk::kotlin_enum()
-        })
-        .collect();
+    let mut bases = Vec::with_capacity(ir.classes.len());
+    for class in 0..ir.classes.len() {
+        let mut root = class as ClassId;
+        while let Some(parent) = tables.table(root).superclass {
+            root = parent;
+        }
+        let superclass = ir.classes[root as usize].superclass;
+        bases.push(if superclass == krusty::types::wk::kotlin_enum() {
+            OwnedBase::Enum
+        } else if is_runtime_exception(classifiers, superclass) {
+            OwnedBase::Exception(runtime.exceptions.ensure_class(
+                module,
+                classifiers,
+                superclass,
+            )?)
+        } else {
+            OwnedBase::None
+        });
+    }
+    let objects = &mut runtime.objects;
     let mut forms: Vec<ClassForm> = ir.classes.iter().map(|_| ClassForm::default()).collect();
     for &id in &tables.order {
         let class = &ir.classes[id as usize];
@@ -289,17 +436,19 @@ pub(super) fn declare(
         let table = tables.table(id);
         let parent = table.superclass.map(|parent| &forms[parent as usize]);
         let mut fields = vec![immutable(ValType::reference(objects.any_table))];
-        if enum_rooted[id as usize] {
-            fields.extend([immutable(STRING), immutable(ValType::I32)]);
+        match bases[id as usize] {
+            OwnedBase::None => {}
+            OwnedBase::Enum => fields.extend([immutable(STRING), immutable(ValType::I32)]),
+            OwnedBase::Exception(_) => fields.extend(ExceptionTransport::base_fields(STRING)),
         }
         if let Some(parent) = table.superclass {
             fields.extend(inherited_fields(ir, &tables, parent)?);
         }
         fields.extend(own_fields(class)?);
-        let root = if enum_rooted[id as usize] {
-            objects.enum_base
-        } else {
-            objects.object
+        let root = match bases[id as usize] {
+            OwnedBase::None => objects.object,
+            OwnedBase::Enum => objects.enum_base,
+            OwnedBase::Exception(structure) => structure,
         };
         let structure = module.subtype(SubType {
             composite: CompositeType::Struct(fields),
@@ -382,46 +531,37 @@ pub(super) fn declare(
                     };
                     accessor_function(module, &mut accessors, accessor, ty)
                 }
-                Slot::Bridge {
-                    declared,
-                    target_slot,
-                    target,
-                } => {
-                    let known = bridges.iter().find(|(bridge, ..)| {
-                        bridge.declared == *declared
-                            && bridge.target_slot == *target_slot
-                            && bridge.target == *target
-                    });
-                    match known {
+                Slot::Bridge { .. } | Slot::AccessorBridge { .. } | Slot::FunctionBridge { .. } => {
+                    let member = BridgedMember::of(entry).ok_or_else(|| {
+                        format!(
+                            "an override carried differently from the member it overrides (`{}`)",
+                            class.fq_name()
+                        )
+                    })?;
+                    // The class that introduced the bridge: every receiver reaching this entry
+                    // is an instance of it, so its table type is the one to cast to, whichever
+                    // subclass's table this happens to be built for first. It is part of the
+                    // bridge's identity, because two unrelated hierarchies can bridge accessors
+                    // of the same types at the same slot.
+                    let mut introducer = id;
+                    while let Some(parent) = tables.table(introducer).superclass {
+                        if tables.table(parent).vtable.get(slot) != Some(entry) {
+                            break;
+                        }
+                        introducer = parent;
+                    }
+                    let bridge = OverrideBridge {
+                        class: introducer,
+                        member,
+                    };
+                    match bridges.iter().find(|(known, ..)| *known == bridge) {
                         Some((_, function, _)) => *function,
                         None => {
-                            // The class that introduced the bridge: every receiver reaching this
-                            // entry is an instance of it, so its table type is the one to cast to,
-                            // whichever subclass's table this happens to be built for first.
-                            let mut introducer = id;
-                            while let Some(parent) = tables.table(introducer).superclass {
-                                if tables.table(parent).vtable.get(slot) != Some(entry) {
-                                    break;
-                                }
-                                introducer = parent;
-                            }
                             let function = module.declare();
-                            let bridge = OverrideBridge {
-                                class: introducer,
-                                declared: *declared,
-                                target_slot: *target_slot,
-                                target: *target,
-                            };
                             bridges.push((bridge, function, ty));
                             function
                         }
                     }
-                }
-                Slot::FunctionBridge { .. } | Slot::AccessorBridge { .. } => {
-                    return Err(format!(
-                        "an override carried differently from the member it overrides (`{}`)",
-                        class.fq_name()
-                    ));
                 }
             };
             module.reference_function(function);
@@ -449,7 +589,7 @@ pub(super) fn declare(
             .filter(|access| access.direct_member)
             .map(|access| (access.operation, access.target))
             .collect(),
-        enum_rooted,
+        bases,
     })
 }
 
@@ -572,7 +712,10 @@ fn slot_types(
                     None => None,
                 },
                 Slot::Bridge { declared, .. } => Some(method_type(module, ir, *declared)?),
-                Slot::FunctionBridge { .. } | Slot::AccessorBridge { .. } => None,
+                Slot::AccessorBridge {
+                    declared, setter, ..
+                } => Some(accessor_type(module, *declared, *setter)?),
+                Slot::FunctionBridge { .. } => None,
             };
             own[slot] = ty;
         }
@@ -652,15 +795,7 @@ fn property_key_type(
             if let Some(function) = function {
                 return method_type(module, ir, function);
             }
-            let value = carrier(*ty)?.ok_or_else(|| "a `Unit` property".to_string())?;
-            let mut params = vec![REFERENCE];
-            let results = if setter {
-                params.push(value);
-                Vec::new()
-            } else {
-                vec![value]
-            };
-            return Ok(module.func_type(params, results));
+            return accessor_type(module, *ty, setter);
         }
         Some(IrLocalPropertyLayout::MemberExtension {
             getter,

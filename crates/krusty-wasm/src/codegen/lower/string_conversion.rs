@@ -14,6 +14,9 @@ impl Body<'_> {
             self.string_constant("kotlin.Unit");
             return Ok(());
         }
+        if ty.is_unsigned() {
+            return self.unsigned_string_of(id, ty);
+        }
         let nullable_scalar = match ty.kind() {
             TyKind::Nullable(inner) => self
                 .scalar_string_function(inner)
@@ -44,6 +47,11 @@ impl Body<'_> {
                 self.scalar_string_function(ty).expect("checked above")
             }
             ty if self.class_of_type(ty).is_some() => return self.object_to_string(ty),
+            ty if ty.non_null().obj_internal()
+                == Some(super::super::super::type_objects::ktype()) =>
+            {
+                return self.type_object_to_string(ty)
+            }
             other => {
                 return Err(format!(
                     "a string template part of type `{}`",
@@ -52,6 +60,25 @@ impl Body<'_> {
             }
         };
         self.code.call(function);
+        Ok(())
+    }
+
+    /// Decimal conversion of an exact non-null unsigned scalar, retaining its semantic width.
+    pub(super) fn unsigned_string_of(&mut self, id: u32, source: Ty) -> Result<(), Unsupported> {
+        if !source.is_unsigned() || self.type_of(id)? != Some(source) {
+            return Err(
+                "an unsigned string conversion without its exact non-null scalar source".into(),
+            );
+        }
+        self.expression(id)?;
+        if let Some(mask) = source.unsigned_widen_mask() {
+            self.code.i32_const(mask).op(AND32);
+        }
+        self.code.call(if source == Ty::ULong {
+            self.runtime.string_of_u64
+        } else {
+            self.runtime.string_of_u32
+        });
         Ok(())
     }
 
@@ -77,3 +104,6 @@ impl Body<'_> {
 fn is_unit(ty: Ty) -> bool {
     ty == Ty::Unit || matches!(ty.kind(), TyKind::Obj(name, _) if name == krusty::types::wk::unit())
 }
+
+#[cfg(test)]
+mod tests;

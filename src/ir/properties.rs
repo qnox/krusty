@@ -149,12 +149,24 @@ pub struct IrAccessorLines {
     pub declaration_end: u32,
 }
 
+/// Written declaration coordinates retained before bounded source syntax is released.
+#[derive(Clone, Copy, Debug)]
+pub struct IrPropertyDeclarationSource {
+    pub declaration: crate::diag::Span,
+    pub name: crate::diag::Span,
+    pub keyword: crate::diag::Span,
+    pub visibility_modifier: Option<crate::diag::Span>,
+}
+
 /// One source property declaration and the checked bodies that realize its language semantics.
 /// Storage and accessor naming remain backend choices; stable property/class identities and final
 /// types are already fixed here.
 #[derive(Clone, Debug)]
 pub struct IrCheckedProperty {
     pub declaration: crate::fir::DeclarationId,
+    pub declaration_source: Option<IrPropertyDeclarationSource>,
+    /// Resolved declaration annotations, including those with binary retention.
+    pub annotations: Box<[TypeName]>,
     /// Exact source name span retained for diagnostics that can only be classified after a backend
     /// has selected the declaration's physical representation.
     pub diagnostic_span: Option<crate::diag::Span>,
@@ -202,6 +214,18 @@ pub struct IrCheckedProperty {
     pub setter_declaration: Option<crate::fir::DeclarationId>,
     pub getter_inline: bool,
     pub setter_inline: bool,
+}
+
+impl IrCheckedProperty {
+    /// Whether this is the checked result property synthesized for a script.
+    pub(crate) fn is_script_result(&self) -> bool {
+        self.flags.has(crate::fir::DeclarationFlags::SCRIPT_RESULT)
+    }
+
+    /// Whether the checked declaration is a mutable property.
+    pub(crate) fn is_mutable(&self) -> bool {
+        self.flags.has(crate::fir::DeclarationFlags::MUTABLE)
+    }
 }
 
 /// A property a class DECLARES. A property is a declaration, not a pair of methods: `val a: Int` is one

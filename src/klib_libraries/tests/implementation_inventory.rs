@@ -347,7 +347,7 @@ pub(super) fn libraries(
 ) -> KlibLibraries {
     let bodies = super::super::KlibDeclarationBodies::from_libraries(bodies)
         .expect("the fixture body modules have unique exact identities");
-    KlibLibraries::over_with_bodies(Rc::new(inventory), Rc::new(bodies))
+    KlibLibraries::over_with_bodies(Rc::new(inventory), bodies)
 }
 
 pub(super) fn declaration_tree(
@@ -1082,11 +1082,10 @@ fn prepared_inline_filter_keeps_an_associated_member_signature() {
     let [associated] = classifier.associated_functions.as_slice() else {
         panic!("one associated member must be signed")
     };
-    let signature = KlibIrSignature::Public(associated.signature.clone());
-
     assert!(inventory
         .inline_body_selection()
-        .contains(module, &signature));
+        .of_module(module)
+        .contains(&associated.signature));
 }
 
 #[test]

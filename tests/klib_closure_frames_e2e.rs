@@ -74,6 +74,18 @@ fn official_receiver_captures_preserve_values_and_once_only_inputs() {
 }
 
 #[test]
+fn official_inline_objects_read_their_captured_parameter_reified_type_and_lambda() {
+    let library = include_str!("fixtures/klib_closure_frames/InlineObject.kt");
+    let consumer = include_str!("fixtures/klib_closure_frames/InlineObjectConsumer.kt");
+    assert_official_dependency_closures(
+        library,
+        consumer,
+        "SerializedInlineObject",
+        DependencyConsumer::Native,
+    );
+}
+
+#[test]
 fn official_dependency_closures_preserve_nested_values_and_once_only_operands() {
     assert_official_dependency_closures(
         LIBRARY,
@@ -146,6 +158,49 @@ fn dependency_class_storage_is_independent_of_constructor_parameters() {
         include_str!("fixtures/klib_dependency_classes/InitializedConsumer.kt"),
         "ImportedClassLayout",
         DependencyConsumer::InitializationLayout,
+    );
+}
+
+// PLATFORM-SPECIFIC: the official producer's generic constructor and callback ABI.
+#[test]
+fn dependency_generic_class_initializers_preserve_declared_carriers() {
+    assert_official_dependency_closures(
+        r#"
+package fixture
+class Generic<T>(seed: T, effect: (T) -> T) {
+    private val stored = effect(seed)
+    init { effect(seed) }
+}
+fun <T> construct(seed: T, effect: (T) -> T): Generic<T> = Generic(seed, effect)
+"#,
+        r#"
+fun box(): String {
+    var intCalls = 0
+    construct(Int.MIN_VALUE) {
+        if (it != Int.MIN_VALUE) throw IllegalStateException("Int carrier")
+        intCalls++
+        it
+    }
+    var longCalls = 0
+    construct(Long.MIN_VALUE) {
+        if (it != Long.MIN_VALUE) throw IllegalStateException("Long carrier")
+        longCalls++
+        it
+    }
+    var text = ""
+    construct("OK") { text += it; it }
+    var nullCalls = 0
+    construct<String?>(null) {
+        if (it != null) throw IllegalStateException("nullable carrier")
+        nullCalls++
+        it
+    }
+    return if (intCalls == 2 && longCalls == 2 && text == "OKOK" && nullCalls == 2)
+        "OK" else "constructor effects"
+}
+"#,
+        "ImportedGenericClassInitialization",
+        DependencyConsumer::Native,
     );
 }
 
@@ -443,19 +498,22 @@ fn assert_official_dependency_closures(
         &purpose,
         || {
             // Establish the portable source behavior before executing a Native dependency consumer.
-            if matches!(purpose, DependencyConsumer::SourceClassifierCollision) {
-                // These are different modules with equal classifier names, not a source redeclaration.
-                let dependency = common::kotlinc_lib_out(&[("Library.kt", library_source)])
-                    .expect("reference compiler required for dependency identity oracle");
-                assert_eq!(
-                    common::kotlinc_box_files_result_with_classpath(
-                        &[("Consumer.kt", &consumer_text)],
-                        "fixture.ConsumerKt",
-                        &[dependency],
-                    ),
-                    "OK"
-                );
-            } else {
+            // kotlinc compiles the dependency and its consumer as separate modules: the runtime
+            // answer every krusty lane must reproduce.
+            let dependency = common::kotlinc_lib_out(&[("Library.kt", library_source)])
+                .expect("reference compiler required for the dependency consumer oracle");
+            assert_eq!(
+                common::kotlinc_box_files_result_with_classpath(
+                    &[("Consumer.kt", &consumer_text)],
+                    "fixture.ConsumerKt",
+                    &[dependency],
+                ),
+                "OK",
+                "{fixture_name}: unexpected kotlinc result"
+            );
+            // Different modules with equal classifier names are not a source redeclaration, so
+            // only the other consumers also run as one krusty source module.
+            if !matches!(purpose, DependencyConsumer::SourceClassifierCollision) {
                 common::expect_box_ok_with_stdlib(
                     &format!("{library_source}\n{consumer}"),
                     &format!("{fixture_name}Oracle"),

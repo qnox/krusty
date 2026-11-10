@@ -173,10 +173,9 @@ invocation separately because each is a separate process with its own wall time.
 unfiltered binary name.
 
 CI builds the conformance test binary and CLI once. Every version in `kotlin-versions` expands into
-independent `jvm`, `native`, and `wasm` matrix rows from those artifacts. GitHub resolves a job's
-producer dependencies before it expands the matrix, so JVM rows use an early scheduler matrix that
-does not wait for the focused KLIB test binaries; Native and Wasm use a second scheduler matrix once
-that target-only artifact is ready. Both matrices execute one YAML-anchored conformance step
+independent `jvm`, `native`, and `wasm` matrix rows from those artifacts. Those rows never wait for the
+ordinary compiler unit test binary: the `klib-implementation-coverage` job builds it and checks every release's exact Native and Wasm stdlib KLIB implementation coverage with
+it (`just klib-implementation-coverage`). One conformance matrix executes one step
 inventory and the same backend-neutral case table. The JVM row runs its box corpus and JVM-owned
 regressions. The Native and Wasm rows run their own box corpora followed by
 their focused non-corpus regressions against the same exact target compiler and KLIB setup, so no
@@ -407,7 +406,7 @@ class-dump: live kotlinc summary cache-miss test=<module>::<case> invocations=<n
 `kotlin_cli_jvm_conformance` (in the `conformance` binary) runs Kotlin's own command-line test
 corpus, `compiler/testData/cli/jvm` at the reference tag, through the krusty binary. `just box-corpus`
 provisions it in the same checkout as the box corpus. CI caches that checkout under a key versioned
-for every input it carries (`box-and-cli-corpus-v1-…`); a cache hit sets `KRUSTY_BOX_CORPUS_OFFLINE=1`,
+for every input it carries (`box-and-cli-corpus-v2-…`); a cache hit sets `KRUSTY_BOX_CORPUS_OFFLINE=1`,
 and `just box-corpus` then fails rather than fetch into an incomplete restored checkout, so adding a
 corpus input means bumping the salt. Each case is an `.args` file and the `.out`
 file kotlinc's `AbstractCliTest` compares against: the normalized stderr followed by the exit code's
@@ -447,6 +446,48 @@ being skipped, so the gate never tests fewer cases than it claims. JDKs are foun
 `JAVA_HOME_<release>_X64` variables `actions/setup-java` exports, and from
 `KRUSTY_JDK_<release>_HOME`, which overrides the rest.
 
+## Bytecode Text Ratchet
+
+`kotlin_bytecode_text_conformance` (in the `conformance` binary) compiles Kotlin's bytecode-text
+corpus, `compiler/testData/codegen/bytecodeText` at the reference tag, with krusty. `just box-corpus`
+checks it out beside the box corpus. Each case's `// <N> <pattern>` lines count a Java regular
+expression over the text ASM's `Textifier` prints for the case's Kotlin classes, as JetBrains'
+`BytecodeTextHandler` does; `// @<path>.class:` narrows the following lines to one class. The text
+and the pattern semantics come from the ASM copy and the JDK the reference distribution runs on,
+through a pooled server (`tests/common/asm_text`), so no request starts a JVM. Applicability and the
+compilation topology are the JVM box lane's, shared with the other bytecode corpora through
+`tests/bytecode_corpus.rs`. The lane reports `<passed>/<applicable>` on stderr.
+
+`tests/bytecode_text_expected_failures/jvm/<version>.txt` lists the cases krusty does not reproduce
+yet; any case joining or leaving it fails. A krusty panic is never an expected failure or a
+not-applicable case: it fails the lane whatever the lists say, and a bless refuses to write while
+any case panicked or could not run. Rewrite it from a full local run:
+
+```sh
+KRUSTY_BLESS_BYTECODE_TEXT_EXPECTATIONS=1 KRUSTY_LANGUAGE_VERSION=<v> \
+  ./run-tests.sh --test conformance kotlin_bytecode_text_conformance -- --nocapture
+```
+
+`KRUSTY_BYTECODE_TEXT_ONLY=<substring>` runs the matching cases and prints each mismatch.
+`tests/bytecode_text_expected_not_applicable/jvm/<version>.txt` lists the cases the reference
+kotlinc does not reproduce through this runner, each group under a comment saying why;
+`the_reference_compiler_reproduces_every_applicable_bytecode_text_case` holds it honest and runs in
+`scripts/conformance-regressions.sh` under `KRUSTY_BYTECODE_REFERENCE_TIMEOUT_SECONDS`. Its
+reference classes come from the box lane's reference-class cache.
+
+## Bytecode Listing Ratchet
+
+`kotlin_bytecode_listing_conformance` compiles `compiler/testData/codegen/bytecodeListing` the same
+way and compares each module's class listing with the case's `.txt`, as JetBrains'
+`BytecodeListingHandler` does: Kotlin classes read without code, sorted by output path, rendered by
+`tests/common/asm_text/BytecodeListing.java` (a port of `BytecodeListingTextCollectingVisitor`)
+under `WITH_SIGNATURES`, `IGNORE_ANNOTATIONS` and `DONT_SORT_DECLARATIONS`, with a `Module:` header
+per module when a case has several. Its inventories are `tests/bytecode_listing_expected_failures`
+and `tests/bytecode_listing_expected_not_applicable`, blessed with
+`KRUSTY_BLESS_BYTECODE_LISTING_EXPECTATIONS=1` and focused with `KRUSTY_BYTECODE_LISTING_ONLY`;
+`the_reference_compiler_reproduces_every_applicable_bytecode_listing_case` runs in
+`scripts/conformance-regressions.sh` beside the bytecode-text one.
+
 ## JVM processes
 
 kotlinc, `javac`, and `java` that the suite runs on every test are pooled. A cache hit does not
@@ -481,12 +522,12 @@ Do not use `--release` for tests. The release build cycle takes longer than it s
 ## Required Check
 
 The `ci` workflow's `ci-and-conformance` job is the single check for master's ruleset to require.
-It needs the independent `lint` and coverage-owning `ci` jobs, both scheduler halves of the shared
-conformance matrix, `build-gradle-plugin`, and the whole `gradle` compatibility matrix. Every
+It needs the independent `lint` and coverage-owning `ci` jobs, the shared conformance matrix,
+`klib-implementation-coverage`, `build-gradle-plugin`, and the whole `gradle` compatibility matrix. Every
 supported Kotlin version has distinct JVM, Native and Wasm conformance
-rows; the maximum-version Native row also runs the focused KLIB decoder, value-class and
-kotlinc-native oracle coverage formerly owned by a standalone job, while `just klib-semantics`
-remains the focused local recipe. One backend-neutral box inventory includes upstream and owned
+rows. The KLIB decoder, value-class and kotlinc-native oracle tests are ordinary e2e and unit tests
+that the `ci` coverage gate runs against the maximum-version Native distribution, while
+`just klib-semantics` remains the focused local recipe. One backend-neutral box inventory includes upstream and owned
 portable regular/multimodule cases in every JVM, Native and Wasm row; directives may not silently
 skip owned cases. Genuinely platform-specific sources live in named target-owned tests with a
 `PLATFORM-SPECIFIC` marker. The JVM row owns JVM regressions; Native
@@ -645,9 +686,10 @@ is compiled once and the cfg(test) harness overlaps the binaries. Nightly rustc 
 job per core (`-Z threads`). The run ends with `coverage: phases` repeating every
 finished phase and `coverage: phase total <seconds>s`, which is wall time from the first phase rather than
 the sum of the rows. The conformance box runner prints the same shape as
-`conformance-run: phase box-conformance <seconds>s`. The shared binary job prints
-`shared-bins: phase conformance-test-binary`, `shared-bins: phase krusty-cli`, and
-`shared-bins: phase krusty-build-tests`. Conformance lanes and Gradle lanes run those binaries. A
+`conformance-run: phase box-conformance <seconds>s`. The conformance producer prints
+`conformance-bin: phase conformance-test-binary`, the KLIB coverage job prints
+`klib-implementation-coverage: phase compiler-unit-tests`, and the tool producer prints `tool-bins: phase krusty-cli` and
+`tool-bins: phase krusty-build-tests`. Conformance lanes and Gradle lanes run those binaries. A
 Gradle lane does not compile krusty.
 
 Performance-relevant harness state:
