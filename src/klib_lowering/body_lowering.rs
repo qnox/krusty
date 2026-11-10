@@ -926,6 +926,12 @@ impl<'a> BodyLowering<'a> {
     /// as a prepared-inline copy passes an erased value to a function parameter's invocation.
     fn declared_operand(&mut self, id: KlibIrExprId, declared: Ty) -> Lowered<ExprId> {
         let lowered = self.expression(id)?;
+        self.declared_lowered(lowered, declared)
+    }
+
+    /// The lowered `lowered` as a value of the declared type `declared`; see
+    /// [`Self::declared_operand`].
+    fn declared_lowered(&mut self, lowered: ExprId, declared: Ty) -> Lowered<ExprId> {
         let actual = self.lowered_type(lowered);
         if is_value_of(actual, declared) {
             return Ok(lowered);

@@ -42,6 +42,63 @@ fn a_body_publishes_each_serialized_default_in_its_parameter_slot() {
     assert_eq!(defaults.iter().flatten().count(), 2);
 }
 
+/// kotlinc's `fun f(a: CharSequence = ", "): CharSequence = a`, the shape of
+/// `joinToString`'s separator: a default of a subtype of the parameter's type is coerced to that
+/// type exactly as a source default is.
+#[test]
+fn a_default_of_a_subtype_is_a_value_of_the_parameter_type() {
+    let fixture = demo(&[("f", &[T::CharSequence], T::CharSequence)], |_, body| {
+        let separator = body.string(", ");
+        body.default(0, separator);
+        let result = body.param(0);
+        Some(vec![body.ret(result)])
+    });
+    let mut unit = DependencyBodyUnit::default();
+    let facts = fixture
+        .callees(&["f"])
+        .with_type_oracle(&StringIsACharSequence);
+    let function = unit
+        .lower_function(fixture.callable("f"), &fixture.bodies, &facts)
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    validated(unit.ir());
+    let source = "fun f(a: CharSequence = \", \"): CharSequence {\n return a\n}\n";
+    assert_eq!(
+        lowered_body(&unit, function),
+        source_body_with_stdlib(source, "f", 1)
+    );
+    let defaults = unit
+        .ir()
+        .param_defaults(function)
+        .expect("the declaration publishes its default")
+        .iter()
+        .map(|default| default.map(|default| render(unit.ir(), default)))
+        .collect::<Vec<_>>();
+    assert_eq!(defaults, source_defaults_with_stdlib(source, "f", 1));
+}
+
+/// A class model in which `String` is a `CharSequence`, and both are `Any`.
+struct StringIsACharSequence;
+
+impl crate::assignable::TypeOracle for StringIsACharSequence {
+    fn direct_supertypes(&self, ty: crate::types::Ty) -> Vec<crate::types::Ty> {
+        if ty == T::String.semantic() {
+            vec![T::CharSequence.semantic(), T::Any.semantic()]
+        } else if ty == T::CharSequence.semantic() {
+            vec![T::Any.semantic()]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn type_param_variance(
+        &self,
+        _: crate::types::TypeName,
+        _: usize,
+    ) -> crate::types::TypeVariance {
+        crate::types::TypeVariance::Invariant
+    }
+}
+
 /// A declaration without a serialized default publishes no defaults at all, as a source one does.
 #[test]
 fn a_body_without_defaults_publishes_none() {
