@@ -375,3 +375,83 @@ fn overflowing_constant_arithmetic_folds_without_a_diagnostic() {
     assert_eq!(krusty, Vec::<String>::new());
     assert_matches_kotlinc("FoldedOverflow", src);
 }
+
+/// A NaN a constant evaluates to keeps the bits its arithmetic produced before Kotlin 2.5, and is
+/// the canonical NaN of its type under 2.5's `NormalizeNaNValuesInConstContext`, at every read of
+/// the constant. Each release's kotlinc and krusty pinned to that release must report the same
+/// raw bits.
+#[test]
+fn a_nan_constant_has_the_bits_its_release_gives_it() {
+    const SOURCE: &str = "const val positiveFloat = 0.0f / 0.0f
+const val negativeFloat = -(0.0f / 0.0f)
+const val positiveDouble = 0.0 / 0.0
+const val negativeDouble = -(0.0 / 0.0)
+fun box(): String = listOf(
+    positiveFloat.toRawBits().toLong(),
+    negativeFloat.toRawBits().toLong(),
+    positiveDouble.toRawBits(),
+    negativeDouble.toRawBits(),
+).joinToString()
+";
+    let canonical = "2143289344, 2143289344, 9221120237041090560, 9221120237041090560";
+    let reference_21 = release_box("2.4.21", "NanConstants", SOURCE);
+    assert_ne!(
+        reference_21.0, canonical,
+        "2.4.21 keeps the arithmetic's NaN bits"
+    );
+    assert_eq!(reference_21.0, reference_21.1, "krusty pinned to 2.4.21");
+    let reference_25 = release_box("2.5.0-Beta2", "NanConstants", SOURCE);
+    assert_eq!(
+        reference_25.0, canonical,
+        "2.5.0-Beta2 normalizes every NaN constant"
+    );
+    assert_eq!(
+        reference_25.0, reference_25.1,
+        "krusty pinned to 2.5.0-Beta2"
+    );
+}
+
+/// `box()`'s answer from `release`'s kotlinc and from krusty pinned to that release, each against
+/// that release's standard library.
+fn release_box(release: &str, stem: &str, source: &str) -> (String, String) {
+    let stdlib = common::kotlinc_lib_for_release(release)
+        .unwrap_or_else(|| panic!("kotlinc {release}"))
+        .join("kotlin-stdlib.jar");
+    let work = common::scratch_dir().expect("allocate a scratch directory");
+    let file = work.join(format!("{stem}.kt"));
+    std::fs::write(&file, source).expect("write the program");
+    let path = |path: &std::path::Path| path.to_string_lossy().into_owned();
+    let reference = work.join("reference");
+    let (code, stderr) = common::kotlinc_compile_for_release(
+        release,
+        &[path(&file), "-d".to_string(), path(&reference)],
+    )
+    .unwrap_or_else(|| panic!("kotlinc {release} is not available"));
+    assert_eq!(code, 0, "kotlinc {release} compiles {stem}: {stderr}");
+    let pinned = work.join("krusty");
+    let krusty = std::process::Command::new(common::krusty_binary())
+        .arg(format!("-Xkotlin-reference-version={release}"))
+        .arg(path(&file))
+        .args(["-no-stdlib", "-cp"])
+        .arg(path(&stdlib))
+        .arg("-d")
+        .arg(path(&pinned))
+        .output()
+        .expect("run krusty");
+    assert!(
+        krusty.status.success(),
+        "krusty pinned to {release} compiles {stem}: {}",
+        String::from_utf8_lossy(&krusty.stderr)
+    );
+    let run = |output: &std::path::Path| {
+        common::run_box(
+            &[],
+            &format!("{stem}Kt"),
+            &[output.to_path_buf(), stdlib.clone()],
+        )
+        .unwrap_or_else(|| panic!("run {stem}Kt.box() from {}", output.display()))
+    };
+    let answers = (run(&reference), run(&pinned));
+    let _ = std::fs::remove_dir_all(&work);
+    answers
+}
