@@ -24,6 +24,10 @@ on:
         description: Build and publish a release of this master commit after the test suite passes
         type: boolean
         default: false
+  # A daily release of master's tip, as if dispatched with `release` on. Cron is UTC: 11:00 UTC is
+  # 12:00 CET, and 13:00 during CEST. A tip that already has its release republishes nothing.
+  schedule:
+    - cron: '0 11 * * *'
 
 permissions:
   contents: read
@@ -1316,12 +1320,12 @@ jobs:
             "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/$kotlin/kotlin-stdlib-$kotlin.jar"
           scripts/bazel-smoke.sh "$PWD/krusty" "$RUNNER_TEMP/kotlin-stdlib.jar"
 
-  # A release is started by hand (`release` input) on a master commit and builds its own immutable
-  # artifacts there, even after master advances. All six platforms build concurrently on their
-  # hosted runners; the queue's own master runs leave them out.
+  # A release is started by hand (`release` input) or by the daily schedule on a master commit and
+  # builds its own immutable artifacts there, even after master advances. All six platforms build
+  # concurrently on their hosted runners; the queue's own master runs leave them out.
   build-release:
     needs: [ci-and-conformance]
-    if: github.ref == 'refs/heads/master' && inputs.release
+    if: github.ref == 'refs/heads/master' && (inputs.release || github.event_name == 'schedule')
     strategy:
       fail-fast: false
       matrix:
