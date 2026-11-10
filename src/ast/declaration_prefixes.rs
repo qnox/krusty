@@ -15,6 +15,8 @@ pub struct DeclarationPrefix {
     /// The first modifier keyword after any annotations, or the declaration's own keyword when it
     /// wrote no modifier. kotlinc starts a diagnostic about the declaration's modifiers here.
     pub start: Span,
+    /// The token following the annotations and modifiers (`val`/`var` for a property).
+    pub keyword: Span,
     /// The visibility modifier the declaration wrote, if any.
     pub visibility: Option<Visibility>,
     /// Where the whole declaration starts, annotations included.

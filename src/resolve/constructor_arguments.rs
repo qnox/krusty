@@ -65,6 +65,40 @@ pub(super) struct ConstructionExpectations {
 }
 
 impl Checker<'_> {
+    /// Report why the only constructor a delegation or entry could reach rejected its arguments.
+    ///
+    /// kotlinc checks `super(...)`, `this(...)`, a class-header base call, and an enum entry's
+    /// arguments like any call: a single candidate whose arguments all map reports each argument
+    /// that does not fit its parameter, at that argument. Returns whether anything was reported,
+    /// so the caller keeps its own diagnostic for a mapping failure or several candidates.
+    pub(super) fn report_single_constructor_argument_mismatches(
+        &mut self,
+        arguments: &CtorDelegationCall,
+        candidates: &[CtorDelegationCandidate],
+        rejected: &[ConstructorCandidateRejection],
+    ) -> bool {
+        let ([_], [rejection]) = (candidates, rejected) else {
+            return false;
+        };
+        let reportable = rejection
+            .mapped_mismatches
+            .iter()
+            .filter(|mismatch| mismatch.actual != Ty::Error && mismatch.expected != Ty::Error)
+            .filter_map(|mismatch| {
+                Some((*arguments.args.get(mismatch.source_argument)?, *mismatch))
+            })
+            .collect::<Vec<_>>();
+        for &(argument, mismatch) in &reportable {
+            self.report_assignability_error(
+                mismatch.expected,
+                mismatch.actual,
+                self.span(argument),
+                "argument",
+            );
+        }
+        !reportable.is_empty()
+    }
+
     pub(super) fn match_ctor_delegation_candidate(
         &self,
         scope: &CheckerScope<'_>,

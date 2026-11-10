@@ -25,6 +25,42 @@ pub(crate) enum UnboundSpecialization {
     UseUpperBound,
 }
 
+/// Where an occurrence's inline bound comes from, which decides whether a non-null bound proves a
+/// written `T & Any`.
+#[derive(Clone, Copy)]
+enum Occurrences {
+    /// Receiver specialization of a member as declared: an occurrence whose bound excludes null
+    /// while its projected binding admits null is a written `T & Any`, because a classifier
+    /// argument is always within its formal's declared bound.
+    Written,
+    /// An inferred call slot: its occurrences may carry the declaration-owned formal bound, so a
+    /// non-null bound (`T : Any`) says nothing about a written `& Any`.
+    Declared,
+}
+
+/// How one member-type walk treats unbound formals and non-null occurrences.
+#[derive(Clone, Copy)]
+struct SlotPolicy {
+    unbound: UnboundSpecialization,
+    occurrences: Occurrences,
+}
+
+impl SlotPolicy {
+    const fn written(unbound: UnboundSpecialization) -> Self {
+        Self {
+            unbound,
+            occurrences: Occurrences::Written,
+        }
+    }
+
+    const fn declared(unbound: UnboundSpecialization) -> Self {
+        Self {
+            unbound,
+            occurrences: Occurrences::Declared,
+        }
+    }
+}
+
 /// A capture that closes the value input itself. Nested function/classifier slots retain their
 /// own type-mismatch diagnostics rather than prohibiting the whole source argument.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -201,7 +237,7 @@ fn specialize_member_type_with_unbound(
     ty: Ty,
     bindings: &GSigBinds,
     position: TypePosition,
-    unbound: UnboundSpecialization,
+    policy: SlotPolicy,
     input_projection: &mut Option<InputProjection>,
 ) -> Ty {
     match ty.kind() {
@@ -211,11 +247,13 @@ fn specialize_member_type_with_unbound(
                 .copied()
                 .map(Ty::raw_binding_read)
             else {
-                return match unbound {
+                return match policy.unbound {
                     UnboundSpecialization::Preserve => ty,
                     UnboundSpecialization::UseUpperBound => bound.non_null(),
                 };
             };
+            let narrows_projection = matches!(policy.occurrences, Occurrences::Written)
+                && !bound.upper_bound_admits_null();
             let adjusted = |binding: Ty| {
                 if bound.upper_bound_admits_null() {
                     binding
@@ -227,7 +265,12 @@ fn specialize_member_type_with_unbound(
             match (position, binding.kind()) {
                 // The projection already carries the capture's readable bound. Applying the
                 // declaration bound again would silently narrow the actual capture before a
-                // selected-call or recovery consumer observes its value type.
+                // selected-call or recovery consumer observes its value type; only an occurrence
+                // that excludes null (`T & Any`) reads that bound without its `?`.
+                (
+                    TypePosition::Out,
+                    TyKind::OutProjection(inner) | TyKind::StarProjection(inner),
+                ) if narrows_projection => adjusted(inner),
                 (
                     TypePosition::Out,
                     TyKind::OutProjection(inner) | TyKind::StarProjection(inner),
@@ -242,10 +285,22 @@ fn specialize_member_type_with_unbound(
                 }
                 (TypePosition::Out, TyKind::InProjection(_)) => bound,
                 (TypePosition::In, TyKind::InProjection(inner)) => adjusted(inner),
+                // A classifier argument keeps the projection. An occurrence that excludes null
+                // narrows the bound the projection reads, as kotlinc approximates the capture:
+                // `Box<T & Any>` through `Holder<*>` is `Box<out Any>`.
                 (
                     TypePosition::Invariant,
-                    TyKind::InProjection(_) | TyKind::OutProjection(_) | TyKind::StarProjection(_),
-                ) => binding,
+                    TyKind::OutProjection(inner) | TyKind::StarProjection(inner),
+                ) if narrows_projection && adjusted(inner) != inner => {
+                    Ty::out_projection(adjusted(inner))
+                }
+                (TypePosition::Invariant, TyKind::InProjection(inner)) if narrows_projection => {
+                    Ty::in_projection(adjusted(inner))
+                }
+                (TypePosition::Invariant, TyKind::InProjection(_)) => binding,
+                (TypePosition::Invariant, TyKind::OutProjection(_) | TyKind::StarProjection(_)) => {
+                    binding
+                }
                 _ => adjusted(binding),
             }
         }
@@ -259,7 +314,7 @@ fn specialize_member_type_with_unbound(
                         *parameter,
                         bindings,
                         compose_position(position, crate::types::TypeVariance::In),
-                        unbound,
+                        policy,
                         &mut None,
                     )
                 })
@@ -269,7 +324,7 @@ fn specialize_member_type_with_unbound(
                 signature.ret,
                 bindings,
                 position,
-                unbound,
+                policy,
                 &mut None,
             ),
             signature.context_count,
@@ -281,7 +336,7 @@ fn specialize_member_type_with_unbound(
             inner,
             bindings,
             position,
-            unbound,
+            policy,
             input_projection,
         )),
         TyKind::PlatformNullable(inner) => {
@@ -291,7 +346,7 @@ fn specialize_member_type_with_unbound(
                 declared,
                 bindings,
                 position,
-                unbound,
+                policy,
                 input_projection,
             );
             // A flexible variable is the interval `T..T?`. A nullable binding makes both faces
@@ -310,7 +365,7 @@ fn specialize_member_type_with_unbound(
                 inner,
                 bindings,
                 position,
-                unbound,
+                policy,
                 input_projection,
             ))
         }
@@ -319,7 +374,7 @@ fn specialize_member_type_with_unbound(
             inner,
             bindings,
             compose_position(position, crate::types::TypeVariance::In),
-            unbound,
+            policy,
             &mut None,
         )),
         TyKind::OutProjection(inner) => Ty::out_projection(specialize_member_type_with_unbound(
@@ -327,7 +382,7 @@ fn specialize_member_type_with_unbound(
             inner,
             bindings,
             compose_position(position, crate::types::TypeVariance::Out),
-            unbound,
+            policy,
             &mut None,
         )),
         TyKind::StarProjection(inner) => Ty::star_projection(specialize_member_type_with_unbound(
@@ -335,7 +390,7 @@ fn specialize_member_type_with_unbound(
             inner,
             bindings,
             compose_position(position, crate::types::TypeVariance::Out),
-            unbound,
+            policy,
             &mut None,
         )),
         TyKind::Obj(internal, arguments) if !arguments.is_empty() => {
@@ -366,7 +421,7 @@ fn specialize_member_type_with_unbound(
                             *argument,
                             bindings,
                             argument_position,
-                            unbound,
+                            policy,
                             &mut None,
                         )
                     })
@@ -388,7 +443,7 @@ pub(super) fn specialize_member_type(
         ty,
         bindings,
         position,
-        UnboundSpecialization::Preserve,
+        SlotPolicy::written(UnboundSpecialization::Preserve),
         &mut None,
     )
 }
@@ -473,7 +528,14 @@ fn instantiate_slot_with_input_projection(
             crate::types::ty_with_param_bounds(ty, &bounds)
         }
     });
-    specialize_member_type_with_unbound(source, ty, bindings, position, unbound, input_projection)
+    specialize_member_type_with_unbound(
+        source,
+        ty,
+        bindings,
+        position,
+        SlotPolicy::declared(unbound),
+        input_projection,
+    )
 }
 
 /// Instantiate every value-parameter slot from one semantic declaration signature. Keeping the
@@ -588,7 +650,7 @@ pub(crate) fn specialize_signature_input_type(
         ty,
         bindings,
         TypePosition::In,
-        UnboundSpecialization::Preserve,
+        SlotPolicy::declared(UnboundSpecialization::Preserve),
         &mut None,
     )
 }
@@ -603,7 +665,7 @@ pub(crate) fn specialize_signature_output_type(
         ty,
         bindings,
         TypePosition::Out,
-        UnboundSpecialization::Preserve,
+        SlotPolicy::declared(UnboundSpecialization::Preserve),
         &mut None,
     )
 }
@@ -618,7 +680,7 @@ pub(super) fn specialize_final_signature_output_type(
         ty,
         bindings,
         TypePosition::Out,
-        UnboundSpecialization::UseUpperBound,
+        SlotPolicy::declared(UnboundSpecialization::UseUpperBound),
         &mut None,
     )
 }
@@ -633,7 +695,7 @@ pub(crate) fn specialize_signature_receiver_type(
         ty,
         bindings,
         TypePosition::Invariant,
-        UnboundSpecialization::Preserve,
+        SlotPolicy::declared(UnboundSpecialization::Preserve),
         &mut None,
     )
 }

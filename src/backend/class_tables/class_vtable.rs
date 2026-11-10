@@ -241,7 +241,7 @@ pub(super) fn class_table(
                 None => match &own_key {
                     SlotKey::Getter(target) | SlotKey::Setter(target) => {
                         let setter = matches!(own_key, SlotKey::Setter(..));
-                        let implemented = property_type(ir, *target, &overridden_properties)
+                        let implemented = property_type(ir, class, *target, &overridden_properties)
                             .ok_or_else(|| {
                                 format!(
                                     "a property accessor without a recorded semantic type (`{}.{}`)",
