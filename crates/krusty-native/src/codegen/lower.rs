@@ -2403,7 +2403,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(Some(joined))
     }
 
-    /// One field's contribution to a data class's `hashCode`, which is the field's own `hashCode`.
+    /// One field's contribution to a data class's `hashCode`, which is the field's own `hashCode`,
+    /// except that an ARRAY field contributes its contents' hash, as kotlinc's does.
     ///
     /// Kotlin's answer for each primitive is fixed, and these are those answers rather than
     /// anything this generator is free to choose: a program can print a hash, and two programs
@@ -2418,7 +2419,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             if self.terminated {
                 return Ok(None);
             }
-            return self.runtime_call("kt_hash_code", &[any()], Ty::Int, &[value]);
+            return self.generated_property_hash(value, ty).map(Some);
         }
         let Some(operand) = self.coerce(value, ty)? else {
             return Err("a `Unit` data-class field".into());
@@ -2427,6 +2428,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(None);
         }
         self.value_hash(operand, ty).map(Some)
+    }
+
+    /// The hash a generated `hashCode` takes of a property value already in hand. An array
+    /// property hashes by its CONTENTS (`Arrays.hashCode`, which is `contentHashCode()`), not by
+    /// the array's own identity `hashCode`; every other property hashes as [`Self::value_hash`]
+    /// says. Equality of the same property stays the array's identity.
+    pub(super) fn generated_property_hash(
+        &mut self,
+        operand: Value,
+        ty: Ty,
+    ) -> Result<Value, Unsupported> {
+        if !ty.non_null().is_array() {
+            return self.value_hash(operand, ty);
+        }
+        Ok(self
+            .runtime_call("kt_array_content_hash_code", &[any()], Ty::Int, &[operand])?
+            .expect("`kt_array_content_hash_code` returns an Int"))
     }
 
     /// The hash of a value already in hand, by the same rules.
