@@ -50,6 +50,7 @@ mod object_entries;
 mod objects;
 mod ranges;
 mod references;
+mod reified_templates;
 mod representation;
 mod scope;
 mod statics;
@@ -749,6 +750,7 @@ impl<'a> FileLowering<'a> {
                     finallys: Vec::new(),
                     dead: Vec::new(),
                     unresolved_reified: Vec::new(),
+                    scope: krusty::ir::IrEnclosure::File,
                     frame_objects: krusty::fx_hash::HashMap::default(),
                     frame_fields: krusty::fx_hash::HashMap::default(),
                     enum_base: None,
@@ -845,6 +847,7 @@ impl<'a> FileLowering<'a> {
             ret,
             &name,
             &mut |lowering, params| {
+                lowering.scope = krusty::ir::IrEnclosure::Function(index as krusty::ir::FunId);
                 lowering.record_semantic_slots(&semantic_slots);
                 for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
                     let variable = lowering.declare_value(slot as u32, *ty)?;
@@ -944,6 +947,11 @@ struct BodyLowering<'a, 'b, 'c> {
     /// being emitted. A runtime type operation naming one executes Kotlin's direct-call failure;
     /// ordinary functions and specialized inline copies leave this empty.
     unresolved_reified: Vec<String>,
+    /// The declaration whose body this is, which says whether a runtime type operation on a
+    /// reified parameter belongs to that parameter's own template
+    /// ([`IrFile::is_reified_template_operation`]). A body emitted for no declared function is the
+    /// file's own.
+    scope: krusty::ir::IrEnclosure,
     /// The constructions of this body whose object lives in this frame, each with the local it
     /// initializes; see `frame_objects`.
     frame_objects: krusty::fx_hash::HashMap<u32, u32>,
@@ -1765,21 +1773,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         | IrTypeOp::NotInstanceOf
                         | IrTypeOp::Cast
                         | IrTypeOp::CastNonNull
-                ) && self.unresolved_reified.iter().any(|parameter| {
-                    type_operand
-                        .type_parameter_occurrence_bound(parameter)
-                        .is_some()
-                }) {
+                ) && self.is_unresolved_reified_operation(id, type_operand)
+                {
                     // The operand precedes kotlinc's reified-operation marker and therefore keeps
                     // any side effect or exception it produces before the marker's own failure.
                     let _ = self.expression(arg)?;
                     if self.terminated {
                         return Ok(None);
                     }
-                    let message = self.string_literal(
-                        b"This function has a reified type parameter and thus can only be inlined at compilation time, not called directly.",
-                    )?;
-                    self.raise("kt_type_unsupported_operation_exception", message)
+                    self.reified_direct_call_failure()
                 } else {
                     self.type_operation(
                         op,
