@@ -1,10 +1,10 @@
-//! Download Maven repository jars a project already named.
+//! Download Maven repository jars a parity scan already named.
 //!
 //! A JPS library table records the resolved coordinate as a path under `$MAVEN_REPOSITORY$`. The
-//! corpus resolves the same kind of coordinate from Maven Central. This module fetches that
-//! artifact into the path the library table already names. A jar that is not in that layout, or
-//! whose download fails, stays missing: callers must not treat the classpath as present until the
-//! file exists.
+//! parity command fetches that artifact from Maven Central into the path the library table names.
+//! The editor refresh does not: it runs on the analysis thread. A jar that is not in that layout,
+//! or whose download fails, stays missing. Callers must not treat the classpath as present until
+//! the file exists.
 
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -23,6 +23,46 @@ pub struct RepositoryJar {
 pub struct InstallResult {
     pub installed: usize,
     pub failed: usize,
+}
+
+/// Where a missing Maven-repository jar may be downloaded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepositoryFetch {
+    /// Editor refresh. Missing jars stay missing; nothing is fetched.
+    Editor,
+    /// `krusty-lsp parity`.
+    Parity,
+}
+
+impl RepositoryFetch {
+    /// Install missing repository jars when this is the parity scan.
+    ///
+    /// The editor value returns without reading the local repository or calling out to the network.
+    pub fn fetch_named_jars(self, classpath: &[PathBuf]) -> InstallResult {
+        let repository = match self {
+            Self::Editor => None,
+            Self::Parity => maven_repository_dir(),
+        };
+        fetch_repository_jars(self, classpath, repository.as_deref(), curl_fetch)
+    }
+}
+
+/// Fetch missing repository jars when `site` is [`RepositoryFetch::Parity`].
+///
+/// `Editor` returns before `fetch` is called, even when `repository` names a missing jar.
+fn fetch_repository_jars(
+    site: RepositoryFetch,
+    classpath: &[PathBuf],
+    repository: Option<&Path>,
+    fetch: impl FnMut(&str, &Path) -> io::Result<()>,
+) -> InstallResult {
+    if site != RepositoryFetch::Parity {
+        return InstallResult::default();
+    }
+    let Some(repository) = repository else {
+        return InstallResult::default();
+    };
+    install_missing_repository_jars(classpath, repository, fetch)
 }
 
 pub fn maven_repository_dir() -> Option<PathBuf> {
@@ -124,17 +164,13 @@ pub fn curl_fetch(url: &str, destination: &Path) -> io::Result<()> {
             output.status
         )));
     }
-    std::fs::rename(&temporary, destination).map_err(|error| {
+    std::fs::rename(&temporary, destination).inspect_err(|_| {
         let _ = std::fs::remove_file(&temporary);
-        error
     })
 }
 
 pub fn ensure_maven_repository_jars(classpath: &[PathBuf]) -> InstallResult {
-    let Some(repository) = maven_repository_dir() else {
-        return InstallResult::default();
-    };
-    install_missing_repository_jars(classpath, &repository, curl_fetch)
+    RepositoryFetch::Parity.fetch_named_jars(classpath)
 }
 
 fn artifact_token(value: &str) -> bool {
@@ -242,5 +278,60 @@ mod tests {
             panic!("an installed jar must not be fetched again");
         });
         assert_eq!(again, InstallResult::default());
+    }
+
+    #[test]
+    fn the_editor_fetch_gate_does_not_download_a_missing_jar() {
+        let tree = crate::project::testing::TempTree::new("editor-fetch-gate");
+        let repository = tree.directory("m2");
+        let missing = repository.join("com/example/lib/1.0/lib-1.0.jar");
+        let mut calls = 0;
+        let result = fetch_repository_jars(
+            RepositoryFetch::Editor,
+            std::slice::from_ref(&missing),
+            Some(&repository),
+            |_url, _path| {
+                calls += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(calls, 0);
+        assert_eq!(result, InstallResult::default());
+        assert!(!missing.exists());
+        assert_eq!(
+            RepositoryFetch::Editor.fetch_named_jars(std::slice::from_ref(&missing)),
+            InstallResult::default()
+        );
+    }
+
+    #[test]
+    fn the_parity_fetch_gate_downloads_a_missing_repository_jar() {
+        let tree = crate::project::testing::TempTree::new("parity-fetch-gate");
+        let repository = tree.directory("m2");
+        let missing = repository.join("com/example/lib/1.0/lib-1.0.jar");
+        let mut calls = 0;
+        let result = fetch_repository_jars(
+            RepositoryFetch::Parity,
+            std::slice::from_ref(&missing),
+            Some(&repository),
+            |url, path| {
+                calls += 1;
+                assert!(url.starts_with("https://repo.maven.apache.org/maven2/"));
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(path, url)?;
+                Ok(())
+            },
+        );
+        assert_eq!(calls, 1);
+        assert_eq!(
+            result,
+            InstallResult {
+                installed: 1,
+                failed: 0
+            }
+        );
+        assert!(missing.is_file());
     }
 }

@@ -29,9 +29,9 @@ use project_analysis_group::{
 
 use krusty::source::SourceKind;
 use krusty_lsp::{
-    detect, AnalysisWorker, DocumentAnalysis, DumpResult, DumpTarget, LibraryRef, LspOptions,
-    MaterializedDefinition, ProcessRunner, ProjectFeedback, ProjectMessageKind, ProjectSources,
-    ProjectSync, ProviderKind, RefreshOutcome,
+    detect, detect_for_scan, AnalysisWorker, DocumentAnalysis, DumpResult, DumpTarget, LibraryRef,
+    LspOptions, MaterializedDefinition, ProcessRunner, ProjectFeedback, ProjectMessageKind,
+    ProjectSources, ProjectSync, ProviderKind, RefreshOutcome,
 };
 
 #[cfg(unix)]
@@ -109,7 +109,7 @@ fn run_model_command(args: &[String]) {
         eprintln!("krusty-lsp: {}: {error}", command.root.display());
         std::process::exit(1);
     });
-    let provider = detect(&root, &[]);
+    let provider = detect_for_scan(&root, &[]);
     let model = match provider.probe(&ProcessRunner) {
         Ok(model) => model,
         Err(error) => {
@@ -369,7 +369,7 @@ fn run_parity_command(args: &[String]) -> bool {
         std::process::exit(1);
     });
     let started = Instant::now();
-    let provider = detect(&root, &[]);
+    let provider = detect_for_scan(&root, &[]);
     let model = provider.probe(&ProcessRunner).unwrap_or_else(|error| {
         eprintln!("krusty-lsp: cannot resolve project model: {error}");
         std::process::exit(1);
@@ -1255,15 +1255,10 @@ impl WorkerHost {
                     &classpath,
                     jdk_home.as_deref(),
                 );
-                let fetched =
-                    krusty_lsp::project::maven_repository::ensure_maven_repository_jars(&classpath);
-                if fetched.failed > 0 {
-                    logs.push(format!(
-                        "krusty: {} Maven repository jar(s) could not be downloaded; those \
-                         classpath entries stay missing",
-                        fetched.failed
-                    ));
-                }
+                // Missing repository jars stay missing on this refresh. The parity command is
+                // what downloads them; this call runs on the analysis thread.
+                let _ = krusty_lsp::project::maven_repository::RepositoryFetch::Editor
+                    .fetch_named_jars(&classpath);
                 let missing_classpath =
                     krusty_lsp::project::classpath_presence::missing_classpath_warning(
                         &classpath,
