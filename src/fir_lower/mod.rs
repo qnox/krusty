@@ -38,6 +38,7 @@ mod delegated_properties;
 mod dependency_templates;
 #[cfg(test)]
 mod entry_point_tests;
+mod equals_guards;
 mod erased_parameters;
 mod error;
 mod expect_realization;
@@ -326,7 +327,7 @@ pub(crate) fn lower_body_with_context(
         })
         .collect::<Result<Vec<_>, FirLoweringFailure>>()?;
     lowering.in_default_argument = root_is_default;
-    let mut roots = Vec::new();
+    let mut roots = lowering.equality_bound_prologue(declaration)?;
     for root in body.roots().iter().copied() {
         let lowered = lowering.statement(root)?;
         // A destructuring declaration lowers to several declarations in the surrounding lexical
@@ -938,7 +939,7 @@ impl<'a> BodyLowering<'a> {
         let extension = self
             .has_extension_receiver
             .then_some(context_start + self.context_parameter_count);
-        let dispatch = self.has_dispatch_receiver.then_some(self.capture_count);
+        let dispatch = self.dispatch_receiver_slot();
         extension
             .into_iter()
             .chain(
