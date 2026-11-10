@@ -425,6 +425,43 @@ fn nested_class_block_members_belong_to_the_nested_class() {
     assert_eq!(run(SRC).expect("nested block"), "OK");
 }
 
+/// A class's static state initializes in kotlinc's order relative to its `companion object`: the
+/// stores of the block properties written before it, the companion's construction, properties and
+/// `init` blocks, then the block properties written after it. kotlinc 2.4 instead stored every
+/// block property before the companion's initialization; the directive names both releases'
+/// features so the same program pins whichever reference compiler the harness runs.
+#[test]
+fn block_and_companion_object_initialization_follow_kotlinc() {
+    const SRC: &str = "// LANGUAGE: +CompanionBlocksAndExtensions +CompanionBlocks +CompanionExtensions\n\
+        var log = \"\"\n\
+        fun l(s: String): String { log += s; return s }\n\
+        class A {\n\
+        \x20   companion { val b1 = l(\"b1\") }\n\
+        \x20   companion object {\n\
+        \x20       val o1 = l(\"o1\")\n\
+        \x20       init { l(\"oi\") }\n\
+        \x20       val o2 = l(\"o2\")\n\
+        \x20   }\n\
+        \x20   companion { val b2 = l(\"b2\") }\n\
+        }\n\
+        class B {\n\
+        \x20   companion object { val o = l(\"o\") }\n\
+        \x20   companion { val b = l(\"b\") }\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   A.b1\n\
+        \x20   log += \"|\"\n\
+        \x20   B.b\n\
+        \x20   return log\n\
+        }\n";
+    let expected = common::kotlinc_box_result(SRC);
+    assert!(expected.contains('|'), "kotlinc ran the program: {expected}");
+    assert_eq!(
+        common::compile_and_run_with_stdlib(SRC, "Main").expect("initialization order"),
+        expected
+    );
+}
+
 /// A block member's source position is among its class's members, where it was written: the
 /// accessors and functions of a block between two methods sit between those methods.
 #[test]
