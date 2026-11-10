@@ -515,6 +515,7 @@ fn bind_parameters_and_check_defaults(
                 .body
                 .publish_equality_bound_guard(crate::fir::FirEqualityBoundGuard {
                     parameter: value,
+                    ordinal,
                     bound,
                 });
         }

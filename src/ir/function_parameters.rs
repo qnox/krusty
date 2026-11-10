@@ -646,6 +646,15 @@ mod tests {
     }
 }
 
+/// The parameter a declared `equals` reads as its equality bound (Kotlin 2.5 `StrictEquals`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IrEqualityBoundParameter {
+    /// Index among the declared parameters, counted like [`IrVarargParameter::index`].
+    pub index: usize,
+    /// The classifier type a value must have to reach the body.
+    pub bound: crate::types::Ty,
+}
+
 /// The `vararg` parameter of a declared function.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IrVarargParameter {
