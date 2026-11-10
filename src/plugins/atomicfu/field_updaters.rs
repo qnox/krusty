@@ -74,8 +74,9 @@ fn lower_declaration(ir: &mut IrFile, updater: &FieldUpdater) -> LoweredUpdater 
     }
     // kotlinc's transform stores the value in a new statement with no source position, so the
     // initializer's line is the value's own, entered where the value is computed.
-    if let Some(line) = ir.expr_lines.remove(&store) {
-        ir.expr_lines.entry(initial).or_insert(line);
+    let store_line = ir.take_statement_line(store);
+    if let (Some(line), None) = (store_line, ir.statement_line(initial)) {
+        ir.set_statement_line(initial, line);
     }
 
     let getter_name = accessor_name("get", &volatile_name);
@@ -199,8 +200,8 @@ fn lower_operation(ir: &mut IrFile, updater: &LoweredUpdater, operation: &Update
     // The backend realizes a plugin's runtime calls among the expressions the plugin adds, so the
     // operation becomes a block whose value is a new call.
     let updated = call(ir, &operation.function, Some(operation.read), args);
-    if let Some(&line) = ir.expr_lines.get(&operation.expression) {
-        ir.expr_lines.insert(updated, line);
+    if let Some(line) = ir.statement_line(operation.expression) {
+        ir.set_statement_line(updated, line);
     }
     ir.exprs[operation.expression as usize] = IrExpr::Block {
         stmts: vec![],
