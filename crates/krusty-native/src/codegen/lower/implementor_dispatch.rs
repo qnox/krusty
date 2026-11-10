@@ -119,15 +119,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// A call of a dependency interface member this file does not implement. The link joins the
-    /// stub to the implementation a dependency object recorded under the same identity.
+    /// stub to the implementation a dependency object recorded under the same identity. An
+    /// object the runtime makes records nothing, so one whose class implements the interface is
+    /// tested for first and handed to the runtime function realizing the member on it.
     pub(super) fn dependency_interface_stub(
         &mut self,
         identity: &krusty::libraries::KlibDependencyCallable,
+        signature: super::super::super::intrinsics::FunctionSignature<'_>,
         receiver: u32,
         args: &[u32],
         params: &[Ty],
         ret: Ty,
     ) -> Result<Option<Value>, Unsupported> {
+        let runtime = self.runtime_implementations(signature)?;
         let number = self.file.dependency_interface_number(identity);
         let Some(object) = self.receiver(receiver)? else {
             return Ok(None);
@@ -136,13 +140,114 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if self.terminated {
             return Ok(None);
         }
-        self.dispatch_through(
-            object,
-            model::Dispatch::Interface(number),
-            params,
-            ret,
-            &arguments,
-        )
+        let operands: Vec<(Value, Option<Ty>)> = arguments
+            .iter()
+            .zip(params)
+            .map(|(&value, &param)| (value, Some(param)))
+            .collect();
+        self.dispatch_runtime_implementations(&runtime, object, &operands, ret, |body| {
+            body.dispatch_through(
+                object,
+                model::Dispatch::Interface(number),
+                params,
+                ret,
+                &arguments,
+            )
+        })
+    }
+
+    /// Hand `object` to the runtime function of the first of `runtime`'s classes it is an instance
+    /// of, with `operands` (each value and its physical type), answering `answer`; an object of
+    /// none of them is `otherwise`'s.
+    fn dispatch_runtime_implementations(
+        &mut self,
+        runtime: &[(&'static str, &'static str)],
+        object: Value,
+        operands: &[(Value, Option<Ty>)],
+        answer: Ty,
+        otherwise: impl FnOnce(&mut Self) -> Result<Option<Value>, Unsupported>,
+    ) -> Result<Option<Value>, Unsupported> {
+        if runtime.is_empty() {
+            return otherwise(self);
+        }
+        self.null_check(object)?;
+        let merge = self.builder.create_block();
+        let carried = self.carrier(answer);
+        if let Some(clif) = carried.clif() {
+            self.builder.append_block_param(merge, clif);
+        }
+        for &(descriptor, function) in runtime {
+            let descriptor = self.file.import_data(descriptor)?;
+            let type_address = self.data_address(descriptor);
+            let matches = self
+                .runtime_call(
+                    "kt_is_instance",
+                    &[any(), any()],
+                    Ty::Boolean,
+                    &[object, type_address],
+                )?
+                .expect("`kt_is_instance` returns a Boolean");
+            let made = self.builder.create_block();
+            let rest = self.builder.create_block();
+            self.builder.ins().brif(matches, made, &[], rest, &[]);
+
+            self.continue_in(made);
+            self.builder.seal_block(made);
+            // A runtime member takes its receiver and every operand as a reference.
+            let mut references = vec![object];
+            for &(value, source) in operands {
+                let Some(reference) = self.convert(value, source, any())? else {
+                    return Ok(None);
+                };
+                references.push(reference);
+            }
+            let produced =
+                self.runtime_call(function, &vec![any(); references.len()], any(), &references)?;
+            let produced = match produced {
+                Some(value) if !self.terminated => self.convert(value, Some(any()), answer)?,
+                _ => None,
+            };
+            self.jump_to_merge(merge, carried, produced);
+            self.continue_in(rest);
+            self.builder.seal_block(rest);
+        }
+        let produced = otherwise(self)?;
+        self.jump_to_merge(merge, carried, produced);
+
+        self.builder.switch_to_block(merge);
+        self.builder.seal_block(merge);
+        Ok(carried.clif().map(|_| self.builder.block_params(merge)[0]))
+    }
+
+    /// Each class the runtime makes that implements the interface declaring `signature`, as the
+    /// descriptor its instances carry and the runtime function realizing the member on one. A
+    /// class implementing it with no such function declines: a call through the interface could
+    /// reach an instance nothing implements the member of.
+    fn runtime_implementations(
+        &self,
+        signature: super::super::super::intrinsics::FunctionSignature<'_>,
+    ) -> Result<Vec<(&'static str, &'static str)>, Unsupported> {
+        let Some(interface) = signature.owner.semantic_classifier() else {
+            return Ok(Vec::new());
+        };
+        let mut implementations = Vec::new();
+        for (class, descriptor) in super::classifier_shapes::runtime_member_classes() {
+            if !self.file.is_subclassifier(class, interface) {
+                continue;
+            }
+            let function =
+                super::super::super::intrinsics::runtime_implementation(class, signature)
+                    .ok_or_else(|| {
+                        declined!(
+                            "the member `{}.{}` of the runtime's `{}`",
+                            interface.render().replace('/', "."),
+                            signature.name,
+                            class.render().replace('/', ".")
+                        )
+                    })?;
+            implementations.push((descriptor, function));
+        }
+        Ok(implementations)
     }
 
     /// Whether `internal`'s member stays with the runtime, rather than a direct implementor call.
@@ -189,12 +294,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if implementors.is_empty() || implementors.len() != declared.len() {
             return None;
         }
-        Some(self.dependency_interface_dispatch(&implementors, receiver, args, ret))
+        let runtime = match self.runtime_implementations(signature) {
+            Ok(runtime) => runtime,
+            Err(declined) => return Some(Err(declined)),
+        };
+        Some(self.dependency_interface_dispatch(&implementors, &runtime, receiver, args, ret))
     }
 
+    /// Dispatch among the classes of this file implementing a dependency interface member, then
+    /// among the classes the runtime makes that implement it.
     fn dependency_interface_dispatch(
         &mut self,
         implementors: &[ImplementorArm],
+        runtime: &[(&'static str, &'static str)],
         receiver: u32,
         args: &[u32],
         ret: Ty,
@@ -213,10 +325,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             }
             operands.push((value, self.physical_type(*argument)));
         }
-        self.dispatch_by_implementor_with(implementors, object, &operands, ret, |body, _| {
-            // Unreachable when every implementor was tested. The merge fills the carrier.
-            body.runtime_call("kt_abstract_method_called", &[], Ty::Unit, &[])?;
-            Ok(None)
+        let runtime_operands = operands.clone();
+        self.dispatch_by_implementor_with(implementors, object, &operands, ret, |body, object| {
+            body.dispatch_runtime_implementations(runtime, object, &runtime_operands, ret, |body| {
+                // Unreachable when every implementor was tested. The merge fills the carrier.
+                body.runtime_call("kt_abstract_method_called", &[], Ty::Unit, &[])?;
+                Ok(None)
+            })
         })
     }
 

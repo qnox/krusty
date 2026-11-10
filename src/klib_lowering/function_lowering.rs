@@ -25,9 +25,7 @@ use crate::types::{Ty, TyKind, TypeName};
 
 mod class_initializers;
 mod closure_headers;
-pub(super) use class_initializers::{
-    initializer_header, local_initializer_header, local_member_header,
-};
+pub(super) use class_initializers::{local_initializer_header, local_member_header};
 mod declared_type_parameters;
 pub(super) use closure_headers::{closure_header, CaptureParameter};
 mod reference_headers;

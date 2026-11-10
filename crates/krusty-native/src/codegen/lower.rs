@@ -35,6 +35,7 @@ use declared_capabilities::{
     declares_its_own_comparable, implemented_collections, implemented_dependencies,
     overrides_a_throwable_accessor,
 };
+mod atomic_fields;
 mod functions;
 mod implementor_dispatch;
 mod imported_functions;
@@ -947,10 +948,9 @@ struct BodyLowering<'a, 'b, 'c> {
     /// being emitted. A runtime type operation naming one executes Kotlin's direct-call failure;
     /// ordinary functions and specialized inline copies leave this empty.
     unresolved_reified: Vec<String>,
-    /// The declaration whose body this is, which says whether a runtime type operation on a
-    /// reified parameter belongs to that parameter's own template
-    /// ([`IrFile::is_reified_template_operation`]). A body emitted for no declared function is the
-    /// file's own.
+    /// The common-IR scope whose body this frame lowers. A type operation against a reified
+    /// parameter the scope's own declaration introduces is that declaration's template, which
+    /// [`krusty::ir::IrFile::is_reified_template_operation`] identifies for every backend.
     scope: krusty::ir::IrEnclosure,
     /// The constructions of this body whose object lives in this frame, each with the local it
     /// initializes; see `frame_objects`.
@@ -2167,6 +2167,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 finally,
                 result,
             } => self.try_catch(body, &catches, finally, result),
+            IrExpr::PluginPlaceholder {
+                plugin: "atomicfu",
+                kind,
+                exprs,
+                data,
+                types,
+            } => self.atomic_field_operation(kind, &exprs, &data, &types),
             IrExpr::Return(_)
             | IrExpr::Variable { .. }
             | IrExpr::SetValue { .. }

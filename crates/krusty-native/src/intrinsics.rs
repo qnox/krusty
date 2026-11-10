@@ -51,8 +51,8 @@ impl DeclarationOwner {
         }
     }
 
-    #[cfg(test)]
-    fn classifier(physical: TypeName) -> Self {
+    /// A member's owner that is the classifier `physical` itself.
+    pub(super) fn classifier(physical: TypeName) -> Self {
         Self {
             physical,
             semantic: Some(SemanticCallableOwner::Classifier(physical)),
@@ -1988,6 +1988,19 @@ pub(super) fn runtime_companion_member(
     }
 }
 
+/// The runtime function realizing the interface member `signature` on an instance of `class`, a
+/// class the runtime makes that implements the interface: the realization of the class's own
+/// member of that signature, which overrides it. Called as [`runtime_member`]'s function is.
+pub(super) fn runtime_implementation(
+    class: TypeName,
+    signature: FunctionSignature<'_>,
+) -> Option<&'static str> {
+    runtime_member(FunctionSignature {
+        owner: DeclarationOwner::classifier(class),
+        ..signature
+    })
+}
+
 /// The runtime function realizing a selected dependency MEMBER, called with the receiver as its
 /// first argument. Receiver and arguments are passed as references, so a scalar receiver boxes —
 /// which is what `4.toString()` means anyway.
@@ -2028,6 +2041,9 @@ pub(super) fn runtime_member(signature: FunctionSignature<'_>) -> Option<&'stati
             // The builder's override of `Any.toString`: the text it holds.
             ("toString", []) => Some("kt_to_string"),
             ("append", [_]) => Some("kt_string_builder_append"),
+            // The range form, `append(value: CharSequence?, startIndex, endIndex)`, the builder's one
+            // three-operand `append`: its bounds cross boxed like every operand here.
+            ("append", [_, Ty::Int, Ty::Int]) => Some("kt_string_builder_append_range"),
             ("appendLine", [_]) => Some("kt_string_builder_append_line"),
             ("appendLine", []) => Some("kt_string_builder_append_new_line"),
             _ => None,
@@ -2677,6 +2693,32 @@ mod tests {
             collection(krusty::types::CollectionKind::Collection, false),
             "get"
         ));
+    }
+
+    #[test]
+    fn the_builder_realizes_each_appendable_member_with_a_runtime_function() {
+        let builder = krusty::types::type_name("kotlin/text/StringBuilder");
+        let appendable = || member("kotlin/text/Appendable");
+        let answer = Ty::obj("kotlin/text/Appendable");
+        let text = Ty::nullable(Ty::obj("kotlin/CharSequence"));
+        assert_eq!(
+            runtime_implementation(
+                builder,
+                function(appendable(), "append", &[Ty::Char], answer)
+            ),
+            Some("kt_string_builder_append")
+        );
+        assert_eq!(
+            runtime_implementation(builder, function(appendable(), "append", &[text], answer)),
+            Some("kt_string_builder_append")
+        );
+        assert_eq!(
+            runtime_implementation(
+                builder,
+                function(appendable(), "append", &[text, Ty::Int, Ty::Int], answer)
+            ),
+            Some("kt_string_builder_append_range")
+        );
     }
 
     #[test]
