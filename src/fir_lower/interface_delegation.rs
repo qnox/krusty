@@ -284,8 +284,8 @@ fn materialize_delegation(
                     function,
                     crate::ir::FnParamInfo::identities(parameter_identities),
                 );
-                if let Some(spellings) = &member.parameter_spellings {
-                    ir.fn_declared_spellings.insert(function, spellings.clone());
+                if let Some(spellings) = member.enhanced_parameter_spellings() {
+                    ir.fn_declared_spellings.insert(function, spellings);
                 }
                 if !member.type_parameters.is_empty() {
                     ir.signatures.insert(

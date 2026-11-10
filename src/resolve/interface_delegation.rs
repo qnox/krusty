@@ -912,7 +912,7 @@ fn delegation_members(
                     parameter_identities,
                     type_parameters,
                     overridden: overridden.into_boxed_slice(),
-                    parameter_spellings: enhanced_parameter_spellings(&parameter_enhancements),
+                    parameter_enhancements: parameter_enhancements.into_boxed_slice(),
                     call,
                 },
             ));
@@ -1029,22 +1029,4 @@ mod tests {
             ]
         );
     }
-}
-
-/// The declared spellings of a delegation forwarder whose parameters take `enhancements`, or
-/// `None` when no parameter is enhanced.
-fn enhanced_parameter_spellings(
-    enhancements: &[crate::libraries::TypeEnhancement],
-) -> Option<crate::spelling::DeclaredSpellings> {
-    if enhancements.iter().all(|enhancement| enhancement.is_none()) {
-        return None;
-    }
-    let mut spellings = crate::spelling::DeclaredSpellings {
-        params: vec![crate::spelling::Spelled::default(); enhancements.len()],
-        ..Default::default()
-    };
-    for (spelling, enhancement) in spellings.params.iter_mut().zip(enhancements) {
-        spelling.mark_enhanced(enhancement);
-    }
-    Some(spellings)
 }
