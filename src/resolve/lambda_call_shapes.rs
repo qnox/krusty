@@ -166,20 +166,29 @@ impl Checker<'_> {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        if generic.as_ref().is_some_and(|(_, bindings)| {
-            // This is the pre-lambda applicability probe. A bound that still depends on an
-            // unbound callable formal is completed by the postponed lambda result, so it cannot
-            // eliminate this overload yet. Final selection validates the complete signature.
-            let mut partial_signature = semantic.clone().into_owned();
-            for bounds in &mut partial_signature.formal_bounds {
-                bounds.retain(|bound| !ty_mentions_param(*bound, &unbound_formals));
-            }
-            !crate::symbol_resolver::generic_bindings_satisfy_bounds(
-                &partial_signature,
-                bindings,
-                |actual, bound| self.generic_bound_admits(actual, bound),
-            )
-        }) {
+        // Explicit type arguments fix every formal, and one outside its bound is the call's own
+        // diagnostic, not a reason to leave its lambdas unshaped: kotlinc still types
+        // `f<String> { v -> .. }` against `(String) -> ..` beside the bound error.
+        let fully_explicit = !type_args.is_empty()
+            && type_args
+                .iter()
+                .all(|argument| !argument.mentions_error() && !argument.mentions_pending());
+        if !fully_explicit
+            && generic.as_ref().is_some_and(|(_, bindings)| {
+                // This is the pre-lambda applicability probe. A bound that still depends on an
+                // unbound callable formal is completed by the postponed lambda result, so it cannot
+                // eliminate this overload yet. Final selection validates the complete signature.
+                let mut partial_signature = semantic.clone().into_owned();
+                for bounds in &mut partial_signature.formal_bounds {
+                    bounds.retain(|bound| !ty_mentions_param(*bound, &unbound_formals));
+                }
+                !crate::symbol_resolver::generic_bindings_satisfy_bounds(
+                    &partial_signature,
+                    bindings,
+                    |actual, bound| self.generic_bound_admits(actual, bound),
+                )
+            })
+        {
             return false;
         }
         let generic_params = generic.as_ref().map(|(params, _)| params);
