@@ -1056,19 +1056,10 @@ fn member_overrides(
                 "an override of a declaration other than a function",
             ));
         }
-        // A public function and a public property accessor are both published interface members.
-        // A file-local signature is a different declaration in every library and is not one.
-        let declaration = match &symbol.signature {
-            KlibIrSignature::Public(signature) => {
-                KlibDeclarationSignature::Public(signature.clone())
-            }
-            KlibIrSignature::Accessor(signature) => {
-                KlibDeclarationSignature::Accessor(signature.clone())
-            }
-            KlibIrSignature::FileLocal { .. } => {
-                return Err(unsupported("an override of a non-public declaration"));
-            }
+        let KlibIrSignature::Public(signature) = &symbol.signature else {
+            return Err(unsupported("an override of a non-public declaration"));
         };
+        let declaration = KlibDeclarationSignature::Public(signature.clone());
         let identity = match scope.bodies.callee_origin(scope.module, &declaration) {
             KlibCalleeOrigin::Exact(identity) => identity,
             KlibCalleeOrigin::Missing => {
