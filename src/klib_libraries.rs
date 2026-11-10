@@ -36,7 +36,9 @@ use crate::types::TypeName;
 pub use archives::OpenedKlibLibraries;
 pub use archives::{KlibLibrariesOpenError, KlibLibraryInput, KlibStdlibSemantics};
 pub use declaration_bodies::{KlibBodyLibrary, KlibDeclarationBodies, KlibDeclarationBodiesError};
-pub(crate) use declaration_bodies::{KlibCalleeOrigin, LocatedClass, LocatedMember};
+pub(crate) use declaration_bodies::{
+    KlibCalleeOrigin, KlibEnumEntryClass, LocatedClass, LocatedMember,
+};
 pub use declaration_signatures::KlibLibraryError;
 pub use serialized_references::{
     KlibReferenceBinding, KlibReferenceBindings, KlibReferenceDispatch, KlibReferenceOrigin,
@@ -110,15 +112,12 @@ impl KlibLibraries {
     }
 
     fn over(inventory: std::rc::Rc<inventory::PackageInventory>) -> Self {
-        Self::over_with_bodies(
-            inventory,
-            std::rc::Rc::new(KlibDeclarationBodies::default()),
-        )
+        Self::over_with_bodies(inventory, KlibDeclarationBodies::default())
     }
 
     fn over_with_bodies(
         inventory: std::rc::Rc<inventory::PackageInventory>,
-        bodies: std::rc::Rc<KlibDeclarationBodies>,
+        bodies: KlibDeclarationBodies,
     ) -> Self {
         Self::over_with_bodies_and_snapshot(
             inventory,
@@ -130,13 +129,13 @@ impl KlibLibraries {
 
     fn over_with_bodies_and_snapshot(
         inventory: std::rc::Rc<inventory::PackageInventory>,
-        bodies: std::rc::Rc<KlibDeclarationBodies>,
+        bodies: KlibDeclarationBodies,
         inline_bodies: std::rc::Rc<KlibDeclarationBodies>,
         body_snapshot: Option<crate::libraries::DependencyBodySnapshot>,
     ) -> Self {
         let mut libraries = Self {
             inventory,
-            bodies,
+            bodies: std::rc::Rc::new(bodies),
             inline_bodies,
             references: std::rc::Rc::default(),
             body_snapshot,
@@ -144,6 +143,10 @@ impl KlibLibraries {
             lookups: lookup::SymbolLookups::default(),
         };
         libraries.references = std::rc::Rc::new(KlibReferenceBindings::freeze(&libraries));
+        let inherited = serialized_references::inherited_members(&libraries);
+        std::rc::Rc::get_mut(&mut libraries.bodies)
+            .expect("the bodies stay unshared until their provider is published")
+            .bind_inherited_members(inherited);
         libraries
     }
 

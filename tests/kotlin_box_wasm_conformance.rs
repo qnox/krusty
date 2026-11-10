@@ -910,6 +910,15 @@ fn expect_reference_array_bounds(source: &str, name: &str) {
     }
 }
 
+/// The shared `unsignedValueBoxes` program: a nullable unsigned value, and one read as `Any`, is a
+/// box of its own classifier, never the signed box of the same width.
+#[test]
+fn wasm_shared_unsigned_value_boxes_program() {
+    let src = include_str!("box_regressions/unsignedValueBoxes.kt");
+    expect_reference_box(src, "unsignedValueBoxes");
+    expect_wasm_box(src, "unsignedValueBoxes");
+}
+
 // PLATFORM-SPECIFIC: a reference assertion cannot implement nullable scalar unboxing.
 fn expect_reference_box(src: &str, stem: &str) {
     let jdk = super::common::jdk_modules();
@@ -951,28 +960,31 @@ fn wasm_nullable_scalar_assertions_decline_without_an_unboxing_contract() {
     }
 }
 
-// PLATFORM-SPECIFIC: function values are non-suspend objects called through their arity's entry;
-// a suspend function value has no Wasm representation yet and must decline, not run as a plain one.
+// PLATFORM-SPECIFIC: a suspend function value is a function value whose implementation takes the
+// caller's continuation. Passing one without invoking it answers the same as on the JVM.
 #[test]
-fn wasm_suspend_function_values_decline() {
+fn wasm_suspend_function_values_are_function_values() {
     let src = "fun take(f: suspend () -> Int): Int = 1\nfun box(): String = if (take { 2 } == 1) \"OK\" else \"fail\"";
     expect_reference_box(src, "suspendFunctionValue");
-    expect_wasm_decline(src, "suspendFunctionValue", "a suspend function value");
+    expect_wasm_box(src, "suspendFunctionValue");
 }
 
-// PLATFORM-SPECIFIC: a lambda or callable reference converted to a `fun interface` is not a
-// function value; until SAM conversion lands, both forms must decline.
+// A lambda or callable reference converted to a `fun interface` becomes an object of that
+// interface whose member forwards to the function value.
 #[test]
-fn wasm_sam_converted_function_values_decline() {
-    for (stem, argument) in [
-        ("samConvertedLambda", "{ 1 }"),
-        ("samConvertedReference", "(::one)"),
+fn wasm_sam_converted_function_values_implement_their_interface() {
+    for (stem, src) in [
+        (
+            "samConvertedLambda",
+            include_str!("box_regressions/samConvertedLambda.kt"),
+        ),
+        (
+            "samConvertedReference",
+            include_str!("box_regressions/samConvertedReference.kt"),
+        ),
     ] {
-        let src = format!(
-            "fun interface Source {{ fun get(): Int }}\nfun one(): Int = 1\nfun read(source: Source): Int = source.get()\nfun box(): String = if (read {argument} == 1) \"OK\" else \"fail\""
-        );
-        expect_reference_box(&src, stem);
-        expect_wasm_decline(&src, stem, "a lambda converted to a `fun interface`");
+        expect_reference_box(src, stem);
+        expect_wasm_box(src, stem);
     }
 }
 
@@ -1278,6 +1290,9 @@ mod dependency_constructor_exports;
 #[path = "wasm_escaping_closures.rs"]
 mod escaping_closures;
 
+#[path = "wasm_type_of.rs"]
+mod type_of;
+
 #[test]
 fn wasm_finally_preserves_values_original_exceptions_and_cleanup_precedence() {
     expect_wasm_box(
@@ -1285,3 +1300,14 @@ fn wasm_finally_preserves_values_original_exceptions_and_cleanup_precedence() {
         "wasmFinallyValueAndKotlinThrow",
     );
 }
+
+#[test]
+fn wasm_data_class_unit_property_uses_units_fixed_hash() {
+    expect_wasm_box(
+        include_str!("box_regressions/knownPrimaryConstructorRoles.kt"),
+        "wasmKnownPrimaryConstructorRoles",
+    );
+}
+
+#[path = "wasm_unsigned_decimal.rs"]
+mod unsigned_decimal;

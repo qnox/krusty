@@ -31,6 +31,7 @@ use krusty::diag::{DiagSink, Severity};
 use krusty::jvm::classpath::Classpath;
 use krusty::source::SourceInput;
 
+use super::box_lane_profile::{timed, Stage};
 use super::box_ratchet::{self, Platform};
 
 /// How long one case may run. The programs are tiny; anything near this is a miscompiled loop.
@@ -288,6 +289,69 @@ impl Libraries {
     }
 }
 
+/// The atomicfu compiler plugin for a `// WITH_ATOMICFU` native or wasm case. The JVM lane
+/// selects that plugin through its own `-Xplugin` argument. These lanes have no plugin switch, so
+/// without one their runtime library bodies are lowered. The plugin lowers the target's atomic
+/// representation: wasm value fields, or native atomic operations.
+fn atomicfu_plugins(
+    directive_source: &str,
+    target: krusty::compilation_target::CompilationTarget,
+) -> krusty::plugins::registry::NativePlugins {
+    use krusty::compilation_target::CompilationTarget;
+    use krusty::plugins::cli::{PluginConfig, ATOMICFU_PLUGIN_ID};
+    use krusty::plugins::registry::{Activation, PluginRegistry};
+    if !krusty::conformance::directive(directive_source, "WITH_ATOMICFU") {
+        return krusty::plugins::registry::NativePlugins::none();
+    }
+    if matches!(target, CompilationTarget::Jvm | CompilationTarget::Js) {
+        return krusty::plugins::registry::NativePlugins::none();
+    }
+    let jar = krusty::toolchain::atomicfu_compiler_plugin_jar()
+        .unwrap_or_else(|| panic!("cannot provision the atomicfu compiler plugin"));
+    let mut config = PluginConfig::none();
+    config.plugin_jars.push(jar.display().to_string());
+    let resolved = PluginRegistry::with_builtins().resolve(&Activation {
+        config: &config,
+        classpath: &[],
+        module_name: "box",
+        codegen_host: false,
+    });
+    let errors = resolved
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.is_error())
+        .map(|diagnostic| diagnostic.message())
+        .collect::<Vec<_>>();
+    if !errors.is_empty() {
+        panic!("atomicfu compiler plugin: {}", errors.join("\n"));
+    }
+    let native = resolved.native;
+    if !native.plugin_ids().contains(&ATOMICFU_PLUGIN_ID) {
+        panic!("atomicfu compiler plugin was not activated");
+    }
+    native
+}
+
+/// The atomicfu runtime KLIB a `// WITH_ATOMICFU` native or wasm case resolves `kotlinx.atomicfu`
+/// against. The JVM lane compiles that directive with the compiler plugin and the JVM jar.
+fn atomicfu_runtime_dependencies(
+    directive_source: &str,
+    target: krusty::compilation_target::CompilationTarget,
+) -> Vec<PathBuf> {
+    if !krusty::conformance::directive(directive_source, "WITH_ATOMICFU") {
+        return Vec::new();
+    }
+    if matches!(
+        target,
+        krusty::compilation_target::CompilationTarget::Jvm
+            | krusty::compilation_target::CompilationTarget::Js
+    ) {
+        return Vec::new();
+    }
+    vec![krusty::toolchain::atomicfu_klib(target)
+        .unwrap_or_else(|| panic!("cannot provision the atomicfu runtime KLIB for {target:?}"))]
+}
+
 /// Wasm publishes kotlin-test separately from its stdlib. Retain it as an ordinary dependency:
 /// these coordinates select the exact target/version but confer no compiler intrinsic authority.
 fn wasm_test_library(
@@ -404,11 +468,13 @@ pub fn compile<B: Backend>(
             "the {target:?} corpus lane received a {compilation_target:?} backend"
         )));
     }
+    let dependencies = atomicfu_runtime_dependencies(directive_source, compilation_target);
     let PlatformLibraries {
         semantics,
         native_imports,
-    } = libraries.platform(compilation_target, &[], &[]);
-    let platform = krusty::frontend::PlatformProvider::new(compilation_target, semantics);
+    } = libraries.platform(compilation_target, &dependencies, &[]);
+    let platform = krusty::frontend::PlatformProvider::new(compilation_target, semantics)
+        .with_native_plugins(atomicfu_plugins(directive_source, compilation_target));
     let features = krusty::features::LangFeatures::from_source(directive_source);
     let mut diags = DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
@@ -491,11 +557,17 @@ pub fn analyze_module(
         .iter()
         .map(|(stem, _)| stem.clone())
         .collect::<Vec<_>>();
+    let mut dependencies = dependency_klibs.to_vec();
+    dependencies.extend(atomicfu_runtime_dependencies(
+        directive_source,
+        backend_target,
+    ));
     let PlatformLibraries {
         semantics,
         native_imports,
-    } = libraries.platform(backend_target, dependency_klibs, friend_klibs);
-    let platform = krusty::frontend::PlatformProvider::new(backend_target, semantics);
+    } = libraries.platform(backend_target, &dependencies, friend_klibs);
+    let platform = krusty::frontend::PlatformProvider::new(backend_target, semantics)
+        .with_native_plugins(atomicfu_plugins(directive_source, backend_target));
     let features = module_features(directive_source, unit.common_file_count);
     let diagnostics_start = diags.diags.len();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_module(
@@ -666,7 +738,7 @@ pub fn compile_modules<B: Backend, M: krusty::backend::DependencyMetadata>(
 
 /// Run a program with the lane's deadline; its framed verdict.
 pub fn run_program(command: &mut Command) -> Outcome {
-    match run_with_timeout(command, RUN_TIMEOUT) {
+    match timed(Stage::Run, || run_with_timeout(command, RUN_TIMEOUT)) {
         // The entry prints what `box()` returned after `BOX_RESULT_FRAME`, and nothing after it:
         // the answer is every byte past the one frame. Anything before it is the PROGRAM's own
         // output — `controlStructures/kt513.kt` builds a list and `println`s it before returning
@@ -1013,7 +1085,9 @@ fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
         .and_then(|stem| stem.to_str())
         .unwrap_or("Case");
     if super::box_inventory::owned(file) {
-        if let Err(error) = super::box_reference_classes::checked_box(&source, stem) {
+        if let Err(error) = timed(Stage::JvmOracle, || {
+            super::box_reference_classes::checked_box(&source, stem)
+        }) {
             return Outcome::Harness(format!("required JVM oracle: {error}"));
         }
     }
@@ -1025,8 +1099,9 @@ fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
         && lane.platform() == box_ratchet::Platform::Native
         && source.contains("// MODULE:")
     {
-        let answer =
-            super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(&source);
+        let answer = timed(Stage::TargetOracle, || {
+            super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(&source)
+        });
         if answer.as_deref() != Some("OK") {
             return Outcome::Harness(format!(
                 "required Native oracle must return OK, got {answer:?}"
@@ -1064,13 +1139,17 @@ fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
             }
             emitted.insert(unit.name.clone());
         }
-        return lane.compile_modules_and_run(scratch, stem, &units, &source);
+        return timed(Stage::Lane, || {
+            lane.compile_modules_and_run(scratch, stem, &units, &source)
+        });
     }
     let sources = match prepare_sources(&source, stem, lane.test_target()) {
         Ok(sources) => sources,
         Err(outcome) => return outcome,
     };
-    lane.compile_and_run(scratch, stem, &sources, &source)
+    timed(Stage::Lane, || {
+        lane.compile_and_run(scratch, stem, &sources, &source)
+    })
 }
 
 /// The report line, in a stable machine-readable shape:
@@ -1185,10 +1264,11 @@ pub fn run(lane: &dyn Lane) {
     let pool = pool.build().expect("build the worker pool");
 
     let started = Instant::now();
-    let outcomes: Vec<(&PathBuf, Outcome)> = pool.install(|| {
+    let timed_outcomes: Vec<((&PathBuf, Outcome), Duration)> = pool.install(|| {
         files
             .par_iter()
             .map(|file| {
+                let case_started = Instant::now();
                 // A panic inside the compiler is a failure of THAT case, recorded like any other
                 // so one bug does not hide the picture for the rest of the corpus; the test still
                 // fails.
@@ -1207,10 +1287,25 @@ pub fn run(lane: &dyn Lane) {
                         None => message,
                     })
                 });
-                (file, result)
+                ((file, result), case_started.elapsed())
             })
             .collect()
     });
+    let wall = started.elapsed();
+    let case_times = timed_outcomes
+        .iter()
+        .map(|((file, _), time)| (relative(file), *time))
+        .collect::<Vec<_>>();
+    let timing = super::box_lane_profile::timing_report(
+        wall,
+        pool.current_num_threads(),
+        &case_times,
+        super::box_lane_profile::stage_times(),
+    );
+    let outcomes = timed_outcomes
+        .into_iter()
+        .map(|(outcome, _)| outcome)
+        .collect::<Vec<_>>();
     // Compilation is finished. Restore ordinary panic reporting before validating outcomes:
     // an owned fatal outcome or a broken inventory must remain visible, not fail silently under
     // the compiler-only hook.
@@ -1313,7 +1408,15 @@ pub fn run(lane: &dyn Lane) {
             ("outside-lane", outside),
         ],
     );
-    eprintln!("{report} ({:.1}s)", started.elapsed().as_secs_f64());
+    eprintln!("{report} ({:.1}s)", wall.as_secs_f64());
+    eprint!("{timing}");
+    eprintln!(
+        "{}",
+        super::box_reference_classes::reference_profile(
+            super::box_reference_classes::reference_stats(),
+            super::common::kotlinc_server::kotlinc_server_stats(),
+        )
+    );
     eprint!(
         "{}",
         unexpected_failure_reason_report(&traced, &unexpected_failure_keys, relative)

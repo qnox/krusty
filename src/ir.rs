@@ -81,6 +81,8 @@ mod local_class_names;
 mod local_delegates;
 pub use local_delegates::IrLocalDelegateAccess;
 pub use local_delegates::{IrInlineDeclaration, IrLocalDelegateAccessorPlan, IrLocalDelegatePlan};
+mod declared_parameters;
+pub use declared_parameters::IrDeclaredParameters;
 mod function_positions;
 pub use function_positions::IrFunctionPosition;
 pub mod local_property_references;
@@ -116,7 +118,9 @@ mod when_facts;
 pub use crate::enclosing_declarations::EnclosingDeclaration;
 /// A declared type's checked source spelling, which the IR carries per declaration
 /// ([`IrFile::prop_declared_spellings`]) as part of its contract with backends and plugins.
-pub use crate::fir::{CallableId, ExternalCallableId, SourceFileId};
+pub use crate::fir::{
+    CallableId, ExternalCallableId, ExternalPropertyId, PropertyId, SourceFileId,
+};
 pub use crate::spelling::{Spelled, TypeUseAnnotation};
 pub use crate::types::EqualityMode;
 pub(crate) use annotations::PackagePropertyAnnotations;
@@ -177,8 +181,8 @@ pub use package_declarations::{
 pub use progression::{IrProgressionSource, IrRuntimeFunction};
 pub use properties::{
     IrAccessorLines, IrCheckedProperty, IrInlinePropertySplice, IrInlineTypeSubstitution,
-    IrMemberKind, IrModuleProperty, IrProperty, IrPropertyModality, IrPropertyModifiers,
-    IrPropertyOrigin, MemberExtProp, PrivatePropertyAccessorCall,
+    IrMemberKind, IrModuleProperty, IrProperty, IrPropertyDeclarationSource, IrPropertyModality,
+    IrPropertyModifiers, IrPropertyOrigin, MemberExtProp, PrivatePropertyAccessorCall,
 };
 pub use property_layouts::IrLocalPropertyLayout;
 pub use references::{
@@ -1295,6 +1299,15 @@ pub struct IrValueClassTypeOperation {
     pub role: IrValueClassTypeRole,
 }
 
+/// The inline function whose body an expansion copied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum IrInlineCallee {
+    /// A same-module inline callable, by its stable checked identity.
+    Module(crate::fir::CallableId),
+    /// An inline dependency function, expanded from its template in this file.
+    Dependency(crate::fir::ExternalCallableId),
+}
+
 /// A call-site copy of a lambda implementation.
 ///
 /// The record keeps the checked declaration identities and lexical containment that caused the
@@ -1315,8 +1328,8 @@ pub struct IrSpecializedFunction {
     /// Source spelling of that declaration, or the deliberately empty spelling of a constructor or
     /// unnamed initializer. This is rendering provenance, never the expansion identity.
     pub caller_source_name: String,
-    /// Stable checked identity of the same-module inline callable that was expanded.
-    pub inline_callee: crate::fir::CallableId,
+    /// The inline callable that was expanded.
+    pub inline_callee: IrInlineCallee,
     /// Source spelling retained for target-specific debug/artifact rendering.
     pub inline_callee_source_name: String,
     /// Specialized implementation lexically containing this one. Nested copies retain containment
@@ -1343,7 +1356,7 @@ pub struct IrSpecializedAnonymousClass {
     pub caller: Option<IrEnclosure>,
     pub caller_is_default: bool,
     pub caller_source_name: String,
-    pub inline_callee: crate::fir::CallableId,
+    pub inline_callee: IrInlineCallee,
     pub inline_callee_source_name: String,
     /// For each of the callee's operands, by its value slot: the caller's `crossinline` parameter
     /// the expansion binds it to, when it is one. A copy remaps its captures' provenance through
@@ -1702,6 +1715,9 @@ pub struct IrFile {
     /// What the Compose plugin recorded from this file's source at the handoff, for its body
     /// transform. `None` unless the plugin is active and the file declares a composable function.
     pub compose: Option<Box<crate::plugins::compose::ComposeFileFacts>>,
+    /// What the atomicfu plugin recorded from this file's source at the handoff, for its body
+    /// transform. `None` unless the plugin is active and the file declares an atomic it lowers.
+    pub atomicfu: Option<Box<crate::plugins::atomicfu::AtomicfuFileFacts>>,
     /// Package functions a compiler plugin gave physical parameters their declaration does not
     /// have (Compose's `$composer` and `$changed`). Metadata records their realized signature.
     pub plugin_extended_signatures: crate::fx_hash::HashSet<FunId>,
@@ -1896,13 +1912,6 @@ pub struct IrFile {
     pub(crate) enum_initializers: crate::fx_hash::HashMap<ClassId, FunId>,
     /// `FunId` → source parameter names and, when present, default-value expressions.
     pub fn_params: crate::fx_hash::HashMap<u32, FnParamInfo>,
-    /// Per declared method/function, whether each SOURCE parameter was declared nullable (`a: String?`).
-    /// The checker `Ty` drops nullability and `IrFunction::params` is kept non-null on purpose — it feeds
-    /// the value-class name mangle, which must NOT see recovered nullability (a nullable-VC param mangles
-    /// like a non-null one; perturbing it renames the method away from its call sites). `@Metadata` and
-    /// the `@NotNull`/`@Nullable` parameter annotations, which DO need the declared nullability, consult
-    /// this side-table instead. Empty ⇒ treat every parameter as non-null (the prior behavior).
-    pub fn_param_declared_nullable: crate::fx_hash::HashMap<u32, Vec<bool>>,
     /// How SOURCE spelled a member's declared types, by `FunId` — see [`crate::spelling`].
     ///
     /// Class `@Metadata` is built from the IR alone (no AST, no `FrontendSymbols`), so a declared
@@ -1932,9 +1941,10 @@ pub struct IrFile {
         crate::fx_hash::HashMap<(crate::types::TypeName, u32), crate::spelling::DeclaredSpellings>,
     /// Function ids realizing an extension receiver among their physical parameters. Metadata and JVM
     /// default-argument masks consume this semantic fact directly; neither may infer receiver-ness
-    /// from the synthetic `$receiver` parameter spelling. WHERE that receiver sits is
-    /// `fn_context_counts`: Kotlin signs a context extension `(contexts…, receiver, values…)`, so the
-    /// receiver is `params[0]` only when the function declares no `context(…)` clause.
+    /// from the synthetic `$receiver` parameter spelling. WHERE that receiver sits is the declared
+    /// parameters' `context_count`: Kotlin signs a context extension `(contexts…, receiver,
+    /// values…)`, so the receiver is `params[0]` only when the function declares no `context(…)`
+    /// clause.
     pub extension_receiver_fns: crate::fx_hash::HashSet<u32>,
     /// Members this file's `companion { … }` blocks declared, placed on their classes.
     pub companion_blocks: IrCompanionBlocks,
@@ -1945,11 +1955,6 @@ pub struct IrFile {
         TypeName,
         Option<crate::metadata::class_declarations::ClassDeclarationRecord>,
     >,
-    /// Function id → how many of its LEADING physical parameters are context parameters. Class
-    /// `@Metadata` is built from the IR alone, so this is the only carrier telling it to record them
-    /// as `Function.context_parameter` (field 13) rather than as ordinary value parameters — without
-    /// it a consuming compiler demands them positionally. Absent ⇒ none.
-    pub fn_context_counts: crate::fx_hash::HashMap<u32, usize>,
     /// Member EXTENSION properties per class (`object Tools { val Int.doubled get() = … }`), keyed by
     /// the declaring class's fq name. Lowering realizes each as accessor METHODS (`getDoubled(I)I`),
     /// which erases property-ness from the IR — class `@Metadata` needs the declaration back: a
@@ -2057,12 +2062,6 @@ pub struct IrFile {
     /// Function ids declared `infix` (metadata bit 9, `a f b`) and, separately, `tailrec` (bit 11).
     pub infix_fns: crate::fx_hash::HashSet<u32>,
     pub tailrec_fns: crate::fx_hash::HashSet<u32>,
-    /// Per declared method/function, the user annotations on each SOURCE parameter, parallel to
-    /// [`IrFunction::params`] (so an extension's leading receiver slot is present and empty). Absent ⇒
-    /// no parameter of that function carries one, the overwhelmingly common case; the JVM emitter and
-    /// `@Metadata` both read it, so it must not be folded into either representation. Retention stays
-    /// SEMANTIC here — the JVM split into visible/invisible attributes belongs to the emitter.
-    pub fn_param_annotations: crate::fx_hash::HashMap<u32, Vec<DeclarationAnnotations>>,
     /// Annotations written on a source property's accessors, by property. A declared accessor's
     /// also land in [`Self::function_annotations`]; a default one exists only in a backend.
     pub accessor_annotations: crate::fx_hash::HashMap<crate::fir::PropertyId, AccessorAnnotations>,
@@ -2075,10 +2074,6 @@ pub struct IrFile {
     /// exact static storage that will own them.
     pub(crate) companion_block_field_annotations:
         crate::fx_hash::HashMap<crate::fir::PropertyId, DeclarationAnnotations>,
-    /// Per declared function, whether each PHYSICAL source parameter carries Kotlin's semantic
-    /// `@NoInfer` type-use marker. Extension receivers occupy their physical slot with `false`;
-    /// metadata projection removes that slot again. This is inference policy, not a JVM fact.
-    pub fn_param_no_infer: crate::fx_hash::HashMap<u32, Vec<bool>>,
     /// Function id → checked non-default Kotlin return-value status, which Kotlin metadata records.
     pub fn_return_value_statuses: crate::fx_hash::HashMap<u32, crate::types::ReturnValueStatus>,
     /// Class identity → per-primary-constructor-parameter checked default expression (`None` =
@@ -2310,10 +2305,6 @@ pub struct IrFile {
     /// absent = public, or private for a singleton, whose constructor only a generated singleton
     /// records as public. It sets `@Metadata` `Constructor.flags` and the JVM access.
     pub ctor_visibilities: crate::fx_hash::HashMap<TypeName, crate::types::Visibility>,
-    /// A declared function's `vararg` parameter — class `@Metadata` must emit
-    /// `ValueParameter.vararg_element_type` (f4) or a consumer demands one literal array (`too many
-    /// arguments`).
-    pub fn_varargs: crate::fx_hash::HashMap<u32, IrVarargParameter>,
     /// Declaring class to indices in `statics` for class properties whose JVM field is static.
     pub declared_class_statics: crate::fx_hash::HashMap<TypeName, Vec<u32>>,
     /// (class internal name, property name) → 1-based source line of a BODY property's declaration.
@@ -2321,6 +2312,8 @@ pub struct IrFile {
     pub prop_decl_lines: crate::fx_hash::HashMap<(TypeName, String), u32>,
     /// The source position of every function declaration (`src/ir/function_positions.rs`).
     pub(crate) function_positions: function_positions::IrFunctionPositions,
+    /// The declared parameter facts of every function (`src/ir/declared_parameters.rs`).
+    pub(crate) declared_parameters: declared_parameters::IrDeclaredParameterColumn,
     /// Functions whose debug representation retains receiver/parameter bindings even when the body
     /// deliberately has no executable source line. Generated declarations use this explicit
     /// source/debug contract instead of inventing a line merely to retain their binding names.
@@ -2799,6 +2792,16 @@ impl IrFile {
             _ => None,
         }
     }
+
+    /// The checker-selected constructor a source construction reaches; `None` for a construction
+    /// synthesized without a checked selection.
+    pub fn construction_target(
+        &self,
+        construction: ExprId,
+    ) -> Option<crate::ir::IrConstructorTarget> {
+        self.construction_targets.get(&construction).copied()
+    }
+
     pub fn add_expr(&mut self, mut e: IrExpr) -> ExprId {
         let id = self.exprs.len() as u32;
         match &mut e {

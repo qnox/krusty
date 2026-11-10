@@ -25,9 +25,7 @@ use crate::types::{Ty, TyKind, TypeName};
 
 mod class_initializers;
 mod closure_headers;
-pub(super) use class_initializers::{
-    initializer_header, local_initializer_header, local_member_header,
-};
+pub(super) use class_initializers::{local_initializer_header, local_member_header};
 mod declared_type_parameters;
 pub(super) use closure_headers::{closure_header, CaptureParameter};
 mod reference_headers;
@@ -79,6 +77,17 @@ impl FunctionHeader {
 
     pub(super) fn value(&self, symbol: &KlibIrSymbol) -> Option<ParameterValue> {
         self.values.get(symbol).copied()
+    }
+
+    /// The value slot and published identity of the parameter `symbol`, when it is one.
+    pub(super) fn parameter_identity(
+        &self,
+        symbol: &KlibIrSymbol,
+    ) -> Option<(u32, &IrParameterIdentity)> {
+        let value = self.value(symbol)?;
+        let offset = self.parameter_count() - self.params.len();
+        let index = usize::try_from(value.index).ok()?.checked_sub(offset)?;
+        Some((value.index, self.identities.get(index)?))
     }
 
     /// How many value slots the parameters take; a body's local variables follow them.
@@ -1060,7 +1069,7 @@ pub(super) fn declare_function(ir: &mut IrFile, header: &FunctionHeader) -> FunI
         ir.extension_receiver_fns.insert(function);
     }
     if header.context_count != 0 {
-        ir.fn_context_counts.insert(function, header.context_count);
+        ir.declared_parameters_mut(function).context_count = header.context_count;
     }
     if let Some(receiver) = header.singleton_extension_unread_receiver() {
         ir.singleton_extension_unread_receivers

@@ -6,6 +6,18 @@ pub(super) enum LibraryConstructorSelection {
     Selected,
     Rejected,
     NoMatch(Option<std::sync::Arc<RejectedProviderConstructors>>),
+    /// The selected constructor is not visible from the call site. Like kotlinc's invisible
+    /// candidate it does not end the callable tower: the caller reports it only when no later
+    /// level resolves the call.
+    Invisible(Box<InvisibleConstructor>),
+}
+
+/// A selected constructor the call site cannot access, kept until its tower declines.
+pub(super) struct InvisibleConstructor {
+    pub(super) owner: TypeName,
+    pub(super) classifier: crate::libraries::LibraryType,
+    pub(super) member: crate::libraries::LibraryMember,
+    pub(super) bindings: Option<crate::symbol_resolver::GSigBinds>,
 }
 
 /// Immutable evidence from one constructor selection attempt, in declaration order. Mapping
@@ -781,8 +793,15 @@ impl Checker<'_> {
             None
         };
         let bindings = &member_bindings[candidate_index];
-        if self.reject_ctor_access(call, internal, classifier, &member, bindings.as_ref()) {
-            return Ok(LibraryConstructorSelection::Rejected);
+        if !self.constructor_accessible(internal, &member) {
+            return Ok(LibraryConstructorSelection::Invisible(Box::new(
+                InvisibleConstructor {
+                    owner: internal,
+                    classifier: classifier.clone(),
+                    member,
+                    bindings: bindings.clone(),
+                },
+            )));
         }
         let mut slots = vec![None; member.params.len()];
         for (&argument, &slot) in args.iter().zip(&selected.argument_slots) {
