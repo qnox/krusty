@@ -282,7 +282,15 @@ impl Checker<'_> {
         };
         let body_scope = scope.child(ScopeKind::Block);
         let scope = &body_scope;
-        self.declare_loop_variable(scope, &name, elem, true); // mutated by the lowering
+        self.declare_loop_variable(scope, &name, elem, true);
+        self.record_lexical_declaration(
+            scope,
+            &name,
+            super::lexical_bindings::LexicalValueRole::Statement {
+                declaration: self.file.stmt_spans[statement.0 as usize],
+                slot: 0,
+            },
+        ); // mutated by the lowering
         self.check_loop_body(scope, body, &label);
     }
 
@@ -323,6 +331,14 @@ impl Checker<'_> {
         let body_scope = scope.child(ScopeKind::Block);
         let scope = &body_scope;
         let flow_identity = self.declare_loop_variable(scope, &name, elem, false);
+        self.record_lexical_declaration(
+            scope,
+            &name,
+            super::lexical_bindings::LexicalValueRole::Statement {
+                declaration: self.file.stmt_spans[statement.0 as usize],
+                slot: 0,
+            },
+        );
         self.record_enhanced_loop_variable(flow_identity, iterable, elem);
         self.check_loop_body(scope, body, &label);
     }

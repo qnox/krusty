@@ -49,7 +49,7 @@ impl Checker<'_> {
     pub(super) fn check_parameter_defaults<'p>(
         &mut self,
         scope: &CheckerScope<'_>,
-        parameters: impl ExactSizeIterator<Item = (&'p str, Option<ExprId>)>,
+        parameters: impl ExactSizeIterator<Item = (&'p str, Option<ExprId>, crate::diag::Span)>,
         parameter_types: &[Ty],
         flow: ParameterDefaultFlow,
     ) {
@@ -62,16 +62,21 @@ impl Checker<'_> {
         let identities = parameters
             .iter()
             .zip(parameter_types)
-            .map(|(&(name, _), &ty)| {
+            .map(|(&(name, _, declaration), &ty)| {
                 (name != "_").then(|| {
                     let identity = self.declare(scope, name, ty, false);
+                    self.record_lexical_declaration(
+                        scope,
+                        name,
+                        super::lexical_bindings::LexicalValueRole::Parameter(declaration),
+                    );
                     self.uninitialized_default_parameters
                         .insert(identity, name.to_string());
                     identity
                 })
             })
             .collect::<Vec<_>>();
-        for (((_name, default), &ty), identity) in
+        for (((_name, default, _declaration), &ty), identity) in
             parameters.into_iter().zip(parameter_types).zip(identities)
         {
             if let Some(default) = default {
