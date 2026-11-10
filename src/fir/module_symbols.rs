@@ -19,6 +19,8 @@ mod declaration_names;
 
 #[cfg(test)]
 mod declaration_name_tests;
+#[cfg(test)]
+mod unfinalized_classifier_tests;
 
 /// Pass-2 current-module provider. Its type deliberately cannot retain the Pass-1 symbol table.
 pub(crate) struct StreamedModuleSymbols<'a> {
@@ -288,8 +290,13 @@ impl<'a> StreamedModuleSymbols<'a> {
         let declaration_header = self.index.declaration_header(owner)?;
         // A declaration identity alone is sufficient for lexical binding, but hierarchy and member
         // projection require the complete semantic classifier header. Deferred body-local shapes
-        // stay on the checker-owned overlay until that contract is available.
+        // stay on the checker-owned overlay until that contract is available. A header without
+        // its type-parameter layout did not finalize: projecting it would publish an empty
+        // type-parameter list.
         let classifier_header = self.index.classifier_header(owner)?;
+        if self.index.classifier_type_arguments(owner).is_none() {
+            return None;
+        }
         let anchor = self.index.declaration_anchor(owner)?;
         let flags = declaration_header.flags;
         let mut projected = crate::libraries::LibraryType::declaration_header();
@@ -431,10 +438,9 @@ impl<'a> StreamedModuleSymbols<'a> {
             }
         }
 
-        let parameters = self
-            .index
-            .classifier_type_arguments(owner)
-            .unwrap_or_default();
+        let Some(parameters) = self.index.classifier_type_arguments(owner) else {
+            return None;
+        };
         let parameter_names = parameters
             .iter()
             .map(|parameter| {
