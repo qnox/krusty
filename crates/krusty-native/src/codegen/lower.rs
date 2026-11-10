@@ -51,6 +51,7 @@ mod object_entries;
 mod objects;
 mod ranges;
 mod references;
+mod reified_templates;
 mod representation;
 mod scope;
 mod statics;
@@ -1772,25 +1773,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         | IrTypeOp::NotInstanceOf
                         | IrTypeOp::Cast
                         | IrTypeOp::CastNonNull
-                ) && (self.unresolved_reified.iter().any(|parameter| {
-                    type_operand
-                        .type_parameter_occurrence_bound(parameter)
-                        .is_some()
-                }) || self.file.ir.is_reified_template_operation(
-                    self.scope,
-                    id,
-                    type_operand,
-                )) {
+                ) && self.is_unresolved_reified_operation(id, type_operand)
+                {
                     // The operand precedes kotlinc's reified-operation marker and therefore keeps
                     // any side effect or exception it produces before the marker's own failure.
                     let _ = self.expression(arg)?;
                     if self.terminated {
                         return Ok(None);
                     }
-                    let message = self.string_literal(
-                        b"This function has a reified type parameter and thus can only be inlined at compilation time, not called directly.",
-                    )?;
-                    self.raise("kt_type_unsupported_operation_exception", message)
+                    self.reified_direct_call_failure()
                 } else {
                     self.type_operation(
                         op,
