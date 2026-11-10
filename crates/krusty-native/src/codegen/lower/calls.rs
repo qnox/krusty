@@ -438,7 +438,16 @@ impl BodyLowering<'_, '_, '_> {
                         .or_else(|| self.unsigned_array_carrier_access(realization)),
                     dispatch_receiver,
                     args,
-                    *extension_receiver_parameter,
+                    super::compiler_intrinsics::DeclaredOperands {
+                        receiver: match realization.declaration_owner {
+                            Some(krusty::types::SemanticCallableOwner::Classifier(owner)) => {
+                                Some(Ty::obj_name(owner))
+                            }
+                            _ => None,
+                        },
+                        params: &realization.params,
+                        extension_receiver_parameter: *extension_receiver_parameter,
+                    },
                     *ret,
                 ) {
                     return realized;
@@ -844,7 +853,7 @@ impl BodyLowering<'_, '_, '_> {
                             if realization.owner_is_interface {
                                 if let Some(identity) = realization.dependency_callable.as_ref() {
                                     return self.dependency_interface_stub(
-                                        identity, receiver, args, params, *ret,
+                                        identity, signature, receiver, args, params, *ret,
                                     );
                                 }
                             }

@@ -178,7 +178,7 @@ pub(in super::super) fn apply(
     inline_template_function: crate::ir::FunId,
     inline_template_owner: Option<crate::types::TypeName>,
     inline_template_source: crate::fir::SourceFileId,
-    inline_callee: crate::fir::CallableId,
+    inline_callee: crate::ir::IrInlineCallee,
     inline_callee_source_name: &str,
 ) -> Vec<crate::ir::FunId> {
     let mut replacements = HashMap::<u32, u32>::default();
@@ -283,7 +283,7 @@ struct Specialization<'a> {
     inline_template_function: crate::ir::FunId,
     inline_template_owner: Option<crate::types::TypeName>,
     inline_template_source: crate::fir::SourceFileId,
-    inline_callee: crate::fir::CallableId,
+    inline_callee: crate::ir::IrInlineCallee,
     inline_callee_source_name: &'a str,
 }
 

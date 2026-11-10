@@ -844,6 +844,7 @@ pub(super) fn delegated_call_with_dispatch(
 ) -> Result<ExprId, FirFileLoweringFailure> {
     match &call.target {
         FirCallTarget::Module(target) => {
+            let target = &super::expect_realization::realized_callable(index, *target);
             let callable =
                 index
                     .callable(*target)
