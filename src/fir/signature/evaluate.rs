@@ -1658,6 +1658,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         arguments,
                         scope,
                         origin,
+                        later,
                     } => {
                         let callee =
                             evaluate_expression(semantics, callee, graph, demand, memo, computing)?;
@@ -1671,8 +1672,19 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         let scope = graph.scope(scope).expect(
                             "an invoke signature expression must retain its declaration scope",
                         );
-                        let expectations =
-                            semantics.invoke_argument_expectations(scope, callee, &probes)?;
+                        // Arguments the callee cannot shape mean it has no applicable `invoke`.
+                        let expectations = match (
+                            semantics.invoke_argument_expectations(scope, callee, &probes),
+                            later,
+                        ) {
+                            (Ok(expectations), _) => expectations,
+                            (Err(_), Some(later)) => {
+                                return evaluate_expression(
+                                    semantics, later, graph, demand, memo, computing,
+                                );
+                            }
+                            (Err(diagnostic), None) => return Err(diagnostic),
+                        };
                         let mut resolved_arguments = Vec::new();
                         for (index, argument) in graph.call_arguments(arguments).iter().enumerate()
                         {
@@ -1686,7 +1698,21 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                                 computing,
                             )?);
                         }
-                        semantics.select_invoke(scope, origin, callee, &resolved_arguments, demand)
+                        match semantics.select_invoke(
+                            scope,
+                            origin,
+                            callee,
+                            &resolved_arguments,
+                            demand,
+                        )? {
+                            InvokeSelection::Selected(result) => Ok(result),
+                            InvokeSelection::Inapplicable(diagnostic) => match later {
+                                Some(later) => evaluate_expression(
+                                    semantics, later, graph, demand, memo, computing,
+                                ),
+                                None => Err(diagnostic),
+                            },
+                        }
                     }
                     SigExpr::Function {
                         parameters,

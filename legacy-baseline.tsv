@@ -20,12 +20,12 @@
 8	uses	merge_generic_upper_bindings
 8	uses	complete_bottom_constraint_bindings
 # Unifiers that run beside the call constraint system, and name-keyed substitution.
-49	uses	unify_ty
+48	uses	unify_ty
 29	uses	unify_ty_from_symbols
 42	uses	unify_inferred_ty
 7	uses	unify_inferred_ty_with_source
 7	uses	unify_ty_common
-5	uses	unify_member_extension_slot
+4	uses	unify_member_extension_slot
 282	uses	ty_subst_keep_unbound
 # Common-supertype joins that one join replaces.
 12	uses	semantic_common_supertype
@@ -34,10 +34,10 @@
 16	uses	common_super_type
 10	uses	common_super_types
 10	uses	merge_inferred_ty
-22	uses	merge_inferred_ty_from_symbols
+21	uses	merge_inferred_ty_from_symbols
 8	uses	merge_inferred_lower_bounds_from_symbols
 5	uses	try_branch_join
 # Call selection without a shared applicability ranking.
 177	fns	select_
 # The temporary signature bridge, which must disappear.
-31649	lines	src/resolve/streaming_signature_bridge*
+31697	lines	src/resolve/streaming_signature_bridge*

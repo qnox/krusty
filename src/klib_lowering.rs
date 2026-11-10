@@ -22,6 +22,7 @@ mod class_storage;
 mod closure_forms;
 mod constructor_calls;
 mod decline;
+mod enum_classes;
 mod function_lowering;
 mod inline_templates;
 mod ir_builtins;
@@ -38,6 +39,7 @@ mod type_evidence;
 pub use crate::libraries::KlibBodyCallable as KlibCallable;
 pub use body_unit::DependencyBodyUnit;
 pub(crate) use body_unit::{is_private_value_member, EmittedDependencyCallable};
+pub(crate) use callee_facts::ClassInitializations;
 pub use callee_facts::KlibCalleeFacts;
 pub(crate) use closure_forms::emitted_closure_function;
 

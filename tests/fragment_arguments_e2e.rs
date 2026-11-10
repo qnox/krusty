@@ -642,3 +642,46 @@ fn a_classifier_nested_in_an_alias_actualized_expect_class_is_the_targets_nested
         without_facade(&compiled.kotlinc.2)
     );
 }
+
+/// A common call of an `expect` function binds the `expect` declaration, so its result is typed in
+/// the common fragment's terms: an alias-actualized `expect` class stays that class, not the
+/// alias's target the `actual` is written in.
+#[test]
+fn a_common_call_of_an_expect_function_typed_by_an_alias_actualized_class_matches_kotlinc() {
+    let compiled = compile_sources(
+        "package p\nexpect open class Lock()\nexpect fun make(): Lock\nexpect fun take(lock: Lock): Int\nexpect val shared: Lock\nfun c(): Lock = make()\nfun d(lock: Lock): Int = take(lock)\nfun e(): Lock = shared\nfun f(): Int = take(make())\n",
+        "package p\nactual typealias Lock = java.util.concurrent.locks.ReentrantLock\nactual fun make(): Lock = Lock()\nactual fun take(lock: Lock): Int = lock.holdCount\nactual val shared: Lock = Lock()\nfun j() = c().isLocked && e().isLocked && d(Lock()) == f()\n",
+        common_and_jvm,
+    );
+    assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
+    assert_eq!(
+        (compiled.krusty.0, &compiled.krusty.2),
+        (compiled.kotlinc.0, &compiled.kotlinc.2)
+    );
+}
+
+/// The result of a common call of an `expect` function is the common fragment's `expect` class,
+/// which declares none of the alias target's members.
+#[test]
+fn a_common_read_of_an_alias_target_member_on_an_expect_result_is_kotlincs_unresolved_reference() {
+    rejected_in_common(
+        "package p\nexpect open class Lock()\nexpect fun make(): Lock\nfun c() = make().isLocked\n",
+        "package p\nactual typealias Lock = java.util.concurrent.locks.ReentrantLock\nactual fun make(): Lock = Lock()\n",
+    );
+}
+
+/// A common call of an inline `expect` function, bound by the `expect`'s own bound on an
+/// alias-actualized interface, inlines the body of the `actual` replacing it.
+#[test]
+fn a_common_call_of_an_inline_expect_function_inlines_its_actual_as_kotlinc_does() {
+    let compiled = compile_sources(
+        "package p\nexpect interface Closer {\n    fun close()\n}\nexpect inline fun <C : Closer, R> C.use(block: (C) -> R): R\nfun <C : Closer, R> C.withUse(block: C.() -> R): R = use(block)\n",
+        "package p\nactual typealias Closer = java.io.Closeable\nactual inline fun <C : Closer, R> C.use(block: (C) -> R): R = try { block(this) } finally { close() }\nfun j() = java.io.StringReader(\"a\").withUse { read() }\n",
+        common_and_jvm,
+    );
+    assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
+    assert_eq!(
+        (compiled.krusty.0, &compiled.krusty.2),
+        (compiled.kotlinc.0, &compiled.kotlinc.2)
+    );
+}

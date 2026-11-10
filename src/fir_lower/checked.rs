@@ -239,6 +239,7 @@ impl BodyLowering<'_> {
                 },
             );
         };
+        let target = super::expect_realization::realized_callable(self.index, target);
         let callable = self
             .index
             .callable(target)
@@ -597,6 +598,7 @@ impl BodyLowering<'_> {
         let extension_receiver = self.receiver(call.extension_receiver)?;
         match &call.target {
             FirCallTarget::Module(target) => {
+                let target = &super::expect_realization::realized_callable(self.index, *target);
                 self.index
                     .callable(*target)
                     .ok_or(FirLoweringFailure::MissingCallable(*target))?;
@@ -1147,6 +1149,7 @@ impl BodyLowering<'_> {
                 property: target,
                 inline_splice,
             } => {
+                let target = &super::expect_realization::realized_property(self.index, *target);
                 let (dispatch_receiver, dispatch_class) =
                     self.module_property_receiver(*target, dispatch_receiver)?;
                 let operation = IrCheckedOperation::PropertyRead {
@@ -1225,6 +1228,7 @@ impl BodyLowering<'_> {
                 property: target,
                 inline_splice,
             } => {
+                let target = &super::expect_realization::realized_property(self.index, *target);
                 let (dispatch_receiver, dispatch_class) =
                     self.module_property_receiver(*target, dispatch_receiver)?;
                 let operation = IrCheckedOperation::PropertyWrite {
