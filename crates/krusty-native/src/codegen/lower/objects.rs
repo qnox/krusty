@@ -403,10 +403,17 @@ impl<'a> FileLowering<'a> {
                 self.ir.classes[*class as usize].fields[*field as usize].ty,
             );
             let base = self.class_base(*class).to_string();
+            // A later file's subclass inherits the accessors of a class it extends by symbol.
             let id = if matches!(slot, Slot::FieldGetter { .. }) {
-                self.declare_local_function(&format!("kt_{base}__get_f{field}"), &[any()], ty)?
+                self.declare_class_function(
+                    *class,
+                    &format!("kt_{base}__get_f{field}"),
+                    &[any()],
+                    ty,
+                )?
             } else {
-                self.declare_local_function(
+                self.declare_class_function(
+                    *class,
                     &format!("kt_{base}__set_f{field}"),
                     &[any(), ty],
                     Ty::Unit,
@@ -632,8 +639,13 @@ impl<'a> FileLowering<'a> {
         Ok(entries)
     }
 
-    /// What realizes each entry of a class or interface table.
-    pub(super) fn table_functions(&mut self, table: &[Slot]) -> Result<Vec<FuncId>, Unsupported> {
+    /// What realizes each entry of a class or interface table, whose inherited entries are those
+    /// of `laid_out`, the superclass an earlier file laid out.
+    pub(super) fn table_functions(
+        &mut self,
+        table: &[Slot],
+        laid_out: Option<TypeName>,
+    ) -> Result<Vec<FuncId>, Unsupported> {
         let mut functions = Vec::with_capacity(table.len());
         for slot in table {
             functions.push(match slot {
@@ -658,6 +670,10 @@ impl<'a> FileLowering<'a> {
                 },
                 Slot::Abstract => self.import("kt_abstract_method_called", &[], Ty::Unit)?,
                 Slot::ModuleFunction(callable) => self.interface_default_import(*callable)?,
+                Slot::Inherited { slot } => self.inherited_entry(laid_out, Some(*slot), None)?,
+                Slot::InheritedInterface { number } => {
+                    self.inherited_entry(laid_out, None, Some(*number))?
+                }
                 Slot::FieldGetter { .. }
                 | Slot::FieldSetter { .. }
                 | Slot::AnnotationMember { .. }
@@ -696,7 +712,7 @@ impl<'a> FileLowering<'a> {
         let layout = self.model.layout(class).clone();
         let base = self.class_base(class).to_string();
 
-        let vtable = self.table_functions(&layout.vtable)?;
+        let vtable = self.table_functions(&layout.vtable, layout.laid_out_superclass)?;
         let declared = &self.ir.classes[class as usize];
         let instantiable = !(declared.is_interface || declared.is_abstract || declared.is_sealed);
         let itable = if self.ir.classes[class as usize].is_interface {
@@ -704,20 +720,29 @@ impl<'a> FileLowering<'a> {
             // it starts from, and is read there rather than through this descriptor.
             Vec::new()
         } else {
-            self.table_functions(&layout.itable)?
+            self.table_functions(&layout.itable, layout.laid_out_superclass)?
         };
+        if self.extended.contains(&class) {
+            self.extension_tables
+                .insert(class, (vtable.clone(), itable.clone()));
+        }
         let name = self.kotlin_name(class);
         let descriptor = self.classes[class as usize].descriptor;
         // A class's `super` is its superclass where it has one, because `is` walks that chain.
         // With no superclass in this file it may still have one the RUNTIME owns — `class C :
         // Exception(…)` — and pointing at that descriptor is the whole of what makes `catch (e:
         // Exception)` take `C`: matching a clause walks exactly this chain.
-        let superclass = match layout.superclass {
-            Some(parent) => self.classes[parent as usize].descriptor,
-            None => match model::external_base(self.ir.classes[class as usize].superclass) {
-                Some(base) => self.import_data(base.descriptor)?,
-                None => self.import_data("kt_type_any")?,
-            },
+        let superclass = match (layout.superclass, layout.laid_out_superclass) {
+            (Some(parent), _) => self.classes[parent as usize].descriptor,
+            (None, Some(laid_out)) => self
+                .type_descriptor(Ty::obj_name(laid_out))?
+                .ok_or("a superclass of the module with no descriptor")?,
+            (None, None) => {
+                match model::external_base(self.ir.classes[class as usize].superclass) {
+                    Some(base) => self.import_data(base.descriptor)?,
+                    None => self.import_data("kt_type_any")?,
+                }
+            }
         };
         let local_interfaces = self.model.interfaces[class as usize].clone();
         let mut interfaces: Vec<DataId> = local_interfaces
@@ -994,6 +1019,20 @@ impl<'a> FileLowering<'a> {
                     None if model::external_base(*owner).is_some() => {
                         throwable_base = true;
                         (None, target_params.clone())
+                    }
+                    // A superclass an earlier file laid out, through the entry its file exports
+                    // for the selected constructor.
+                    None if self.model.layout(class).laid_out_superclass == Some(*owner) => {
+                        let (constructor, params) =
+                            self.laid_out_super_constructor(class, target.ordinal)?;
+                        if params.len() != target_params.len() {
+                            return Err(declined!(
+                                "a delegation to a superclass constructor with compiler-supplied \
+                                 parameters (`{}`)",
+                                owner.render()
+                            ));
+                        }
+                        (Some(constructor), target_params.clone())
                     }
                     None => {
                         return Err(declined!(
@@ -1513,6 +1552,25 @@ impl<'a> FileLowering<'a> {
                     })?,
                 };
                 Some((parent_constructor, params))
+            }
+            // A superclass an earlier file laid out is constructed through the entry its file
+            // exports for the constructor the checker selected.
+            None if layout.laid_out_superclass.is_some() => {
+                let (constructor, params) =
+                    self.laid_out_super_constructor(class, declaration.super_ctor.ordinal)?;
+                if declaration.super_args.len() != params.len()
+                    || self
+                        .ir
+                        .super_constructor_default_arguments
+                        .contains_key(&declaration.fq_name_id())
+                {
+                    return Err(declined!(
+                        "a superclass constructor call of another arity or with omitted \
+                         arguments (`{}`)",
+                        declaration.fq_name()
+                    ));
+                }
+                Some((constructor, params))
             }
             // A base the runtime owns has no constructor to call: the object is already
             // allocated, and what the base's constructor would have done is store what it was
@@ -2141,7 +2199,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// typed initializer and publishes the instance before the companion constructor, so a
     /// companion that constructs its holder does not re-enter. An enum's companion stays
     /// with the enum initializer.
-    fn activate_class(&mut self, class: ClassId) -> Result<(), Unsupported> {
+    pub(super) fn activate_class(&mut self, class: ClassId) -> Result<(), Unsupported> {
         let mut chain = vec![class];
         loop {
             let parent = self
@@ -2153,6 +2211,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 break;
             };
             chain.push(parent);
+        }
+        self.activate_laid_out_superclass(*chain.last().expect("non-empty"))?;
+        if self.terminated {
+            return Ok(());
         }
         for &owner in chain.iter().rev() {
             let getter = {

@@ -261,7 +261,6 @@ bridges/test8.kt
 bridges/twoParentsWithDifferentMethodsTwoBridges.kt
 bridges/twoParentsWithDifferentMethodsTwoBridges2.kt
 bridges/twoParentsWithTheSameMethodOneBridge.kt
-bridges/varargBridge1.kt
 builtinStubMethods/customReadOnlyIterator.kt
 builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
 callableReference/adaptedReferences/adaptedSecondArgArray.kt
@@ -1543,13 +1542,7 @@ evaluate/intrinsicConst/kt58717.kt
 evaluate/intrinsicConst/lowerAndUpperCase.kt
 evaluate/kt9443.kt
 evaluate/objectConstValInAnnotationArgument.kt
-evaluate/serialization/annotationOnFakeOverride.kt
-evaluate/serialization/annotationOnFakeOverrideProperty.kt
-evaluate/serialization/annotationOnParameterOnFakeOverride.kt
-evaluate/serialization/annotationOnSecondParameterOnFakeOverride.kt
-evaluate/serialization/annotationOnTypeOnFakeOverride.kt
 evaluate/serialization/annotationSerialization.kt
-evaluate/serialization/annotationWithDefaultValueOnFakeOverride.kt
 evaluate/serialization/typeAnnotation.kt
 evaluate/thisPlusString.kt
 evaluate/ubyteOperations.kt
@@ -2727,7 +2720,6 @@ multiplatform/k2/basic/localIntersectionOverrideWithDefaultParameterInCommonModu
 multiplatform/k2/basic/localSubstitutionOverrideInCommonModule.kt
 multiplatform/k2/basic/nameBasedDestructuringFullForm.kt
 multiplatform/k2/basic/nameBasedDestructuringShortForm.kt
-multiplatform/k2/basic/nonExternalEquals.kt
 multiplatform/k2/basic/overridesOfExpectMembers.kt
 multiplatform/k2/basic/substitutionOverrideInCommonModule.kt
 multiplatform/k2/basic/transitiveSuperclassActualization.kt
@@ -2765,7 +2757,6 @@ multiplatform/k2/extensionPropertiesOverloads.kt
 multiplatform/k2/hmpp/abstractExpectedActual2-2.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritance.kt
-multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflict.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflictDefaults.kt
 multiplatform/k2/hmpp/expectActualGeneric2-2.kt
 multiplatform/k2/hmpp/expectActualGeneric3-3.kt
@@ -2802,10 +2793,8 @@ multiplatform/k2/hmpp/typealiasNameClash.kt
 multiplatform/k2/hmpp/typealiasReturnTypeIntersectionBound.kt
 multiplatform/k2/internalOverride.kt
 multiplatform/k2/internalOverride2.kt
-multiplatform/k2/internalSetterInCommon.kt
 multiplatform/k2/kt66970.kt
 multiplatform/k2/kt68801.kt
-multiplatform/k2/mergedOverrides.kt
 multiplatform/k2/migratedOldTests/mpp_default_args.kt
 nameBasedDestructuring/fullFormExtraPropType.kt
 nameBasedDestructuring/fullFormFromSmartCast.kt
@@ -4030,7 +4019,6 @@ specialBuiltins/throwable.kt
 specialBuiltins/throwableCause.kt
 specialBuiltins/throwableComplex.kt
 specialBuiltins/throwableImpl.kt
-specialBuiltins/throwableImplWithSecondaryConstructor.kt
 storeStackBeforeInline/differentTypes.kt
 storeStackBeforeInline/primitiveMerge.kt
 storeStackBeforeInline/simple.kt
@@ -4102,7 +4090,6 @@ syntheticAccessors/protectedMemberReferenceAccessor/kt46597_property.kt
 toArray/kt3177-toTypedArray.kt
 toArray/returnToTypedArray.kt
 traits/diamondPropertyAccessors.kt
-traits/doubleGenericDiamond.kt
 traits/kt2399.kt
 traits/kt5393_property.kt
 traits/multiple.kt
@@ -4166,7 +4153,6 @@ typealias/deserializedAbbreviationWithRedundantArgument.kt
 typealias/localTypeAliases.kt
 typealias/nestedTypeAliasesAndStaticScope.kt
 typealias/nestedTypeAliasesAndTypeArguments.kt
-typealias/privateInKlib.kt
 typealias/typeAliasAsBareType.kt
 unaryOp/callWithCommonType.kt
 unaryOp/intrinsicNullable.kt

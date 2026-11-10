@@ -79,6 +79,7 @@ use krusty::ir::{
 use krusty::types::{Ty, TypeName};
 
 use super::super::classes::{self as model, AnyMember, ClassModel, Slot};
+use super::super::laid_out_classes::{LaidOutClass, LaidOutClasses};
 use super::super::symbols::Symbols;
 use super::{Entry, BOX_RESULT_FRAME, PROGRAM_ENTRY};
 use crate::NativeTarget;
@@ -151,6 +152,8 @@ pub struct Lowered {
     pub defines_entry: bool,
     /// This file's contribution to the module's C header, in source order.
     pub abi: Vec<super::super::c_abi::Record>,
+    /// What a later file of the module extending a class of this one reads of it.
+    pub laid_out: Vec<(TypeName, LaidOutClass)>,
 }
 
 /// Build the ISA for `target`. Non-PIC, because the output is a static executable at a fixed
@@ -235,6 +238,9 @@ pub struct FileInput<'a> {
     pub slot_plan: &'a krusty::backend::class_tables::module_slots::ModuleSlotPlan,
     /// The module's classifier facts, which every file reads alike.
     pub module_facts: &'a krusty::backend::BackendModuleFacts,
+    /// The classes earlier files of the source module laid out, which a class of this file may
+    /// extend.
+    pub laid_out: &'a LaidOutClasses,
 }
 
 pub fn lower_file(
@@ -263,8 +269,11 @@ pub fn lower_file(
         value_classes,
         slot_plan,
         module_facts,
+        laid_out,
     } = input;
-    let class_model = model::build(ir, value_classes, slot_plan)?;
+    let class_model = model::build(ir, value_classes, slot_plan, laid_out)?;
+    let extended = extended_elsewhere(ir, unit_kind, module_facts);
+    let exported = module_abi::exported_classes(&class_model, &extended);
     // Another file calls a default-argument entry by the one symbol its identity names.
     if let Some(declaration) = ir.default_entries.keys().find(|&&declaration| {
         krusty::backend::default_arguments::published_identities(ir, declaration).len() > 1
@@ -316,6 +325,11 @@ pub fn lower_file(
         values: value_classes,
         slot_plan,
         module_facts,
+        laid_out,
+        extended,
+        exported,
+        extension_entries: HashMap::default(),
+        extension_tables: HashMap::default(),
         module: &mut module,
         symbols: super::super::symbols::symbols(ir, module_name, runtime_symbols.clone()),
         model: class_model,
@@ -397,6 +411,7 @@ pub fn lower_file(
     lowering.define_constructor_entry_points(file_init)?;
     lowering.define_singleton_entry_points(file_init)?;
     lowering.define_value_box_entry_points()?;
+    lowering.define_extension_entries(file_init)?;
     let defines_entry = selected.is_some();
     let abi = match unit_kind {
         krusty::backend::CheckedIrUnitKind::Source => {
@@ -408,6 +423,7 @@ pub fn lower_file(
     lowering.define_dependency_exports(file_init, dependency_exports)?;
     lowering.define_interface_identities()?;
 
+    let records = lowering.laid_out_records()?;
     let comdat_objects = std::mem::take(&mut lowering.comdat_objects);
     let mut product = module.finish();
     for data in comdat_objects {
@@ -429,7 +445,35 @@ pub fn lower_file(
         object,
         defines_entry,
         abi,
+        laid_out: records,
     })
+}
+
+/// The classes of `ir` another file of the module extends, with their superclasses in this file:
+/// what a later file's subclass names by symbol, so their objects define those symbols for the
+/// link to find. A support unit's classes are no source file's to extend.
+fn extended_elsewhere(
+    ir: &IrFile,
+    unit_kind: krusty::backend::CheckedIrUnitKind,
+    module_facts: &krusty::backend::BackendModuleFacts,
+) -> krusty::fx_hash::HashSet<krusty::ir::ClassId> {
+    let mut extended = krusty::fx_hash::HashSet::default();
+    if unit_kind != krusty::backend::CheckedIrUnitKind::Source {
+        return extended;
+    }
+    let classes = module_facts.classes();
+    for (id, class) in ir.classes.iter().enumerate() {
+        if class.is_interface || ir.local_class_name_provenance.contains_key(&(id as u32)) {
+            continue;
+        }
+        if classes
+            .subclasses_of(class.fq_name)
+            .any(|subclass| ir.class_id_by_name(subclass).is_none())
+        {
+            extended.insert(id as krusty::ir::ClassId);
+        }
+    }
+    extended
 }
 
 struct FileLowering<'a> {
@@ -447,6 +491,17 @@ struct FileLowering<'a> {
     slot_plan: &'a krusty::backend::class_tables::module_slots::ModuleSlotPlan,
     /// The module's classifier facts, which say what every file, not only this one, declares.
     module_facts: &'a krusty::backend::BackendModuleFacts,
+    /// The classes earlier files of the source module laid out.
+    laid_out: &'a LaidOutClasses,
+    /// The classes of this file another file of the module extends.
+    extended: krusty::fx_hash::HashSet<krusty::ir::ClassId>,
+    /// The classes of `extended` and their superclasses here, whose table entries another file
+    /// links by symbol.
+    exported: krusty::fx_hash::HashSet<krusty::ir::ClassId>,
+    /// The entry points a later file's subclass of each class in `extended` calls.
+    extension_entries: HashMap<krusty::ir::ClassId, module_abi::ExtensionEntries>,
+    /// What the vtable and interface table of each class in `extended` hold.
+    extension_tables: HashMap<krusty::ir::ClassId, (Vec<FuncId>, Vec<FuncId>)>,
     module: &'a mut ObjectModule,
     /// Symbols of this file's classes and functions.
     symbols: Symbols,

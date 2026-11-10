@@ -47,6 +47,7 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
     is_scalar_operation(operation)
         || IrBinOp::of_primitive_operator(operation).is_some()
         || operation == krusty::backend::BackendCompilerIntrinsic::ThrowableMessage
+        || operation == krusty::backend::BackendCompilerIntrinsic::ThrowableCause
         || operation == krusty::backend::BackendCompilerIntrinsic::ArrayGet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySize
@@ -67,6 +68,7 @@ use super::super::runtime::*;
 use super::any_member_reach::FileReach;
 use super::callable_registry::{CallableRegistry, FileCallTargets};
 use super::classes::{FileClasses, RealizedProperties};
+use super::laid_out_classes::LaidOutClasses;
 use super::property_registry::PropertyRegistry;
 
 pub(super) type Unsupported = String;
@@ -103,6 +105,8 @@ pub(super) struct ModuleState<'a> {
     pub(super) runtime: &'a mut Runtime,
     pub(super) callables: &'a mut CallableRegistry,
     pub(super) properties: &'a mut PropertyRegistry,
+    /// The classes earlier files of the source module laid out; this file's join them.
+    pub(super) classes: &'a mut LaidOutClasses,
 }
 
 /// Lower every function and class of `file` into the program.
@@ -125,6 +129,7 @@ pub(super) fn lower_file(
         runtime,
         callables: callable_registry,
         properties: property_registry,
+        classes: laid_out_classes,
     } = state;
     for property in &ir.statics {
         if property.owner.is_some() {
@@ -199,8 +204,18 @@ pub(super) fn lower_file(
     let classes = if ir.classes.is_empty() {
         None
     } else {
-        let mut classes =
-            super::classes::declare(ir, module, runtime, classifiers, &indices, properties, plan)?;
+        let mut classes = super::classes::declare(
+            ir,
+            module,
+            runtime,
+            &indices,
+            properties,
+            super::classes::BeyondFile {
+                classifiers,
+                plan,
+                laid_out: laid_out_classes,
+            },
+        )?;
         super::interface_members::record(
             &super::interface_members::Recording {
                 ir,
@@ -328,6 +343,9 @@ pub(super) fn lower_file(
             module,
             runtime,
         )?;
+        for (name, record) in classes.records(ir, &indices, &signatures) {
+            laid_out_classes.insert(name, record);
+        }
     } else if !member_property_definitions.is_empty() {
         return Err("a member property definition without its class layout".to_string());
     }
@@ -1181,9 +1199,9 @@ impl<'a> Body<'a> {
                 ..
             } = &**call_callee
                 && defaults.is_empty()
-                && self.is_throwable_message(*target) =>
+                && let Some(field) = self.throwable_field(*target) =>
             {
-                self.throwable_message(dispatch_receiver, &args, *ret)?;
+                self.throwable_field_read(field, dispatch_receiver, &args, *ret)?;
             }
             IrExpr::Call {
                 dispatch_receiver: Some(receiver),
@@ -1472,9 +1490,9 @@ impl<'a> Body<'a> {
                     source_receiver: Some(_),
                 } = &**checked_op
                     && parameters.is_empty()
-                    && self.is_throwable_message_property(*target) =>
+                    && let Some(field) = self.throwable_field_property(*target) =>
             {
-                self.throwable_message(*receiver, arguments, *result)?;
+                self.throwable_field_read(field, *receiver, arguments, *result)?;
             }
             IrExpr::Checked(ref checked_op)
                 if let krusty::ir::IrCheckedOperation::ExternalPropertyRead {
@@ -2065,6 +2083,7 @@ mod tests {
                 runtime: &mut started.runtime,
                 callables: &mut started.callables,
                 properties: &mut started.properties,
+                classes: &mut started.classes,
             },
         )
     }
