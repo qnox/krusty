@@ -75,9 +75,10 @@ impl IrFile {
             .any(|edge| edge.implementation_function == Some(function))
     }
 
-    /// The member functions of `owner` that override one of `Any`'s `equals`/`hashCode`/`toString`,
-    /// each with the `Any` member it overrides, by the frontend's override edges. A value class
-    /// generates exactly the `Any` members its source does not override.
+    /// The source member functions of `owner` that override one of `Any`'s
+    /// `equals`/`hashCode`/`toString`, each with the `Any` member it overrides, by the frontend's
+    /// override edges. The structural trio common lowering generates is not one of them: a value
+    /// class generates exactly the `Any` members its source does not override.
     pub fn any_member_overrides(
         &self,
         owner: TypeName,
@@ -101,6 +102,7 @@ impl IrFile {
                 };
                 self.checked_callable_functions
                     .get(&declaration)
+                    .filter(|&&function| !self.is_data_class_member(owner, function))
                     .map(|&function| (function, member))
             })
             .collect()

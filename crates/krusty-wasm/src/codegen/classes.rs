@@ -335,8 +335,6 @@ fn check_supported(ir: &IrFile, id: ClassId) -> Result<(), Unsupported> {
         "a callable reference"
     } else if class.lambda.is_some() || class.sam_wrapper.is_some() {
         "a function value's class"
-    } else if class.is_value {
-        "a value class"
     // An inner class's enclosing instance is already an ordinary constructor-prefix argument and
     // field in checked IR, which this object form can carry like every other reference field.
     // Anonymous superclass operands are also ordinary parameters, without capture storage.
