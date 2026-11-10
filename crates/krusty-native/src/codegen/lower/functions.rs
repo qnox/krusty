@@ -173,15 +173,43 @@ fn reference_identity(
         }
         Target::FunctionValueConversion { ordinal } => format!("conversion_{ordinal}"),
         // A property read as a function value is the property reference, equal to every other
-        // reference to the same property.
+        // reference to the same property. A property another module may name is identified by
+        // its getter's published identity, in its own module as in every other.
         Target::Property(property) => match property.referenced_property() {
             Some(krusty::ir::IrReferencedProperty::Module(property)) => {
-                let declaration = ReferenceDeclaration::property(file.module_name, property);
+                // A property this module exports is named by its published identity, which its
+                // importers' references share; any other module property by its declaration.
+                let declaration = match file.dependency_signatures.property_declaration(property) {
+                    Some(identity) => ReferenceDeclaration::dependency(identity),
+                    None => ReferenceDeclaration::property(file.module_name, property),
+                };
                 return Ok(ReferenceIdentity::Program(
                     declaration.marker(reference.bound_receiver.is_some()),
                 ));
             }
+            // A dependency property is named by its getter's own provider identity, which every
+            // file's reference to it shares, under the same rule as a dependency function's
+            // reference: a getter its provider gives no such identity is identified per file.
             Some(krusty::ir::IrReferencedProperty::External(property)) => {
+                let getter = file
+                    .callables
+                    .property(property)
+                    .ok_or("a property reference without frozen declaration facts")?
+                    .getter;
+                // An exported property's module names it by its getter's published identity, so an
+                // importer names it by that same identity rather than a source export's marker.
+                let identity = file
+                    .callables
+                    .callable(getter)
+                    .ok_or("a property reference without frozen getter facts")?
+                    .dependency_callable
+                    .as_ref();
+                if let Some(identity) = identity {
+                    return Ok(ReferenceIdentity::Program(
+                        ReferenceDeclaration::dependency(identity)
+                            .marker(reference.bound_receiver.is_some()),
+                    ));
+                }
                 format!("property_e{}", property.raw())
             }
             None => {
