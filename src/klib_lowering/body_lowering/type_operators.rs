@@ -1,8 +1,8 @@
 //! Type operators: `is`, `!is`, `as` and the implicit casts a KLIB states explicitly.
 //!
 //! Each lowers to the type operation checked FIR lowering produces for the source form, where
-//! that is one operation over the lowered operand. A form checked FIR lowering expands into
-//! control flow of its own (`as?`, `is` of a nullable type), settles without a test (`is
+//! that is one operation over the lowered operand, or to the shared shape of an `is` of a nullable
+//! type. A form checked FIR lowering expands into other control flow of its own (`as?`), settles without a test (`is
 //! Nothing`), or derives from facts a KLIB does not carry (a platform type's implicit non-null
 //! assertion names the call that produced the value) declines by its name.
 
@@ -32,7 +32,11 @@ impl BodyLowering<'_> {
                     return Err(mismatch("an `is` check is not typed `Boolean`"));
                 }
                 if target.is_nullable() {
-                    return unsupported("an `is` check of a nullable type");
+                    return self.nullable_type_test(
+                        operator == KlibIrTypeOperator::NotInstanceOf,
+                        target,
+                        argument,
+                    );
                 }
                 if target.canonical_semantic() == Ty::Nothing {
                     return unsupported("an `is` check of `Nothing`");
@@ -70,6 +74,44 @@ impl BodyLowering<'_> {
             self.ir.written_casts.insert(lowered);
         }
         Ok(self.typed(lowered, ty))
+    }
+
+    /// `argument is target` (or `!is`) for a nullable `target`, as checked FIR lowering shapes it:
+    /// a nullable operand becomes `tmp == null || tmp is T`, testing a stable read in place and
+    /// anything else through a temporary, and a non-null operand tests the non-null target.
+    /// A nullable type-parameter target names a reified parameter only in a declaration this
+    /// lowering does not prepare, and declines.
+    fn nullable_type_test(
+        &mut self,
+        negated: bool,
+        target: Ty,
+        argument: KlibIrExprId,
+    ) -> Lowered<ExprId> {
+        let tested = target.non_null();
+        if tested.is_ty_param() {
+            return unsupported("an `is` check of a nullable type parameter");
+        }
+        let arg = self.expression(argument)?;
+        let actual = self.lowered_type(arg);
+        if actual == Ty::Unit {
+            // Checked FIR lowering first gives a `Unit` operand a value of its own.
+            return unsupported("a type operator on a `Unit` value");
+        }
+        let test = if crate::ir::admits_null_at_runtime(actual) {
+            let operand = match self.ir.stable_value_read(arg) {
+                Some(slot) => crate::ir::TestedOperand::Stable(slot),
+                None => crate::ir::TestedOperand::Temporary(self.locals.anonymous_slot()),
+            };
+            let test = self.ir.null_or_instance(arg, tested, operand);
+            if negated {
+                self.ir.add_negation(test)
+            } else {
+                test
+            }
+        } else {
+            self.ir.instance_check(negated, arg, tested)
+        };
+        Ok(self.typed(test, Ty::Boolean))
     }
 
     /// An implicit cast to `target`. One to the value's own type converts nothing and adds no
