@@ -9,7 +9,7 @@
 
 use krusty::backend::class_tables::module_slots::PlanKey;
 use krusty::backend::class_tables::{
-    function_key, local_property_target, AnyMember, Slot, SlotKey,
+    function_key, local_property_target, AnyMember, SlotKey,
 };
 use krusty::backend::interface_identity::member_identity;
 use krusty::fir::{
@@ -17,8 +17,8 @@ use krusty::fir::{
     ResolvedPropertyOverrideTarget,
 };
 use krusty::ir::{
-    Callee, ClassId, CtorDelegateTarget, FunId, IrExpr, IrLocalPropertyLayout, IrSuperCallKind,
-    IrTypeOp, IrVirtualTarget,
+    Callee, ClassId, CtorDelegateTarget, FunId, IrLocalPropertyLayout, IrSuperCallKind, IrTypeOp,
+    IrVirtualTarget,
 };
 use krusty::types::{Ty, TyKind, TypeName};
 
@@ -1098,79 +1098,6 @@ impl Body<'_> {
         let structure = self.file_classes()?.structure(class);
         self.code.ref_test(nullable, HeapType::Concrete(structure));
         Ok(())
-    }
-
-    /// Whether a call through `member`'s slot on a value statically of `class` could reach
-    /// `kotlin.Any`'s own member. The table entry stays `Slot::AnyMember` when the class does not
-    /// override it, including where a default body is installed for that entry.
-    pub(super) fn reaches_any_default(
-        &self,
-        class: ClassId,
-        member: AnyMember,
-    ) -> Result<bool, Unsupported> {
-        let classes = self.file_classes()?;
-        Ok(self.ir.classes.iter().enumerate().any(|(id, candidate)| {
-            let id = id as ClassId;
-            if candidate.is_interface {
-                return false;
-            }
-            let mut ancestor = Some(id);
-            let mut related = classes.tables.interfaces[id as usize].contains(&class);
-            while let Some(current) = ancestor {
-                related |= current == class;
-                ancestor = classes.tables.table(current).superclass;
-            }
-            related
-                && classes.tables.table(id).vtable[member.slot() as usize]
-                    == Slot::AnyMember(member)
-        }))
-    }
-
-    /// Whether a call through `member`'s slot on a value statically of type `ty` could reach
-    /// `kotlin.Any`'s own member. A type naming a class of this file is answered by that class's
-    /// hierarchy; any other reference type (`Any`, a type parameter, an interface) is erased, so
-    /// its value can be an instance of every class here or a runtime exception object. A scalar's box and `Unit` answer the
-    /// member themselves.
-    pub(super) fn may_reach_any_default(
-        &self,
-        ty: Ty,
-        member: AnyMember,
-    ) -> Result<bool, Unsupported> {
-        if let Some(class) = self.class_of_type(ty) {
-            return self.reaches_any_default(class, member);
-        }
-        if ty.non_null().obj_internal() == Some(super::super::super::type_objects::ktype()) {
-            return self.ktype_may_reach_any_default(member);
-        }
-        if !matches!(carrier(ty.non_null())?, Some(ValType::Ref { .. })) {
-            return Ok(false);
-        }
-        if self.holds_runtime_exception_objects() {
-            return Ok(true);
-        }
-        let Some(classes) = self.classes else {
-            return Ok(false);
-        };
-        Ok(self.ir.classes.iter().enumerate().any(|(id, class)| {
-            !class.is_interface
-                && classes.tables.table(id as ClassId).vtable[member.slot() as usize]
-                    == Slot::AnyMember(member)
-        }))
-    }
-
-    /// Whether an erased reference of this file can hold a runtime exception object. Those objects
-    /// are built by the exception runtime, not declared by this file's classes, and they answer
-    /// none of `kotlin.Any`'s overridable members. One becomes a value only when this file
-    /// constructs a runtime exception class or binds a thrown exception in a catch clause.
-    fn holds_runtime_exception_objects(&self) -> bool {
-        self.ir.exprs.iter().any(|node| match node {
-            IrExpr::Try { catches, .. } => !catches.is_empty(),
-            IrExpr::New { internal, .. } => self
-                .classifiers
-                .classifier(*internal)
-                .is_some_and(|fact| fact.runtime_exception.is_some()),
-            _ => false,
-        })
     }
 
     /// `lhs == rhs` on objects: `lhs?.equals(rhs) ?: (rhs === null)`.

@@ -10,9 +10,11 @@
 //! A value statically of a class of this file is an instance of that class's hierarchy; one of an
 //! interface of this file can also be a function value converted to it. Any other reference
 //! (`Any`, a type parameter, an interface declared elsewhere) is erased: it can be an instance of
-//! every class here, or one of the runtime's objects this file creates. Either can also be an object
-//! another file of the module creates; the file records such a call
-//! (`super::super::super::any_member_reach`) for the module to weigh against the other files.
+//! every class here, or one of the runtime's objects this file creates, including a runtime
+//! exception this file constructs or catches. A `KType` value is narrower: the runtime's own
+//! object, or a class implementing `KType`. Either can also be an object another file of the
+//! module creates; the file records such a call (`super::super::super::any_member_reach`) for the
+//! module to weigh against the other files.
 
 use krusty::backend::class_tables::AnyMember;
 use krusty::ir::{ClassId, IrExpr, IrFile};
@@ -55,8 +57,19 @@ impl Body<'_> {
         if !matches!(carrier(value)?, Some(ValType::Ref { .. })) {
             return Ok(false);
         }
+        if value.obj_internal() == Some(super::super::super::super::type_objects::ktype()) {
+            // The runtime object answers every member. Another file's class can implement
+            // `KType`; a floating box or a function value cannot, so this is not an erased call.
+            self.record_call(member, ty, Receiver::Classes);
+            return self.ktype_reaches_unrealized(member);
+        }
         self.record_call(member, ty, Receiver::Erased);
         if member == AnyMember::ToString && holds_unprinted_values(self.ir) {
+            return Ok(true);
+        }
+        // A runtime exception this file builds or catches is not a class of the file.
+        // Its table installs `equals`, `hashCode` and `Throwable.toString`.
+        if self.holds_runtime_exception_objects() && runtime_exception_lacks_body(member) {
             return Ok(true);
         }
         let Some(classes) = self.classes else {
@@ -84,6 +97,19 @@ impl Body<'_> {
         }))
     }
 
+    /// Whether this file constructs a runtime exception or binds one in a catch. Those objects
+    /// are not classes of the file, so the class walk above does not see their tables.
+    fn holds_runtime_exception_objects(&self) -> bool {
+        self.ir.exprs.iter().any(|node| match node {
+            IrExpr::Try { catches, .. } => !catches.is_empty(),
+            IrExpr::New { internal, .. } => self
+                .classifiers
+                .classifier(*internal)
+                .is_some_and(|fact| fact.runtime_exception.is_some()),
+            _ => false,
+        })
+    }
+
     /// Record, for the module, a call through `member`'s slot on a `ty` that can receive
     /// `receiver` from another file.
     fn record_call(&self, member: AnyMember, ty: Ty, receiver: Receiver) {
@@ -95,6 +121,14 @@ impl Body<'_> {
             };
             format!("a `{name}` of `{}`", super::super::describe(ty))
         });
+    }
+}
+
+/// Whether a runtime exception object's table has no body for `member`. The runtime installs
+/// `equals`, `hashCode` and `Throwable.toString` on every such table.
+fn runtime_exception_lacks_body(member: AnyMember) -> bool {
+    match member {
+        AnyMember::Equals | AnyMember::HashCode | AnyMember::ToString => false,
     }
 }
 

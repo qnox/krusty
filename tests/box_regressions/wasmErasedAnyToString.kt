@@ -4,7 +4,10 @@
 // caught exception's `Throwable.toString`. Identity hashes differ between targets, so only the
 // class-name part of `Any.toString` is compared. `Throwable.toString` names the class by a
 // target-specific package (`java.lang` on the JVM, `kotlin` on wasm-js) or, on wasm-wasi, by its
-// simple name alone, so only that simple name and the message are.
+// simple name alone, so only that simple name and the message are. A `typeOf` value and the
+// same value read as `Any` take one `toString` analysis, so their text agrees.
+import kotlin.reflect.typeOf
+
 interface Shape
 
 class Square : Shape {
@@ -64,5 +67,10 @@ fun box(): String {
         template(e)
     }
     if (!hasSuffix(bare, "IllegalArgumentException]")) return "FAIL: no message $bare"
+    val described = typeOf<String>()
+    val erased: Any = described
+    val fromType = "$described"
+    val fromErased = "$erased"
+    if (fromType != fromErased) return "FAIL: typeOf $fromType vs $fromErased"
     return "OK"
 }
