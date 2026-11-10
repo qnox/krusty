@@ -42743,6 +42743,9 @@ impl<'a> Checker<'a> {
         if !self.fragment.is_type_use_annotations() {
             self.check_classifier_own_annotations(scope, cl, current_owner);
             self.check_supertype_usage(cl, current_owner);
+            // Member annotations see the classifier's own static rungs (nested classifiers and
+            // its companion), which the class body scope below has not opened yet.
+            let member_rung = self.enter_annotation_class_rung(current_owner);
             for entry in &cl.enum_entries {
                 self.check_non_property_annotation_applications_in_declaration_scope(
                     scope,
@@ -42781,6 +42784,7 @@ impl<'a> Checker<'a> {
                     "constructor",
                 );
             }
+            self.exit_annotation_class_rung(member_rung);
             // Compiler plugins' own class rules read the applications checked just above.
             self.check_plugin_class_rules(scope, cl);
         }
