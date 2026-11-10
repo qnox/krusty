@@ -498,12 +498,22 @@ fn package_exports(
         let Some(layout) = ir.local_property_layouts.get(&source.property) else {
             continue;
         };
-        let (getter, setter) = match layout {
-            crate::ir::IrLocalPropertyLayout::TopLevelStorage { getter, setter, .. } => {
-                (*getter, *setter)
-            }
+        // Storage owned by a receiverless package property: its default accessors are the
+        // checked storage operations a target exports as bodies. A classifier-associated or
+        // `const` property publishes its value, not an accessor.
+        let (getter, setter, storage) = match layout {
+            crate::ir::IrLocalPropertyLayout::TopLevelStorage {
+                getter,
+                setter,
+                qualifier,
+                ..
+            } => (
+                *getter,
+                *setter,
+                qualifier.is_none() && !source.is_const && !declaration.is_expect,
+            ),
             crate::ir::IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. } => {
-                (Some(*getter), *setter)
+                (Some(*getter), *setter, false)
             }
             crate::ir::IrLocalPropertyLayout::Member { .. }
             | crate::ir::IrLocalPropertyLayout::MemberExtension { .. } => continue,
@@ -525,13 +535,23 @@ fn package_exports(
                 return None;
             }
         }
-        for (callable, accessor) in [
-            getter.map(|getter| (getter, MetadataAccessor::Getter)),
-            setter.map(|setter| (setter, MetadataAccessor::Setter)),
-        ]
-        .into_iter()
-        .flatten()
-        {
+        for (callable, accessor, modifiers, present) in [
+            (
+                getter,
+                MetadataAccessor::Getter,
+                &declaration.getter_modifiers,
+                true,
+            ),
+            (
+                setter,
+                MetadataAccessor::Setter,
+                &declaration.setter_modifiers,
+                declaration.is_var,
+            ),
+        ] {
+            if !present {
+                continue;
+            }
             let signature =
                 match package_property_accessor_signature(container, declaration, accessor) {
                     Ok(signature) => signature,
@@ -545,6 +565,33 @@ fn package_exports(
                         return None;
                     }
                 };
+            let Some(callable) = callable else {
+                if storage
+                    && modifiers.is_default
+                    && modifiers.visibility != crate::types::Visibility::Private
+                    && !modifiers.is_external
+                    && !declaration.is_external
+                {
+                    let operation = match accessor {
+                        MetadataAccessor::Getter => {
+                            crate::backend::ExportedPropertyAccessor::Getter(source.property)
+                        }
+                        MetadataAccessor::Setter => {
+                            crate::backend::ExportedPropertyAccessor::Setter(source.property)
+                        }
+                    };
+                    exports.record_property_accessor(
+                        operation,
+                        crate::libraries::KlibDependencyCallable {
+                            module: module_name.to_owned(),
+                            declaration: crate::libraries::KlibDeclarationSignature::Accessor(
+                                signature,
+                            ),
+                        },
+                    );
+                }
+                continue;
+            };
             if crate::backend::has_standalone_dependency_code(ir, callable) {
                 exports.record_callable(
                     callable,
