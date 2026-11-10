@@ -17937,6 +17937,26 @@ impl<'a> Checker<'a> {
                         return self.lambda_probe_ty(scope, a).unwrap_or(Ty::Error);
                     }
                     if let Expr::Lambda { params, body } = self.file.expr(a).clone() {
+                        // Several overloads and no applicable shape: the lambda has no expected
+                        // function type. kotlinc leaves its parameters uninferred instead of
+                        // checking them as `Any`.
+                        let competing = selected_lambda_shape.is_none()
+                            && this_member_ext_lambda_plan.is_none()
+                            && top_level_family.len() > 1;
+                        if competing {
+                            self.report_unshaped_lambda_diagnostics(scope, &[a]);
+                            self.omit_unshaped_any_receiver_type += 1;
+                            let checked = self.expr_inner_lambda(
+                                scope,
+                                a,
+                                None,
+                                params,
+                                body,
+                                call_fn_name.as_deref(),
+                            );
+                            self.omit_unshaped_any_receiver_type -= 1;
+                            return checked;
+                        }
                         return self.expr_inner_lambda(
                             scope,
                             a,

@@ -588,7 +588,9 @@ impl Checker<'_> {
         if self.diags.diags.len() == checkpoint {
             return false;
         }
-        if has_value_arguments {
+        if has_value_arguments
+            && !self.report_shaped_lambda_bound_mismatches(call, candidate, signature, &bindings)
+        {
             let display = self.source_callable_display(candidate).unwrap_or_else(|| {
                 Self::callable_candidate_display(&candidate.callable.name, candidate)
             });
@@ -598,6 +600,58 @@ impl Checker<'_> {
             );
         }
         true
+    }
+
+    /// A shaped lambda on the only overload is the call's argument diagnostic, not an
+    /// inapplicable-candidate line: kotlinc reports the bound and `argument type mismatch` for
+    /// the lambda even when both sides render as the explicit argument's function type.
+    fn report_shaped_lambda_bound_mismatches(
+        &mut self,
+        call: ExprId,
+        candidate: &crate::libraries::FunctionInfo,
+        signature: &crate::libraries::GenericSig,
+        bindings: &crate::symbol_resolver::GSigBinds,
+    ) -> bool {
+        let Expr::Call { args, .. } = self.file.expr(call).clone() else {
+            return false;
+        };
+        let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let context_count = candidate.context_count.min(signature.params.len());
+        let Some(argument_parameters) = call_argument_parameter_indices(
+            args.len(),
+            signature.params.len().saturating_sub(context_count),
+            argument_names,
+            trailing_lambda,
+            &candidate.call_sig.suffix(context_count),
+        ) else {
+            return false;
+        };
+        let mut reported = false;
+        for (source, parameter) in argument_parameters.into_iter().enumerate() {
+            let argument = args[source];
+            if !matches!(self.file.expr(argument), Expr::Lambda { .. }) {
+                continue;
+            }
+            let Some(expected) = signature
+                .params
+                .get(parameter + context_count)
+                .copied()
+                .map(|parameter| crate::symbol_resolver::ty_subst_keep_unbound(parameter, bindings))
+                .filter(|expected| expected.non_null().is_fun())
+            else {
+                continue;
+            };
+            let actual = self.expr_types[argument.0 as usize];
+            if !actual.non_null().is_fun() {
+                continue;
+            }
+            if let Some(message) = self.assignability_error_message(expected, actual, "argument") {
+                self.diags.error(self.span(argument), message);
+                reported = true;
+            }
+        }
+        reported
     }
 
     /// Retain upper-bound diagnostics when a rejected call still has one shape-matching candidate.

@@ -888,32 +888,29 @@ impl Checker<'_> {
         call: UntypedLambdaCall<'_>,
     ) -> Result<Option<crate::symbol_resolver::LambdaCallShape>, Vec<crate::libraries::FunctionInfo>>
     {
-        let shape_with = |explicit_bounds| {
-            overloads
-                .iter()
-                .filter(|overload| overload.kind == crate::libraries::FnKind::TopLevel)
-                .filter_map(|overload| {
-                    self.top_level_overload_lambda_shape(
-                        lexical_scope,
-                        overload,
-                        call,
-                        explicit_bounds,
-                    )
-                    .map(|shape| (overload, shape))
-                })
-                .collect::<Vec<_>>()
+        // A bound on an explicit type argument is decided once. While another top-level overload
+        // shares the call, the violation is applicability: that overload does not shape the
+        // lambdas, and an empty applicable set stays empty. The only overload is the selected
+        // call, so the violation is that call's own diagnostic and its lambdas are still shaped
+        // (`pick<String> { v -> v.length }` against `(String) -> Int` beside the bound error).
+        let only_overload = overloads
+            .iter()
+            .filter(|overload| overload.kind == crate::libraries::FnKind::TopLevel)
+            .count()
+            == 1;
+        let explicit_bounds = if only_overload && fully_explicit_type_arguments(call.type_args) {
+            ExplicitTypeArgumentBounds::Deferred
+        } else {
+            ExplicitTypeArgumentBounds::Enforced
         };
-        let mut shaped = shape_with(ExplicitTypeArgumentBounds::Enforced);
-        // Explicit type arguments outside their bounds make a candidate inapplicable, but when no
-        // candidate applies kotlinc still types the lambdas against the one it reports:
-        // `f<String> { v -> .. }` for `f<T : Number>` checks the lambda as `(String) -> ..` beside
-        // the bound error.
-        if shaped.is_empty() && fully_explicit_type_arguments(call.type_args) {
-            shaped = shape_with(ExplicitTypeArgumentBounds::Deferred);
-            if shaped.len() > 1 {
-                shaped.clear();
-            }
-        }
+        let shaped = overloads
+            .iter()
+            .filter(|overload| overload.kind == crate::libraries::FnKind::TopLevel)
+            .filter_map(|overload| {
+                self.top_level_overload_lambda_shape(lexical_scope, overload, call, explicit_bounds)
+                    .map(|shape| (overload, shape))
+            })
+            .collect::<Vec<_>>();
         let Some((_, first)) = shaped.first() else {
             return Ok(self.companion_invoke_lambda_shape(
                 lexical_scope,
@@ -1428,7 +1425,8 @@ enum ExtensionShapeChoice {
 }
 
 /// Whether the pre-lambda applicability probe rejects a candidate whose explicit type arguments
-/// break their declared bounds.
+/// break their declared bounds. Chosen once for a call: enforced while overloads compete, deferred
+/// when the only overload is already the selected call.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum ExplicitTypeArgumentBounds {
     Enforced,
