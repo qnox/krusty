@@ -44,6 +44,10 @@ impl ProjectSync {
         self.provider.kind()
     }
 
+    pub fn root(&self) -> &Path {
+        self.provider.root()
+    }
+
     pub fn model(&self) -> Option<&ProjectModel> {
         self.snapshot.as_ref().map(SourceModuleGraph::model)
     }

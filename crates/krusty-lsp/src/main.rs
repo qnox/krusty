@@ -407,10 +407,12 @@ fn run_parity_command(args: &[String]) -> bool {
         .iter()
         .flat_map(|plan| plan.classpath.iter().cloned())
         .collect::<Vec<_>>();
-    let fetched = krusty_lsp::project::maven_repository::ensure_maven_repository_jars(&classpath);
+    let fetched = krusty_lsp::project::maven_repository::ensure_repository_jars(
+        model.kind, &root, &classpath,
+    );
     if fetched.installed > 0 || fetched.failed > 0 {
         eprintln!(
-            "krusty-lsp parity: downloaded {} Maven repository jar(s), {} still missing",
+            "krusty-lsp parity: resolved {} Maven repository jar(s), {} still missing",
             fetched.installed, fetched.failed
         );
     }
@@ -1255,10 +1257,18 @@ impl WorkerHost {
                     &classpath,
                     jdk_home.as_deref(),
                 );
-                // Missing repository jars stay missing on this refresh. The parity command is
-                // what downloads them; this call runs on the analysis thread.
-                let _ = krusty_lsp::project::maven_repository::RepositoryFetch::Editor
-                    .fetch_named_jars(&classpath);
+                let fetched = krusty_lsp::project::maven_repository::ensure_repository_jars(
+                    sync.kind(),
+                    sync.root(),
+                    &classpath,
+                );
+                if fetched.failed > 0 {
+                    logs.push(format!(
+                        "krusty: {} Maven repository jar(s) could not be resolved; those \
+                         classpath entries stay missing",
+                        fetched.failed
+                    ));
+                }
                 let missing_classpath =
                     krusty_lsp::project::classpath_presence::missing_classpath_warning(
                         &classpath,
