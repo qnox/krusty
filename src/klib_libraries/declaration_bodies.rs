@@ -18,7 +18,9 @@ use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrBody, KlibIrClass, KlibIrExprKind, KlibIrFunction, KlibIrMember,
     KlibIrStatement, KlibIrType,
 };
-use crate::metadata::klib_ir::{KlibIrModuleTrees, KlibIrSignature, KlibIrSymbolKind};
+use crate::metadata::klib_ir::{
+    KlibIrModuleTrees, KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind,
+};
 use crate::types::{type_name_child, TypeName};
 
 /// The decoded function declarations of a set of KLIB libraries, joined by exact signature.
@@ -671,8 +673,22 @@ impl KlibDeclarationBodies {
         let Some((arena, function)) = self.function(identity) else {
             return Vec::new();
         };
-        arena
-            .emitted_callable_symbols(function, forms)
+        let mut symbols = arena.emitted_callable_symbols(function, forms);
+        // A file-local class the body constructs, an object literal's among them, is
+        // materialized with the body, every member included, since dispatch can run any of them.
+        let mut classes = crate::fx_hash::HashSet::default();
+        let mut next = 0;
+        while let Some(symbol) = symbols.get(next).copied() {
+            next += 1;
+            if let Some(class) = self.constructed_local_class(&identity.module, arena, symbol) {
+                if classes.insert(&class.base.symbol) {
+                    symbols.extend(
+                        arena.emitted_callable_symbols_from(arena.class_member_roots(class), forms),
+                    );
+                }
+            }
+        }
+        symbols
             .into_iter()
             .filter_map(|symbol| declaration_signature(&symbol.signature))
             .filter_map(
@@ -682,6 +698,29 @@ impl KlibDeclarationBodies {
                 },
             )
             .collect()
+    }
+
+    /// The file-local class of `module` whose constructor `symbol` names, serialized in `arena`.
+    fn constructed_local_class<'a>(
+        &'a self,
+        module: &str,
+        arena: &'a KlibIrArena,
+        symbol: &KlibIrSymbol,
+    ) -> Option<&'a KlibIrClass> {
+        if symbol.kind != KlibIrSymbolKind::Constructor
+            || !matches!(symbol.signature, KlibIrSignature::FileLocal { .. })
+        {
+            return None;
+        }
+        let (function_arena, function) = self.module_local_function(module, &symbol.signature)?;
+        let KlibIrType::Simple { classifier, .. } = function_arena.ty(function.return_type) else {
+            return None;
+        };
+        let (class_arena, class) = self.module_local_class(module, &classifier.signature)?;
+        (function.constructor
+            && std::ptr::eq(arena, function_arena)
+            && std::ptr::eq(arena, class_arena))
+        .then_some(class)
     }
 
     /// Whether `identity` is an executable dependency-support root: its own serialized body has a

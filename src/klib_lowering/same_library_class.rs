@@ -174,6 +174,44 @@ pub(super) fn substitute_applied_signature(
     ))
 }
 
+/// The override edge of an object member to the declaration `identity`, which the producer
+/// published as the member's overridden symbol.
+///
+/// `declarations` is the provider's registry. `None` when it realizes no declaration of that exact
+/// identity. A getter answers only a property member and a function only a function member; a
+/// setter is never an object literal's override.
+pub(super) fn declared_override(
+    identity: KlibDependencyCallable,
+    declarations: &dyn crate::symbol_source::SymbolSource,
+    supertypes: &[Ty],
+    property: bool,
+    applied_supertype: &dyn Fn(Ty, TypeName) -> Option<Ty>,
+) -> Result<Option<MemberOverride>, KlibBodyDeclineReason> {
+    let Some((_, realization)) = declarations.external_callable_by_dependency(&identity) else {
+        return Ok(None);
+    };
+    let getter = realization
+        .klib_body_accessor
+        .as_ref()
+        .map(|accessor| matches!(accessor.role, crate::libraries::KlibAccessorRole::Getter));
+    match getter {
+        Some(false) => {
+            return Err(mismatch("an object literal overrides a property setter"));
+        }
+        Some(true) if !property => return Err(mismatch("a function overrides a property")),
+        None if property => return Err(mismatch("a property overrides a function")),
+        Some(true) | None => {}
+    }
+    realized_member_override(
+        identity,
+        &realization,
+        property,
+        supertypes,
+        applied_supertype,
+    )
+    .map(Some)
+}
+
 /// The override `realization` declares, viewed through one of `supertypes`.
 ///
 /// The owner is the realization's classifier. The applied signature substitutes that classifier's
