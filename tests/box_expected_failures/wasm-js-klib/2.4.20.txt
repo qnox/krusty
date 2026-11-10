@@ -2765,7 +2765,6 @@ inlineClasses/valueClassInValueClass.kt
 inlineClasses/valueClassInstanceOfNumberAndComparable.kt
 inlineClasses/valueClassInstanceOfNumberAndComparableInFunction.kt
 inlineClasses/valueClassInstanceOfNumberAndComparableInInlineFunction.kt
-inlineClasses/whenWithSubject.kt
 inlineClasses/whenWithSubjectGeneric.kt
 inlineClasses/withReturnTypeManglingGeneric.kt
 inlineEvaluationOrder/argumentOfCall.kt
