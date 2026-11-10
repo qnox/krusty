@@ -40,6 +40,7 @@ mod dependency_templates;
 mod entry_point_tests;
 mod erased_parameters;
 mod error;
+mod expect_realization;
 mod expression;
 mod external_references;
 #[cfg(test)]
@@ -144,8 +145,9 @@ pub(super) fn resolved_parameter_identity(
 }
 
 /// Whether `declaration` is, or belongs to, an `expect` classifier an `actual typealias`
-/// actualized. Common code types one as its own classifier and every target realizes the alias's
-/// target, so nothing of the `expect` is lowered. An `@OptionalExpectation` annotation without an
+/// actualized, or is an `expect` function or property an `actual` replaces. Common code types each
+/// by its own declaration and every target realizes the actual, so nothing of the `expect` is
+/// lowered. An `@OptionalExpectation` annotation without an
 /// actual is no such classifier: it is lowered as declared.
 pub(super) fn within_actualized_expect(
     index: &ResolvedModuleIndex,
@@ -155,14 +157,15 @@ pub(super) fn within_actualized_expect(
         index.declaration_anchor(current)?.owner
     })
     .any(|current| {
-        index
-            .declaration_header(current)
-            .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::EXPECT))
-            && index.classifier_header(current).is_some_and(|classifier| {
-                index
-                    .type_alias_by_identity(classifier.classifier)
-                    .is_some()
-            })
+        index.source_fragments().replacing_actual(current).is_some()
+            || index
+                .declaration_header(current)
+                .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::EXPECT))
+                && index.classifier_header(current).is_some_and(|classifier| {
+                    index
+                        .type_alias_by_identity(classifier.classifier)
+                        .is_some()
+                })
     })
 }
 
