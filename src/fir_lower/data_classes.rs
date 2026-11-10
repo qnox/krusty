@@ -240,6 +240,13 @@ fn synthesize_components_and_copy(
         defaults: Box::new([]),
         default_prefix_count: 0,
     });
+    // `copy` calls the primary constructor; record that selection like a source construction's.
+    let target = super::constructors::primary_constructor_declaration(index, declaration)
+        .and_then(|primary| super::constructors::module_constructor_target(index, primary))
+        .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
+    ir.construction_targets.insert(constructed, target);
+    // The construction is part of the class's own body, so a private primary stays a direct call.
+    ir.expression_owners.insert(constructed, owner);
     let returned = ir.add_expr(IrExpr::Return(Some(constructed)));
     ir.functions[copy as usize].body = Some(ir.add_expr(IrExpr::Block {
         stmts: vec![returned],

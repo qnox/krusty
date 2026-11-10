@@ -211,6 +211,46 @@ fn builtin_serializers() -> &'static [BuiltinSerializer] {
                 false,
             ),
             (
+                "kotlin/CharArray",
+                "kotlinx/serialization/internal/CharArraySerializer",
+                false,
+            ),
+            (
+                "kotlin/DoubleArray",
+                "kotlinx/serialization/internal/DoubleArraySerializer",
+                false,
+            ),
+            (
+                "kotlin/FloatArray",
+                "kotlinx/serialization/internal/FloatArraySerializer",
+                false,
+            ),
+            (
+                "kotlin/LongArray",
+                "kotlinx/serialization/internal/LongArraySerializer",
+                false,
+            ),
+            (
+                "kotlin/IntArray",
+                "kotlinx/serialization/internal/IntArraySerializer",
+                false,
+            ),
+            (
+                "kotlin/ShortArray",
+                "kotlinx/serialization/internal/ShortArraySerializer",
+                false,
+            ),
+            (
+                "kotlin/ByteArray",
+                "kotlinx/serialization/internal/ByteArraySerializer",
+                false,
+            ),
+            (
+                "kotlin/BooleanArray",
+                "kotlinx/serialization/internal/BooleanArraySerializer",
+                false,
+            ),
+            (
                 "kotlin/uuid/Uuid",
                 "kotlinx/serialization/internal/UuidSerializer",
                 true,

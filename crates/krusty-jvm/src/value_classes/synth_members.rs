@@ -922,13 +922,11 @@ pub(super) fn synth_value_members(
             // A `vararg` stays one on the static: Java calls it in element form, and its
             // `Signature` keeps the element's declaration-site wildcards.
             if let Some(index) = sc.vararg_index {
-                ir.fn_varargs.insert(
-                    constructor,
-                    krusty::ir::IrVarargParameter {
+                ir.declared_parameters_mut(constructor).vararg =
+                    Some(krusty::ir::IrVarargParameter {
                         index,
                         is_last: index + 1 == sc.named_params.len(),
-                    },
-                );
+                    });
             }
             crate::method_parameters::record_function(ir, constructor, &names, &[]);
             ir.fn_source_order.insert(constructor, sc.source_order);

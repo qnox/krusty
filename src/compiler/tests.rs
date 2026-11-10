@@ -144,8 +144,10 @@ impl Backend for MemberAnnotationRecordingBackend {
         }) {
             *state |= 1;
         }
-        if file.ir.fn_param_annotations.values().any(|parameters| {
-            parameters.iter().any(|annotations| {
+        if (0..file.ir.functions.len()).any(|function| {
+            let function = crate::ir::FunId::try_from(function).expect("a function id fits u32");
+            let parameters = file.ir.declared_parameters(function);
+            parameters.annotations.iter().any(|annotations| {
                 annotations
                     .applications()
                     .any(|annotation| annotation.internal.matches("ParameterMarker"))

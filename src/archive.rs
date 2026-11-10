@@ -1,7 +1,7 @@
 //! Opening the zip archives the compiler reads: classpath jars, KLIBs, compiler plugins.
 
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Cursor, Read, Seek, SeekFrom};
 
 use zip::read::{ArchiveOffset, Config};
 use zip::result::ZipResult;
@@ -17,14 +17,25 @@ const END_RECORD_LEN: usize = 22;
 /// archive is first read at offset 0 and kept only when it is the one detection would select.
 /// Anything else, such as a self-executing jar with prepended data or a file holding several
 /// archives, is read by detection, as the JVM's own zip reader accepts it.
-pub fn open_file(mut file: File) -> ZipResult<ZipArchive<File>> {
-    let last = last_end_record(&mut file)?;
-    let mut detect = file.try_clone()?;
+pub fn open_file(file: File) -> ZipResult<ZipArchive<File>> {
+    let detect = file.try_clone()?;
+    open(file, detect)
+}
+
+/// [`open_file`] for an archive already read into memory: a reader that also digests the archive
+/// parses the same snapshot it keyed.
+pub fn open_bytes(bytes: &[u8]) -> ZipResult<ZipArchive<Cursor<&[u8]>>> {
+    open(Cursor::new(bytes), Cursor::new(bytes))
+}
+
+/// [`open_file`] over `reader`, with `detect` a second reader of the same bytes for detection.
+fn open<R: Read + Seek>(mut reader: R, mut detect: R) -> ZipResult<ZipArchive<R>> {
+    let last = last_end_record(&mut reader)?;
     if let Some(last) = last {
         let known = Config {
             archive_offset: ArchiveOffset::Known(0),
         };
-        if let Ok(archive) = ZipArchive::with_config(known, file) {
+        if let Ok(archive) = ZipArchive::with_config(known, reader) {
             if last.selects(&archive) {
                 return Ok(archive);
             }
@@ -46,7 +57,7 @@ impl EndRecord {
     /// record first and finds its central directory where offset 0 put it, so it reads the same
     /// archive. A record from earlier in the file, read after this one was rejected at offset 0,
     /// has another directory, file count, or comment.
-    fn selects(&self, archive: &ZipArchive<File>) -> bool {
+    fn selects<R: Read + Seek>(&self, archive: &ZipArchive<R>) -> bool {
         archive.offset() == 0
             && archive.central_directory_start() == u64::from(self.directory_offset)
             && archive.len() == usize::from(self.files)
@@ -58,7 +69,7 @@ impl EndRecord {
 /// A record that may defer to a zip64 one, or a signature in a truncated record, leaves the
 /// selection to detection. An archive without a comment ends in its record, so the last 22 bytes
 /// are read first and the comment-sized tail only when they hold no signature.
-fn last_end_record(file: &mut File) -> io::Result<Option<EndRecord>> {
+fn last_end_record(file: &mut (impl Seek + Read)) -> io::Result<Option<EndRecord>> {
     let len = file.seek(SeekFrom::End(0))?;
     let mut found = None;
     for window in [END_RECORD_LEN, END_RECORD_LEN + usize::from(u16::MAX)] {
@@ -134,7 +145,7 @@ mod tests {
     }
 
     /// Every entry of `archive`, by name, with its contents.
-    fn entries(mut archive: ZipArchive<std::fs::File>) -> Vec<(String, String)> {
+    fn entries<R: Read + std::io::Seek>(mut archive: ZipArchive<R>) -> Vec<(String, String)> {
         (0..archive.len())
             .map(|index| {
                 let mut entry = archive.by_index(index).expect("entry");
@@ -152,6 +163,8 @@ mod tests {
         let detected = entries(ZipArchive::new(open(&path)).expect("detect archive"));
         std::fs::remove_file(&path).expect("remove archive");
         assert_eq!(read, detected);
+        let in_memory = entries(super::open_bytes(bytes).expect("read archive bytes"));
+        assert_eq!(in_memory, read);
         read
     }
 
