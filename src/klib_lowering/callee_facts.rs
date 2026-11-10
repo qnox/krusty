@@ -253,7 +253,7 @@ impl<'a> KlibCalleeFacts<'a> {
     {
         use super::decline::KlibBodyDeclineReason;
         use super::function_lowering::{
-            raw_function_header, raw_function_header_with_class, HeaderPurpose,
+            raw_function_header_with_class, selected_function_header, HeaderPurpose,
         };
         let selected = match self.get(identity) {
             Some(KlibCalleeFact::Ambiguous) => {
@@ -275,9 +275,14 @@ impl<'a> KlibCalleeFacts<'a> {
             .ok_or(KlibBodyDeclineReason::Unjoined)?;
         // A body-bearing target leaf still authenticates its complete declared header, not the
         // narrower set of declarations whose executable bodies common lowering supports. A
-        // member's header names its class's type parameters (`Array<T>.size`), which only its
-        // authenticated class binds.
-        if selected.is_member() {
+        // generic class binds its type parameters in `selected_function_header`, the header a
+        // call edge uses. A member whose class has no type parameters still authenticates that
+        // class and its receiver here.
+        if selected.is_member()
+            && selected
+                .class_contract()
+                .is_none_or(|class| class.parameters.formals.is_empty())
+        {
             let class = super::class_headers::authenticate(selected, bodies)?;
             super::class_headers::authenticate_receiver(
                 class.contract,
@@ -292,7 +297,13 @@ impl<'a> KlibCalleeFacts<'a> {
                 class.types,
             )?;
         } else {
-            raw_function_header(Some(selected), HeaderPurpose::External, arena, declaration)?;
+            selected_function_header(
+                selected,
+                HeaderPurpose::External,
+                arena,
+                declaration,
+                Some(bodies),
+            )?;
         }
         Ok(Some(operation))
     }
