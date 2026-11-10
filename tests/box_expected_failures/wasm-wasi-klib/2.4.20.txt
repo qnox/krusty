@@ -648,7 +648,6 @@ companionBlocksAndExtensions/initializersInheritanceMultipleSupertypes.kt
 companionBlocksAndExtensions/initializersInheritanceMultipleSupertypesMixedOrder.kt
 companionBlocksAndExtensions/initializersTriggeredByObject.kt
 companionBlocksAndExtensions/inline_block.kt
-companionBlocksAndExtensions/inline_extensions.kt
 companionBlocksAndExtensions/innerClasses.kt
 companionBlocksAndExtensions/interfaces.kt
 companionBlocksAndExtensions/lateinit.kt
@@ -723,7 +722,6 @@ constants/constValFromAnotherModuleInConsVal.kt
 constants/divisionByZero.kt
 constants/doNotTriggerInit.kt
 constants/float.kt
-constants/foldingBinaryOpsUnsigned.kt
 constants/kt9532.kt
 contextParameters/contextOnInvokeResolve.kt
 contextParameters/contextPropertyInInterface.kt
@@ -4447,7 +4445,6 @@ regressions/multimodule/inlineNullCheckReturnTargets.kt
 regressions/multimodule/inlineStdlibRepeat.kt
 regressions/multimodule/inlineTextTrim.kt
 regressions/multimodule/inlineTodoDefaultMessage.kt
-regressions/multimodule/inlineUnsignedConstructionAndData.kt
 regressions/multimodule/multimoduleDependencyFunctionImplementationMarkers.kt
 regressions/multimodule/multimoduleDirectCollectionIterator.kt
 regressions/objectCaptureOuterConstructorProperty.kt
@@ -4760,7 +4757,6 @@ unsignedTypes/iterateOverArrayOfUnsignedValues.kt
 unsignedTypes/iterateOverListOfBoxedUnsignedValues.kt
 unsignedTypes/kt25784.kt
 unsignedTypes/kt43286.kt
-unsignedTypes/kt43286a.kt
 unsignedTypes/kt47716.kt
 unsignedTypes/kt61418.kt
 unsignedTypes/literalEqualsNullableUnsigned.kt
@@ -4768,7 +4764,6 @@ unsignedTypes/nullableSmartcastUnsignedArray.kt
 unsignedTypes/nullableUnsignedEqualsLiteral.kt
 unsignedTypes/signedToUnsignedConversions.kt
 unsignedTypes/unsignedArraySize.kt
-unsignedTypes/unsignedInStringInterpolation.kt
 unsignedTypes/unsignedIntCompare.kt
 unsignedTypes/unsignedIntDivide.kt
 unsignedTypes/unsignedIntRemainder.kt
@@ -4780,7 +4775,6 @@ unsignedTypes/unsignedLongRemainder.kt
 unsignedTypes/unsignedLongToString.kt
 unsignedTypes/unsignedRangeIterator.kt
 unsignedTypes/unsignedTypePrefixIncrementDecrementBoxing.kt
-unsignedTypes/unsignedTypeValuesInsideStringTemplates.kt
 unsignedTypes/varargsOfUnsignedTypes.kt
 unsignedTypes/whenByUnsigned.kt
 vararg/boxingArgumentsForVararg.kt
