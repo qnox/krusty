@@ -31,6 +31,11 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
+# The Gradle project probe is allowed 45 minutes. A shorter wrapper kills a real model
+# (the Kotlin compiler repository configures in several minutes) and the scan then
+# publishes counts with no declaration set.
+MODEL_RESOLVE_TIMEOUT_SECONDS = 45 * 60
+
 # Message normalization: a cluster is a root cause, not a wording. Identifiers, literals and numbers
 # are what vary between two reports of the SAME gap, so they are what gets folded away.
 NORMALIZERS = [
@@ -114,7 +119,10 @@ def resolve_model(binary: Path | None, root: Path) -> dict | None:
         return None
     try:
         finished = subprocess.run(
-            [str(binary), "model", str(root)], capture_output=True, text=True, timeout=300
+            [str(binary), "model", str(root)],
+            capture_output=True,
+            text=True,
+            timeout=MODEL_RESOLVE_TIMEOUT_SECONDS,
         )
         return json.loads(finished.stdout) if finished.returncode == 0 else None
     except (OSError, ValueError, subprocess.SubprocessError):

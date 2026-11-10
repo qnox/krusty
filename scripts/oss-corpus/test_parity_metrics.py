@@ -57,6 +57,9 @@ class ParityMetrics(unittest.TestCase):
         self.assertEqual(summary["missing_classpath_entries"], 3)
         self.assertEqual(summary["total_errors"], 2)
 
+    def test_model_resolution_waits_for_the_gradle_probe(self):
+        self.assertEqual(SCAN.MODEL_RESOLVE_TIMEOUT_SECONDS, 45 * 60)
+
     def test_navigation_queries_are_not_copied_from_the_analysis_time(self):
         summary = SCAN.summarize(
             [

@@ -3,12 +3,12 @@
 How much of `intellij-community` krusty's front end accepts today. Regenerate with:
 
 ```bash
-scripts/parity-scan.py '<project-root>' --depth none --jobs 6 --timeout 300
+scripts/parity-scan.py '<project-root>' --depth none --jobs 3 --timeout 300
 ```
 
-Project revision: `3f14adc599ef2c39a75c0e54c40d910676836bc8` (dirty worktree)  
-Compiler binary SHA-256: `d7a39acd3f91042421d2e4c363e44088362885ce978f9048ac91a5561b25c8ab`  
-Harness repository revision: `0ce1ae4ef3ec426536fe80fac11922dfa36772fe`
+Project revision: `b2c2e6113bcb04dfa18a73dcffca3de2532f1b6f`  
+Compiler binary SHA-256: `55d5c8ae11d1d137d09fbedbf96dc4ff87f5265b0085fdef646337f207279ac6`  
+Harness repository revision: `b7d5ea6062038d44ce27e979b4b4fa4d953664de` (dirty worktree)
 
 ## How to read this
 
@@ -24,17 +24,29 @@ conservative heuristic, not an adjusted module pass rate.
 
 | measure | value |
 | --- | --- |
-| modules scanned | 931 |
-| modules with zero errors | 4 (0.4%) |
-| modules whose only errors name an unbuilt dependency | 19 |
-| Kotlin files checked | 25134 |
-| error diagnostics | 627220 |
-| … naming a declaration the scan could not see | 252981 |
-| … remaining, clustered below | 374239 |
-| distinct error clusters | 977 |
+| modules scanned | 1059 |
+| modules with zero errors | 37 (3.5%) |
+| modules whose only errors name an unbuilt dependency | 2 |
+| Kotlin files checked | 15007 |
+| error diagnostics | 482265 |
+| … naming a declaration the scan could not see | 136898 |
+| … remaining, clustered below | 345367 |
+| distinct error clusters | 512 |
 | modules that hit the input budget | 0 |
 | checked files that could not be read | 0 |
 | modules whose Java stub overlay failed | 0 |
+| modules that opened completely | 555 |
+| classpath entries missing from disk | 1946 |
+| parse time | not measured |
+| type-information latency | not measured |
+| go-to-definition and find-references | definition 3369 µs, references 165539 µs (index lookup, not analysis) |
+
+Parse time and type-information latency are not measured: one module analysis is timed
+as a whole (`elapsed_ms`), and that figure is not copied into either of them. Go-to-definition
+and find-references are the server's index lookups after that analysis, in microseconds,
+and only for modules that issued the query. Find-references reads the open documents'
+definition indexes. The closed-file index keeps diagnostics and parse-only symbols, not
+those edges, so it is not searched.
 
 ## Module outcomes
 
@@ -43,72 +55,74 @@ denominator above without contributing to any cluster.
 
 | status | modules |
 | --- | ---: |
-| `errors` | 916 |
-| `crash (signal: 10 (SIGBUS))` | 10 |
-| `ok` | 4 |
-| `timeout` | 1 |
+| `errors` | 920 |
+| `crash (exit status: 101)` | 101 |
+| `ok` | 37 |
+| `crash (signal: 6 (SIGABRT))` | 1 |
 
 ## Top error clusters
 
 | errors | modules | pattern | example |
 | ---: | ---: | --- | --- |
-| 301247 | 891 | unresolved reference '_'. | `DefaultGithubGistContentsCollector.kt:32` |
-| 13590 | 640 | krusty: cannot infer the type of property '_'; add an explicit type | `DefaultGithubGistContentsCollector.kt:144` |
-| 6924 | 412 | krusty: cannot destructure this type (no operator '_') | `DefaultGithubGistContentsCollector.kt:33` |
-| 4532 | 515 | krusty: supertype '_' could not be resolved (provide it on the classpath) | `GHRepositoryCoordinates.kt:9` |
-| 4288 | 322 | krusty: this class-literal form is not supported | `GHGQLRequests.kt:239` |
-| 3870 | 356 | '_' is not an array (cannot index) | `GithubApiRequest.kt:259` |
-| 3015 | 66 | v0: class bodies support member '_', '_'/'_', and '_' blocks | `GithubResponsePage.kt:15` |
-| 2970 | 354 | argument type mismatch: actual type is '_', but '_' was expected. | `GHEServerVersionChecker.kt:15` |
-| 2642 | 307 | krusty: unresolved super method '_' | `GHPRTimelineVirtualFile.kt:47` |
-| 2535 | 312 | return label '_' does not denote an enclosing lambda | `GHPRProjectMetricsCollector.kt:103` |
-| 1761 | 232 | krusty: callable references are not supported | `GHOpenInBrowserFromAnnotationActionGroup.kt:33` |
-| 1526 | 257 | return type mismatch: expected '_', actual '_'. | `DefaultGithubGistContentsCollector.kt:126` |
-| 1296 | 323 | none of the following candidates is applicable: | `GithubApiRequest.kt:181` |
-| 1229 | 170 | '_' cannot be reassigned. | `Utils.kt:23` |
-| 1205 | 248 | operator cannot be applied to '_' and '_' | `GHOpenInBrowserFromAnnotationActionGroup.kt:28` |
-| 1112 | 201 | only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type '_'. | `GHPullRequest.kt:82` |
-| 1111 | 143 | only named arguments are available for Java annotations. | `GHShareProjectUtil.kt:15` |
-| 1068 | 221 | unresolved Java static '_' for given argument types | `GHGQLQueryLoader.kt:30` |
-| 988 | 244 | '_' expression must be exhaustive. Add an '_' branch. | `GHPRAISummaryViewModel.kt:50` |
-| 925 | 216 | krusty: catch type is not a known exception class | `GithubLoginPanel.kt:97` |
-| 706 | 16 | krusty: object bodies support '_', '_'/'_', and '_' blocks | `GithubIssuesLoadingHelper.kt:30` |
-| 702 | 142 | no parameter with name '_' found. | `GithubApiRequestExecutor.kt:216` |
-| 652 | 112 | expected an expression | `NewifyMemberContributor.kt:117` |
-| 633 | 116 | expected '_' | `NewifyMemberContributor.kt:117` |
-| 597 | 134 | krusty: a lambda that calls a local function is not supported | `GHGQLQueryLoader.kt:30` |
+| 254975 | 905 | unresolved reference '_'. | `DefaultGithubGistContentsCollector.kt:4` |
+| 24510 | 670 | unresolved reference '_' on receiver of type '_'. | `GHOpenInBrowserActionGroup.kt:39` |
+| 21503 | 718 | '_' overrides nothing. | `GHCopyLinkActionGroup.kt:15` |
+| 5722 | 560 | internal error: Pass-N class has no finalized constructor signatures | `GHOpenInBrowserFromAnnotationActionGroup.kt:19` |
+| 4693 | 431 | overload resolution ambiguity for extension property '_' | `GHGQLQueryLoader.kt:22` |
+| 4620 | 511 | cannot infer type for type parameter '_'. Specify it explicitly. | `DefaultGithubGistContentsCollector.kt:22` |
+| 3868 | 300 | Cannot access class '_'. Check your module classpath for missing or conflicting dependencies. | `DefaultGithubGistContentsCollector.kt:76` |
+| 3838 | 149 | Cannot access '_' which is a supertype of '_'. Check your module classpath for missing or conflicting dependencies. | `GithubCreateGistService.kt:40` |
+| 2482 | 276 | krusty: cannot destructure this type (no operator '_') | `DefaultGithubGistContentsCollector.kt:33` |
+| 1899 | 297 | argument type mismatch: actual type is '_', but '_' was expected. | `GithubApiHelperRequestExecutor.kt:126` |
+| 1454 | 269 | krusty: unresolved super method '_' | `GHPRReviewSubmitAction.kt:99` |
+| 1399 | 327 | return type mismatch: expected '_', actual '_'. | `GHGQLRequests.kt:48` |
+| 1094 | 228 | unresolved label. | `GHRepositoryHostingService.kt:26` |
+| 1020 | 275 | unresolved reference '_' for operator '_'. | `DefaultGithubGistContentsCollector.kt:121` |
+| 859 | 137 | '_' is prohibited here. | `GHPRReviewCommentBodyViewModel.kt:166` |
+| 713 | 156 | '_' cannot be reassigned. | `GHCloneDialogExtensionComponentBase.kt:240` |
+| 650 | 9 | expected a class member declaration | `JavaProjectSettingsEntityImpl.kt:129` |
+| 639 | 187 | '_' expression must be exhaustive. Add an '_' branch. | `GHPullRequestReviewThread.kt:72` |
+| 556 | 48 | no value passed for parameter '_'. | `GHPRTimelineReviewViewModel.kt:118` |
+| 543 | 133 | annotation argument must be a compile-time constant. | `GithubApiRequestExecutor.kt:51` |
+| 506 | 116 | none of the following candidates is applicable: | `GithubApiRequest.kt:352` |
+| 399 | 168 | unresolved Java static '_' for given argument types | `GHGQLQueryLoader.kt:30` |
+| 388 | 125 | candidate '_' is inapplicable because of a receiver type mismatch. | `GHPRListViewModel.kt:86` |
+| 353 | 91 | cannot infer type for value parameter '_'. Specify it explicitly. | `GithubApiHelperRequestExecutor.kt:125` |
+| 318 | 140 | selected inline body has an unpublishable declaration dependency | `GHPRCreationServiceImpl.kt:80` |
 
 ## Slowest modules
 
 | ms | module |
 | ---: | --- |
-| 300046 | intellij.platform.ide.impl:main |
-| 212532 | intellij.platform.lang.impl:main |
-| 32504 | intellij.python.community.impl:main |
-| 24641 | intellij.platform.vcs.impl:main |
-| 22475 | intellij.vcs.git.backend:main |
-| 22314 | intellij.java.impl:main |
-| 20134 | intellij.maven:main |
-| 16948 | intellij.platform.ide:main |
-| 15947 | intellij.groovy.psi:main |
-| 12447 | intellij.python.psi.impl:main |
-| 10598 | intellij.groovy:main |
-| 8734 | intellij.devkit.core:main |
-| 7680 | intellij.vcs.github:main |
-| 7209 | intellij.platform.execution.impl:main |
-| 6547 | intellij.gradle:main |
-| 6489 | intellij.platform.debugger.impl:main |
-| 6460 | intellij.kotlin.j2k:main |
-| 6359 | intellij.mermaid:main |
-| 6312 | intellij.java.analysis.impl:main |
-| 6121 | intellij.platform.util:main |
-| 5619 | intellij.platform.diff.impl:main |
-| 5550 | intellij.platform.workspace.jps:main |
-| 5182 | intellij.platform.vcs.log.impl:main |
-| 5151 | intellij.grid.impl:main |
-| 4038 | intellij.platform.externalSystem.impl:main |
+| 17374 | intellij.platform.lang.impl:main |
+| 14052 | intellij.platform.ide.impl:main |
+| 6924 | intellij.platform.consoleView.impl:main |
+| 6168 | intellij.vcs.git.shared:main |
+| 5723 | intellij.platform.debugger.impl:main |
+| 5589 | intellij.vcs.github:main |
+| 5432 | intellij.platform.searchEverywhere.frontend:main |
+| 5202 | intellij.kotlin.j2k:main |
+| 4408 | intellij.platform.locking.impl:main |
+| 4368 | intellij.maven:main |
+| 4331 | intellij.platform.polySymbols.testFramework:main |
+| 4137 | intellij.vcs.git.backend:main |
+| 4113 | intellij.grid.impl:main |
+| 3991 | intellij.vcs.gitlab.backend:main |
+| 3780 | intellij.platform.ide:main |
+| 3761 | intellij.platform.recentFiles.frontend:main |
+| 3644 | intellij.platform.vcs.impl:main |
+| 3437 | intellij.platform.buildScripts.devDistGenerator:main |
+| 3333 | intellij.platform.workspace.jps:main |
+| 3172 | intellij.platform.buildScripts.productDsl:main |
+| 3112 | intellij.driver.sdk:main |
+| 3102 | intellij.tools.ide.starter:main |
+| 3006 | intellij.platform.structureView.frontend:main |
+| 2955 | intellij.java.impl:main |
+| 2862 | intellij.kotlin.projectWizard.core:main |
 
 ## Bazel worker: what actually builds
+
+Measured on project revision `3f14adc599ef2c39a75c0e54c40d910676836bc8`, not on the revision in the headline. This open did not re-run the worker probe.
 
 The numbers above measure ANALYSIS (diagnostics per file). This section measures EMISSION through
 the Bazel path — `krusty --persistent_worker` speaking jvm-inc-builder's argument surface, driven by

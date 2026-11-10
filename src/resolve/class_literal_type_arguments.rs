@@ -70,6 +70,35 @@ pub(super) fn useless_alias_type(
 }
 
 impl Checker<'_> {
+    /// Star-project a class literal whose classifier was not published to the module index.
+    ///
+    /// The class is still declared in this file (`class Child<T> : Missing`), so its type
+    /// parameters are known from that declaration. A class declared elsewhere stays the unbound
+    /// type: both passes then agree, and the unresolved supertype remains the diagnostic.
+    fn unindexed_class_literal_receiver(&self, internal: TypeName) -> Option<Ty> {
+        // `parent` is the package of a top-level classifier. A nested classifier's parent is
+        // its enclosing class, which this file-level walk does not search.
+        let parent = internal.parent().unwrap_or(TypeName::ROOT);
+        if parent != self.source_package {
+            return None;
+        }
+        let segment = internal.segment_ref();
+        let class = self
+            .file
+            .decls
+            .iter()
+            .find_map(|&id| match self.file.decl(id) {
+                Decl::Class(class) if class.name == segment => Some(class),
+                _ => None,
+            })?;
+        let count = class.type_parameters.type_params().len();
+        if count == 0 {
+            return Some(Ty::obj_name(internal));
+        }
+        let star = Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")));
+        Some(Ty::obj_args_name(internal, &vec![star; count]))
+    }
+
     /// Resolve one class-literal left-hand side as an unbound semantic type. A value root remains
     /// bound and is checked by the caller. A simple classifier is selected once by the ordinary
     /// scope tower; the special type-argument diagnostic consumes that selected alias identity.
@@ -114,10 +143,15 @@ impl Checker<'_> {
             let Some((internal, [])) = ty.obj_parts() else {
                 return ty;
             };
-            let classifier = self
-                .fed_source()
-                .classifier(internal)
-                .expect("a resolved class-literal classifier must retain its declaration");
+            // A class whose signature did not finalize (an unresolved supertype) is absent
+            // from the module index, while the literal still names that classifier. Star
+            // projection then uses the type parameters still written on the class in this
+            // file. Aborting would drop every other diagnostic in the module.
+            let Some(classifier) = self.fed_source().classifier(internal) else {
+                return self
+                    .unindexed_class_literal_receiver(internal)
+                    .unwrap_or(ty);
+            };
             super::class_literal_receiver::star_projected_class_literal_receiver(ty, &classifier)
         })
     }
