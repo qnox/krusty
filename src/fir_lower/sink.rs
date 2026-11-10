@@ -1595,6 +1595,13 @@ impl<'a> CommonIrBodySink<'a> {
         if !default_fragment && self.ir.functions[function as usize].body.is_some() {
             return Err(FirFileLoweringFailure::DuplicateBody(callable.id));
         }
+        if let Some(guard) = body.equality_bound_guard() {
+            self.ir.declared_parameters_mut(function).equality_bound =
+                Some(crate::ir::IrEqualityBoundParameter {
+                    index: guard.ordinal as usize,
+                    bound: guard.bound.get(),
+                });
+        }
         if callable.is_inline() {
             let (modifiers, modes) = body.inline_parameter_contract();
             let info = self.ir.fn_params.get_mut(&function).ok_or(
