@@ -127,4 +127,83 @@ impl<'u, 's> Linker<'u, 's> {
             contract,
         })
     }
+
+    /// The ordinary class declaring `selected`, with its own instance fields in member order, so a
+    /// final member's body can read the object it is called on. The class is not initialized here:
+    /// a runtime instance already has the layout these fields name.
+    pub(super) fn materialize_ordinary_storage(
+        &mut self,
+        ir: &mut IrFile,
+        selected: KlibBodyCallable<'s>,
+    ) -> Result<super::OrdinaryBody<'s>, KlibBodyDeclineReason> {
+        let header = super::super::class_headers::authenticate(selected, self.sources.bodies)?;
+        let contract = header.contract;
+        if contract.is_value || contract.is_builtin_type() {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "an ordinary member's class is a value or builtin type".to_owned(),
+            ));
+        }
+        let identity = KlibDependencyCallable {
+            module: contract.module.clone(),
+            declaration: KlibDeclarationSignature::Public(contract.signature.clone()),
+        };
+        if let Some(&class) = self.classes.get(&identity) {
+            let fields = self
+                .ordinary_fields
+                .get(&class)
+                .expect("an ordinary class records the fields it materialized")
+                .clone();
+            return Ok(super::OrdinaryBody {
+                class,
+                fields,
+                contract,
+            });
+        }
+        if ir.class_id_by_name(contract.classifier).is_some() {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "different dependency identities claim the same materialized classifier".to_owned(),
+            ));
+        }
+        let mut identities = HashSet::default();
+        let mut stored_fields = Vec::new();
+        let mut symbols = Vec::new();
+        for member in &header.class.members {
+            let Some(field) = super::super::class_storage::member_field(member) else {
+                continue;
+            };
+            let stored =
+                super::super::class_storage::declared_field(&header, field, &mut identities)?;
+            symbols.push(&field.base.symbol);
+            stored_fields.push(stored);
+        }
+        let mut class = IrClass::synthetic(contract.classifier);
+        class.declaration_name = Some(super::super::klib_types::classifier_declaration(
+            &contract.signature,
+        )?);
+        class.type_params = header.formals.clone();
+        class.fields = stored_fields
+            .iter()
+            .map(|stored| {
+                IrField::new(stored.name.clone(), stored.ty)
+                    .with_is_final(stored.final_)
+                    .with_is_private(stored.private)
+            })
+            .collect();
+        let class = ir.add_class(class);
+        let fields = symbols
+            .into_iter()
+            .zip(stored_fields)
+            .map(|(symbol, stored)| super::OrdinaryField {
+                symbol,
+                ty: stored.ty,
+            })
+            .collect::<Vec<_>>();
+        self.ordinary_fields.insert(class, fields.clone());
+        self.classes.insert(identity, class);
+        Ok(super::OrdinaryBody {
+            class,
+            fields,
+            contract,
+        })
+    }
 }

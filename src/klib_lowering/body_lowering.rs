@@ -360,6 +360,19 @@ impl<'a> BodyLowering<'a> {
         }
     }
 
+    /// This body as a final member of the ordinary class `class`, reading that class's fields.
+    pub(super) fn reading_ordinary_fields(
+        mut self,
+        class: crate::ir::ClassId,
+        fields: &[(&'a crate::metadata::klib_ir::KlibIrSymbol, Ty)],
+        receiver: Ty,
+    ) -> Self {
+        self.instance_storage = Some(instance_storage::InstanceStorageFrame::ordinary_member(
+            class, receiver, fields,
+        ));
+        self
+    }
+
     /// This body as a member of the value class `class`, which reads its value through `field`.
     pub(super) fn reading_value_through(
         mut self,

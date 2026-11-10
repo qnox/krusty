@@ -1364,8 +1364,8 @@ fn stdlib_range_literal_membership_without_a_range_construction_declines() {
 }
 
 /// A `contains` a checked source edge selected stays that call: the fold never replaces a
-/// declaration another obligation needs. The support unit then declines at that member call,
-/// which it does not link.
+/// declaration another obligation needs. The member lowers, and its body declines at the member
+/// call it does not link.
 #[test]
 fn stdlib_range_literal_membership_keeps_a_selected_contains() {
     use crate::symbol_source::SymbolSource;
@@ -1406,7 +1406,8 @@ fn stdlib_range_literal_membership_keeps_a_selected_contains() {
             .map(|function| lowered_body(&unit, function))
             .map_err(|decline| decline.to_string()),
         Err(
-            "the KLIB body of `kotlin.text.isSurrogate` (it uses a call of a member function)"
+            "the KLIB body of `kotlin.text.isSurrogate` (it reaches the KLIB body of \
+             `kotlin.ranges.CharRange.contains` (it uses a call of a member function))"
                 .to_owned()
         )
     );

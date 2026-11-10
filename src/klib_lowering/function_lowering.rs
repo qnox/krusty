@@ -490,6 +490,9 @@ pub(super) enum HeaderPurpose {
     /// is its class ([`super::class_headers::authenticate_private_member`] proves the raw header
     /// against it first), and it is emitted as that class's other members are.
     PrivateValueMember(TypeName),
+    /// The body of a private member of an ordinary class `TypeName` whose final member this unit
+    /// emits. No provider records the private member. Its class is the calling member's.
+    PrivateOrdinaryMember(TypeName),
 }
 
 pub(super) fn raw_function_header(
@@ -556,21 +559,23 @@ fn header(
     vararg_parameters::reject_dispatch_marker(function.dispatch_receiver.as_ref())?;
     let emitted_singleton_dispatch = match purpose {
         HeaderPurpose::Body(singleton) => singleton,
-        HeaderPurpose::External | HeaderPurpose::PrivateValueMember(_) => None,
+        HeaderPurpose::External
+        | HeaderPurpose::PrivateValueMember(_)
+        | HeaderPurpose::PrivateOrdinaryMember(_) => None,
     };
-    let private_value_class = match purpose {
-        HeaderPurpose::PrivateValueMember(class) => {
+    let private_class = match purpose {
+        HeaderPurpose::PrivateValueMember(class) | HeaderPurpose::PrivateOrdinaryMember(class) => {
             if selected.is_some()
                 || crate::metadata::semantic::declaration_visibility(function.base.flags)
                     != crate::types::Visibility::Private
             {
                 return Err(mismatch(
-                    "a value class member without a provider record is not private".to_owned(),
+                    "a class member without a provider record is not private".to_owned(),
                 ));
             }
             Some(class)
         }
-        _ => None,
+        HeaderPurpose::Body(_) | HeaderPurpose::External => None,
     };
     // Validate the producer's qualified marker even for a header-only transitive callee. Such a
     // callee can be exported with its unread-receiver effect and selected by a later source
@@ -630,26 +635,45 @@ fn header(
                     "a dispatch receiver",
                 ));
             }
-            (Some(receiver), None) if private_value_class.is_some() => {
+            (Some(receiver), None) if private_class.is_some() => {
                 let serialized = semantic_type(arena, types, receiver.ty)?;
-                if serialized.kotlin_class_internal() != private_value_class {
+                if serialized.kotlin_class_internal() != private_class {
                     return Err(mismatch(
-                        "a private value class member's receiver is not its calling class"
-                            .to_owned(),
+                        "a private class member's receiver is not its calling class".to_owned(),
                     ));
                 }
                 value_receiver = Some((&receiver.base.symbol, serialized));
                 Some(serialized)
             }
-            (None, None) if private_value_class.is_some() => {
+            (None, None) if private_class.is_some() => {
                 return Err(mismatch(
-                    "a private value class member has no dispatch receiver".to_owned(),
+                    "a private class member has no dispatch receiver".to_owned(),
                 ));
             }
             (Some(_), None) if emitted_singleton_dispatch.is_none() => {
                 return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
                     "a dispatch receiver",
                 ));
+            }
+            (Some(receiver), Some(selected)) if selected.closes_as_ordinary_member() => {
+                // A final member, or any member of a final class, is the declaration a call runs.
+                // Its body reads `this` as the object it is called on.
+                let class = selected
+                    .class_contract()
+                    .expect("an ordinary member names its class");
+                super::class_headers::authenticate_receiver(class, arena, function)?;
+                let serialized = semantic_type(arena, types, receiver.ty)?;
+                if selected.declaration_owner()
+                    != serialized
+                        .kotlin_class_internal()
+                        .map(crate::types::SemanticCallableOwner::Classifier)
+                {
+                    return Err(mismatch(
+                        "a final class member's receiver is not its declaring class".to_owned(),
+                    ));
+                }
+                value_receiver = Some((&receiver.base.symbol, serialized));
+                Some(serialized)
             }
             (Some(receiver), Some(selected))
                 if selected

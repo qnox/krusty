@@ -75,6 +75,29 @@ impl<'a> InstanceStorageFrame<'a> {
         }
     }
 
+    /// A final ordinary member reads and writes the fields of the class it declares, by the
+    /// symbols of that class's own instance storage.
+    pub(super) fn ordinary_member(
+        class: ClassId,
+        receiver: Ty,
+        fields: &[(&'a crate::metadata::klib_ir::KlibIrSymbol, Ty)],
+    ) -> Self {
+        Self {
+            class,
+            receiver: Some(receiver),
+            fields: fields
+                .iter()
+                .enumerate()
+                .map(|(index, (symbol, ty))| Field {
+                    symbol: *symbol,
+                    index: u32::try_from(index).expect("a field list fits u32"),
+                    ty: *ty,
+                })
+                .collect(),
+            access: Access::Member,
+        }
+    }
+
     pub(super) fn value_member(
         class: ClassId,
         field: &'a KlibIrField,

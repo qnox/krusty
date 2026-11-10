@@ -34,8 +34,9 @@ pub(super) fn declarations(
         if !visited.insert(identity.clone()) {
             continue;
         }
-        // A private member of a value class has no provider declaration; the member calling it
-        // authenticates its class, and it is emitted as that member is.
+        // A private member of the class whose body calls it has no provider declaration. The
+        // caller authenticates the class, and the member is emitted as that caller is. The class
+        // is a value class or an ordinary class whose member body this walk already admitted.
         if let Some(class) = value_class.filter(|class| {
             platform
                 .external_callable_by_dependency(&identity)
@@ -153,7 +154,8 @@ pub(super) fn declarations(
             && (!(matches!(
                 realization.kind,
                 ExternalCallableKind::TopLevel | ExternalCallableKind::Extension
-            ) || is_value_class_member(selected))
+            ) || is_value_class_member(selected)
+                || selected.closes_as_ordinary_member())
                 || !realization
                     .klib_body_declaration_modifiers
                     .is_some_and(|modifiers| modifiers.permits_ordinary_body()))
@@ -161,9 +163,11 @@ pub(super) fn declarations(
             return Err(format!("a transitive KLIB body has no supported ordinary declaration contract: {identity:?}"));
         }
         if emits_body {
-            let value_class = is_value_class_member(selected)
-                .then(|| selected.class_contract().cloned())
-                .flatten();
+            // Private members of this class are reached with the class, not through a provider.
+            let value_class = (is_value_class_member(selected)
+                || selected.closes_as_ordinary_member())
+            .then(|| selected.class_contract().cloned())
+            .flatten();
             pending.extend(
                 bodies
                     .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)

@@ -21,6 +21,7 @@ mod for_loop_bindings;
 mod inline_templates;
 mod object_literal_overrides;
 mod object_literals;
+mod ordinary_class_members;
 mod parameter_defaults;
 mod primitive_calls;
 mod range_membership_producers;

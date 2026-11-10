@@ -252,6 +252,7 @@ struct PendingBody<'a> {
     header: FunctionHeader,
     function: FunId,
     value_member: Option<ValueMember<'a>>,
+    ordinary: Option<OrdinaryBody<'a>>,
     local_body: Option<super::same_library_class::LocalBody<'a>>,
 }
 
@@ -259,6 +260,7 @@ struct PendingBody<'a> {
 struct BodyHeader<'a> {
     header: FunctionHeader,
     value_member: Option<ValueMember<'a>>,
+    ordinary: Option<OrdinaryBody<'a>>,
 }
 
 /// The class of a value class member this unit emits: the class it materializes, the field the
@@ -267,6 +269,28 @@ struct BodyHeader<'a> {
 struct ValueMember<'a> {
     class: crate::ir::ClassId,
     field: &'a KlibIrField,
+    contract: &'a crate::libraries::KlibBodyClassContract,
+}
+
+/// One instance field of an ordinary class a final member reads, in the class's member order.
+#[derive(Clone, Copy)]
+struct OrdinaryField<'a> {
+    symbol: &'a KlibIrSymbol,
+    ty: Ty,
+}
+
+/// The ordinary class a final member's body reads: the class this unit materialized for its
+/// fields, those fields, and the provider's class contract.
+struct OrdinaryBody<'a> {
+    class: crate::ir::ClassId,
+    fields: Vec<OrdinaryField<'a>>,
+    contract: &'a crate::libraries::KlibBodyClassContract,
+}
+
+/// The class of the ordinary member being lowered, whose private members are emitted with it.
+#[derive(Clone, Copy)]
+struct OrdinaryClass<'a> {
+    class: crate::ir::ClassId,
     contract: &'a crate::libraries::KlibBodyClassContract,
 }
 
@@ -686,6 +710,8 @@ impl DependencyBodyUnit {
             active_module: callable.identity().module.clone(),
             active_identity: callable.identity().clone(),
             active_value_class: None,
+            active_ordinary: None,
+            ordinary_fields: HashMap::default(),
             sources,
         };
         let root = sources
@@ -707,20 +733,31 @@ impl DependencyBodyUnit {
                         .is_some_and(|class| !class.is_value && !class.is_builtin_type())
                 {
                     // A member of an ordinary class is installed with the class that declares it.
-                    if !linker.materialize_declaring_class(&mut self.ir, callable)? {
-                        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                    // A final member, or any member of a final class, still lowers from its body
+                    // contract when that class is not one this unit materializes.
+                    if linker.materialize_declaring_class(&mut self.ir, callable)? {
+                        linker
+                            .functions
+                            .get(callable.identity())
+                            .copied()
+                            .ok_or_else(|| {
+                                KlibBodyDeclineReason::SignatureMismatch(
+                                    "a materialized class did not install its member".to_owned(),
+                                )
+                            })
+                    } else if callable.closes_as_ordinary_member() {
+                        linker.declare(
+                            &mut self.ir,
+                            callable.identity(),
+                            Some(callable),
+                            arena,
+                            function,
+                        )
+                    } else {
+                        Err(KlibBodyDeclineReason::UnsupportedDeclaration(
                             "a member of a class this unit does not materialize",
-                        ));
+                        ))
                     }
-                    linker
-                        .functions
-                        .get(callable.identity())
-                        .copied()
-                        .ok_or_else(|| {
-                            KlibBodyDeclineReason::SignatureMismatch(
-                                "a materialized class did not install its member".to_owned(),
-                            )
-                        })
                 } else {
                     linker.declare(
                         &mut self.ir,
@@ -736,6 +773,10 @@ impl DependencyBodyUnit {
             linker.active_module.clone_from(&body.identity.module);
             linker.active_identity.clone_from(&body.identity);
             linker.active_value_class = body.value_member;
+            linker.active_ordinary = body.ordinary.as_ref().map(|ordinary| OrdinaryClass {
+                class: ordinary.class,
+                contract: ordinary.contract,
+            });
             let function = LoweredFunction {
                 symbol: body.symbol,
                 function: body.function,
@@ -769,11 +810,35 @@ impl DependencyBodyUnit {
                     .map(|()| lowered)
                 })
             } else {
-                match body.value_member {
-                    Some(member) => lowering
+                match (body.value_member, body.ordinary.as_ref()) {
+                    (Some(member), None) => lowering
                         .reading_value_through(member.class, member.field)
                         .body(body.statements),
-                    None => lowering.body(body.statements),
+                    (None, Some(ordinary)) => match body.header.value_receiver() {
+                        Some(receiver) => {
+                            let fields = ordinary
+                                .fields
+                                .iter()
+                                .map(|field| (field.symbol, field.ty))
+                                .collect::<Vec<_>>();
+                            lowering
+                                .reading_ordinary_fields(ordinary.class, &fields, receiver)
+                                .body(body.statements)
+                        }
+                        None => Err(KlibBodyDeclineReason::SignatureMismatch(
+                            "a final class member is emitted without its receiver".to_owned(),
+                        )),
+                    },
+                    (None, None) => lowering.body(body.statements),
+                    (Some(_), Some(_)) => {
+                        return Err(KlibBodyDecline::new(
+                            body.identity.declaration.clone(),
+                            KlibBodyDeclineReason::SignatureMismatch(
+                                "a member body is both a value class and an ordinary class"
+                                    .to_owned(),
+                            ),
+                        ))
+                    }
                 }
                 .and_then(|lowered| {
                     publish_parameter_defaults(
@@ -825,6 +890,11 @@ struct Linker<'u, 's> {
     /// The class and value field of the value class member being lowered, the class of every
     /// private member it calls.
     active_value_class: Option<ValueMember<'s>>,
+    /// The ordinary class of the final member being lowered, the class of every private member
+    /// it calls.
+    active_ordinary: Option<OrdinaryClass<'s>>,
+    /// Instance fields of each ordinary class this lowering materialized, by the class in `ir`.
+    ordinary_fields: HashMap<crate::ir::ClassId, Vec<OrdinaryField<'s>>>,
     sources: Sources<'s>,
 }
 
@@ -1078,8 +1148,14 @@ impl CallLinker for Linker<'_, '_> {
     }
 
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
-        // A support unit links no member of a generic class.
-        (sub.kotlin_class_internal() == Some(owner)).then_some(sub)
+        // The receiver of an inherited member is the class the body was lowered on, a subtype of
+        // the class that declares the member. The applied supertype is that declaration's class
+        // at the receiver's type arguments.
+        crate::assignable::applied_supertype(
+            &crate::symbol_resolver::SourceOracle(self.sources.declarations),
+            sub,
+            Ty::obj_name(owner),
+        )
     }
 
     fn dependency_override(
@@ -1151,10 +1227,12 @@ impl CallLinker for Linker<'_, '_> {
             )
         };
         let signature = KlibDeclarationSignature::Accessor(callee.clone());
+        // An accessor the body names on its class and no library serializes there is the
+        // declaration it inherits, the same binding the body closure already walks.
         let identity = match self
             .sources
             .bodies
-            .callee_origin(&self.active_module, &signature)
+            .linked_origin(&self.active_module, &signature)
         {
             KlibCalleeOrigin::Exact(identity) => identity,
             KlibCalleeOrigin::Missing => return Err(unsupported()),
@@ -1196,6 +1274,25 @@ impl CallLinker for Linker<'_, '_> {
                 context_count: linked.context_count,
                 class_type_parameters: linked.class_type_parameters,
             });
+        }
+        if let Some(linked) = self.ordinary_member_getter(ir, &identity)? {
+            return Ok(linked);
+        }
+        if callee.name().starts_with("<get-") {
+            if let Some(linked) = self.private_ordinary_member(ir, &identity)? {
+                let Callee::Local(function) = linked.callee else {
+                    unreachable!("a class member is a local function");
+                };
+                return Ok(LinkedAccessor {
+                    target: LinkedAccessorTarget::Local(function),
+                    write: false,
+                    receiver: linked.receiver,
+                    params: linked.params,
+                    ret: linked.ret,
+                    context_count: linked.context_count,
+                    class_type_parameters: linked.class_type_parameters,
+                });
+            }
         }
         // A complete retained export or positive target plan owns this edge. Other accessors
         // retain the explicit unsupported boundary instead of acquiring a header-only body path.
@@ -1441,6 +1538,12 @@ impl CallLinker for Linker<'_, '_> {
             {
                 return Ok(linked);
             }
+            if let Some(linked) = self
+                .private_ordinary_member(ir, &identity)
+                .map_err(callee_declined)?
+            {
+                return Ok(linked);
+            }
         }
         if let Some((linked, _)) = self
             .installed_member(ir, &identity)
@@ -1466,6 +1569,20 @@ impl CallLinker for Linker<'_, '_> {
                 None => false,
             };
             if !value_class_member {
+                if closes_as_ordinary_member(selected) {
+                    let selected = selected_callable_for_header_purpose(
+                        selected,
+                        HeaderPurpose::Body(None),
+                        arena,
+                        declaration,
+                        Some(self.sources.bodies),
+                    )
+                    .map_err(callee_declined)?
+                    .expect("a final class member call has a selected declaration");
+                    return self
+                        .ordinary_member(ir, &identity, selected, arena, declaration)
+                        .map_err(callee_declined);
+                }
                 return Err(KlibBodyDeclineReason::UnsupportedOperation(
                     "a call of a member function",
                 ));
@@ -1613,6 +1730,7 @@ impl<'s> Linker<'_, 's> {
                 BodyHeader {
                     header,
                     value_member: Some(active),
+                    ordinary: None,
                 },
             )?,
         };
@@ -1681,6 +1799,181 @@ impl<'s> Linker<'_, 's> {
             class_type_parameters: self.class_type_parameters(Some(selected))?,
             parameter_defaults: parameter_defaults(declaration),
         })
+    }
+
+    /// The getter of a final ordinary class's property, when this unit emits its body.
+    fn ordinary_member_getter(
+        &mut self,
+        ir: &mut IrFile,
+        identity: &KlibDependencyCallable,
+    ) -> Result<Option<LinkedAccessor>, KlibBodyDeclineReason> {
+        if self.sources.externals.contains_key(identity) {
+            return Ok(None);
+        }
+        let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(identity) else {
+            return Ok(None);
+        };
+        if !callables
+            .iter()
+            .any(|callable| callable.closes_as_ordinary_member())
+        {
+            return Ok(None);
+        }
+        let selected = callables[0];
+        let Some(accessor) = selected.accessor() else {
+            return Ok(None);
+        };
+        if accessor.role != crate::libraries::KlibAccessorRole::Getter {
+            return Ok(None);
+        }
+        let Some((arena, declaration)) = self.sources.bodies.function(identity) else {
+            return Ok(None);
+        };
+        if !matches!(declaration.body, Some(KlibIrBody::Block(_))) {
+            return Ok(None);
+        }
+        let selected = selected_callable_for_header_purpose(
+            Some(SelectedKlibCallables::Variants(callables)),
+            HeaderPurpose::Body(None),
+            arena,
+            declaration,
+            Some(self.sources.bodies),
+        )?
+        .expect("a selected bucket holds a callable");
+        let linked = self.ordinary_member(ir, identity, selected, arena, declaration)?;
+        let Callee::Local(function) = linked.callee else {
+            unreachable!("a class member is a local function");
+        };
+        Ok(Some(LinkedAccessor {
+            target: LinkedAccessorTarget::Local(function),
+            write: false,
+            receiver: linked.receiver,
+            params: linked.params,
+            ret: linked.ret,
+            context_count: linked.context_count,
+            class_type_parameters: linked.class_type_parameters,
+        }))
+    }
+
+    /// A call of the final ordinary class member `selected`, emitted as a function of its class
+    /// that reads the object it is called on.
+    fn ordinary_member(
+        &mut self,
+        ir: &mut IrFile,
+        identity: &KlibDependencyCallable,
+        selected: KlibBodyCallable<'s>,
+        arena: &'s KlibIrArena,
+        declaration: &'s KlibIrFunction,
+    ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
+        let function = match self.functions.get(identity) {
+            Some(&function) => {
+                body_header(Some(selected), arena, declaration, self.sources.bodies)?;
+                function
+            }
+            None => self.declare(ir, identity, Some(selected), arena, declaration)?,
+        };
+        let declared = &ir.functions[function as usize];
+        let (Some(receiver), params) = (
+            self.member_receivers.get(identity).copied(),
+            &declared.params,
+        ) else {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a final class member is emitted without its receiver".to_owned(),
+            ));
+        };
+        Ok(LinkedCallee {
+            callee: Callee::Local(function),
+            receiver: Some(receiver),
+            params: params.to_vec(),
+            ret: declared.ret,
+            context_count: ir.declared_parameters(function).context_count,
+            singleton_dispatch: None,
+            type_parameters: selected
+                .generic_signature()
+                .map_or_else(Vec::new, |signature| signature.formals.clone()),
+            type_parameter_bounds: selected
+                .generic_signature()
+                .map(|signature| signature.formal_bounds.clone()),
+            class_type_parameters: self.class_type_parameters(Some(selected))?,
+            parameter_defaults: parameter_defaults(declaration),
+        })
+    }
+
+    /// A call of a private member of the ordinary class whose final member is being lowered.
+    fn private_ordinary_member(
+        &mut self,
+        ir: &mut IrFile,
+        identity: &KlibDependencyCallable,
+    ) -> Result<Option<LinkedCallee>, KlibBodyDeclineReason> {
+        let Some(active) = self.active_ordinary else {
+            return Ok(None);
+        };
+        if self.sources.callees.get(identity).is_some()
+            || self.sources.externals.contains_key(identity)
+        {
+            return Ok(None);
+        }
+        let Some((_, declaration)) = self.sources.bodies.function(identity) else {
+            return Ok(None);
+        };
+        if declaration.dispatch_receiver.is_none()
+            || crate::metadata::semantic::declaration_visibility(declaration.base.flags)
+                != crate::types::Visibility::Private
+        {
+            return Ok(None);
+        }
+        let (arena, declaration, header) =
+            private_ordinary_member_header(active.contract, identity, self.sources.bodies)?;
+        let fields = self
+            .ordinary_fields
+            .get(&active.class)
+            .cloned()
+            .ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch(
+                    "an ordinary class member is emitted without its fields".to_owned(),
+                )
+            })?;
+        self.private_members.insert(identity.clone());
+        let function = match self.functions.get(identity) {
+            Some(&function) => function,
+            None => self.queue(
+                ir,
+                identity,
+                None,
+                arena,
+                declaration,
+                BodyHeader {
+                    header,
+                    value_member: None,
+                    ordinary: Some(OrdinaryBody {
+                        class: active.class,
+                        fields,
+                        contract: active.contract,
+                    }),
+                },
+            )?,
+        };
+        let declared = &ir.functions[function as usize];
+        let (Some(receiver), params) = (
+            self.member_receivers.get(identity).copied(),
+            &declared.params,
+        ) else {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a final class member is emitted without its receiver".to_owned(),
+            ));
+        };
+        Ok(Some(LinkedCallee {
+            callee: Callee::Local(function),
+            receiver: Some(receiver),
+            params: params.to_vec(),
+            ret: declared.ret,
+            context_count: 0,
+            singleton_dispatch: None,
+            type_parameters: Vec::new(),
+            type_parameter_bounds: Some(Vec::new()),
+            class_type_parameters: Vec::new(),
+            parameter_defaults: parameter_defaults(declaration),
+        }))
     }
 
     fn class_type_parameters(
@@ -1765,14 +2058,28 @@ impl<'s> Linker<'_, 's> {
     ) -> Result<FunId, KlibBodyDeclineReason> {
         block_statements(function)?;
         let header = body_header(selected, arena, function, self.sources.bodies)?;
-        let value_member = match (header.value_receiver(), selected) {
-            (Some(_), Some(selected)) => Some(self.materialize_value_class(ir, selected)?),
-            (Some(_), None) => {
+        let (value_member, ordinary) = match (header.value_receiver(), selected) {
+            (Some(_), Some(selected))
+                if selected
+                    .class_contract()
+                    .is_some_and(|class| class.is_value) =>
+            {
+                (Some(self.materialize_value_class(ir, selected)?), None)
+            }
+            (Some(_), Some(selected)) if selected.closes_as_ordinary_member() => {
+                (None, Some(self.materialize_ordinary_storage(ir, selected)?))
+            }
+            (Some(_), Some(_)) => {
                 return Err(KlibBodyDeclineReason::SignatureMismatch(
-                    "a value class member body has no selected declaration".to_owned(),
+                    "a member body with a receiver is not a supported class member".to_owned(),
                 ))
             }
-            (None, _) => None,
+            (Some(_), None) => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "a class member body has no selected declaration".to_owned(),
+                ))
+            }
+            (None, _) => (None, None),
         };
         self.queue(
             ir,
@@ -1783,6 +2090,7 @@ impl<'s> Linker<'_, 's> {
             BodyHeader {
                 header,
                 value_member,
+                ordinary,
             },
         )
     }
@@ -1798,6 +2106,7 @@ impl<'s> Linker<'_, 's> {
         BodyHeader {
             header,
             value_member,
+            ordinary,
         }: BodyHeader<'s>,
     ) -> Result<FunId, KlibBodyDeclineReason> {
         let statements = block_statements(function)?;
@@ -1822,6 +2131,7 @@ impl<'s> Linker<'_, 's> {
             header,
             function: declared,
             value_member,
+            ordinary,
             local_body: None,
         });
         Ok(declared)
@@ -1850,6 +2160,25 @@ fn private_value_member_header<'b>(
     let header = super::function_lowering::raw_function_header_with_class(
         None,
         HeaderPurpose::PrivateValueMember(class.classifier),
+        member.arena,
+        member.function,
+        member.types,
+    )?;
+    Ok((member.arena, member.function, header))
+}
+
+/// The header of `identity`, a private member of the ordinary class `class`, proved against that
+/// class's raw header.
+fn private_ordinary_member_header<'b>(
+    class: &crate::libraries::KlibBodyClassContract,
+    identity: &KlibDependencyCallable,
+    bodies: &'b KlibDeclarationBodies,
+) -> Result<(&'b KlibIrArena, &'b KlibIrFunction, FunctionHeader), KlibBodyDeclineReason> {
+    let member = super::class_headers::authenticate_private_member(class, identity, bodies)?;
+    block_statements(member.function)?;
+    let header = super::function_lowering::raw_function_header_with_class(
+        None,
+        HeaderPurpose::PrivateOrdinaryMember(class.classifier),
         member.arena,
         member.function,
         member.types,
@@ -1903,6 +2232,16 @@ fn body_header(
 enum SelectedKlibCallables<'callable, 'facts> {
     One(KlibBodyCallable<'callable>),
     Variants(&'facts [KlibBodyCallable<'callable>]),
+}
+
+fn closes_as_ordinary_member(selected: Option<SelectedKlibCallables<'_, '_>>) -> bool {
+    match selected {
+        Some(SelectedKlibCallables::One(candidate)) => candidate.closes_as_ordinary_member(),
+        Some(SelectedKlibCallables::Variants(candidates)) => candidates
+            .iter()
+            .any(|candidate| candidate.closes_as_ordinary_member()),
+        None => false,
+    }
 }
 
 fn selected_callable_for_header<'callable>(

@@ -68,6 +68,7 @@ impl<'s> Linker<'_, 's> {
             header: prepared.init_header,
             function: init,
             value_member: None,
+            ordinary: None,
             local_body: Some(super::super::same_library_class::LocalBody::Initialize(
                 super::super::same_library_class::LocalInitialize {
                     class: class_id,
@@ -150,6 +151,7 @@ impl<'s> Linker<'_, 's> {
                 header: member.header,
                 function,
                 value_member: None,
+                ordinary: None,
                 local_body: Some(super::super::same_library_class::LocalBody::Member(
                     super::super::same_library_class::LocalMemberFields {
                         class: class_id,

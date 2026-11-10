@@ -228,6 +228,25 @@ impl<'a> KlibBodyCallable<'a> {
         self.kind == ExternalCallableKind::Member
     }
 
+    /// A member of an ordinary class whose call is not virtual and whose declaration already
+    /// permits an ordinary body. The member is final, or its class is, so the body that was
+    /// compiled for this declaration is the one a call runs. An open member of an open class
+    /// still dispatches through the receiver's class.
+    pub(crate) fn closes_as_ordinary_member(self) -> bool {
+        let Some(class) = self.class_contract() else {
+            return false;
+        };
+        if !self.is_member() || class.is_value || class.is_builtin_type() {
+            return false;
+        }
+        let Some(modifiers) = self.declaration_modifiers() else {
+            return false;
+        };
+        modifiers.permits_ordinary_body()
+            && (class.modality == crate::metadata::semantic::KotlinModality::Final
+                || modifiers.modality == crate::metadata::semantic::KotlinModality::Final)
+    }
+
     pub(crate) fn kind(self) -> ExternalCallableKind {
         self.kind
     }

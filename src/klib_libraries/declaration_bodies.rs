@@ -468,8 +468,15 @@ impl KlibDeclarationBodies {
         self.callable_references()
             .into_iter()
             .filter(|(module, reference)| {
-                matches!(reference, KlibDeclarationSignature::Public(public)
-                    if public.declaration().segments().len() > 1)
+                let member = match reference {
+                    KlibDeclarationSignature::Public(public) => {
+                        public.declaration().segments().len() > 1
+                    }
+                    KlibDeclarationSignature::Accessor(accessor) => {
+                        accessor.property().declaration().segments().len() > 1
+                    }
+                };
+                member
                     && matches!(
                         self.callee_origin(module, reference),
                         KlibCalleeOrigin::Missing
