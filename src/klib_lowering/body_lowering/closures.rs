@@ -131,6 +131,7 @@ impl BodyLowering<'_> {
             .get_mut(&implementation)
             .expect("a closure publishes its parameters")
             .captured_receivers = receivers;
+        let enclosing_reified = self.reified_parameters.clone();
         let mut lowering = BodyLowering::new(
             self.arena,
             LoweredFunction {
@@ -142,6 +143,7 @@ impl BodyLowering<'_> {
             self.ir,
             self.linker,
         );
+        lowering.inherit_reified_parameters(&enclosing_reified);
         lowering.instance_storage = self
             .instance_storage
             .as_ref()

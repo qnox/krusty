@@ -65,23 +65,43 @@ impl BodyLowering<'_> {
     }
 
     /// `argument is target`, or `!is` when `negated`, built by the type-test operations checked
-    /// FIR lowering uses from the nullability of the lowered operand's type and of the target. A
-    /// KLIB body has no reified type parameter (such a function declines). A non-null target is
-    /// tested as written: a KLIB carries no erased-upper-bound plan, so `s is String` for
-    /// `s: String?` is an instance test, which answers what checked FIR's `s != null` does.
+    /// FIR lowering uses from the nullability of the lowered operand's type and of the target.
+    ///
+    /// A reified type parameter is tested as written, nullability included. Its bound may admit
+    /// `null` (`T : Any?`) while a call instantiates it with a non-null type, and `null is String`
+    /// is false: expanding that parameter here into `tmp == null || tmp is T` would accept the
+    /// `null`. The call-site substitution names the real target. A prepared inline template records
+    /// those parameters on its header; an ordinary body declares none, because a reified
+    /// declaration declines before its body is lowered.
+    ///
+    /// Any other non-null target is tested as written too: a KLIB carries no erased-upper-bound
+    /// plan, so `s is String` for `s: String?` is an instance test, which answers what checked
+    /// FIR's `s != null` does.
     fn type_test(&mut self, negated: bool, target: Ty, argument: KlibIrExprId) -> Lowered<ExprId> {
         let arg = self.type_operator_operand(argument)?;
-        let test = if admits_null_at_runtime(target) {
+        let test = if self.reified_type_parameter_target(target) || !admits_null_at_runtime(target)
+        {
+            self.ir.add_instance_check(negated, arg, target)
+        } else {
             let operand_type = self.lowered_type(arg);
             let locals = &mut self.locals;
             self.ir
                 .add_nullable_target_type_test(negated, arg, operand_type, target, || {
                     locals.anonymous_slot()
                 })
-        } else {
-            self.ir.add_instance_check(negated, arg, target)
         };
         Ok(self.typed(test, Ty::Boolean))
+    }
+
+    /// Whether `target` (or `target?`) names a reified type parameter this body keeps unsubstituted.
+    fn reified_type_parameter_target(&self, target: Ty) -> bool {
+        let TyKind::TyParam(identity, _) = target.non_null().kind() else {
+            return false;
+        };
+        let name = identity.as_str();
+        self.reified_parameters
+            .iter()
+            .any(|parameter| parameter == name)
     }
 
     /// The lowered operand `argument` of a type operator.

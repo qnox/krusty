@@ -327,6 +327,24 @@ pub(super) struct BodyLowering<'a> {
     member_return: Option<KlibIrSymbol>,
     /// The result type of [`Self::member_return`].
     member_result: Option<Ty>,
+    /// Semantic names of reified type parameters a type test in this body keeps as written: this
+    /// function's own, and those of an inline template a nested closure was lowered inside.
+    reified_parameters: Vec<String>,
+}
+
+/// Semantic names of the reified type parameters `function`'s signature declares or captures.
+fn reified_parameter_names(ir: &IrFile, function: FunId) -> Vec<String> {
+    ir.signatures
+        .get(&function)
+        .map(|signature| {
+            signature
+                .type_params
+                .iter()
+                .filter(|parameter| parameter.reified)
+                .map(|parameter| parameter.semantic_name.clone())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl<'a> BodyLowering<'a> {
@@ -338,6 +356,12 @@ impl<'a> BodyLowering<'a> {
         ir: &'a mut IrFile,
         linker: &'a mut dyn CallLinker,
     ) -> Self {
+        let mut reified_parameters = reified_parameter_names(ir, function.function);
+        for name in header.reified_parameters() {
+            if !reified_parameters.iter().any(|parameter| parameter == name) {
+                reified_parameters.push(name.clone());
+            }
+        }
         Self {
             arena,
             function,
@@ -357,6 +381,22 @@ impl<'a> BodyLowering<'a> {
             captures: HashMap::default(),
             member_return: None,
             member_result: None,
+            reified_parameters,
+        }
+    }
+
+    /// Keep type tests of `enclosing`'s reified parameters as written, as well as this function's
+    /// own. A closure lowered inside an inline template does not declare those parameters, but a
+    /// test in its body still names them.
+    pub(super) fn inherit_reified_parameters(&mut self, enclosing: &[String]) {
+        for name in enclosing {
+            if !self
+                .reified_parameters
+                .iter()
+                .any(|parameter| parameter == name)
+            {
+                self.reified_parameters.push(name.clone());
+            }
         }
     }
 

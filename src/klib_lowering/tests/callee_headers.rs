@@ -21,7 +21,7 @@ use crate::metadata::id_signature::{
 };
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrBody, KlibIrExprKind, KlibIrFunction, KlibIrMember, KlibIrNullability,
-    KlibIrParameter, KlibIrStatement, KlibIrType, KlibIrTypeParameter,
+    KlibIrParameter, KlibIrStatement, KlibIrType, KlibIrTypeOperator, KlibIrTypeParameter,
 };
 use crate::metadata::klib_ir::{KlibIrDeclarationTree, KlibIrSymbolKind};
 use crate::metadata::semantic::{KotlinType, KotlinTypeParameter, KotlinTypeParameterId};
@@ -672,6 +672,156 @@ fn a_raw_generic_header_does_not_accept_a_prepared_erased_parameter() {
             T::NullableAny.semantic(),
             record.params[0],
         )))
+    );
+}
+
+/// `return a is T` in a prepared inline copy, `a: Any?`, `T` bounded by `Any?`.
+fn prepared_type_parameter_test(reified: bool) -> String {
+    let (mut arena, mut function, mut record) = generic_identity_header();
+    let formal = function.regular_parameters[0].ty;
+    let any = arena.push_type(T::NullableAny.klib());
+    let boolean = arena.push_type(T::Boolean.klib());
+    let nothing = arena.push_type(T::Nothing.klib());
+    function.regular_parameters[0].ty = any;
+    function.return_type = boolean;
+    record.params = [T::NullableAny.semantic()];
+    record.ret = T::Boolean.semantic();
+    let generic = record.generic.as_mut().expect("generic");
+    generic.params = vec![T::NullableAny.semantic()];
+    generic.ret = T::Boolean.semantic();
+    if reified {
+        function.type_parameters[0].base.flags |= 8;
+        record.reified.push(0);
+    }
+    let symbol = function.base.symbol.clone();
+    let parameter = function.regular_parameters[0].base.symbol.clone();
+    let read = arena.push_expr(
+        Some(any),
+        KlibIrExprKind::GetValue {
+            symbol: parameter,
+            origin: None,
+        },
+    );
+    let test = arena.push_expr(
+        Some(boolean),
+        KlibIrExprKind::TypeOperator {
+            operator: KlibIrTypeOperator::InstanceOf,
+            operand: formal,
+            argument: read,
+        },
+    );
+    let returned = arena.push_expr(
+        Some(nothing),
+        KlibIrExprKind::Return {
+            target: symbol,
+            value: test,
+        },
+    );
+    function.body = Some(KlibIrBody::Block(vec![KlibIrStatement::Expression(
+        returned,
+    )]));
+    let header = super::super::function_lowering::prepared_inline_header(
+        record.callable(),
+        &record.formals,
+        &arena,
+        &function,
+    )
+    .unwrap_or_else(|reason| panic!("prepared header: {reason:?}"));
+    let mut ir = crate::ir::IrFile::default();
+    let lowered_function = super::super::function_lowering::declare_function(&mut ir, &header);
+    let statements = match &function.body {
+        Some(KlibIrBody::Block(statements)) => statements.clone(),
+        _ => panic!("a block body"),
+    };
+    let mut linker = NoCalls;
+    let body = super::super::body_lowering::BodyLowering::new(
+        &arena,
+        super::super::body_lowering::LoweredFunction {
+            symbol: &function.base.symbol,
+            function: lowered_function,
+        },
+        &header,
+        &super::super::ir_builtins::IrBuiltinOperators::new(),
+        &mut ir,
+        &mut linker,
+    )
+    .body(&statements)
+    .unwrap_or_else(|reason| panic!("type test: {reason:?}"));
+    super::render(&ir, body)
+}
+
+struct NoCalls;
+
+impl super::super::body_lowering::CallLinker for NoCalls {
+    fn requires_declaration(
+        &self,
+        _: &crate::metadata::id_signature::KlibPublicIdSignature,
+    ) -> Result<bool, KlibBodyDeclineReason> {
+        panic!("no call")
+    }
+    fn link(
+        &mut self,
+        _: &mut crate::ir::IrFile,
+        _: &crate::metadata::id_signature::KlibPublicIdSignature,
+    ) -> Result<super::super::body_lowering::LinkedCallee, KlibBodyDeclineReason> {
+        panic!("no call")
+    }
+    fn link_constructor(
+        &mut self,
+        _: &mut crate::ir::IrFile,
+        _: &crate::metadata::id_signature::KlibPublicIdSignature,
+    ) -> Result<super::super::body_lowering::LinkedConstructor, KlibBodyDeclineReason> {
+        panic!("no construction")
+    }
+    fn link_accessor(
+        &mut self,
+        _: &mut crate::ir::IrFile,
+        _: &crate::metadata::id_signature::KlibAccessorIdSignature,
+    ) -> Result<super::super::body_lowering::LinkedAccessor, KlibBodyDeclineReason> {
+        panic!("no accessor")
+    }
+    fn singleton(&self, _: crate::types::TypeName) -> Result<(), KlibBodyDeclineReason> {
+        panic!("no singleton")
+    }
+    fn applied_supertype(&self, sub: Ty, owner: crate::types::TypeName) -> Option<Ty> {
+        (sub.kotlin_class_internal() == Some(owner)).then_some(sub)
+    }
+    fn is_subtype(
+        &self,
+        _: &super::super::klib_types::KlibTypeParameters,
+        sub: Ty,
+        sup: Ty,
+    ) -> bool {
+        sub == sup
+    }
+    fn same_type(&self, left: Ty, right: Ty) -> bool {
+        left == right
+    }
+    fn constructor_bound(
+        &self,
+        _: &super::super::klib_types::KlibTypeParameters,
+        argument: Ty,
+        bound: Ty,
+    ) -> bool {
+        argument == bound
+    }
+}
+
+#[test]
+fn a_reified_type_parameter_test_stays_an_instance_check() {
+    assert_eq!(
+        prepared_type_parameter_test(true),
+        "scope {scope {return@Some(0) InstanceOf<<\"declaration-owned-formal\">>(v0!: \
+         kotlin/Any?): Boolean: Nothing}: Nothing}"
+    );
+}
+
+#[test]
+fn an_ordinary_type_parameter_test_expands_when_its_bound_admits_null() {
+    assert_eq!(
+        prepared_type_parameter_test(false),
+        "scope {scope {return@Some(0) when[RefEq(v0, Null) -> Boolean(true), else -> \
+         InstanceOf<<\"declaration-owned-formal\">>(v0)]: Boolean: Nothing}: Nothing}"
     );
 }
 

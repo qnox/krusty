@@ -46,6 +46,7 @@ fn a_receiver_after_a_value_capture_keeps_its_origin_through_nested_recapture() 
         type_parameters: KlibTypeParameters::default(),
         erasures: HashMap::default(),
         erased_result: None,
+        reified_parameters: Vec::new(),
     };
     let captured_value = header
         .capture_parameter(&value, 0, IrCapturingCallable::Lambda, &[], false)
@@ -133,6 +134,7 @@ fn instance_header() -> (FunctionHeader, KlibIrSymbol, KlibIrSymbol, Ty) {
         type_parameters: KlibTypeParameters::default(),
         erasures: HashMap::default(),
         erased_result: None,
+        reified_parameters: Vec::new(),
     };
     (header, receiver, value, receiver_ty)
 }

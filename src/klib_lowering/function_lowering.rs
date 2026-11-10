@@ -68,6 +68,9 @@ pub(super) struct FunctionHeader {
     erasures: HashMap<String, Ty>,
     /// The type the body returns when that is the erasure of the declared result.
     erased_result: Option<Ty>,
+    /// Semantic names of reified type parameters this prepared-inline body still names. An
+    /// ordinary body has none: a reified declaration declines before its body is lowered.
+    reified_parameters: Vec<String>,
 }
 
 impl FunctionHeader {
@@ -139,6 +142,11 @@ impl FunctionHeader {
     /// The type parameters the body may name.
     pub(super) fn type_parameters(&self) -> &KlibTypeParameters {
         &self.type_parameters
+    }
+
+    /// Semantic names of reified type parameters a type test in this body keeps unsubstituted.
+    pub(super) fn reified_parameters(&self) -> &[String] {
+        &self.reified_parameters
     }
 
     /// The declared parameter types, context parameters and extension receiver included.
@@ -276,7 +284,9 @@ pub(super) fn prepared_inline_header(
             ));
         }
     }
-    for (parameter, formal) in function.type_parameters.iter().zip(formals) {
+    let reified_ordinals = selected.reified_type_parameter_ordinals();
+    let mut reified_parameters = Vec::new();
+    for (index, (parameter, formal)) in function.type_parameters.iter().zip(formals).enumerate() {
         let TyKind::TyParam(name, bound) = formal.kind() else {
             return Err(mismatch(format!(
                 "the type parameter `{}` is selected as {formal:?}",
@@ -298,6 +308,10 @@ pub(super) fn prepared_inline_header(
                 "the type parameter `{}` repeats a class type parameter's identity",
                 parameter.name
             )));
+        }
+        let ordinal = u32::try_from(index).expect("a type-parameter list fits u32");
+        if parameter.is_reified() || reified_ordinals.contains(&ordinal) {
+            reified_parameters.push(name.as_str().to_owned());
         }
     }
     // The extension receiver is serialized either in its own slot or as the leading value
@@ -460,6 +474,7 @@ pub(super) fn prepared_inline_header(
         type_parameters,
         erasures,
         erased_result,
+        reified_parameters,
     })
 }
 
@@ -846,6 +861,7 @@ fn header(
         type_parameters,
         erasures: HashMap::default(),
         erased_result: None,
+        reified_parameters: Vec::new(),
     })
 }
 

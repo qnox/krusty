@@ -153,5 +153,6 @@ fn member_header(
         type_parameters,
         erasures: HashMap::default(),
         erased_result: None,
+        reified_parameters: Vec::new(),
     }
 }
