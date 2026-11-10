@@ -305,7 +305,7 @@ pub(super) fn mark_places(
 /// `AnonymousObjectTransformer` give it. A lambda is invoked when a `FunctionN.invoke` is called on
 /// it, and retained when it is an argument of a regenerated object's `<init>`; a parameter null
 /// check is no use. `Err` names any other use, and a lambda the body both invokes and retains.
-pub(crate) fn lambda_placements(
+pub fn lambda_placements(
     node: &MethodNode,
     parameters: &Parameters,
     lambdas: usize,

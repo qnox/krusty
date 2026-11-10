@@ -14,6 +14,20 @@ impl IrFile {
         );
     }
 
+    /// A lowering checkpoint retains immutable declaration facts, including owners whose class
+    /// storage has not been materialized in this file yet.
+    pub(crate) fn declared_class_self_type_owners(&self) -> crate::fx_hash::HashSet<TypeName> {
+        self.declared_class_self_types.keys().copied().collect()
+    }
+
+    pub(crate) fn restore_declared_class_self_type_owners(
+        &mut self,
+        owners: &crate::fx_hash::HashSet<TypeName>,
+    ) {
+        self.declared_class_self_types
+            .retain(|owner, _| owners.contains(owner));
+    }
+
     pub(crate) fn declared_class_self_type(&self, classifier: TypeName) -> Option<Ty> {
         self.declared_class_self_types.get(&classifier).copied()
     }
@@ -30,7 +44,7 @@ impl IrFile {
         self.declarationless_classes.insert(internal);
     }
 
-    pub(crate) fn is_declarationless_class(&self, internal: TypeName) -> bool {
+    pub fn is_declarationless_class(&self, internal: TypeName) -> bool {
         self.declarationless_classes.contains(&internal)
     }
 
@@ -63,7 +77,7 @@ impl IrFile {
     }
 
     /// Checked primary-constructor default expressions, each an independently emitted value root.
-    pub(crate) fn class_ctor_default_roots(&self) -> impl Iterator<Item = ExprId> + '_ {
+    pub fn class_ctor_default_roots(&self) -> impl Iterator<Item = ExprId> + '_ {
         self.class_ctor_defaults
             .values()
             .flat_map(|defaults| defaults.iter().flatten().copied())
@@ -95,19 +109,19 @@ impl IrFile {
 
     /// Record the signature a plugin's IR lowering gives a class it generated, when it differs from
     /// the declared one (kotlinx.serialization's bounded `$serializer` type parameters).
-    pub(crate) fn insert_lowered_class_signature(&mut self, internal: TypeName, sig: IrGenericSig) {
+    pub fn insert_lowered_class_signature(&mut self, internal: TypeName, sig: IrGenericSig) {
         self.lowered_class_signatures.insert(internal, sig);
     }
 
     /// The signature the class's classfile is written from: its lowered one, else its declaration.
-    pub(crate) fn lowered_class_signature(&self, internal: TypeName) -> Option<&IrGenericSig> {
+    pub fn lowered_class_signature(&self, internal: TypeName) -> Option<&IrGenericSig> {
         self.lowered_class_signatures
             .get(&internal)
             .or_else(|| self.class_signatures.get(&internal))
     }
 
     /// `class` applied to its own type parameters (`C<T>`): the type of its `this`.
-    pub(crate) fn class_type(&self, class: &IrClass) -> Ty {
+    pub fn class_type(&self, class: &IrClass) -> Ty {
         let arguments: Vec<Ty> = self
             .class_signature_name(class.fq_name)
             .map(|signature| {
@@ -124,6 +138,13 @@ impl IrFile {
     pub fn insert_field_signatures(&mut self, internal: &str, sigs: Vec<(String, String)>) {
         self.field_signatures
             .insert(crate::types::type_name(internal), sigs);
+    }
+
+    /// Whether this exact owner retains field-signature records whose declaration roles are opaque.
+    pub(crate) fn has_field_signatures(&self, owner: crate::types::TypeName) -> bool {
+        self.field_signatures
+            .get(&owner)
+            .is_some_and(|records| !records.is_empty())
     }
 
     pub fn field_signatures(&self, internal: &str) -> Option<&Vec<(String, String)>> {

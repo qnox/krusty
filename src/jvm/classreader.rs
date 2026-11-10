@@ -79,7 +79,7 @@ pub(crate) fn visibility_of_access(access: u16) -> crate::types::Visibility {
 
 impl MethodSig {
     /// The method's declaration visibility, from its access flags.
-    pub(crate) fn visibility(&self) -> crate::types::Visibility {
+    pub fn visibility(&self) -> crate::types::Visibility {
         visibility_of_access(self.access)
     }
     pub fn is_public(&self) -> bool {
@@ -325,6 +325,18 @@ impl ClassInfo {
         self.this_class.render()
     }
 
+    /// The functions, properties, and constructors this class file's `@Metadata` declares, decoded
+    /// on first use. A compilation reads them through `Classpath::class_members`, which records a
+    /// failure as the classpath's load error.
+    pub fn kotlin_members(
+        &self,
+    ) -> Result<&crate::jvm::metadata::KotlinMembers, crate::jvm::metadata::MetadataDecodeError>
+    {
+        self.meta
+            .members
+            .decode(&self.methods, &self.meta.type_parameter_scope)
+    }
+
     /// The Kotlin package this class's declarations belong to. `@JvmPackageName` divorces that from
     /// the class file's own location (`package kotlin.test` emitted to
     /// `kotlin/test/junit5/annotations/AnnotationsKt`), and only `@Metadata`'s `pn` records it — so
@@ -359,7 +371,6 @@ impl ClassInfo {
         let meta = crate::jvm::metadata::decode_metadata_within(
             raw,
             &self.this_class(),
-            &self.methods,
             &outer.meta.type_parameter_scope,
         )
         .map_err(ReadError::BadKotlinMetadata)?;
@@ -468,7 +479,7 @@ pub enum C {
 
 /// A class file's constant pool and the offset of the `access_flags` that follow it, for a reader
 /// that walks the rest of the class itself.
-pub(crate) fn read_constant_pool(bytes: &[u8]) -> Result<(Vec<C>, usize), ReadError> {
+pub fn read_constant_pool(bytes: &[u8]) -> Result<(Vec<C>, usize), ReadError> {
     let mut r = Reader { b: bytes, i: 0 };
     if r.u4()? != 0xCAFEBABE {
         return Err(ReadError::NotAClass);
@@ -1238,9 +1249,8 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         k: attrs.k,
         package_name: attrs.pn,
     };
-    let meta =
-        crate::jvm::metadata::decode_metadata_within(&raw_metadata, &this_class, &methods, &[])
-            .map_err(ReadError::BadKotlinMetadata)?;
+    let meta = crate::jvm::metadata::decode_metadata_within(&raw_metadata, &this_class, &[])
+        .map_err(ReadError::BadKotlinMetadata)?;
     let inner_metadata = meta.is_inner.then(|| std::sync::Arc::new(raw_metadata));
     Ok(ClassInfo {
         major,

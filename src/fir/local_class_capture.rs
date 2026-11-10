@@ -72,6 +72,20 @@ impl FirLocalClassCaptureSource {
     }
 }
 
+/// The declaration role owning a source enclosing instance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EnclosingInstanceKind {
+    Classifier,
+    EnumEntry,
+}
+
+/// The selected instance owner, independent from its semantic enum/class view.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EnclosingInstanceOwner {
+    pub declaration: DeclarationId,
+    pub kind: EnclosingInstanceKind,
+}
+
 /// What a captured receiver was in source. A target names the capture's field and constructor
 /// parameter after it; kotlinc's `LocalDeclarationsLowering` names each kind differently.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -79,7 +93,11 @@ pub enum FirCapturedReceiver {
     /// The instance of an enclosing class, with that class's resolved identity. A capture written
     /// in a local class's member may reach past that class to an outer instance; the identity says
     /// whose, so a target can realize the instance as the value its declaring member holds.
-    Enclosing { classifier: crate::types::TypeName },
+    Enclosing {
+        classifier: crate::types::TypeName,
+        /// Resolver candidates have no stable owner. Checked source publication supplies it.
+        owner: Option<EnclosingInstanceOwner>,
+    },
     /// The extension receiver of the named callable with this source name, and whether that
     /// callable is a local function or the declaration the capture is written in.
     Callable {
@@ -108,6 +126,13 @@ pub enum CapturedCallableOwner {
 }
 
 impl FirCapturedReceiver {
+    pub(crate) fn enclosing_owner(&self) -> Option<EnclosingInstanceOwner> {
+        match self {
+            Self::Enclosing { owner, .. } => *owner,
+            _ => None,
+        }
+    }
+
     pub(super) fn storage_payload_bytes(&self) -> usize {
         match self {
             Self::Enclosing { .. } | Self::Lambda(None) => 0,

@@ -18,13 +18,30 @@ pub struct BridgeParameter {
     pub semantic: Ty,
 }
 
-/// The collection-bridge guard a JVM pass selects once: which erased parameter to test, and the
-/// neutral result to return when the value is not that parameter's type. Common lowering leaves
-/// the plan absent. Emission writes this record and does not select it again.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The collection-bridge guard a JVM pass selects once: which erased parameters to test, in order,
+/// how, and the neutral result to return when a value is not its parameter's type. Common lowering
+/// leaves the plan absent. Emission writes this record and does not select it again.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CollectionBarrierPlan {
-    pub parameter: usize,
+    pub parameters: Vec<CollectionBarrierParameter>,
     pub outcome: crate::libraries::CollectionBarrierOutcome,
+}
+
+/// One erased parameter a collection guard tests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CollectionBarrierParameter {
+    pub parameter: usize,
+    pub check: CollectionBarrierCheck,
+}
+
+/// How a collection guard tests one parameter against the override's type for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CollectionBarrierCheck {
+    /// The type's JVM class is narrower than `Object`: an `instanceof` test, which `null` passes
+    /// when the type admits it.
+    Instance { admits_null: bool },
+    /// The type erases to `Object`: only `null` can fail it, when the type rejects `null`.
+    Presence { admits_null: bool },
 }
 
 /// Which accessor of a property a bridge delegates to.
@@ -66,7 +83,7 @@ pub struct Bridge {
     /// identity without recovering the declaration from `name`.
     pub overridden_owner: Option<TypeName>,
     /// Provider-normalized collection ABI role of the exact overridden declaration.
-    pub collection_barrier: Option<crate::libraries::CollectionBarrierOutcome>,
+    pub collection_barrier: Option<crate::libraries::CollectionBarrier>,
     /// The parameters visible on this bridge, one per erased parameter. These are frozen before a
     /// representation pass can prepend carrier/receiver parameters to the delegated target.
     pub parameters: Vec<BridgeParameter>,

@@ -25,9 +25,14 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
             }
             IrCheckedOperation::ConstructorDelegation {
                 outer_receiver,
+                capture_arguments,
                 arguments,
                 ..
             } => {
+                capture_arguments
+                    .iter()
+                    .flatten()
+                    .for_each(|&(value, _)| f(value));
                 outer_receiver.iter().for_each(|&receiver| f(receiver));
                 arguments.iter().for_each(|argument| match argument {
                     IrCheckedArgument::Expression { value, .. } => f(*value),
@@ -147,6 +152,11 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         | IrExpr::LateinitCheck { operand: arg, .. }
         | IrExpr::Throw { operand: arg }
         | IrExpr::EnumValueOf { arg, .. }
+        | IrExpr::EnumConstant {
+            construction: arg, ..
+        }
+        | IrExpr::EnumEntriesList { values: arg, .. }
+        | IrExpr::NoSuchEnumConstant { name: arg, .. }
         | IrExpr::EnumSwitchOrdinal { subject: arg, .. }
         | IrExpr::ReifiedTypeOp { arg, .. }
         | IrExpr::RefGet { holder: arg, .. }
@@ -251,6 +261,7 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         | IrExpr::EnumValues { .. }
         | IrExpr::EnumSwitchKey { .. }
         | IrExpr::EnumEntries { .. }
+        | IrExpr::EnumAllocation { .. }
         | IrExpr::ReifiedClassMarker { .. }
         | IrExpr::UnitInstance
         | IrExpr::CurrentContinuation
@@ -460,7 +471,7 @@ fn default_expr_stub_safe_with_locals(
 /// Expressions in one function body's value namespace, each once. A nested lambda's captures read
 /// this namespace, while its `inline_body` uses the lambda function's own slots and return
 /// boundary, so a rewrite of this body's values never reaches through that boundary.
-pub(crate) fn value_namespace_expressions(ir: &IrFile, body: ExprId) -> Vec<ExprId> {
+pub fn value_namespace_expressions(ir: &IrFile, body: ExprId) -> Vec<ExprId> {
     let mut seen = crate::fx_hash::HashSet::default();
     let mut pending = vec![body];
     let mut expressions = Vec::new();

@@ -13,7 +13,7 @@
 use crate::fx_hash::HashMap;
 
 use super::decline::KlibBodyDeclineReason;
-use super::klib_types::{classifier_name, semantic_type, KlibTypeParameters};
+use super::klib_types::{classifier_name, semantic_type, semantic_type_in, KlibTypeParameters};
 use crate::fir::ResolvedParameterIdentity;
 use crate::ir::{FnParamInfo, FunId, IrFile, IrFunction, IrParameterIdentity};
 use crate::libraries::KlibBodyCallable;
@@ -25,9 +25,13 @@ use crate::types::{Ty, TyKind, TypeName};
 
 mod class_initializers;
 mod closure_headers;
-pub(super) use class_initializers::initializer_header;
+pub(super) use class_initializers::{
+    initializer_header, local_initializer_header, local_member_header,
+};
 mod declared_type_parameters;
 pub(super) use closure_headers::{closure_header, CaptureParameter};
+mod reference_headers;
+pub(super) use reference_headers::reference_header;
 pub(super) mod vararg_parameters;
 
 /// One parameter as the body reads it.
@@ -54,6 +58,8 @@ pub(super) struct FunctionHeader {
     /// A member template's dispatch receiver, which the body reads in the value slot ahead of the
     /// parameters, as a same-module member body reads `this`.
     receiver_slot: Option<TypeName>,
+    /// A value class member's receiver, which its body reads as its first parameter.
+    value_receiver: Option<Ty>,
     singleton_extension_unread_receiver: Option<Ty>,
     values: HashMap<KlibIrSymbol, ParameterValue>,
     /// Each parameter's serialized default, aligned with [`Self::params`].
@@ -75,24 +81,42 @@ impl FunctionHeader {
         self.values.get(symbol).copied()
     }
 
-    /// How many value slots the parameters take; a body's local variables follow them.
-    pub(super) fn parameter_count(&self) -> usize {
-        self.params.len() + usize::from(self.receiver_slot.is_some())
+    /// The value slot and published identity of the parameter `symbol`, when it is one.
+    pub(super) fn parameter_identity(
+        &self,
+        symbol: &KlibIrSymbol,
+    ) -> Option<(u32, &IrParameterIdentity)> {
+        let value = self.value(symbol)?;
+        let offset = self.parameter_count() - self.params.len();
+        let index = usize::try_from(value.index).ok()?.checked_sub(offset)?;
+        Some((value.index, self.identities.get(index)?))
     }
 
-    /// The declared type of the value in `slot`: the dispatch receiver of a member template, then
-    /// the parameters.
+    /// How many value slots the parameters take; a body's local variables follow them.
+    pub(super) fn parameter_count(&self) -> usize {
+        self.params.len()
+            + usize::from(self.receiver_slot.is_some() || self.value_receiver.is_some())
+    }
+
+    /// The declared type of the value in `slot`: the dispatch receiver of a member template or a
+    /// value class member, then the parameters.
     pub(super) fn slot_type(&self, slot: u32) -> Ty {
-        match (self.receiver_slot, slot) {
-            (Some(receiver), 0) => Ty::obj_name(receiver),
-            (Some(_), slot) => self.params[slot as usize - 1],
-            (None, slot) => self.params[slot as usize],
+        match (self.receiver_slot, self.value_receiver, slot) {
+            (Some(receiver), _, 0) => Ty::obj_name(receiver),
+            (None, Some(receiver), 0) => receiver,
+            (Some(_), _, slot) | (None, Some(_), slot) => self.params[slot as usize - 1],
+            (None, None, slot) => self.params[slot as usize],
         }
     }
 
     /// The classifier whose instance a member template's body reads as its dispatch receiver.
     pub(super) fn receiver_slot(&self) -> Option<TypeName> {
         self.receiver_slot
+    }
+
+    /// The receiver a value class member's body reads as `this`, value slot 0.
+    pub(super) fn value_receiver(&self) -> Option<Ty> {
+        self.value_receiver
     }
 
     /// Each parameter's serialized default, aligned with [`Self::params`].
@@ -169,6 +193,9 @@ pub(super) fn function_header(
 /// and the result must be either its selected type or that type's erasure, which the body then
 /// reads at. A function-typed parameter is read at its selected type, and its invocations convert
 /// the erased operands instead.
+///
+/// A member of a generic class is copied out of its class, so the copy erases the class's type
+/// parameters as well: its dispatch receiver is the class applied to their erasures.
 pub(super) fn prepared_inline_header(
     selected: KlibBodyCallable<'_>,
     formals: &[Ty],
@@ -235,6 +262,22 @@ pub(super) fn prepared_inline_header(
     }
     let mut type_parameters = KlibTypeParameters::default();
     let mut erasures = HashMap::default();
+    let class_formals = selected
+        .class_contract()
+        .map_or(&[][..], |class| &*class.parameters.formals);
+    for formal in class_formals {
+        let TyKind::TyParam(name, bound) = formal.kind() else {
+            return Err(mismatch(format!(
+                "a class type parameter is selected as {formal:?}"
+            )));
+        };
+        let erasure = crate::types::ty_subst_keep_unbound(bound, &erasures);
+        if erasures.insert(name.as_str().to_owned(), erasure).is_some() {
+            return Err(mismatch(
+                "a class repeats a type parameter identity".to_owned(),
+            ));
+        }
+    }
     for (parameter, formal) in function.type_parameters.iter().zip(formals) {
         let TyKind::TyParam(name, bound) = formal.kind() else {
             return Err(mismatch(format!(
@@ -252,7 +295,12 @@ pub(super) fn prepared_inline_header(
         }
         // A bound names only earlier formals here; a later one stays and fails the comparison.
         let erasure = crate::types::ty_subst_keep_unbound(bound, &erasures);
-        erasures.insert(name.as_str().to_owned(), erasure);
+        if erasures.insert(name.as_str().to_owned(), erasure).is_some() {
+            return Err(mismatch(format!(
+                "the type parameter `{}` repeats a class type parameter's identity",
+                parameter.name
+            )));
+        }
     }
     // The extension receiver is serialized either in its own slot or as the leading value
     // parameter; both orders follow the selected declaration's.
@@ -310,20 +358,24 @@ pub(super) fn prepared_inline_header(
     };
     let mut values = HashMap::default();
     // A member's body reads its dispatch receiver in the slot ahead of the parameters. Its type
-    // names the selected classifier, without type arguments of its own.
+    // names the selected classifier, applied to the erasures of its class's type parameters.
     let receiver_slot = match dispatch_receiver {
         Some(receiver) => {
             let TyKind::Obj(classifier, arguments) =
                 semantic_type(arena, &type_parameters, receiver.ty)?.kind()
             else {
                 return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-                    "a dispatch receiver of a generic or non-class type",
+                    "a dispatch receiver of a non-class type",
                 ));
             };
-            if !arguments.is_empty() {
-                return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-                    "a dispatch receiver of a generic or non-class type",
-                ));
+            let erased_formals = class_formals
+                .iter()
+                .map(|formal| crate::types::ty_subst(*formal, &erasures))
+                .collect::<Vec<_>>();
+            if arguments[..] != erased_formals[..] {
+                return Err(mismatch(format!(
+                    "the dispatch receiver applies {arguments:?} to its class, whose type parameters erase to {erased_formals:?}"
+                )));
             }
             // Metadata is authoritative for the member's owner: the copy must be its member.
             if selected.declaration_owner()
@@ -403,6 +455,7 @@ pub(super) fn prepared_inline_header(
         extension_receiver,
         dispatch_receiver: None,
         receiver_slot,
+        value_receiver: None,
         singleton_extension_unread_receiver: None,
         values,
         defaults,
@@ -434,6 +487,11 @@ pub(super) fn function_header_with_emitted_dispatch(
 pub(super) enum HeaderPurpose {
     Body(Option<Ty>),
     External,
+    /// The body of a private member of the value class `TypeName`, which no provider records. A
+    /// private member is called only from its class, so the calling member's authenticated class
+    /// is its class ([`super::class_headers::authenticate_private_member`] proves the raw header
+    /// against it first), and it is emitted as that class's other members are.
+    PrivateValueMember(TypeName),
 }
 
 pub(super) fn raw_function_header(
@@ -500,7 +558,21 @@ fn header(
     vararg_parameters::reject_dispatch_marker(function.dispatch_receiver.as_ref())?;
     let emitted_singleton_dispatch = match purpose {
         HeaderPurpose::Body(singleton) => singleton,
-        HeaderPurpose::External => None,
+        HeaderPurpose::External | HeaderPurpose::PrivateValueMember(_) => None,
+    };
+    let private_value_class = match purpose {
+        HeaderPurpose::PrivateValueMember(class) => {
+            if selected.is_some()
+                || crate::metadata::semantic::declaration_visibility(function.base.flags)
+                    != crate::types::Visibility::Private
+            {
+                return Err(mismatch(
+                    "a value class member without a provider record is not private".to_owned(),
+                ));
+            }
+            Some(class)
+        }
+        _ => None,
     };
     // Validate the producer's qualified marker even for a header-only transitive callee. Such a
     // callee can be exported with its unread-receiver effect and selected by a later source
@@ -520,6 +592,8 @@ fn header(
             ));
         }
     }
+    // The dispatch receiver of a value class member whose body reads it, and its type.
+    let mut value_receiver = None;
     let dispatch_receiver = if matches!(purpose, HeaderPurpose::External) {
         let receiver = function
             .dispatch_receiver
@@ -558,10 +632,51 @@ fn header(
                     "a dispatch receiver",
                 ));
             }
+            (Some(receiver), None) if private_value_class.is_some() => {
+                let serialized = semantic_type(arena, types, receiver.ty)?;
+                if serialized.kotlin_class_internal() != private_value_class {
+                    return Err(mismatch(
+                        "a private value class member's receiver is not its calling class"
+                            .to_owned(),
+                    ));
+                }
+                value_receiver = Some((&receiver.base.symbol, serialized));
+                Some(serialized)
+            }
+            (None, None) if private_value_class.is_some() => {
+                return Err(mismatch(
+                    "a private value class member has no dispatch receiver".to_owned(),
+                ));
+            }
             (Some(_), None) if emitted_singleton_dispatch.is_none() => {
                 return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
                     "a dispatch receiver",
                 ));
+            }
+            (Some(receiver), Some(selected))
+                if selected
+                    .class_contract()
+                    .is_some_and(|class| class.is_value) =>
+            {
+                // A value class's member is final and is emitted as a member of its class, whose
+                // `this` is the value it is called on. Semantic conversion interns the class path,
+                // so the raw receiver proves the exact class identity first.
+                let class = selected
+                    .class_contract()
+                    .expect("the guard selected a value class member");
+                super::class_headers::authenticate_receiver(class, arena, function)?;
+                let serialized = semantic_type(arena, types, receiver.ty)?;
+                if selected.declaration_owner()
+                    != serialized
+                        .kotlin_class_internal()
+                        .map(crate::types::SemanticCallableOwner::Classifier)
+                {
+                    return Err(mismatch(
+                        "a value class member's receiver is not its declaring class".to_owned(),
+                    ));
+                }
+                value_receiver = Some((&receiver.base.symbol, serialized));
+                Some(serialized)
             }
             (Some(receiver), selected) => {
                 // A member body can be emitted with an erased dispatch slot only when its serialized
@@ -649,7 +764,7 @@ fn header(
     }
     varargs.authenticate(selected, function.companion_extension_class.is_some())?;
     let ret = semantic_type(arena, types, function.return_type)?;
-    let identities = match selected {
+    let resolved = match selected {
         None => identities.into_iter().collect::<Option<Vec<_>>>().ok_or(
             KlibBodyDeclineReason::UnsupportedDeclaration(
                 "a context parameter no selected declaration describes",
@@ -665,13 +780,39 @@ fn header(
         )?,
     };
     let mut values = HashMap::default();
-    for (index, ((role, parameter), identity)) in serialized.iter().zip(&identities).enumerate() {
+    let identities = resolved
+        .iter()
+        .map(IrParameterIdentity::resolved)
+        .collect::<Vec<_>>();
+    let first_parameter = match value_receiver {
+        Some(_)
+            if !function.context_parameters.is_empty() || function.extension_receiver.is_some() =>
+        {
+            return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                "a value class member with context parameters or an extension receiver",
+            ));
+        }
+        Some((symbol, _)) => {
+            // The receiver is the member's `this`, value index 0, ahead of its parameters.
+            values.insert(
+                symbol.clone(),
+                ParameterValue {
+                    index: 0,
+                    stable_read: true,
+                    erased: None,
+                },
+            );
+            1
+        }
+        None => 0,
+    };
+    for (index, ((role, parameter), identity)) in serialized.iter().zip(&resolved).enumerate() {
         let stable_read = parameter_role(*role, identity).ok_or_else(|| {
             mismatch(format!(
                 "parameter {index} is a {role:?} parameter serialized and {identity:?} selected"
             ))
         })?;
-        let index = u32::try_from(index).expect("a parameter list fits u32");
+        let index = u32::try_from(index + first_parameter).expect("a parameter list fits u32");
         if values
             .insert(
                 parameter.base.symbol.clone(),
@@ -692,14 +833,12 @@ fn header(
         name: function.name.clone(),
         params,
         ret,
-        identities: identities
-            .iter()
-            .map(IrParameterIdentity::resolved)
-            .collect(),
+        identities,
         context_count: function.context_parameters.len(),
         extension_receiver: function.extension_receiver.is_some(),
         dispatch_receiver,
         receiver_slot: None,
+        value_receiver: value_receiver.map(|(_, receiver)| receiver),
         singleton_extension_unread_receiver,
         values,
         defaults: serialized
@@ -919,8 +1058,11 @@ pub(super) fn declare_function(ir: &mut IrFile, header: &FunctionHeader) -> FunI
         params: header.params.clone(),
         ret: header.ret,
         body: None,
-        is_static: true,
-        dispatch_receiver: None,
+        // A value class member keeps its receiver as `this`; the target represents it.
+        is_static: header.value_receiver.is_none(),
+        dispatch_receiver: header
+            .value_receiver
+            .and_then(|receiver| receiver.kotlin_class_internal()),
     });
     ir.fn_source_names.insert(function, header.name.clone());
     ir.fn_params
@@ -929,7 +1071,7 @@ pub(super) fn declare_function(ir: &mut IrFile, header: &FunctionHeader) -> FunI
         ir.extension_receiver_fns.insert(function);
     }
     if header.context_count != 0 {
-        ir.fn_context_counts.insert(function, header.context_count);
+        ir.declared_parameters_mut(function).context_count = header.context_count;
     }
     if let Some(receiver) = header.singleton_extension_unread_receiver() {
         ir.singleton_extension_unread_receivers

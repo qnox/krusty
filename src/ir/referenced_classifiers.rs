@@ -8,7 +8,7 @@ use crate::types::{Ty, TyKind, TypeName};
 
 /// Push every classifier identity carried by `ty`, including nested generic/projection/function
 /// positions. Source spellings never participate in this inventory.
-pub(crate) fn collect_classifier_names(ty: Ty, out: &mut Vec<TypeName>) {
+pub fn collect_classifier_names(ty: Ty, out: &mut Vec<TypeName>) {
     match ty.kind() {
         TyKind::Obj(classifier, arguments) => {
             out.push(classifier);
@@ -33,7 +33,7 @@ pub(crate) fn collect_classifier_names(ty: Ty, out: &mut Vec<TypeName>) {
     }
 }
 
-pub(crate) fn referenced_classifier_names(ir: &IrFile) -> Vec<TypeName> {
+pub fn referenced_classifier_names(ir: &IrFile) -> Vec<TypeName> {
     let mut out = Vec::new();
     let mut seen = HashSet::default();
     for function in &ir.functions {
@@ -90,6 +90,15 @@ pub(crate) fn referenced_classifier_names(ir: &IrFile) -> Vec<TypeName> {
                 collect_classifier_names(result, &mut out);
             }
         }
+    }
+    // A class realizes each inherited default with a forwarder that declares the member's types.
+    for default in ir.inherited_defaults.values().flatten() {
+        default
+            .parameters
+            .iter()
+            .chain(&default.applied_parameters)
+            .chain([&default.result, &default.applied_result])
+            .for_each(|ty| collect_classifier_names(*ty, &mut out));
     }
     for (_, ty) in ir.logical_types() {
         collect_classifier_names(ty, &mut out);

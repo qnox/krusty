@@ -144,7 +144,10 @@ impl Checker<'_> {
             return false;
         };
         let source = self.fed_source();
-        let provisional = self.expr_types[expression.0 as usize];
+        let provisional = self.provisional_result(
+            expression,
+            self.recorded_result_evidence(expression, &generic),
+        );
         crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
             &source,
             &generic,
@@ -159,6 +162,56 @@ impl Checker<'_> {
                 &bindings,
             )
         })
+    }
+
+    /// The argument kind of the nested generic call `argument`, whose checked type is `ty`.
+    pub(super) fn expected_type_callable_argument(
+        &self,
+        argument: ExprId,
+        ty: Ty,
+        signature: GenericSig,
+    ) -> CallArgKind {
+        CallArgKind::ExpectedTypeCallable {
+            provisional: ty,
+            generic_sig: std::sync::Arc::new(signature),
+            provisional_open: self.provisional_result(argument, ty).open,
+        }
+    }
+
+    /// `ty`, the expectation-free result of the nested call `expression`, with whether it still
+    /// names an open formal. A type parameter lexically in scope at that call is the enclosing
+    /// declaration's own type (`R` in `Box(listOf(r))` inside `fun <R>`), as fixed as a classifier.
+    pub(super) fn provisional_result(
+        &self,
+        expression: ExprId,
+        ty: Ty,
+    ) -> crate::symbol_resolver::ProvisionalResult {
+        crate::symbol_resolver::ProvisionalResult {
+            ty,
+            open: ty
+                .mentions_open_ty_param(&|formal| self.lexically_fixed_at_call(expression, formal)),
+        }
+    }
+
+    /// The nested call's result as evidence from its own inputs. A result formal its selection
+    /// recorded without a solution is still open: the checked type's default completion for it
+    /// (`Completion<Any?>` for `Completion {}`, whose lambda takes `T` from context) is not a
+    /// lower bound an enclosing expectation must keep.
+    fn recorded_result_evidence(&self, expression: ExprId, generic: &GenericSig) -> Ty {
+        let provisional = self.expr_types[expression.0 as usize];
+        let Some(recorded) = self.selected_call_type_arguments(expression) else {
+            return provisional;
+        };
+        if recorded.len() != generic.formals.len() || recorded.iter().all(Option::is_some) {
+            return provisional;
+        }
+        let solved = generic
+            .formals
+            .iter()
+            .zip(recorded)
+            .filter_map(|(formal, argument)| argument.map(|argument| (*formal, argument)))
+            .collect::<crate::symbol_resolver::GSigBinds>();
+        crate::symbol_resolver::ty_subst_keep_unbound(generic.ret, &solved)
     }
 
     /// Whether this nested call has no input-fixed result shape and therefore receives an ordinary
@@ -207,13 +260,21 @@ impl Checker<'_> {
             .is_some_and(|lexical| lexical.iter().any(|identity| identity == formal))
     }
 
-    /// `signature` as the template of the one call `call`: formals lexically in scope there are
-    /// renamed to that call's fresh variables, exactly as its constraints were solved.
+    /// The call expression that owns the inference variables solved at `call`.
+    pub(super) fn call_site(&self, call: ExprId) -> crate::types::CallSiteIdentity {
+        crate::types::CallSiteIdentity {
+            compilation: self.compilation_id,
+            file: self.file_index,
+            call: call.0,
+        }
+    }
+
+    /// `signature` as the template of the one call `call`: every formal is that call's variable,
+    /// exactly as its constraints were solved.
     fn call_site_signature(&self, call: ExprId, signature: GenericSig) -> GenericSig {
-        crate::symbol_resolver::CallSiteVariables::instantiate(&signature, |formal| {
-            self.lexically_fixed_at_call(call, formal)
-        })
-        .map_or(signature, |instance| instance.signature().clone())
+        crate::symbol_resolver::CallSiteVariables::instantiate(&signature, self.call_site(call))
+            .signature()
+            .clone()
     }
 
     /// The semantic generic signature retained by one checker-selected call. Declaration origin and
@@ -334,7 +395,7 @@ impl Checker<'_> {
             })
             .collect::<Vec<_>>();
         Some(std::borrow::Cow::Owned(GenericSig {
-            formals: classifier.type_params().clone(),
+            formals: crate::types::TyParamName::all(classifier.type_params()),
             formal_bounds: classifier.type_param_bounds().clone(),
             receiver: None,
             params: constructor_parameter_shapes(constructor).to_vec(),
@@ -469,7 +530,7 @@ impl Checker<'_> {
             .resolved_constructors
             .get(&expression)
             .and_then(|constructor| self.resolved_type_name(constructor.owner()))
-            .map(|classifier| classifier.type_params().clone())
+            .map(|classifier| crate::types::TyParamName::all(classifier.type_params()))
             .unwrap_or_default();
         let shape_mentions_result_formal = |shape: Ty| {
             signature
@@ -524,10 +585,14 @@ impl Checker<'_> {
                         .any(shape_mentions_result_formal)
                 }),
         };
-        fn is_declaration_fallback(symbolic: Ty, actual: Ty, formals: &[String]) -> bool {
+        fn is_declaration_fallback(
+            symbolic: Ty,
+            actual: Ty,
+            formals: &[crate::types::TyParamName],
+        ) -> bool {
             match (symbolic.kind(), actual.kind()) {
-                (TyKind::TyParam(formal, bound), _)
-                    if formals.iter().any(|declared| declared == formal) =>
+                (TyKind::TyParam(formal, bound) | TyKind::Var(formal, bound), _)
+                    if formals.contains(&formal) =>
                 {
                     // An alias formal (`E` of `typealias HashSet<E> = java.util.HashSet<E>`) is
                     // bounded by `Any?`; the Java target completes the same position from its own
@@ -602,7 +667,7 @@ mod tests {
         SelectedGenericCallShape::source_for_test(
             declaration,
             GenericSig {
-                formals: vec!["T".to_string()],
+                formals: vec![crate::types::TyParamName::new("T")],
                 formal_bounds: vec![Vec::new()],
                 receiver: None,
                 params: Vec::new(),

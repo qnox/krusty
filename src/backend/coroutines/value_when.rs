@@ -18,7 +18,7 @@ use super::CoroutineRepresentation;
 /// a temp: `return when (x) { a -> v0; else -> v1 }` becomes `var tmp = <default>; when (x) { a -> { …
 /// tmp = v0 }; else -> { … tmp = v1 } }; return tmp`. The flattener models a `when` STATEMENT with
 /// suspending branch bodies (`emit_when_stmt`), so each branch's suspension surfaces there.
-pub(crate) fn desugar_value_when(
+pub fn desugar_value_when(
     ir: &mut IrFile,
     representation: &dyn CoroutineRepresentation,
     b: ExprId,

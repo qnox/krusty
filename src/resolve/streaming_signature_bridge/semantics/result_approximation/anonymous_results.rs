@@ -220,7 +220,7 @@ impl Projection<'_> {
             };
         }
         match ty.kind() {
-            TyKind::TyParam(..) | TyKind::DefinitelyNotNull(_) => {
+            TyKind::TyParam(..) | TyKind::Var(..) | TyKind::DefinitelyNotNull(_) => {
                 let applied = crate::symbol_resolver::instantiate_slot(
                     self.source,
                     None,
@@ -232,7 +232,10 @@ impl Projection<'_> {
                 if applied == ty {
                     Ok(ty)
                 } else {
-                    self.approximate(applied, position, bindings)
+                    // Substitution is parallel: its image may legitimately contain the same
+                    // formal (for example X -> List<X>). Only anonymous types in that image
+                    // still need approximation; applying this environment again expands forever.
+                    self.approximate(applied, position, &GSigBinds::default())
                 }
             }
             TyKind::Obj(owner, arguments) => {
@@ -255,7 +258,7 @@ impl Projection<'_> {
                     // A directly captured use-site projection is already the declaration-owned
                     // view of an invariant argument. Keep its direction; compound argument shapes
                     // instead need their upper/lower interval computed below.
-                    if matches!(argument.kind(), TyKind::TyParam(..))
+                    if matches!(argument.kind(), TyKind::TyParam(..) | TyKind::Var(..))
                         && matches!(variance, TypeVariance::Invariant)
                     {
                         let view = crate::symbol_resolver::instantiate_slot(
@@ -268,7 +271,11 @@ impl Projection<'_> {
                         );
                         if view.projection_inner().is_some() {
                             if matches!(position, TypePosition::Out) {
-                                applied.push(self.approximate(view, position, bindings)?);
+                                applied.push(self.approximate(
+                                    view,
+                                    position,
+                                    &GSigBinds::default(),
+                                )?);
                                 continue;
                             }
                             return Ok(Ty::Nothing);
@@ -343,6 +350,83 @@ impl Projection<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anonymous_self_types_preserve_enclosing_declaration_parameter_order() {
+        let source =
+            "interface Parent<T>\nclass Owner<Y> { fun <X> make() = object : Parent<X> {} }";
+        let mut diagnostics = crate::diag::DiagSink::new();
+        let analysis = crate::frontend::analyze_source_set_with_features(
+            &[crate::source::SourceInput::kotlin(source).with_file_stem("CapturedOwnerOrder")],
+            crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
+            &crate::features::LangFeatures::new(),
+            &mut diagnostics,
+        );
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+        let owner = analysis
+            .symbols
+            .class_by_type_name(crate::types::type_name("Owner"))
+            .unwrap();
+        let methods = owner.methods.get("make").unwrap();
+        assert_eq!(methods.len(), 1);
+        let generic = methods[0].generic_sig.as_ref().unwrap();
+        assert_eq!(
+            generic.ret.obj_internal(),
+            Some(crate::types::type_name("Parent"))
+        );
+        assert_eq!(generic.ret.type_args().len(), 1);
+        assert_eq!(
+            generic.ret.type_args()[0].ty_param_name(),
+            Some(generic.formals[0].as_str())
+        );
+    }
+
+    #[test]
+    fn substitution_images_keep_their_own_formal_occurrences() {
+        let text = "interface Parent<T>\nclass Inv<T>";
+        let inputs =
+            [crate::frontend::SourceInput::kotlin(text).with_file_stem("ParallelSubstitution")];
+        let mut diagnostics = crate::diag::DiagSink::new();
+        let files = [crate::frontend::parse_source_with_detected_features(
+            text,
+            &mut diagnostics,
+        )];
+        let headers = crate::fir::inventory_parsed_source_headers(&inputs, &files);
+        let table = crate::resolve::collect_signatures_with_cp_headers(
+            &files,
+            &headers,
+            Box::new(crate::libraries::EmptySymbolSource),
+            &mut diagnostics,
+        );
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+        let module = crate::module_symbols::ModuleSymbols::for_file(&table, 0);
+        let source = CompositeSource::new(vec![&module, &*table.libraries]);
+        let reject = |message: &str| panic!("valid substitution rejected: {message}");
+        let parent_templates = |_| None;
+        let mut projection = Projection {
+            table: &table,
+            headers: &headers,
+            source: &source,
+            reject: &reject,
+            parent_templates: &parent_templates,
+            visiting: HashSet::default(),
+        };
+        let formal = Ty::ty_param("X", Ty::nullable(Ty::obj("kotlin/Any")));
+        let image = Ty::obj_args("Parent", &[formal]);
+        let container = Ty::obj_args("Inv", &[formal]);
+        for binding in [image, Ty::out_projection(image)] {
+            let mut bindings = GSigBinds::default();
+            bindings.insert(crate::types::TyParamName::new("X"), binding);
+            assert_eq!(
+                projection.approximate(formal, TypePosition::Out, &bindings),
+                Ok(image)
+            );
+            assert_eq!(
+                projection.approximate(container, TypePosition::Out, &bindings),
+                Ok(Ty::obj_args("Inv", &[binding])),
+            );
+        }
+    }
 
     #[test]
     fn source_anonymous_results_preserve_wrappers_and_declared_parameter_identities() {

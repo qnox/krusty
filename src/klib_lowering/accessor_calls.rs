@@ -1,6 +1,6 @@
 //! Exact property identity and declared ABI shared by dependency getter preparation and linking.
 
-use super::body_lowering::LinkedAccessor;
+use super::body_lowering::{LinkedAccessor, LinkedAccessorTarget};
 use super::decline::KlibBodyDeclineReason;
 use super::function_lowering::{raw_function_header_with_class, HeaderPurpose};
 use crate::libraries::{KlibAccessorRole, KlibBodyCallable};
@@ -65,7 +65,7 @@ pub(super) fn authenticate(
         ));
     }
     Ok(Some(LinkedAccessor {
-        property: accessor.property,
+        target: LinkedAccessorTarget::External(accessor.property),
         write: false,
         receiver: Some(declared_receiver),
         params: params.to_vec(),

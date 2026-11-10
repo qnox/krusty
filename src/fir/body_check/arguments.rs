@@ -91,8 +91,7 @@ impl BodyFirChecker<'_> {
             | FirExprKind::CapturedValueWrite { .. }
             | FirExprKind::ValueWrite { .. }
             | FirExprKind::PropertyWrite { .. }
-            | FirExprKind::BackingFieldWrite { .. }
-            | FirExprKind::IndexedWrite { .. } => true,
+            | FirExprKind::BackingFieldWrite { .. } => true,
             FirExprKind::Block {
                 result: Some(result),
                 ..
@@ -1041,7 +1040,7 @@ impl BodyFirChecker<'_> {
         let target = self.resolved_type(span, received)?;
         let cause = self.expression_origin(receiver)?;
         checked.conversion =
-            Some(self.platform_producer_conversion(receiver, checked.value, cause, target));
+            Some(self.extension_receiver_conversion(receiver, checked.value, cause, target));
         Ok(())
     }
 
@@ -1064,9 +1063,28 @@ impl BodyFirChecker<'_> {
             let target = self.resolved_type(span, parameter)?;
             let cause = self.expression_origin(call)?;
             checked.conversion =
-                Some(self.platform_producer_conversion(receiver, checked.value, cause, target));
+                Some(self.extension_receiver_conversion(receiver, checked.value, cause, target));
         }
         Ok(checked)
+    }
+
+    /// [`Self::platform_producer_conversion`] for a value that reaches an extension receiver. The
+    /// guard can narrow inside the value too (a conditional's branches), and every narrowing it
+    /// records is a receiver assertion.
+    fn extension_receiver_conversion(
+        &mut self,
+        receiver: ExprId,
+        value: crate::fir::FirExprId,
+        cause: OriginId,
+        target: ResolvedTy,
+    ) -> FirConversion {
+        let start = self.body.platform_narrowing_count();
+        let conversion = self.platform_producer_conversion(receiver, value, cause, target);
+        self.body.consume_narrowings_at(
+            start,
+            crate::fir::FirPlatformNarrowingSite::ExtensionReceiver,
+        );
+        conversion
     }
 
     /// The implicit not-null cast over the checked `value` of `source`. kotlinc names the check
@@ -1131,9 +1149,10 @@ impl BodyFirChecker<'_> {
         cause: OriginId,
         target: ResolvedTy,
     ) -> FirConversion {
-        let narrowing = self
-            .body
-            .add_platform_narrowing(FirPlatformNarrowing { message });
+        let narrowing = self.body.add_platform_narrowing(FirPlatformNarrowing {
+            message,
+            site: crate::fir::FirPlatformNarrowingSite::Value,
+        });
         FirConversion {
             origin: cause,
             kind: FirConversionKind::PlatformNarrowing {

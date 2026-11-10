@@ -120,7 +120,7 @@ fn bind_direct_supertype(
         if actual.is_star_projection() {
             continue;
         }
-        let TyKind::TyParam(name, _) = formal.non_null().kind() else {
+        let (TyKind::TyParam(name, _) | TyKind::Var(name, _)) = formal.non_null().kind() else {
             continue;
         };
         bindings
