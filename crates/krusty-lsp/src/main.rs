@@ -1257,18 +1257,6 @@ impl WorkerHost {
                     &classpath,
                     jdk_home.as_deref(),
                 );
-                let fetched = krusty_lsp::project::maven_repository::ensure_repository_jars(
-                    sync.kind(),
-                    sync.root(),
-                    &classpath,
-                );
-                if fetched.failed > 0 {
-                    logs.push(format!(
-                        "krusty: {} Maven repository jar(s) could not be resolved; those \
-                         classpath entries stay missing",
-                        fetched.failed
-                    ));
-                }
                 let missing_classpath =
                     krusty_lsp::project::classpath_presence::missing_classpath_warning(
                         &classpath,

@@ -6,6 +6,8 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 pub(crate) const BUILD_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
+/// A first-time scan of a large build. The editor probe keeps [`BUILD_TOOL_TIMEOUT`].
+pub(crate) const SCAN_PROBE_TIMEOUT: Duration = Duration::from_secs(45 * 60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Command {

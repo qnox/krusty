@@ -72,25 +72,14 @@ pub(super) fn useless_alias_type(
 impl Checker<'_> {
     /// Star-project a class literal whose classifier was not published to the module index.
     ///
-    /// The class is still declared in this file (`class Child<T> : Missing`), so its type
-    /// parameters are known from that declaration. A class declared elsewhere stays the unbound
-    /// type: both passes then agree, and the unresolved supertype remains the diagnostic.
+    /// `internal` is the classifier the literal already selected. The declaration index maps
+    /// that identity to the class still written in this file, including a nested class. A class
+    /// declared elsewhere stays the unbound type: both passes then agree, and the unresolved
+    /// supertype remains the diagnostic.
     fn unindexed_class_literal_receiver(&self, internal: TypeName) -> Option<Ty> {
-        // `parent` is the package of a top-level classifier. A nested classifier's parent is
-        // its enclosing class, which this file-level walk does not search.
-        let parent = internal.parent().unwrap_or(TypeName::ROOT);
-        if parent != self.source_package {
-            return None;
-        }
-        let segment = internal.segment_ref();
-        let class = self
-            .file
-            .decls
-            .iter()
-            .find_map(|&id| match self.file.decl(id) {
-                Decl::Class(class) if class.name == segment => Some(class),
-                _ => None,
-            })?;
+        let (active, index) = self.active_declarations.zip(self.resolved_index)?;
+        let declaration = index.classifier_declaration(internal)?;
+        let (_, class) = active.class(self.file, declaration)?;
         let count = class.type_parameters.type_params().len();
         if count == 0 {
             return Some(Ty::obj_name(internal));
