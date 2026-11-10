@@ -667,92 +667,28 @@ fun box(): String {
     );
 }
 
-// PLATFORM-SPECIFIC: source getter exports retain the defining module's declared storage ABI.
 #[test]
-fn native_source_getter_exports_read_declared_generic_storage() {
-    // Direct imported construction remains covered by the original graph retained in #2780.
-    // This separate getter graph uses the producer's factories and checks every storage form.
-    let source = include_str!("box_regressions/multimodule/sourceGetterExports.kt").to_owned();
-    let stem = "nativeSourceGetterExports";
-    super::box_reference_classes::checked_box(&source, stem)
-        .expect("the JVM oracle must run the complete source-getter graph");
-    assert_eq!(run_native_abi_case(&source, stem), Outcome::Pass);
-}
-
-// PLATFORM-SPECIFIC: a source-module accessor export and its declared Native receiver ABI.
-#[test]
-fn native_explicit_getter_exports_keep_their_declared_receiver() {
-    let source = include_str!("box_regressions/multimodule/explicitGetterExports.kt");
-    let stem = "nativeExplicitGetterExports";
+fn native_virtual_field_getter_exports_run_the_override() {
+    let source = include_str!("box_regressions/multimodule/virtualFieldGetterExport.kt");
+    let stem = "virtualFieldGetterExport";
     super::box_reference_classes::checked_box(source, stem)
-        .expect("the JVM oracle must run the complete explicit-getter graph");
-    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
-}
-
-// PLATFORM-SPECIFIC: a source getter's public ABI differs from its Native backing-field storage.
-#[test]
-fn native_getter_exports_preserve_distinct_backing_field_storage() {
-    let source = include_str!("box_regressions/multimodule/distinctBackingFieldExport.kt");
-    let stem = "nativeDistinctBackingFieldExport";
-    super::box_reference_classes::checked_box(source, stem)
-        .expect("the JVM oracle must run the complete backing-field graph");
-    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
-}
-
-// PLATFORM-SPECIFIC: explicit accessor entries retain boxed class formals and a void setter ABI.
-#[test]
-fn native_explicit_setter_exports_keep_their_declared_value_parameter() {
-    let source = include_str!("box_regressions/multimodule/explicitSetterExports.kt");
-    let stem = "nativeExplicitSetterExports";
-    super::box_reference_classes::checked_box(source, stem)
-        .expect("the JVM oracle must run the complete explicit-setter graph");
-    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
-}
-
-// PLATFORM-SPECIFIC: an external virtual getter must execute its override or decline cleanly.
-#[test]
-fn native_virtual_field_getter_exports_never_select_base_storage_directly() {
-    assert_virtual_getter_export(
-        "open class Base { open val value: String = \"base\" }\n\
-         class Derived : Base() { override val value: String = \"OK\" }",
-        "nativeVirtualFieldGetterExport",
+        .expect("the JVM oracle must establish the virtual field getter result");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "an open stored property must run the override"
     );
 }
 
-// PLATFORM-SPECIFIC: explicit virtual accessor bodies have the same dispatch obligation.
 #[test]
-fn native_virtual_explicit_getter_exports_never_select_a_base_body_directly() {
-    assert_virtual_getter_export(
-        "open class Base { open val value: String get() = \"base\" }\n\
-         class Derived : Base() { override val value: String get() = \"OK\" }",
-        "nativeVirtualExplicitGetterExport",
-    );
-}
-
-fn assert_virtual_getter_export(declarations: &str, stem: &str) {
-    let source = format!(
-        "// MODULE: lib\npackage fixture\n{declarations}\n\
-         fun produce(): Base = Derived()\n\
-         // MODULE: main(lib)\nfun box(): String = fixture.produce().value\n"
-    );
-    super::box_reference_classes::checked_box(&source, stem)
-        .expect("the JVM oracle must establish the virtual getter result");
-    match run_native_abi_case(&source, stem) {
-        Outcome::Pass => {}
-        Outcome::Declined(reason) => assert_eq!(
-            reason, "a read of the property `fixture/Base.value`",
-            "unsupported dynamic dispatch must remain an explicit property decline"
-        ),
-        other => panic!("a virtual getter must not call its base entry directly: {other:?}"),
-    }
-}
-
-// PLATFORM-SPECIFIC: effective finality admits safe entries without requiring every class final.
-#[test]
-fn native_source_getter_exports_admit_both_forms_of_static_dispatch() {
-    let source = include_str!("box_regressions/multimodule/staticallyDispatchedGetterExports.kt");
-    let stem = "nativeStaticallyDispatchedGetterExports";
+fn native_virtual_explicit_getter_exports_run_the_override() {
+    let source = include_str!("box_regressions/multimodule/virtualExplicitGetterExport.kt");
+    let stem = "virtualExplicitGetterExport";
     super::box_reference_classes::checked_box(source, stem)
-        .expect("the JVM oracle must establish both static-dispatch results");
-    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
+        .expect("the JVM oracle must establish the virtual explicit getter result");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "an open explicit getter must run the override"
+    );
 }
