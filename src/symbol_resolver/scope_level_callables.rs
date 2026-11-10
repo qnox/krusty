@@ -348,6 +348,13 @@ pub(super) fn level_functions(
         .flat_map(|record| record.callables.functions().iter())
 }
 
+/// The nearest receiver-less function level and the scope rung it occupies.
+pub(crate) struct ReceiverlessFunctionLevel {
+    pub(crate) scope_rung: crate::libraries::CallableScopeRung,
+    pub(crate) scope_rank: u32,
+    pub(crate) functions: Vec<FunctionInfo>,
+}
+
 /// Property overloads borrowed in record order.
 pub(super) fn level_properties(
     symbols: &[Rc<ResolvedSymbols>],
@@ -358,6 +365,42 @@ pub(super) fn level_properties(
 }
 
 impl SymbolResolver<'_> {
+    /// The nearest receiver-less function level for `name`, with the scope rung that level occupies.
+    ///
+    /// This is the same level [`Self::top_level_candidates`] returns, including the inaccessible
+    /// fallback when no level is accessible. Callers that also collect a classifier's constructors
+    /// stamp this rung onto the functions so one selection can rank the two families.
+    pub(crate) fn nearest_receiverless_function_level(
+        &self,
+        name: &str,
+    ) -> Option<ReceiverlessFunctionLevel> {
+        let scope = self.fn_scope?;
+        let mut nearest_inaccessible = None;
+        for level in tagged_symbol_levels_in_function_scope(&self.src, name, scope) {
+            let functions = function_set_from_symbols(&level.symbols)
+                .into_top_level()
+                .filter(|function| !function.callable.default_call)
+                .collect::<Vec<_>>();
+            if functions.is_empty() {
+                continue;
+            }
+            let found = ReceiverlessFunctionLevel {
+                scope_rung: level.kind.callable_scope_rung(),
+                scope_rank: level.rank,
+                functions,
+            };
+            if found
+                .functions
+                .iter()
+                .any(|function| self.non_member_callable_accessible(function))
+            {
+                return Some(found);
+            }
+            nearest_inaccessible.get_or_insert(found);
+        }
+        nearest_inaccessible
+    }
+
     /// The receiver-less function overloads named `name` at the nearest scope level that offers one.
     pub(crate) fn top_level_candidates(&self, name: &str) -> Vec<FunctionInfo> {
         let functions = self.nearest_top_level_functions(&self.symbol_levels_in_scope(name));

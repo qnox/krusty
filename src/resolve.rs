@@ -57,6 +57,7 @@ use annotation_bindings::{BoundAnnotation, BoundAnnotations};
 mod anonymous_extension_functions;
 mod anonymous_object_capture;
 mod backing_field_binding;
+mod bare_constructor_precedence;
 mod boolean_implications;
 mod dependency_annotation_defaults;
 use anonymous_object_capture::{
@@ -18140,7 +18141,67 @@ impl<'a> Checker<'a> {
                 // A selected constructor the site cannot see. It yields to every later callable
                 // level and is reported only once they have all declined.
                 let mut invisible_constructor: Option<Box<InvisibleConstructor>> = None;
-                if let Some(scoped_internal) = bare_constructor_classifier {
+                let call_args = CallArgs {
+                    call,
+                    args,
+                    arg_tys: &arg_tys,
+                };
+                // A receiver-less function and a file/import classifier share one selection. The
+                // constructor candidates carry the classifier's rung, so a nearer applicable
+                // function wins and an inapplicable one falls through, without selecting the
+                // function family a second time.
+                let settled = bare_constructor_classifier.map_or(
+                    std::ops::ControlFlow::Continue(bare_constructor_precedence::SettledBareCall {
+                        run_existing: true,
+                        top_level: None,
+                        inapplicable: None,
+                        low_priority: None,
+                        inapplicable_constructor: false,
+                        provider_rejections: None,
+                        mapping_failure: None,
+                    }),
+                    |classifier| {
+                        self.settle_competing_bare_call(
+                            scope,
+                            call_args,
+                            bare_constructor_precedence::BareConstructorCompetition {
+                                name: &fname,
+                                classifier,
+                                functions: &top_level_family,
+                                alias_target: bare_alias_target,
+                                explicit_type_args: &explicit_type_args,
+                                expected,
+                                arg_names: arg_names.as_deref(),
+                            },
+                        )
+                    },
+                );
+                let bare_constructor_precedence::SettledBareCall {
+                    run_existing: run_existing_constructor,
+                    top_level: shared_top_level,
+                    inapplicable: shared_inapplicable,
+                    low_priority,
+                    inapplicable_constructor,
+                    provider_rejections,
+                    mapping_failure,
+                } = match settled {
+                    std::ops::ControlFlow::Break(ty) => return ty,
+                    std::ops::ControlFlow::Continue(settled) => settled,
+                };
+                had_inapplicable_constructor |= inapplicable_constructor;
+                provider_constructor_rejections.extend(provider_rejections);
+                if let Some(error) = mapping_failure {
+                    provider_constructor_rejections.extend(error.retained_provider_constructors());
+                    constructor_mapping_failure = Some(error);
+                }
+                let mut preselected_low_priority_constructor = None;
+                if let Some((internal, classifier, selected)) = low_priority {
+                    low_priority_provider_constructor = Some((internal, classifier, false));
+                    preselected_low_priority_constructor = Some(selected);
+                }
+                if let Some(scoped_internal) =
+                    bare_constructor_classifier.filter(|_| run_existing_constructor)
+                {
                     let (inherited, inherited_owner) =
                         self.inherited_nested_type_with_owner(&fname);
                     let inherited_shape = (inherited.found() == Some(scoped_internal))
@@ -18285,11 +18346,7 @@ impl<'a> Checker<'a> {
                                 } else {
                                     let result = self.finish_source_constructor_call(
                                         scope,
-                                        CallArgs {
-                                            call,
-                                            args,
-                                            arg_tys: &arg_tys,
-                                        },
+                                        call_args,
                                         &cls,
                                         selected,
                                         implicit_constructor_outer.map(|receiver| receiver.ty),
@@ -18390,11 +18447,7 @@ impl<'a> Checker<'a> {
                 // Inapplicable associated candidates join the final report.
                 let mut inapplicable_associated = Vec::new();
                 let associated_site = classifier_associated::AssociatedCallSite {
-                    call_args: CallArgs {
-                        call,
-                        args,
-                        arg_tys: &arg_tys,
-                    },
+                    call_args,
                     argument_names: arg_names.as_deref(),
                     explicit_type_args: &explicit_type_args,
                     expected,
@@ -18662,30 +18715,34 @@ impl<'a> Checker<'a> {
                     );
                     return Ty::Error;
                 }
-                let top_level = top_level_sam_pick
-                    .map(|(info, bindings)| {
-                        CallableCandidateSelection::Selected(Box::new(SelectedCallable {
-                            call_site_params: info.callable.params.clone(),
-                            info,
-                            bindings,
-                            intersection_bindings: HashMap::default(),
-                            candidate_index: None,
-                        }))
-                    })
-                    .or_else(|| {
-                        self.select_callable_candidate(
-                            scope,
-                            CallArgs {
-                                call,
-                                args,
-                                arg_tys: &arg_tys,
-                            },
-                            &explicit_type_args,
-                            None,
-                            CallResultConstraint::direct(expected),
-                            top_level_candidates.clone(),
-                        )
-                    });
+                let top_level = if run_existing_constructor {
+                    top_level_sam_pick
+                        .map(|(info, bindings)| {
+                            CallableCandidateSelection::Selected(Box::new(SelectedCallable {
+                                call_site_params: info.callable.params.clone(),
+                                info,
+                                bindings,
+                                intersection_bindings: HashMap::default(),
+                                candidate_index: None,
+                            }))
+                        })
+                        .or_else(|| {
+                            self.select_callable_candidate(
+                                scope,
+                                CallArgs {
+                                    call,
+                                    args,
+                                    arg_tys: &arg_tys,
+                                },
+                                &explicit_type_args,
+                                None,
+                                CallResultConstraint::direct(expected),
+                                top_level_candidates.clone(),
+                            )
+                        })
+                } else {
+                    shared_top_level
+                };
                 // kotlinc's tower gives every implicit receiver a lexical depth, and that
                 // receiver's member level and its extension levels — over every non-local scope,
                 // current package and imports alike — sit at that depth. Receiver-less top-level
@@ -19009,7 +19066,7 @@ impl<'a> Checker<'a> {
                             bound_outer: None,
                             expected,
                             priority: ConstructorPriorityTier::Low,
-                            selected: None,
+                            selected: preselected_low_priority_constructor.as_ref(),
                         },
                     ) {
                         Ok(LibraryConstructorSelection::Selected) => {
@@ -19061,7 +19118,11 @@ impl<'a> Checker<'a> {
                     return Ty::Error;
                 }
                 let mut candidates = inapplicable_associated;
-                candidates.extend(self.resolver().top_level_candidates(&fname));
+                if let Some(family) = shared_inapplicable {
+                    candidates.extend(family);
+                } else {
+                    candidates.extend(self.resolver().top_level_candidates(&fname));
+                }
                 candidates.extend(inapplicable_classifier_invoke.iter().cloned());
                 if let Some(result) = self.finish_deferred_lexical_invoke_failure(
                     scope,

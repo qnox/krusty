@@ -67,6 +67,13 @@ impl Checker<'_> {
                 constructor(signature, &function.member_with_return(signature.ret))
             }
             Some(constructor) => Self::bound_inner_constructor_display(constructor, function),
+            None if function.constructor.is_some() => {
+                let signature = function.semantic_signature();
+                Self::generic_constructor_display(
+                    &signature,
+                    &function.member_with_return(signature.ret),
+                )
+            }
             None => Self::generic_callable_display(name, function),
         }
     }

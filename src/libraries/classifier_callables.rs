@@ -241,6 +241,32 @@ impl FunctionInfo {
         Some(member)
     }
 
+    /// Normalize one constructor of `classifier`, reached by a bare `Name(args)` on the file and
+    /// import scope tower, into the candidate structure the same-named functions use. The
+    /// classifier's own type parameters are the constructor's inference variables and its
+    /// application is the result. The caller stamps the classifier's scope rung so one selection
+    /// ranks this constructor against receiver-less functions.
+    pub(crate) fn scope_constructor(
+        internal: TypeName,
+        classifier: &LibraryType,
+        mut constructor: LibraryMember,
+    ) -> Self {
+        constructor.owner.get_or_insert(internal);
+        constructor.generic_sig = constructor_generic_signature(internal, classifier, &constructor);
+        let result = constructor
+            .generic_sig
+            .as_ref()
+            .map_or_else(|| Ty::obj_name(internal), |signature| signature.ret);
+        let mut candidate = Self::classifier_member(FnKind::TopLevel, internal, constructor);
+        candidate.callable.ret = result;
+        candidate.ret = ReturnInfo::new(false, Some(result));
+        candidate.constructor = Some(ConstructorCandidate {
+            classifier: internal,
+            outer: None,
+        });
+        candidate
+    }
+
     /// Normalize one constructor of the `inner` classifier `inner` as a member candidate of its
     /// outer class; `None` for a classifier that captures no outer instance. Kotlin collects such
     /// a constructor into the receiver's member level together with the same-named member
@@ -294,6 +320,43 @@ mod tests {
     use crate::libraries::{
         CompilerIntrinsic, InlineBodyPlan, InlineBodyValue, InlineKind, MemberRealization,
     };
+
+    #[test]
+    fn a_scope_constructor_is_a_receiverless_candidate_for_its_classifier() {
+        let internal = crate::types::type_name("kotlin/Pair");
+        let mut classifier = LibraryType::declaration_header();
+        classifier.type_parameters = crate::types::TypeParameters::invariant(
+            vec!["A".into(), "B".into()],
+            vec![Vec::new(), Vec::new()],
+        );
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let constructor = LibraryMember::new(
+            "<init>".into(),
+            vec![Ty::ty_param("A", any), Ty::ty_param("B", any)],
+            Ty::Unit,
+            "(Ljava/lang/Object;Ljava/lang/Object;)V".into(),
+        );
+        let candidate = FunctionInfo::scope_constructor(internal, &classifier, constructor);
+        assert_eq!(candidate.kind, FnKind::TopLevel);
+        assert_eq!(
+            candidate.constructor,
+            Some(ConstructorCandidate {
+                classifier: internal,
+                outer: None,
+            })
+        );
+        assert!(candidate.bound_inner_constructor().is_none());
+        let signature = candidate.generic_sig.expect("generic constructor");
+        assert_eq!(signature.formals, ["A", "B"]);
+        assert_eq!(
+            signature.params,
+            [Ty::ty_param("A", any), Ty::ty_param("B", any)]
+        );
+        assert_eq!(
+            signature.ret,
+            Ty::obj_args_name(internal, &[Ty::ty_param("A", any), Ty::ty_param("B", any)])
+        );
+    }
 
     #[test]
     fn an_inner_constructor_keeps_independent_formals_and_a_complete_instance_result() {
