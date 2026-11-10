@@ -533,6 +533,25 @@ krusty-build-tests:
     set -euo pipefail
     scripts/cargo-test-binary.sh krusty_build -p krusty-build --lib
 
+# The normal compiler unit suite, which exact-version CI rows run without rebuilding Rust.
+compiler-unit-tests:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scripts/cargo-test-binary.sh krusty -p krusty --lib
+
+# Hold one release's Native, Wasm/JS and Wasm/WASI stdlib KLIBs to their exact-identity
+# implementation backlogs (`tests/klib_uncovered_implementations/`), using the compiler unit binary
+# BIN (`just compiler-unit-tests`). Each target reads that release's own stdlib.
+klib-implementation-coverage BIN VERSION=`just max-version`:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bin="$(realpath "{{BIN}}")"
+    export KRUSTY_LANGUAGE_VERSION="{{VERSION}}"
+    export KRUSTY_KOTLIN_NATIVE="$(just kotlin-native "{{VERSION}}")"
+    export KRUSTY_KOTLINC="$(just kotlinc "{{VERSION}}")"
+    KRUSTY_REQUIRE_KLIB=1 KRUSTY_REQUIRE_KLIB_IMPLEMENTATION_TARGETS=native,wasm-js,wasm-wasi \
+      "$bin" klib_libraries::tests::implementation_coverage:: --nocapture
+
 # Build the conformance test binary and print its path.
 conformance-bin:
     #!/usr/bin/env bash
