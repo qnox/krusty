@@ -1047,6 +1047,7 @@ impl Checker<'_> {
                     &named_whole_array_varargs(&argument_map, arg_names, &overload.call_sig),
                 ),
                 type_args,
+                ExplicitTypeArgumentBounds::Enforced,
             ) {
                 continue;
             }

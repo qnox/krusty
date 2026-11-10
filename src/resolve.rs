@@ -215,7 +215,7 @@ mod lexical_value_invoke;
 use lexical_value_invoke::{DeferredInvokePeers, DeferredLexicalInvoke, LexicalInvokeSite};
 mod lambda_call_shapes;
 mod property_read_selection;
-use lambda_call_shapes::UntypedLambdaCall;
+use lambda_call_shapes::{ExplicitTypeArgumentBounds, UntypedLambdaCall};
 use lexical_policies::LexicalPolicy;
 use library_constructor_failure::LibraryConstructorFailure;
 mod lambda_expectation;
@@ -49257,6 +49257,7 @@ impl<'a> Checker<'a> {
                     (args, partial),
                     (argument_parameters, &whole_array),
                     type_args,
+                    ExplicitTypeArgumentBounds::Enforced,
                 )
             })
             .cloned()

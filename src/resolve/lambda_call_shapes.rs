@@ -72,6 +72,7 @@ impl Checker<'_> {
         args_and_partial: (&[ExprId], &[Option<Ty>]),
         argument_slots: (&[usize], &[bool]),
         type_args: &[Ty],
+        explicit_bounds: ExplicitTypeArgumentBounds,
     ) -> bool {
         let (args, arg_tys) = args_and_partial;
         let (argument_map, whole_array_varargs) = argument_slots;
@@ -166,14 +167,7 @@ impl Checker<'_> {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        // Explicit type arguments fix every formal, and one outside its bound is the call's own
-        // diagnostic, not a reason to leave its lambdas unshaped: kotlinc still types
-        // `f<String> { v -> .. }` against `(String) -> ..` beside the bound error.
-        let fully_explicit = !type_args.is_empty()
-            && type_args
-                .iter()
-                .all(|argument| !argument.mentions_error() && !argument.mentions_pending());
-        if !fully_explicit
+        if explicit_bounds == ExplicitTypeArgumentBounds::Enforced
             && generic.as_ref().is_some_and(|(_, bindings)| {
                 // This is the pre-lambda applicability probe. A bound that still depends on an
                 // unbound callable formal is completed by the postponed lambda result, so it cannot
@@ -894,14 +888,32 @@ impl Checker<'_> {
         call: UntypedLambdaCall<'_>,
     ) -> Result<Option<crate::symbol_resolver::LambdaCallShape>, Vec<crate::libraries::FunctionInfo>>
     {
-        let shaped = overloads
-            .iter()
-            .filter(|overload| overload.kind == crate::libraries::FnKind::TopLevel)
-            .filter_map(|overload| {
-                self.top_level_overload_lambda_shape(lexical_scope, overload, call)
+        let shape_with = |explicit_bounds| {
+            overloads
+                .iter()
+                .filter(|overload| overload.kind == crate::libraries::FnKind::TopLevel)
+                .filter_map(|overload| {
+                    self.top_level_overload_lambda_shape(
+                        lexical_scope,
+                        overload,
+                        call,
+                        explicit_bounds,
+                    )
                     .map(|shape| (overload, shape))
-            })
-            .collect::<Vec<_>>();
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut shaped = shape_with(ExplicitTypeArgumentBounds::Enforced);
+        // Explicit type arguments outside their bounds make a candidate inapplicable, but when no
+        // candidate applies kotlinc still types the lambdas against the one it reports:
+        // `f<String> { v -> .. }` for `f<T : Number>` checks the lambda as `(String) -> ..` beside
+        // the bound error.
+        if shaped.is_empty() && fully_explicit_type_arguments(call.type_args) {
+            shaped = shape_with(ExplicitTypeArgumentBounds::Deferred);
+            if shaped.len() > 1 {
+                shaped.clear();
+            }
+        }
         let Some((_, first)) = shaped.first() else {
             return Ok(self.companion_invoke_lambda_shape(
                 lexical_scope,
@@ -1024,6 +1036,7 @@ impl Checker<'_> {
         lexical_scope: &CheckerScope<'_>,
         o: &crate::libraries::FunctionInfo,
         call: UntypedLambdaCall<'_>,
+        explicit_bounds: ExplicitTypeArgumentBounds,
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
         let UntypedLambdaCall {
             args,
@@ -1072,6 +1085,7 @@ impl Checker<'_> {
             (args, arg_tys),
             (&argument_map, &whole_arrays),
             type_args,
+            explicit_bounds,
         );
         crate::trace_compiler!(
             "lambda_shape",
@@ -1259,6 +1273,7 @@ impl Checker<'_> {
             (args, arg_tys),
             (&argument_map, &whole_arrays),
             type_args,
+            ExplicitTypeArgumentBounds::Enforced,
         ) {
             crate::trace_compiler!(
                 "lambda_shape",
@@ -1410,4 +1425,21 @@ enum ExtensionShapeChoice {
         lambda: usize,
         tied: Vec<crate::symbol_resolver::LambdaCallShape>,
     },
+}
+
+/// Whether the pre-lambda applicability probe rejects a candidate whose explicit type arguments
+/// break their declared bounds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum ExplicitTypeArgumentBounds {
+    Enforced,
+    /// The call's diagnostics report the bound; the candidate still shapes the call's lambdas.
+    Deferred,
+}
+
+/// Every type argument is written and resolved, so no argument constraint can change them.
+fn fully_explicit_type_arguments(type_args: &[Ty]) -> bool {
+    !type_args.is_empty()
+        && type_args
+            .iter()
+            .all(|argument| !argument.mentions_error() && !argument.mentions_pending())
 }
