@@ -1071,7 +1071,7 @@ fn class_initializer_steps<'ir>(
     };
     let declared_by_companion =
         |&(index, _, _): &(u32, &krusty::ir::IrStatic, krusty::ir::ExprId)| {
-            ir.jvm_companion_static_property(index).is_some()
+            ir.is_jvm_companion_hoisted_static(index)
         };
     let (companion, own): (Vec<_>, Vec<_>) = statics.iter().partition(|s| declared_by_companion(s));
     let (before, after): (Vec<_>, Vec<_>) = own
