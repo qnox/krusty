@@ -235,6 +235,53 @@ fn push_access_arguments(access: &KlibIrMemberAccess, pending: &mut Vec<KlibIrEx
     }
 }
 
+impl KlibIrArena {
+    /// The expressions the members of `class` evaluate: member and accessor bodies with their
+    /// parameter defaults, field initializers and anonymous initializers. A constructor and a class
+    /// nested in `class` are not included.
+    pub(crate) fn class_member_roots(&self, class: &KlibIrClass) -> Vec<KlibIrExprId> {
+        let mut roots = Vec::new();
+        let push_function = |function: KlibIrFunctionId, roots: &mut Vec<KlibIrExprId>| {
+            let function = self.function(function);
+            if function.constructor {
+                return;
+            }
+            if let Some(KlibIrBody::Block(statements)) = &function.body {
+                push_statement_expressions(self, statements, roots);
+            }
+            roots.extend(
+                function
+                    .context_parameters
+                    .iter()
+                    .chain(&function.extension_receiver)
+                    .chain(&function.regular_parameters)
+                    .filter_map(|parameter| parameter.default_value),
+            );
+        };
+        for member in &class.members {
+            match member {
+                KlibIrMember::Function(function) => push_function(*function, &mut roots),
+                KlibIrMember::Property(property) => {
+                    for accessor in property.getter.iter().chain(property.setter.iter()) {
+                        push_function(*accessor, &mut roots);
+                    }
+                    if let Some(field) = &property.backing_field {
+                        roots.extend(field.initializer);
+                    }
+                }
+                KlibIrMember::Field(field) => roots.extend(field.initializer),
+                KlibIrMember::AnonymousInitializer { statements, .. } => {
+                    push_statement_expressions(self, statements, &mut roots);
+                }
+                KlibIrMember::Class(_)
+                | KlibIrMember::EnumEntry(_)
+                | KlibIrMember::TypeAlias(_) => {}
+            }
+        }
+        roots
+    }
+}
+
 fn push_statement_expressions(
     arena: &KlibIrArena,
     statements: &[KlibIrStatement],

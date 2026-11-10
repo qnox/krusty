@@ -1,4 +1,4 @@
-/// The kotlinx-serialization compiler plugin release krusty reproduces, from the `-Xplugin` jar's
+/// The bundled compiler plugin release krusty reproduces, from the `-Xplugin` jar's
 /// manifest (`2.4.10-release-377`). The plugin ships inside kotlinc and is released with it, so this
 /// is the kotlinc release the jar came from; its checkers' wording follows it, independent of the
 /// Kotlin version krusty targets.

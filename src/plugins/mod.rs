@@ -17,11 +17,14 @@
 
 pub mod allopen;
 pub mod assignment;
+pub mod atomicfu;
 pub mod class_metadata;
 pub mod cli;
 pub mod compose;
 pub mod deps;
 pub mod noarg;
+mod plugin_release;
+pub use plugin_release::PluginRelease;
 pub mod registry;
 pub mod runtime_declarations;
 pub mod sam_with_receiver;
@@ -870,11 +873,31 @@ pub trait CheckedSourceFacts {
     ) -> Option<crate::diag::Span>;
     /// The checked annotations of the dependency function a call selected by `callable`.
     fn dependency_annotations(&self, callable: crate::ir::ExternalCallableId) -> &[TypeName];
+    /// The declaring owner and Kotlin name of the dependency function a call selected by
+    /// `callable`, as its provider normalized them.
+    fn dependency_callable(
+        &self,
+        callable: crate::ir::ExternalCallableId,
+    ) -> Option<DependencyDeclaration<'_>>;
+    /// The declaring owner and Kotlin name of the dependency property a read or write selected by
+    /// `property`.
+    fn dependency_property(
+        &self,
+        property: crate::ir::ExternalPropertyId,
+    ) -> Option<DependencyDeclaration<'_>>;
     /// The declaration shape of the dependency function a call selected by `callable`.
     fn dependency_shape(
         &self,
         callable: crate::ir::ExternalCallableId,
     ) -> Option<DependencyCallableShape>;
+}
+
+/// A dependency declaration a checked call or property access selected: the package or classifier
+/// that declares it and its Kotlin name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DependencyDeclaration<'a> {
+    pub owner: TypeName,
+    pub name: &'a str,
 }
 
 /// What a plugin reads of a dependency function's declaration besides its parameter types.
@@ -986,6 +1009,7 @@ fn triggered(ir: &IrFile, plugins: &registry::NativePlugins, ctx: &PluginContext
     });
     uses_serialization
         || ir.compose.is_some()
+        || ir.atomicfu.is_some()
         || !ctx
             .classes_with(crate::types::type_name(serialization::SERIALIZABLE_FQ))
             .is_empty()

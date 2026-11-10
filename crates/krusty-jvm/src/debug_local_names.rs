@@ -451,7 +451,9 @@ mod tests {
                 caller: Some(krusty::ir::IrEnclosure::File),
                 caller_is_default: false,
                 caller_source_name: "box".to_string(),
-                inline_callee: krusty::fir::CallableId::from_raw(0),
+                inline_callee: krusty::ir::IrInlineCallee::Module(
+                    krusty::fir::CallableId::from_raw(0),
+                ),
                 inline_callee_source_name: "define".to_string(),
                 parent: None,
                 consumed_inline_capture: false,
