@@ -139,20 +139,14 @@ impl Checker<'_> {
             let Some((internal, [])) = ty.obj_parts() else {
                 return ty;
             };
-            // A class whose signature did not finalize publishes its type parameters and not
-            // its header. Star-project from that declaration, including a nested class.
-            // Aborting would drop every other diagnostic in the module.
-            let recovered = self.unindexed_class_literal_receiver(internal);
+            // A header that did not finalize is not published, so this classifier is absent and
+            // the declaration's published type parameters are the count. A published classifier
+            // carries those parameters itself.
             let Some(classifier) = self.fed_source().classifier(internal) else {
-                return recovered.unwrap_or(ty);
+                return self
+                    .unindexed_class_literal_receiver(internal)
+                    .unwrap_or(ty);
             };
-            if classifier.type_params().is_empty()
-                && recovered
-                    .as_ref()
-                    .is_some_and(|ty| ty.obj_parts().is_some_and(|(_, args)| !args.is_empty()))
-            {
-                return recovered.unwrap_or(ty);
-            }
             super::class_literal_receiver::star_projected_class_literal_receiver(ty, &classifier)
         })
     }
