@@ -9,7 +9,6 @@
 # test infrastructure applies those directives to the module; the box harness's file split drops
 # that text, so both compilers build the case under kotlinc's default modes.
 jvm8/defaults/defaultCompatibilityBridges/annotations.kt
-jvm8/defaults/defaultCompatibilityBridges/noBridgeIfSuperMethodIsAbstract.kt
 jvm8/defaults/disable/differentModeParents.kt
 jvm8/defaults/enable/differentModeParents.kt
 jvm8/defaults/enable/differentModeParentsAnnotatedClass.kt
@@ -19,14 +18,12 @@ jvm8/defaults/noCompatibility/differentModeParentsAnnotatedClass.kt
 nullabilityAnnotations/samAdapterForJavaInterfaceWithNullability.kt
 sam/callableRefGenericSamInterface.kt
 sam/callableRefSpecializedSamInterface.kt
-sam/genericSamInterface.kt
 sam/kt16650.kt
 sam/kt84931.kt
 sam/lambdaGenericFunInterface.kt
 sam/lambdaGenericSamInterface.kt
 sam/lambdaSpecializedFunInterface.kt
 sam/lambdaSpecializedSamInterface.kt
-sam/specializedSamInterface.kt
 
 # The case selects a compiler option through a directive the box harness does not translate yet:
 # `INHERIT_MULTIFILE_PARTS`.
