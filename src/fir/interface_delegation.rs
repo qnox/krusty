@@ -82,9 +82,10 @@ pub struct ResolvedDelegatedFunction {
     pub type_parameters: Box<[ResolvedDelegatedTypeParameter]>,
     /// Every exact interface declaration the one generated body implements.
     pub overridden: Box<[ResolvedDelegatedFunctionDeclaration]>,
-    /// Per forwarder parameter, the positions a Java parameter takes rigid from a Kotlin
-    /// declaration the forwarder also overrides; metadata marks them `EnhancedNullability`.
-    pub parameter_enhancements: Box<[crate::libraries::TypeEnhancement]>,
+    /// The forwarder's declared parameter spellings when a Java parameter takes rigid positions
+    /// from a Kotlin declaration the forwarder also overrides; metadata marks them
+    /// `EnhancedNullability`. `None` when no parameter is enhanced.
+    pub parameter_spellings: Option<crate::spelling::DeclaredSpellings>,
     pub call: ResolvedDelegatedCall,
 }
 

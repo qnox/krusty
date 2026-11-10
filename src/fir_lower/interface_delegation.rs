@@ -284,23 +284,8 @@ fn materialize_delegation(
                     function,
                     crate::ir::FnParamInfo::identities(parameter_identities),
                 );
-                if member
-                    .parameter_enhancements
-                    .iter()
-                    .any(|enhancement| !enhancement.is_none())
-                {
-                    let mut spellings = crate::spelling::DeclaredSpellings {
-                        params: vec![crate::spelling::Spelled::default(); params.len()],
-                        ..Default::default()
-                    };
-                    for (spelling, enhancement) in spellings
-                        .params
-                        .iter_mut()
-                        .zip(member.parameter_enhancements.iter())
-                    {
-                        spelling.mark_enhanced(enhancement);
-                    }
-                    ir.fn_declared_spellings.insert(function, spellings);
+                if let Some(spellings) = &member.parameter_spellings {
+                    ir.fn_declared_spellings.insert(function, spellings.clone());
                 }
                 if !member.type_parameters.is_empty() {
                     ir.signatures.insert(
