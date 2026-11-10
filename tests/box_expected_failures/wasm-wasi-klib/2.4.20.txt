@@ -1802,7 +1802,6 @@ function/extension.kt
 function/intrinsic.kt
 function/localFunction.kt
 function/localFunction2.kt
-function/manglingImportedFromObjectWithNI.kt
 function/minus_eq.kt
 function/named.kt
 function/plus_eq.kt
