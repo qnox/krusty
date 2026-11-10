@@ -1105,7 +1105,63 @@ fn a_constructed_class_of_its_own_tree_contributes_its_member_callees() {
     else {
         panic!("a top-level KLIB function freezes its public signature")
     };
-    let class = counted_class_with(3, |arena, class_ty| {
+    let class = helper_calling_class(helper);
+    let demo = demo_with(&shapes, vec![class], build);
+    let make = demo.callable("make").identity().clone();
+    let helper = demo.callable("helper").identity().clone();
+    assert_eq!(
+        demo.bodies
+            .emitted_body_callables(&make, crate::klib_lowering::EMITTED_CALL_FORMS),
+        vec![helper]
+    );
+}
+
+/// A file-local symbol is a slot of the signature tables of the trees that serialize the body.
+/// A body of another component (a prepared-inline copy) that names the same file and slot as an
+/// ordinary private class does not reach that class, so its members contribute nothing.
+#[test]
+fn a_colliding_file_local_symbol_of_another_component_contributes_nothing() {
+    const HELPER: Shape = ("helper", &[], T::Int);
+    let build = |name: &str, body: &mut super::demo_package::Body| match name {
+        "make" => {
+            let constructed = counted_construction(body);
+            Some(vec![body.ret(constructed)])
+        }
+        "helper" => {
+            let value = body.int(1);
+            Some(vec![body.ret(value)])
+        }
+        _ => None,
+    };
+    let shapes = [EMPTY_MAKE, HELPER];
+    let signed = demo_with(&shapes, vec![counted_class(3)], build);
+    let Some(crate::libraries::KlibDeclarationSignature::Public(helper)) =
+        signed.facts["helper"].declaration_signature.clone()
+    else {
+        panic!("a top-level KLIB function freezes its public signature")
+    };
+    let ordinary = demo_with(&shapes, vec![helper_calling_class(helper)], build);
+    let make = ordinary.callable("make").identity().clone();
+    assert_eq!(
+        ordinary
+            .bodies
+            .emitted_body_callables(&make, crate::klib_lowering::EMITTED_CALL_FORMS),
+        vec![ordinary.callable("helper").identity().clone()]
+    );
+    // The other component serializes the same constructing body but no class at those
+    // coordinates.
+    let (_, prepared) = module_trees("demo", &shapes, Vec::new(), build);
+    let prepared = KlibDeclarationBodies::from_libraries(vec![("demo".to_owned(), prepared)])
+        .expect("one library");
+    assert_eq!(
+        prepared.emitted_body_callables(&make, crate::klib_lowering::EMITTED_CALL_FORMS),
+        Vec::new()
+    );
+}
+
+/// A private class whose member `read` calls the public function `helper`.
+fn helper_calling_class(helper: KlibPublicIdSignature) -> KlibIrDeclarationTree {
+    counted_class_with(3, |arena, class_ty| {
         let int = arena.push_type(T::Int.klib());
         let call = arena.push_expr(
             Some(int),
@@ -1144,13 +1200,5 @@ fn a_constructed_class_of_its_own_tree_contributes_its_member_callees() {
             body: Some(KlibIrBody::Block(vec![KlibIrStatement::Expression(call)])),
         });
         vec![KlibIrMember::Function(member)]
-    });
-    let demo = demo_with(&shapes, vec![class], build);
-    let make = demo.callable("make").identity().clone();
-    let helper = demo.callable("helper").identity().clone();
-    assert_eq!(
-        demo.bodies
-            .emitted_body_callables(&make, crate::klib_lowering::EMITTED_CALL_FORMS),
-        vec![helper]
-    );
+    })
 }
