@@ -270,6 +270,7 @@ mod tests {
             classifier,
             subject,
             registrations: Box::new([]),
+            source_order: None,
         });
         let key = file.add_expr(IrExpr::EnumSwitchKey {
             classifier,
