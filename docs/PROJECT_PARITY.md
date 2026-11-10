@@ -6,6 +6,12 @@ How much of `intellij-community` krusty's front end accepts today. Regenerate wi
 scripts/parity-scan.py '<project-root>' --depth none --jobs 3 --timeout 300
 ```
 
+The same command measures a checkout of the Kotlin compiler. Read the JSONL it writes
+for modules scanned, modules that opened completely, missing classpath entries, error
+diagnostics, crash rows, and the navigation timings. Parse time and type-information
+latency stay unmeasured unless the server path timed them; do not copy `elapsed_ms`
+into either. Those counts belong in the pull request that measured them.
+
 Project revision: `b2c2e6113bcb04dfa18a73dcffca3de2532f1b6f`  
 Compiler binary SHA-256: `55d5c8ae11d1d137d09fbedbf96dc4ff87f5265b0085fdef646337f207279ac6`  
 Harness repository revision: `b7d5ea6062038d44ce27e979b4b4fa4d953664de` (dirty worktree)

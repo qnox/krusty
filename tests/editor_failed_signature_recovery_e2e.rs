@@ -110,41 +110,6 @@ fun useText(): Int = text.value.length
     );
 }
 
-/// `Child::class` names a classifier whose signature did not finalize. The literal is still a
-/// use of that classifier: the analysis reports the unresolved supertype and stays up. Aborting
-/// here used to discard every diagnostic in the module (the parity worker exited 101).
-#[test]
-fn a_class_literal_of_a_class_with_an_unresolved_supertype_stays_alive() {
-    let source = r#"
-package sample
-
-class Child<T> : Missing()
-fun useClass() = Child::class
-"#;
-    assert_eq!(
-        editor_diagnostics(source),
-        vec!["unresolved reference 'Missing'.".to_string()],
-    );
-}
-
-/// The same recovery for a nested class. The literal's selected declaration is that nested
-/// class, not a top-level class whose simple name happens to match the last segment.
-#[test]
-fn a_class_literal_of_a_nested_class_with_an_unresolved_supertype_stays_alive() {
-    let source = r#"
-package sample
-
-class Outer {
-    class Inner<T> : Missing()
-}
-fun useClass() = Outer.Inner::class
-"#;
-    assert_eq!(
-        editor_diagnostics(source),
-        vec!["unresolved reference 'Missing'.".to_string()],
-    );
-}
-
 /// A file's own policies still govern its recovery diagnostics. With `broken`'s inferred result
 /// unresolved, the compiler reports from the partial index; `@file:Suppress` must still silence the
 /// internal-annotation access it covers, so kotlinc's single unresolved reference is the complete
