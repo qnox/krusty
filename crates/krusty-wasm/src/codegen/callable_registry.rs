@@ -43,7 +43,7 @@ pub(super) struct CallableRegistry {
     module: HashMap<CallableId, u32>,
     module_defaults: HashMap<CallableId, u32>,
     /// Defining-file getters of checked objects in the active source module.
-    source_singletons: HashMap<krusty::types::TypeName, SourceSingleton>,
+    source_singletons: HashMap<krusty::backend::DependencyClassifier, SourceSingleton>,
     dependencies: HashMap<KlibDependencyCallable, u32>,
     /// The default entry of each published declaration that declares a default.
     dependency_defaults: HashMap<KlibDependencyCallable, u32>,
@@ -76,7 +76,8 @@ pub(super) struct FileCallTargets {
         HashMap<ExternalCallableId, SingletonExtensionUnreadReceiver>,
     /// The selected instance getter for each object outside this file.
     singletons: HashMap<krusty::backend::DependencyClassifier, u32>,
-    singleton_definitions: HashMap<krusty::ir::ClassId, (krusty::types::TypeName, u32)>,
+    singleton_definitions:
+        HashMap<krusty::ir::ClassId, (krusty::backend::DependencyClassifier, u32)>,
     /// The entry of each constant of another file's enum this file reads.
     enum_constants: HashMap<krusty::backend::EnumConstant, u32>,
 }
@@ -105,7 +106,7 @@ impl CallableRegistry {
 
     fn reserve_source_singleton(
         &mut self,
-        classifier: krusty::types::TypeName,
+        classifier: krusty::backend::DependencyClassifier,
         wasm: &mut Module,
     ) -> &mut SourceSingleton {
         self.source_singletons
@@ -249,7 +250,7 @@ impl CallableRegistry {
                 }
                 if !facts
                     .classifier(declaration.fq_name)
-                    .is_some_and(|fact| fact.kind == krusty::libraries::TypeKind::Object)
+                    .is_some_and(|fact| fact.is_object())
                 {
                     return Err(
                         "a source object without its frozen singleton declaration".to_owned()
@@ -319,7 +320,7 @@ impl CallableRegistry {
                     if ir.class_id_by_name(*classifier).is_none() =>
                 {
                     let entry = match source.and_then(|(_, facts)| facts.classifier(*classifier)) {
-                        Some(fact) if fact.kind == krusty::libraries::TypeKind::Object => {
+                        Some(fact) if fact.is_object() => {
                             Some(self.reserve_source_singleton(*classifier, wasm).function)
                         }
                         Some(_) => {

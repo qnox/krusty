@@ -172,6 +172,11 @@ impl BackendClassifierFact {
         )
     }
 
+    /// Whether the frozen declaration is a Kotlin `object`, including a companion object.
+    pub fn is_object(&self) -> bool {
+        self.kind == crate::libraries::TypeKind::Object
+    }
+
     pub fn is_annotation(&self) -> bool {
         self.kind == crate::libraries::TypeKind::Annotation
     }
