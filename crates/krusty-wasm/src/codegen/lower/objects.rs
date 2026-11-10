@@ -35,6 +35,9 @@ use super::{carrier, Body, FileContext, Unsupported, STRING};
 const STRING_HEAP: HeapType = HeapType::Concrete(1);
 
 mod override_bridges;
+mod unrealized_members;
+
+pub(super) use unrealized_members::holds_unprinted_values;
 
 #[cfg(test)]
 mod tests;
@@ -170,7 +173,7 @@ impl Body<'_> {
         Ok(())
     }
 
-    /// Push a new instance of `class` with every field at its default value.
+    /// Push a new instance of `class`: its identity hash, and every field at its default value.
     fn allocate(&mut self, class: ClassId) -> Result<(), Unsupported> {
         let classes = self.file_classes()?;
         let form = &classes.forms[class as usize];
@@ -187,7 +190,9 @@ impl Body<'_> {
             chain.push(parent);
         }
         let exception_rooted = classes.exception_base(class).is_some();
-        self.code.global_get(table);
+        self.code
+            .global_get(table)
+            .call(self.runtime.identity.allocate);
         self.enum_base_fields(class)?;
         if exception_rooted {
             // A runtime exception's message and cause, which its constructor's delegation to
@@ -1050,8 +1055,7 @@ impl Body<'_> {
             {
                 let structure =
                     self.runtime
-                        .exceptions
-                        .ensure_class(self.module, self.classifiers, name)?;
+                        .exception_class(self.module, self.classifiers, name)?;
                 self.code.ref_test(nullable, HeapType::Concrete(structure));
             }
             _ => match (self.interface_of_type(tested), self.class_of_type(tested)) {
@@ -1097,7 +1101,8 @@ impl Body<'_> {
     }
 
     /// Whether a call through `member`'s slot on a value statically of `class` could reach
-    /// `kotlin.Any`'s own member, which this module has no body for.
+    /// `kotlin.Any`'s own member. The table entry stays `Slot::AnyMember` when the class does not
+    /// override it, including where a default body is installed for that entry.
     pub(super) fn reaches_any_default(
         &self,
         class: ClassId,
@@ -1174,17 +1179,6 @@ impl Body<'_> {
         self.value(lhs, any())?;
         self.value(rhs, any())?;
         self.code.call(self.runtime.object_equals);
-        Ok(())
-    }
-
-    /// Replace the object on the stack, statically of type `ty`, with its `toString()`, or
-    /// `"null"`.
-    pub(super) fn object_to_string(&mut self, ty: Ty) -> Result<(), Unsupported> {
-        let class = self.class_of_type(ty).expect("checked by the caller");
-        if self.reaches_any_default(class, AnyMember::ToString)? {
-            return Err("`kotlin.Any.toString`'s own rendering".to_string());
-        }
-        self.dispatch_to_string();
         Ok(())
     }
 

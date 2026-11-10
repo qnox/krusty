@@ -12,9 +12,10 @@
 //! supertype of an object and a `String`. A slot's function takes its receiver that way too, so an
 //! override never needs a different signature from the member it overrides.
 //!
-//! Of `kotlin.Any`'s members only `equals` has a default body here, identity; `hashCode` and
-//! `toString` have none until the library's own bodies are compiled into the module, and a class
-//! that does not override them gets the trap every abstract slot gets.
+//! `kotlin.Any`'s `equals` defaults to identity here. Its `hashCode` and `toString` read the
+//! identity hash every object of a declared class carries (`$Identified`, see `super::identity`);
+//! `super::runtime` writes those defaults, and a slot with no body gets the trap every abstract
+//! slot gets.
 
 use krusty::fx_hash::HashMap;
 
@@ -32,6 +33,10 @@ pub(super) const REFERENCE: ValType = ValType::Ref {
 /// The field of every dispatch table holding the class's interface table: after `kotlin.Any`'s
 /// three slots.
 pub(super) const ITABLE_FIELD: u32 = 3;
+
+/// The field of `$Enum` holding `kotlin.Enum`'s `name`, after the identity prefix; `ordinal`
+/// follows it.
+pub(super) const ENUM_NAME_FIELD: u32 = super::identity::PREFIX_FIELDS;
 
 /// The dispatch table field holding class slot `slot`.
 pub(super) fn slot_field(slot: u32) -> u32 {
@@ -51,7 +56,10 @@ pub(super) struct ObjectRoot {
     pub(super) any_table: u32,
     /// `$Object`: the dispatch table, and nothing else yet.
     pub(super) object: u32,
-    /// `$Enum`: `$Object`, then `kotlin.Enum`'s `name` and `ordinal`, which every enum class's
+    /// `$Identified`: `$Object`, then the object's immutable identity hash
+    /// (`super::identity`), which every object with `kotlin.Any`'s identity semantics extends.
+    pub(super) identified: u32,
+    /// `$Enum`: `$Identified`, then `kotlin.Enum`'s `name` and `ordinal`, which every enum class's
     /// struct extends.
     pub(super) enum_base: u32,
     /// The function types of `kotlin.Any`'s three slots, in slot order.
@@ -90,13 +98,22 @@ impl ObjectRoot {
             supertype: None,
             open: true,
         });
-        let enum_base = module.subtype(SubType {
+        let identified = module.subtype(SubType {
             composite: CompositeType::Struct(vec![
                 immutable(ValType::reference(any_table)),
-                immutable(string),
                 immutable(ValType::I32),
             ]),
             supertype: Some(object),
+            open: true,
+        });
+        let enum_base = module.subtype(SubType {
+            composite: CompositeType::Struct(vec![
+                immutable(ValType::reference(any_table)),
+                immutable(ValType::I32),
+                immutable(string),
+                immutable(ValType::I32),
+            ]),
+            supertype: Some(identified),
             open: true,
         });
         let identity_equals = module.declare();
@@ -114,6 +131,7 @@ impl ObjectRoot {
             itable,
             any_table,
             object,
+            identified,
             enum_base,
             any_slot_types,
             identity_equals,

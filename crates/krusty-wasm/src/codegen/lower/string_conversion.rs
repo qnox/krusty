@@ -1,5 +1,9 @@
 //! The string a template makes of each operand, which is also `Any?.toString()`.
 
+use krusty::backend::class_tables::AnyMember;
+
+use super::super::super::encode::ValType;
+use super::super::super::runtime::AND32;
 use super::*;
 
 impl Body<'_> {
@@ -51,11 +55,16 @@ impl Body<'_> {
             ty if self.scalar_string_function(ty).is_some() => {
                 self.scalar_string_function(ty).expect("checked above")
             }
-            ty if self.class_of_type(ty).is_some() => return self.object_to_string(ty),
+            // A `KType` object prints through its own slot. Every other reference, including a
+            // class and an erased `Any`, prints through the shared runtime `toString`.
             ty if ty.non_null().obj_internal()
                 == Some(super::super::super::type_objects::ktype()) =>
             {
-                return self.type_object_to_string(ty)
+                self.expression(id)?;
+                return self.type_object_to_string(ty);
+            }
+            ty if matches!(carrier(ty)?, Some(ValType::Ref { .. })) => {
+                return self.reference_string(id, ty);
             }
             other => {
                 return Err(format!(
@@ -64,6 +73,7 @@ impl Body<'_> {
                 ));
             }
         };
+        self.expression(id)?;
         self.code.call(function);
         Ok(())
     }
@@ -84,6 +94,20 @@ impl Body<'_> {
         } else {
             self.runtime.string_of_u32
         });
+        Ok(())
+    }
+
+    /// Push the reference `id`, statically of type `ty`, as `toString()` of whatever it holds at
+    /// run time, or `"null"`.
+    fn reference_string(&mut self, id: u32, ty: Ty) -> Result<(), Unsupported> {
+        if self.may_reach_unrealized(ty, AnyMember::ToString)? {
+            return Err(format!(
+                "a `toString` of `{}` reaching a runtime object this target cannot print",
+                describe(ty)
+            ));
+        }
+        self.expression(id)?;
+        self.code.call(self.runtime.object_strings.any_to_string);
         Ok(())
     }
 

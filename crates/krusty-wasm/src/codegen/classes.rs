@@ -2,15 +2,23 @@
 //! (`krusty::backend::class_tables`): a struct type per class, a dispatch-table type per class and
 //! one instance of it, and the functions every class needs beyond its methods.
 //!
-//! **Objects.** A class's struct is the root `$Object`'s single field — the dispatch table — then
-//! the fields of its superclasses in this file, root first, then its own: the tables' field order.
+//! **Objects.** A class's struct is `$Identified`'s two fields — the dispatch table, then the
+//! object's identity hash — then the fields of the base no file declares: `kotlin.Enum`'s for an
+//! enum class, a runtime exception's message and cause for a class extending one. The fields of its
+//! superclasses in this file follow, root first, then its own: the tables' field order.
 //! It is declared a subtype of its superclass's struct, so `ref.test` and `ref.cast` answer `is` and
 //! `as` along the class hierarchy directly.
 //!
 //! **Tables.** A class's table is a struct with one immutable field per slot of its shared table,
 //! each a typed function reference, and the interface table after `kotlin.Any`'s three
 //! (`super::super::objects::slot_field`). It is declared a subtype of its superclass's table, or of
-//! `$AnyTable` for a root class. A slot a table does not type is `funcref` and null.
+//! `$AnyTable` for a root class. A slot a table does not type is `funcref` and null. A class that
+//! inherits `kotlin.Any`'s own `hashCode` gets its identity hash; one that inherits `toString` gets
+//! `kotlin.Enum`'s, its `name`, `kotlin.Throwable`'s for a class extending a runtime exception, or
+//! otherwise `kotlin.Any`'s default rendering. Both defaults print the name Kotlin gives the source
+//! class (`krusty::backend::class_names::source_class_names`). A compiler-generated class has no
+//! such name, so its slot holds the trap of a member with no body, and [`FileClasses::realizes`]
+//! says so.
 //!
 //! **Interfaces.** Interface members are numbered once for the module, from the declaration
 //! headers (`class_tables::module_interfaces`), and kept out of the class tables: a call through
@@ -30,6 +38,7 @@
 
 use krusty::fx_hash::HashMap;
 
+use krusty::backend::class_names::source_class_names;
 use krusty::backend::class_tables::module_classes::ModuleClasses;
 use krusty::backend::class_tables::module_slots::ModuleSlotPlan;
 use krusty::backend::class_tables::{
@@ -45,6 +54,7 @@ use super::super::encode::{
     Code, CompositeType, FieldType, HeapType, Module, StorageType, SubType, ValType,
 };
 use super::super::exception_transport::ExceptionTransport;
+use super::super::identity::PREFIX_FIELDS;
 use super::super::interface_dispatch::ClassRef;
 use super::super::objects::{immutable, ObjectRoot, ITABLE_FIELD, REFERENCE};
 use super::super::runtime::Runtime;
@@ -222,8 +232,10 @@ pub(super) struct FileClasses {
     /// The checked property each realized member read or write (by expression) selected.
     properties: HashMap<u32, PropertyId>,
     /// The base no file declares that each class extends, itself or through a superclass of this
-    /// file, whose fields lead its struct after the dispatch table.
+    /// file, whose fields lead its struct after the identity prefix.
     bases: Vec<OwnedBase>,
+    /// Which of `kotlin.Any`'s members each class's table has a body for, by class and slot.
+    realized: Vec<[bool; ANY_SLOTS as usize]>,
 }
 
 impl FileClasses {
@@ -237,10 +249,16 @@ impl FileClasses {
 
     /// The struct field holding field `index` of `class`.
     pub(super) fn field(&self, class: ClassId, index: u32) -> u32 {
-        1 + self.base_fields(class) + self.tables.table(class).first_field + index
+        PREFIX_FIELDS + self.base_fields(class) + self.tables.table(class).first_field + index
     }
 
-    /// How many fields of `class`'s struct, after the dispatch table, a base no file declares
+    /// Whether the table of `class`, a class with instances of its own, has a body for `member`:
+    /// `false` where the slot traps.
+    pub(super) fn realizes(&self, class: ClassId, member: AnyMember) -> bool {
+        self.realized[class as usize][member.slot() as usize]
+    }
+
+    /// How many fields of `class`'s struct, after the identity prefix, a base no file declares
     /// contributes: `kotlin.Enum`'s `name` and `ordinal`, or a runtime exception's message and
     /// cause.
     pub(super) fn base_fields(&self, class: ClassId) -> u32 {
@@ -277,10 +295,11 @@ impl FileClasses {
     }
 }
 
-/// `kotlin.Enum`'s `name` and `ordinal`: fields 1 and 2 of `$Enum`.
+/// `kotlin.Enum`'s `name` and `ordinal`: the fields of `$Enum` after the identity prefix.
 pub(super) const ENUM_BASE_FIELDS: u32 = 2;
 
-/// A runtime exception's message and cause: fields 1 and 2 of its runtime struct.
+/// A runtime exception's message and cause: the fields of its runtime struct after the identity
+/// prefix.
 const EXCEPTION_BASE_FIELDS: u32 = 2;
 
 /// The wasm signature of a method of the file: the receiver, then its parameters.
@@ -418,11 +437,7 @@ pub(super) fn declare(
         bases.push(if superclass == krusty::types::wk::kotlin_enum() {
             OwnedBase::Enum
         } else if is_runtime_exception(classifiers, superclass) {
-            OwnedBase::Exception(runtime.exceptions.ensure_class(
-                module,
-                classifiers,
-                superclass,
-            )?)
+            OwnedBase::Exception(runtime.exception_class(module, classifiers, superclass)?)
         } else {
             OwnedBase::None
         });
@@ -436,7 +451,10 @@ pub(super) fn declare(
         }
         let table = tables.table(id);
         let parent = table.superclass.map(|parent| &forms[parent as usize]);
-        let mut fields = vec![immutable(ValType::reference(objects.any_table))];
+        let mut fields = vec![
+            immutable(ValType::reference(objects.any_table)),
+            immutable(ValType::I32),
+        ];
         match bases[id as usize] {
             OwnedBase::None => {}
             OwnedBase::Enum => fields.extend([immutable(STRING), immutable(ValType::I32)]),
@@ -447,7 +465,7 @@ pub(super) fn declare(
         }
         fields.extend(own_fields(class)?);
         let root = match bases[id as usize] {
-            OwnedBase::None => objects.object,
+            OwnedBase::None => objects.identified,
             OwnedBase::Enum => objects.enum_base,
             OwnedBase::Exception(structure) => structure,
         };
@@ -485,6 +503,7 @@ pub(super) fn declare(
     // One table instance per class that has instances of its own.
     let mut accessors: Vec<(Accessor, u32, u32)> = Vec::new();
     let mut bridges: Vec<(OverrideBridge, u32, u32)> = Vec::new();
+    let mut realized = vec![[true; ANY_SLOTS as usize]; ir.classes.len()];
     for &id in &tables.order {
         let class = &ir.classes[id as usize];
         if class.is_interface || class.is_abstract || class.is_sealed {
@@ -500,7 +519,11 @@ pub(super) fn declare(
             );
             ancestor = tables.table(current).superclass;
         }
-        let (record, itable) = objects.interfaces.class(module, objects.itable, ancestors);
+        let (record, itable) =
+            runtime
+                .objects
+                .interfaces
+                .class(module, runtime.objects.itable, ancestors);
         let table = tables.table(id);
         let mut init = Code::default();
         for (slot, entry) in table.vtable.iter().enumerate() {
@@ -512,10 +535,17 @@ pub(super) fn declare(
                 continue;
             };
             let function = match entry {
-                Slot::AnyMember(AnyMember::Equals) => objects.identity_equals,
-                Slot::AnyMember(AnyMember::HashCode | AnyMember::ToString) | Slot::Abstract => {
-                    objects.trap(module, ty)
+                Slot::AnyMember(member) => {
+                    match inherited_any_member(ir, runtime, module, id, *member, bases[id as usize])
+                    {
+                        Some(function) => function,
+                        None => {
+                            realized[id as usize][slot] = false;
+                            runtime.objects.trap(module, ty)
+                        }
+                    }
                 }
+                Slot::Abstract => runtime.objects.trap(module, ty),
                 Slot::Function(function) => functions
                     .get(*function as usize)
                     .copied()
@@ -591,6 +621,32 @@ pub(super) fn declare(
             .map(|access| (access.operation, access.target))
             .collect(),
         bases,
+        realized,
+    })
+}
+
+/// The body the table of `class` holds for `kotlin.Any`'s `member`, which the class inherits
+/// through `base`; `None` when this backend has none (see the module documentation).
+fn inherited_any_member(
+    ir: &IrFile,
+    runtime: &mut Runtime,
+    module: &mut Module,
+    class: ClassId,
+    member: AnyMember,
+    base: OwnedBase,
+) -> Option<u32> {
+    Some(match (member, base) {
+        (AnyMember::Equals, _) => runtime.objects.identity_equals,
+        (AnyMember::HashCode, _) => runtime.identity.hash_code,
+        (AnyMember::ToString, OwnedBase::Enum) => runtime.object_strings.enum_name,
+        (AnyMember::ToString, OwnedBase::None) => {
+            let names = source_class_names(ir, class)?;
+            runtime.identity_to_string(module, ir.classes[class as usize].fq_name_id(), &names)
+        }
+        (AnyMember::ToString, OwnedBase::Exception(_)) => {
+            let names = source_class_names(ir, class)?;
+            runtime.throwable_to_string(module, ir.classes[class as usize].fq_name_id(), &names)
+        }
     })
 }
 

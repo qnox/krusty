@@ -121,7 +121,7 @@ impl Body<'_> {
         operand: u32,
         reference: ValType,
     ) -> Result<(), Unsupported> {
-        let structure = self.runtime.exceptions.ensure_class(
+        let structure = self.runtime.exception_class(
             self.module,
             self.classifiers,
             krusty::libraries::RuntimeExceptionKind::NullPointer.classifier(),
@@ -138,7 +138,7 @@ impl Body<'_> {
             structure,
             None,
             self.runtime.string,
-        );
+        )?;
         self.code
             .throw(self.runtime.exceptions.tag)
             .end()
@@ -178,10 +178,9 @@ impl Body<'_> {
             return self.construction(site, internal, args, params);
         };
         constructor_frame(internal, params, args.len(), kind, message, declaration)?;
-        let structure =
-            self.runtime
-                .exceptions
-                .ensure_class(self.module, self.classifiers, internal)?;
+        let structure = self
+            .runtime
+            .exception_class(self.module, self.classifiers, internal)?;
         let message = match (message, args) {
             (false, []) => None,
             (true, [message]) => {
@@ -199,7 +198,7 @@ impl Body<'_> {
             structure,
             message,
             self.runtime.string,
-        );
+        )?;
         Ok(())
     }
 
@@ -244,8 +243,7 @@ impl Body<'_> {
             return Ok(self.file_classes()?.structure(class));
         }
         self.runtime
-            .exceptions
-            .ensure_class(self.module, self.classifiers, identity)
+            .exception_class(self.module, self.classifiers, identity)
     }
 
     pub(super) fn throw_value(&mut self, operand: u32) -> Result<(), Unsupported> {
