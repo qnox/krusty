@@ -182,29 +182,14 @@ pub(super) fn source_ordered_members<'a>(
                 )
             }),
     );
-    for (index, property) in ir.statics.iter().enumerate() {
-        let index = index as u32;
-        if !ir.companion_blocks.is_storage(index) || property.owner != Some(class.fq_name_id()) {
-            continue;
-        }
-        for (accessor, present) in [
+    ordered.extend(
+        static_default_accessors(ir, class).map(|(key, index, accessor)| {
             (
-                StaticAccessor::Getter,
-                ir.has_jvm_default_static_getter(index),
-            ),
-            (
-                StaticAccessor::Setter,
-                ir.has_jvm_default_static_setter(index),
-            ),
-        ] {
-            if present {
-                ordered.push((
-                    (property.source_order, slot(accessor)),
-                    SourceOrderedMember::StaticDefaultAccessor(index, accessor),
-                ));
-            }
-        }
-    }
+                key,
+                SourceOrderedMember::StaticDefaultAccessor(index, accessor),
+            )
+        }),
+    );
     ordered.extend(
         class
             .methods
@@ -283,6 +268,39 @@ pub(super) fn source_ordered_members<'a>(
         }
     }
     ordered
+}
+
+/// The compiler-default accessors of the `companion { … }` block properties `class` stores, each
+/// keyed at its property's place among the class's members, the getter before the setter.
+pub(super) fn static_default_accessors<'a>(
+    ir: &'a IrFile,
+    class: &'a IrClass,
+) -> impl Iterator<Item = ((u32, u8), u32, super::static_fields::StaticAccessor)> + 'a {
+    use super::static_fields::StaticAccessor;
+    (0..ir.statics.len() as u32)
+        .filter(move |&index| {
+            ir.companion_blocks.is_storage(index)
+                && ir.statics[index as usize].owner == Some(class.fq_name_id())
+        })
+        .flat_map(move |index| {
+            let order = ir.statics[index as usize].source_order;
+            [
+                (
+                    StaticAccessor::Getter,
+                    0,
+                    ir.has_jvm_default_static_getter(index),
+                ),
+                (
+                    StaticAccessor::Setter,
+                    1,
+                    ir.has_jvm_default_static_setter(index),
+                ),
+            ]
+            .into_iter()
+            .filter_map(move |(accessor, slot, present)| {
+                present.then_some(((order, slot), index, accessor))
+            })
+        })
 }
 
 /// The schedule key of an `interface by` forwarder. kotlinc generates delegated members after the

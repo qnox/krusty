@@ -1251,6 +1251,32 @@ impl ReleaseBuild {
         build
     }
 
+    /// kotlinc's bytes of `class`.
+    fn reference_class(&self, class: &str) -> Vec<u8> {
+        Self::read_class(&self.reference, class)
+    }
+
+    /// krusty's bytes of `class`.
+    fn krusty_class(&self, class: &str) -> Vec<u8> {
+        Self::read_class(&self.krusty, class)
+    }
+
+    fn read_class(dir: &std::path::Path, class: &str) -> Vec<u8> {
+        std::fs::read(dir.join(format!("{class}.class")))
+            .unwrap_or_else(|error| panic!("{class} in {}: {error}", dir.display()))
+    }
+
+    /// The class files one compiler wrote, by name.
+    fn class_files(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("list the output")
+            .map(|entry| entry.expect("an output entry").file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".class"))
+            .collect();
+        names.sort();
+        names
+    }
+
     /// `box()`'s result from kotlinc's classes and from krusty's.
     fn box_results(&self) -> (String, String) {
         let run = |dir: &std::path::Path| {
@@ -1293,6 +1319,73 @@ fn hoisted_companion_delegate_initializes_with_its_companion_on_2_5() {
         SRC,
         "2.5.0-Beta2",
         &["+CompanionBlocks", "+CompanionExtensions"],
+    );
+    let (expected, actual) = build.box_results();
+    assert!(expected.starts_with("OK:"), "kotlinc ran the program: {expected}");
+    assert_eq!(actual, expected);
+}
+
+/// From Kotlin 2.5 an interface's block properties are stored: kotlinc keeps their fields in
+/// synthetic `$$PrivateFields1` (blocks before the companion object) and `$$PrivateFields2`
+/// (blocks after it) classes behind the interface's static accessors, and the interface's
+/// `<clinit>` initializes each class at its place around the companion object.
+#[test]
+fn interface_block_storage_follows_kotlinc_2_5() {
+    const SRC: &str = "var log = \"\"\n\
+        interface Ordered {\n\
+        \x20   companion {\n\
+        \x20       val before: String = run { log += \"A\"; \"a\" }\n\
+        \x20       var counter: Int = run { log += \"B\"; 1 }\n\
+        \x20       fun describe() = before + counter\n\
+        \x20   }\n\
+        \x20   companion object {\n\
+        \x20       val inObject: String = run { log += \"C\"; \"c\" }\n\
+        \x20       init { log += \"I\" }\n\
+        \x20   }\n\
+        \x20   companion {\n\
+        \x20       const val tag = \"t\"\n\
+        \x20       val after: String = run { log += \"D\"; \"d\" }\n\
+        \x20   }\n\
+        }\n\
+        interface AfterObject {\n\
+        \x20   companion object { val o = \"o\" }\n\
+        \x20   companion { val late: String = run { log += \"L\"; \"l\" } }\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   Ordered.counter = Ordered.counter + 1\n\
+        \x20   val values = Ordered.describe() + Ordered.inObject + Ordered.after + Ordered.tag\n\
+        \x20   val late = AfterObject.late + AfterObject.o\n\
+        \x20   return if (values == \"a2cdt\" && late == \"lo\") \"OK:$log\" else \"FAIL:$values:$late:$log\"\n\
+        }\n";
+    let build = ReleaseBuild::new(
+        "InterfaceStorage",
+        SRC,
+        "2.5.0-Beta2",
+        &["+CompanionBlocks", "+CompanionExtensions"],
+    );
+    for class in [
+        "Ordered",
+        "Ordered$$PrivateFields1",
+        "Ordered$$PrivateFields2",
+        "AfterObject",
+        "AfterObject$$PrivateFields2",
+    ] {
+        let (krusty, reference) = (build.krusty_class(class), build.reference_class(class));
+        assert_eq!(
+            common::member_table(&krusty),
+            common::member_table(&reference),
+            "{class}: kotlinc's member table"
+        );
+        assert_eq!(
+            common::raw_kotlin_metadata(&krusty),
+            common::raw_kotlin_metadata(&reference),
+            "{class}: kotlinc's @Metadata"
+        );
+    }
+    assert_eq!(
+        ReleaseBuild::class_files(&build.krusty),
+        ReleaseBuild::class_files(&build.reference),
+        "kotlinc's class files"
     );
     let (expected, actual) = build.box_results();
     assert!(expected.starts_with("OK:"), "kotlinc ran the program: {expected}");

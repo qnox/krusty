@@ -373,10 +373,13 @@ pub(super) fn emit_default_static_accessor(
     // `()Ljava/util/List<Ljava/lang/String;>;` and `setXs(List)` as `(Ljava/util/List<…>;)V`.
     let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
     let declared = ir.static_accessor_annotations(static_index);
+    let storage_class = companion_blocks::storage_class(ir, static_index, owner);
+    let access = companion_blocks::default_accessor_access(ir, static_index);
     if accessor == StaticAccessor::Setter {
         emit_default_static_setter(
             cw,
-            owner,
+            &storage_class,
+            access,
             s,
             ir.static_field_jvm_name(static_index),
             DefaultSetterHeader {
@@ -414,7 +417,7 @@ pub(super) fn emit_default_static_accessor(
     if getter_line != 0 {
         g.mark_line(getter_line);
     }
-    let fref = cw.fieldref(owner, field_name, &desc);
+    let fref = cw.fieldref(&storage_class, field_name, &desc);
     g.getstatic(fref, slot_words(jt) as i32);
     // kotlinc emits no guard in the getter of a property another class probes with
     // `isInitialized`: that getter returns the raw field.
@@ -448,7 +451,7 @@ pub(super) fn emit_default_static_accessor(
     emit_return(jt, &mut g);
     g.link();
     cw.add_method_sig(
-        0x0019 | super::method_access::annotated_method_modifiers(annotations),
+        access | super::method_access::annotated_method_modifiers(annotations),
         &accessor_signature.name,
         &accessor_signature.descriptor,
         &g,
@@ -504,7 +507,8 @@ struct DefaultSetterHeader<'a> {
 /// A static property's compiler-default `setX`; see [`emit_default_static_accessor`].
 fn emit_default_static_setter(
     cw: &mut ClassWriter,
-    owner: &str,
+    storage_class: &str,
+    access: u16,
     s: &krusty::ir::IrStatic,
     field_name: &str,
     header: DefaultSetterHeader<'_>,
@@ -556,7 +560,7 @@ fn emit_default_static_setter(
         st.mark_line(setter_line);
     }
     load(jt, 0, &mut st);
-    let fref = cw.fieldref(owner, field_name, &field_descriptor);
+    let fref = cw.fieldref(storage_class, field_name, &field_descriptor);
     st.putstatic(fref, slot_words(jt) as i32);
     let setter_end = if s.is_lateinit && s.line != 0 && s.accessor_lines.declaration_end > s.line {
         s.accessor_lines.declaration_end
@@ -573,7 +577,7 @@ fn emit_default_static_setter(
     st.ensure_locals(words);
     st.link();
     cw.add_method_sig(
-        0x0019 | super::method_access::annotated_method_modifiers(annotations),
+        access | super::method_access::annotated_method_modifiers(annotations),
         name,
         descriptor,
         &st,
@@ -1263,7 +1267,10 @@ impl Emitter<'_> {
             // A `companion { … }` block property is read like a top-level one, with its
             // class in the facade's place: another class calls its public getter.
             if !emitted_by_owner && companion_blocks::getter_owned(self.ir, i) {
-                let m = self.cw.methodref(
+                let m = companion_blocks::accessor_methodref(
+                    self.ir,
+                    self.cw,
+                    i,
                     &owner_name,
                     &self.ir.jvm_static_getter_name(i),
                     &format!("(){}", type_descriptor(jt)),
@@ -1283,7 +1290,7 @@ impl Emitter<'_> {
                 })
             {
                 let fref = self.cw.fieldref(
-                    &owner_name,
+                    &companion_blocks::storage_class(self.ir, i, &owner_name),
                     self.ir.static_field_jvm_name(i),
                     &type_descriptor(jt),
                 );
@@ -1479,9 +1486,14 @@ impl Emitter<'_> {
             let emitted_by_owner = self.static_owner == Some(StaticOwner::Class(owner));
             if !emitted_by_owner && companion_blocks::setter_owned(self.ir, index) {
                 let setter = self.ir.jvm_static_setter_name(index);
-                let m =
-                    self.cw
-                        .methodref(&owner_name, &setter, &format!("({})V", type_descriptor(jt)));
+                let m = companion_blocks::accessor_methodref(
+                    self.ir,
+                    self.cw,
+                    index,
+                    &owner_name,
+                    &setter,
+                    &format!("({})V", type_descriptor(jt)),
+                );
                 code.invokestatic(m, slot_words(jt) as i32, 0);
             } else if emitted_by_owner
                 || !self.ir.is_jvm_companion_hoisted_static(index)
@@ -1491,7 +1503,7 @@ impl Emitter<'_> {
                     == Some(krusty::types::Visibility::Protected)
             {
                 let fref = self.cw.fieldref(
-                    &owner_name,
+                    &companion_blocks::storage_class(self.ir, index, &owner_name),
                     self.ir.static_field_jvm_name(index),
                     &type_descriptor(jt),
                 );
@@ -1605,7 +1617,9 @@ pub(super) fn declare_interface_statics(ir: &IrFile, c: &IrClass, cw: &mut Class
     // after that alias store, before `@Metadata`. A hoisted `@JvmField` property is visited later
     // because kotlinc places it after both.
     for (static_index, property) in ir.statics.iter().enumerate().filter(|(index, property)| {
-        property.owner_matches(&fq_name) && !ir.is_jvm_field_static(*index as u32)
+        property.owner_matches(&fq_name)
+            && !ir.is_jvm_field_static(*index as u32)
+            && !companion_blocks::in_interface_storage_class(ir, *index as u32)
     }) {
         let descriptor = ir_type_desc(&property.ty);
         let value = property.init.and_then(|init| constant_value(ir, init));
