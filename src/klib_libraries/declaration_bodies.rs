@@ -676,15 +676,20 @@ impl KlibDeclarationBodies {
         let mut symbols = arena.emitted_callable_symbols(function, forms);
         // A file-local class the body constructs, an object literal's among them, is
         // materialized with the body, every member included, since dispatch can run any of them.
+        // A private class of the same file is its own declaration tree, so its members are read
+        // in the arena that serializes the class.
         let mut classes = crate::fx_hash::HashSet::default();
         let mut next = 0;
         while let Some(symbol) = symbols.get(next).copied() {
             next += 1;
-            if let Some(class) = self.constructed_local_class(&identity.module, arena, symbol) {
+            if let Some((class_arena, class)) =
+                self.constructed_local_class(&identity.module, symbol)
+            {
                 if classes.insert(&class.base.symbol) {
-                    symbols.extend(
-                        arena.emitted_callable_symbols_from(arena.class_member_roots(class), forms),
-                    );
+                    symbols.extend(class_arena.emitted_callable_symbols_from(
+                        class_arena.class_member_roots(class),
+                        forms,
+                    ));
                 }
             }
         }
@@ -700,13 +705,13 @@ impl KlibDeclarationBodies {
             .collect()
     }
 
-    /// The file-local class of `module` whose constructor `symbol` names, serialized in `arena`.
+    /// The file-local class of `module` whose constructor `symbol` names, with the arena that
+    /// serializes the class and its constructor.
     fn constructed_local_class<'a>(
         &'a self,
         module: &str,
-        arena: &'a KlibIrArena,
         symbol: &KlibIrSymbol,
-    ) -> Option<&'a KlibIrClass> {
+    ) -> Option<(&'a KlibIrArena, &'a KlibIrClass)> {
         if symbol.kind != KlibIrSymbolKind::Constructor
             || !matches!(symbol.signature, KlibIrSignature::FileLocal { .. })
         {
@@ -717,10 +722,8 @@ impl KlibDeclarationBodies {
             return None;
         };
         let (class_arena, class) = self.module_local_class(module, &classifier.signature)?;
-        (function.constructor
-            && std::ptr::eq(arena, function_arena)
-            && std::ptr::eq(arena, class_arena))
-        .then_some(class)
+        (function.constructor && std::ptr::eq(function_arena, class_arena))
+            .then_some((class_arena, class))
     }
 
     /// Whether `identity` is an executable dependency-support root: its own serialized body has a
