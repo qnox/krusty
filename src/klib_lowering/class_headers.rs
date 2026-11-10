@@ -4,7 +4,9 @@ use super::decline::KlibBodyDeclineReason;
 use super::klib_types::{classifier_name, semantic_type, KlibTypeParameters};
 use crate::fx_hash::HashSet;
 use crate::klib_libraries::KlibDeclarationBodies;
-use crate::libraries::{KlibBodyCallable, KlibBodyClassContract, KlibBodyClassParameters};
+use crate::libraries::{
+    KlibAccessorRole, KlibBodyCallable, KlibBodyClassContract, KlibBodyClassParameters,
+};
 use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrClass, KlibIrFunction, KlibIrVariance};
 use crate::metadata::klib_ir::KlibIrSymbolKind;
 use crate::metadata::klib_ir::{
@@ -78,7 +80,13 @@ pub(super) fn authenticate<'a, 'b>(
         ));
     }
     let member = bodies
-        .class_member_header(selected.identity(), &class.signature)
+        .class_member_header(
+            selected.identity(),
+            &class.signature,
+            selected
+                .accessor()
+                .map_or(KlibAccessorRole::Getter, |accessor| accessor.role),
+        )
         .map_err(mismatch)?
         .ok_or_else(|| mismatch("a selected member has no exact serialized class header"))?;
     if member.class.base.symbol.kind != KlibIrSymbolKind::Class {
@@ -115,7 +123,7 @@ pub(super) fn authenticate_private_member<'a, 'b>(
         ));
     }
     let member = bodies
-        .class_member_header(identity, &class.signature)
+        .class_member_header(identity, &class.signature, KlibAccessorRole::Getter)
         .map_err(mismatch)?
         .ok_or_else(|| mismatch("a private member is not a direct member of its calling class"))?;
     if member.class.base.symbol.kind != KlibIrSymbolKind::Class {
