@@ -478,15 +478,16 @@ fn compile_multifile(
     // `.java` blocks are collected separately: javac compiles them first (in-process, via the
     // persistent JavaRunner) and their classes join krusty's classpath as an in-memory overlay,
     // mirroring how kotlinc's test infra makes Java sources visible to the Kotlin compile.
-    let (mut blocks, java_blocks) = krusty::conformance::split_files(src);
+    let (mut blocks, java_blocks) = krusty::conformance::split_files(src).ok()?;
     // Single-file (no `// FILE:` markers) but routed here for coroutine-helper injection: the whole
     // source is the one main block.
     if blocks.is_empty() && java_blocks.is_empty() {
         blocks.push((main_stem.to_string(), src.to_string()));
     }
     // Mirror kotlinc: a `// WITH_COROUTINES` test gets the generated `helpers` source as an extra file.
-    if src.contains("// WITH_COROUTINES") {
-        blocks.push(("CoroutineUtil".to_string(), COROUTINE_HELPERS.to_string()));
+    if krusty::conformance::directive(src, "WITH_COROUTINES") {
+        let helpers = krusty::conformance::coroutine_sources(src, COROUTINE_HELPERS).ok()?;
+        blocks.extend(helpers);
     }
     // A lone `// FILE: main.kt` block still names the file (and so its facade class), exactly as
     // kotlinc's test infra compiles it; only a source with no Kotlin at all is rejected here.
@@ -726,7 +727,7 @@ fn compile_module_test(
     let mut modules = split_modules(src)?;
     // kotlinc's `// WITH_COROUTINES` helpers live in an implicit `support` module every module sees.
     if krusty::conformance::directive(src, "WITH_COROUTINES") {
-        krusty::conformance::inject_support_module(&mut modules, COROUTINE_HELPERS);
+        krusty::conformance::inject_coroutine_support(&mut modules, src, COROUTINE_HELPERS).ok()?;
     }
     let uid = UID.fetch_add(1, Ordering::Relaxed);
     let tmp = std::env::temp_dir().join(format!("krusty_modtest_{}_{uid}", std::process::id()));

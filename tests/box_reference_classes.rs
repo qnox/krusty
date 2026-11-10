@@ -21,8 +21,9 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use krusty::conformance::{
-    directive, inject_support_module, module_units, reference_only_kotlinc_arguments, split_files,
-    split_modules, unit_compiler_configuration, BoxJdk, FragmentUnit,
+    contains_directive, coroutine_sources, directive, inject_coroutine_support, module_units,
+    reference_only_kotlinc_arguments, source_modules, split_files, unit_compiler_configuration,
+    BoxJdk, FragmentUnit,
 };
 
 use super::common::{self, byte_dump};
@@ -651,12 +652,12 @@ fn plan_units(src: &str, stem: &str, coroutine_helpers: &str) -> Result<Vec<Plan
             })
             .map_err(|error| format!("reference oracle: {error}"))
     };
-    if src.contains("// MODULE:") {
-        let Some(mut modules) = split_modules(src) else {
+    if contains_directive(src, "MODULE") {
+        let Some(mut modules) = source_modules(src) else {
             return Err("reference oracle does not support this // MODULE: shape".to_string());
         };
         if directive(src, "WITH_COROUTINES") {
-            inject_support_module(&mut modules, coroutine_helpers);
+            inject_coroutine_support(&mut modules, src, coroutine_helpers)?;
         }
         return module_units(&modules)
             .into_iter()
@@ -676,13 +677,13 @@ fn plan_units(src: &str, stem: &str, coroutine_helpers: &str) -> Result<Vec<Plan
             })
             .collect();
     }
-    let (mut kotlin, java) = if src.contains("// FILE:") {
-        split_files(src)
+    let (mut kotlin, java) = if contains_directive(src, "FILE") {
+        split_files(src)?
     } else {
         (vec![(stem.to_string(), src.to_string())], Vec::new())
     };
     if directive(src, "WITH_COROUTINES") {
-        kotlin.push(("CoroutineUtil".to_string(), coroutine_helpers.to_string()));
+        kotlin.extend(coroutine_sources(src, coroutine_helpers)?);
     }
     let configuration = configuration(&kotlin)?;
     Ok(vec![PlannedUnit {

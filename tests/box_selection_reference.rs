@@ -112,6 +112,15 @@ impl Drop for Scratch {
 }
 
 fn compile_and_run(root: &Path, source: &str) -> String {
+    compile_and_run_with_options(root, source, None, &[])
+}
+
+fn compile_and_run_with_options(
+    root: &Path,
+    source: &str,
+    java: Option<String>,
+    options: &[&str],
+) -> String {
     let work = Scratch::new();
     let enum_file = work.0.join("TargetBackend.kt");
     let probe_file = work.0.join("SelectionOracle.kt");
@@ -119,7 +128,7 @@ fn compile_and_run(root: &Path, source: &str) -> String {
     std::fs::write(&probe_file, source).unwrap();
     let output = work.0.join("out");
     let stdlib = common::stdlib_jar();
-    let arguments = vec![
+    let mut arguments = vec![
         "-no-stdlib".into(),
         "-no-reflect".into(),
         "-classpath".into(),
@@ -129,10 +138,17 @@ fn compile_and_run(root: &Path, source: &str) -> String {
         enum_file.to_string_lossy().into_owned(),
         probe_file.to_string_lossy().into_owned(),
     ];
+    arguments.extend(options.iter().copied().map(str::to_owned));
     let (status, diagnostics) = common::kotlinc_server::kotlinc_compile_unrecorded(&arguments)
         .expect("exact-version reference compiler");
     assert_eq!(status, 0, "selector oracle compilation:\n{diagnostics}");
-    let classpath = vec![output.clone(), stdlib, common::jdk_modules()];
+    let mut classpath = vec![output.clone(), stdlib, common::jdk_modules()];
+    if let Some(java) = java {
+        let (classes, _) =
+            common::javac_compile(&[("DirectiveOracle.java".into(), java)], &classpath[..2])
+                .expect("compile original upstream directive methods");
+        classpath.push(classes);
+    }
     common::run_box(&[], "SelectionOracleKt", &classpath)
         .expect("run selector oracle on the shared JVM")
 }
@@ -247,5 +263,226 @@ fn every_box_root_and_selected_file_matches_executed_upstream_generators() {
             actual_files, expected_files,
             "{name}: exact upstream model selection"
         );
+    }
+}
+
+#[test]
+fn native_configuration_matches_upstream_relevance_filters() {
+    let corpus = krusty::toolchain::box_corpus_dir().expect("provisioned Kotlin corpus");
+    let root = box_inventory::checkout(&corpus).unwrap();
+    let original = read(
+        root,
+        "native/native.tests/testFixtures/org/jetbrains/kotlin/konan/test/blackbox/support/group/ExtTestCaseGroupProvider.kt",
+    );
+    let constants = original
+        .lines()
+        .filter(|line| line.contains("private val INCOMPATIBLE_"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let start = original.find("INCOMPATIBLE_DIRECTIVES.none").unwrap();
+    let end = original[start..].find("&& !(FILECHECK_STAGE").unwrap() + start;
+    let expression = original[start..end].trim();
+    let cases = [
+        ("FULL_JDK", ""),
+        ("JVM_TARGET", "1.8"),
+        ("DIAGNOSTICS", "-UNUSED_VARIABLE"),
+        ("API_VERSION", "1.4"),
+        ("API_VERSION", "1.5"),
+        ("LANGUAGE_VERSION", "1.3"),
+        ("LANGUAGE_VERSION", "1.4"),
+        ("LANGUAGE_VERSION", "2.4"),
+        ("WITH_STDLIB", ""),
+        ("KJS_WITH_FULL_RUNTIME", ""),
+    ];
+    let queries = cases
+        .iter()
+        .map(|(name, value)| {
+            format!(
+                "relevant({}, {}).toString()",
+                kotlin_string(name),
+                kotlin_string(value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let kotlin = format!(
+        r#"
+const val FULL_JDK = "FULL_JDK"
+const val JVM_TARGET = "JVM_TARGET"
+const val DIAGNOSTICS = "DIAGNOSTICS"
+const val API_VERSION = "API_VERSION"
+const val LANGUAGE_VERSION = "LANGUAGE_VERSION"
+object ApiVersion {{ const val KOTLIN_1_4 = "1.4" }}
+object LanguageVersion {{ const val KOTLIN_1_3 = "1.3"; const val KOTLIN_1_4 = "1.4" }}
+{constants}
+class Directives(val name: String, val value: String) {{
+    operator fun contains(key: String) = key == name
+    operator fun get(key: String): List<String> = if (key == name) listOf(value) else emptyList()
+}}
+class Structure(val directives: Directives)
+fun relevant(name: String, value: String): Boolean {{
+    val structure = Structure(Directives(name, value))
+    return {expression}
+}}
+fun box(): String = listOf({queries}).joinToString("\n")
+"#
+    );
+    let result = compile_and_run(root, &kotlin);
+    let results: Vec<_> = result.lines().collect();
+    assert_eq!(results.len(), cases.len());
+    for ((name, value), actual) in cases.into_iter().zip(results) {
+        let source = format!("// {name}: {value}");
+        assert_eq!(
+            krusty::conformance::native_box_configuration_applicable(&source),
+            actual.parse::<bool>().unwrap(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn native_def_applicability_matches_the_pinned_runner() {
+    let corpus = krusty::toolchain::box_corpus_dir().expect("provisioned Kotlin corpus");
+    let root = box_inventory::checkout(&corpus).unwrap();
+    let original = read(
+        root,
+        "native/native.tests/testFixtures/org/jetbrains/kotlin/konan/test/blackbox/support/util/CInteropUtils.kt",
+    );
+    let function = &original[original
+        .find("fun String.defFileContentsIsSupportedOn(")
+        .unwrap()..];
+    let cases = [
+        "headers = stdlib.h\n",
+        "language = Objective-C\nheaders = Test.h\n",
+        "LANGUAGE=objective-c\n",
+        "language = C\n",
+        "---\nlanguage = Objective-C\n",
+        "language = Objective-C\n---\n",
+        "language = Objective-C = extra\n",
+    ];
+    let queries = [false, true]
+        .into_iter()
+        .flat_map(|apple| {
+            cases.iter().map(move |source| {
+                format!(
+                    "{}.defFileContentsIsSupportedOn(KonanTarget(Family({apple}))).toString()",
+                    kotlin_string(source)
+                )
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let kotlin = format!(
+        r#"
+class Family(val isAppleFamily: Boolean)
+class KonanTarget(val family: Family)
+{function}
+fun box(): String = listOf({queries}).joinToString("\n")
+"#
+    );
+    let result = compile_and_run(root, &kotlin);
+    let actual = result.lines().collect::<Vec<_>>();
+    let expected = [false, true]
+        .into_iter()
+        .flat_map(|apple| {
+            cases.iter().map(move |source| {
+                krusty::conformance::native_def_contents_supported(source, apple).to_string()
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn native_target_conditions_match_the_pinned_evaluator() {
+    let corpus = krusty::toolchain::box_corpus_dir().expect("provisioned Kotlin corpus");
+    let root = box_inventory::checkout(&corpus).unwrap();
+    let original = read(
+        root,
+        "native/native.tests/testFixtures/org/jetbrains/kotlin/konan/test/blackbox/support/group/IgnoreDisableHelper.kt",
+    );
+    let properties = read(
+        root,
+        "native/native.tests/testFixtures/org/jetbrains/kotlin/konan/test/blackbox/support/ConfigurationProperties.kt",
+    );
+    let start = properties.find("enum class ClassLevelProperty(").unwrap();
+    let end = start + properties[start..].find("\n    ;").unwrap();
+    let property_enum = format!("{}\n}}", &properties[start..end]);
+    let constants_start = original.find("private val TARGET_FAMILY").unwrap();
+    let constants_end = original.find("internal val List<TargetBackend>").unwrap();
+    let evaluator_start = original.find("internal fun Settings.evaluate(").unwrap();
+    let evaluator_end = original
+        .find("fun RegisteredDirectives.collectToggledCheckers(")
+        .unwrap();
+    let (arch, other, target, other_target) = match std::env::consts::ARCH {
+        "aarch64" => ("ARM64", "X64", "linux_arm64", "linux_x64"),
+        "x86_64" => ("X64", "ARM64", "linux_x64", "linux_arm64"),
+        architecture => panic!("unsupported Native test architecture: {architecture}"),
+    };
+    let cases = vec![
+        vec![String::new()],
+        vec!["isAppleTarget=false".into()],
+        vec!["isAppleTarget=true".into()],
+        vec!["targetFamily=LINUX".into()],
+        vec!["targetFamily=MINGW".into()],
+        vec![format!("targetArchitecture={arch}")],
+        vec![format!("targetArchitecture={other}")],
+        vec![format!("target={target}")],
+        vec![format!("target={other_target}")],
+        vec!["targetSupportsCoreSymbolication=false".into()],
+        vec!["targetSupportsCoreSymbolication=true".into()],
+        vec!["targetFamily=LINUX && isAppleTarget=false".into()],
+        vec!["targetFamily=LINUX && isAppleTarget=true".into()],
+        vec!["isAppleTarget=true".into(), "targetFamily=LINUX".into()],
+    ];
+    let queries = cases
+        .iter()
+        .map(|values| {
+            format!(
+                "excluded(listOf({})).toString()",
+                values
+                    .iter()
+                    .map(|value| kotlin_string(value))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let kotlin = include_str!("fixtures/box_selection/NativeDisableOracle.kt")
+        .replace("@CLASS_LEVEL_PROPERTIES@", &property_enum)
+        .replace("@ARCH@", arch)
+        .replace("@TARGET@", target)
+        .replace("@CONSTANTS@", &original[constants_start..constants_end])
+        .replace("@EVALUATOR@", &original[evaluator_start..evaluator_end])
+        .replace("@QUERIES@", &queries);
+    // The pinned test infrastructure uses the bracket destructuring syntax ahead of its
+    // default language version. Enable that syntax without rewriting the original evaluator.
+    let result = compile_and_run_with_options(
+        root,
+        &kotlin,
+        None,
+        &["-XXLanguage:+NameBasedDestructuring"],
+    );
+    let results = result.lines().collect::<Vec<_>>();
+    assert_eq!(results.len(), cases.len());
+    for (values, excluded) in cases.iter().zip(results) {
+        for name in ["DISABLE_NATIVE", "IGNORE_NATIVE"] {
+            let source = values
+                .iter()
+                .map(|value| {
+                    if value.is_empty() {
+                        format!("// {name}\n")
+                    } else {
+                        format!("// {name}: {value}\n")
+                    }
+                })
+                .collect::<String>();
+            assert_eq!(
+                krusty::conformance::native_box_configuration_applicable(&source),
+                !excluded.parse::<bool>().unwrap(),
+                "{source}"
+            );
+        }
     }
 }
