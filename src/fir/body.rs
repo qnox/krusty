@@ -9,7 +9,9 @@ use crate::fx_hash::{HashMap, HashSet};
 
 mod annotation_constructions;
 mod context_parameters;
+mod equality_bound;
 pub use annotation_constructions::{FirAnnotationConstruction, FirAnnotationDefaultValue};
+pub use equality_bound::FirEqualityBoundGuard;
 pub(super) mod value_parameters;
 pub use value_parameters::{FirDefaultValue, FirValueParameter, FirVarargParameter};
 pub(crate) mod debug_lines;
@@ -1769,6 +1771,7 @@ pub struct FirBody {
     /// crossinline capture wherever it is moved, which the target's inline ABI depends on.
     crossinline_parameters: Vec<LocalValueId>,
     parameters: Vec<FirValueParameter>,
+    equality_bound_guard: Option<FirEqualityBoundGuard>,
     default_values: Vec<FirDefaultValue>,
     captures: Vec<FirCapture>,
     capture_declaration_ordinals: Box<[u32]>,
@@ -1837,6 +1840,7 @@ impl FirBody {
             spliced_inline_parameters: Vec::new(),
             crossinline_parameters: Vec::new(),
             parameters: Vec::new(),
+            equality_bound_guard: None,
             default_values: Vec::new(),
             captures: Vec::new(),
             capture_declaration_ordinals: Box::default(),

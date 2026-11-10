@@ -7162,6 +7162,10 @@ pub struct TypeInfo {
     /// span. The public property result remains in `property_decl_types`/the stable signature;
     /// checked FIR consumes this distinct owner-local storage boundary directly.
     pub(crate) explicit_backing_field_types: HashMap<(u32, u32), Ty>,
+    /// The `@EqualityBound` classifier, declared or inherited from the overridden `equals`, under
+    /// which a function body read its parameter, keyed by that parameter's type-reference span.
+    /// Checked FIR publishes it as the body's guard; lowering realizes the guard ahead of the body.
+    pub(crate) equality_bound_parameters: HashMap<(u32, u32), Ty>,
     /// Final results for source members checked inside the active body unit. Local and anonymous
     /// classifiers can mention enclosing classifiers, values, and type parameters that the module
     /// header table deliberately cannot finalize in Pass 1. This includes both expression-inferred
@@ -30354,6 +30358,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         local_decl_types: HashMap::default(),
         property_decl_types: HashMap::default(),
         explicit_backing_field_types: HashMap::default(),
+        equality_bound_parameters: HashMap::default(),
         contextual_constructor_signatures: HashMap::default(),
         selected_generic_calls: HashMap::default(),
         inferred_expression_intersections: HashMap::default(),
@@ -31812,6 +31817,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         local_decl_types,
         property_decl_types,
         explicit_backing_field_types,
+        equality_bound_parameters,
         selected_generic_calls,
         selected_value_smartcasts,
         selected_numeric_conversions,
@@ -32112,6 +32118,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         local_decl_types,
         property_decl_types,
         explicit_backing_field_types,
+        equality_bound_parameters,
         checked_source_member_results: inferred_source_member_rets,
         checked_declaration_results: inferred_stable_declaration_rets,
         inferred_declaration_publications,
@@ -32853,6 +32860,7 @@ struct Checker<'a> {
     local_decl_types: HashMap<StmtId, Ty>,
     property_decl_types: HashMap<(u32, u32), Ty>,
     explicit_backing_field_types: HashMap<(u32, u32), Ty>,
+    equality_bound_parameters: HashMap<(u32, u32), Ty>,
     /// Generic result templates for constructor spellings whose selected classifier does not carry
     /// the complete source-level substitution. The important case is an omitted generic typealias
     /// application (`Alias()`, `Alias<Y> = Box<Y>`): contextual argument inference must constrain
@@ -42428,6 +42436,8 @@ impl<'a> Checker<'a> {
             // `declare_narrowing_shadow` retains the original declared/storage type for writes and
             // checked-FIR smart-cast materialization.
             self.declare_narrowing_shadow(scope, &parameter.name, bound);
+            self.equality_bound_parameters
+                .insert((parameter.ty.span.lo, parameter.ty.span.hi), bound);
         }
     }
 

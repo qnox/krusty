@@ -500,6 +500,24 @@ fn bind_parameters_and_check_defaults(
             _ => FirValueParameter::bound(origin, value, parameter.ty),
         };
         checker.body.add_parameter(parameter_record);
+        if let Some(&bound) = checker
+            .info
+            .equality_bound_parameters
+            .get(&(parameter.span.lo, parameter.span.hi))
+        {
+            let bound = ResolvedTy::new(bound).map_err(|error| {
+                checker.failure(
+                    Some(parameter.span),
+                    BodyCheckFailureKind::UnpublishableType(error),
+                )
+            })?;
+            checker
+                .body
+                .publish_equality_bound_guard(crate::fir::FirEqualityBoundGuard {
+                    parameter: value,
+                    bound,
+                });
+        }
         if parameter.inline_expansion_mode() == crate::types::InlineExpansionMode::Splice {
             checker.body.add_spliced_inline_parameter(value);
         }
