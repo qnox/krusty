@@ -1,7 +1,11 @@
 // Class literals over a type and over a value, and the `KClass` members a program reads off
 // them. A bound literal answers the receiver's runtime class, never its static type, and a scalar
-// receiver answers its box's class. Tokens are equal by the class they stand for.
+// receiver answers its box's class. Tokens are equal by the class they stand for. A `typeOf`
+// object is one of those values; its runtime class differs by target, so this file compares the
+// object and leaves `::class` on it to the Wasm type-of check.
 package regression.classliterals
+
+import kotlin.reflect.typeOf
 
 open class Base
 class Derived : Base()
@@ -54,5 +58,9 @@ fun box(): String {
     val anonymous = object {}
     if (anonymous::class.simpleName != null) return "fail anonymous simpleName"
     if (anonymous::class == Local::class) return "fail anonymous distinct"
+
+    val described = typeOf<Derived>()
+    if (described != typeOf<Derived>()) return "fail typeOf"
+    if (described == typeOf<Base>()) return "fail typeOf distinct"
     return "OK"
 }
