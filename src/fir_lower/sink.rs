@@ -389,6 +389,8 @@ impl<'a> CommonIrBodySink<'a> {
         callable: CallableId,
         visiting: &mut crate::fx_hash::HashSet<CallableId>,
     ) -> Result<(), FirFileLoweringFailure> {
+        // A common call of an `expect` inlines the template of the `actual` replacing it.
+        let callable = super::expect_realization::realized_callable(index, callable);
         if self.materialized_inline_callables.contains(&callable) {
             return Ok(());
         }

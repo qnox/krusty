@@ -844,7 +844,7 @@ impl BodyLowering<'_, '_, '_> {
                             if realization.owner_is_interface {
                                 if let Some(identity) = realization.dependency_callable.as_ref() {
                                     return self.dependency_interface_stub(
-                                        identity, receiver, args, params, *ret,
+                                        identity, signature, receiver, args, params, *ret,
                                     );
                                 }
                             }

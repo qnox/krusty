@@ -220,4 +220,9 @@ const char *kt_render(KRef value, kt_int *byte_length, KRef *storage);
    written. Defined in `krusty_lang.c`. */
 kt_int kt_render_ulong(uint64_t value, char *buffer);
 
+/* `<a><first><b><second>`, then `<c><third>` when `c` is not NULL, the numbers rendered in decimal:
+   the message of a bounds failure. Defined in `krusty_rt.c`. */
+KRef kt_bounds_text(const char *a, kt_int first, const char *b, kt_int second, const char *c,
+                    kt_int third);
+
 #endif /* KRUSTY_INTERNAL_H */

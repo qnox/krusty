@@ -141,9 +141,18 @@ impl Checker<'_> {
                             .map(|candidate| candidate.target.params())
                             .collect::<Vec<_>>(),
                     );
+                    let selection =
+                        c.select_source_constructor(header_scope, &arguments, &candidates);
+                    if let SourceConstructorSelection::NoMatch { rejected, .. } = &selection {
+                        c.report_single_constructor_argument_mismatches(
+                            &arguments,
+                            &candidates,
+                            rejected,
+                        );
+                    }
                     if let SourceConstructorSelection::Selected {
                         resolved: selected, ..
-                    } = c.select_source_constructor(header_scope, &arguments, &candidates)
+                    } = selection
                     {
                         let mut selected = *selected;
                         if let (true, ResolvedCtorDelegationTarget::Super { owner, .. }) =

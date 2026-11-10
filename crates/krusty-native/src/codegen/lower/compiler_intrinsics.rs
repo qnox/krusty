@@ -151,6 +151,9 @@ impl BodyLowering<'_, '_, '_> {
                     }
                     self.primitive_hash_code(operand)
                 }
+                // The iteration protocol's own member: the member path realizes it through the
+                // receiver's runtime descriptor, exactly as it realizes a source call of it.
+                DependencyOperation::PrimitiveIteratorNext => return None,
             });
         }
         if intrinsic == Some(krusty::backend::BackendCompilerIntrinsic::ReinterpretBits) {
