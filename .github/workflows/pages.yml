@@ -82,7 +82,7 @@ jobs:
                 git ls-tree --name-only "$sha" scripts/oss-corpus/patches/ | xargs -r -n1 basename > "$dir/patches.txt"
               fi
             done
-          run=$(gh run list -R "$GITHUB_REPOSITORY" --workflow ci.yml --branch master --event push \
+          run=$(gh run list -R "$GITHUB_REPOSITORY" --workflow ci.yml --branch master --event workflow_dispatch \
             --status success --limit 1 --json databaseId,headSha,createdAt,url --jq '.[0] // empty')
           if [ -n "$run" ]; then
             printf '%s\n' "$run" > "$in/ci-run.json"

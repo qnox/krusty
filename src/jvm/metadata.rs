@@ -1338,16 +1338,7 @@ pub fn decode_metadata_within(
     let class_flags = (k == Some(1)).then(|| class_identity::class_flags(&ctx));
     let scope =
         enclosing_type_parameters::class_scope(enclosing, &class_tparams, &class_type_param_bounds);
-    let data_equality_bound = class_flags
-        .is_some_and(|flags| flags & (1u64 << 10) != 0)
-        .then(|| Ty::obj(this_class));
-    let members = LazyMembers::new(
-        bytes.clone(),
-        d2.to_vec(),
-        k == Some(1),
-        enclosing,
-        data_equality_bound,
-    );
+    let members = LazyMembers::new(bytes.clone(), d2.to_vec(), k == Some(1), enclosing);
     Ok(KotlinMeta {
         class_visibility: class_flags
             .map(flags_visibility)
@@ -1684,7 +1675,6 @@ fn decode_functions(
     fn_field: u64,
     class_tparams: &[(u64, String)],
     class_tparam_bounds: &[Vec<Ty>],
-    data_equality_bound: Option<Ty>,
 ) -> MetadataResult<Vec<MetaFn>> {
     let declared_classifier = |ty: Ty| match ty.non_null().kind() {
         TyKind::Obj(internal, _) => Some(internal),
@@ -1808,22 +1798,12 @@ fn decode_functions(
                     };
                     let value_params: Vec<MetaValueParam> =
                         pf.value_params.iter().map(decode_parameter).collect();
-                    let equality_bound = pf
-                        .value_params
-                        .iter()
-                        .find_map(|parameter| {
-                            decode_type(
-                                parameter.equality_bound_body.as_deref(),
-                                parameter.equality_bound_id,
-                            )
-                        })
-                        .or_else(|| {
-                            (pf.is_synthesized
-                                && kotlin_name == "equals"
-                                && value_params.len() == 1)
-                                .then_some(data_equality_bound)
-                                .flatten()
-                        });
+                    let equality_bound = pf.value_params.iter().find_map(|parameter| {
+                        decode_type(
+                            parameter.equality_bound_body.as_deref(),
+                            parameter.equality_bound_id,
+                        )
+                    });
                     let context_params = if !pf.context_params.is_empty() {
                         Some(
                             pf.context_params
@@ -2705,7 +2685,7 @@ mod module_reader_tests {
             enclosing: &[],
         };
         let decoded =
-            super::decode_functions(&ctx, 3, &[], &[], None).expect("function metadata decodes");
+            super::decode_functions(&ctx, 3, &[], &[]).expect("function metadata decodes");
         assert_eq!(decoded.len(), 1);
         let function = &decoded[0];
         assert!(function.is_extension());

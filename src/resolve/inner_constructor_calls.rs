@@ -357,6 +357,10 @@ impl Checker<'_> {
                 ))
             }
             Ok(LibraryConstructorSelection::Rejected) => Some(Ty::Error),
+            Ok(LibraryConstructorSelection::Invisible(invisible)) => {
+                self.report_invisible_constructor(call, &invisible);
+                Some(Ty::Error)
+            }
             Ok(LibraryConstructorSelection::NoMatch(_)) => {
                 crate::trace_compiler!(
                     "resolve",
