@@ -1282,7 +1282,13 @@ impl ReleaseBuild {
     fn class_files(dir: &std::path::Path) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(dir)
             .expect("list the output")
-            .map(|entry| entry.expect("an output entry").file_name().to_string_lossy().into_owned())
+            .map(|entry| {
+                entry
+                    .expect("an output entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .filter(|name| name.ends_with(".class"))
             .collect();
         names.sort();
@@ -1403,6 +1409,9 @@ fn interface_block_storage_follows_kotlinc_2_5() {
         "kotlinc's class files"
     );
     let (expected, actual) = build.box_results();
-    assert!(expected.starts_with("OK:"), "kotlinc ran the program: {expected}");
+    assert!(
+        expected.starts_with("OK:"),
+        "kotlinc ran the program: {expected}"
+    );
     assert_eq!(actual, expected);
 }
