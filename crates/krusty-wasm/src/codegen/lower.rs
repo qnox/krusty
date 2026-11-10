@@ -540,6 +540,11 @@ fn expression_type(
         },
         // A member access common lowering produced after checking has its declaration's type,
         // which is what the instruction leaves on the stack; a use at a narrower type casts.
+        IrExpr::EnclosingInstance { inner, outer, .. } if ir.checked_type(id).is_none() => {
+            let (class, field) = super::classes::enclosing_field(ir, *inner, *outer)
+                .ok_or_else(|| "an enclosing instance without authenticated storage".to_string())?;
+            ir.classes[class as usize].fields[field as usize].ty
+        }
         IrExpr::GetField { class, index, .. } if ir.checked_type(id).is_none() => {
             ir.classes[*class as usize].fields[*index as usize].ty
         }
@@ -1360,6 +1365,13 @@ impl<'a> Body<'a> {
                 result,
             } => {
                 self.try_catch(body, &catches, finally, result)?;
+            }
+            IrExpr::EnclosingInstance {
+                receiver,
+                inner,
+                outer,
+            } => {
+                self.enclosing_instance(receiver, inner, outer)?;
             }
             IrExpr::GetField {
                 receiver,
