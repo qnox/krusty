@@ -750,6 +750,7 @@ impl<'a> FileLowering<'a> {
                     finallys: Vec::new(),
                     dead: Vec::new(),
                     unresolved_reified: Vec::new(),
+                    scope: krusty::ir::IrEnclosure::File,
                     frame_objects: krusty::fx_hash::HashMap::default(),
                     frame_fields: krusty::fx_hash::HashMap::default(),
                     enum_base: None,
@@ -846,6 +847,7 @@ impl<'a> FileLowering<'a> {
             ret,
             &name,
             &mut |lowering, params| {
+                lowering.scope = krusty::ir::IrEnclosure::Function(index as krusty::ir::FunId);
                 lowering.record_semantic_slots(&semantic_slots);
                 for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
                     let variable = lowering.declare_value(slot as u32, *ty)?;
@@ -945,6 +947,10 @@ struct BodyLowering<'a, 'b, 'c> {
     /// being emitted. A runtime type operation naming one executes Kotlin's direct-call failure;
     /// ordinary functions and specialized inline copies leave this empty.
     unresolved_reified: Vec<String>,
+    /// The common-IR scope whose body this frame lowers. A type operation against a reified
+    /// parameter the scope's own declaration introduces is that declaration's template, which
+    /// [`krusty::ir::IrFile::is_reified_template_operation`] identifies for every backend.
+    scope: krusty::ir::IrEnclosure,
     /// The constructions of this body whose object lives in this frame, each with the local it
     /// initializes; see `frame_objects`.
     frame_objects: krusty::fx_hash::HashMap<u32, u32>,
@@ -1766,11 +1772,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         | IrTypeOp::NotInstanceOf
                         | IrTypeOp::Cast
                         | IrTypeOp::CastNonNull
-                ) && self.unresolved_reified.iter().any(|parameter| {
+                ) && (self.unresolved_reified.iter().any(|parameter| {
                     type_operand
                         .type_parameter_occurrence_bound(parameter)
                         .is_some()
-                }) {
+                }) || self.file.ir.is_reified_template_operation(
+                    self.scope,
+                    id,
+                    type_operand,
+                )) {
                     // The operand precedes kotlinc's reified-operation marker and therefore keeps
                     // any side effect or exception it produces before the marker's own failure.
                     let _ = self.expression(arg)?;

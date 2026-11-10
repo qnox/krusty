@@ -1095,6 +1095,10 @@ impl<'a> FileLowering<'a> {
         let prelude = secondary.delegate_prelude.clone();
         let body_expression = secondary.body;
         self.emit_function(id, signature, Ty::Unit, &name, &mut |body, params| {
+            body.scope = krusty::ir::IrEnclosure::Constructor {
+                class,
+                ordinal: ordinal as u32 + 1,
+            };
             body.record_semantic_slots(&semantic_slots);
             for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
                 let variable = body.declare_value(slot as u32, *ty)?;
@@ -1559,6 +1563,7 @@ impl<'a> FileLowering<'a> {
 
         let name = format!("{}.<init>", declaration.fq_name());
         self.emit_function(id, signature, Ty::Unit, &name, &mut |body, params| {
+            body.scope = krusty::ir::IrEnclosure::Constructor { class, ordinal: 0 };
             body.record_semantic_slots(&semantic_slots);
             for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
                 let variable = body.declare_value(slot as u32, *ty)?;
