@@ -700,23 +700,20 @@ impl<'a> Checker<'a> {
     }
 
     /// Whether `x in a..b` has a REFERENCE value over a primitive range whose elements can actually
-    /// inhabit it (`x: Any` over `4..10`). The membership test then reduces to "is `x` a boxed element
-    /// of the range", so a value type unrelated to the boxed element (`x: String` over `4..10`) is
+    /// inhabit it (`x: Any` over `4..10`). The membership test then reduces to "is `x` an element
+    /// of the range", so a value type unrelated to the element's classifier (`x: String` over `4..10`) is
     /// excluded — that comparison is never non-trivially true and kotlinc rejects it.
     ///
     /// Only `Int`/`Long`/`Char` elements qualify, because the widened form is `Iterable<T>.contains`:
     /// a FLOATING-POINT range is a `ClosedFloatingPointRange`, not an `Iterable`, so kotlinc rejects
-    /// `x: Any in 1.0..2.0` outright; a `Byte`/`Short` range is really an `IntRange` (its elements box
-    /// to `Integer`, not to the bound's own wrapper); and an unsigned range's elements box to their
+    /// `x: Any in 1.0..2.0` outright; a `Byte`/`Short` range is really an `IntRange` (its elements are
+    /// `Int`s, not the bound's own type); and an unsigned range's elements box to their
     /// inline class, which krusty erases to the signed primitive.
     fn in_range_widened_value(&self, value: Ty, element: Ty) -> bool {
         if !matches!(element, Ty::Int | Ty::Long | Ty::Char) {
             return false;
         }
-        let Some(boxed) = element.boxed_ref() else {
-            return false;
-        };
-        value.is_reference() && self.when_objs_comparable(value.non_null(), boxed)
+        value.is_reference() && self.when_objs_comparable(value.non_null(), element)
     }
 
     pub(super) fn resolve_in_range_expression(
