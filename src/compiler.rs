@@ -864,8 +864,10 @@ fn check_body_group(
         symbols.semantic_platform(),
         &info,
         index,
-        group.root,
-        &group.bodies,
+        crate::resolve::CheckedLocalBodies {
+            root: group.root,
+            bodies: &group.bodies,
+        },
     ) {
         diags.error(
             Span::new(0, 0),

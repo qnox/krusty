@@ -8,6 +8,18 @@ use super::ProductionSignatureSemantics;
 use crate::resolve::selected_result_publication::CompactSelectedResultPublication;
 use crate::types::{Ty, TyKind};
 
+pub(super) struct SelectedMemberPublication<'a> {
+    pub(super) receiver: crate::fir::ResolvedTy,
+    pub(super) type_arguments: &'a [Ty],
+    pub(super) expected: Option<crate::fir::ResolvedTy>,
+    pub(super) result: Ty,
+    pub(super) member: Option<crate::libraries::LibraryMember>,
+    pub(super) source: Option<(u32, u32)>,
+    pub(super) source_declaration: Option<crate::fir::DeclarationId>,
+    pub(super) argument_types: Vec<Ty>,
+    pub(super) publication: CompactSelectedResultPublication,
+}
+
 fn whole_array_arguments(arguments: &[crate::fir::ResolvedSigCallArgument<'_>]) -> Box<[bool]> {
     arguments
         .iter()
@@ -117,20 +129,23 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         scope: crate::fir::SignatureScope,
         origin: crate::fir::OriginId,
-        receiver: crate::fir::ResolvedTy,
-        type_arguments: &[Ty],
-        expected: Option<crate::fir::ResolvedTy>,
-        result: Ty,
-        member: Option<crate::libraries::LibraryMember>,
-        source: Option<(u32, u32)>,
-        source_declaration: Option<crate::fir::DeclarationId>,
-        argument_types: Vec<Ty>,
-        publication: CompactSelectedResultPublication,
+        selected: SelectedMemberPublication<'_>,
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<crate::fir::ResolvedMemberCall, crate::fir::DiagnosticId> {
+        let SelectedMemberPublication {
+            receiver,
+            type_arguments,
+            expected,
+            result,
+            member,
+            source,
+            source_declaration,
+            argument_types,
+            publication,
+        } = selected;
         if let Some(member) = member.as_ref() {
             if let Some(declaration) = member.stable_declaration {
                 if self
@@ -214,12 +229,14 @@ impl ProductionSignatureSemantics<'_> {
             {
                 let ty = self.apply_demanded_source_callable(
                     source,
-                    Some(receiver.get()),
                     &signature,
-                    &argument_types,
-                    None,
-                    type_arguments,
-                    expected.map(crate::fir::ResolvedTy::get),
+                    super::demanded_source_call::DemandedSourceInputs {
+                        receiver: Some(receiver.get()),
+                        arguments: &argument_types,
+                        argument_kinds: None,
+                        explicit_type_arguments: type_arguments,
+                        expected: expected.map(crate::fir::ResolvedTy::get),
+                    },
                 )?;
                 self.record_final_selected_publication(origin, publication, ty);
                 return Ok(crate::fir::ResolvedMemberCall {

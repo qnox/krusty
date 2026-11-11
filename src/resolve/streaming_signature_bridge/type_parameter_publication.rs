@@ -6,6 +6,18 @@ use crate::types::{Ty, TyKind};
 
 use super::super::SymbolTable;
 
+pub(super) struct DeclaredTypeParameters<'a> {
+    names: &'a [String],
+    bounds: &'a [(String, crate::fir::HeaderTypeId, TypeRef)],
+}
+
+pub(super) struct TypeParameterPublication<'a> {
+    pub(super) deferred_candidates: &'a crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    pub(super) deferred_headers: &'a mut crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    pub(super) failed: &'a mut Vec<crate::fir::DeclarationId>,
+    pub(super) diagnostics: &'a mut crate::diag::DiagSink,
+}
+
 pub(super) fn publish_declared_counts(
     headers: &crate::fir::StreamedHeaderModule,
     index: &mut crate::fir::ResolvedModuleIndex,
@@ -231,13 +243,16 @@ pub(super) fn enclosing(
 pub(super) fn symbolic(
     index: &crate::fir::ResolvedModuleIndex,
     declaration: crate::fir::DeclarationId,
-    declared_names: &[String],
-    declared_bounds: &[(String, crate::fir::HeaderTypeId, TypeRef)],
+    declared: DeclaredTypeParameters<'_>,
     reuse_callable_contract: bool,
     semantics: &super::ProductionSignatureSemantics<'_>,
     source: crate::fir::SourceFileId,
     declaration_start: u32,
 ) -> Result<super::super::TParams, crate::fir::DiagnosticId> {
+    let DeclaredTypeParameters {
+        names: declared_names,
+        bounds: declared_bounds,
+    } = declared;
     let table = semantics.table;
     let enclosing = enclosing(index, declaration);
     // A bound is resolved through the declaration's own scope tower: its lexical classifiers,
@@ -380,12 +395,15 @@ pub(super) fn publish(
     index: &mut crate::fir::ResolvedModuleIndex,
     declaration: crate::fir::DeclarationId,
     packed: &[crate::fir::HeaderTypeParameter],
-    declared_names: &[String],
-    declared_bounds: &[(String, crate::fir::HeaderTypeId, TypeRef)],
+    declared: DeclaredTypeParameters<'_>,
     symbolic: &super::super::TParams,
     stable: Option<&GenericSig>,
     table: &SymbolTable,
 ) -> Result<(), crate::fir::UnpublishableType> {
+    let DeclaredTypeParameters {
+        names: declared_names,
+        bounds: declared_bounds,
+    } = declared;
     let parameters = declared_names
         .iter()
         .zip(packed)
@@ -439,11 +457,14 @@ pub(super) fn publish_source_declarations(
     index: &mut crate::fir::ResolvedModuleIndex,
     semantics: &super::ProductionSignatureSemantics<'_>,
     solver_diagnostics: usize,
-    deferred_candidates: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
-    deferred_headers: &mut crate::fx_hash::HashSet<crate::fir::DeclarationId>,
-    failed: &mut Vec<crate::fir::DeclarationId>,
-    diagnostics: &mut crate::diag::DiagSink,
+    publication: TypeParameterPublication<'_>,
 ) {
+    let TypeParameterPublication {
+        deferred_candidates,
+        deferred_headers,
+        failed,
+        diagnostics,
+    } = publication;
     'declarations: for stub in &headers.stubs {
         if deferred_headers.contains(&stub.id)
             && stub.kind != crate::fir::DeclarationKind::Classifier
@@ -547,8 +568,10 @@ pub(super) fn publish_source_declarations(
         let symbolic = match symbolic(
             index,
             stub.id,
-            &declared_names,
-            &declared_bounds,
+            DeclaredTypeParameters {
+                names: &declared_names,
+                bounds: &declared_bounds,
+            },
             stable_generic.is_some(),
             semantics,
             stub.source,
@@ -575,8 +598,10 @@ pub(super) fn publish_source_declarations(
             index,
             stub.id,
             packed,
-            &declared_names,
-            &declared_bounds,
+            DeclaredTypeParameters {
+                names: &declared_names,
+                bounds: &declared_bounds,
+            },
             &symbolic,
             stable_generic,
             semantics.table,

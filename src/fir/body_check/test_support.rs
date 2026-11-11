@@ -183,8 +183,10 @@ pub(super) fn prepare_fir_source(
             pass_two_symbols.semantic_platform(),
             &info,
             &mut index,
-            root,
-            &selected_stable_bodies,
+            crate::resolve::CheckedLocalBodies {
+                root,
+                bodies: &selected_stable_bodies,
+            },
         )
         .expect("fresh Pass 2 local signatures");
     }

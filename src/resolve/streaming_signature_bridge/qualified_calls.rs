@@ -70,7 +70,7 @@ impl ProductionSignatureSemantics<'_> {
         self.with_qualified_package_resolver(scope, qualifier, |package, resolver| {
         let candidates = self.implicit_context_candidates(
             scope,
-            resolver.accessible_top_level_candidates(name).into_iter(),
+            resolver.accessible_top_level_candidates(name),
         );
         let (selected_arguments, selected_argument_types) =
             Self::mapped_call_arguments(&candidates, arguments, trailing_lambda)
@@ -106,12 +106,14 @@ impl ProductionSignatureSemantics<'_> {
             {
                 return self.apply_demanded_source_callable(
                     source,
-                    None,
                     &signature,
-                    &selected_argument_types,
-                    None,
-                    &type_arguments,
-                    None,
+                    super::demanded_source_call::DemandedSourceInputs {
+                        receiver: None,
+                        arguments: &selected_argument_types,
+                        argument_kinds: None,
+                        explicit_type_arguments: &type_arguments,
+                        expected: None,
+                    },
                 );
             }
         }
@@ -145,7 +147,7 @@ impl ProductionSignatureSemantics<'_> {
             let candidates = Self::structurally_applicable_call_candidates(
                 self.implicit_context_candidates(
                     scope,
-                    resolver.accessible_top_level_candidates(name).into_iter(),
+                    resolver.accessible_top_level_candidates(name),
                 ),
                 &argument_names,
                 arguments.len(),

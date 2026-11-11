@@ -10,16 +10,28 @@ use crate::types::Ty;
 
 use super::super::Signature;
 
+/// The receiver, arguments, and expected result that specialize one demanded source callable.
+pub(super) struct DemandedSourceInputs<'a> {
+    pub(super) receiver: Option<Ty>,
+    pub(super) arguments: &'a [Ty],
+    pub(super) argument_kinds: Option<&'a [CallArgKind]>,
+    pub(super) explicit_type_arguments: &'a [Ty],
+    pub(super) expected: Option<Ty>,
+}
+
 pub(super) fn demanded_source_result(
     source: &dyn SymbolSource,
     callable: &Signature,
     signature: &crate::fir::ResolvedSignature,
-    receiver: Option<Ty>,
-    arguments: &[Ty],
-    argument_kinds: Option<&[CallArgKind]>,
-    explicit_type_arguments: &[Ty],
-    expected: Option<Ty>,
+    inputs: DemandedSourceInputs<'_>,
 ) -> Ty {
+    let DemandedSourceInputs {
+        receiver,
+        arguments,
+        argument_kinds,
+        explicit_type_arguments,
+        expected,
+    } = inputs;
     let mut bindings = GSigBinds::default();
     if let Some(generic) = callable.generic_sig.as_ref() {
         bindings.extend(

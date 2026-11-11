@@ -7,6 +7,20 @@
 use super::*;
 use crate::types::TyKind;
 
+pub(super) struct OperatorConventionCall<'a> {
+    receiver: crate::fir::ResolvedTy,
+    spelling: &'a str,
+    arguments: &'a [crate::fir::ResolvedSigCallArgument<'a>],
+    local_operator: Option<crate::fir::ResolvedTy>,
+}
+
+pub(super) struct InPlaceAssignment {
+    pub(super) operator: crate::fir::SigBinaryOperator,
+    pub(super) receiver: crate::fir::ResolvedTy,
+    pub(super) argument: crate::fir::ResolvedTy,
+    pub(super) local_operator: Option<crate::fir::ResolvedTy>,
+}
+
 enum ReceiverOperatorRung {
     Selected {
         callable: Box<crate::libraries::FunctionInfo>,
@@ -22,15 +36,18 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         scope: crate::fir::SignatureScope,
         origin: crate::fir::OriginId,
-        receiver: crate::fir::ResolvedTy,
-        spelling: &str,
-        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
-        local_operator: Option<crate::fir::ResolvedTy>,
+        call: OperatorConventionCall<'_>,
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+        let OperatorConventionCall {
+            receiver,
+            spelling,
+            arguments,
+            local_operator,
+        } = call;
         if let Some(result) =
             self.select_receiver_operator_rung(scope, receiver, spelling, arguments, true, demand)?
         {
@@ -59,8 +76,10 @@ impl ProductionSignatureSemantics<'_> {
         for dispatch in self.signature_dispatch_receivers(scope) {
             let selected = self.signature_member_extension_call(
                 scope,
-                receiver.get(),
-                dispatch,
+                super::lookups::MemberExtensionReceivers {
+                    extension: receiver.get(),
+                    dispatch,
+                },
                 spelling,
                 lookups::SignatureMemberExtensionArguments {
                     arguments: &argument_kinds,
@@ -176,12 +195,14 @@ impl ProductionSignatureSemantics<'_> {
                 return self
                     .apply_demanded_source_callable(
                         source,
-                        Some(receiver.get()),
                         &signature,
-                        &argument_types,
-                        None,
-                        &[],
-                        None,
+                        super::demanded_source_call::DemandedSourceInputs {
+                            receiver: Some(receiver.get()),
+                            arguments: &argument_types,
+                            argument_kinds: None,
+                            explicit_type_arguments: &[],
+                            expected: None,
+                        },
                     )
                     .map(Some);
             }
@@ -212,15 +233,11 @@ impl ProductionSignatureSemantics<'_> {
             &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
         ]);
         let oracle = crate::symbol_resolver::SourceOracle(&source);
-        if super::super::context_argument_types(
+        super::super::context_argument_types(
             &self.implicit_receivers(scope),
             &signature.params[..context_count],
             &oracle,
-        )
-        .is_none()
-        {
-            return None;
-        }
+        )?;
         let context = crate::assignable::TyCtx::new();
         let operands = std::iter::once(receiver.get())
             .chain(arguments.iter().map(|argument| argument.ty.get()));
@@ -236,15 +253,18 @@ impl ProductionSignatureSemantics<'_> {
 pub(super) fn selects_in_place_assignment(
     semantics: &ProductionSignatureSemantics<'_>,
     scope: crate::fir::SignatureScope,
-    operator: crate::fir::SigBinaryOperator,
     origin: crate::fir::OriginId,
-    receiver: crate::fir::ResolvedTy,
-    argument: crate::fir::ResolvedTy,
-    local_operator: Option<crate::fir::ResolvedTy>,
+    assignment: InPlaceAssignment,
     demand: &mut dyn FnMut(
         crate::fir::DeclarationId,
     ) -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
 ) -> bool {
+    let InPlaceAssignment {
+        operator,
+        receiver,
+        argument,
+        local_operator,
+    } = assignment;
     let spelling = match operator {
         crate::fir::SigBinaryOperator::Add => "plusAssign",
         crate::fir::SigBinaryOperator::Subtract => "minusAssign",
@@ -276,10 +296,12 @@ pub(super) fn selects_in_place_assignment(
         .select_operator_convention(
             scope,
             origin,
-            receiver,
-            spelling,
-            &arguments,
-            local_operator,
+            OperatorConventionCall {
+                receiver,
+                spelling,
+                arguments: &arguments,
+                local_operator,
+            },
             demand,
         )
         .is_ok_and(|result| result.get() == Ty::Unit)

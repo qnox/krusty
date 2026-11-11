@@ -1202,13 +1202,16 @@ impl ProductionSignatureSemantics<'_> {
     pub(super) fn signature_member_extension_call(
         &self,
         scope: crate::fir::SignatureScope,
-        extension_receiver: Ty,
-        dispatch_receiver: Ty,
+        receivers: MemberExtensionReceivers,
         name: &str,
         call: SignatureMemberExtensionArguments<'_>,
         result_constraint: super::super::CallResultConstraint,
         selection: super::super::MemberExtensionSelection,
     ) -> SignatureMemberExtensionCallSelection {
+        let MemberExtensionReceivers {
+            extension: extension_receiver,
+            dispatch: dispatch_receiver,
+        } = receivers;
         let SignatureMemberExtensionArguments {
             arguments: argument_kinds,
             names,
@@ -1412,27 +1415,19 @@ impl ProductionSignatureSemantics<'_> {
     /// mirroring the top-level selection above one receiver rung at a time.
     pub(super) fn bare_member_call_expectations(
         &self,
-        scope: crate::fir::SignatureScope,
-        spelling: &str,
-        arguments: &[crate::fir::SigCallArgumentProbe<'_>],
-        type_arguments: &[Ty],
-        trailing_lambda: bool,
-        refresh_typed_postponed: bool,
-        expected: Option<Ty>,
+        call: super::semantics::ReceiverLevelCall<'_, '_>,
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<Box<[Option<crate::fir::ResolvedTy>]>, crate::fir::DiagnosticId> {
-        let call = super::semantics::ReceiverLevelCall {
+        let super::semantics::ReceiverLevelCall {
             scope,
             spelling,
             arguments,
-            type_arguments,
-            trailing_lambda,
             refresh_typed_postponed,
-            result_constraint: super::super::CallResultConstraint::direct(expected),
-        };
+            ..
+        } = call;
         for receiver in self
             .implicit_receivers(scope)
             .into_iter()
@@ -1844,6 +1839,12 @@ pub(super) enum SignatureMemberExtensionCallSelection {
         Vec<super::super::member_extension_selection::MemberExtensionConventionDiagnosticCandidate>,
     ),
     Ambiguous(Vec<super::super::MemberExtensionFunctionCandidate>),
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct MemberExtensionReceivers {
+    pub(super) extension: Ty,
+    pub(super) dispatch: Ty,
 }
 
 #[derive(Clone, Copy, Default)]

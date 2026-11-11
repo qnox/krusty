@@ -82,7 +82,7 @@ pub(crate) use local_signatures::publish_checked_local_signatures_in_active_root
 pub(crate) use local_signatures::publish_discovered_local_capture_declarations;
 pub(crate) use local_signatures::{
     publish_checked_default_local_signatures, publish_checked_inline_local_signatures,
-    publish_checked_local_signatures_in_pass_two_root,
+    publish_checked_local_signatures_in_pass_two_root, CheckedLocalBodies,
 };
 use postponed_argument_mapping::{typed_argument_evidence, MappedTopLevelSelection};
 pub(crate) use source_contracts::{extract_source_contract_candidates, SourceContractCandidate};
@@ -135,6 +135,12 @@ struct ExplicitContextCall {
     candidates: Vec<crate::libraries::FunctionInfo>,
     arguments: Vec<crate::symbol_resolver::CallArgKind>,
     argument_types: Vec<Ty>,
+}
+
+struct SuperMemberCall<'a> {
+    arguments: &'a [crate::fir::ResolvedSigCallArgument<'a>],
+    type_arguments: &'a [Ty],
+    trailing_lambda: bool,
 }
 
 const RECURSIVE_INFERENCE_MESSAGE: &str = "type checking has run into a recursive problem. Easiest workaround: specify the types of your declarations explicitly.";
@@ -1865,13 +1871,16 @@ impl ProductionSignatureSemantics<'_> {
     fn apply_demanded_source_callable(
         &self,
         source: (u32, u32),
-        receiver: Option<Ty>,
         signature: &crate::fir::ResolvedSignature,
-        arguments: &[Ty],
-        argument_kinds: Option<&[crate::symbol_resolver::CallArgKind]>,
-        explicit_type_arguments: &[Ty],
-        expected: Option<Ty>,
+        inputs: demanded_source_call::DemandedSourceInputs<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+        let demanded_source_call::DemandedSourceInputs {
+            receiver,
+            arguments,
+            argument_kinds,
+            explicit_type_arguments,
+            expected,
+        } = inputs;
         let declaration = DeclId(source.1);
         let Some(callable) = self
             .table
@@ -1904,11 +1913,13 @@ impl ProductionSignatureSemantics<'_> {
             &semantic_source,
             callable,
             signature,
-            receiver,
-            arguments,
-            argument_kinds,
-            explicit_type_arguments,
-            expected,
+            demanded_source_call::DemandedSourceInputs {
+                receiver,
+                arguments,
+                argument_kinds,
+                explicit_type_arguments,
+                expected,
+            },
         );
         crate::trace_compiler!(
             "signature",
@@ -2054,14 +2065,17 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         super_spelling: &str,
         member_spelling: &str,
-        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
-        type_arguments: &[Ty],
-        trailing_lambda: bool,
+        call: SuperMemberCall<'_>,
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+        let SuperMemberCall {
+            arguments,
+            type_arguments,
+            trailing_lambda,
+        } = call;
         let (class_super, interface_supers) = self.direct_super_receivers(scope, super_spelling)?;
         // `super.Inner(args)` is a constructor call on an inner classifier inherited through the
         // selected direct super receiver, not a method named `Inner`. Classifier construction is
@@ -4539,10 +4553,11 @@ pub(crate) fn finalized_streamed_signature_index(
             classifier.internal,
             interface_delegations,
         ));
-        let sealed_subclasses = classifier
-            .is_sealed()
-            .then(|| table.subclass_names_of(classifier.internal))
-            .unwrap_or_default();
+        let sealed_subclasses = if classifier.is_sealed() {
+            table.subclass_names_of(classifier.internal)
+        } else {
+            Default::default()
+        };
         let signature_scope = crate::fir::SignatureScope {
             owner: stub.id,
             source: stub.source,
@@ -4559,7 +4574,7 @@ pub(crate) fn finalized_streamed_signature_index(
                         .filter(|_| {
                             parameter.context_kind == crate::types::ContextParameterKind::Named
                         })
-                        .map(|name| Box::<str>::from(name)),
+                        .map(Box::<str>::from),
                     parameter.context_kind,
                     semantics.resolve_compact_header_type(signature_scope, parameter.ty)?,
                 ))
@@ -4607,10 +4622,12 @@ pub(crate) fn finalized_streamed_signature_index(
         &mut index,
         &semantics,
         solver_diagnostics,
-        &deferred_local_candidates,
-        &mut deferred_local_headers,
-        &mut failed,
-        diags,
+        type_parameter_publication::TypeParameterPublication {
+            deferred_candidates: &deferred_local_candidates,
+            deferred_headers: &mut deferred_local_headers,
+            failed: &mut failed,
+            diagnostics: diags,
+        },
     );
     // Syntaxless frontend-plugin callables already carry their complete semantic generic shape.
     // Publish those formals on the generated stable declaration just as compact syntax publishes

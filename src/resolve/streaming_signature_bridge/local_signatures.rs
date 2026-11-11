@@ -8,6 +8,23 @@ use crate::types::{TyKind, TypeVariance};
 #[cfg(test)]
 mod tests;
 
+/// The root declaration and the bodies published with one checked local-signature pass.
+pub(crate) struct CheckedLocalBodies<'a> {
+    pub(crate) root: crate::fir::DeclarationId,
+    pub(crate) bodies: &'a crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+}
+
+struct LocalSignatureSelection<'a> {
+    inline_owners: Option<&'a [crate::fir::DeclarationId]>,
+    active_source: Option<&'a crate::fir::ActiveSourceDeclarations>,
+    active_root: Option<(
+        &'a crate::fir::ActiveSourceDeclarations,
+        crate::fir::DeclarationId,
+        &'a crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    )>,
+    exact_declarations: Option<&'a [crate::fir::DeclarationId]>,
+}
+
 /// Same-parse test adapter for capture storage discovered by the legacy retained-file fixture.
 /// Production ordinary bodies publish no capture declaration; their checked FIR carries field
 /// coordinates directly.
@@ -91,8 +108,7 @@ pub(crate) fn publish_checked_local_signatures_in_active_root(
     table: &SymbolTable,
     info: &super::super::TypeInfo,
     index: &mut crate::fir::ResolvedModuleIndex,
-    selected_root: crate::fir::DeclarationId,
-    selected_bodies: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    selected: CheckedLocalBodies<'_>,
 ) -> Result<(), Vec<crate::fir::DeclarationId>> {
     publish_checked_local_signatures_selected(
         file,
@@ -101,10 +117,12 @@ pub(crate) fn publish_checked_local_signatures_in_active_root(
         table.libraries.as_ref(),
         info,
         index,
-        None,
-        Some(active),
-        Some((active, selected_root, selected_bodies)),
-        None,
+        LocalSignatureSelection {
+            inline_owners: None,
+            active_source: Some(active),
+            active_root: Some((active, selected.root, selected.bodies)),
+            exact_declarations: None,
+        },
     )
 }
 
@@ -115,8 +133,7 @@ pub(crate) fn publish_checked_local_signatures_in_pass_two_root(
     platform: &dyn crate::libraries::SemanticPlatform,
     info: &super::super::TypeInfo,
     index: &mut crate::fir::ResolvedModuleIndex,
-    selected_root: crate::fir::DeclarationId,
-    selected_bodies: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    selected: CheckedLocalBodies<'_>,
 ) -> Result<(), Vec<crate::fir::DeclarationId>> {
     publish_checked_local_signatures_selected(
         file,
@@ -125,10 +142,12 @@ pub(crate) fn publish_checked_local_signatures_in_pass_two_root(
         platform,
         info,
         index,
-        None,
-        Some(active),
-        Some((active, selected_root, selected_bodies)),
-        None,
+        LocalSignatureSelection {
+            inline_owners: None,
+            active_source: Some(active),
+            active_root: Some((active, selected.root, selected.bodies)),
+            exact_declarations: None,
+        },
     )
 }
 
@@ -149,10 +168,12 @@ pub(crate) fn publish_checked_local_signatures(
         table.libraries.as_ref(),
         info,
         index,
-        None,
-        Some(&active),
-        None,
-        None,
+        LocalSignatureSelection {
+            inline_owners: None,
+            active_source: Some(&active),
+            active_root: None,
+            exact_declarations: None,
+        },
     )
 }
 
@@ -172,10 +193,12 @@ pub(crate) fn publish_checked_inline_local_signatures(
         table.libraries.as_ref(),
         info,
         index,
-        Some(inline_owners),
-        active,
-        None,
-        None,
+        LocalSignatureSelection {
+            inline_owners: Some(inline_owners),
+            active_source: active,
+            active_root: None,
+            exact_declarations: None,
+        },
     )
 }
 
@@ -249,10 +272,12 @@ pub(crate) fn publish_checked_default_local_signatures(
         table.libraries.as_ref(),
         info,
         index,
-        Some(&owners),
-        Some(active),
-        None,
-        Some(&exact),
+        LocalSignatureSelection {
+            inline_owners: Some(&owners),
+            active_source: Some(active),
+            active_root: None,
+            exact_declarations: Some(&exact),
+        },
     )
 }
 
@@ -300,15 +325,14 @@ fn publish_checked_local_signatures_selected(
     platform: &dyn crate::libraries::SemanticPlatform,
     info: &super::super::TypeInfo,
     index: &mut crate::fir::ResolvedModuleIndex,
-    inline_owners: Option<&[crate::fir::DeclarationId]>,
-    active_source: Option<&crate::fir::ActiveSourceDeclarations>,
-    active_root: Option<(
-        &crate::fir::ActiveSourceDeclarations,
-        crate::fir::DeclarationId,
-        &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
-    )>,
-    exact_declarations: Option<&[crate::fir::DeclarationId]>,
+    selection: LocalSignatureSelection<'_>,
 ) -> Result<(), Vec<crate::fir::DeclarationId>> {
+    let LocalSignatureSelection {
+        inline_owners,
+        active_source,
+        active_root,
+        exact_declarations,
+    } = selection;
     use crate::fir::{
         CallableId, DeclarationFlags, DeclarationId, DeclarationKind, PropertyId,
         ResolvedCallableShape, ResolvedTy, ResolvedTypeParameterFlags, ResolvedValueParameterFlags,
@@ -977,14 +1001,13 @@ fn publish_checked_local_signatures_selected(
             })
             .collect::<Vec<_>>();
         if index.classifier_header(declaration).is_none() {
-            let sealed_subclasses = class
-                .is_sealed()
-                .then(|| {
-                    table
-                        .expect("legacy local classifier publication requires Pass-1 symbols")
-                        .subclass_names_of(class.internal)
-                })
-                .unwrap_or_default();
+            let sealed_subclasses = if class.is_sealed() {
+                table
+                    .expect("legacy local classifier publication requires Pass-1 symbols")
+                    .subclass_names_of(class.internal)
+            } else {
+                Default::default()
+            };
             if index
                 .publish_classifier_header(
                     declaration,

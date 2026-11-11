@@ -104,12 +104,14 @@ impl ProductionSignatureSemantics<'_> {
                     return self
                         .apply_demanded_source_callable(
                             source,
-                            Some(callee.get()),
                             &signature,
-                            &argument_types,
-                            None,
-                            &[],
-                            None,
+                            super::super::demanded_source_call::DemandedSourceInputs {
+                                receiver: Some(callee.get()),
+                                arguments: &argument_types,
+                                argument_kinds: None,
+                                explicit_type_arguments: &[],
+                                expected: None,
+                            },
                         )
                         .map(crate::fir::InvokeSelection::Selected);
                 }
@@ -132,8 +134,10 @@ impl ProductionSignatureSemantics<'_> {
         for dispatch in self.signature_dispatch_receivers(scope) {
             let selected = self.signature_member_extension_call(
                 scope,
-                callee.get(),
-                dispatch,
+                super::super::lookups::MemberExtensionReceivers {
+                    extension: callee.get(),
+                    dispatch,
+                },
                 "invoke",
                 super::super::lookups::SignatureMemberExtensionArguments {
                     arguments: &argument_kinds,

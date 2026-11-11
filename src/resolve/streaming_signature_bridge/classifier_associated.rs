@@ -232,12 +232,14 @@ impl ProductionSignatureSemantics<'_> {
                     return self
                         .apply_demanded_source_callable(
                             source,
-                            None,
                             &signature,
-                            &argument_types,
-                            None,
-                            &resolved_type_arguments,
-                            expected,
+                            super::demanded_source_call::DemandedSourceInputs {
+                                receiver: None,
+                                arguments: &argument_types,
+                                argument_kinds: None,
+                                explicit_type_arguments: &resolved_type_arguments,
+                                expected,
+                            },
                         )
                         .map(AssociatedSignatureCall::Selected);
                 }

@@ -143,19 +143,6 @@
 1	src/resolve/signature_collection/type_universe.rs	the loop variable `file_index` is used to index `file_class_names`
 1	src/resolve/signature_collection/type_universe.rs	this `if` statement can be collapsed
 1	src/resolve/source_constructors.rs	very complex type used. Consider factoring parts into `type` definitions
-1	src/resolve/streaming_signature_bridge.rs	redundant closure: help: replace the closure with the associated function itself: `Box::<str>::from`
-1	src/resolve/streaming_signature_bridge.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if member.ret.obj_internal() == Some(owner) { member.ret.type_args() } else { Default::default() }`
-1	src/resolve/streaming_signature_bridge/demanded_source_call.rs	this function has too many arguments (8/7)
-1	src/resolve/streaming_signature_bridge/implicit_context_candidates.rs	the `Err`-variant returned from this function is very large: the `Err`-variant is at least 1176 bytes
-1	src/resolve/streaming_signature_bridge/local_signatures.rs	this function has too many arguments (10/7)
-1	src/resolve/streaming_signature_bridge/local_signatures.rs	this method chain can be written more clearly with `if .. else ..`
-1	src/resolve/streaming_signature_bridge/lookups.rs	this function has too many arguments (8/7)
-1	src/resolve/streaming_signature_bridge/lookups.rs	this function has too many arguments (9/7)
-1	src/resolve/streaming_signature_bridge/operator_conventions.rs	large size difference between variants: the entire enum is at least 1232 bytes
-1	src/resolve/streaming_signature_bridge/operator_conventions.rs	this block may be rewritten with the `?` operator
-1	src/resolve/streaming_signature_bridge/rejected_member_call.rs	this function has too many arguments (10/7)
-1	src/resolve/streaming_signature_bridge/selected_result_publication.rs	this function has too many arguments (13/7)
-1	src/resolve/streaming_signature_bridge/semantics.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/resolve/streaming_signature_tests.rs	called `Iterator::last` on a `DoubleEndedIterator`; this will needlessly iterate the entire iterator
 1	src/resolve/type_parameter_owners.rs	this loop could be written as a `while let` loop: help: try: `while let Some(header) = index.declaration_header(current) { .. }`
 1	src/resolve/type_use_annotation_publication.rs	very complex type used. Consider factoring parts into `type` definitions
@@ -218,13 +205,6 @@
 2	src/resolve/invoke_selection.rs	this function has too many arguments (8/7)
 2	src/resolve/postponed_constraints.rs	unnecessary use of `clone` to create a slice from a reference: help: try: `std::slice::from_ref(&name)`
 2	src/resolve/selected_result_publication.rs	local variable doesn't need to be boxed here
-2	src/resolve/streaming_signature_bridge.rs	this function has too many arguments (8/7)
-2	src/resolve/streaming_signature_bridge.rs	this method chain can be written more clearly with `if .. else ..`
-2	src/resolve/streaming_signature_bridge/delegates.rs	this function has too many arguments (8/7)
-2	src/resolve/streaming_signature_bridge/local_signatures.rs	this function has too many arguments (8/7)
-2	src/resolve/streaming_signature_bridge/operator_conventions.rs	this function has too many arguments (8/7)
-2	src/resolve/streaming_signature_bridge/qualified_calls.rs	explicit call to `.into_iter()` in function argument accepting `IntoIterator`
-2	src/resolve/streaming_signature_bridge/semantics.rs	this function has too many arguments (8/7)
 2	tests/private_inline_property_ref_e2e.rs	writing `&PathBuf` instead of `&Path` involves a new object where a slice will do
 2	tests/reified_anonymous_object_e2e.rs	very complex type used. Consider factoring parts into `type` definitions
 3	src/fir/body_check/calls.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `selected`
@@ -232,8 +212,6 @@
 3	src/fir/module_symbols.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
 3	src/module_symbols.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
 3	src/resolve.rs	unnecessary closure used to substitute value for `Option::None`
-3	src/resolve/streaming_signature_bridge/rejected_member_call.rs	this function has too many arguments (8/7)
-3	src/resolve/streaming_signature_bridge/type_parameter_publication.rs	this function has too many arguments (8/7)
 4	src/klib_lowering/body_unit.rs	the borrowed expression implements the required traits: help: change this to: `callee_declined`
 4	src/resolve/delegated_properties.rs	this function has too many arguments (8/7)
 5	src/resolve.rs	this function has too many arguments (9/7)
