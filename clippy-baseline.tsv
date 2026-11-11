@@ -17,30 +17,6 @@
 1	src/parser.rs	field assignment outside of initializer for an instance created with Default::default()
 1	src/parser.rs	this manual char comparison can be written more succinctly: help: consider using an array of `char`: `['L', 'l', 'u', 'U']`
 1	src/parser.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if header_ctor_kw { self.tok().span.lo } else { 0 }`
-1	src/resolve.rs	called `expect` on `current_owner` after checking its variant with `is_some`
-1	src/resolve.rs	redundant closure: help: replace the closure with the function itself: `&hidden`
-1	src/resolve.rs	redundant closure: help: replace the closure with the function itself: `matches_qual`
-1	src/resolve.rs	this function has too many arguments (10/7)
-1	src/resolve.rs	this function has too many arguments (12/7)
-1	src/resolve.rs	this function has too many arguments (14/7)
-1	src/resolve.rs	this method chain can be written more clearly with `if .. else ..`
-1	src/resolve.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if internal == foo { vec!["prop".to_string()] } else { Default::default() }`
-1	src/resolve.rs	usage of `bool::then` in `filter_map`
-1	src/resolve/alias_projection.rs	this function has too many arguments (8/7)
-1	src/resolve/body_local_property_selection.rs	this function has too many arguments (10/7)
-1	src/resolve/body_local_property_selection.rs	this function has too many arguments (8/7)
-1	src/resolve/body_local_property_selection.rs	this function has too many arguments (9/7)
-1	src/resolve/callable_reference_lhs.rs	this function has too many arguments (9/7)
-1	src/resolve/callable_reference_selection.rs	redundant closure: help: replace the closure with the function itself: `is_assignable`
-1	src/resolve/callable_reference_selection.rs	this `match` expression can be replaced with `?`
-1	src/resolve/callable_reference_selection.rs	this `repeat().take()` can be written more concisely: help: consider using `repeat_n()` instead: `std::iter::repeat_n(element, values.len())`
-1	src/resolve/conditional_branch.rs	this function has too many arguments (8/7)
-1	src/resolve/delegated_properties.rs	this `if` statement can be collapsed
-1	src/resolve/delegated_properties.rs	using `contains()` instead of `iter().any()` is more efficient: help: try: `arguments.contains(&ret)`
-1	src/resolve/dependency_annotation_defaults.rs	unnecessary closure used with `bool::then`
-1	src/resolve/diagnostic_selection.rs	this `if` has identical blocks
-1	src/resolve/enhanced_values.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if !coerced_to_unit { self.value_enhancement(result) } else { Default::default() }`
-1	src/resolve/explicit_property_write.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/resolve/selected_result_publication.rs	this function has too many arguments (9/7)
 1	src/resolve/streaming_signature_bridge/demanded_source_call.rs	this function has too many arguments (8/7)
 1	src/resolve/streaming_signature_bridge/local_signatures.rs	this function has too many arguments (10/7)
@@ -52,21 +28,13 @@
 1	tests/common/byte_dump/fingerprint.rs	function `immutable_classpath_content_fingerprint` is never used
 1	tests/common/source_set_compile.rs	function `source_set_diagnostics` is never used
 12	src/parser.rs	this `map_or` can be simplified
-16	src/resolve.rs	this function has too many arguments (8/7)
 2	src/fir/signature.rs	this function has too many arguments (11/7)
 2	src/fir/signature.rs	this function has too many arguments (8/7)
-2	src/resolve.rs	returning the result of a `let` binding from a block
-2	src/resolve/call_diagnostics.rs	this function has too many arguments (8/7)
 2	src/resolve/streaming_signature_bridge.rs	this function has too many arguments (8/7)
 2	src/resolve/streaming_signature_bridge/delegates.rs	this function has too many arguments (8/7)
 2	src/resolve/streaming_signature_bridge/local_signatures.rs	this function has too many arguments (8/7)
 2	src/resolve/streaming_signature_bridge/operator_conventions.rs	this function has too many arguments (8/7)
 2	src/resolve/streaming_signature_bridge/semantics.rs	this function has too many arguments (8/7)
-3	src/resolve.rs	unnecessary closure used to substitute value for `Option::None`
 3	src/resolve/streaming_signature_bridge/rejected_member_call.rs	this function has too many arguments (8/7)
 3	src/resolve/streaming_signature_bridge/type_parameter_publication.rs	this function has too many arguments (8/7)
-4	src/resolve/delegated_properties.rs	this function has too many arguments (8/7)
-5	src/resolve.rs	this function has too many arguments (9/7)
-5	src/resolve.rs	very complex type used. Consider factoring parts into `type` definitions
-5	src/resolve/callable_reference_selection.rs	redundant closure: help: replace the closure with the function itself: `&mut is_assignable`
 6	src/conformance.rs	doc list item without indentation

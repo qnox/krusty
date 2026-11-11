@@ -339,11 +339,15 @@ fn check_default_source(input: DefaultSourceInput<'_>, state: DefaultSourceState
     diagnostic_ranges.dedup();
     let info = diags.with_authoritative_ranges(&diagnostic_ranges, |diags| {
         crate::resolve::check_signature_default_declarations_at_with_index(
-            file,
-            raw_source as u32,
+            crate::resolve::SourceFileUnit {
+                file,
+                file_index: raw_source as u32,
+            },
             &active,
-            &selection.roots[raw_source],
-            &selection.bodies[raw_source],
+            crate::resolve::StableDefaultSelection {
+                roots: &selection.roots[raw_source],
+                defaults: &selection.bodies[raw_source],
+            },
             symbols,
             index,
             diags,
@@ -634,11 +638,15 @@ pub(super) fn streaming(
                 }
             };
             let info = crate::resolve::check_preinferred_inline_declarations_at_with_index(
-                &files[raw_source],
-                raw_source as u32,
-                &selection.roots[raw_source],
-                &selection.bodies[raw_source],
-                &selected_stable_bodies,
+                crate::resolve::SourceFileUnit {
+                    file: &files[raw_source],
+                    file_index: raw_source as u32,
+                },
+                crate::resolve::SpanBodySelection {
+                    declarations: &selection.roots[raw_source],
+                    bodies: &selection.bodies[raw_source],
+                    stable_bodies: &selected_stable_bodies,
+                },
                 &active,
                 &index,
                 symbols,

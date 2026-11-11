@@ -376,8 +376,10 @@ impl Checker<'_> {
                 argument,
                 probed_actual,
                 expected,
-                call_sig,
-                parameter,
+                SelectedFormal {
+                    signature: call_sig,
+                    index: parameter,
+                },
                 implicit_lambda_label.as_deref(),
             );
             if whole_array {
@@ -432,8 +434,7 @@ impl Checker<'_> {
             };
             self.expect_call_arg_labeled(
                 scope,
-                expected,
-                declared,
+                ParameterTypeExpectation { expected, declared },
                 argument,
                 actual,
                 call_sig
