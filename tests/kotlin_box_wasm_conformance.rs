@@ -993,6 +993,97 @@ fn wasm_suspend_function_values_are_function_values() {
     expect_wasm_box(src, "suspendFunctionValue");
 }
 
+/// The shared receiver-reuse program, including its non-suspending suspend lambda.
+#[test]
+fn wasm_apply_receiver_single_store_runs() {
+    let src = include_str!("box_regressions/applyReceiverSingleStore.kt");
+    expect_reference_box(src, "applyReceiverSingleStore");
+    expect_wasm_box(src, "applyReceiverSingleStore");
+}
+
+#[test]
+fn wasm_parameterless_start_coroutine_delivers_its_completion() {
+    let src = include_str!("box_regressions/parameterlessStartCoroutineCompletion.kt");
+    expect_reference_box(src, "parameterlessStartCoroutineCompletion");
+    expect_wasm_box(src, "parameterlessStartCoroutineCompletion");
+}
+
+#[test]
+fn wasm_continuation_factory_value_is_not_null() {
+    let src = include_str!("box_regressions/continuationFactoryValue.kt");
+    expect_reference_box(src, "continuationFactoryValue");
+    expect_wasm_box(src, "continuationFactoryValue");
+}
+
+#[test]
+fn wasm_start_coroutine_evaluates_the_receiver_first() {
+    let src = include_str!("box_regressions/startCoroutineOperandOrder.kt");
+    expect_reference_box(src, "startCoroutineOperandOrder");
+    expect_wasm_box(src, "startCoroutineOperandOrder");
+}
+
+#[test]
+fn wasm_continuation_hash_code_is_stable() {
+    let src = include_str!("box_regressions/continuationIdentityHash.kt");
+    expect_reference_box(src, "continuationIdentityHash");
+    expect_wasm_box(src, "continuationIdentityHash");
+}
+
+#[test]
+fn wasm_continuation_is_its_interface_and_keeps_its_context() {
+    let src = include_str!("box_regressions/continuationIdentity.kt");
+    expect_reference_box(src, "continuationIdentity");
+    expect_wasm_box(src, "continuationIdentity");
+}
+
+// PLATFORM-SPECIFIC: the reference compiler runs this through the stdlib. Wasm declines it: the
+// completion is a different object from the one the factory allocates, and emitting that call
+// would fail the cast.
+#[test]
+fn wasm_foreign_start_coroutine_completion_declines() {
+    let src = include_str!("foreignStartCoroutineCompletion.kt");
+    expect_reference_box(src, "foreignStartCoroutineCompletion");
+    expect_wasm_decline(
+        src,
+        "foreignStartCoroutineCompletion",
+        "a startCoroutine completion that is not the factory continuation",
+    );
+}
+
+// PLATFORM-SPECIFIC: the reference compiler calls `resumeWith` on a `Continuation` it cannot prove
+// is the factory object. Wasm tests the value and leaves a different object untouched, so the
+// program finishes without trapping and without calling that resume.
+#[test]
+fn wasm_continuation_typed_foreign_completion_is_not_called() {
+    let src = include_str!("foreignContinuationTypedCompletion.kt");
+    expect_wasm_box(src, "foreignContinuationTypedCompletion");
+}
+
+#[test]
+fn wasm_continuation_from_another_file_is_its_interface() {
+    let src = include_str!("box_regressions/continuationAcrossFiles.kt");
+    let (blocks, java) = krusty::conformance::split_files(src);
+    assert!(java.is_empty());
+    let sources: Vec<(&str, &str)> = blocks
+        .iter()
+        .map(|(name, source)| (name.as_str(), source.as_str()))
+        .collect();
+    super::common::expect_box_ok_files_with_stdlib(&sources, "continuationAcrossFiles");
+    let files: Vec<(String, String)> = blocks
+        .iter()
+        .map(|(name, source)| (format!("{name}.kt"), source.clone()))
+        .collect();
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        let stem = "continuationAcrossFiles";
+        if !focused_wasm_lane_available(&lane, stem) {
+            return;
+        }
+        let outcome = lane.compile_and_run(&std::env::temp_dir(), stem, &files, src);
+        assert_eq!(outcome, Outcome::Pass, "{stem} on {}", target.name());
+    }
+}
+
 // A lambda or callable reference converted to a `fun interface` becomes an object of that
 // interface whose member forwards to the function value.
 #[test]

@@ -112,6 +112,10 @@ pub enum CompilerIntrinsic {
     Print,
     Println,
     StartCoroutine,
+    /// `kotlin.coroutines.Continuation(context, resumeWith)`. The stdlib body is an anonymous
+    /// object. A target that expands inline calls in IR realizes the call itself; the JVM
+    /// bytecode inliner still expands the classfile body.
+    ContinuationFactory,
     /// The current suspend body's continuation context. The stdlib declaration is a public
     /// `@InlineOnly` suspend property whose private throwing accessor is never invoked directly.
     CoroutineContext,
@@ -201,6 +205,13 @@ impl CompilerIntrinsic {
     /// never expanded from that body, even where the library serializes it as an inline template.
     pub fn replaces_its_body(self) -> bool {
         matches!(self, Self::TypeOf | Self::EnumEntries)
+    }
+
+    /// The compiler realizes the call, so common lowering must not expand a serialized body in
+    /// its place. [`Self::replaces_its_body`] covers a body that only throws.
+    /// [`Self::ContinuationFactory`] is the anonymous-object factory those bodies cannot lower.
+    pub fn skips_serialized_body(self) -> bool {
+        self.replaces_its_body() || matches!(self, Self::ContinuationFactory)
     }
 }
 

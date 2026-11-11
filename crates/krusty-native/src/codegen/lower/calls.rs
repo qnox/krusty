@@ -364,6 +364,7 @@ impl BodyLowering<'_, '_, '_> {
                 extension_receiver_parameter,
                 substitutions,
             } => {
+                let owners = self.file.callables.continuation_factory();
                 let Some(realization) = self.file.callables.callable(*target) else {
                     return Err("an unresolvable dependency call".into());
                 };
@@ -372,6 +373,52 @@ impl BodyLowering<'_, '_, '_> {
                     == Some(krusty::backend::BackendCompilerIntrinsic::TypeOf)
                 {
                     return self.type_of(*target, substitutions);
+                }
+                // `startCoroutine` on a parameterless suspend lambda runs that lambda. The stdlib
+                // body builds a coroutine this runtime does not construct.
+                if realization.compiler_operation()
+                    == Some(krusty::backend::BackendCompilerIntrinsic::ContinuationFactory)
+                {
+                    if !defaults.is_empty() || extension_receiver_parameter.is_some() {
+                        return Err("a Continuation of another shape".into());
+                    }
+                    return self.continuation_factory(args, params);
+                }
+                if realization.compiler_operation()
+                    == Some(krusty::backend::BackendCompilerIntrinsic::StartCoroutine)
+                {
+                    if !defaults.is_empty() || extension_receiver_parameter.is_some() {
+                        return Err("a startCoroutine of another shape".into());
+                    }
+                    return self.parameterless_start_coroutine(
+                        site,
+                        *ret,
+                        dispatch_receiver,
+                        args,
+                        params,
+                    );
+                }
+                let declared = match realization.declaration_owner {
+                    Some(krusty::types::SemanticCallableOwner::Classifier(name)) => Some(name),
+                    _ => None,
+                };
+                let on_continuation = declared.is_some_and(|owner| owners.declares(owner));
+                let plain = realization.owner_is_interface
+                    && defaults.is_empty()
+                    && extension_receiver_parameter.is_none();
+                if on_continuation && plain && realization.params.is_empty() && args.is_empty() {
+                    let Some(receiver) = dispatch_receiver else {
+                        return Err(declined!("a continuation context without a receiver"));
+                    };
+                    return self.continuation_context(receiver);
+                }
+                if on_continuation
+                    && plain
+                    && realization.params.len() == 1
+                    && args.len() == 1
+                    && *ret == Ty::Unit
+                {
+                    return self.continuation_resume(dispatch_receiver, args);
                 }
                 let symbols = self.file.dependency_symbols;
                 let export_of = |realization: &krusty::backend::BackendCallableFact| {

@@ -199,7 +199,13 @@ impl Backend for CraneliftBackend {
         &self,
         operation: krusty::backend::BackendCompilerIntrinsic,
     ) -> bool {
+        use krusty::backend::BackendCompilerIntrinsic;
         dependency_intrinsics::operation_plan(operation).is_some()
+            || matches!(
+                operation,
+                BackendCompilerIntrinsic::StartCoroutine
+                    | BackendCompilerIntrinsic::ContinuationFactory
+            )
     }
 
     fn realizes_dependency_getter(

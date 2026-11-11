@@ -28,6 +28,7 @@ use super::super::super::objects::{slot_field, REFERENCE};
 use super::super::super::runtime::{Runtime, EQZ32, OR32};
 use super::super::classes::{Accessor, FileClasses};
 use super::super::interface_members::{accessor_types, member_signature};
+use super::super::library_objects::ModuleRuntime;
 use super::super::property_registry::{MemberProperty, MemberPropertyDefinition, TopLevelProperty};
 use super::{carrier, Body, FileContext, Unsupported, STRING};
 
@@ -201,6 +202,17 @@ impl Body<'_> {
         if self.ir.class_id_by_name(classifier).is_none() {
             if let Some(entry) = self.calls.dependency_singleton(classifier) {
                 self.code.call(entry);
+                return Ok(());
+            }
+            // No module exported this object. Its published declaration stores nothing, so the
+            // instance is the only effect, and every read — a factory operand included — shares it.
+            if self
+                .classifiers
+                .classifier(classifier)
+                .is_some_and(|fact| fact.inert_singleton)
+            {
+                let global = self.inert_instance(classifier)?;
+                self.code.global_get(global);
                 return Ok(());
             }
         }
@@ -1036,6 +1048,10 @@ impl Body<'_> {
             TyKind::Obj(name, _) if name == krusty::types::wk::any() => {
                 self.code.ref_test(nullable, HeapType::Eq);
             }
+            TyKind::Obj(name, _) if self.callables.continuation_factory().declares(name) => {
+                self.continuation_items()?;
+                self.interface_test(name, nullable);
+            }
             TyKind::Obj(name, _)
                 if self
                     .classifiers
@@ -1235,7 +1251,7 @@ pub(super) fn define_class_functions(
     context: &FileContext<'_>,
     classes: &FileClasses,
     module: &mut Module,
-    runtime: &mut Runtime,
+    runtime: &mut ModuleRuntime,
 ) -> Result<(), Unsupported> {
     let ir = context.ir;
     for (id, class) in ir.classes.iter().enumerate() {
@@ -1372,7 +1388,7 @@ pub(super) fn define_module_property_functions(
     classes: &FileClasses,
     definitions: &[MemberPropertyDefinition],
     module: &mut Module,
-    runtime: &mut Runtime,
+    runtime: &mut ModuleRuntime,
 ) -> Result<(), Unsupported> {
     for definition in definitions {
         let layout = context

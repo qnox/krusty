@@ -9,7 +9,8 @@
 //! parameter is the semantic type parameter the declaration's provider record states for it
 //! ([`KlibTypeParameters`]); a body whose declaration binds none of its type parameters declines
 //! on the first use of one. Other type-use annotations carry no semantic type, as in metadata.
-//! Definitely non-null, dynamic, error, suspend and context function types decline by form.
+//! Definitely non-null, dynamic, error, reflective suspend, and context function types decline
+//! by form. A non-reflective `SuspendFunctionN` is the suspend function type it denotes.
 
 use crate::fx_hash::HashMap;
 
@@ -70,7 +71,13 @@ fn class_type(
         if !function.is_reflective() {
             let ret = arguments.pop().expect("a function type has its result");
             let receiver = receiver && !arguments.is_empty();
-            return Ok(Ty::fun_with_shape(arguments, ret, 0, receiver, false));
+            return Ok(Ty::fun_with_shape(
+                arguments,
+                ret,
+                0,
+                receiver,
+                function.is_suspend(),
+            ));
         }
     }
     if receiver {
@@ -202,9 +209,9 @@ fn function_shape(
     arguments: usize,
 ) -> Result<Option<function_classifiers::FunctionClassifier>, KlibBodyDeclineReason> {
     if let Some(function) = function_classifiers::classifier(name) {
-        if function.is_suspend() {
+        if function.is_reflective() && function.is_suspend() {
             return Err(KlibBodyDeclineReason::UnsupportedType(
-                "a suspend function type",
+                "a reflective suspend function type",
             ));
         }
         if !function.is_reflective() && arguments != function.arity() + 1 {
@@ -237,7 +244,9 @@ pub(super) fn closure_type_arity(arena: &KlibIrArena, id: KlibIrTypeId) -> Optio
     }
     let (name, _) = class_head(classifier, annotations, &|_| Ok(None)).ok()?;
     let function = function_shape(name, arguments.len()).ok()??;
-    (!function.is_reflective()).then(|| function.arity())
+    // A suspend closure is not an ordinary function closure. Its declaration stays out of the
+    // emitted-closure edge even though the type itself is a suspend function type.
+    (!function.is_reflective() && !function.is_suspend()).then(|| function.arity())
 }
 
 /// One type argument, as the provider converts a metadata type argument.

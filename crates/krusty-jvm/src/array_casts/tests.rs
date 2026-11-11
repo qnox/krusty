@@ -38,6 +38,7 @@ fn hierarchy(edges: &[(&str, &[&str])]) -> Facts {
                 role: None,
                 companion: None,
                 enum_entries_accessor: None,
+                inert_singleton: false,
             }),
         );
     }

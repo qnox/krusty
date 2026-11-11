@@ -754,6 +754,7 @@ mod tests {
             role,
             companion: None,
             enum_entries_accessor: None,
+            inert_singleton: false,
         })
     }
 

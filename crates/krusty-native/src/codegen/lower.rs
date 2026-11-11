@@ -351,6 +351,8 @@ pub fn lower_file(
         dependency_symbols,
         dependency_singletons,
         dependency_interface_calls: Vec::new(),
+        continuation_descriptors: None,
+        inert_objects: HashMap::default(),
         dependency_enum_constants,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
@@ -541,6 +543,10 @@ struct FileLowering<'a> {
     dependency_singletons: &'a HashMap<krusty::types::TypeName, String>,
     /// The exported entry answering each constant of a preceding file's enum.
     dependency_enum_constants: &'a HashMap<krusty::backend::EnumConstant, String>,
+    /// The continuation class and the interface it implements, created on first use.
+    continuation_descriptors: Option<(DataId, DataId)>,
+    /// Canonical instances of dependency objects whose published declaration stores nothing.
+    inert_objects: HashMap<krusty::types::TypeName, DataId>,
 }
 
 impl<'a> FileLowering<'a> {
@@ -1717,6 +1723,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     fn lowered_expression(&mut self, id: u32) -> Result<Option<Value>, Unsupported> {
+        if let Some(result) = self.continuation_property(id) {
+            return result;
+        }
         if let Some(result) = match self.file.ir.expr(id) {
             IrExpr::Checked(operation) => self.emitted_dependency_property(id, operation),
             _ => None,

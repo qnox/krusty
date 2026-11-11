@@ -938,4 +938,69 @@ impl CheckedBackendCallables {
     pub fn property(&self, identity: ExternalPropertyId) -> Option<&BackendPropertyFact> {
         self.properties.get(&identity)
     }
+
+    /// The interface `Continuation(context) { }` returns, when this file uses that factory.
+    ///
+    /// The factory is a top-level function. The interface is its result, not the function's owner.
+    /// A member declared on that interface may also name the provider's physical owner.
+    pub fn continuation_factory(&self) -> ContinuationFactoryOwners {
+        if let Some(fact) = self.callables.values().find(|fact| {
+            fact.compiler_operation() == Some(BackendCompilerIntrinsic::ContinuationFactory)
+        }) {
+            let semantic = fact
+                .declared_ret
+                .unwrap_or(fact.ret)
+                .non_null()
+                .obj_internal();
+            let physical = match fact.declaration_owner {
+                Some(SemanticCallableOwner::Classifier(name)) if Some(name) != semantic => {
+                    Some(name)
+                }
+                _ => None,
+            };
+            return ContinuationFactoryOwners { semantic, physical };
+        }
+        // A file can name the interface without calling the factory: `is Continuation`, or
+        // `startCoroutine` on a continuation another file built. The completion parameter is that
+        // interface.
+        let Some(fact) = self.callables.values().find(|fact| {
+            fact.compiler_operation() == Some(BackendCompilerIntrinsic::StartCoroutine)
+        }) else {
+            return ContinuationFactoryOwners::default();
+        };
+        let semantic = fact
+            .params
+            .last()
+            .copied()
+            .and_then(|ty| ty.non_null().obj_internal());
+        ContinuationFactoryOwners {
+            semantic,
+            physical: None,
+        }
+    }
+}
+
+/// The owners of the continuation factory this file can lower.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ContinuationFactoryOwners {
+    semantic: Option<TypeName>,
+    physical: Option<TypeName>,
+}
+
+impl ContinuationFactoryOwners {
+    /// Whether `owner` is the factory's interface or the declaration that publishes it.
+    pub fn declares(self, owner: TypeName) -> bool {
+        self.semantic == Some(owner) || self.physical == Some(owner)
+    }
+
+    /// The interface the source names, or the published declaration when it has no classifier owner.
+    pub fn interface(self) -> Option<TypeName> {
+        self.semantic.or(self.physical)
+    }
+
+    /// Each distinct owner, the semantic interface first.
+    pub fn names(self) -> [Option<TypeName>; 2] {
+        let physical = self.physical.filter(|name| self.semantic != Some(*name));
+        [self.semantic, physical]
+    }
 }

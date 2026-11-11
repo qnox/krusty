@@ -1068,6 +1068,7 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::Print
                 | krusty::libraries::CompilerIntrinsic::Println
                 | krusty::libraries::CompilerIntrinsic::StartCoroutine
+                | krusty::libraries::CompilerIntrinsic::ContinuationFactory
                 | krusty::libraries::CompilerIntrinsic::CoroutineContext
                 | krusty::libraries::CompilerIntrinsic::CoroutineSuspended
                 | krusty::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn

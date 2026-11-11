@@ -211,6 +211,14 @@ impl<'a> FileLowering<'a> {
             .map_err(|error| declined!("declaring `{name}` ({error})"))
     }
 
+    /// A data symbol every file of this module may define. The linker keeps one of the weak
+    /// definitions, so each file names the same address.
+    pub(super) fn declare_module_data(&mut self, symbol: &str) -> Result<DataId, Unsupported> {
+        self.module
+            .declare_data(symbol, Linkage::Preemptible, false, false)
+            .map_err(|error| declined!("declaring `{symbol}` ({error})"))
+    }
+
     pub(super) fn declare_local_function(
         &mut self,
         name: &str,
@@ -466,6 +474,31 @@ impl<'a> FileLowering<'a> {
         base: &str,
         shape: DescriptorShape<'_>,
     ) -> Result<(), Unsupported> {
+        self.define_described_type(descriptor, base, shape, None)
+    }
+
+    /// [`define_type_descriptor`] for a descriptor every file of the module defines under one
+    /// symbol. `section` is that definition's own section, which the object groups as a COMDAT so
+    /// the link keeps one of them.
+    pub(super) fn define_shared_type_descriptor(
+        &mut self,
+        descriptor: DataId,
+        base: &str,
+        section: &str,
+        shape: DescriptorShape<'_>,
+    ) -> Result<(), Unsupported> {
+        self.define_described_type(descriptor, base, shape, Some(section))?;
+        self.comdat_objects.push(descriptor);
+        Ok(())
+    }
+
+    fn define_described_type(
+        &mut self,
+        descriptor: DataId,
+        base: &str,
+        shape: DescriptorShape<'_>,
+        section: Option<&str>,
+    ) -> Result<(), Unsupported> {
         let DescriptorShape {
             kotlin_name,
             instance_size,
@@ -575,6 +608,9 @@ impl<'a> FileLowering<'a> {
         let mut description = DataDescription::new();
         description.define(bytes.into_boxed_slice());
         description.set_align(8);
+        if let Some(section) = section {
+            description.set_custom_section(section);
+        }
         for (offset, thunk) in [
             (ktype::WALK_ITERATOR, walk.iterator),
             (ktype::WALK_HAS_NEXT, walk.has_next),
@@ -2566,6 +2602,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let func_ref = self.func_ref(id);
                 let call = self.emit_call(func_ref, &[])?;
                 return Ok(Some(self.builder.inst_results(call)[0]));
+            }
+            // No module exported this object. Its published declaration stores nothing, so the
+            // instance is the only effect, and every read — a factory operand included — shares it.
+            if self
+                .file
+                .classifiers
+                .classifier(classifier)
+                .is_some_and(|fact| fact.inert_singleton)
+            {
+                let instance = self.file.inert_instance(classifier)?;
+                return Ok(Some(self.data_address(instance)));
             }
         }
         let class = self.file.class_of(classifier, "the object")?;
