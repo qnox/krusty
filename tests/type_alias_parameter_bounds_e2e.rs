@@ -39,3 +39,34 @@ fn bounds_on_type_alias_parameters_are_rejected_like_kotlinc() {
         ["bounds on type alias parameters are prohibited."; 3]
     );
 }
+
+#[test]
+fn bounds_on_local_type_alias_parameters_are_rejected_like_kotlinc() {
+    let source = "fun use() {\n\
+                  \x20   typealias Local<T : Number> = List<T>\n\
+                  \x20   val list: Local<Int> = listOf(1)\n\
+                  \x20   println(list)\n\
+                  }\n";
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics_with_shared_args(
+        &[("LocalTypeAliasBounds.kt", source)],
+        std::slice::from_ref(&stdlib),
+        &["-XXLanguage:+LocalTypeAliases".to_string()],
+    );
+    assert_ne!(result.krusty_code, 0, "krusty silently accepted source");
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc unexpectedly accepted source"
+    );
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let kotlinc_errors = errors(&result.reference_stderr);
+    assert_eq!(krusty_errors, kotlinc_errors);
+    assert_eq!(
+        krusty_errors
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>(),
+        ["bounds on type alias parameters are prohibited."]
+    );
+}
