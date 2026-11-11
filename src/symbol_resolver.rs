@@ -119,7 +119,7 @@ pub(crate) use member_specialization::{
 use member_specialization::{
     bind_member_return, bind_member_return_from_call_args_tracking,
     preserve_receiver_identity_bindings, specialize_call_sig, specialize_callable,
-    specialize_final_signature_output_type, specialize_member_type,
+    specialize_final_signature_output_type, specialize_member_type, MemberReturnCall,
 };
 #[cfg(test)]
 use overload_selection::fun_return_compatible;
@@ -3009,12 +3009,14 @@ fn resolved_member_from_info_tracking(
             bind_member_return_from_call_args_tracking(
                 source,
                 gsig,
-                recv,
-                args,
-                type_args,
-                o.call_sig.vararg_index,
-                &o.call_sig.no_infer_params,
-                o.callable.ret,
+                MemberReturnCall {
+                    receiver: recv,
+                    arguments: args,
+                    type_arguments: type_args,
+                    vararg_index: o.call_sig.vararg_index,
+                    no_infer_params: &o.call_sig.no_infer_params,
+                    provider_return: o.callable.ret,
+                },
             )
         },
     );
