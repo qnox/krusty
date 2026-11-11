@@ -1,12 +1,13 @@
 //! `typeOf<T>()`: a new `KType` object describing the checked type argument
 //! (the Wasm runtime's `type_objects`).
 //!
-//! The described classifier is named by its Kotlin qualified name, which is what Kotlin/Wasm
-//! prints and what makes two descriptions of one type equal. A local class or an anonymous object
+//! The described classifier is its identity: a declared classifier's name, or the arity of a
+//! `FunctionN`, which a function type and its `FunctionN` spelling share. Its Kotlin qualified
+//! name is only what Kotlin/Wasm prints. A local class or an anonymous object
 //! has none, and a type parameter's classifier is a `KTypeParameter`, which this target does not
 //! build; each declines, as does a suspend function type.
 
-use super::super::super::type_objects::{Projection, TypeDescription};
+use super::super::super::type_objects::{Classifier, Projection, TypeDescription};
 use super::*;
 use krusty::backend::class_tables::{AnyMember, Slot};
 use krusty::ir::ClassId;
@@ -115,14 +116,11 @@ impl Body<'_> {
                     .iter()
                     .map(|argument| self.type_projection(*argument))
                     .collect::<Result<Vec<_>, _>>()?;
-                (name.kotlin_qualified_name(), arguments)
+                (self.described_classifier(name), arguments)
             }
-            TyKind::Unit => (
-                krusty::types::wk::unit().kotlin_qualified_name(),
-                Vec::new(),
-            ),
+            TyKind::Unit => (Classifier::Declared(krusty::types::wk::unit()), Vec::new()),
             TyKind::Nothing => (
-                krusty::types::wk::nothing().kotlin_qualified_name(),
+                Classifier::Declared(krusty::types::wk::nothing()),
                 Vec::new(),
             ),
             TyKind::Fun(signature) => {
@@ -138,10 +136,9 @@ impl Body<'_> {
                     .chain(std::iter::once(&signature.ret))
                     .map(|argument| self.type_description(*argument).map(Projection::Invariant))
                     .collect::<Result<Vec<_>, _>>()?;
-                (
-                    format!("kotlin.Function{}", signature.params.len()),
-                    arguments,
-                )
+                let arity = u8::try_from(signature.params.len())
+                    .map_err(|_| format!("`typeOf` of the function type `{}`", describe(ty)))?;
+                (Classifier::Function(arity), arguments)
             }
             _ => return Err(format!("`typeOf` of `{}`", describe(ty))),
         };
@@ -150,6 +147,17 @@ impl Body<'_> {
             arguments,
             nullable,
         })
+    }
+
+    /// The classifier `name` describes: a `FunctionN` by the arity its provider published for it,
+    /// so `Function1<A, B>` and `(A) -> B` describe one classifier.
+    fn described_classifier(&self, name: krusty::types::TypeName) -> Classifier {
+        match self.classifiers.classifier(name).and_then(|fact| fact.role) {
+            Some(krusty::types::ClassifierRole::FunctionOfArity(arity)) => {
+                Classifier::Function(arity)
+            }
+            _ => Classifier::Declared(name),
+        }
     }
 
     fn type_projection(&self, argument: Ty) -> Result<Projection, Unsupported> {

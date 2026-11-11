@@ -325,6 +325,24 @@ impl UnsignedElement {
     }
 }
 
+/// The scalar type of an exact unsigned `toString(): String` declaration.
+///
+/// Decimal conversion applies to all four unsigned widths independently of the binary-operation
+/// realization below. The provider has already authenticated this qualified declaration owner.
+pub(crate) fn unsigned_to_string_type(facts: &BuiltinMemberDeclaration<'_>) -> Option<Ty> {
+    if facts.name != "toString"
+        || !facts.params.is_empty()
+        || facts.ret != Ty::String
+        || facts.is_property
+        || facts.is_operator
+        || facts.is_infix
+    {
+        return None;
+    }
+    let ty = crate::types::builtin_semantic(facts.owner)?;
+    ty.is_unsigned().then_some(ty)
+}
+
 /// The unsigned value class and operation of an exact `UInt`/`ULong` declaration:
 /// `compareTo(same): Int`, `div(same): same` and `rem(same): same` as operators, and
 /// `toString(): String`. Any other overload, including the mixed-width ones, stays ordinary.
@@ -348,7 +366,7 @@ pub(crate) fn unsigned_member_operation(
         "compareTo" if binary && facts.ret == Ty::Int => UnsignedMemberOperation::CompareTo,
         "div" if binary && facts.ret == element => UnsignedMemberOperation::Divide,
         "rem" if binary && facts.ret == element => UnsignedMemberOperation::Remainder,
-        "toString" if facts.params.is_empty() && facts.ret == Ty::String => {
+        "toString" if unsigned_to_string_type(facts) == Some(element) => {
             UnsignedMemberOperation::ToString
         }
         _ => return None,

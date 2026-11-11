@@ -79,6 +79,9 @@ impl BodyLowering<'_> {
         let capture_count = u32::try_from(captures.len()).expect("a capture list fits u32");
         declared.constructor_prefix_count = capture_count;
         declared.ctor_param_count = capture_count;
+        // Each captured value is stored before the superclass constructor runs, as the anonymous
+        // class checked FIR builds stores it.
+        declared.pre_super_param_fields = (0..capture_count).map(|index| (index, index)).collect();
         declared.fields = captures
             .iter()
             .map(|capture| IrField::new(capture.name.clone(), capture.ty).with_is_final(true))

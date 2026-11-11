@@ -59,6 +59,29 @@ impl KlibReferenceBindings {
     }
 }
 
+/// The real declarations that member references of ordinary bodies inherit, by the same
+/// normalization as template references. A reference that names no declaration stays unbound.
+pub(super) fn inherited_members(
+    libraries: &KlibLibraries,
+) -> Vec<(
+    (String, KlibDeclarationSignature),
+    Option<KlibDependencyCallable>,
+)> {
+    libraries
+        .bodies
+        .unserialized_member_references()
+        .into_iter()
+        .filter_map(|(module, reference)| {
+            let binding = match normalize_reference(libraries, &module, &reference) {
+                KlibReferenceOrigin::Exact(binding) => Some(binding.declaration),
+                KlibReferenceOrigin::Ambiguous => None,
+                KlibReferenceOrigin::Missing => return None,
+            };
+            Some(((module, reference), binding))
+        })
+        .collect()
+}
+
 pub(super) fn normalize_reference(
     libraries: &KlibLibraries,
     module: &str,
