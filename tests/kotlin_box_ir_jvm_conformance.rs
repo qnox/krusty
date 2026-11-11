@@ -1308,7 +1308,7 @@ fn write_flamegraph(guard: &pprof::ProfilerGuard<'_>) {
     }
 
     let mut v: Vec<_> = leaf.into_iter().collect();
-    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.sort_by_key(|frame| std::cmp::Reverse(frame.1));
     eprintln!("--- profiler: top krusty frames ({total} samples) ---");
     for (name, c) in v.into_iter().take(25) {
         eprintln!("  {:>5.1}%  {name}", 100.0 * c as f64 / total.max(1) as f64);
@@ -2338,7 +2338,7 @@ fn kotlin_codegen_box_conformance() {
     );
     if byte_diff_on {
         let mut diffs = byte_diffs.into_inner().unwrap();
-        diffs.sort_by(|a, b| a.0.cmp(&b.0));
+        diffs.sort_by_key(|(path, _)| path.clone());
         let (mut identical, mut divergent, mut ref_fail) = (0usize, 0, 0);
         let report_path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/byte_diff_report.txt");

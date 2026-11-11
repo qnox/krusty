@@ -327,17 +327,54 @@ jobs:
           echo "compile_missing=$compile_missing" >> "$GITHUB_OUTPUT"
       # The native runtime's thread drivers run on every supported architecture: built for each
       # with clang and lld, and run under QEMU's user-mode emulators (tests/native_runtime_e2e.rs).
+      # The packages are cached by the runner's release, so a run installs them without the Ubuntu
+      # archive: the hosted runners' resolver failed for every *.ubuntu.com host for hours at a time.
+      - name: select cross-architecture package cache
+        id: cross-packages
+        run: echo "key=cross-packages-v1-$(. /etc/os-release && echo "$ID-$VERSION_ID")-${{ runner.arch }}" >> "$GITHUB_OUTPUT"
+      - name: restore cross-architecture packages
+        id: cross-packages-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/cross-packages
+          key: ${{ steps.cross-packages.outputs.key }}
       - name: install cross-architecture runners
         # The POSIX drivers compile against each target's own glibc headers, so the layer's
         # hand-copied numbers and layouts are checked against the target's, not the host's.
         # Self-hosted runners ship these preinstalled and have no sudo.
         run: |
+          set -euo pipefail
           if [ -x /usr/bin/qemu-aarch64 ] && [ -x /usr/bin/qemu-riscv64 ] && [ -x /usr/bin/ld.lld ] &&
             [ -d /usr/aarch64-linux-gnu/include ] && [ -d /usr/riscv64-linux-gnu/include ]; then
             exit 0
           fi
-          sudo apt-get update
-          sudo apt-get install -y qemu-user lld libc6-dev-arm64-cross libc6-dev-riscv64-cross
+          packages=(qemu-user lld libc6-dev-arm64-cross libc6-dev-riscv64-cross)
+          # The cached packages are exactly what the archive installed on this release: no network.
+          if compgen -G "$HOME/cross-packages/*.deb" >/dev/null && sudo dpkg -i "$HOME"/cross-packages/*.deb; then
+            exit 0
+          fi
+          # From the archive, falling back to another official mirror when the archive's hosts do
+          # not resolve. apt verifies every index against Ubuntu's signing keys either way.
+          if ! sudo apt-get update --error-on=any; then
+            mirror=https://mirrors.edge.kernel.org/ubuntu/
+            echo "::warning::the Ubuntu archive is unreachable; installing from $mirror"
+            [ ! -f /etc/apt/apt-mirrors.txt ] || echo "$mirror" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+            for f in /etc/apt/sources.list.d/*.sources; do
+              [ ! -f "$f" ] || sudo sed -i -E "s#https?://([a-z0-9.-]+\.)?(archive|security)\.ubuntu\.com/ubuntu/?#$mirror#g" "$f"
+            done
+            sudo apt-get update --error-on=any
+          fi
+          sudo apt-get install -y --download-only "${packages[@]}"
+          mkdir -p "$HOME/cross-packages"
+          find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t "$HOME/cross-packages/" {} +
+          sudo apt-get install -y "${packages[@]}"
+      # Saved by master, as every cache here: a queue branch's own entry would be visible to it alone.
+      - name: save cross-architecture packages
+        if: github.ref == 'refs/heads/master' && steps.cross-packages-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/cross-packages
+          key: ${{ steps.cross-packages.outputs.key }}
       # The KLIB semantics, value-class and kotlinc-native oracle tests are ordinary e2e and unit
       # tests: the coverage gate runs them against the maximum-version Native distribution.
       - name: restore integration Native toolchain
@@ -848,8 +885,14 @@ jobs:
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
           KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE: "1"
         run: just conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
+      # Also after a failed or timed-out run: each entry is published whole (an OK or FAILED marker
+      # renamed into place) and only for a complete compile, so what a cut-short run saves is exact.
+      # A cold cache after a change to the files the key hashes takes longer than the lane's
+      # deadline on the slower runners; saving only on success left it cold for every queue run.
       - name: save kotlinc box references (${{ matrix.version }})
-        if: matrix.target == 'jvm' && github.ref == 'refs/heads/master' && steps.box-references.outputs.cache-hit != 'true'
+        if: >-
+          !cancelled() && matrix.target == 'jvm' && github.ref == 'refs/heads/master'
+          && steps.box-references.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/ref-classes

@@ -482,9 +482,12 @@ impl Checker<'_> {
         self.merge_mapped_generic_argument_bindings(
             overload,
             receiver,
-            (args, arg_tys),
-            argument_map,
-            whole_array_varargs,
+            super::generic_call_bindings::MappedGenericArguments {
+                args,
+                arg_tys,
+                argument_map,
+                named_whole_array_varargs: whole_array_varargs,
+            },
             type_args,
             &mut binds,
         );

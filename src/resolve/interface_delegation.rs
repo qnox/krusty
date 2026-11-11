@@ -338,11 +338,7 @@ fn function_call(
                 extension_receiver,
             );
         }
-        let mut declared_parameters = signature
-            .parameters
-            .iter()
-            .map(|parameter| *parameter)
-            .collect::<Vec<_>>();
+        let mut declared_parameters = signature.parameters.to_vec();
         if let Some(extension_receiver) = callable.shape.extension_receiver {
             declared_parameters.insert(
                 callable
@@ -523,7 +519,7 @@ fn property_call(
     if setter {
         parameters.push(property_type);
     }
-    let result = setter.then_some(Ty::Unit).unwrap_or(property_type);
+    let result = if setter { Ty::Unit } else { property_type };
     let callable = if setter {
         property.setter.as_ref()?
     } else {
