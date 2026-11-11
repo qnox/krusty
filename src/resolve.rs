@@ -9266,6 +9266,98 @@ struct CallArgs<'a> {
     arg_tys: &'a [Ty],
 }
 
+/// The call, the callee expression, and the classifier value it is invoked on.
+struct ClassifierValueCallSite {
+    call: ExprId,
+    callee: ExprId,
+    receiver: ExprId,
+}
+
+/// Argument expressions whose types are only partly known, with lambdas still open.
+struct PartialArguments<'a> {
+    args: &'a [ExprId],
+    types: &'a [Option<Ty>],
+}
+
+/// The outer instance and alias application a source constructor is checked through.
+struct AppliedConstructorContext {
+    bound_outer: Option<Ty>,
+    applied_classifier: Option<Ty>,
+}
+
+/// Parameter facts a selected source constructor checks its arguments against.
+struct SourceConstructorParameters<'a> {
+    params: &'a [Ty],
+    parameter_shapes: &'a [(Ty, bool)],
+    slots: Option<&'a [Option<ExprId>]>,
+    implicit_integer_coercion: &'a [bool],
+    whole_array_varargs: Option<&'a [bool]>,
+}
+
+/// Whether those arguments name the applied alias rather than the expanded classifier.
+struct AppliedConstructorNaming {
+    bound_outer: Option<Ty>,
+    arguments_name_an_applied_classifier: bool,
+}
+
+/// The extension receiver and simple name a callable reference is bound to.
+struct ExtensionReferenceTarget<'a> {
+    receiver: Ty,
+    name: &'a str,
+}
+
+/// The adapted argument mapping and explicit type arguments of a callable reference.
+struct AdaptedReferenceArguments {
+    mapping: Vec<AdaptedRefArgument>,
+    type_arguments: Vec<Ty>,
+}
+
+/// A call together with its argument expressions, checked types, and labels.
+struct NamedCallArguments<'a> {
+    call: ExprId,
+    args: &'a [ExprId],
+    arg_tys: &'a [Ty],
+    argument_names: Option<&'a [Option<String>]>,
+}
+
+/// Provenance of a dispatch receiver beyond the property's declaring owner.
+struct DispatchPropertyProvenance {
+    enum_entry: Option<EnumEntryProperty>,
+    selected_receiver: Option<(usize, usize)>,
+}
+
+/// The value-parameter list a constructor-arity diagnostic is written against.
+struct ConstructorValueParameters<'a> {
+    types: &'a [Ty],
+    names: &'a [String],
+    defaults: &'a [bool],
+    vararg: Option<usize>,
+}
+
+/// The selected formal a committed argument is checked against.
+struct SelectedFormal<'a> {
+    signature: &'a CallSig,
+    index: usize,
+}
+
+/// The expected type of one call parameter and the type the parameter declares.
+struct ParameterTypeExpectation {
+    expected: Ty,
+    declared: Ty,
+}
+
+/// An extension member named on a receiver.
+struct ExtensionMember<'a> {
+    receiver: Ty,
+    name: &'a str,
+}
+
+/// The name and kind of one operator candidate family.
+struct OperatorCallableKind<'a> {
+    name: &'a str,
+    kind: crate::libraries::FnKind,
+}
+
 struct SelectedLocalExtension {
     statement: StmtId,
     signature: Signature,
@@ -10144,7 +10236,7 @@ impl<'a> Checker<'a> {
     fn active_inner_owner_type_parameters(
         &self,
         parser: DeclId,
-    ) -> Option<Vec<(String, String, Ty, Vec<Ty>)>> {
+    ) -> Option<Vec<InnerOwnerTypeParameter>> {
         let (active, index) = self.active_declarations.zip(self.resolved_index)?;
         let mut current = active.canonical_classifier_declaration(parser, index)?;
         let mut levels = Vec::new();
@@ -10694,10 +10786,9 @@ impl<'a> Checker<'a> {
             let narrowed_base = declined_receiver
                 .and_then(|receiver| self.narrowed_read_base.get(&receiver).copied());
             let declined = declined_receiver.and_then(|receiver| {
-                let found = self.declined_smartcast_target(scope, receiver, |this, target| {
+                self.declined_smartcast_target(scope, receiver, |this, target| {
                     exists_on_non_null(this, target)
-                });
-                found
+                })
             });
             if declined.is_some() {
                 if report_diagnostics {
@@ -10862,14 +10953,17 @@ impl<'a> Checker<'a> {
     fn check_classifier_value_call(
         &mut self,
         scope: &CheckerScope<'_>,
-        call: ExprId,
-        callee: ExprId,
-        receiver: ExprId,
+        site: ClassifierValueCallSite,
         classifier: TypeName,
         name: &str,
         args: &[ExprId],
         expected: Option<Ty>,
     ) -> ClassifierValueCall {
+        let ClassifierValueCallSite {
+            call,
+            callee,
+            receiver,
+        } = site;
         let Some(receiver_ty) = self.classifier_value_ty(receiver, classifier, false) else {
             return ClassifierValueCall::NoValue;
         };
@@ -10890,8 +10984,10 @@ impl<'a> Checker<'a> {
         let argument_types = self.ext_arg_tys(
             scope,
             call,
-            receiver_ty,
-            name,
+            ExtensionMember {
+                receiver: receiver_ty,
+                name,
+            },
             args,
             &type_args,
             CallResultConstraint::direct(expected),
@@ -11976,13 +12072,16 @@ impl<'a> Checker<'a> {
         call: ExprId,
         receiver: Ty,
         name: &str,
-        args: &[ExprId],
-        partial_arg_tys: &[Option<Ty>],
+        arguments: PartialArguments<'_>,
         expected_result: Option<Ty>,
     ) -> (
         Option<crate::libraries::LibraryMember>,
         Option<GenericMemberPlan>,
     ) {
+        let PartialArguments {
+            args,
+            types: partial_arg_tys,
+        } = arguments;
         let argument_names = self.file.call_arg_names.get(&call.0).cloned();
         let explicit_type_args = self.resolved_explicit_type_args(scope, call);
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
@@ -12068,25 +12167,12 @@ impl<'a> Checker<'a> {
     fn check_applicable_module_member_call(
         &mut self,
         scope: &CheckerScope<'_>,
-        call: ExprId,
+        call_args: CallArgs<'_>,
         rt: Ty,
         name: &str,
-        args: &[ExprId],
-        arg_tys: &[Ty],
         expected: Option<Ty>,
     ) -> Option<Ty> {
-        self.check_module_member_call_mode(
-            scope,
-            CallArgs {
-                call,
-                args,
-                arg_tys,
-            },
-            rt,
-            name,
-            true,
-            expected,
-        )
+        self.check_module_member_call_mode(scope, call_args, rt, name, true, expected)
     }
 
     fn check_module_member_call_mode(
@@ -12624,15 +12710,18 @@ impl<'a> Checker<'a> {
         call_args: CallArgs<'_>,
         class: &ClassSig,
         selected: ResolvedCtorDelegation,
-        bound_outer: Option<Ty>,
         expected: Option<Ty>,
-        applied_classifier: Option<Ty>,
+        application: AppliedConstructorContext,
     ) -> Ty {
         let CallArgs {
             call,
             args,
             arg_tys,
         } = call_args;
+        let AppliedConstructorContext {
+            bound_outer,
+            applied_classifier,
+        } = application;
         let applied_classifier = self.alias_constructor_fixed_application(call, applied_classifier);
         let primary = matches!(
             &selected.target,
@@ -12719,14 +12808,18 @@ impl<'a> Checker<'a> {
                         arg_tys: &source_actuals,
                     },
                     class,
-                    &selected.argument_types,
-                    &source_shapes,
-                    None,
-                    &selected.argument_implicit_integer_coercion,
-                    Some(&whole_array_varargs),
+                    SourceConstructorParameters {
+                        params: &selected.argument_types,
+                        parameter_shapes: &source_shapes,
+                        slots: None,
+                        implicit_integer_coercion: &selected.argument_implicit_integer_coercion,
+                        whole_array_varargs: Some(&whole_array_varargs),
+                    },
                     applied_classifier.or(expected),
-                    bound_outer,
-                    applied_classifier.is_some(),
+                    AppliedConstructorNaming {
+                        bound_outer,
+                        arguments_name_an_applied_classifier: applied_classifier.is_some(),
+                    },
                 )
             } else {
                 let mut slots = vec![None; declared_params.len()];
@@ -12749,14 +12842,18 @@ impl<'a> Checker<'a> {
                         arg_tys,
                     },
                     class,
-                    &declared_params,
-                    parameter_shapes.as_deref().expect("checked above"),
-                    Some(&slots),
-                    &implicit_integer_coercion,
-                    None,
+                    SourceConstructorParameters {
+                        params: &declared_params,
+                        parameter_shapes: parameter_shapes.as_deref().expect("checked above"),
+                        slots: Some(&slots),
+                        implicit_integer_coercion: &implicit_integer_coercion,
+                        whole_array_varargs: None,
+                    },
                     applied_classifier.or(expected),
-                    bound_outer,
-                    applied_classifier.is_some(),
+                    AppliedConstructorNaming {
+                        bound_outer,
+                        arguments_name_an_applied_classifier: applied_classifier.is_some(),
+                    },
                 )
             }
         } else {
@@ -13084,10 +13181,12 @@ impl<'a> Checker<'a> {
                     let argument_names = self.file.call_arg_names.get(&call.0).cloned();
                     return self.finish_top_level_call(
                         scope,
-                        call,
-                        args,
-                        &argument_types,
-                        argument_names.as_deref(),
+                        NamedCallArguments {
+                            call,
+                            args,
+                            arg_tys: &argument_types,
+                            argument_names: argument_names.as_deref(),
+                        },
                         selected,
                         &[],
                         None,
@@ -13198,10 +13297,12 @@ impl<'a> Checker<'a> {
                 Some(CallableCandidateSelection::Selected(selected)) => {
                     return self.finish_top_level_call(
                         scope,
-                        call,
-                        args,
-                        &argument_types,
-                        None,
+                        NamedCallArguments {
+                            call,
+                            args,
+                            arg_tys: &argument_types,
+                            argument_names: None,
+                        },
                         *selected,
                         &[],
                         None,
@@ -13824,10 +13925,12 @@ impl<'a> Checker<'a> {
                                 self.retire_selected_lambda_probe(call, args, probe_mark);
                                 return self.finish_top_level_call(
                                     scope,
-                                    call,
-                                    args,
-                                    &arg_tys,
-                                    arg_names.as_deref(),
+                                    NamedCallArguments {
+                                        call,
+                                        args,
+                                        arg_tys: &arg_tys,
+                                        argument_names: arg_names.as_deref(),
+                                    },
                                     *selected,
                                     &targs,
                                     None,
@@ -13933,9 +14036,11 @@ impl<'a> Checker<'a> {
                             },
                             &cls,
                             selected,
-                            None,
                             expected,
-                            qualified_alias_target,
+                            AppliedConstructorContext {
+                                bound_outer: None,
+                                applied_classifier: qualified_alias_target,
+                            },
                         );
                     }
                     // A class name with a companion also denotes that companion in value
@@ -14260,11 +14365,9 @@ impl<'a> Checker<'a> {
                         // `super.B(args)` constructs that inner class with the already selected
                         // (possibly labeled) receiver. Reuse ordinary inner-constructor candidate
                         // selection; checked FIR consumes the receiver coordinate recorded here.
-                        if let Some(super_receiver) = applied_sup.filter(|receiver| {
-                            receiver
-                                .obj_internal()
-                                .is_some_and(|owner| matches_qual(owner))
-                        }) {
+                        if let Some(super_receiver) = applied_sup
+                            .filter(|receiver| receiver.obj_internal().is_some_and(matches_qual))
+                        {
                             if let Some(ret) = self.bound_inner_constructor_call(
                                 scope,
                                 BoundInnerConstruction {
@@ -14315,7 +14418,16 @@ impl<'a> Checker<'a> {
                     let value_hidden = self.qualifier_value_is_hidden_by_type_arguments(receiver);
                     if !value_hidden {
                         match self.check_classifier_value_call(
-                            scope, call, callee, receiver, classifier, &name, args, expected,
+                            scope,
+                            ClassifierValueCallSite {
+                                call,
+                                callee,
+                                receiver,
+                            },
+                            classifier,
+                            &name,
+                            args,
+                            expected,
                         ) {
                             ClassifierValueCall::Checked(ret) => return ret,
                             ClassifierValueCall::NoValue => {}
@@ -14491,10 +14603,12 @@ impl<'a> Checker<'a> {
                     let call_diagnostics = self.diags.diags.len();
                     if let Some(rejected) = self.report_single_mapped_candidate_type_errors(
                         scope,
-                        call,
+                        CallArgs {
+                            call,
+                            args,
+                            arg_tys: &arg_tys,
+                        },
                         &name,
-                        args,
-                        &arg_tys,
                         CallConstraints {
                             type_args: &explicit_type_args,
                             receiver: classifier_receiver,
@@ -14635,8 +14749,10 @@ impl<'a> Checker<'a> {
                     call,
                     rt,
                     &name,
-                    args,
-                    &generic_member_partial,
+                    PartialArguments {
+                        args,
+                        types: &generic_member_partial,
+                    },
                     expected,
                 );
                 crate::trace_compiler!(
@@ -15080,11 +15196,13 @@ impl<'a> Checker<'a> {
                 // `check_builtin_operator_method`; the arg-type rule is the checker's.
                 if arg_names.is_none() {
                     if let Some(ret) = self.check_builtin_operator_method(
-                        call,
+                        CallArgs {
+                            call,
+                            args,
+                            arg_tys: &arg_tys,
+                        },
                         rt,
                         &name,
-                        args,
-                        &arg_tys,
                         infix_shadows_builtin,
                         &receiver_callables,
                     ) {
@@ -15375,10 +15493,12 @@ impl<'a> Checker<'a> {
                     );
                     if let Some(rejected_result) = self.report_single_mapped_candidate_type_errors(
                         scope,
-                        call,
+                        CallArgs {
+                            call,
+                            args,
+                            arg_tys: &arg_tys,
+                        },
                         &name,
-                        args,
-                        &arg_tys,
                         CallConstraints {
                             type_args: &call_targs,
                             receiver: rt,
@@ -16518,8 +16638,10 @@ impl<'a> Checker<'a> {
                                         call,
                                         args,
                                         known_argument_parameters.as_deref(),
-                                        generic,
-                                        &formal,
+                                        call_diagnostics::ContextualFormal {
+                                            signature: generic,
+                                            formal: &formal,
+                                        },
                                         call_fn_name.as_deref(),
                                     );
                                     return self.set(call, Ty::Error);
@@ -18229,9 +18351,12 @@ impl<'a> Checker<'a> {
                                         },
                                         &cls,
                                         selected,
-                                        implicit_constructor_outer.map(|receiver| receiver.ty),
                                         expected,
-                                        bare_alias_target,
+                                        AppliedConstructorContext {
+                                            bound_outer: implicit_constructor_outer
+                                                .map(|receiver| receiver.ty),
+                                            applied_classifier: bare_alias_target,
+                                        },
                                     );
                                     if cls.inner_of.is_some() {
                                         if let Some(receiver) = implicit_constructor_outer {
@@ -18510,7 +18635,15 @@ impl<'a> Checker<'a> {
                     if let Some(bt) = callee_this {
                         if let Some(bi) = bt.obj_internal() {
                             if let Some(ret) = self.check_applicable_module_member_call(
-                                scope, call, bt, &fname, args, &arg_tys, expected,
+                                scope,
+                                CallArgs {
+                                    call,
+                                    args,
+                                    arg_tys: &arg_tys,
+                                },
+                                bt,
+                                &fname,
+                                expected,
                             ) {
                                 self.narrowed_this_member.insert(call, bi);
                                 if let Some(receiver) = callee_receivers.first().copied() {
@@ -18801,10 +18934,12 @@ impl<'a> Checker<'a> {
                     }
                     return self.finish_top_level_call(
                         scope,
-                        call,
-                        args,
-                        &arg_tys,
-                        arg_names.as_deref(),
+                        NamedCallArguments {
+                            call,
+                            args,
+                            arg_tys: &arg_tys,
+                            argument_names: arg_names.as_deref(),
+                        },
                         selection.candidate().expect("non-ambiguous selection"),
                         &explicit_type_args,
                         top_level_sam_signatures.as_deref(),
@@ -18988,9 +19123,11 @@ impl<'a> Checker<'a> {
                         },
                         &class,
                         selected,
-                        None,
                         expected,
-                        None,
+                        AppliedConstructorContext {
+                            bound_outer: None,
+                            applied_classifier: None,
+                        },
                     );
                 }
                 if let Some(invisible) = invisible_constructor {
@@ -24263,9 +24400,11 @@ fun box(): String {
                     hidden_member_properties: Default::default(),
                     hidden_deprecated_callables: Default::default(),
                     declared_callables,
-                    declared_callable_order: (internal == foo)
-                        .then(|| vec!["prop".to_string()])
-                        .unwrap_or_default(),
+                    declared_callable_order: if internal == foo {
+                        vec!["prop".to_string()]
+                    } else {
+                        Default::default()
+                    },
                     members: vec![],
                     methods_as_declarations: false,
                     companion: vec![],
@@ -29856,9 +29995,11 @@ fn make_checker<'a>(
         file_index,
         source_files,
         syms,
-        None,
-        None,
-        None,
+        CheckerIndexes {
+            resolved_index: None,
+            active_declarations: None,
+            streamed_cache: None,
+        },
         diags,
     )
 }
@@ -29915,16 +30056,25 @@ impl CheckerSymbolEnvironment for PassTwoSymbols {
     }
 }
 
+struct CheckerIndexes<'a> {
+    resolved_index: Option<&'a crate::fir::ResolvedModuleIndex>,
+    active_declarations: Option<&'a crate::fir::ActiveSourceDeclarations>,
+    streamed_cache: Option<&'a crate::fir::StreamedModuleProjectionCache>,
+}
+
 fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
     file: &'a File,
     file_index: u32,
     source_files: Option<&'a [File]>,
     syms: &'a S,
-    resolved_index: Option<&'a crate::fir::ResolvedModuleIndex>,
-    active_declarations: Option<&'a crate::fir::ActiveSourceDeclarations>,
-    streamed_cache: Option<&'a crate::fir::StreamedModuleProjectionCache>,
+    indexes: CheckerIndexes<'a>,
     diags: &'a mut DiagSink,
 ) -> Checker<'a> {
+    let CheckerIndexes {
+        resolved_index,
+        active_declarations,
+        streamed_cache,
+    } = indexes;
     let imports = import_map(file);
     let function_import_scope = resolved_index.map_or_else(
         || {
@@ -30909,22 +31059,22 @@ fn discover_anonymous_object_captures_at(
     }
 
     let mut scratch = DiagSink::new();
-    let info = check_file_at_impl_mode_with_index(
+    let info = check_file_at_impl_mode_with_index(IndexedFileCheck {
         file,
         file_index,
-        None,
+        source_files: None,
         syms,
-        None,
-        &mut scratch,
-        CaptureDiscovery::Scratch,
+        resolved_index: None,
+        diags: &mut scratch,
+        captures: CaptureDiscovery::Scratch,
         selected_declarations,
         selected_body_declarations,
-        None,
-        None,
-        None,
-        SourceFragmentMode::Complete,
-        None,
-    );
+        active_declarations: None,
+        selected_stable_roots: None,
+        selected_stable_bodies: None,
+        fragment: SourceFragmentMode::Complete,
+        streamed_cache: None,
+    });
     let mut discovered = info.anonymous_object_captures_by_class;
     if selected_declarations.is_none() {
         for declaration in declarations {
@@ -31128,22 +31278,42 @@ enum CaptureDiscovery<'a> {
     AtConstruction,
 }
 
-fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
-    file: &File,
+struct IndexedFileCheck<'a, S: CheckerSymbolEnvironment + ?Sized> {
+    file: &'a File,
     file_index: u32,
-    source_files: Option<&[File]>,
-    syms: &mut S,
-    resolved_index: Option<&crate::fir::ResolvedModuleIndex>,
-    diags: &mut DiagSink,
-    captures: CaptureDiscovery<'_>,
-    selected_declarations: Option<&crate::fx_hash::HashSet<Span>>,
-    selected_body_declarations: Option<&crate::fx_hash::HashSet<Span>>,
-    active_declarations: Option<&crate::fir::ActiveSourceDeclarations>,
-    selected_stable_roots: Option<&crate::fx_hash::HashSet<crate::fir::DeclarationId>>,
-    selected_stable_bodies: Option<&crate::fx_hash::HashSet<crate::fir::DeclarationId>>,
+    source_files: Option<&'a [File]>,
+    syms: &'a mut S,
+    resolved_index: Option<&'a crate::fir::ResolvedModuleIndex>,
+    diags: &'a mut DiagSink,
+    captures: CaptureDiscovery<'a>,
+    selected_declarations: Option<&'a crate::fx_hash::HashSet<Span>>,
+    selected_body_declarations: Option<&'a crate::fx_hash::HashSet<Span>>,
+    active_declarations: Option<&'a crate::fir::ActiveSourceDeclarations>,
+    selected_stable_roots: Option<&'a crate::fx_hash::HashSet<crate::fir::DeclarationId>>,
+    selected_stable_bodies: Option<&'a crate::fx_hash::HashSet<crate::fir::DeclarationId>>,
     fragment: SourceFragmentMode,
-    streamed_cache: Option<&crate::fir::StreamedModuleProjectionCache>,
+    streamed_cache: Option<&'a crate::fir::StreamedModuleProjectionCache>,
+}
+
+fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
+    check: IndexedFileCheck<'_, S>,
 ) -> TypeInfo {
+    let IndexedFileCheck {
+        file,
+        file_index,
+        source_files,
+        syms,
+        resolved_index,
+        diags,
+        captures,
+        selected_declarations,
+        selected_body_declarations,
+        active_declarations,
+        selected_stable_roots,
+        selected_stable_bodies,
+        fragment,
+        streamed_cache,
+    } = check;
     let capture_discovery = matches!(captures, CaptureDiscovery::Scratch);
     let anonymous_lexical_scope = anonymous_lexical_class_scope(file);
     let mut c = make_checker_with_index(
@@ -31151,9 +31321,11 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         file_index,
         source_files,
         &*syms,
-        resolved_index,
-        active_declarations,
-        streamed_cache,
+        CheckerIndexes {
+            resolved_index,
+            active_declarations,
+            streamed_cache,
+        },
         diags,
     );
     c.selected_body_declarations = selected_body_declarations.cloned();
@@ -31802,7 +31974,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             .copied()
             .collect(),
     );
-    let info = TypeInfo {
+    TypeInfo {
         expr_types,
         callable_reference_types,
         reflective_callable_references,
@@ -31881,74 +32053,83 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         delegate_property_reference_type,
         context_args,
         lambda_body_results,
-    };
-    info
+    }
 }
 
 /// Check only the active declaration fragment that owns inline body work. Every non-active source
 /// declaration is resolved from `resolved_index`/`syms`; no sibling parser `File` is available at
 /// this boundary. This lets Pass 1 release each legacy declaration arena as soon as its retained
 /// inline FIR has been constructed.
+pub(crate) struct SourceFileUnit<'a> {
+    pub(crate) file: &'a File,
+    pub(crate) file_index: u32,
+}
+
+pub(crate) struct SpanBodySelection<'a> {
+    pub(crate) declarations: &'a crate::fx_hash::HashSet<Span>,
+    pub(crate) bodies: &'a crate::fx_hash::HashSet<Span>,
+    pub(crate) stable_bodies: &'a crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+}
+
+pub(crate) struct StableDefaultSelection<'a> {
+    pub(crate) roots: &'a crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    pub(crate) defaults: &'a crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+}
+
 pub(crate) fn check_preinferred_inline_declarations_at_with_index(
-    file: &File,
-    file_index: u32,
-    selected_declarations: &crate::fx_hash::HashSet<Span>,
-    selected_body_declarations: &crate::fx_hash::HashSet<Span>,
-    selected_stable_bodies: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    unit: SourceFileUnit<'_>,
+    selection: SpanBodySelection<'_>,
     active_declarations: &crate::fir::ActiveSourceDeclarations,
     resolved_index: &crate::fir::ResolvedModuleIndex,
     syms: &mut SymbolTable,
     diags: &mut DiagSink,
 ) -> TypeInfo {
     crate::wide_stack::on_wide_stack(move || {
-        check_file_at_impl_mode_with_index(
-            file,
-            file_index,
-            None,
+        check_file_at_impl_mode_with_index(IndexedFileCheck {
+            file: unit.file,
+            file_index: unit.file_index,
+            source_files: None,
             syms,
-            Some(resolved_index),
+            resolved_index: Some(resolved_index),
             diags,
-            CaptureDiscovery::Published,
-            Some(selected_declarations),
-            Some(selected_body_declarations),
-            Some(active_declarations),
-            None,
-            Some(selected_stable_bodies),
-            SourceFragmentMode::InlinePreparation,
-            None,
-        )
+            captures: CaptureDiscovery::Published,
+            selected_declarations: Some(selection.declarations),
+            selected_body_declarations: Some(selection.bodies),
+            active_declarations: Some(active_declarations),
+            selected_stable_roots: None,
+            selected_stable_bodies: Some(selection.stable_bodies),
+            fragment: SourceFragmentMode::InlinePreparation,
+            streamed_cache: None,
+        })
     })
 }
 
 pub(crate) fn check_selected_declarations_in_pass_two(
-    file: &File,
-    file_index: u32,
-    selected_declarations: &crate::fx_hash::HashSet<Span>,
-    selected_body_declarations: &crate::fx_hash::HashSet<Span>,
+    unit: SourceFileUnit<'_>,
+    selection: SpanBodySelection<'_>,
     active_declarations: &crate::fir::ActiveSourceDeclarations,
-    selected_stable_bodies: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     symbols: &mut PassTwoSymbols,
     index: &crate::fir::ResolvedModuleIndex,
     streamed_cache: &crate::fir::StreamedModuleProjectionCache,
     diags: &mut DiagSink,
 ) -> TypeInfo {
     crate::wide_stack::on_wide_stack(move || {
-        check_file_at_impl_mode_with_index(
-            file,
-            file_index,
-            None,
-            symbols,
-            Some(index),
+        check_file_at_impl_mode_with_index(IndexedFileCheck {
+            file: unit.file,
+            file_index: unit.file_index,
+            source_files: None,
+            syms: symbols,
+            resolved_index: Some(index),
             diags,
-            CaptureDiscovery::AtConstruction,
-            Some(selected_declarations),
-            Some(selected_body_declarations),
-            Some(active_declarations),
-            None,
-            Some(selected_stable_bodies),
-            SourceFragmentMode::Complete,
-            Some(streamed_cache),
-        )
+            captures: CaptureDiscovery::AtConstruction,
+            selected_declarations: Some(selection.declarations),
+            selected_body_declarations: Some(selection.bodies),
+            active_declarations: Some(active_declarations),
+            selected_stable_roots: None,
+            selected_stable_bodies: Some(selection.stable_bodies),
+            fragment: SourceFragmentMode::Complete,
+            streamed_cache: Some(streamed_cache),
+        })
     })
 }
 
@@ -31956,32 +32137,30 @@ pub(crate) fn check_selected_declarations_in_pass_two(
 /// declaration selection enters ordinary lexical scopes, but callable/constructor bodies remain
 /// unopened because their finalized results already live in `index`.
 pub(crate) fn check_signature_default_declarations_at_with_index(
-    file: &File,
-    file_index: u32,
+    unit: SourceFileUnit<'_>,
     active_declarations: &crate::fir::ActiveSourceDeclarations,
-    selected_stable_roots: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
-    selected_stable_defaults: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    selection: StableDefaultSelection<'_>,
     syms: &mut SymbolTable,
     index: &crate::fir::ResolvedModuleIndex,
     diags: &mut DiagSink,
 ) -> TypeInfo {
     crate::wide_stack::on_wide_stack(move || {
-        check_file_at_impl_mode_with_index(
-            file,
-            file_index,
-            None,
+        check_file_at_impl_mode_with_index(IndexedFileCheck {
+            file: unit.file,
+            file_index: unit.file_index,
+            source_files: None,
             syms,
-            Some(index),
+            resolved_index: Some(index),
             diags,
-            CaptureDiscovery::AtConstruction,
-            None,
-            None,
-            Some(active_declarations),
-            Some(selected_stable_roots),
-            Some(selected_stable_defaults),
-            SourceFragmentMode::SignatureDefaults,
-            None,
-        )
+            captures: CaptureDiscovery::AtConstruction,
+            selected_declarations: None,
+            selected_body_declarations: None,
+            active_declarations: Some(active_declarations),
+            selected_stable_roots: Some(selection.roots),
+            selected_stable_bodies: Some(selection.defaults),
+            fragment: SourceFragmentMode::SignatureDefaults,
+            streamed_cache: None,
+        })
     })
 }
 
@@ -32256,6 +32435,19 @@ struct LambdaCheckMode {
     result_constraint: LambdaResultConstraint,
 }
 
+type InnerOwnerTypeParameter = (String, String, Ty, Vec<Ty>);
+type StableReceiverCallableKey = (Ty, String, Vec<TypeName>);
+type DemandReject<'a> = &'a dyn Fn(&str, Span) -> bool;
+type FlowNarrowing = (NarrowPath, Ty);
+type DeclinedFlowNarrowing = (String, Ty);
+type OwnedPropertyFacts = (
+    TypeName,
+    Ty,
+    bool,
+    Option<Visibility>,
+    Option<crate::fir::DeclarationId>,
+);
+
 struct Checker<'a> {
     file: &'a File,
     /// Interned source package of `file`, computed once from its dotted spelling.
@@ -32336,7 +32528,7 @@ struct Checker<'a> {
     /// includes lexical class access because visibility can change across nested classifier bodies.
     /// Pass-1 and legacy mutable-symbol checks bypass this cache entirely.
     stable_receiver_callable_cache:
-        std::cell::RefCell<HashMap<(Ty, String, Vec<TypeName>), crate::libraries::Callables>>,
+        std::cell::RefCell<HashMap<StableReceiverCallableKey, crate::libraries::Callables>>,
     /// Complete function supertypes of an applied classifier. This is immutable after the Pass-1
     /// declaration index is finalized and is queried for nearly every call argument, including
     /// ordinary primitives whose answer is the same empty set each time.
@@ -32349,7 +32541,7 @@ struct Checker<'a> {
     /// in declaration order, so a module property declared later in the same file has no value yet;
     /// kotlinc rejects `val eager = later` with "variable 'later' must be initialized". The symbol
     /// table has no notion of position, so the engine records the rejected read at its source span.
-    demand_rejects: Option<&'a dyn Fn(&str, Span) -> bool>,
+    demand_rejects: Option<DemandReject<'a>>,
     expr_types: Vec<Ty>,
     /// Trace-only duplicate-traversal detector. This is deliberately not a semantic cache: normal
     /// builds contain no field or branch, and trace builds report the caller bug to remove.
@@ -33896,14 +34088,17 @@ impl<'a> Checker<'a> {
     fn record_extension_ref(
         &mut self,
         expression: ExprId,
-        receiver: Ty,
-        name: &str,
+        target: ExtensionReferenceTarget<'_>,
         binding: CallableReferenceBinding,
         function: crate::libraries::FunctionInfo,
-        argument_mapping: Vec<AdaptedRefArgument>,
-        type_arguments: Vec<Ty>,
+        adapted: AdaptedReferenceArguments,
         expected: Option<&'static crate::types::FnSig>,
     ) -> Ty {
+        let ExtensionReferenceTarget { receiver, name } = target;
+        let AdaptedReferenceArguments {
+            mapping: argument_mapping,
+            type_arguments,
+        } = adapted;
         if function.kind == crate::libraries::FnKind::Extension && function.source_member.is_some()
         {
             return self.reject_member_extension_reference(expression, name);
@@ -34008,12 +34203,16 @@ impl<'a> Checker<'a> {
                 }
                 Some(self.record_extension_ref(
                     expression,
-                    receiver.ty(),
-                    name,
+                    ExtensionReferenceTarget {
+                        receiver: receiver.ty(),
+                        name,
+                    },
                     receiver.binding(),
                     function,
-                    argument_mapping,
-                    type_arguments,
+                    AdaptedReferenceArguments {
+                        mapping: argument_mapping,
+                        type_arguments,
+                    },
                     expected,
                 ))
             }
@@ -37062,8 +37261,10 @@ impl<'a> Checker<'a> {
                 binding,
                 receiver,
                 *member,
-                argument_mapping,
-                type_arguments,
+                AdaptedReferenceArguments {
+                    mapping: argument_mapping,
+                    type_arguments,
+                },
                 expected,
             )),
         }
@@ -37075,10 +37276,13 @@ impl<'a> Checker<'a> {
         binding: CallableReferenceBinding,
         receiver: Ty,
         mut member: crate::libraries::LibraryMember,
-        argument_mapping: Vec<AdaptedRefArgument>,
-        type_arguments: Vec<Ty>,
+        adapted: AdaptedReferenceArguments,
         expected: &'static crate::types::FnSig,
     ) -> Ty {
+        let AdaptedReferenceArguments {
+            mapping: argument_mapping,
+            type_arguments,
+        } = adapted;
         if member.is_member_extension() {
             return self.reject_member_extension_reference(expression, &member.name);
         }
@@ -38156,14 +38360,17 @@ impl<'a> Checker<'a> {
     fn finish_top_level_call(
         &mut self,
         scope: &CheckerScope<'_>,
-        call: ExprId,
-        args: &[ExprId],
-        arg_tys: &[Ty],
-        argument_names: Option<&[Option<String>]>,
+        arguments: NamedCallArguments<'_>,
         selected: SelectedCallable,
         explicit_type_args: &[Ty],
         sam_signatures: Option<&[Option<crate::symbol_resolver::SamSignature>]>,
     ) -> Ty {
+        let NamedCallArguments {
+            call,
+            args,
+            arg_tys,
+            argument_names,
+        } = arguments;
         let SelectedCallable {
             info: mut selected,
             call_site_params,
@@ -38890,8 +39097,10 @@ impl<'a> Checker<'a> {
             },
             is_var,
             owner,
-            None,
-            None,
+            DispatchPropertyProvenance {
+                enum_entry: None,
+                selected_receiver: None,
+            },
         );
     }
 
@@ -38902,9 +39111,12 @@ impl<'a> Checker<'a> {
         binding: DispatchPropertyBinding,
         is_var: bool,
         owner: TypeName,
-        enum_entry_property: Option<EnumEntryProperty>,
-        selected_receiver_identity: Option<(usize, usize)>,
+        provenance: DispatchPropertyProvenance,
     ) {
+        let DispatchPropertyProvenance {
+            enum_entry: enum_entry_property,
+            selected_receiver: selected_receiver_identity,
+        } = provenance;
         let implicit_receivers = self.implicit_receivers(scope);
         let receiver_identity = selected_receiver_identity
             .or_else(|| {
@@ -39774,10 +39986,12 @@ impl<'a> Checker<'a> {
                         args,
                         &failure,
                         class_name,
-                        candidate.target.params(),
-                        &candidate.param_names,
-                        &candidate.defaults,
-                        candidate.vararg,
+                        ConstructorValueParameters {
+                            types: candidate.target.params(),
+                            names: &candidate.param_names,
+                            defaults: &candidate.defaults,
+                            vararg: candidate.vararg,
+                        },
                     ) {
                         return true;
                     }
@@ -39795,11 +40009,14 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
         failure: &CallArgMappingFailure,
         class_name: &str,
-        params: &[Ty],
-        names: &[String],
-        defaults: &[bool],
-        vararg: Option<usize>,
+        parameters: ConstructorValueParameters<'_>,
     ) -> bool {
+        let ConstructorValueParameters {
+            types: params,
+            names,
+            defaults,
+            vararg,
+        } = parameters;
         if !matches!(
             failure.errors.as_slice(),
             [CallArgMappingError::TooManyArguments { .. }]
@@ -40264,8 +40481,7 @@ impl<'a> Checker<'a> {
                 let actual = self.expr_types[argument.0 as usize];
                 self.expect_call_arg_labeled(
                     scope,
-                    expected,
-                    declared,
+                    ParameterTypeExpectation { expected, declared },
                     argument,
                     actual,
                     has_receiver,
@@ -40295,8 +40511,7 @@ impl<'a> Checker<'a> {
             }
             self.expect_call_arg_labeled(
                 scope,
-                expected,
-                declared,
+                ParameterTypeExpectation { expected, declared },
                 argument,
                 self.expr_types[argument.0 as usize],
                 false,
@@ -41057,9 +41272,11 @@ impl<'a> Checker<'a> {
                         } else {
                             let applied = self.alias_application_ty_with_spelling(
                                 scope,
-                                alias.formals,
-                                alias.expansion,
-                                alias.expansion_spelling,
+                                alias_projection::SelectedAliasApplication {
+                                    formals: alias.formals,
+                                    expansion: alias.expansion,
+                                    expansion_spelling: alias.expansion_spelling,
+                                },
                                 &r.name,
                                 alias_projection::AliasArguments::of(r),
                                 r.span,
@@ -41860,7 +42077,7 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         cond: ExprId,
         truth: bool,
-    ) -> (Vec<(NarrowPath, Ty)>, Vec<(String, Ty)>) {
+    ) -> (Vec<FlowNarrowing>, Vec<DeclinedFlowNarrowing>) {
         let mut candidates = Vec::new();
         let mut declined = Vec::new();
         self.collect_condition_narrowings(scope, cond, truth, &mut candidates, &mut declined);
@@ -42220,7 +42437,7 @@ impl<'a> Checker<'a> {
                 let Some(unresolved) = unresolved else {
                     continue;
                 };
-                let expression = property.init.or_else(|| match property.getter.as_ref() {
+                let expression = property.init.or(match property.getter.as_ref() {
                     Some(FunBody::Expr(getter)) => Some(*getter),
                     Some(FunBody::Block(_) | FunBody::None) | None => None,
                 });
@@ -43333,14 +43550,18 @@ impl<'a> Checker<'a> {
                         } else if !self.append_authoritative_constructor_property_overlay(
                             scope,
                             &mut props,
-                            owner,
                             property,
-                            source_member,
-                            stable_declaration,
-                            constructor_property_facts[property_index]
-                                .as_ref()
-                                .map(|(declaration, finalized, _, _)| (*declaration, *finalized)),
-                            checked,
+                            body_local_property_selection::ConstructorPropertyFacts {
+                                owner,
+                                source_member,
+                                stable_declaration,
+                                stable_fact: constructor_property_facts[property_index]
+                                    .as_ref()
+                                    .map(|(declaration, finalized, _, _)| {
+                                        (*declaration, *finalized)
+                                    }),
+                                checked,
+                            },
                         ) {
                             self.failed_local_declaration_bindings.insert(
                                 stable_declaration
@@ -43558,9 +43779,11 @@ impl<'a> Checker<'a> {
                         property_scope,
                         current_owner,
                         property,
-                        source_member,
-                        stable_declaration,
-                        cl.is_interface(),
+                        body_local_property_selection::DeferredBodyProperty {
+                            source_member,
+                            stable_declaration,
+                            interface: cl.is_interface(),
+                        },
                         &mut props,
                     ) {
                         absent = false;
@@ -43589,7 +43812,7 @@ impl<'a> Checker<'a> {
                     if property.declared_ty().is_some() || (!has_unresolved && !absent) {
                         continue;
                     }
-                    let expression = property.init.or_else(|| match property.getter.as_ref() {
+                    let expression = property.init.or(match property.getter.as_ref() {
                         Some(FunBody::Expr(getter)) => Some(*getter),
                         Some(FunBody::Block(_) | FunBody::None) | None => None,
                     });
@@ -43934,43 +44157,45 @@ impl<'a> Checker<'a> {
             // on this same active checker; deeper descendants recurse from their direct owner.
             // Nested anonymous objects remain excluded because their construction expression owns
             // the exact method/type-parameter scope in which they must be checked.
-            if body_local_class && current_owner.is_some() {
-                let owner = current_owner.expect("body-local class has a semantic classifier");
-                let nested = self
-                    .file
-                    .decls
-                    .iter()
-                    .copied()
-                    .filter_map(|declaration| match self.file.decl(declaration) {
-                        Decl::Class(class)
-                            if declaration != d
-                                && !self
-                                    .anonymous_lexical_scope
-                                    .declarations
-                                    .contains(&declaration)
-                                && self
-                                    .active_classifier_internal(declaration, class)
-                                    .is_some_and(|classifier| {
-                                        classifier.nested_owner() == Some(owner)
-                                    }) =>
+            if body_local_class {
+                if let Some(owner) = current_owner {
+                    let nested = self
+                        .file
+                        .decls
+                        .iter()
+                        .copied()
+                        .filter_map(|declaration| match self.file.decl(declaration) {
+                            Decl::Class(class)
+                                if declaration != d
+                                    && !self
+                                        .anonymous_lexical_scope
+                                        .declarations
+                                        .contains(&declaration)
+                                    && self
+                                        .active_classifier_internal(declaration, class)
+                                        .is_some_and(|classifier| {
+                                            classifier.nested_owner() == Some(owner)
+                                        }) =>
+                            {
+                                Some((declaration, class.clone()))
+                            }
+                            Decl::Class(_) => None,
+                            Decl::Fun(_) | Decl::Property(_) => None,
+                        })
+                        .collect::<Vec<_>>();
+                    for (declaration, class) in nested {
+                        if !self.signature_defaults_only
+                            || self.signature_default_expression_depth != 0
                         {
-                            Some((declaration, class.clone()))
+                            self.checked_local_class_declarations.insert(declaration);
                         }
-                        Decl::Class(_) => None,
-                        Decl::Fun(_) | Decl::Property(_) => None,
-                    })
-                    .collect::<Vec<_>>();
-                for (declaration, class) in nested {
-                    if !self.signature_defaults_only || self.signature_default_expression_depth != 0
-                    {
-                        self.checked_local_class_declarations.insert(declaration);
+                        let saved = self.take_body_state();
+                        self.check_class(scope, &class, declaration);
+                        self.restore_body_state(saved);
                     }
-                    let saved = self.take_body_state();
-                    self.check_class(scope, &class, declaration);
-                    self.restore_body_state(saved);
-                }
-                if !self.signature_defaults_only || default_owned_class {
-                    self.retry_body_local_properties_after_nested(scope, d, cl, &mut props);
+                    if !self.signature_defaults_only || default_owned_class {
+                        self.retry_body_local_properties_after_nested(scope, d, cl, &mut props);
+                    }
                 }
             }
             let method_capture_plan = class_capture_plan.as_ref();
@@ -46132,17 +46357,7 @@ impl<'a> Checker<'a> {
             .map(|(_, ty, is_var, _, _)| (ty, is_var))
     }
 
-    fn lookup_prop_with_owner_name(
-        &self,
-        receiver: Ty,
-        name: &str,
-    ) -> Option<(
-        TypeName,
-        Ty,
-        bool,
-        Option<Visibility>,
-        Option<crate::fir::DeclarationId>,
-    )> {
+    fn lookup_prop_with_owner_name(&self, receiver: Ty, name: &str) -> Option<OwnedPropertyFacts> {
         if let Some(property) = self.checked_body_local_property(receiver, name) {
             return Some((
                 property.owner,
@@ -46519,10 +46734,13 @@ impl<'a> Checker<'a> {
         argument: ExprId,
         probed_actual: Ty,
         expected: Ty,
-        call_sig: &CallSig,
-        parameter: usize,
+        formal: SelectedFormal<'_>,
         implicit_lambda_label: Option<&str>,
     ) -> Ty {
+        let SelectedFormal {
+            signature: call_sig,
+            index: parameter,
+        } = formal;
         crate::trace_compiler!(
             "lambda_apply",
             "commit selected argument={argument:?} probed={probed_actual:?} expected={expected:?} syntax={:?}",
@@ -46889,7 +47107,17 @@ impl<'a> Checker<'a> {
         argument: ExprId,
         actual: Ty,
     ) {
-        self.expect_call_arg_labeled(scope, expected, expected, argument, actual, false, None);
+        self.expect_call_arg_labeled(
+            scope,
+            ParameterTypeExpectation {
+                expected,
+                declared: expected,
+            },
+            argument,
+            actual,
+            false,
+            None,
+        );
     }
 
     /// `declared` is the selected parameter's own type, before the call's type variables are
@@ -46898,13 +47126,13 @@ impl<'a> Checker<'a> {
     fn expect_call_arg_labeled(
         &mut self,
         scope: &CheckerScope<'_>,
-        expected: Ty,
-        declared: Ty,
+        parameter: ParameterTypeExpectation,
         argument: ExprId,
         actual: Ty,
         lambda_has_receiver: bool,
         implicit_lambda_label: Option<&str>,
     ) {
+        let ParameterTypeExpectation { expected, declared } = parameter;
         // Some selected call paths validate their arguments directly rather than through
         // `selected_argument_type` (notably source constructors). Once selection supplies a
         // function expectation, postponed lambdas and callable references must be committed here as
@@ -47192,20 +47420,26 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         call_args: CallArgs<'_>,
         class: &ClassSig,
-        params: &[Ty],
-        parameter_shapes: &[(Ty, bool)],
-        slots: Option<&[Option<ExprId>]>,
-        implicit_integer_coercion: &[bool],
-        whole_array_varargs: Option<&[bool]>,
+        parameters: SourceConstructorParameters<'_>,
         expected_result: Option<Ty>,
-        bound_outer: Option<Ty>,
-        arguments_name_an_applied_classifier: bool,
+        application: AppliedConstructorNaming,
     ) -> Vec<Ty> {
         let CallArgs {
             call,
             args,
             arg_tys,
         } = call_args;
+        let SourceConstructorParameters {
+            params,
+            parameter_shapes,
+            slots,
+            implicit_integer_coercion,
+            whole_array_varargs,
+        } = parameters;
+        let AppliedConstructorNaming {
+            bound_outer,
+            arguments_name_an_applied_classifier,
+        } = application;
         // A call through a typealias has already consumed the written arguments while expanding
         // the alias. They are not necessarily the constructed classifier's own arguments: for
         // `typealias A<K, L> = Generic<K>.Inner<L>`, `A<Int, String>` expands to
@@ -47778,8 +48012,10 @@ impl<'a> Checker<'a> {
                 .map_or(*expected, |&(shape, _)| shape);
             self.expect_call_arg_labeled(
                 scope,
-                substituted,
-                declared,
+                ParameterTypeExpectation {
+                    expected: substituted,
+                    declared,
+                },
                 argument,
                 actual,
                 has_receiver,
@@ -49582,23 +49818,23 @@ impl<'a> Checker<'a> {
             });
         let consider_extension =
             shapeable && method_sig.is_none() && (provider.is_none() || provider_needs_sam);
-        let member_extension = consider_extension
-            .then(|| {
-                self.member_extension_lambda_shape(
-                    scope,
-                    result_constraint,
-                    MemberExtensionCall {
-                        extension_receiver: receiver,
-                        name,
-                        args,
-                        partial_arg_tys: partial,
-                        arg_names,
-                        explicit_type_args,
-                        trailing_lambda,
-                    },
-                )
-            })
-            .unwrap_or(member_extension_selection::MemberExtensionLambdaShape::Absent);
+        let member_extension = if consider_extension {
+            self.member_extension_lambda_shape(
+                scope,
+                result_constraint,
+                MemberExtensionCall {
+                    extension_receiver: receiver,
+                    name,
+                    args,
+                    partial_arg_tys: partial,
+                    arg_names,
+                    explicit_type_args,
+                    trailing_lambda,
+                },
+            )
+        } else {
+            member_extension_selection::MemberExtensionLambdaShape::Absent
+        };
         let member_extension_claimed = !matches!(
             &member_extension,
             member_extension_selection::MemberExtensionLambdaShape::Absent
@@ -49653,12 +49889,12 @@ impl<'a> Checker<'a> {
         &mut self,
         scope: &CheckerScope<'_>,
         call: ExprId,
-        receiver: Ty,
-        name: &str,
+        member: ExtensionMember<'_>,
         args: &[ExprId],
         explicit_type_args: &[Ty],
         result_constraint: CallResultConstraint,
     ) -> Vec<Ty> {
+        let ExtensionMember { receiver, name } = member;
         let partial: Vec<Option<Ty>> = args
             .iter()
             .map(|&x| {
@@ -49675,8 +49911,10 @@ impl<'a> Checker<'a> {
             call,
             receiver,
             name,
-            args,
-            &partial,
+            PartialArguments {
+                args,
+                types: &partial,
+            },
             result_constraint.expected(),
         );
         // One decision for the whole call — see `Checker::call_lambda_shaping`.
@@ -51650,8 +51888,10 @@ impl<'a> Checker<'a> {
                     checked_arg_tys = self.ext_arg_tys(
                         scope,
                         e,
-                        recv,
-                        &name,
+                        ExtensionMember {
+                            receiver: recv,
+                            name: &name,
+                        },
                         a,
                         &type_args,
                         CallResultConstraint::safe_lifted(expected),
@@ -51818,11 +52058,13 @@ impl<'a> Checker<'a> {
                         let receiver_callables = self.stable_receiver_callables(recv, &name);
                         let rejected_candidates = receiver_callables.functions().to_vec();
                         let result = if let Some(ret) = self.check_builtin_operator_method(
-                            e,
+                            CallArgs {
+                                call: e,
+                                args: a,
+                                arg_tys,
+                            },
                             recv,
                             &name,
-                            a,
-                            arg_tys,
                             false,
                             &receiver_callables,
                         ) {
@@ -54758,8 +55000,10 @@ impl<'a> Checker<'a> {
                         CallableReferenceBinding::Unbound,
                         receiver_ty,
                         selected.member_with_return(ret),
-                        argument_mapping,
-                        type_arguments,
+                        AdaptedReferenceArguments {
+                            mapping: argument_mapping,
+                            type_arguments,
+                        },
                         expected,
                     ));
                 }
@@ -55564,14 +55808,17 @@ impl<'a> Checker<'a> {
     /// qualified path's user-`infix`-shadows-builtin case (a safe call is never infix).
     fn check_builtin_operator_method(
         &mut self,
-        e: ExprId,
+        call_args: CallArgs<'_>,
         rt: Ty,
         name: &str,
-        args: &[ExprId],
-        arg_tys: &[Ty],
         skip_operator_arm: bool,
         callables: &crate::libraries::Callables,
     ) -> Option<Ty> {
+        let CallArgs {
+            call: e,
+            args,
+            arg_tys,
+        } = call_args;
         // Byte/Short bitwise operations live in `kotlin.experimental` as ordinary extensions;
         // unlike Int/Long they are not primitive members. Let the shared candidate path select
         // those declarations (and enforce imports/visibility) instead of reserving the spelling as
@@ -55836,10 +56083,12 @@ impl<'a> Checker<'a> {
                 }
                 if let Some(rejected_result) = self.report_single_mapped_candidate_type_errors(
                     scope,
-                    e,
+                    CallArgs {
+                        call: e,
+                        args,
+                        arg_tys,
+                    },
                     name,
-                    args,
-                    arg_tys,
                     constraints,
                     &overloads,
                 ) {
@@ -56831,11 +57080,11 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         site: Option<IncDecSite>,
         recv: Ty,
-        name: &str,
-        kind: crate::libraries::FnKind,
+        operator: OperatorCallableKind<'_>,
         diagnostic_spans: Option<(Span, Span)>,
         callables: &crate::libraries::Callables,
     ) -> Result<Option<ResolvedCall>, ()> {
+        let OperatorCallableKind { name, kind } = operator;
         let selected = {
             let resolver = self.resolver();
             let (mut functions, _) = callables.clone().into_parts();
@@ -57010,8 +57259,10 @@ impl<'a> Checker<'a> {
             scope,
             site,
             recv,
-            name,
-            crate::libraries::FnKind::Member,
+            OperatorCallableKind {
+                name,
+                kind: crate::libraries::FnKind::Member,
+            },
             diagnostic_spans,
             &callables,
         )? {
@@ -57086,8 +57337,10 @@ impl<'a> Checker<'a> {
             scope,
             site,
             recv,
-            name,
-            crate::libraries::FnKind::Extension,
+            OperatorCallableKind {
+                name,
+                kind: crate::libraries::FnKind::Extension,
+            },
             diagnostic_spans,
             &callables,
         )

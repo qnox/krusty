@@ -1512,8 +1512,10 @@ impl Checker<'_> {
                     args[i],
                     *a,
                     *p,
-                    &positional_signature,
-                    i,
+                    SelectedFormal {
+                        signature: &positional_signature,
+                        index: i,
+                    },
                     implicit_lambda_label.as_deref(),
                 );
                 self.expect_call_arg(scope, *p, args[i], actual);

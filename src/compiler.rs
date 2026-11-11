@@ -838,12 +838,16 @@ fn check_body_group(
         }
     }
     let info = crate::resolve::check_selected_declarations_in_pass_two(
-        active_file,
-        raw_source as u32,
-        &selected_roots,
-        &selected_bodies,
+        crate::resolve::SourceFileUnit {
+            file: active_file,
+            file_index: raw_source as u32,
+        },
+        crate::resolve::SpanBodySelection {
+            declarations: &selected_roots,
+            bodies: &selected_bodies,
+            stable_bodies: &group.bodies,
+        },
         active,
-        &group.bodies,
         symbols,
         index,
         streamed_cache,
@@ -896,12 +900,16 @@ fn check_body_group(
     // this group, so replace its diagnostics with the authoritative traversal's exact sequence.
     diags.diags.truncate(diagnostics_start);
     let info = crate::resolve::check_selected_declarations_in_pass_two(
-        active_file,
-        raw_source as u32,
-        &selected_roots,
-        &selected_bodies,
+        crate::resolve::SourceFileUnit {
+            file: active_file,
+            file_index: raw_source as u32,
+        },
+        crate::resolve::SpanBodySelection {
+            declarations: &selected_roots,
+            bodies: &selected_bodies,
+            stable_bodies: &group.bodies,
+        },
         active,
-        &group.bodies,
         symbols,
         index,
         streamed_cache,

@@ -12,6 +12,12 @@ use rejection_plan::{
     MappedRejectionCandidate, MappedRejectionPlan, RejectedArgumentInput, RejectedArgumentSite,
 };
 
+/// The generic declaration and the formal whose contextual result constraints disagree.
+pub(super) struct ContextualFormal<'a> {
+    pub(super) signature: &'a crate::libraries::GenericSig,
+    pub(super) formal: &'a String,
+}
+
 #[derive(Clone, Copy)]
 enum ReceiverAdmissionPhase {
     BeforeArguments,
@@ -264,13 +270,16 @@ impl Checker<'_> {
     pub(super) fn report_single_mapped_candidate_type_errors(
         &mut self,
         scope: &CheckerScope<'_>,
-        call: ExprId,
+        call_args: CallArgs<'_>,
         name: &str,
-        args: &[ExprId],
-        arg_tys: &[Ty],
         constraints: CallConstraints<'_>,
         candidates: &[crate::libraries::FunctionInfo],
     ) -> Option<Ty> {
+        let CallArgs {
+            call,
+            args,
+            arg_tys,
+        } = call_args;
         let type_args = constraints.type_args;
         let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
@@ -664,10 +673,10 @@ impl Checker<'_> {
         call: ExprId,
         args: &[ExprId],
         argument_parameters: Option<&[usize]>,
-        signature: &crate::libraries::GenericSig,
-        formal: &String,
+        inferred: ContextualFormal<'_>,
         implicit_lambda_label: Option<&str>,
     ) {
+        let ContextualFormal { signature, formal } = inferred;
         let message = format!(
             "cannot infer type for type parameter '{}'. Specify it explicitly.",
             crate::types::type_parameter_source_name(formal)
@@ -849,20 +858,14 @@ impl Checker<'_> {
         constraints: CallConstraints<'_>,
         candidates: &[crate::libraries::FunctionInfo],
     ) {
-        let CallArgs {
-            call,
-            args,
-            arg_tys,
-        } = call_args;
+        let CallArgs { call, args, .. } = call_args;
         let reported = self.report_member_and_extensions_inapplicable(call, name, args, candidates)
             || self.report_inapplicable_member_mapping_error(call, name, args, candidates)
             || self
                 .report_single_mapped_candidate_type_errors(
                     scope,
-                    call,
+                    call_args,
                     name,
-                    args,
-                    arg_tys,
                     constraints,
                     candidates,
                 )
