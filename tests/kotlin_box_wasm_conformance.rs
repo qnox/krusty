@@ -17,7 +17,7 @@ use krusty::backend::Entry;
 use krusty::conformance::TestTarget;
 use krusty_wasm::{WasmBackend, WasmTarget};
 
-use super::box_lane::{self, Lane, Libraries, Outcome};
+use super::box_lane::{self, Lane, ModuleCase, Outcome};
 use super::box_ratchet::Platform;
 
 /// The prefix the wasm backend puts on every decline; what follows names the construct.
@@ -133,13 +133,8 @@ impl Lane for WasmLane {
         }
     }
 
-    /// The exact target stdlib KLIB: wasm-js and wasm-wasi publish different platform surfaces.
-    fn libraries(&self) -> Libraries {
-        Libraries::StdlibKlib
-    }
-
     fn unavailable(&self) -> Option<String> {
-        if !self.libraries().available(self.test_target()) {
+        if !box_lane::stdlib_klib_available(self.test_target()) {
             return Some("no stdlib and JDK modules to analyze against".to_string());
         }
         node_unavailable()
@@ -176,7 +171,6 @@ impl Lane for WasmLane {
         let program = match box_lane::compile(
             sources,
             directive_source,
-            self.libraries(),
             self.test_target(),
             &backend,
             "box",
@@ -216,11 +210,12 @@ impl Lane for WasmLane {
         )
         .with_annotations_in_metadata(features.has("AnnotationsInMetadata"));
         let program = match box_lane::compile_modules(
-            scratch,
-            stem,
-            modules,
+            ModuleCase {
+                scratch,
+                stem,
+                modules,
+            },
             directive_source,
-            self.libraries(),
             self.test_target(),
             &backend,
             &metadata,
@@ -241,8 +236,6 @@ fn wasm_applicability_reads_both_the_family_and_the_exact_target() {
     let wasi = WasmLane {
         target: WasmTarget::Wasi,
     };
-    assert_eq!(js.libraries(), Libraries::StdlibKlib);
-    assert_eq!(wasi.libraries(), Libraries::StdlibKlib);
     assert_eq!(js.test_target(), TestTarget::WasmJs);
     assert_eq!(wasi.test_target(), TestTarget::WasmWasi);
     for (target, expected) in [
@@ -907,7 +900,6 @@ fn expect_reference_array_bounds(source: &str, name: &str) {
             let mut program = box_lane::compile(
                 &[("Bounds.kt".to_owned(), source.to_owned())],
                 source,
-                Libraries::StdlibKlib,
                 lane.test_target(),
                 &backend,
                 "box",

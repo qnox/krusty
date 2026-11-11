@@ -167,7 +167,6 @@
 1	src/symbol_resolver/overload_selection.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/types.rs	redundant guard
 1	src/types/interning.rs	unnecessary use of `to_string`: help: use: `"T"`
-1	tests/box_lane.rs	this function has too many arguments (9/7)
 1	tests/common/byte_dump.rs	function `flush_recorded_class_dumps` is never used
 1	tests/common/byte_dump.rs	unused import: `immutable_classpath_content_fingerprint`
 1	tests/common/byte_dump/fingerprint.rs	function `immutable_classpath_content_fingerprint` is never used

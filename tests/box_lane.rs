@@ -90,9 +90,6 @@ pub trait Lane: Sync {
 
     fn test_target(&self) -> TestTarget;
 
-    /// What this lane's cases are analyzed against.
-    fn libraries(&self) -> Libraries;
-
     /// Why this host cannot run the lane, or `None` when it can.
     fn unavailable(&self) -> Option<String>;
 
@@ -173,16 +170,6 @@ impl Drop for Scratch {
     }
 }
 
-/// What a lane's cases are analyzed against. It is the lane's own setting, so a target moves to its
-/// own library surface without forking the driver.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Libraries {
-    /// The target's own stdlib KLIB (`toolchain::kotlin_stdlib_klib`), the library kotlinc
-    /// compiles that target against. Native includes `kotlin.test`; Wasm adds its exact target
-    /// kotlin-test KLIB as an ordinary dependency.
-    StdlibKlib,
-}
-
 struct PlatformLibraries {
     semantics: Box<dyn krusty::libraries::SemanticPlatform>,
     native_imports: Vec<krusty_native::ImportLibrary>,
@@ -194,74 +181,69 @@ pub struct CompiledProgram {
     pub native_imports: Vec<krusty_native::ImportLibrary>,
 }
 
-impl Libraries {
-    /// Whether this host has the libraries a `target` case is analyzed against.
-    pub fn available(self, target: TestTarget) -> bool {
-        let Self::StdlibKlib = self;
-        krusty::toolchain::kotlin_stdlib_klib(target.compilation_target()).is_some()
-    }
+/// Whether this host has the target's stdlib KLIB, the library kotlinc compiles that target
+/// against. Native includes `kotlin.test`; Wasm adds its exact target kotlin-test KLIB as an
+/// ordinary dependency.
+pub fn stdlib_klib_available(target: TestTarget) -> bool {
+    krusty::toolchain::kotlin_stdlib_klib(target.compilation_target()).is_some()
+}
 
-    /// A fresh semantic platform for one compilation.
-    fn platform(
-        self,
-        target: krusty::compilation_target::CompilationTarget,
-        dependencies: &[PathBuf],
-        friend_dependencies: &[PathBuf],
-    ) -> PlatformLibraries {
-        let Self::StdlibKlib = self;
-        STDLIB_KLIBS.with(|opened| {
-            if !dependencies.is_empty() {
-                let mut libraries = dependencies
-                    .iter()
-                    .map(|path| {
-                        if friend_dependencies.contains(path) {
-                            krusty::klib_libraries::KlibLibraryInput::friend(path.clone())
-                        } else {
-                            krusty::klib_libraries::KlibLibraryInput::dependency(path.clone())
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                libraries.push(krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
-                    krusty::toolchain::kotlin_stdlib_klib(target)
-                        .expect("checked by `Libraries::available`"),
-                    klib_stdlib_semantics(target),
-                ));
-                libraries.extend(wasm_test_library(target));
-                let (libraries, native_imports) = open_klib_inputs(target, &libraries)
-                    .unwrap_or_else(|error| {
-                        panic!("opening the {target:?} dependency KLIBs: {error}")
-                    });
-                return PlatformLibraries {
-                    semantics: Box::new(libraries),
-                    native_imports,
-                };
-            }
-            let mut opened = opened.borrow_mut();
-            if let Some((_, libraries, native_imports)) =
-                opened.iter().find(|(opened, _, _)| *opened == target)
-            {
-                return PlatformLibraries {
-                    semantics: Box::new(libraries.for_compilation()),
-                    native_imports: native_imports.clone(),
-                };
-            }
-            let stdlib = krusty::toolchain::kotlin_stdlib_klib(target)
-                .expect("checked by `Libraries::available`");
-            let mut inputs = vec![krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
-                stdlib,
+/// A fresh semantic platform for one compilation against that stdlib KLIB.
+fn stdlib_platform(
+    target: krusty::compilation_target::CompilationTarget,
+    dependencies: &[PathBuf],
+    friend_dependencies: &[PathBuf],
+) -> PlatformLibraries {
+    STDLIB_KLIBS.with(|opened| {
+        if !dependencies.is_empty() {
+            let mut libraries = dependencies
+                .iter()
+                .map(|path| {
+                    if friend_dependencies.contains(path) {
+                        krusty::klib_libraries::KlibLibraryInput::friend(path.clone())
+                    } else {
+                        krusty::klib_libraries::KlibLibraryInput::dependency(path.clone())
+                    }
+                })
+                .collect::<Vec<_>>();
+            libraries.push(krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
+                krusty::toolchain::kotlin_stdlib_klib(target)
+                    .expect("checked by `stdlib_klib_available`"),
                 klib_stdlib_semantics(target),
-            )];
-            inputs.extend(wasm_test_library(target));
-            let (libraries, native_imports) = open_klib_inputs(target, &inputs)
-                .unwrap_or_else(|error| panic!("opening the {target:?} stdlib KLIB: {error}"));
-            let compilation = PlatformLibraries {
+            ));
+            libraries.extend(wasm_test_library(target));
+            let (libraries, native_imports) = open_klib_inputs(target, &libraries)
+                .unwrap_or_else(|error| panic!("opening the {target:?} dependency KLIBs: {error}"));
+            return PlatformLibraries {
+                semantics: Box::new(libraries),
+                native_imports,
+            };
+        }
+        let mut opened = opened.borrow_mut();
+        if let Some((_, libraries, native_imports)) =
+            opened.iter().find(|(opened, _, _)| *opened == target)
+        {
+            return PlatformLibraries {
                 semantics: Box::new(libraries.for_compilation()),
                 native_imports: native_imports.clone(),
             };
-            opened.push((target, libraries, native_imports));
-            compilation
-        })
-    }
+        }
+        let stdlib = krusty::toolchain::kotlin_stdlib_klib(target)
+            .expect("checked by `stdlib_klib_available`");
+        let mut inputs = vec![krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
+            stdlib,
+            klib_stdlib_semantics(target),
+        )];
+        inputs.extend(wasm_test_library(target));
+        let (libraries, native_imports) = open_klib_inputs(target, &inputs)
+            .unwrap_or_else(|error| panic!("opening the {target:?} stdlib KLIB: {error}"));
+        let compilation = PlatformLibraries {
+            semantics: Box::new(libraries.for_compilation()),
+            native_imports: native_imports.clone(),
+        };
+        opened.push((target, libraries, native_imports));
+        compilation
+    })
 }
 
 /// The atomicfu compiler plugin for a `// WITH_ATOMICFU` native or wasm case. The JVM lane
@@ -408,7 +390,6 @@ thread_local! {
 pub fn compile<B: Backend>(
     sources: &[(String, String)],
     directive_source: &str,
-    libraries: Libraries,
     target: TestTarget,
     backend: &B,
     module_name: &str,
@@ -432,7 +413,7 @@ pub fn compile<B: Backend>(
     let PlatformLibraries {
         semantics,
         native_imports,
-    } = libraries.platform(compilation_target, &dependencies, &[]);
+    } = stdlib_platform(compilation_target, &dependencies, &[]);
     let platform = krusty::frontend::PlatformProvider::new(compilation_target, semantics)
         .with_native_plugins(atomicfu_plugins(directive_source, compilation_target));
     let features = krusty::features::LangFeatures::from_source(directive_source);
@@ -488,7 +469,6 @@ pub fn analyze_module(
     unit: &krusty::conformance::ModuleUnit,
     module_dependencies: ModuleDependencies<'_>,
     directive_source: &str,
-    libraries: Libraries,
     target: TestTarget,
     backend_target: krusty::compilation_target::CompilationTarget,
     diags: &mut DiagSink,
@@ -531,7 +511,7 @@ pub fn analyze_module(
     let PlatformLibraries {
         semantics,
         native_imports,
-    } = libraries.platform(backend_target, &dependencies, module_dependencies.friends);
+    } = stdlib_platform(backend_target, &dependencies, module_dependencies.friends);
     let platform = krusty::frontend::PlatformProvider::new(backend_target, semantics)
         .with_native_plugins(atomicfu_plugins(directive_source, backend_target));
     let features = module_features(directive_source, unit.common_file_count);
@@ -545,21 +525,31 @@ pub fn analyze_module(
     Ok((analysis, stems, native_imports))
 }
 
+/// One multi-module corpus case: where its generated KLIBs live, the case name, and its source
+/// modules in dependency order.
+pub struct ModuleCase<'a> {
+    pub scratch: &'a Path,
+    pub stem: &'a str,
+    pub modules: &'a [krusty::conformance::ModuleUnit],
+}
+
 /// Analyze each source module against only its declared dependency KLIB closure, emit all target
 /// code through one backend session, and retain every generated dependency as a distinct archive.
 /// The target lane supplies `metadata`: Native owns its concrete Konan target here, while each Wasm
 /// lane owns its exact JS/WASI platform.
 pub fn compile_modules<B: Backend, M: krusty::backend::DependencyMetadata>(
-    scratch: &Path,
-    stem: &str,
-    modules: &[krusty::conformance::ModuleUnit],
+    case: ModuleCase<'_>,
     directive_source: &str,
-    libraries: Libraries,
     target: TestTarget,
     backend: &B,
     metadata: &M,
     decline_prefix: &str,
 ) -> Result<CompiledProgram, Outcome> {
+    let ModuleCase {
+        scratch,
+        stem,
+        modules,
+    } = case;
     #[derive(Clone)]
     struct GeneratedDependency {
         archive: PathBuf,
@@ -670,7 +660,6 @@ pub fn compile_modules<B: Backend, M: krusty::backend::DependencyMetadata>(
                 friends: &friend_klibs,
             },
             directive_source,
-            libraries,
             target,
             compilation_target,
             &mut diags,

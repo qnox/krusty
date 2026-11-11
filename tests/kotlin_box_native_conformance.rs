@@ -17,18 +17,16 @@ use std::process::Command;
 use krusty::conformance::TestTarget;
 use krusty_native::{CraneliftBackend, Entry, NativeTarget};
 
-use super::box_lane::{self, Lane, Libraries, Outcome};
+use super::box_lane::{self, Lane, ModuleCase, Outcome};
 use super::box_ratchet::Platform;
-
-/// Native cases are analyzed against the Kotlin/Native stdlib KLIB, as kotlinc-native compiles them.
-const LIBRARIES: Libraries = Libraries::StdlibKlib;
 
 /// The prefix the native backend puts on every decline; what follows names the construct.
 const DECLINE_PREFIX: &str = "krusty: the native backend does not support ";
 
 fn host() -> Option<NativeTarget> {
     let target = NativeTarget::host()?;
-    (krusty_native::can_link(target) && LIBRARIES.available(TestTarget::Native)).then_some(target)
+    (krusty_native::can_link(target) && box_lane::stdlib_klib_available(TestTarget::Native))
+        .then_some(target)
 }
 
 /// Why a case is outside this harness before any compilation, or `None` when it applies.
@@ -187,10 +185,6 @@ impl Lane for NativeLane {
         TestTarget::Native
     }
 
-    fn libraries(&self) -> Libraries {
-        LIBRARIES
-    }
-
     fn unavailable(&self) -> Option<String> {
         self.target.is_none().then(|| {
             "no prebuilt native runtime for this host, or no Kotlin/Native stdlib KLIB".to_string()
@@ -219,7 +213,6 @@ impl Lane for NativeLane {
         let program = match box_lane::compile(
             sources,
             directive_source,
-            LIBRARIES,
             TestTarget::Native,
             &backend,
             "box",
@@ -261,11 +254,12 @@ impl Lane for NativeLane {
             Err(error) => return Outcome::Harness(error.to_string()),
         };
         let program = match box_lane::compile_modules(
-            scratch,
-            stem,
-            modules,
+            ModuleCase {
+                scratch,
+                stem,
+                modules,
+            },
             directive_source,
-            LIBRARIES,
             TestTarget::Native,
             &backend,
             &metadata,
