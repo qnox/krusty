@@ -284,7 +284,7 @@ mod property_write_selection;
 mod qualified_call_shaping;
 mod qualifier_tree_type_arguments;
 mod qualifiers;
-mod receiver_capture_identity;
+pub(crate) mod receiver_capture_identity;
 use receiver_capture_identity::{LambdaReceiverSlot, ReceiverDeclarationRole, ReceiverLabel};
 mod receiver_flow;
 use receiver_flow::CompletedFlow;

@@ -1654,20 +1654,30 @@ impl BodyFirChecker<'_> {
             "anonymous body captures declaration={declaration:?} expression={expression:?} captures={captures:?}",
         );
         let mut captures = self.checked_class_captures(declaration, span, origin, &captures)?;
-        if !captures.is_empty() {
-            let stored = self
-                .info
-                .local_class_capture_layouts
-                .stored
-                .get(&transient)
-                .filter(|stored| stored.len() == captures.len())
-                .ok_or_else(|| {
-                    self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
-                })?;
+        let capture_order = if captures.is_empty() {
+            Box::default()
+        } else {
+            let layouts = &self.info.local_class_capture_layouts;
+            let (order, stored) = match (
+                layouts.orders.get(&transient),
+                layouts.stored.get(&transient),
+            ) {
+                (Some(order), Some(stored))
+                    if order.len() == captures.len() && stored.len() == captures.len() =>
+                {
+                    (order.clone(), stored.clone())
+                }
+                _ => {
+                    return Err(
+                        self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+                    )
+                }
+            };
             for (capture, stored) in captures.iter_mut().zip(stored.iter().copied()) {
                 capture.stored = stored;
             }
-        }
+            order
+        };
         crate::trace_compiler!(
             "fir",
             "anonymous checked captures declaration={declaration:?} captures={}",
@@ -1724,6 +1734,7 @@ impl BodyFirChecker<'_> {
         Ok(FirExprKind::AnonymousObject(FirAnonymousObject {
             declaration,
             captures,
+            capture_order,
             delegate_arguments: delegate_arguments.into_boxed_slice(),
             super_arguments,
         }))

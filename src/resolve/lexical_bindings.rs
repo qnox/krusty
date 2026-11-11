@@ -163,6 +163,22 @@ impl Checker<'_> {
         self.record_lexical_declaration(scope, name, LexicalValueRole::Parameter(declaration));
     }
 
+    /// Flow identity of the context parameter declared at `declaration`, when that binding is
+    /// still visible. Capture order uses it to place the parameter beside the values it is read
+    /// with; the parameter's receiver role is not itself a flow identity.
+    pub(super) fn context_parameter_flow_identity(
+        &self,
+        scope: &CheckerScope<'_>,
+        declaration: Span,
+    ) -> Option<u32> {
+        let declaration = LexicalValueDeclaration {
+            file: self.file_index,
+            role: LexicalValueRole::Parameter(declaration),
+        };
+        self.lexical_binding_by_declaration(scope, declaration)
+            .map(|(_, local, _)| local.flow_identity)
+    }
+
     pub(super) fn retain_capture_declaration(
         &self,
         scope: &CheckerScope<'_>,

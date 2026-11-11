@@ -325,6 +325,10 @@ pub enum DelegateGetValueTarget {
         dispatch_receiver: ImplicitReceiverSelection,
         /// Source role selected while the receiver declaration and lexical tower are live.
         dispatch_receiver_role: crate::fir::FirCapturedReceiver,
+        /// Declaration identity of that receiver. A capture matches this, not the formatted role:
+        /// the formatted role is rebuilt from whichever scope asks, and two scopes can spell one
+        /// receiver differently.
+        dispatch_declaration: Option<super::ReceiverDeclarationRole>,
         context_count: usize,
         params: Vec<Ty>,
         ret: Ty,
@@ -1589,6 +1593,8 @@ impl Checker<'_> {
                                     .class_receiver
                                     .then_some(selected.dispatch_receiver.declared_ty),
                             ),
+                            dispatch_declaration: scope
+                                .implicit_receiver_role(selected.dispatch_receiver.identity),
                             context_count: selected.context_count,
                             params: selected.params,
                             ret: selected.ret,

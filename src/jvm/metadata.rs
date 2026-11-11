@@ -2,7 +2,7 @@
 //!
 //! The `d1` protobuf is decoded against `d2` string-table identities before semantic facts publish.
 
-pub(crate) mod anonymous_origin;
+pub mod anonymous_origin;
 pub use inline_class::InlineClass;
 pub use lazy_members::{KotlinMembers, LazyMembers};
 use member_names::function_jvm_name;

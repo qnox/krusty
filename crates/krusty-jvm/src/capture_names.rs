@@ -47,35 +47,49 @@ pub(super) fn constructor_receiver(
 /// for an argument that is no capture): the field, which is also the constructor's
 /// `-java-parameters` entry, and the constructor's local-variable name.
 ///
-/// kotlinc allocates them in the constructor's physical order, so a capture whose spelling an
-/// earlier capture already took is numbered after it: a shadowing `val registry` and the context
-/// parameter `registry` it hides are `$registry` and `$registry$1`, whichever comes first.
+/// kotlinc allocates parameters and fields in the constructor's physical order, in separate
+/// namespaces. A capture that is only a constructor parameter (a context value read while the
+/// instance is built) takes a parameter name and does not consume the field spelling, so the next
+/// stored value keeps `$c` on its field while its parameter is `$c$1`.
 pub(super) fn class_captures(ir: &IrFile, class: &IrClass) -> Vec<Option<CaptureNames>> {
     let mut names = class
         .ctor_args
         .iter()
-        .map(|argument| Some(class_capture(ir, class, argument.capture.as_ref()?)))
+        .map(|argument| {
+            let capture = argument.capture.as_ref()?;
+            let names = class_capture(ir, class, capture);
+            let field = names.field.clone();
+            Some((names, argument.field_index.is_some(), field))
+        })
         .collect::<Vec<_>>();
     let physical = super::ir_emit::capture_order::physical(ir, class, (0..names.len()).collect());
-    let mut taken = HashSet::default();
+    let mut parameter_taken = HashSet::default();
+    let mut field_taken = HashSet::default();
     for identity in physical {
-        let Some(capture) = names[identity].as_mut() else {
+        let Some((capture, stored, field)) = names[identity].as_mut() else {
             continue;
         };
-        let field = (0u32..)
-            .map(|ordinal| match ordinal {
-                0 => capture.field.clone(),
-                _ => format!("{}${ordinal}", capture.field),
-            })
-            .find(|candidate| !taken.contains(candidate))
-            .expect("an unbounded range has an untaken name");
-        taken.insert(field.clone());
-        if capture.parameter == capture.field {
-            capture.parameter.clone_from(&field);
+        capture.parameter = numbered(&capture.parameter, &mut parameter_taken);
+        if *stored {
+            capture.field = numbered(field, &mut field_taken);
         }
-        capture.field = field;
     }
     names
+        .into_iter()
+        .map(|entry| entry.map(|(names, _, _)| names))
+        .collect()
+}
+
+fn numbered(base: &str, taken: &mut HashSet<String>) -> String {
+    let name = (0u32..)
+        .map(|ordinal| match ordinal {
+            0 => base.to_string(),
+            _ => format!("{base}${ordinal}"),
+        })
+        .find(|candidate| !taken.contains(candidate))
+        .expect("an unbounded range has an untaken name");
+    taken.insert(name.clone());
+    name
 }
 
 /// The names of one capture before numbering: `$a` for a value; a receiver spelled as

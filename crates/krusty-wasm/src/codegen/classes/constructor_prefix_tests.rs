@@ -415,6 +415,7 @@ fn capture_storage_and_unproven_prefix_roles_still_decline() {
         source_name: "captured".into(),
         receiver: None,
         crossinline_parameter: None,
+        inlined: false,
     });
     assert_eq!(check_class(&captured), expected);
     let mut stored = original.clone();
