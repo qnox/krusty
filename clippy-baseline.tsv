@@ -6,9 +6,6 @@
 1	src/compiler.rs	this function has too many arguments (8/7)
 1	src/compiler.rs	this function has too many arguments (9/7)
 1	src/compiler/dependency_body_emission.rs	redundant guard
-1	src/fir/active_source.rs	this block may be rewritten with the `?` operator: help: replace it with: `file.decl_arena.get(class.0 as usize)?;`
-1	src/fir/active_source.rs	this function has too many arguments (8/7)
-1	src/fir/active_source.rs	this function has too many arguments (9/7)
 1	src/fir/body_check/assignment_tests.rs	using `contains()` instead of `iter().any()` is more efficient: help: try: `expression_types.contains(&expected)`
 1	src/fir/body_check/calls.rs	unneeded `return` statement
 1	src/fir/body_check/calls.rs	very complex type used. Consider factoring parts into `type` definitions
@@ -19,20 +16,11 @@
 1	src/fir/body_check/invokes.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `dispatch_receiver`
 1	src/fir/body_check/properties.rs	this function has too many arguments (8/7)
 1	src/fir/body_check/property_tests.rs	this call to `as_ref` does nothing: help: try: `arguments`
-1	src/fir/header.rs	called `expect` on `property.init` after checking its variant with `is_some`
-1	src/fir/header.rs	this function has too many arguments (10/7)
-1	src/fir/interface_delegation.rs	large size difference between variants: the entire enum is at least 448 bytes
-1	src/fir/interface_delegation.rs	large size difference between variants: the entire enum is at least 512 bytes
-1	src/fir/module_symbols.rs	this function has too many arguments (8/7)
 1	src/fir/signature.rs	this function has too many arguments (10/7)
 1	src/fir/signature.rs	this function has too many arguments (12/7)
 1	src/fir/signature/classifier_headers.rs	this function has too many arguments (8/7)
-1	src/fir/signature/evaluate.rs	this function has too many arguments (9/7)
 1	src/fir/signature/local_type_aliases.rs	this function has too many arguments (10/7)
-1	src/fir/signature_extract.rs	this function has too many arguments (8/7)
 1	src/fir/signature_extract/condition_facts.rs	this function has too many arguments (8/7)
-1	src/fir/signature_extract/try_flow.rs	this function has too many arguments (8/7)
-1	src/fir/tests.rs	useless conversion to the same type: `fir::identities::TypeParameterId`: help: consider removing `.into()`: `TypeParameterId::from_raw(0)`
 1	src/fir_lower/checked.rs	called `expect` on `enclosing` after checking its variant with `is_some`
 1	src/fir_lower/classifier_references.rs	this function has too many arguments (11/7)
 1	src/fir_lower/constructors.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let identity = index.type_parameter(classifier, ordinal)?;`
@@ -166,8 +154,6 @@
 12	src/parser.rs	this `map_or` can be simplified
 16	src/resolve.rs	this function has too many arguments (8/7)
 2	src/fir/body_check/references.rs	this function has too many arguments (8/7)
-2	src/fir/header.rs	this function has too many arguments (8/7)
-2	src/fir/module_symbols.rs	this method chain can be written more clearly with `if .. else ..`
 2	src/fir/signature.rs	this function has too many arguments (11/7)
 2	src/fir/signature.rs	this function has too many arguments (8/7)
 2	src/fir_lower/checked.rs	this function has too many arguments (8/7)
@@ -189,8 +175,6 @@
 2	src/resolve/streaming_signature_bridge/operator_conventions.rs	this function has too many arguments (8/7)
 2	src/resolve/streaming_signature_bridge/semantics.rs	this function has too many arguments (8/7)
 3	src/fir/body_check/calls.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `selected`
-3	src/fir/header.rs	this function has too many arguments (9/7)
-3	src/fir/module_symbols.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
 3	src/module_symbols.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
 3	src/resolve.rs	unnecessary closure used to substitute value for `Option::None`
 3	src/resolve/streaming_signature_bridge/rejected_member_call.rs	this function has too many arguments (8/7)

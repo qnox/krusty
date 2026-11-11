@@ -103,6 +103,13 @@ struct CompactLambdaReturnScope {
     values: Vec<SigExprId>,
 }
 
+/// Arguments of one source member call recorded in the compact signature graph.
+struct SourceMemberCall {
+    arguments: super::CallArgumentRange,
+    type_arguments: super::OperandRange,
+    trailing_lambda: bool,
+}
+
 impl SignatureConstraintExtractor {
     fn lexical_receiver_function_value(
         &self,
@@ -1499,9 +1506,13 @@ impl SignatureConstraintExtractor {
                             self.source_member_call(
                                 receiver,
                                 name,
-                                arguments,
-                                type_arguments,
-                                file.call_has_trailing_lambda.contains(&expression.0),
+                                SourceMemberCall {
+                                    arguments,
+                                    type_arguments,
+                                    trailing_lambda: file
+                                        .call_has_trailing_lambda
+                                        .contains(&expression.0),
+                                },
                                 scope,
                                 selector_origin,
                             )
@@ -1610,9 +1621,13 @@ impl SignatureConstraintExtractor {
                             self.source_member_call(
                                 callee,
                                 "invoke",
-                                arguments,
-                                type_arguments,
-                                file.call_has_trailing_lambda.contains(&expression.0),
+                                SourceMemberCall {
+                                    arguments,
+                                    type_arguments,
+                                    trailing_lambda: file
+                                        .call_has_trailing_lambda
+                                        .contains(&expression.0),
+                                },
                                 scope,
                                 callee_origin,
                             )
@@ -1653,9 +1668,13 @@ impl SignatureConstraintExtractor {
                                 self.source_member_call(
                                     receiver,
                                     spelling,
-                                    arguments,
-                                    type_arguments,
-                                    file.call_has_trailing_lambda.contains(&expression.0),
+                                    SourceMemberCall {
+                                        arguments,
+                                        type_arguments,
+                                        trailing_lambda: file
+                                            .call_has_trailing_lambda
+                                            .contains(&expression.0),
+                                    },
                                     scope,
                                     callee_origin,
                                 )
@@ -1819,9 +1838,13 @@ impl SignatureConstraintExtractor {
                             self.source_member_call(
                                 receiver,
                                 name,
-                                arguments,
-                                type_arguments,
-                                file.call_has_trailing_lambda.contains(&expression.0),
+                                SourceMemberCall {
+                                    arguments,
+                                    type_arguments,
+                                    trailing_lambda: file
+                                        .call_has_trailing_lambda
+                                        .contains(&expression.0),
+                                },
                                 scope,
                                 selector_origin,
                             )
@@ -1944,7 +1967,17 @@ impl SignatureConstraintExtractor {
                 body,
                 catches,
                 finally,
-            } => self.try_expression(file, *body, catches, *finally, scope, origin, node_origin)?,
+            } => self.try_expression(
+                file,
+                try_flow::TrySyntax {
+                    body: *body,
+                    catches,
+                    finally: *finally,
+                },
+                scope,
+                origin,
+                node_origin,
+            )?,
             Expr::When { subject, arms } => {
                 if let Some(subject) = subject {
                     let _ = self.expression(file, *subject, scope, origin);
@@ -2805,12 +2838,15 @@ impl SignatureConstraintExtractor {
         &mut self,
         receiver: SigExprId,
         spelling: &str,
-        arguments: super::CallArgumentRange,
-        type_arguments: super::OperandRange,
-        trailing_lambda: bool,
+        call: SourceMemberCall,
         scope: SignatureScopeId,
         origin: OriginId,
     ) -> SigExprId {
+        let SourceMemberCall {
+            arguments,
+            type_arguments,
+            trailing_lambda,
+        } = call;
         let spelling = self.graph.intern_name(spelling);
         let target = self.graph.add_member_selection(DeferredMemberSelection {
             scope,
