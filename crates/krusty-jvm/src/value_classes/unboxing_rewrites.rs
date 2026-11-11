@@ -180,10 +180,10 @@ pub(super) fn unbox_wrap_nullable(
         args: vec![],
     });
     super::type_operation_roles::record_null_safe_unbox_type_operation_edge(ir, unboxed, orig_id);
-    let when = ir.exprs.len() as ExprId;
-    ir.exprs.push(IrExpr::When {
-        branches: vec![(Some(is_null), null2), (None, unboxed)],
-    });
+    let when = ir.add_when(
+        vec![(Some(is_null), null2), (None, unboxed)],
+        Ty::nullable(u),
+    );
     ir.null_guards.insert(when);
     ir.jvm_value_class_null_guards.insert(when);
     ir.exprs[id as usize] = IrExpr::Block {
