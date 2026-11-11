@@ -1282,29 +1282,38 @@ impl Drop for BoxRunner {
     }
 }
 
-/// Opt-in JVM diagnostics for a runner: set `KRUSTY_JVM_GCLOG=<dir>` to make every runner JVM log GC,
-/// metaspace, and class-unload events to `<dir>/<role>-<pid>.gclog` (unified `-Xlog`). Empty ⇒ no args,
-/// zero overhead. Lets a profiling run see GC frequency/pauses and whether metaspace/class-unloading is
-/// a bottleneck, instead of guessing. Pair with `KRUSTY_PROF=1` for the per-phase (compile/box) timings.
-#[allow(dead_code)]
-fn jvm_gclog_args(role: &str) -> Vec<String> {
+/// Unified-logging arguments for a JVM that answers a binary protocol on its stdout. HotSpot
+/// prints its unified-logging warnings (a thread it could not start, a container limit it could not
+/// read) to stdout by default, where a `[0.012s][warning]...` line would be read as a reply frame, so
+/// these send them to stderr instead.
+///
+/// Opt-in diagnostics on top: set `KRUSTY_JVM_GCLOG=<dir>` to make the JVM log GC, metaspace, and
+/// class-unload events to `<dir>/<role>-<pid>.gclog`. Lets a profiling run see GC frequency/pauses
+/// and whether metaspace/class-unloading is a bottleneck, instead of guessing. Pair with
+/// `KRUSTY_PROF=1` for the per-phase (compile/box) timings.
+pub fn protocol_jvm_log_args(role: &str) -> Vec<String> {
+    let mut args = vec![
+        "-Xlog:disable".to_owned(),
+        "-Xlog:all=warning:stderr".to_owned(),
+    ];
     let Some(dir) = std::env::var("KRUSTY_JVM_GCLOG")
         .ok()
         .filter(|v| !v.is_empty())
     else {
-        return Vec::new();
+        return args;
     };
     let _ = std::fs::create_dir_all(&dir);
     let pid = std::process::id();
-    vec![format!(
+    args.push(format!(
         "-Xlog:gc*=info,gc+metaspace=info,class+unload=info:file={dir}/{role}-{pid}.gclog:time,uptime,level,tags"
-    )]
+    ));
+    args
 }
 
 impl BoxRunner {
     fn new(java: &str, cp: &str) -> Option<Self> {
         let mut cmd = Command::new(java);
-        cmd.args(jvm_gclog_args("boxrunner"));
+        cmd.args(protocol_jvm_log_args("boxrunner"));
         // Cap the runner heap (-Xmx512m) to keep each persistent runner small — they used to grow to
         // ~1 GB and several run at once, so this eases gate memory pressure. Deliberately keep the
         // DEFAULT collector + full tiered JIT: BoxRunner dispatches box() bodies on a cached thread pool
@@ -2851,6 +2860,7 @@ struct JavaRunner {
 impl JavaRunner {
     fn new(java: &str, runner_dir: &Path) -> Option<Self> {
         let mut cmd = Command::new(java);
+        cmd.args(protocol_jvm_log_args("javarunner"));
         // Cap heap for footprint, but keep the default collector + full tiered JIT: JavaRunner executes
         // the reference javac output on a thread pool, so serial GC / C1-only throttles it (see BoxRunner).
         cmd.args([
