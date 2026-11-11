@@ -288,7 +288,6 @@ callableReference/adaptedReferences/extensionPropertyWithAnonymousContextFun.kt
 callableReference/adaptedReferences/extensionPropertyWithAnonymousExtensionFun.kt
 callableReference/adaptedReferences/inlineDefault.kt
 callableReference/adaptedReferences/inlineVararg.kt
-callableReference/adaptedReferences/inlineVarargInts.kt
 callableReference/adaptedReferences/innerConstructorWithVararg.kt
 callableReference/adaptedReferences/localFunctionWithDefault.kt
 callableReference/adaptedReferences/manyDefaultsAndVararg.kt
@@ -392,7 +391,6 @@ callableReference/kt49526_sam.kt
 callableReference/kt49526a.kt
 callableReference/kt49526b.kt
 callableReference/kt50172.kt
-callableReference/kt51844.kt
 callableReference/kt52270.kt
 callableReference/property/accessViaSubclass.kt
 callableReference/property/accessorForPropertyWithPrivateSetter.kt
@@ -473,7 +471,6 @@ casts/unitNullableCast.kt
 casts/wasmCastMessages.kt
 casts/wasmCastMessagesWasmJs.kt
 checkcastOptimization/kt19128.kt
-checkcastOptimization/kt19246.kt
 checkcastOptimization/kt50215.kt
 classDelegation/delegationToInOutTypeParameters.kt
 classDelegation/delegationToOutTypeParameter.kt
