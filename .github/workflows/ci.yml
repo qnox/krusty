@@ -976,36 +976,20 @@ jobs:
         with:
           distribution: zulu
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+      - &setup-gradle-cache
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
         with:
-          # The wrapper's distribution and the dependencies live in ~/.gradle, restored below.
-          # Basic caching shares one key across jobs and saves only the first job's home.
-          cache-provider: external
-      - &restore-gradle-home
-        name: restore Gradle user home
-        id: gradle-home
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-home-${{ github.job }}-${{ matrix.kotlin || 'plugin' }}-${{ hashFiles('tools/**/*.gradle*', 'tools/**/gradle-wrapper.properties', 'tools/**/*.versions.toml') }}
-          restore-keys: |
-            gradle-home-${{ github.job }}-${{ matrix.kotlin || 'plugin' }}-
+          # The wrapper's distribution and the dependencies live in Gradle's user home. The default
+          # provider keys an entry per job and matrix lane, stores the dependencies each lane
+          # shares once, writes only on master, and drops whatever this run did not read.
+          cache-cleanup: on-success
+          # A fixture's build cache serves only the run that filled it.
+          gradle-home-cache-excludes: caches/build-cache-1
       - name: build portable local-Maven distribution
         run: |
           set -euo pipefail
           version=$(just version)
           scripts/package-gradle-plugin.sh "$version" "$PWD/dist-gradle"
-      - &save-gradle-home
-        name: save Gradle user home
-        if: github.ref == 'refs/heads/master' && steps.gradle-home.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ steps.gradle-home.outputs.cache-primary-key }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: krusty-gradle-plugin
@@ -1038,10 +1022,7 @@ jobs:
         with:
           distribution: zulu
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
-        with:
-          cache-provider: external
-      - *restore-gradle-home
+      - *setup-gradle-cache
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
@@ -1050,7 +1031,6 @@ jobs:
           set -euo pipefail
           chmod +x krusty
           scripts/package-build-tools.sh "$(just version)" "${{ matrix.kotlin }}" "$PWD/krusty" "$PWD/dist-build-tools"
-      - *save-gradle-home
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: krusty-build-tools-kotlin-${{ matrix.kotlin }}
@@ -1118,23 +1098,18 @@ jobs:
             echo "$GRADLE_ENTRY/bin" >> "$GITHUB_PATH"
             echo "found=true" >> "$GITHUB_OUTPUT"
           fi
+      # The nested fixture builds share one isolated Gradle user home, outside the checkout.
+      # setup-gradle caches the user home GRADLE_USER_HOME names when it runs.
+      - name: select the integration Gradle user home
+        run: echo "GRADLE_USER_HOME=$RUNNER_TEMP/krusty-gradle-user-home" >> "$GITHUB_ENV"
       - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
         with:
           gradle-version: ${{ steps.gradle-on-path.outputs.found != 'true' && matrix.gradle || '' }}
-          # The integration harness deliberately uses an isolated user home below. Do not restore
-          # an unused ~/.gradle cache; the next step owns the exact home the nested builds consume.
-          cache-provider: external
-      - name: restore Gradle integration dependencies
-        id: gradle-integration
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/krusty-gradle-user-home/caches
-          # Each matrix lane has a different Gradle/KGP/KSP dependency graph. The generated fixture
-          # build scripts live in gradle.rs, while the tested plugin build lives under tools/.
-          key: gradle-integration-${{ runner.os }}-${{ runner.arch }}-${{ matrix.gradle }}-${{ matrix.kotlin }}-${{ matrix.ksp }}-${{ hashFiles('Cargo.lock', 'crates/krusty-build/src/gradle.rs', 'tools/krusty-gradle/**') }}
-          # A changed key restores the lane's last cache: most dependencies are unchanged, and a
-          # miss re-downloaded all ~780 MB (75% of lanes missed, 1.5-2.3 min each).
-          restore-keys: gradle-integration-${{ runner.os }}-${{ runner.arch }}-${{ matrix.gradle }}-${{ matrix.kotlin }}-${{ matrix.ksp }}-
+          # One entry per matrix lane, since each has its own Gradle/KGP/KSP/AGP graph. Dependencies
+          # the lanes share are stored once, and cleanup drops whatever the lane's tests did not read.
+          cache-cleanup: on-success
+          # A fixture's build cache serves only the run that filled it.
+          gradle-home-cache-excludes: caches/build-cache-1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
@@ -1159,7 +1134,7 @@ jobs:
           KRUSTY_GRADLE_VERSION: ${{ matrix.gradle }}
           # Keep Gradle's mutable Kotlin DSL workspace out of the checkout. A later archive of the
           # workspace must not retain a script directory without its metadata.bin.
-          KRUSTY_GRADLE_USER_HOME: ${{ runner.temp }}/krusty-gradle-user-home
+          KRUSTY_GRADLE_USER_HOME: ${{ env.GRADLE_USER_HOME }}
         run: |
           chmod +x krusty krusty-build-tests
           tests="kotlin_compiler_slice_compiles_through_krusty kotlin_dsl_build_src_compiles_through_krusty"
@@ -1179,12 +1154,6 @@ jobs:
           fi
           KRUSTY_GRADLE_BIN=$(command -v gradle) \
             ./krusty-build-tests --ignored $tests
-      - name: save Gradle integration dependencies
-        if: github.ref == 'refs/heads/master' && steps.gradle-integration.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/krusty-gradle-user-home/caches
-          key: ${{ steps.gradle-integration.outputs.cache-primary-key }}
 
   # Build the Maven plugin's release bytes once: a portable local Maven repository the release
   # publishes and the job below consumes.

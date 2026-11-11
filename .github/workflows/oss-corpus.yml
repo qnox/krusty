@@ -1,7 +1,8 @@
 name: oss corpus
 
 # Conformance on the top-starred Kotlin projects and the Android sample listed in
-# scripts/oss-corpus/projects.tsv. Each project builds twice from a pinned commit with its own
+# scripts/oss-corpus/projects.tsv. Rows whose lane is `lsp` only (intellij-community and kotlin)
+# are measured by scripts/parity-scan.py and are not built here. Each built project builds twice from a pinned commit with its own
 # Gradle build: once with kotlinc, once with the krusty Gradle plugin applied by an init script. The
 # run reports, per project, how many Kotlin/JVM compilations krusty built, how many classes match
 # kotlinc's byte for byte, why the rest missed, how many of the project's own tests that pass on
@@ -47,7 +48,7 @@ jobs:
           REQUESTED: ${{ inputs.projects }}
         run: |
           set -euo pipefail
-          listed=$(awk -F'\t' '!/^#/ && NF { print $1 }' scripts/oss-corpus/projects.tsv)
+          listed=$(python3 scripts/oss-corpus/projects.py --lane compile)
           if [ -n "$REQUESTED" ]; then
             for name in $REQUESTED; do
               grep -qxF "$name" <<<"$listed" || { echo "unknown corpus project: $name" >&2; exit 1; }
@@ -163,7 +164,7 @@ jobs:
         run: |
           set -euo pipefail
           # A pinned fork (a mirror that keeps the pinned commit) counts its upstream's stars.
-          awk -F'\t' '!/^#/ && NF { print $1 "\t" $2 }' scripts/oss-corpus/projects.tsv |
+          python3 scripts/oss-corpus/projects.py --lane compile --urls |
             while IFS=$'\t' read -r name url; do
               repo=${url#https://github.com/}
               stars=$(gh api "repos/$repo" --jq 'if .fork then .source.stargazers_count else .stargazers_count end' || true)

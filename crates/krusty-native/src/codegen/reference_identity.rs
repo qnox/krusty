@@ -11,6 +11,12 @@ impl ReferenceDeclaration {
         ))
     }
 
+    pub(super) fn property(module: &str, property: krusty::fir::PropertyId) -> Self {
+        Self(super::super::symbols::property_reference_symbol(
+            module, property,
+        ))
+    }
+
     pub(super) fn source(module: &str, callable: krusty::fir::CallableId) -> Self {
         Self(super::super::symbols::module_function_symbol(
             module, callable,

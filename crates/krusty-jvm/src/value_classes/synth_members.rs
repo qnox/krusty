@@ -1234,9 +1234,7 @@ fn property_hash(ir: &mut IrFile, underlying: Ty) -> ExprId {
     });
     let zero = ir.add_expr(IrExpr::Const(krusty::ir::IrConst::Int(0)));
     let non_null = hash(ir);
-    ir.add_expr(IrExpr::When {
-        branches: vec![(Some(is_null), zero), (None, non_null)],
-    })
+    ir.add_when(vec![(Some(is_null), zero), (None, non_null)], Ty::Int)
 }
 
 /// Decrement every value-slot index (`GetValue`/`SetValue`/`Variable`) reachable from `root` by one —

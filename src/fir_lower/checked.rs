@@ -534,20 +534,14 @@ impl BodyLowering<'_> {
         )))))
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn checked_property_reference(
         &mut self,
-        target: &FirPropertyReferenceTarget,
-        binding: crate::fir::FirCallableReferenceBinding,
+        reference: super::property_references::CheckedPropertyReference<'_>,
         dispatch_receiver: Option<FirReceiver>,
         extension_receiver: Option<FirReceiver>,
-        mutable: bool,
-        substitutions: &[FirTypeSubstitution],
-        adaptation: Option<&crate::fir::FirReferenceAdaptation>,
-        reference_ty: crate::types::Ty,
         reflective: bool,
     ) -> Result<ExprId, FirLoweringFailure> {
-        match target {
+        match reference.target {
             FirPropertyReferenceTarget::Module(target) => {
                 self.index
                     .property(*target)
@@ -572,28 +566,24 @@ impl BodyLowering<'_> {
         let dispatch_receiver = self.receiver(dispatch_receiver)?;
         let extension_receiver = self.receiver(extension_receiver)?;
         if !reflective {
-            if let Some(reference) = self.materialize_property_function_reference(
-                target,
-                binding,
+            if let Some(function) = self.materialize_property_function_reference(
+                &reference,
                 dispatch_receiver,
                 extension_receiver,
-                substitutions,
-                adaptation,
-                reference_ty,
             )? {
-                return Ok(reference);
+                return Ok(function);
             }
         }
         Ok(self.ir.add_expr(IrExpr::Checked(Box::new(
             IrCheckedOperation::PropertyReference {
-                target: target.clone(),
+                target: reference.target.clone(),
                 delegated: false,
-                binding,
+                binding: reference.binding,
                 dispatch_receiver,
                 extension_receiver,
-                mutable,
-                substitutions: lower_substitutions(substitutions),
-                adaptation: adaptation.cloned().map(Box::new),
+                mutable: reference.mutable,
+                substitutions: lower_substitutions(reference.substitutions),
+                adaptation: reference.adaptation.cloned().map(Box::new),
             },
         ))))
     }
