@@ -19,25 +19,6 @@
 1	src/fir/signature/classifier_headers.rs	this function has too many arguments (8/7)
 1	src/fir/signature/local_type_aliases.rs	this function has too many arguments (10/7)
 1	src/fir/signature_extract/condition_facts.rs	this function has too many arguments (8/7)
-1	src/fir_lower/checked.rs	called `expect` on `enclosing` after checking its variant with `is_some`
-1	src/fir_lower/classifier_references.rs	this function has too many arguments (11/7)
-1	src/fir_lower/constructors.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let identity = index.type_parameter(classifier, ordinal)?;`
-1	src/fir_lower/constructors.rs	using `contains()` instead of `iter().any()` is more efficient: help: try: `slots.contains(&(parameter, field))`
-1	src/fir_lower/constructors.rs	using `map` over `inspect`
-1	src/fir_lower/external_references.rs	this function has too many arguments (8/7)
-1	src/fir_lower/external_references.rs	unnecessary closure used to substitute value for `Option::None`
-1	src/fir_lower/inline_body.rs	this `.find_map(..)` can be written more simply using `.find(..)`
-1	src/fir_lower/inline_body.rs	this function has too many arguments (9/7)
-1	src/fir_lower/inline_returns.rs	this loop could be written as a `while let` loop
-1	src/fir_lower/inlining/escaping_lambda/transfer.rs	this `map_or` can be simplified
-1	src/fir_lower/inlining/escaping_lambda/transfer.rs	this function has too many arguments (10/7)
-1	src/fir_lower/inlining/escaping_lambda/transfer.rs	this function has too many arguments (13/7)
-1	src/fir_lower/properties.rs	this function has too many arguments (10/7)
-1	src/fir_lower/properties.rs	this function has too many arguments (8/7)
-1	src/fir_lower/property_references.rs	this function has too many arguments (8/7)
-1	src/fir_lower/sink.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `outer_ty`
-1	src/fir_lower/source_calls.rs	very complex type used. Consider factoring parts into `type` definitions
-1	src/fir_lower/tests.rs	the method `accept_inline_bodies` doesn't need a mutable reference
 1	src/frontend/inline_preparation.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let selected_bodies = bodies.get_mut(provider.source.raw() as usize)?;`
 1	src/frontend/inline_preparation.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let selected_roots = roots.get_mut(root.source.raw() as usize)?;`
 1	src/frontend/inline_preparation.rs	this function has too many arguments (9/7)
@@ -112,10 +93,6 @@
 2	src/fir/body_check/references.rs	this function has too many arguments (8/7)
 2	src/fir/signature.rs	this function has too many arguments (11/7)
 2	src/fir/signature.rs	this function has too many arguments (8/7)
-2	src/fir_lower/checked.rs	this function has too many arguments (8/7)
-2	src/fir_lower/inlining/converted_inline_lambda.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `index`
-2	src/fir_lower/inlining/converted_inline_lambda.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `source`
-2	src/fir_lower/source_calls.rs	this function has too many arguments (8/7)
 2	src/jvm/jvm_libraries.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
 2	src/resolve.rs	returning the result of a `let` binding from a block
 2	src/resolve/call_diagnostics.rs	this function has too many arguments (8/7)
