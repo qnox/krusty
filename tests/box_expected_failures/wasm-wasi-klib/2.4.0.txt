@@ -215,13 +215,11 @@ boxing/boxing8.kt
 boxing/boxing9.kt
 boxing/kt53100_casts.kt
 boxing/missingValueClassUnboxing.kt
-boxingOptimization/boxedIntegersCmp.kt
 boxingOptimization/boxedRealsCmp.kt
 boxingOptimization/casts.kt
 boxingOptimization/checkcastAndInstanceOf2.kt
 boxingOptimization/fold.kt
 boxingOptimization/foldRange.kt
-boxingOptimization/intCompareTo.kt
 boxingOptimization/kt19767_2.kt
 boxingOptimization/kt46859.kt
 boxingOptimization/kt48394.kt

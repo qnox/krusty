@@ -318,6 +318,17 @@ impl CallableRegistry {
                         // The boxes below a library class implement its member through a stub.
                         continue;
                     }
+                    let abstract_primitive_member = callable
+                        .dependency_callable
+                        .as_ref()
+                        .is_none_or(|identity| !self.dependencies.contains_key(identity))
+                        && super::lower::primitive_supertypes::is_realized(ir, callables, *target);
+                    if abstract_primitive_member {
+                        // `Number`'s conversions and `Comparable.compareTo` are abstract. A boxed
+                        // primitive realizes them; the library declares no body to emit. A
+                        // published body stays the implementation.
+                        continue;
+                    }
                     if callable
                         .compiler_operation()
                         .filter(|operation| {
