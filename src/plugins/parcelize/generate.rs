@@ -45,7 +45,7 @@ fn describe_contents(ir: &mut IrFile, class: &ParcelizedClass) {
         value: None,
     });
     if start != 0 {
-        ir.expr_lines.insert(flags, start);
+        ir.set_statement_line(flags, start);
     }
     if end != 0 {
         ir.mark_implicit_return_end_line(returned, end);
