@@ -1260,7 +1260,6 @@ dataClasses/copy/kt3033.kt
 dataClasses/copy/withGenericParameter.kt
 dataClasses/doubleParam.kt
 dataClasses/equalityChecksPrimitiveUnboxed.kt
-dataClasses/equals/genericarray.kt
 dataClasses/equals/null.kt
 dataClasses/equals/nullother.kt
 dataClasses/equals/sameinstance.kt
@@ -2099,7 +2098,6 @@ inlineClasses/boxReturnValueOnOverride/uncastInlineClassToAnyAndBack.kt
 inlineClasses/boxReturnValueOnOverride/uncastInlineClassToAnyAndBackGeneric.kt
 inlineClasses/boxReturnValueOnOverride/unrelatedGenerics.kt
 inlineClasses/boxReturnValueOnOverride/unrelatedGenericsGeneric.kt
-inlineClasses/boxUnboxInlineClassesWithOperatorsGetSet.kt
 inlineClasses/boxUnboxInlineClassesWithOperatorsGetSetGeneric.kt
 inlineClasses/boxUnboxOfInlineClassForCapturedVarsGeneric.kt
 inlineClasses/bridgeForFunctionReturningInlineClassGeneric.kt
@@ -2108,7 +2106,6 @@ inlineClasses/bridgeGenerationWithInlineClassOverAnyGeneric.kt
 inlineClasses/bridgeGenerationWithInlineClassOverAnyGeneric2.kt
 inlineClasses/bridgesWhenInlineClassImplementsGenericInterface.kt
 inlineClasses/bridgesWhenInlineClassImplementsGenericInterfaceGeneric.kt
-inlineClasses/callComputablePropertyInsideInlineClass.kt
 inlineClasses/callableReferences/boundInlineClassExtensionFun.kt
 inlineClasses/callableReferences/boundInlineClassExtensionFunGeneric.kt
 inlineClasses/callableReferences/boundInlineClassExtensionVal.kt
@@ -2185,7 +2182,6 @@ inlineClasses/checkUnboxingResultFromTypeVariable.kt
 inlineClasses/checkUnboxingResultFromTypeVariableGeneric.kt
 inlineClasses/checkUnboxingResultFromTypeVariableGeneric2.kt
 inlineClasses/classInInlineClassInitGeneric.kt
-inlineClasses/computablePropertyInsideInlineClass.kt
 inlineClasses/conformToComparableAndCallInterfaceMethod.kt
 inlineClasses/conformToComparableAndCallInterfaceMethodGeneric.kt
 inlineClasses/constructorCallableReference.kt
@@ -2425,7 +2421,6 @@ inlineClasses/iterateOverArrayOfInlineClassValuesGeneric.kt
 inlineClasses/iterateOverListOfInlineClassValues.kt
 inlineClasses/iterateOverListOfInlineClassValuesGeneric.kt
 inlineClasses/jvmInline.kt
-inlineClasses/kt25246.kt
 inlineClasses/kt25750.kt
 inlineClasses/kt25750Generic.kt
 inlineClasses/kt25771.kt
@@ -2474,7 +2469,6 @@ inlineClasses/kt38680aGeneric.kt
 inlineClasses/kt38680bGeneric.kt
 inlineClasses/kt44141.kt
 inlineClasses/kt44867.kt
-inlineClasses/kt44978.kt
 inlineClasses/kt45084Generic.kt
 inlineClasses/kt45991.kt
 inlineClasses/kt46554Generic.kt
