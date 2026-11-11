@@ -17,8 +17,8 @@ use krusty::fir::{
     ResolvedPropertyOverrideTarget,
 };
 use krusty::ir::{
-    Callee, ClassId, CtorDelegateTarget, FunId, IrExpr, IrLocalPropertyLayout, IrSuperCallKind,
-    IrTypeOp, IrVirtualTarget,
+    Callee, ClassId, CtorDelegateTarget, FunId, IrClass, IrExpr, IrLocalPropertyLayout,
+    IrSuperCallKind, IrTypeOp, IrVirtualTarget,
 };
 use krusty::types::{Ty, TyKind, TypeName};
 
@@ -38,6 +38,23 @@ mod override_bridges;
 
 #[cfg(test)]
 mod tests;
+
+/// Whether `class`'s slot for `member` is still `kotlin.Any`'s own body. A single-field value
+/// class answers `equals` and `hashCode` from the field it stores.
+fn default_any_member(
+    classes: &FileClasses,
+    id: ClassId,
+    class: &IrClass,
+    member: AnyMember,
+) -> bool {
+    if class.is_value
+        && class.fields.len() == 1
+        && matches!(member, AnyMember::Equals | AnyMember::HashCode)
+    {
+        return false;
+    }
+    classes.tables.table(id).vtable[member.slot() as usize] == Slot::AnyMember(member)
+}
 
 impl Body<'_> {
     pub(super) fn file_classes(&self) -> Result<&FileClasses, Unsupported> {
@@ -1091,7 +1108,9 @@ impl Body<'_> {
     }
 
     /// Whether a call through `member`'s slot on a value statically of `class` could reach
-    /// `kotlin.Any`'s own member, which this module has no body for.
+    /// `kotlin.Any`'s own member, which this module has no body for. A single-field value class
+    /// realizes `equals` and `hashCode` from the field it stores, so those slots are not the
+    /// default.
     pub(super) fn reaches_any_default(
         &self,
         class: ClassId,
@@ -1109,9 +1128,7 @@ impl Body<'_> {
                 related |= current == class;
                 ancestor = classes.tables.table(current).superclass;
             }
-            related
-                && classes.tables.table(id).vtable[member.slot() as usize]
-                    == Slot::AnyMember(member)
+            related && default_any_member(classes, id, candidate, member)
         }))
     }
 
@@ -1141,9 +1158,7 @@ impl Body<'_> {
             return Ok(false);
         };
         Ok(self.ir.classes.iter().enumerate().any(|(id, class)| {
-            !class.is_interface
-                && classes.tables.table(id as ClassId).vtable[member.slot() as usize]
-                    == Slot::AnyMember(member)
+            !class.is_interface && default_any_member(classes, id as ClassId, class, member)
         }))
     }
 

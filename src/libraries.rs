@@ -564,6 +564,12 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         None
     }
 
+    /// The error this platform reports for a value of type `Array<Nothing?>`, which it cannot
+    /// represent. `None` where such an array is an ordinary value.
+    fn array_of_nullable_nothing_error(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Normalize a semantic type to the identity used when comparing source call arguments against
     /// compiled-library signatures. This is not an emit descriptor; it is a semantic compatibility key.
     /// Implementations that do not need library-name normalization return the type unchanged.

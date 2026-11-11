@@ -964,24 +964,14 @@ fn expect_reference_box(src: &str, stem: &str) {
     );
 }
 
-// PLATFORM-SPECIFIC: a reference assertion cannot implement nullable scalar unboxing.
+/// The shared `ArrayOfNullsAnyElement` program, prepared for each target the way the box lanes
+/// prepare it: `OPTIONAL_JVM_INLINE_ANNOTATION` is `@JvmInline` on the JVM and absent on Wasm.
 #[test]
-fn wasm_nullable_scalar_assertions_decline_without_an_unboxing_contract() {
-    for (stem, scalar) in [
-        ("nullableIntAssertion", "Int"),
-        ("nullableLongAssertion", "Long"),
-        ("nullableFloatAssertion", "Float"),
-        ("nullableDoubleAssertion", "Double"),
-    ] {
-        let src =
-            format!("fun read(value: {scalar}?): {scalar} = value!!\nfun box(): String = \"OK\"");
-        expect_reference_box(&src, stem);
-        expect_wasm_decline(
-            &src,
-            stem,
-            "a not-null assertion requiring a scalar reference conversion",
-        );
-    }
+fn wasm_shared_array_of_nulls_program() {
+    let source = include_str!("box_regressions/ArrayOfNullsAnyElement.kt");
+    let prepared = |target| krusty::conformance::prepare_test_source(source, target);
+    expect_reference_box(&prepared(TestTarget::Jvm), "ArrayOfNullsAnyElement");
+    expect_wasm_box(&prepared(TestTarget::WasmJs), "ArrayOfNullsAnyElement");
 }
 
 // PLATFORM-SPECIFIC: a suspend function value is a function value whose implementation takes the
@@ -1307,6 +1297,9 @@ fn wasm_runs_an_enum_class() {
 
 #[path = "wasm_value_hash.rs"]
 mod value_hash;
+
+#[path = "wasm_value_class_equality.rs"]
+mod value_class_equality;
 
 #[path = "wasm_dependency_constructor_exports.rs"]
 mod dependency_constructor_exports;
