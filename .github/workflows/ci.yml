@@ -782,7 +782,10 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: conformance-bin
+      # Only the JVM row runs the compiler binary (its box step and the CLI conformance). The Native
+      # and Wasm rows drive the compiler in-process from the conformance binary.
       - name: download compiler binary
+        if: matrix.target == 'jvm'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
