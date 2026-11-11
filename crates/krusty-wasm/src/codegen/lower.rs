@@ -472,6 +472,33 @@ fn describe(ty: Ty) -> String {
     }
 }
 
+/// The class an enclosing-instance edge leaves and the field its constructor stores the outer
+/// instance in: the field of the leading enclosing-instance parameter.
+fn enclosing_field(
+    ir: &IrFile,
+    inner: krusty::types::TypeName,
+) -> Result<(krusty::ir::ClassId, u32), Unsupported> {
+    let class = ir.class_id_by_name(inner).ok_or_else(|| {
+        // Boundary conversion for a diagnostic.
+        format!(
+            "the enclosing instance of `{}`, which is not declared in this file",
+            inner.render()
+        )
+    })?;
+    let declaration = &ir.classes[class as usize];
+    let &(_, field) = declaration
+        .pre_super_param_fields
+        .iter()
+        .find(|&&(parameter, _)| parameter == 0)
+        .ok_or_else(|| {
+            format!(
+                "an enclosing instance with no stored field (`{}`)",
+                declaration.fq_name()
+            )
+        })?;
+    Ok((class, field))
+}
+
 /// The checked type carried into Wasm emission. A generated value block is a transparent
 /// sequencing node: when it has no checked type of its own, its final child retains the exact
 /// frontend type. This is the same common-IR contract used for physical block representation; it
@@ -515,6 +542,11 @@ fn expression_type(
         // which is what the instruction leaves on the stack; a use at a narrower type casts.
         IrExpr::GetField { class, index, .. } if ir.checked_type(id).is_none() => {
             ir.classes[*class as usize].fields[*index as usize].ty
+        }
+        // An inner class's outer instance is read at the type of the field that stores it.
+        IrExpr::EnclosingInstance { inner, .. } if ir.checked_type(id).is_none() => {
+            let (class, field) = enclosing_field(ir, *inner)?;
+            ir.classes[class as usize].fields[field as usize].ty
         }
         IrExpr::MethodCall { class, index, .. } if ir.checked_type(id).is_none() => {
             let function = ir.classes[*class as usize].methods[*index as usize];
@@ -1308,18 +1340,15 @@ impl<'a> Body<'a> {
                 spreads,
                 elements,
             } => {
-                if arrays::is_int_array(array_type) {
-                    self.int_array_literal(&spreads, &elements)?;
-                } else {
-                    self.reference_array_literal(array_type, &spreads, &elements)?;
-                }
+                self.array_literal(array_type, &spreads, &elements)?;
             }
             IrExpr::NewArray { array_type, size } => {
-                if arrays::is_int_array(array_type) {
-                    self.new_int_array(size)?;
-                } else {
+                // Only `IntArray` is allocated by size yet.
+                let array = array_type.non_null();
+                if array.is_reference_array() || array.array_elem() != Some(Ty::Int) {
                     return Err("the expression `NewArray`".into());
                 }
+                self.new_array(array_type, size)?;
             }
             IrExpr::Try {
                 body,
@@ -1334,6 +1363,12 @@ impl<'a> Body<'a> {
                 class,
                 index,
             } => self.field_read(receiver, class, index)?,
+            IrExpr::EnclosingInstance {
+                receiver, inner, ..
+            } => {
+                let (class, field) = enclosing_field(self.ir, inner)?;
+                self.field_read(receiver, class, field)?;
+            }
             IrExpr::SetField {
                 receiver,
                 class,

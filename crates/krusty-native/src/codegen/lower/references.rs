@@ -158,6 +158,8 @@ impl<'a> FileLowering<'a> {
                 Some(format!("suspendConversion{ordinal}"))
             }
             krusty::ir::IrCallableReferenceTarget::FunctionInvoke => Some("invoke".to_string()),
+            // A function value has no `name`; only the property reference itself does.
+            krusty::ir::IrCallableReferenceTarget::Property(_) => None,
             krusty::ir::IrCallableReferenceTarget::Classifier { operation, .. } => Some(
                 match operation {
                     krusty::ir::IrClassifierCallable::EnumValueOf => "valueOf",
