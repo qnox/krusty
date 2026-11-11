@@ -768,14 +768,15 @@ impl Body<'_> {
         match property.backing_field {
             Some(field) => {
                 self.field_read(receiver, class, field)?;
-                // The field keeps its storage type. Callers of the read see the public type.
-                if let Some(storage) = property
-                    .storage_ty
-                    .filter(|storage| *storage != property.ty)
-                {
-                    adapt_property_carrier(&mut self.code, storage, property.ty, &property.name)?;
+                // The field keeps its storage type. Callers of the read see the public type: the
+                // checker lowers a read of the field itself as a field access, so a property read
+                // that remains is the default getter.
+                match property.storage_ty {
+                    Some(storage) if storage != property.ty => {
+                        self.coerce_emitted_value(storage, property.ty)
+                    }
+                    _ => Ok(()),
                 }
-                Ok(())
             }
             None => Err(format!(
                 "a property with neither storage nor a getter (`{}`)",
@@ -1404,12 +1405,20 @@ pub(super) fn define_module_property_functions(
         let value = carrier(definition.entry.ty)?;
         let getter_ty = module.func_type(vec![REFERENCE], value.into_iter().collect());
         let mut getter = Code::default();
-        emit_module_property_getter(context, classes, runtime, *class, *property, &mut getter)?;
+        let locals = emit_module_property_getter(
+            context,
+            classes,
+            module,
+            runtime,
+            *class,
+            *property,
+            &mut getter,
+        )?;
         module.define(
             definition.entry.getter,
             Function {
                 ty: getter_ty,
-                locals: Vec::new(),
+                locals,
                 code: getter,
             },
         );
@@ -1433,21 +1442,24 @@ pub(super) fn define_module_property_functions(
     Ok(())
 }
 
+/// Emit the body of a module member property's getter entry; returns the locals it declares
+/// after the receiver parameter.
 fn emit_module_property_getter(
     context: &FileContext<'_>,
     classes: &FileClasses,
-    runtime: &Runtime,
+    module: &mut Module,
+    runtime: &mut Runtime,
     class: ClassId,
     property: u32,
     code: &mut Code,
-) -> Result<(), Unsupported> {
+) -> Result<Vec<ValType>, Unsupported> {
     let declaration = &context.ir.classes[class as usize].properties[property as usize];
     let slot = local_property_target(context.ir, class, property as usize)
         .and_then(|target| classes.tables.slot(class, &SlotKey::Getter(target)));
     if let Some(slot) = slot {
         code.local_get(0);
         emit_module_property_dispatch(classes, runtime, class, slot, code)?;
-        return Ok(());
+        return Ok(Vec::new());
     }
     if let Some(getter) = declaration.getter {
         let function = context
@@ -1457,7 +1469,7 @@ fn emit_module_property_getter(
             .flatten()
             .ok_or_else(|| "a module property getter with no emitted function".to_string())?;
         code.local_get(0).call(function);
-        return Ok(());
+        return Ok(Vec::new());
     }
     let field = declaration
         .backing_field
@@ -1466,13 +1478,34 @@ fn emit_module_property_getter(
     code.local_get(0)
         .ref_cast(false, HeapType::Concrete(structure))
         .struct_get(structure, classes.field(class, field));
-    if let Some(storage) = declaration
+    let Some(storage) = declaration
         .storage_ty
         .filter(|storage| *storage != declaration.ty)
-    {
+    else {
+        return Ok(Vec::new());
+    };
+    // A scalar stored for a reference-typed property is boxed on the way out.
+    let stored = carrier(storage)?;
+    let boxed = match stored {
+        Some(value @ (ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64))
+            if matches!(carrier(declaration.ty)?, Some(ValType::Ref { .. })) =>
+        {
+            runtime
+                .box_form(module, storage, value)
+                .map(|form| (form, value))
+        }
+        _ => None,
+    };
+    let Some((form, value)) = boxed else {
         adapt_property_carrier(code, storage, declaration.ty, &declaration.name)?;
-    }
-    Ok(())
+        return Ok(Vec::new());
+    };
+    let (scratch, locals) = match form.needs_scratch() {
+        true => (Some(1), vec![value]),
+        false => (None, Vec::new()),
+    };
+    form.emit_box(code, scratch);
+    Ok(locals)
 }
 
 fn emit_module_property_setter(
