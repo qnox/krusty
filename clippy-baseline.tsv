@@ -70,16 +70,6 @@
 1	src/klib_libraries/inventory.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/klib_libraries/tests.rs	unnecessary closure used with `bool::then`
 1	src/lexer.rs	casting to the same type is unnecessary (`usize` -> `usize`): help: try: `self.i`
-1	src/libraries.rs	this method chain can be written more clearly with `if .. else ..`
-1	src/libraries.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if merged.as_slice() != arguments { Ty::obj_args_name(name, &merged) } else { declared }`
-1	src/libraries/builtin_top_level_realization.rs	function `function_realization` is never used
-1	src/libraries/call_realization.rs	this function has too many arguments (11/7)
-1	src/libraries/classifier_declaration.rs	large size difference between variants: the entire enum is at least 232 bytes
-1	src/libraries/dependency_body_contract.rs	method `has_content_fingerprint` is never used
-1	src/metadata/class_builder/schema.rs	empty line after doc comment
-1	src/metadata/class_builder/schema.rs	the loop variable `index` is used to index `func_msgs`
-1	src/metadata/class_builder/schema.rs	the loop variable `index` is used to index `prop_msgs`
-1	src/metadata/semantic/klib/semantic_decoder_tests.rs	unnecessary use of `clone` to create a slice from a reference
 1	src/parser.rs	field assignment outside of initializer for an instance created with Default::default()
 1	src/parser.rs	this manual char comparison can be written more succinctly: help: consider using an array of `char`: `['L', 'l', 'u', 'U']`
 1	src/parser.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if header_ctor_kw { self.tok().span.lo } else { 0 }`
