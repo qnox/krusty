@@ -71,11 +71,12 @@ impl Checker<'_> {
         receiver: Option<Ty>,
         args_and_partial: (&[ExprId], &[Option<Ty>]),
         argument_slots: (&[usize], &[bool]),
-        type_args: &[Ty],
-        explicit_bounds: ExplicitTypeArgumentBounds,
+        type_arguments: ExplicitTypeArgumentProbe<'_>,
     ) -> bool {
         let (args, arg_tys) = args_and_partial;
         let (argument_map, whole_array_varargs) = argument_slots;
+        let type_args = type_arguments.arguments;
+        let explicit_bounds = type_arguments.bounds;
         let semantic = overload.semantic_signature();
         if !type_args.is_empty() && semantic.formals.len() != type_args.len() {
             return false;
@@ -1081,8 +1082,10 @@ impl Checker<'_> {
             None,
             (args, arg_tys),
             (&argument_map, &whole_arrays),
-            type_args,
-            explicit_bounds,
+            ExplicitTypeArgumentProbe {
+                arguments: type_args,
+                bounds: explicit_bounds,
+            },
         );
         crate::trace_compiler!(
             "lambda_shape",
@@ -1269,8 +1272,10 @@ impl Checker<'_> {
             Some(binding_receiver),
             (args, arg_tys),
             (&argument_map, &whole_arrays),
-            type_args,
-            ExplicitTypeArgumentBounds::Enforced,
+            ExplicitTypeArgumentProbe {
+                arguments: type_args,
+                bounds: ExplicitTypeArgumentBounds::Enforced,
+            },
         ) {
             crate::trace_compiler!(
                 "lambda_shape",
@@ -1432,6 +1437,14 @@ pub(super) enum ExplicitTypeArgumentBounds {
     Enforced,
     /// The call's diagnostics report the bound; the candidate still shapes the call's lambdas.
     Deferred,
+}
+
+/// The call's explicit type arguments and whether this probe treats a bound violation as
+/// inapplicable. They travel together into the pre-lambda applicability check.
+#[derive(Clone, Copy)]
+pub(super) struct ExplicitTypeArgumentProbe<'a> {
+    pub(super) arguments: &'a [Ty],
+    pub(super) bounds: ExplicitTypeArgumentBounds,
 }
 
 /// Every type argument is written and resolved, so no argument constraint can change them.
