@@ -12580,11 +12580,13 @@ impl<'a> Checker<'a> {
         let explicit_type_args = self.resolved_explicit_type_args(scope, call);
         ret = self.commit_module_member_generic_call(
             call,
-            fi.generic_sig.as_ref(),
-            inferred_member_type_args,
-            &explicit_type_args,
-            &logical_arg_tys,
-            &fi.call_sig,
+            intersection_inference::ModuleMemberGenericCall {
+                signature: fi.generic_sig.as_ref(),
+                inferred_arguments: inferred_member_type_args,
+                explicit_type_args: &explicit_type_args,
+                logical_arg_tys: &logical_arg_tys,
+                call_sig: &fi.call_sig,
+            },
             ret,
         );
         let mut resolved = crate::symbol_resolver::ResolvedMember::from_member(
@@ -14425,10 +14427,12 @@ impl<'a> Checker<'a> {
                             let return_info = selected.ret;
                             ret = self.commit_selected_call_intersections(
                                 call,
-                                &signature,
-                                &explicit_type_args,
-                                &shape.parameter_indices,
-                                &shape.call_sig,
+                                intersection_inference::GenericCallCommitment {
+                                    signature: &signature,
+                                    explicit_type_args: &explicit_type_args,
+                                    parameter_indices: &shape.parameter_indices,
+                                    call_sig: &shape.call_sig,
+                                },
                                 &mut selected.bindings,
                                 &mut selected.intersection_bindings,
                                 return_info,
@@ -14688,8 +14692,10 @@ impl<'a> Checker<'a> {
                         call,
                         rt,
                         &name,
-                        args,
-                        &generic_member_partial,
+                        invoke_selection::InvokeArguments {
+                            expressions: args,
+                            partial_types: &generic_member_partial,
+                        },
                         CallResultConstraint::direct(expected),
                     )
                 })
@@ -15189,8 +15195,10 @@ impl<'a> Checker<'a> {
                             args,
                             arg_tys: &arg_tys,
                         },
-                        callee,
-                        value_ty,
+                        invoke_selection::InvokeReceiver {
+                            expression: callee,
+                            ty: value_ty,
+                        },
                         span,
                         plan.invoke,
                         CallResultConstraint::direct(expected),
@@ -38403,10 +38411,12 @@ impl<'a> Checker<'a> {
         if let Some(signature) = selected.generic_sig.clone() {
             ret = self.commit_selected_call_intersections(
                 call,
-                &signature,
-                explicit_type_args,
-                &shape.parameter_indices,
-                &shape.call_sig,
+                intersection_inference::GenericCallCommitment {
+                    signature: &signature,
+                    explicit_type_args,
+                    parameter_indices: &shape.parameter_indices,
+                    call_sig: &shape.call_sig,
+                },
                 &mut selected_bindings,
                 &mut intersection_bindings,
                 selected.ret,
@@ -43166,15 +43176,19 @@ impl<'a> Checker<'a> {
                         };
                         return self.record_or_bind_deferred_constructor_property_type(
                             &classifier_header_scope,
-                            constructor,
-                            *property_declaration,
+                            resolved_type_occurrences::DeferredDeclarationSpelling {
+                                declaration: constructor,
+                                role: constructor_spellings
+                                    .as_ref()
+                                    .and_then(|spellings| spellings.param(index)),
+                            },
+                            resolved_type_occurrences::DeferredDeclarationSpelling {
+                                declaration: *property_declaration,
+                                role: spelling.as_ref().map(|role| role.as_binding()),
+                            },
                             &property.ty,
                             property.is_vararg,
                             constructor_semantic.or(*property_semantic),
-                            constructor_spellings
-                                .as_ref()
-                                .and_then(|spellings| spellings.param(index)),
-                            spelling.as_ref().map(|role| role.as_binding()),
                         );
                     }
                     if let Some(semantic) = constructor_semantic {
@@ -55934,10 +55948,12 @@ impl<'a> Checker<'a> {
             let selected_result = selected.callable.ret;
             let result = self.commit_selected_call_intersections(
                 e,
-                &signature,
-                type_args,
-                &shape.parameter_indices,
-                &shape.call_sig,
+                intersection_inference::GenericCallCommitment {
+                    signature: &signature,
+                    explicit_type_args: type_args,
+                    parameter_indices: &shape.parameter_indices,
+                    call_sig: &shape.call_sig,
+                },
                 &mut selected.bindings,
                 &mut selected.intersection_bindings,
                 return_info,
