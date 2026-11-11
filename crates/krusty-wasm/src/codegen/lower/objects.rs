@@ -1491,7 +1491,7 @@ fn emit_module_property_getter(
             if matches!(carrier(declaration.ty)?, Some(ValType::Ref { .. })) =>
         {
             runtime
-                .box_form(module, storage, value)
+                .box_form(module, storage, value)?
                 .map(|form| (form, value))
         }
         _ => None,
