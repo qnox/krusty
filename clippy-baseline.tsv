@@ -56,25 +56,13 @@
 1	src/resolve/diagnostic_selection.rs	this `if` has identical blocks
 1	src/resolve/enhanced_values.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if !coerced_to_unit { self.value_enhancement(result) } else { Default::default() }`
 1	src/resolve/explicit_property_write.rs	very complex type used. Consider factoring parts into `type` definitions
-1	src/resolve/scope.rs	this `if` can be collapsed into the outer `match`
-1	src/resolve/scope.rs	very complex type used. Consider factoring parts into `type` definitions
-1	src/resolve/selected_argument_commitment.rs	this function has too many arguments (8/7)
 1	src/resolve/selected_result_publication.rs	this function has too many arguments (9/7)
-1	src/resolve/signature_collection/collection.rs	field assignment outside of initializer for an instance created with Default::default()
-1	src/resolve/signature_collection/type_universe.rs	large size difference between variants: the entire enum is at least 232 bytes
-1	src/resolve/signature_collection/type_universe.rs	the loop variable `file_index` is used to index `file_class_names`
-1	src/resolve/signature_collection/type_universe.rs	this `if` statement can be collapsed
-1	src/resolve/source_constructors.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/resolve/streaming_signature_bridge/demanded_source_call.rs	this function has too many arguments (8/7)
 1	src/resolve/streaming_signature_bridge/local_signatures.rs	this function has too many arguments (10/7)
 1	src/resolve/streaming_signature_bridge/lookups.rs	this function has too many arguments (8/7)
 1	src/resolve/streaming_signature_bridge/lookups.rs	this function has too many arguments (9/7)
 1	src/resolve/streaming_signature_bridge/rejected_member_call.rs	this function has too many arguments (10/7)
 1	src/resolve/streaming_signature_bridge/selected_result_publication.rs	this function has too many arguments (13/7)
-1	src/resolve/streaming_signature_tests.rs	called `Iterator::last` on a `DoubleEndedIterator`; this will needlessly iterate the entire iterator
-1	src/resolve/type_parameter_owners.rs	this loop could be written as a `while let` loop: help: try: `while let Some(header) = index.declaration_header(current) { .. }`
-1	src/resolve/type_use_annotation_publication.rs	very complex type used. Consider factoring parts into `type` definitions
-1	src/resolve/variance_conflicts.rs	parameter is only used in recursion: help: if this is intentional, prefix it with an underscore: `_walk`
 1	tests/common/byte_dump.rs	unused import: `immutable_classpath_content_fingerprint`
 1	tests/common/byte_dump/fingerprint.rs	function `immutable_classpath_content_fingerprint` is never used
 1	tests/common/source_set_compile.rs	function `source_set_diagnostics` is never used
@@ -85,7 +73,6 @@
 2	src/jvm/jvm_libraries.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
 2	src/resolve.rs	returning the result of a `let` binding from a block
 2	src/resolve/call_diagnostics.rs	this function has too many arguments (8/7)
-2	src/resolve/selected_result_publication.rs	local variable doesn't need to be boxed here
 2	src/resolve/streaming_signature_bridge.rs	this function has too many arguments (8/7)
 2	src/resolve/streaming_signature_bridge/delegates.rs	this function has too many arguments (8/7)
 2	src/resolve/streaming_signature_bridge/local_signatures.rs	this function has too many arguments (8/7)
