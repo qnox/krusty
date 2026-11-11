@@ -95,7 +95,9 @@ fn reified_template_file(copy: bool) -> IrFile {
                 caller: None,
                 caller_is_default: false,
                 caller_source_name: "caller".to_owned(),
-                inline_callee: krusty::fir::CallableId::from_raw(0),
+                inline_callee: krusty::ir::IrInlineCallee::Module(
+                    krusty::fir::CallableId::from_raw(0),
+                ),
                 inline_callee_source_name: "checks".to_owned(),
                 parent: None,
                 consumed_inline_capture: false,

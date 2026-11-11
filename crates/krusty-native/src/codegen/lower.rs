@@ -35,6 +35,7 @@ use declared_capabilities::{
     declares_its_own_comparable, implemented_collections, implemented_dependencies,
     overrides_a_throwable_accessor,
 };
+mod atomic_fields;
 mod functions;
 mod implementor_dispatch;
 mod imported_functions;
@@ -50,6 +51,7 @@ mod object_entries;
 mod objects;
 mod ranges;
 mod references;
+mod reified_templates;
 mod representation;
 mod scope;
 mod statics;
@@ -220,6 +222,8 @@ pub struct FileInput<'a> {
         &'a HashMap<krusty::backend::KlibDependencyCallable, super::DependencyExport>,
     /// The exported instance entry of each preceding source module's object, by its classifier.
     pub dependency_singletons: &'a HashMap<krusty::types::TypeName, String>,
+    /// The exported entry answering each constant of a preceding file's enum.
+    pub dependency_enum_constants: &'a HashMap<krusty::backend::EnumConstant, String>,
     /// The accessors synthesized for each reference to a dependency property, by site; see
     /// [`crate::dependency_references`].
     pub dependency_properties:
@@ -255,6 +259,7 @@ pub fn lower_file(
         dependency_signatures,
         dependency_symbols,
         dependency_singletons,
+        dependency_enum_constants,
         value_classes,
         slot_plan,
         module_facts,
@@ -346,6 +351,7 @@ pub fn lower_file(
         dependency_symbols,
         dependency_singletons,
         dependency_interface_calls: Vec::new(),
+        dependency_enum_constants,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
     // receivers have a runtime-walkable representation and which shapes still decline; both are read while
@@ -533,6 +539,8 @@ struct FileLowering<'a> {
     dependency_interface_calls: Vec<(u32, Vec<u8>)>,
     /// The exported instance entry of each preceding source module's object, by its classifier.
     dependency_singletons: &'a HashMap<krusty::types::TypeName, String>,
+    /// The exported entry answering each constant of a preceding file's enum.
+    dependency_enum_constants: &'a HashMap<krusty::backend::EnumConstant, String>,
 }
 
 impl<'a> FileLowering<'a> {
@@ -743,6 +751,7 @@ impl<'a> FileLowering<'a> {
                     finallys: Vec::new(),
                     dead: Vec::new(),
                     unresolved_reified: Vec::new(),
+                    scope: krusty::ir::IrEnclosure::File,
                     frame_objects: krusty::fx_hash::HashMap::default(),
                     frame_fields: krusty::fx_hash::HashMap::default(),
                     enum_base: None,
@@ -839,6 +848,7 @@ impl<'a> FileLowering<'a> {
             ret,
             &name,
             &mut |lowering, params| {
+                lowering.scope = krusty::ir::IrEnclosure::Function(index as krusty::ir::FunId);
                 lowering.record_semantic_slots(&semantic_slots);
                 for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
                     let variable = lowering.declare_value(slot as u32, *ty)?;
@@ -938,6 +948,10 @@ struct BodyLowering<'a, 'b, 'c> {
     /// being emitted. A runtime type operation naming one executes Kotlin's direct-call failure;
     /// ordinary functions and specialized inline copies leave this empty.
     unresolved_reified: Vec<String>,
+    /// The common-IR scope whose body this frame lowers. A type operation against a reified
+    /// parameter the scope's own declaration introduces is that declaration's template, which
+    /// [`krusty::ir::IrFile::is_reified_template_operation`] identifies for every backend.
+    scope: krusty::ir::IrEnclosure,
     /// The constructions of this body whose object lives in this frame, each with the local it
     /// initializes; see `frame_objects`.
     frame_objects: krusty::fx_hash::HashMap<u32, u32>,
@@ -1759,21 +1773,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         | IrTypeOp::NotInstanceOf
                         | IrTypeOp::Cast
                         | IrTypeOp::CastNonNull
-                ) && self.unresolved_reified.iter().any(|parameter| {
-                    type_operand
-                        .type_parameter_occurrence_bound(parameter)
-                        .is_some()
-                }) {
+                ) && self.is_unresolved_reified_operation(id, type_operand)
+                {
                     // The operand precedes kotlinc's reified-operation marker and therefore keeps
                     // any side effect or exception it produces before the marker's own failure.
                     let _ = self.expression(arg)?;
                     if self.terminated {
                         return Ok(None);
                     }
-                    let message = self.string_literal(
-                        b"This function has a reified type parameter and thus can only be inlined at compilation time, not called directly.",
-                    )?;
-                    self.raise("kt_type_unsupported_operation_exception", message)
+                    self.reified_direct_call_failure()
                 } else {
                     self.type_operation(
                         op,
@@ -1866,9 +1874,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 value,
             } => self.ref_set(holder, elem, value),
             // The shared enum lowering realized every enum this file declares; what is left names
-            // an enum another file declares, whose constants live there.
-            IrExpr::EnumEntry { classifier, .. }
-            | IrExpr::EnumValues { classifier }
+            // an enum another file declares, whose constants live there. A constant is read
+            // through the entry the declaring file exports.
+            IrExpr::EnumEntry { classifier, name } => {
+                self.dependency_enum_constant(classifier, &name)
+            }
+            IrExpr::EnumValues { classifier }
             | IrExpr::EnumEntries { classifier }
             | IrExpr::EnumValueOf { classifier, .. } => Err(declined!(
                 "an enum another file declares (`{}`)",
@@ -2156,6 +2167,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 finally,
                 result,
             } => self.try_catch(body, &catches, finally, result),
+            IrExpr::PluginPlaceholder {
+                plugin: "atomicfu",
+                kind,
+                exprs,
+                data,
+                types,
+            } => self.atomic_field_operation(kind, &exprs, &data, &types),
             IrExpr::Return(_)
             | IrExpr::Variable { .. }
             | IrExpr::SetValue { .. }
@@ -2376,7 +2394,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(Some(joined))
     }
 
-    /// One field's contribution to a data class's `hashCode`, which is the field's own `hashCode`.
+    /// One field's contribution to a data class's `hashCode`, which is the field's own `hashCode`,
+    /// except that an ARRAY field contributes its contents' hash, as kotlinc's does.
     ///
     /// Kotlin's answer for each primitive is fixed, and these are those answers rather than
     /// anything this generator is free to choose: a program can print a hash, and two programs
@@ -2391,7 +2410,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             if self.terminated {
                 return Ok(None);
             }
-            return self.runtime_call("kt_hash_code", &[any()], Ty::Int, &[value]);
+            return self.generated_property_hash(value, ty).map(Some);
         }
         let Some(operand) = self.coerce(value, ty)? else {
             return Err("a `Unit` data-class field".into());
@@ -2400,6 +2419,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(None);
         }
         self.value_hash(operand, ty).map(Some)
+    }
+
+    /// The hash a generated `hashCode` takes of a property value already in hand. An array
+    /// property hashes by its CONTENTS (`Arrays.hashCode`, which is `contentHashCode()`), not by
+    /// the array's own identity `hashCode`; every other property hashes as [`Self::value_hash`]
+    /// says. Equality of the same property stays the array's identity.
+    pub(super) fn generated_property_hash(
+        &mut self,
+        operand: Value,
+        ty: Ty,
+    ) -> Result<Value, Unsupported> {
+        if !ty.non_null().is_array() {
+            return self.value_hash(operand, ty);
+        }
+        Ok(self
+            .runtime_call("kt_array_content_hash_code", &[any()], Ty::Int, &[operand])?
+            .expect("`kt_array_content_hash_code` returns an Int"))
     }
 
     /// The hash of a value already in hand, by the same rules.
@@ -2430,14 +2466,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             Ty::Char => self.builder.ins().uextend(types::I32, operand),
             Ty::Int | Ty::UInt => operand,
             Ty::Long | Ty::ULong => self.fold_to_int(operand),
-            // A floating-point value hashes by its BITS, which is what makes `NaN`'s hash a
+            // A floating-point value hashes by `toBits()`, which is what makes `NaN`'s hash a
             // number at all: `Float` gives its 32 directly, and `Double` folds its 64 exactly as
-            // `Long` does. Reading the bits is a reinterpretation, not a conversion — a
-            // conversion would round `NaN` to something and lose the very distinction the rule
-            // exists for.
-            Ty::Float => self.bits_of(operand, types::I32),
+            // `Long` does. Reading the bits is a reinterpretation, not a conversion, but
+            // `toBits()` answers every `NaN` with the one canonical pattern, so the hash does too.
+            Ty::Float => self.canonical_bits_of(operand, types::I32),
             Ty::Double => {
-                let bits = self.bits_of(operand, types::I64);
+                let bits = self.canonical_bits_of(operand, types::I64);
                 self.fold_to_int(bits)
             }
             other => return Err(declined!("a data-class field of type `{other:?}`")),
@@ -2458,6 +2493,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let flags = cranelift_codegen::ir::MemFlagsData::new()
             .with_endianness(cranelift_codegen::ir::Endianness::Little);
         self.builder.ins().bitcast(clif, flags, value)
+    }
+
+    /// `toBits()`: the value's bits, except that every `NaN` answers the canonical quiet `NaN`
+    /// pattern (`0x7fc00000` for a `Float`, `0x7ff8000000000000` for a `Double`).
+    fn canonical_bits_of(&mut self, value: Value, clif: Type) -> Value {
+        let bits = self.bits_of(value, clif);
+        let canonical = if clif == types::I32 {
+            self.builder.ins().iconst(types::I32, 0x7fc0_0000)
+        } else {
+            self.builder.ins().iconst(types::I64, 0x7ff8_0000_0000_0000)
+        };
+        let is_nan = self.builder.ins().fcmp(FloatCC::Unordered, value, value);
+        self.builder.ins().select(is_nan, canonical, bits)
     }
 
     /// `(value xor (value ushr 32)).toInt()` — how Kotlin folds 64 bits into a hash.
@@ -2604,6 +2652,7 @@ fn describe(node: &IrExpr) -> String {
             Target::FunctionInvoke => {
                 "a reference to a function value's `invoke` declaration".to_string()
             }
+            Target::Property(_) => "a property reference read as a function value".to_string(),
         };
     }
     // The first two identifiers, not one: `Checked(Call { … })` and `Checked(PropertyRead { … })`

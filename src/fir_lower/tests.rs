@@ -711,18 +711,27 @@ fn external_property_function_reference_is_materialized_without_lookup() {
 
     let mut ir = IrFile::default();
     let lowered = lower_body(body, &ResolvedModuleIndex::default(), &mut ir).unwrap();
-    let IrExpr::Lambda {
-        captures, arity, ..
-    } = ir.expr(lowered.roots[0])
-    else {
-        panic!("function-typed external property reference must become a lambda")
+    let IrExpr::CallableReference(reference) = ir.expr(lowered.roots[0]) else {
+        panic!("function-typed external property reference must become a callable reference")
     };
-    assert_eq!(*arity, 0);
-    assert_eq!(captures.len(), 1);
+    let crate::ir::IrCallableReferenceTarget::Property(property_reference) = &reference.target
+    else {
+        panic!("the reference must keep its checked property target")
+    };
     assert!(matches!(
-        ir.expr(captures[0]),
-        IrExpr::Const(IrConst::String(_))
+        &property_reference.target,
+        FirPropertyReferenceTarget::External { getter, .. }
+            if matches!(**getter, FirPropertyTarget::External { property: selected, .. } if selected == property)
     ));
+    assert!(!property_reference.bound_extension_receiver);
+    assert!(reference.captures.is_empty());
+    assert!(matches!(
+        reference.bound_receiver.map(|receiver| ir.expr(receiver)),
+        Some(IrExpr::Const(IrConst::String(_)))
+    ));
+    assert!(ir
+        .callable_reference_inline_template(lowered.roots[0])
+        .is_some());
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::Checked(checked_op)
@@ -2548,7 +2557,7 @@ fn consuming_sink_retains_member_function_context_arity() {
         .find_map(|(id, function)| (function.name == "four").then_some(id as u32))
         .expect("member context function");
 
-    assert_eq!(ir.fn_context_counts.get(&function), Some(&1));
+    assert_eq!(ir.declared_parameters(function).context_count, 1);
 }
 
 #[test]

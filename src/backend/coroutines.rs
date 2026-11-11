@@ -12,12 +12,16 @@
 //! * [`hoisting`] lifts a suspension nested in an operand into a preceding temporary, in source
 //!   evaluation order.
 //!
+//! [`continuation_parameters`] is the first step of the coroutine lowering itself, for the targets
+//! that realize it on common IR rather than in their own pass (the JVM keeps its own).
+//!
 //! They preserve checked Kotlin meaning and choose no representation. A temporary takes the type
 //! recorded for the value it holds, never one these passes derive; the constant a fresh temporary
 //! starts from is the target's, asked through [`CoroutineRepresentation`].
 
 mod block_splicing;
 mod bottom_completion;
+mod continuation_parameters;
 mod control_flow;
 mod hoisting;
 mod statement_normalization;
@@ -28,6 +32,7 @@ mod value_when;
 
 pub use block_splicing::{diverging_control_core, splice_return_blocks};
 pub use bottom_completion::{suspension_completion, unwrap_suspend_cast, SuspensionCompletion};
+pub use continuation_parameters::add_continuation_parameters;
 pub use control_flow::{expr_contains_owned_loop_jump, expr_has_return, stmt_diverges};
 pub use hoisting::{hoist_spliced_inline_bodies, hoist_suspensions};
 pub use statement_normalization::{
@@ -42,6 +47,15 @@ pub use value_namespace::{
 };
 pub use value_try::desugar_value_try;
 pub use value_when::desugar_value_when;
+
+/// The private normalization entry for compiler-owned checked-source integration controls.
+#[cfg(test)]
+pub(crate) fn normalize_value_when_for_test(
+    ir: &mut crate::ir::IrFile,
+    expression: crate::ir::ExprId,
+) -> Option<crate::ir::ExprId> {
+    value_when::normalize_value_when(ir, expression)
+}
 
 pub use crate::ir::IrConst;
 use crate::types::Ty;

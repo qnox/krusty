@@ -115,14 +115,12 @@ fn prepared_inline_selection_takes_every_inline_declaration_of_its_module() {
     )])
     .expect("the fixture functions are signable");
     let signature = |name| {
-        crate::metadata::klib_ir::KlibIrSignature::Public(
-            inventory
-                .functions(type_name("fixture"), name)
-                .next()
-                .expect("the fixture function is published")
-                .signature
-                .clone(),
-        )
+        inventory
+            .functions(type_name("fixture"), name)
+            .next()
+            .expect("the fixture function is published")
+            .signature
+            .clone()
     };
     let selected = signature("selected");
     let ordinary_inline = signature("ordinaryInline");
@@ -131,12 +129,13 @@ fn prepared_inline_selection_takes_every_inline_declaration_of_its_module() {
     let materialized_lambda = signature("materializedLambda");
     let selection = inventory.inline_body_selection();
 
-    assert!(selection.contains("fixture-module", &selected));
-    assert!(!selection.contains("other-module", &selected));
-    assert!(selection.contains("fixture-module", &ordinary_inline));
-    assert!(!selection.contains("fixture-module", &non_inline_reified));
-    assert!(selection.contains("fixture-module", &direct_lambda));
-    assert!(selection.contains("fixture-module", &materialized_lambda));
+    let fixture = selection.of_module("fixture-module");
+    assert!(fixture.contains(&selected));
+    assert!(!selection.of_module("other-module").contains(&selected));
+    assert!(fixture.contains(&ordinary_inline));
+    assert!(!fixture.contains(&non_inline_reified));
+    assert!(fixture.contains(&direct_lambda));
+    assert!(fixture.contains(&materialized_lambda));
 }
 
 #[test]
@@ -1469,3 +1468,4 @@ mod implementation_coverage;
 mod implementation_inventory;
 mod properties;
 mod serialized_references;
+mod shared_inline_trees;

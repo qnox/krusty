@@ -28,7 +28,7 @@ pub struct CallSite<'a> {
     pub caller: Option<crate::ir::IrEnclosure>,
     pub caller_is_default: bool,
     pub caller_source_name: &'a str,
-    pub inline_callee: crate::fir::CallableId,
+    pub inline_callee: crate::ir::IrInlineCallee,
     pub inline_callee_source_name: &'a str,
     /// For each of the callee's operands, by its value slot: the caller's `crossinline` parameter
     /// the expansion binds it to, when it is one.
@@ -1277,7 +1277,14 @@ fn copied_property_accessors(
     source_name: TypeName,
     cloned: &HashMap<FunId, FunId>,
 ) -> Result<(Option<FunId>, Option<FunId>), super::super::FirLoweringFailure> {
-    let (layout_getter, layout_setter) = layout_accessors(ir, edge, source, source_name, cloned)?;
+    // A source property's accessors are materialized from its layout. A property lowered from a
+    // dependency body has no source layout: the edge records every accessor it has.
+    let (layout_getter, layout_setter) = match edge.implementation {
+        crate::fir::ResolvedPropertyOverrideTarget::Module(_) => {
+            layout_accessors(ir, edge, source, source_name, cloned)?
+        }
+        crate::fir::ResolvedPropertyOverrideTarget::External(_) => (None, None),
+    };
     let getter = match edge.implementation_getter {
         Some(function) => Some(require_clone(function, cloned, source_name)?),
         None => layout_getter,

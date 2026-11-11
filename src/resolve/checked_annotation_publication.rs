@@ -771,12 +771,15 @@ impl Checker<'_> {
         class: &ClassDecl,
         owner: Option<TypeName>,
     ) {
+        let container = self.enter_annotation_class_rung(owner.and_then(TypeName::nested_owner));
         for (annotation, arguments) in class.annotations.iter().zip(&class.annotation_args) {
             if self.has_bound_annotation(annotation) {
                 self.check_annotation_application(scope, annotation, arguments);
             }
         }
+        self.exit_annotation_class_rung(container);
         let diagnostics_before_members = self.diags.diags.len();
+        let member_rung = self.enter_annotation_class_rung(owner);
         if let Some(owner) = owner.filter(|_| class.is_annotation()) {
             self.fold_annotation_element_defaults(scope, class, owner);
         }
@@ -844,6 +847,7 @@ impl Checker<'_> {
                 }
             }
         }
+        self.exit_annotation_class_rung(member_rung);
         self.diags.diags.truncate(diagnostics_before_members);
     }
 

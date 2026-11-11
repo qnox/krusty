@@ -212,6 +212,7 @@ pub(super) fn authenticate_root_header(
             &crate::metadata::id_signature::KlibPublicIdSignature::classifier(
                 crate::types::wk::any(),
             ),
+            crate::libraries::KlibAccessorRole::Getter,
         )
         .map_err(mismatch)?
         .ok_or_else(|| mismatch("a known root constructor is not its class's member"))?;
@@ -248,6 +249,10 @@ pub(super) fn authenticate_root_header(
 }
 
 impl ConstructorDeclaration {
+    pub(super) fn declared_parameters(&self) -> &[Ty] {
+        &self.params
+    }
+
     /// A constructor this library materializes for a file-local class, with no provider record.
     pub(super) fn local(
         classifier: TypeName,

@@ -285,7 +285,6 @@ impl<'a> FileLowering<'a> {
                     Slot::FieldGetter { .. }
                         | Slot::FieldSetter { .. }
                         | Slot::AnnotationMember { .. }
-                        | Slot::ValueMember { .. }
                         | Slot::ValueBridge { .. }
                         | Slot::Bridge { .. }
                         | Slot::FunctionBridge { .. }
@@ -377,14 +376,8 @@ impl<'a> FileLowering<'a> {
                 self.accessors.insert(slot, id);
                 continue;
             }
-            if let Slot::ValueMember { class, member } | Slot::AnnotationMember { class, member } =
-                &slot
-            {
-                let prefix = if matches!(slot, Slot::ValueMember { .. }) {
-                    "box"
-                } else {
-                    "value"
-                };
+            if let Slot::AnnotationMember { class, member } = &slot {
+                let prefix = "value";
                 let base = self.class_base(*class).to_string();
                 let (suffix, params, ret) = match member {
                     AnyMember::Equals => ("equals", vec![any(), any()], Ty::Boolean),
@@ -668,7 +661,6 @@ impl<'a> FileLowering<'a> {
                 Slot::FieldGetter { .. }
                 | Slot::FieldSetter { .. }
                 | Slot::AnnotationMember { .. }
-                | Slot::ValueMember { .. }
                 | Slot::ValueBridge { .. }
                 | Slot::Bridge { .. }
                 | Slot::FunctionBridge { .. }
@@ -1103,6 +1095,10 @@ impl<'a> FileLowering<'a> {
         let prelude = secondary.delegate_prelude.clone();
         let body_expression = secondary.body;
         self.emit_function(id, signature, Ty::Unit, &name, &mut |body, params| {
+            body.scope = krusty::ir::IrEnclosure::Constructor {
+                class,
+                ordinal: ordinal as u32 + 1,
+            };
             body.record_semantic_slots(&semantic_slots);
             for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
                 let variable = body.declare_value(slot as u32, *ty)?;
@@ -1243,9 +1239,6 @@ impl<'a> FileLowering<'a> {
         }
         if let Slot::AnnotationMember { class, member } = slot {
             return self.define_annotation_member(*class, *member, id);
-        }
-        if let Slot::ValueMember { class, member } = slot {
-            return self.define_value_member(*class, *member, id);
         }
         if let Slot::ValueBridge { class, function } = slot {
             return self.define_value_bridge(*class, *function, id);
@@ -1570,6 +1563,7 @@ impl<'a> FileLowering<'a> {
 
         let name = format!("{}.<init>", declaration.fq_name());
         self.emit_function(id, signature, Ty::Unit, &name, &mut |body, params| {
+            body.scope = krusty::ir::IrEnclosure::Constructor { class, ordinal: 0 };
             body.record_semantic_slots(&semantic_slots);
             for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
                 let variable = body.declare_value(slot as u32, *ty)?;
@@ -1870,7 +1864,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             .carrier(stored)
             .clif()
             .expect("fields are never `Unit`");
-        let value = self.builder.ins().load(clif, trusted(), object, offset);
+        let value = if self.file.ir.classes[class as usize].fields[index as usize].is_atomic() {
+            let address = self.builder.ins().iadd_imm_s(object, i64::from(offset));
+            self.builder.ins().atomic_load(clif, trusted(), address)
+        } else {
+            self.builder.ins().load(clif, trusted(), object, offset)
+        };
         self.field_value(value, class, index, ty)
     }
 
@@ -2000,7 +1999,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let Some(value) = value else {
             return Err("a `Unit` value stored to a field".into());
         };
-        self.builder.ins().store(trusted(), value, object, offset);
+        if self.file.ir.classes[class as usize].fields[index as usize].is_atomic() {
+            let address = self.builder.ins().iadd_imm_s(object, i64::from(offset));
+            self.builder.ins().atomic_store(trusted(), value, address);
+        } else {
+            self.builder.ins().store(trusted(), value, object, offset);
+        }
         Ok(())
     }
 
@@ -2075,11 +2079,21 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if declaration.is_abstract || declaration.is_sealed {
             return Err(declined!("construction of the abstract class `{name}`"));
         }
-        let Some(ordinal) =
-            krusty::backend::selected_constructor(self.file.ir, site, class, selected)
-        else {
-            return Err(declined!("a call to an unknown constructor (`{name}`)"));
-        };
+        // A recorded selection wins, including a default-argument entry whose list is the
+        // constructor's parameters plus mask words. A construction with no selection and no
+        // secondary — a KLIB class, whose parameter list is not an identity once a type parameter
+        // is carried — runs the primary. A class that declares secondaries and names none is not
+        // guessed.
+        let ordinal =
+            match krusty::backend::selected_constructor(self.file.ir, site, class, selected) {
+                Some(ordinal) => ordinal,
+                None if declaration.secondary_ctors.is_empty()
+                    && self.file.ir.construction_target(site).is_none() =>
+                {
+                    0
+                }
+                None => return Err(declined!("a call to an unknown constructor (`{name}`)")),
+            };
         let (constructor, params) = match ordinal.checked_sub(1) {
             // The primary's frame reads each parameter's PHYSICAL type, which a captured `var`'s
             // holder differs from.

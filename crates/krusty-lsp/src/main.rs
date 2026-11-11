@@ -2,7 +2,9 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
+mod analysis_finish;
 mod analysis_group;
+use analysis_finish::{finish_analysis, remains_pending as analysis_remains_pending};
 use analysis_group::{
     project_group_inputs, project_group_script_stems, project_group_uris, ProjectAnalysisGroup,
 };
@@ -15,6 +17,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 mod project_analysis_group;
+mod project_launch;
+mod support_crash;
 mod support_splice;
 
 use project_analysis_group::{
@@ -25,10 +29,9 @@ use project_analysis_group::{
 
 use krusty::source::SourceKind;
 use krusty_lsp::{
-    detect, resolve_jdk, AnalysisWorker, DocumentAnalysis, DumpResult, DumpTarget, JdkRequest,
-    LibraryRef, LspOptions, MaterializedDefinition, ProcessRunner, ProjectFeedback,
-    ProjectMessageKind, ProjectSources, ProjectSync, ProviderKind, RefreshOutcome,
-    SystemEnvironment,
+    detect, AnalysisWorker, DocumentAnalysis, DumpResult, DumpTarget, LibraryRef, LspOptions,
+    MaterializedDefinition, ProcessRunner, ProjectFeedback, ProjectMessageKind, ProjectSources,
+    ProjectSync, ProviderKind, RefreshOutcome,
 };
 
 #[cfg(unix)]
@@ -43,45 +46,6 @@ const MAX_RETAINED_DUMP_INPUT_BYTES: usize = krusty_lsp::MAX_RETAINED_ANALYSIS_B
 
 fn is_java_source_path(path: &Path) -> bool {
     path.extension().and_then(|extension| extension.to_str()) == Some("java")
-}
-
-fn analysis_remains_pending(kind: io::ErrorKind) -> bool {
-    matches!(kind, io::ErrorKind::TimedOut | io::ErrorKind::Interrupted)
-}
-
-fn finish_analysis(
-    analysis_pending: &mut bool,
-    result: io::Result<Vec<DocumentAnalysis>>,
-    document_count: usize,
-) -> Vec<DocumentAnalysis> {
-    match result {
-        Ok(analysis) => {
-            *analysis_pending = false;
-            analysis
-        }
-        Err(error) if analysis_remains_pending(error.kind()) => {
-            *analysis_pending = true;
-            eprintln!("krusty-lsp: {error}; source analysis remains pending");
-            Vec::new()
-        }
-        Err(error) => {
-            *analysis_pending = false;
-            (0..document_count)
-                .map(|_| {
-                    DocumentAnalysis::with_diagnostics(vec![krusty::diag::Diagnostic {
-                        span: krusty::diag::Span::new(0, 0),
-                        editor_span: None,
-                        identity: None,
-                        name: None,
-                        severity: krusty::diag::Severity::Error,
-                        kind: krusty::diag::DiagnosticKind::Compiler,
-                        msg: format!("analysis worker failed: {error}"),
-                        file: 0,
-                    }])
-                })
-                .collect()
-        }
-    }
 }
 
 /// What `krusty-lsp model` was asked to dump.
@@ -274,21 +238,6 @@ fn parse_parity_command(args: &[String]) -> Result<ParityCommand, String> {
     })
 }
 
-/// Directory names that never hold a module's own compilable sources, even when they sit under a
-/// declared source root. `testData` is the important one: IntelliJ keeps thousands of deliberately
-/// malformed Kotlin files there, and counting their diagnostics as parity failures would drown the
-/// signal.
-const PARITY_SKIP_DIRECTORIES: &[&str] = &[
-    ".git",
-    "testData",
-    "test-data",
-    "testdata",
-    "out",
-    "build",
-    "target",
-    "node_modules",
-];
-
 fn list_sources(root: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
@@ -299,9 +248,9 @@ fn list_sources(root: &Path, out: &mut Vec<PathBuf>) {
             continue;
         };
         if kind.is_dir() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if PARITY_SKIP_DIRECTORIES.contains(&name.as_ref()) {
+            // Same names the editor's workspace walk refuses, including fixture trees such as
+            // `testData`. A second list here would let the metric and the open disagree.
+            if krusty_lsp::project::is_ignored_directory(&path) {
                 continue;
             }
             list_sources(&path, out);
@@ -609,6 +558,8 @@ fn parity_failure_line(module: &str, status: &str, elapsed: Duration) -> String 
         "unreadable_checked_files": 0,
         "visible_declarations": [],
         "java_stub_failed": false,
+        "missing_classpath_entries": 0,
+        "open_complete": false,
         "error_count": 0,
         "warning_count": 0,
         "diagnostics": [],
@@ -1103,6 +1054,8 @@ struct WorkerHost {
     /// Whether the worker failed (crashed, not timed out) on a group of the current pass. A
     /// background chunk uses it to isolate the file that brought the worker down.
     worker_failed_in_pass: bool,
+    /// Set while a chunk-isolation pass compiles module support without the chunk's own files.
+    support_probe: bool,
     /// Set for a background index chunk. The worker returns diagnostics and skips the navigation
     /// indexes the index store discards. Cleared before the function returns so an interactive
     /// analysis cannot reuse the flag.
@@ -1120,6 +1073,16 @@ struct WorkerHost {
 impl WorkerHost {
     /// One background pass over already-read sources. `index_chunk` owns crash isolation.
     fn index_pass(&mut self, readable: Vec<(String, String)>) -> index_chunk::ChunkPass {
+        self.index_pass_kind(readable, false)
+    }
+
+    /// `support_only` compiles the module support that accompanies `readable` and reports whether
+    /// that support crashed. The per-file outcome is unused; isolation keeps the chunk pass.
+    fn index_pass_kind(
+        &mut self,
+        readable: Vec<(String, String)>,
+        support_only: bool,
+    ) -> index_chunk::ChunkPass {
         let documents: Vec<(&str, &str)> = readable
             .iter()
             .map(|(uri, text)| (uri.as_str(), text.as_str()))
@@ -1131,11 +1094,22 @@ impl WorkerHost {
         let interactive_cache = std::mem::take(&mut self.analysis_cache);
         std::mem::swap(&mut self.project_sources, &mut self.index_project_sources);
         self.index_diagnostics_only = true;
+        self.support_probe = support_only;
         let (analyses, _support) =
             krusty_lsp::Analysis::analyze_open_documents(self, &documents, &indexed_uris);
+        self.support_probe = false;
         self.index_diagnostics_only = false;
         std::mem::swap(&mut self.project_sources, &mut self.index_project_sources);
         self.analysis_cache = interactive_cache;
+        if support_only {
+            return index_chunk::ChunkPass {
+                outcome: krusty_lsp::IndexOutcome {
+                    files: Vec::new(),
+                    conclusive: !self.analysis_pending,
+                },
+                crashed: self.worker_failed_in_pass,
+            };
+        }
         // A short result means the worker did not answer; report it as inconclusive so the store
         // keeps what it already has rather than treating the gap as deletions.
         let conclusive = analyses.len() == readable.len();
@@ -1174,6 +1148,7 @@ impl WorkerHost {
             analysis_cache: Vec::new(),
             analysis_pending: false,
             worker_failed_in_pass: false,
+            support_probe: false,
             index_diagnostics_only: false,
             platform_classpath,
             worker_reconfigure_retry_at_ms: None,
@@ -1242,7 +1217,8 @@ impl WorkerHost {
                 self.analysis_cache.clear();
                 self.workspace_inventory = None;
                 self.scan_incomplete_inventory = false;
-                let (classpath, jdk_home) = Self::launch_from(sync, &self.options, &self.runner);
+                let (classpath, jdk_home) =
+                    project_launch::launch_from(sync, &self.options, &self.runner);
                 let language =
                     match sync.project_language_settings(self.options.language_arguments()) {
                         Ok(language) => language,
@@ -1260,7 +1236,7 @@ impl WorkerHost {
                             };
                         }
                     };
-                let mut logs = Self::describe_model(
+                let mut logs = project_launch::describe_model(
                     sync.kind(),
                     sync.model().map_or(0, |model| model.modules.len()),
                     &classpath,
@@ -1338,59 +1314,6 @@ impl WorkerHost {
         }
     }
 
-    fn describe_model(
-        kind: ProviderKind,
-        modules: usize,
-        classpath: &[PathBuf],
-        jdk_home: Option<&Path>,
-    ) -> Vec<String> {
-        const MAX_LISTED: usize = 60;
-        let mut logs = vec![format!(
-            "krusty: {} — {modules} module(s), {} classpath entr{}",
-            kind.as_str(),
-            classpath.len(),
-            if classpath.len() == 1 { "y" } else { "ies" },
-        )];
-        logs.push(format!(
-            "krusty: JDK = {}",
-            jdk_home.map_or_else(|| "none".to_string(), |home| home.display().to_string()),
-        ));
-        if !classpath.is_empty() {
-            let mut listing = String::from("krusty: classpath:");
-            for entry in classpath.iter().take(MAX_LISTED) {
-                listing.push_str("\n  ");
-                listing.push_str(&entry.to_string_lossy());
-            }
-            if classpath.len() > MAX_LISTED {
-                listing.push_str(&format!("\n  … {} more", classpath.len() - MAX_LISTED));
-            }
-            logs.push(listing);
-        }
-        logs
-    }
-
-    fn launch_from(
-        sync: &ProjectSync,
-        options: &LspOptions,
-        runner: &ProcessRunner,
-    ) -> (Vec<PathBuf>, Option<PathBuf>) {
-        let classpath = sync.project_classpath();
-        if options.no_jdk() {
-            return (classpath, None);
-        }
-        let toolchain = sync.model().and_then(|model| model.jdk_home.clone());
-        let jdk = resolve_jdk(
-            &SystemEnvironment,
-            runner,
-            &JdkRequest {
-                explicit: options.jdk_home(),
-                toolchain: toolchain.as_deref(),
-                jvm_target: sync.jvm_target(),
-            },
-        );
-        (classpath, jdk.map(|jdk| jdk.home))
-    }
-
     fn jdk_warning(&mut self, jdk_found: bool) -> Option<(ProjectMessageKind, String)> {
         if jdk_found || self.options.no_jdk() || self.jdk_warning_shown {
             return None;
@@ -1417,7 +1340,10 @@ impl krusty_lsp::Analysis for WorkerHost {
                 conclusive: true,
             };
         }
-        index_chunk::index_isolating_crashes(readable, &mut |chunk| self.index_pass(chunk))
+        index_chunk::index_isolating_crashes(readable, &mut |request| match request {
+            index_chunk::IsolationRequest::Files(chunk) => self.index_pass(chunk),
+            index_chunk::IsolationRequest::Support(anchor) => self.index_pass_kind(anchor, true),
+        })
     }
 
     fn neighborhood_index_candidates(&mut self, open_uris: &[&str]) -> Vec<String> {
@@ -1661,6 +1587,31 @@ impl krusty_lsp::Analysis for WorkerHost {
                     continue;
                 }
             };
+            if self.support_probe {
+                let verdict = support_crash::compile_disk_support(
+                    &mut self.worker,
+                    self.sync.as_ref().and_then(ProjectSync::model),
+                    module_index,
+                    &self.platform_classpath,
+                    &self.options,
+                    support_crash::DiskSupport {
+                        disk: disk.as_ref(),
+                        inferred_count,
+                        java: &java_sources,
+                    },
+                );
+                match verdict {
+                    support_crash::Probe::Crashed => {
+                        self.worker_failed_in_pass = true;
+                        return (Vec::new(), Vec::new());
+                    }
+                    support_crash::Probe::Pending => {
+                        self.analysis_pending = true;
+                        return (Vec::new(), Vec::new());
+                    }
+                    support_crash::Probe::Clean => continue,
+                }
+            }
             let relations = module_relations
                 .filter(|snapshot| {
                     !matches!(
@@ -2238,9 +2189,14 @@ mod tests {
             "unreadable_checked_files",
             "error_count",
             "warning_count",
+            "missing_classpath_entries",
         ] {
             assert_eq!(value[key], 0, "{key} must be present");
         }
+        assert_eq!(
+            value["open_complete"], false,
+            "a module that produced no analysis did not open completely"
+        );
         assert_eq!(value["truncated"], false);
         assert_eq!(value["java_stub_failed"], false);
         assert!(value["visible_declarations"].as_array().unwrap().is_empty());
@@ -2256,6 +2212,9 @@ mod tests {
             "src/Keep.java",
             "src/notes.txt",
             "src/testData/Broken.kt",
+            "src/test-data/Broken.kt",
+            "src/testdata/Broken.kt",
+            "src/.idea/Broken.kt",
             "src/out/Generated.kt",
         ] {
             let path = root.join(relative);
@@ -2295,7 +2254,7 @@ mod tests {
             .map(|index| PathBuf::from(format!("/classpath/{index}.jar")))
             .collect::<Vec<_>>();
 
-        let logs = WorkerHost::describe_model(ProviderKind::Gradle, 4, &classpath, None);
+        let logs = project_launch::describe_model(ProviderKind::Gradle, 4, &classpath, None);
 
         assert_eq!(
             logs[0],

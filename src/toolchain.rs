@@ -477,7 +477,8 @@ pub fn classpath_jars_for(src: &str) -> Vec<PathBuf> {
         | (directive(src, "WITH_REFLECT") as u8) << 2
         | (directive(src, "STDLIB_JDK8") as u8) << 3
         | (directive(src, "WITH_COROUTINES") as u8) << 4
-        | (directive(src, "WITH_COMPOSE") as u8) << 5;
+        | (directive(src, "WITH_COMPOSE") as u8) << 5
+        | (directive(src, "WITH_ATOMICFU") as u8) << 6;
     static CACHE: std::sync::OnceLock<std::sync::Mutex<crate::fx_hash::HashMap<u8, Vec<PathBuf>>>> =
         std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(crate::fx_hash::HashMap::default()));
@@ -524,6 +525,9 @@ fn classpath_jars_uncached(src: &str) -> Vec<PathBuf> {
     }
     if extra.compose {
         jars.extend(compose_runtime_jars().into_iter().flatten());
+    }
+    if extra.atomicfu {
+        jars.extend(atomicfu_runtime_jar());
     }
     if extra.coroutines {
         // Coroutines aren't in the dist; fetch the runtime jar from Maven.
@@ -599,6 +603,54 @@ pub fn compose_runtime_jars() -> Option<Vec<PathBuf>> {
         ensure_google_maven("androidx.collection", "collection-jvm", "1.5.0")?,
         coroutines_jar()?,
     ])
+}
+
+/// The pinned atomicfu runtime version `// WITH_ATOMICFU` cases compile against: the one
+/// kotlinx.coroutines builds with.
+pub const ATOMICFU_RUNTIME_VERSION: &str = "0.32.1";
+
+/// `atomicfu-jvm`, the runtime the atomicfu compiler plugin lowers away.
+pub fn atomicfu_runtime_jar() -> Option<PathBuf> {
+    ensure_maven(
+        "org.jetbrains.kotlinx",
+        "atomicfu-jvm",
+        ATOMICFU_RUNTIME_VERSION,
+    )
+}
+
+/// The atomicfu compiler plugin of the reference distribution's exact Kotlin version. Unlike the
+/// Compose and serialization plugins, the distribution does not ship it; Maven Central publishes it
+/// with every Kotlin release.
+pub fn atomicfu_compiler_plugin_jar() -> Option<PathBuf> {
+    ensure_maven(
+        "org.jetbrains.kotlin",
+        "kotlin-atomicfu-compiler-plugin-embeddable",
+        &kotlin_version(),
+    )
+}
+
+/// The atomicfu runtime KLIB for `target`, pinned to [`ATOMICFU_RUNTIME_VERSION`].
+///
+/// Native and Wasm `// WITH_ATOMICFU` cases resolve `kotlinx.atomicfu` against this library. The
+/// JVM lane uses [`atomicfu_runtime_jar`] and the compiler plugin instead. Maven drops the
+/// underscores of a Kotlin/Native target name, so `linux_x64` is `atomicfu-linuxx64`.
+pub fn atomicfu_klib(target: crate::compilation_target::CompilationTarget) -> Option<PathBuf> {
+    use crate::compilation_target::CompilationTarget;
+    let artifact = match target {
+        CompilationTarget::Native => {
+            let konan = crate::native_target::NativeTarget::host()?.konan_name()?;
+            format!("atomicfu-{}", konan.replace('_', ""))
+        }
+        CompilationTarget::WasmJs => "atomicfu-wasm-js".to_string(),
+        CompilationTarget::WasmWasi => "atomicfu-wasm-wasi".to_string(),
+        CompilationTarget::Jvm | CompilationTarget::Js => return None,
+    };
+    ensure_maven_artifact(
+        "org.jetbrains.kotlinx",
+        &artifact,
+        ATOMICFU_RUNTIME_VERSION,
+        "klib",
+    )
 }
 
 /// Locate the coroutines runtime jar used by classpath suspend tests.
