@@ -47,7 +47,6 @@ fn observing_klib_entries_preserves_executable_bytes() {
         box_lane::compile(
             &sources,
             source,
-            box_lane::Libraries::StdlibKlib,
             TestTarget::WasmJs,
             &backend,
             "box",
