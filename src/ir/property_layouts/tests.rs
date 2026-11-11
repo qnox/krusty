@@ -1,7 +1,8 @@
 use super::*;
 use crate::fir::{CallableId, DeclarationId, PropertyId};
 use crate::ir::{
-    IrCheckedOperation, IrClass, IrConst, IrExpr, IrField, IrFile, IrFunction, IrProperty,
+    IrCheckedOperation, IrClass, IrConst, IrExpr, IrField, IrFile, IrFunction, IrInlineCallee,
+    IrProperty,
 };
 
 const TARGET: PropertyId = PropertyId::from_raw(7);
@@ -99,7 +100,7 @@ fn copy(ir: &mut IrFile, source: u32, name: &str, field: u32) -> u32 {
             caller: None,
             caller_is_default: false,
             caller_source_name: "caller".into(),
-            inline_callee: CallableId::from_raw(0),
+            inline_callee: IrInlineCallee::Module(CallableId::from_raw(0)),
             inline_callee_source_name: "callee".into(),
             crossinline_operands: Vec::new(),
             method_clones,
