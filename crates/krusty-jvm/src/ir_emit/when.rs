@@ -1,10 +1,11 @@
-//! `when` expressions (and every `if` the frontend lowers to one): type joins, JVM integer
-//! switches, and the chain of conditional branches.
+//! `when` expressions (and every `if` the frontend lowers to one): their recorded result types,
+//! JVM integer switches, and the chain of conditional branches.
 
 use super::*;
-use krusty::types::TyKind;
 
 mod java_hash_map;
+#[cfg(test)]
+mod result_tests;
 mod switch;
 
 /// Whether a discarded `when` still joins a value, as kotlinc's `visitWhen` has it: only a `when`
@@ -76,52 +77,28 @@ impl Emitter<'_> {
         code.athrow();
     }
 
-    pub(super) fn value_ty_of_when(&self, branches: &[(Option<u32>, u32)]) -> Ty {
-        if !branches.iter().any(|(condition, _)| condition.is_none()) {
-            return Ty::Unit;
+    /// The JVM value a `when` leaves at its end: the JVM type a backend pass realized it with,
+    /// else the erasure of the result the checker typed it at or that the pass which built it
+    /// recorded. Emission never joins its branches' values; a value `when` without a recorded
+    /// result is rejected.
+    pub(super) fn when_value_ty(&self, expression: u32) -> Ty {
+        if let Some(realized) = self.ir.physical_type(expression) {
+            return realized;
         }
-        // A diverging branch contributes nothing to the merge type.
-        let last = branches
-            .iter()
-            .rev()
-            .find(|(_, body)| !self.diverges(*body))
-            .map(|(_, body)| self.value_ty(*body))
-            .unwrap_or(Ty::Unit);
-        // `null` and `Nothing` have no concrete verifier type; use another live branch when present.
-        if matches!(last, Ty::Null | Ty::Nothing | Ty::Error) {
-            for (_, body) in branches {
-                if self.diverges(*body) {
-                    continue;
-                }
-                let ty = self.value_ty(*body);
-                if !matches!(ty, Ty::Null | Ty::Nothing | Ty::Error) {
-                    return ty;
-                }
-            }
+        if let Some(result) = self.ir.when_result_type(expression) {
+            return ir_ty_to_jvm(&result);
         }
-        // Distinct reference classes meet as Object in the StackMapTable.
-        if last.is_reference() {
-            let internal = |ty: &Ty| -> Option<String> {
-                match ty.kind() {
-                    TyKind::STRING => Some("java/lang/String".to_string()),
-                    _ if ty.is_array() => Some(type_descriptor(*ty)),
-                    TyKind::Obj(name, _) => Some(name.to_string()),
-                    _ => None,
-                }
-            };
-            let mut names = branches
-                .iter()
-                .filter(|(_, body)| !self.diverges(*body))
-                .map(|(_, body)| self.value_ty(*body))
-                .filter(|ty| !matches!(*ty, Ty::Null | Ty::Nothing | Ty::Error))
-                .filter_map(|ty| internal(&ty));
-            if let Some(first) = names.next() {
-                if names.any(|name| name != first) {
-                    return Ty::obj("kotlin/Any");
-                }
-            }
+        let IrExpr::When { branches } = self.ir.expr(expression) else {
+            unreachable!("only a `when` has a when result");
+        };
+        if branches.iter().any(|(condition, _)| condition.is_none()) {
+            self.run
+                .set_emit_error("a value `when` has no recorded result type".to_string());
+            // The class is refused already; a reference only keeps the rest of this method's
+            // emission well-formed until the refusal discards it.
+            return Ty::obj_name(krusty::types::wk::java_object());
         }
-        last
+        Ty::Unit
     }
 
     /// A safe call's guard laid out as kotlinc writes it: `ifnull` to the null path, the selector
@@ -266,9 +243,7 @@ impl Emitter<'_> {
         };
         let has_else = branches.iter().any(|(c, _)| c.is_none());
         let exhaustive_result = self.ir.whens.exhaustive.get(&expression).copied();
-        let result_ty = exhaustive_result
-            .map(|result| ir_ty_to_jvm(&result))
-            .unwrap_or_else(|| self.value_ty_of_when(branches));
+        let result_ty = self.when_value_ty(expression);
         (has_else || exhaustive_result.is_some())
             && result_ty == Ty::Unit
             && !self.machine_suspensions.contains_key(&expression)
@@ -300,10 +275,7 @@ impl Emitter<'_> {
         let has_else = branches.iter().any(|(c, _)| c.is_none());
         let exhaustive_result = self.ir.whens.exhaustive.get(&expression).copied();
         // A no-`else` or `Unit` `when` is a statement, so nothing reaches the stack at `end`.
-        // Exhaustive results use their checked JVM erasure; other joins derive it from branch values.
-        let result_ty = exhaustive_result
-            .map(|result| ir_ty_to_jvm(&result))
-            .unwrap_or_else(|| self.value_ty_of_when(branches));
+        let result_ty = self.when_value_ty(expression);
         let is_stmt =
             (!has_else && exhaustive_result.is_none()) || result_ty == Ty::Unit || discarded;
         let enclosing_terminal_target = self.terminal_statement_target.take();

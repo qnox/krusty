@@ -1,3 +1,5 @@
+mod value_when_normalization;
+
 use super::*;
 use crate::backend::Artifact;
 use crate::compilation_target::CompilationTarget;

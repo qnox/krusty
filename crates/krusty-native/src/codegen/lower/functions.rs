@@ -172,6 +172,37 @@ fn reference_identity(
             format!("e{}", declaration.raw())
         }
         Target::FunctionValueConversion { ordinal } => format!("conversion_{ordinal}"),
+        // A property read as a function value is the property reference, equal to every other
+        // reference to the same property.
+        Target::Property(property) => match property.referenced_property() {
+            Some(krusty::ir::IrReferencedProperty::Module(property)) => {
+                let declaration = ReferenceDeclaration::property(file.module_name, property);
+                return Ok(ReferenceIdentity::Program(
+                    declaration.marker(reference.bound_receiver.is_some()),
+                ));
+            }
+            // A dependency property is named by its getter's own provider identity, which every
+            // file's reference to it shares, under the same rule as a dependency function's
+            // reference: a getter its provider gives no such identity is identified per file.
+            Some(krusty::ir::IrReferencedProperty::External(property)) => {
+                let getter = file
+                    .callables
+                    .property(property)
+                    .ok_or("a property reference without frozen declaration facts")?
+                    .getter;
+                if let Some(declaration) = dependency_reference_declaration(file, getter)? {
+                    return Ok(ReferenceIdentity::Program(
+                        declaration.marker(reference.bound_receiver.is_some()),
+                    ));
+                }
+                format!("property_e{}", property.raw())
+            }
+            None => {
+                return Err(
+                    "a property read as a function value without its property declaration".into(),
+                );
+            }
+        },
         Target::FunctionInvoke => format!(
             "function_invoke_{}_{}",
             reference.declaration_parameters.len(),
