@@ -691,6 +691,9 @@ struct Parser<'a> {
     /// The type parameters of the declaration whose `<…>` list was parsed last, with their spans,
     /// so its `where` clause can name the parameter each bound constrains.
     type_parameter_spans: Vec<(String, crate::diag::Span)>,
+    /// The span of each upper bound in the type-parameter list parsed last, from the first token
+    /// of the bound (a type-use annotation included) to the end of its type.
+    type_parameter_bound_spans: Vec<crate::diag::Span>,
     /// The script class name and definition when this file is a Kotlin script.
     script: Option<(String, crate::script_definitions::ScriptDefinition)>,
     /// Current expression-recursion depth (see [`Parser::parse_bp`]). Bounded by
@@ -827,6 +830,7 @@ impl<'a> Parser<'a> {
             declaration_name_span: Span::new(0, 0),
             declaration_prefix: Default::default(),
             type_parameter_spans: Vec::new(),
+            type_parameter_bound_spans: Vec::new(),
             script: script.map(|(file_stem, definition)| {
                 (scripts::script_class_name(file_stem), definition.clone())
             }),
@@ -1612,10 +1616,11 @@ impl<'a> Parser<'a> {
         self.bump(); // `typealias`
         let name = self.ident_or_error("typealias name");
         let name_span = self.declaration_name_span;
-        let type_params = if self.at(TokenKind::Lt) {
-            self.parse_type_params(start.lo).0
+        let (type_params, type_param_bound_spans) = if self.at(TokenKind::Lt) {
+            let names = self.parse_type_params(start.lo).0;
+            (names, std::mem::take(&mut self.type_parameter_bound_spans))
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         self.expect(TokenKind::Eq, "'='");
         let target = self.parse_type();
@@ -1623,6 +1628,7 @@ impl<'a> Parser<'a> {
         crate::ast::TypeAliasDecl {
             name,
             type_params,
+            type_param_bound_spans,
             target,
             span: Span::new(start.lo, end.hi),
             name_span,
