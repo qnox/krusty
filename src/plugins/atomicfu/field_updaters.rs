@@ -69,12 +69,25 @@ fn lower_declaration(ir: &mut IrFile, updater: &FieldUpdater) -> LoweredUpdater 
         .with_is_final(false)
         .with_compiler_generated(true);
     let (store, initial) = updater.initializer;
-    if let IrExpr::SetField { value: stored, .. } = &mut ir.exprs[store as usize] {
-        *stored = initial;
-    }
+    let receiver = match &mut ir.exprs[store as usize] {
+        IrExpr::SetField {
+            receiver,
+            value: stored,
+            ..
+        } => {
+            *stored = initial;
+            Some(*receiver)
+        }
+        _ => None,
+    };
     // kotlinc's transform stores the value in a new statement with no source position, so the
-    // initializer's line is the value's own, entered where the value is computed.
+    // initializer's line is the value's own, entered where the value is computed rather than at
+    // the store's receiver.
     let store_line = ir.take_statement_line(store);
+    ir.clear_position(store);
+    if let Some(receiver) = receiver {
+        ir.clear_position(receiver);
+    }
     if let (Some(line), None) = (store_line, ir.statement_line(initial)) {
         ir.set_statement_line(initial, line);
     }
