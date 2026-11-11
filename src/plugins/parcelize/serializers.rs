@@ -192,9 +192,7 @@ impl ParcelRuntime {
             stmts: vec![present, written],
             value: None,
         });
-        let branch = ir.add_expr(IrExpr::When {
-            branches: vec![(Some(is_null), absent), (None, otherwise)],
-        });
+        let branch = ir.add_when(vec![(Some(is_null), absent), (None, otherwise)], Ty::Unit);
         ir.add_expr(IrExpr::Block {
             stmts: vec![declaration, branch],
             value: None,
@@ -227,9 +225,7 @@ impl ParcelRuntime {
             arg: value,
             type_operand: ty,
         });
-        ir.add_expr(IrExpr::When {
-            branches: vec![(Some(absent), null), (None, boxed)],
-        })
+        ir.add_when(vec![(Some(absent), null), (None, boxed)], ty)
     }
 
     fn write_flag(&self, ir: &mut IrFile, parcel: u32, flag: i32) -> ExprId {
