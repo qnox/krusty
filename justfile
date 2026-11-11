@@ -159,12 +159,12 @@ legacy-ratchet-tests:
 outcome-set-merge-tests:
     bash scripts/test-outcome-set-merge.sh
 
-# Register the outcome-manifest merge driver (.gitattributes `merge=outcome-set`) in this clone's
+# Register the outcome-manifest merge driver (.gitattributes `merge=sorted-set`) in this clone's
 # git config; git reads merge drivers only from local config. A checkout that predates the driver
 # script merges those files line by line.
 install-merge-drivers:
-    git config merge.outcome-set.name "outcome manifest set merge"
-    git config merge.outcome-set.driver 'if test -f scripts/outcome-set-merge.sh; then bash scripts/outcome-set-merge.sh %O %A %B; else git merge-file -L ours -L base -L theirs %A %O %B; fi'
+    git config merge.sorted-set.name "outcome manifest set merge"
+    git config merge.sorted-set.driver 'if test -f scripts/outcome-set-merge.sh; then bash scripts/outcome-set-merge.sh %O %A %B; else git merge-file -L ours -L base -L theirs %A %O %B; fi'
 
 # Full test suite through the canonical self-provisioning harness.
 test *ARGS:

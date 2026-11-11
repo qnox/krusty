@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Git merge driver for the outcome manifests (.gitattributes `merge=outcome-set`). Each manifest is a
+# Git merge driver for the outcome manifests (.gitattributes `merge=sorted-set`). Each manifest is a
 # leading comment header followed by unique entries in byte order, so it is a set: two branches that
 # remove or add neighbouring entries changed different elements, and a line-based merge reports a
 # conflict where there is none. The merge keeps an entry exactly when both sides still have it or

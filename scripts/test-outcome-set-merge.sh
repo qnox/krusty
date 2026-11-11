@@ -18,8 +18,8 @@ git config user.email fixture@example.invalid
 git config commit.gpgsign false
 mkdir -p scripts lists/lane
 cp "$script" scripts/outcome-set-merge.sh
-printf 'lists/** merge=outcome-set\n' >.gitattributes
-git config merge.outcome-set.driver \
+printf 'lists/** merge=sorted-set\n' >.gitattributes
+git config merge.sorted-set.driver \
     'if test -f scripts/outcome-set-merge.sh; then bash scripts/outcome-set-merge.sh %O %A %B; else git merge-file -L ours -L base -L theirs %A %O %B; fi'
 
 failures=0

@@ -1,9 +1,10 @@
 tools/krusty-bazel/intellij/*.patch whitespace=-blank-at-eol,-blank-at-eof
 # Outcome manifests are sets of entries; merge them as sets (scripts/outcome-set-merge.sh, installed
-# by `just install-merge-drivers`). Without the driver installed git merges them line by line.
-tests/box_expected_failures/** merge=outcome-set
-tests/box_expected_not_applicable/** merge=outcome-set
-tests/bytecode_listing_expected_failures/** merge=outcome-set
-tests/bytecode_text_expected_failures/** merge=outcome-set
-tests/cli_expected_failures/** merge=outcome-set
-tests/klib_uncovered_implementations/** merge=outcome-set
+# by `just install-merge-drivers`; the merge queue merges them with its own sorted-set driver). Without
+# the driver installed git merges them line by line.
+tests/box_expected_failures/** merge=sorted-set
+tests/box_expected_not_applicable/** merge=sorted-set
+tests/bytecode_listing_expected_failures/** merge=sorted-set
+tests/bytecode_text_expected_failures/** merge=sorted-set
+tests/cli_expected_failures/** merge=sorted-set
+tests/klib_uncovered_implementations/** merge=sorted-set
