@@ -355,6 +355,9 @@ pub(super) fn emit_dependencies<B: Backend>(
                 identity.clone(),
             );
         }
+        for object in unit.materialized_objects() {
+            exports.record_singleton(object);
+        }
         let mut published = Vec::with_capacity(closed.len());
         for (identity, _) in &closed {
             let Some((_external, realization)) = platform.external_callable_by_dependency(identity)
@@ -565,6 +568,7 @@ fn prepare_bodyless_externals(
         } else {
             bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
         };
+        let mut edges = edges;
         // A member of a materialized class is lowered with the class its constructor creates.
         match emitted_roots::member_class_constructor(
             platform,
@@ -573,6 +577,21 @@ fn prepare_bodyless_externals(
             &identity,
         ) {
             Ok(Some(primary)) => pending.push_back(primary),
+            Ok(None) => {}
+            Err(error) => {
+                diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                return false;
+            }
+        }
+        // A member of a materialized object is lowered with the object its initialization
+        // creates, whose edges no constructor declaration carries.
+        match emitted_roots::member_object_initialization(
+            platform,
+            bodies,
+            capabilities.callees,
+            &identity,
+        ) {
+            Ok(Some(initialization)) => edges.extend(initialization),
             Ok(None) => {}
             Err(error) => {
                 diags.error(Span::new(0, 0), format!("internal error: {error}"));

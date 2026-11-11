@@ -657,7 +657,8 @@ impl DependencyBodyUnit {
             .iter()
             .filter_map(|(identity, constructor)| {
                 let class = self.classes[identity];
-                (!self.ir.classes[class as usize].is_abstract).then_some((
+                let declaration = &self.ir.classes[class as usize];
+                (!declaration.is_abstract && !declaration.is_object).then_some((
                     identity,
                     AllocatingConstructor {
                         class,
@@ -665,6 +666,18 @@ impl DependencyBodyUnit {
                     },
                 ))
             })
+    }
+
+    /// Objects owned by this closed unit, whose instance it publishes as their own file would.
+    pub(crate) fn materialized_objects(&self) -> impl Iterator<Item = crate::ir::ClassId> + '_ {
+        let mut objects = self
+            .classes
+            .values()
+            .copied()
+            .filter(|&class| self.ir.classes[class as usize].is_object)
+            .collect::<Vec<_>>();
+        objects.sort_unstable();
+        objects.into_iter()
     }
 
     /// A unit that reads the constants of `enums`, which earlier units materialized, through
@@ -1691,6 +1704,14 @@ impl<'s> Linker<'_, 's> {
         };
         if class.is_value {
             return Ok(true);
+        }
+        if class.kind == crate::libraries::TypeKind::Object {
+            return Ok(super::class_initialization::object_plan(
+                class,
+                self.sources.bodies,
+                self.sources.callees,
+            )?
+            .is_some());
         }
         let Some(primary) = &class.primary_constructor else {
             return Ok(false);

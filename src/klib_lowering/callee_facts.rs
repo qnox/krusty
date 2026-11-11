@@ -264,6 +264,33 @@ impl<'a> KlibCalleeFacts<'a> {
         }
     }
 
+    /// The initializer graph of the object `class`, when its initialization is admitted.
+    pub(crate) fn object_initialization_callees(
+        &self,
+        class: &crate::libraries::KlibBodyClassContract,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<Option<Vec<KlibDependencyCallable>>, super::decline::KlibBodyDeclineReason> {
+        super::class_initialization::object_initialization_callees(class, bodies, self)
+    }
+
+    /// The members dispatch reaches of the object `class`.
+    pub(crate) fn object_dispatched_members(
+        &self,
+        class: &crate::libraries::KlibBodyClassContract,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<Vec<KlibDependencyCallable>, super::decline::KlibBodyDeclineReason> {
+        super::class_initialization::object_dispatched_members(class, bodies, self)
+    }
+
+    /// The declarations the overrides of the object `class` override.
+    pub(crate) fn object_overridden_declarations(
+        &self,
+        class: &crate::libraries::KlibBodyClassContract,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<Vec<KlibDependencyCallable>, super::decline::KlibBodyDeclineReason> {
+        super::class_initialization::object_overridden_declarations(class, bodies, self)
+    }
+
     /// Check graph-owned declarations even when the root operation emits no callee body/export.
     pub(super) fn validate_root_constructor(
         &self,

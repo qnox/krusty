@@ -161,14 +161,16 @@ pub(super) fn runtime_member_classes() -> [(TypeName, &'static str); 1] {
 }
 
 /// Whether the runtime, not a library class body, lays out `internal`: the root class, `Unit`, the
-/// companions of the built-in types, the shared empty set, text, the arrays, the unsigned integers
-/// (carried as the value they wrap), the throwables and builder it constructs, the integral ranges
-/// and progressions, and the standard collection implementations. A dependency body's call of such
-/// a member, or read of such an object, is lowered here as a source one is.
+/// companions of the built-in types, the stateless objects it answers entirely, the shared empty
+/// set, text, the arrays, the unsigned integers (carried as the value they wrap), the throwables
+/// and builder it constructs, the integral ranges and progressions, and the standard collection
+/// implementations. A dependency body's call of such a member, or read of such an object, is
+/// lowered here as a source one is.
 pub(in super::super) fn represents_dependency_classifier(internal: TypeName) -> bool {
     super::super::super::intrinsics::is_any(internal)
         || internal == krusty::types::wk::unit()
         || super::super::super::intrinsics::builtin_companion(internal).is_some()
+        || super::super::super::intrinsics::is_stateless_runtime_object(internal)
         || super::super::super::intrinsics::runtime_object(internal).is_some()
         || internal == krusty::types::wk::string()
         || is_char_sequence(internal)
