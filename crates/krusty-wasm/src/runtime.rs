@@ -20,6 +20,7 @@ mod object_equality;
 
 use krusty::fx_hash::HashMap;
 
+use super::array_objects::ArrayObjects;
 use super::boxes::Boxes;
 use super::callable_references::CallableReferences;
 use super::encode::{
@@ -31,7 +32,6 @@ use super::hashing::Hashing;
 use super::host::Host;
 use super::identity::IdentityObjects;
 use super::objects::ObjectRoot;
-use super::reference_arrays::ReferenceArrays;
 use super::type_objects::{TypeDescription, TypeObject, TypeObjects};
 
 /// Where a host write's bytes are staged in linear memory. The first 16 bytes are left for the
@@ -46,13 +46,8 @@ pub(super) struct Runtime {
     pub(super) chars: u32,
     /// `(struct (field (ref $chars)))`.
     pub(super) string: u32,
-    /// Reference-element array storage shared by every applied Kotlin `Array<T>`.
-    pub(super) references: u32,
-    pub(super) arrays: ReferenceArrays,
-    /// `(array (mut i32))`, the storage of a Kotlin `IntArray`.
-    pub(super) ints: u32,
-    /// `IntArray`'s identity object. Same shape as a reference array, with `ints` as storage.
-    pub(super) int_arrays: ReferenceArrays,
+    /// Every Kotlin array classifier's object type; `Array<T>` shares one reference storage.
+    pub(super) arrays: ArrayObjects,
     pub(super) string_equals: u32,
     pub(super) object_equals: u32,
     pub(super) string_concat: u32,
@@ -122,22 +117,14 @@ impl Runtime {
             storage: StorageType::Val(super::objects::REFERENCE),
             mutable: true,
         }));
-        let ints = module.ty(CompositeType::Array(FieldType {
-            storage: StorageType::Val(ValType::I32),
-            mutable: true,
-        }));
         let identity = IdentityObjects::declare(module, &objects);
-        let arrays = ReferenceArrays::declare(module, &mut objects, &identity, references);
-        let int_arrays = ReferenceArrays::declare(module, &mut objects, &identity, ints);
+        let arrays = ArrayObjects::declare(module, &mut objects, &identity, references);
         let object_equals = module.declare();
         let callable_references = CallableReferences::declare(module, &objects, object_equals);
         let mut runtime = Self {
             chars,
             string,
-            references,
             arrays,
-            ints,
-            int_arrays,
             string_equals: module.declare(),
             object_equals,
             string_concat: module.declare(),

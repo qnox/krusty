@@ -142,9 +142,10 @@ pub(super) fn linearize_suspending_finally(
         stmts: Vec::new(),
         value: None,
     });
-    let rethrow = ir.add_expr(IrExpr::When {
-        branches: vec![(Some(has_exception), throw_block), (None, no_exception)],
-    });
+    let rethrow = ir.add_when(
+        vec![(Some(has_exception), throw_block), (None, no_exception)],
+        Ty::Unit,
+    );
     ir.exprs[expression as usize] = IrExpr::Block {
         stmts: vec![declaration, protected, finally, rethrow],
         value: None,
@@ -249,9 +250,10 @@ pub(super) fn linearize_finally_returns(ir: &mut IrFile, expression: ExprId, ret
         stmts: Vec::new(),
         value: None,
     });
-    let dispatch = ir.add_expr(IrExpr::When {
-        branches: vec![(Some(has_return), return_block), (None, fallthrough)],
-    });
+    let dispatch = ir.add_when(
+        vec![(Some(has_return), return_block), (None, fallthrough)],
+        Ty::Unit,
+    );
     ir.exprs[expression as usize] = IrExpr::Block {
         stmts: vec![completion_decl, return_decl, protected, dispatch],
         value: None,

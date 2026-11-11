@@ -780,64 +780,6 @@ private fun validateJvmTargets(kotlin: String, java: String, mode: String, warn:
  * its free arguments, or the reasons this plugin cannot derive them. A compile with refusals is
  * left to kotlinc, which receives the task's own request unchanged.
  */
-private class KotlincRequest(val arguments: List<String>, val refusals: List<String>)
-
-private fun kotlincRequest(task: KotlinJvmCompile, pluginVersion: String, compilerVersion: String): KotlincRequest {
-    fun refused(reason: String) = KotlincRequest(emptyList(), listOf(reason))
-    if (compilerVersion != pluginVersion) {
-        return refused("Kotlin compiler $compilerVersion differs from Kotlin Gradle plugin $pluginVersion")
-    }
-    val options = task.compilerOptions
-    val unsupported = listOf(
-        "extraWarnings" to options.extraWarnings,
-        "suppressWarnings" to options.suppressWarnings,
-        // Named `-Xwarning-level` policy is forwarded to the compiler, whose diagnostic registry
-        // is the authoritative place to validate names and apply severities. `-Werror` is the
-        // global form of that policy: the compiler fails the compilation when any warning is
-        // emitted.
-        "verbose" to options.verbose,
-        // `useModuleDetection` (set on every Android compile) only configures kotlinc's
-        // multi-module incremental compilation, never a compiler argument; a full krusty compile
-        // has nothing to detect.
-    ).filter { (_, enabled) -> enabled.getOrElse(false) }
-        .map { (name, _) -> "krusty does not support compilerOptions.$name" }
-    if (unsupported.isNotEmpty()) return KotlincRequest(emptyList(), unsupported)
-    val languageVersion = options.languageVersion.orNull?.version
-    val apiVersion = options.apiVersion.orNull?.version
-
-    val structuredOptIns = options.optIn.getOrElse(emptyList())
-    val freeArguments = options.freeCompilerArgs.getOrElse(emptyList())
-    structuredOptInRefusal(structuredOptIns)?.let { return refused(it) }
-    freeArgumentRefusal(freeArguments, pluginVersion)?.let { return refused(it) }
-    // KGP fills kotlinc's arguments from the structured options and appends the free arguments
-    // after them, so a free argument overrides the structured option it restates.
-    val arguments = ArrayList<String>()
-    languageVersion?.let { arguments.addPair("-language-version", it) }
-    apiVersion?.let { arguments.addPair("-api-version", it) }
-    structuredOptIns.forEach { marker ->
-        arguments.add("-opt-in=$marker")
-    }
-    options.moduleName.orNull?.takeIf(String::isNotEmpty)?.let {
-        arguments.addPair("-module-name", it)
-    }
-    options.jvmTarget.orNull?.let { arguments.addPair("-jvm-target", it.target) }
-    options.jvmDefault.orNull?.let { arguments.addPair("-jvm-default", it.compilerArgument) }
-    if (task.multiPlatformEnabled.getOrElse(false)) arguments.add("-Xmulti-platform")
-    if (options.progressiveMode.getOrElse(false)) arguments.add("-progressive")
-    if (options.javaParameters.getOrElse(false)) arguments.add("-java-parameters")
-    if (options.noJdk.getOrElse(false)) arguments.add("-no-jdk")
-    if (options.allWarningsAsErrors.getOrElse(false) && "-Werror" !in freeArguments) {
-        arguments.add("-Werror")
-    }
-    arguments.addAll(freeArguments)
-    return KotlincRequest(arguments, emptyList())
-}
-
-// kotlinc accepts a repeated `-opt-in` marker, so a repeated structured marker reaches krusty as
-// KGP passes it.
-private fun structuredOptInRefusal(markers: List<String>): String? =
-    if (markers.any(String::isBlank)) "compilerOptions.optIn contains an empty marker" else null
-
 private fun supportedKotlinPluginVersion(version: String): String =
     if (version in supportedKotlinVersions) {
         version
@@ -849,9 +791,4 @@ private fun unsupportedKotlinPluginVersion(version: String): String {
     val expected = supportedKotlinVersions.dropLast(1).joinToString(", ") +
         ", or " + supportedKotlinVersions.last()
     return "unsupported Kotlin Gradle plugin $version; expected $expected"
-}
-
-private fun MutableList<String>.addPair(name: String, value: String) {
-    add(name)
-    add(value)
 }

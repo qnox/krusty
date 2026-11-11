@@ -107,6 +107,7 @@ impl ValType {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum StorageType {
     Val(ValType),
+    I8,
     I16,
 }
 
@@ -120,6 +121,7 @@ impl FieldType {
     fn encode(self, out: &mut Vec<u8>) {
         match self.storage {
             StorageType::Val(value) => value.encode(out),
+            StorageType::I8 => out.push(0x78),
             StorageType::I16 => out.push(0x77),
         }
         out.push(u8::from(self.mutable));
@@ -723,6 +725,10 @@ impl Code {
 
     pub(super) fn array_get(&mut self, ty: u32) -> &mut Self {
         self.gc(0x0b).index(ty)
+    }
+
+    pub(super) fn array_get_s(&mut self, ty: u32) -> &mut Self {
+        self.gc(0x0c).index(ty)
     }
 
     pub(super) fn array_get_u(&mut self, ty: u32) -> &mut Self {
