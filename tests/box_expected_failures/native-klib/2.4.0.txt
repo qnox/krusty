@@ -20,7 +20,6 @@ annotations/instances/instanceEquality.kt
 annotations/instances/multifileEqHc.kt
 annotations/instances/multimoduleTypeParams.kt
 annotations/instances/nested.kt
-annotations/instances/nestedDefaults.kt
 annotations/instances/typeAliasesAndGenericsInterop.kt
 annotations/selfReferentialAnnotation.kt
 annotations/typeAnnotations/checkingNotincorporatedInputTypes.kt
