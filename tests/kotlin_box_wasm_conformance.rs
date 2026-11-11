@@ -567,6 +567,29 @@ fun box(): String = if (2.0.pow(3.0) == 8.0) "OK" else "pow"
     );
 }
 
+/// A discarded `if` over sealed value classes lowers `toString` of the underlying interface.
+/// The lambda in the same file stays a function value.
+#[test]
+fn wasm_discarded_if_over_a_sealed_value_class_runs() {
+    let source = include_str!("box_regressions/discardedIfOverSealedValueClasses.kt");
+    let stem = "discardedIfOverSealedValueClasses";
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(
+            focused_wasm_lane_available(&lane, stem),
+            "{stem} requires its Wasm lane"
+        );
+        let sources = box_lane::prepare_sources(source, stem, lane.test_target())
+            .expect("the owned regression prepares");
+        assert_eq!(
+            lane.compile_and_run(&std::env::temp_dir(), stem, &sources, source),
+            Outcome::Pass,
+            "{stem} on {}",
+            target.name()
+        );
+    }
+}
+
 #[test]
 fn kotlin_codegen_box_wasm_js_conformance() {
     box_lane::run(&WasmLane {

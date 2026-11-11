@@ -426,6 +426,21 @@ mod tests {
         }
     }
 
+    /// A plain interface is not a function value, so a lambda elsewhere in the file does not make
+    /// its `toString` unprintable. The value class here delegates `toString` to that interface.
+    #[test]
+    fn a_plain_interface_to_string_survives_a_function_value() {
+        let source = krusty::conformance::prepare_test_source(
+            include_str!("../../../tests/box_regressions/discardedIfOverSealedValueClasses.kt"),
+            krusty::conformance::TestTarget::WasmJs,
+        );
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(target, &source);
+            assert_eq!(diagnostics, Vec::<String>::new(), "{target:?}");
+            assert!(!outputs.is_empty(), "{target:?}");
+        }
+    }
+
     /// A function value converted to a `fun interface` is an instance of it with no `toString`
     /// body, so rendering a value of that interface declines.
     #[test]

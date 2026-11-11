@@ -7,8 +7,8 @@
 //! generated, which Kotlin gives no source name the default prints. Lowering declines a call that
 //! could reach one rather than emit a trap the program would run into.
 //!
-//! A value statically of a class of this file is an instance of that class's hierarchy; one of an
-//! interface of this file can also be a function value converted to it. Any other reference
+//! A value statically of a class of this file is an instance of that class's hierarchy; one of a
+//! `fun interface` of this file can also be a function value converted to it. Any other reference
 //! (`Any`, a type parameter, an interface declared elsewhere) is erased: it can be an instance of
 //! every class here, or one of the runtime's objects this file creates, including a runtime
 //! exception this file constructs or catches. A `KType` value is narrower: the runtime's own
@@ -36,10 +36,15 @@ impl Body<'_> {
         if let Some(class) = self.class_of_type(ty) {
             let declaration = &self.ir.classes[class as usize];
             if declaration.is_interface {
-                // A function value converted to a `fun interface` is an instance of it too.
-                self.record_call(member, ty, Receiver::Erased);
-                if member == AnyMember::ToString && holds_unprinted_values(self.ir) {
-                    return Ok(true);
+                if declaration.is_fun_interface {
+                    // A function value converted to a `fun interface` is an instance of it too.
+                    self.record_call(member, ty, Receiver::Erased);
+                    if member == AnyMember::ToString && holds_unprinted_values(self.ir) {
+                        return Ok(true);
+                    }
+                } else {
+                    // A plain interface is only implemented by classes, including another file's.
+                    self.record_call(member, ty, Receiver::Classes);
                 }
             } else if declaration.is_open || declaration.is_abstract || declaration.is_sealed {
                 self.record_call(member, ty, Receiver::Classes);
