@@ -167,25 +167,8 @@
 1	src/symbol_resolver/overload_selection.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/types.rs	redundant guard
 1	src/types/interning.rs	unnecessary use of `to_string`: help: use: `"T"`
-1	tests/common/byte_dump.rs	function `flush_recorded_class_dumps` is never used
 1	tests/common/byte_dump.rs	unused import: `immutable_classpath_content_fingerprint`
 1	tests/common/byte_dump/fingerprint.rs	function `immutable_classpath_content_fingerprint` is never used
-1	tests/common/e2e.rs	unused import: `kotlinc_box_result_with_classpath`
-1	tests/common/e2e.rs	useless conversion to the same type: `krusty::frontend::PlatformProvider`: help: consider removing `PlatformProvider::from()`: `krusty::frontend::PlatformProvider::jvm(libraries)`
-1	tests/common/kotlin_native_multimodule.rs	this function has too many arguments (8/7)
-1	tests/common/kotlinc_server.rs	function `kotlinc_compile_unrecorded_with_language_settings` is never used
-1	tests/common/mod.rs	function `capture_common_ir` is never used
-1	tests/common/mod.rs	function `compile_in_process_diagnostics` is never used
-1	tests/common/mod.rs	function `run_jvm_main` is never used
-1	tests/common/mod.rs	unused import: `kotlin_compiler_jar`
-1	tests/common/native_backend.rs	constant `NATIVE_RUNTIME_HEADER` is never used
-1	tests/common/native_backend.rs	constant `NATIVE_SYS_HEADER` is never used
-1	tests/common/native_backend.rs	function `native_analysis_with_plugins` is never used
-1	tests/common/native_backend.rs	function `native_sys_header` is never used
-1	tests/common/native_backend.rs	function `write_native_runtime_headers` is never used
-1	tests/common/reference_compiler.rs	function `compiler_module_warnings` is never used
-1	tests/common/reference_compiler.rs	function `compiler_warnings` is never used
-1	tests/common/reference_compiler.rs	function `rendered_error_blocks` is never used
 1	tests/common/source_set_compile.rs	function `source_set_diagnostics` is never used
 12	src/parser.rs	this `map_or` can be simplified
 16	src/resolve.rs	this function has too many arguments (8/7)
