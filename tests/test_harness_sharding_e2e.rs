@@ -1073,14 +1073,20 @@ fn phase_timing_coverage_run_prints_every_phase() {
         .lines()
         .filter_map(|line| line.strip_prefix("coverage: phase start "))
         .collect::<Vec<_>>();
+    // The e2e binary runs in the background beside the small binaries, so the two test phases
+    // start in either order; every other phase is sequential.
+    let mut ordered = starts.clone();
+    if let Some(tests) = ordered.get_mut(3..5) {
+        tests.sort_unstable();
+    }
     assert_eq!(
-        starts,
+        ordered,
         [
             "provision",
             "instrument",
             "build-compiler",
-            "test-lsp-unit",
             "test-e2e",
+            "test-lsp-unit",
             "report-compiler",
             "report-lsp",
         ],
