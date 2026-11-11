@@ -311,7 +311,6 @@ callableReference/adaptedReferences/boundReferences.kt
 callableReference/adaptedReferences/contextFunctionAnonymous.kt
 callableReference/adaptedReferences/contextFunctionWithExtensionProperty.kt
 callableReference/adaptedReferences/contextFunctionWithPassedSuperType.kt
-callableReference/adaptedReferences/contextPropertyWithSam.kt
 callableReference/adaptedReferences/contextTypeWithSam.kt
 callableReference/adaptedReferences/extensionFunctionAnonymous.kt
 callableReference/adaptedReferences/extensionPropertyToFun.kt
@@ -438,10 +437,6 @@ callableReference/property/delegated.kt
 callableReference/property/delegatedMutable.kt
 callableReference/property/enumNameOrdinal.kt
 callableReference/property/extensionProperty.kt
-callableReference/property/extensionPropertyInDelegatedSam.kt
-callableReference/property/extensionPropertyInSamInterface.kt
-callableReference/property/extensionPropertyPassedToDelegatedSam.kt
-callableReference/property/extensionPropertyReferenceWithExplicitType.kt
 callableReference/property/extensionPropertyReferenceWithTypeParameter.kt
 callableReference/property/extensionPropertyWithExtensionReceiver.kt
 callableReference/property/extensionPropertyWithExtensionType.kt
@@ -471,7 +466,6 @@ callableReference/property/simpleMutableMember.kt
 callableReference/property/simpleMutableTopLevel.kt
 callableReference/property/simpleTopLevel.kt
 callableReference/starProjectionCallableReference.kt
-callableReference/twoRefsOneScope.kt
 casts/asForConstants.kt
 casts/asSafeForConstants.kt
 casts/asToNothing.kt
