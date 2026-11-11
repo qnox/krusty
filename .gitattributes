@@ -8,3 +8,7 @@ tests/bytecode_listing_expected_failures/** merge=sorted-set
 tests/bytecode_text_expected_failures/** merge=sorted-set
 tests/cli_expected_failures/** merge=sorted-set
 tests/klib_uncovered_implementations/** merge=sorted-set
+# The clippy baseline is a sorted set of count/file/message rows: two changes that lower or drop
+# different rows merge cleanly. Two that change the same row keep both rows; the check then holds
+# that file+message to the lower count, and `just clippy-baseline` folds them into one.
+clippy-baseline.tsv merge=sorted-set

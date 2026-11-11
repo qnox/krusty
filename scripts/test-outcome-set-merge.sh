@@ -169,6 +169,27 @@ else
     git merge --abort
 fi
 
+# A headerless count/file/message baseline: one side drops a row, the other lowers the next one.
+table=lists/clippy.tsv
+row() { printf '%s\t%s\t%s\n' "$@"; }
+git checkout -q -B table base
+{ row 1 a.rs x; row 2 b.rs y; row 3 c.rs z; } >"$table"
+commit table
+git branch -f table-base
+git checkout -q -B ours table-base
+{ row 1 a.rs x; row 3 c.rs z; } >"$table"
+commit ours
+git checkout -q -B theirs table-base
+{ row 1 a.rs x; row 1 c.rs z; row 2 b.rs y; } >"$table"
+commit theirs
+git checkout -q ours
+if git merge -q --no-edit theirs >/dev/null; then
+    [ "$(cat "$table")" = "$(row 1 a.rs x; row 1 c.rs z)" ] || fail "baseline rows: got"$'\n'"$(cat "$table")"
+else
+    fail "baseline rows conflicted"
+    git merge --abort
+fi
+
 # A checkout that predates the driver script merges line by line instead of failing.
 git checkout -q -B ours base
 git rm -q scripts/outcome-set-merge.sh

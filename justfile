@@ -106,7 +106,7 @@ clippy-findings:
         exit 1
     fi
     sed -nE 's/^([^:]+):[0-9]+:[0-9]+: warning: (.*)$/\1\t\2/p' "$output" \
-      | sort | uniq -c | sed -E 's/^ *([0-9]+) /\1\t/' | sort
+      | LC_ALL=C sort | uniq -c | sed -E 's/^ *([0-9]+) /\1\t/' | LC_ALL=C sort
 
 # Freeze the current clippy findings as the accepted baseline. Run after intentionally fixing (or
 # knowingly accepting) findings; commit the updated clippy-baseline.tsv.
@@ -125,7 +125,8 @@ clippy-baseline-check:
     fail=0
     while IFS=$'\t' read -r cnt file msg; do
         [ -z "${file:-}" ] && continue
-        b=$(awk -F'\t' -v f="$file" -v m="$msg" '$2==f && $3==m {print $1}' "$base")
+        # A merge that lowered one row on both sides keeps both rows: the lower count holds.
+        b=$(awk -F'\t' -v f="$file" -v m="$msg" '$2==f && $3==m && (b=="" || $1<b) {b=$1} END {print b}' "$base")
         b=${b:-0}
         if [ "$cnt" -gt "$b" ]; then
             echo "NEW clippy finding ($cnt > $b allowed) — $file: $msg" >&2
