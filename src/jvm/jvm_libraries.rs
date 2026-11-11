@@ -3145,7 +3145,7 @@ impl JvmLibraries {
                     producer: PropertyProducer::KotlinAccessor,
                     read_stability: self.module_read_stability(mp, cn),
                 };
-                crate::klib_libraries::realize_class_name_property(
+                crate::libraries::realize_class_name_property(
                     cn,
                     self.cp.common_metadata_owns(cn),
                     &mut property,

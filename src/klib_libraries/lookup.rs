@@ -239,7 +239,7 @@ pub(super) fn published_property(
             signed.compiler_builtin_owner,
             &mut property,
         );
-        builtin_realizations::realize_class_name_property(
+        crate::libraries::realize_class_name_property(
             owner,
             signed.compiler_builtin_owner,
             &mut property,

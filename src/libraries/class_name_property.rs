@@ -1,11 +1,10 @@
-//! The exact `kotlin.reflect.KClass` name getters a target answers from its own class tokens.
+//! The exact `kotlin.reflect.KClass` name getters a target answers itself.
 //!
-//! A target that builds the object a class literal evaluates to (rather than calling a library
-//! factory) is the only implementation of these getters it ever reaches, so the platform stdlib's
-//! abstract declarations carry the operation. Archive authority is an input fact, never inferred
-//! from a package or manifest spelling.
+//! A target that builds the object a class literal evaluates to answers these from its own class
+//! tokens. The JVM stdlib implements the same declarations as ordinary interface methods. Archive
+//! authority is an input fact, never inferred from a package or manifest spelling.
 
-use crate::libraries::{ClassNameKind, CompilerIntrinsic, PropKind, PropertyInfo};
+use super::{ClassNameKind, CompilerIntrinsic, PropKind, PropertyInfo};
 use crate::types::{wk, Ty, TypeName};
 
 pub(crate) fn realize_class_name_property(

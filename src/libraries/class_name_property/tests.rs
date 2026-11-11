@@ -1,17 +1,14 @@
-use super::*;
-use crate::types::type_name;
+use super::realize_class_name_property;
+use crate::libraries::{
+    declared_property, property_parameter_identities, CallablePlacement, ClassNameKind,
+    CompilerIntrinsic, PropKind, PropertyAccessorNames, PropertyInfo, TypeParameterIdentities,
+};
+use crate::metadata::semantic::{
+    KotlinAccessorModifiers, KotlinFunctionTypeShape, KotlinModality, KotlinProperty, KotlinType,
+};
+use crate::types::{type_name, wk, Ty, Visibility};
 
 fn name_property(name: &str) -> PropertyInfo {
-    use crate::libraries::{
-        declared_property, property_parameter_identities, CallablePlacement, PropertyAccessorNames,
-        TypeParameterIdentities,
-    };
-    use crate::metadata::semantic::{
-        KotlinAccessorModifiers, KotlinFunctionTypeShape, KotlinModality, KotlinProperty,
-        KotlinType,
-    };
-    use crate::types::Visibility;
-
     let declaration = KotlinProperty {
         name: name.into(),
         receiver: None,
