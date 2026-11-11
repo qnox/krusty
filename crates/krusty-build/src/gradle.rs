@@ -1089,7 +1089,6 @@ tasks.register<JavaExec>("runJvm") {
         let output = GradleBuild::new(root, repository_plugin_project(), &fixture.proxy)
             .plugin_repository(&repository)
             .init_script(init_script)
-            .no_daemon(true)
             .tasks([":classes"])
             .run_output()
             .unwrap_or_else(|error| panic!("{error}"));
@@ -1825,7 +1824,8 @@ fun main() {
     /// Gradle integration builds share one Gradle user home, which each fixture installs through
     /// the process-wide `GRADLE_USER_HOME`. libtest runs tests on parallel threads, so concurrent
     /// fixtures race on that variable and on the shared daemon registry: under Gradle 7.6.3 the
-    /// single-use daemons time out connecting. One fixture runs at a time.
+    /// daemons time out connecting. One fixture runs at a time, so its builds reuse one daemon
+    /// that the previous fixture left idle instead of starting a JVM per build.
     static GRADLE_INTEGRATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     pub(super) struct IntegrationFixture {
@@ -1931,8 +1931,7 @@ fun main() {
             let build = GradleBuild::new(&self.root, repository_plugin_project(), &self.proxy)
                 .property("kotlinPluginVersion", &self.kgp)
                 .property("krustyPluginVersion", &self.plugin_version)
-                .configuration_cache(true)
-                .no_daemon(true);
+                .configuration_cache(true);
             if self.plugin_project.join("repository").is_dir() {
                 build.plugin_repository(self.plugin_project.join("repository"))
             } else {
