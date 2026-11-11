@@ -68,7 +68,7 @@ pub(super) fn supported(ir: &IrFile, id: ClassId) -> bool {
                             argument.capture_identity,
                             Some(ClassCaptureIdentity::Receiver(_))
                         ),
-                        Some(receiver) => enclosing_receiver(ir, argument, receiver),
+                        Some(receiver) => captured_receiver(ir, argument, receiver),
                     })
                     && argument.capture_identity
                         == ir.class_capture_identities.get(&(id, parameter)).copied()
@@ -85,9 +85,45 @@ pub(super) fn supported(ir: &IrFile, id: ClassId) -> bool {
     })
 }
 
+// A captured receiver is an ordinary reference only after its selected role and closure identity
+// survived checking together. An enclosing instance proves its declaration. A context parameter
+// proves the type list and index of its rung. A receiver lambda proves that same closure identity
+// and an object type: that is how `with`'s receiver carries a context parameter into a local class.
+// A field ordinal alone proves none of them.
+fn captured_receiver(ir: &IrFile, argument: &IrCtorArg, receiver: &IrCapturedReceiver) -> bool {
+    match receiver {
+        IrCapturedReceiver::Enclosing { .. } => enclosing_receiver(ir, argument, receiver),
+        IrCapturedReceiver::Context { types, index, .. } => {
+            context_parameter(argument, types, *index)
+        }
+        IrCapturedReceiver::Lambda(_) => receiver_lambda(argument),
+        IrCapturedReceiver::Callable { .. } => false,
+    }
+}
+
+// The parameter's declared type is the entry its rung recorded at `index`. Its closure identity is
+// the receiver id, not a lexical value or an enclosing class.
+fn context_parameter(argument: &IrCtorArg, types: &[Ty], index: u32) -> bool {
+    types
+        .get(index as usize)
+        .is_some_and(|declared| argument.ty == *declared)
+        && matches!(
+            argument.capture_identity,
+            Some(ClassCaptureIdentity::Receiver(_))
+        )
+}
+
+// A receiver lambda's value is the object the checker selected. Extension-callable receivers are
+// a different profile and stay declined.
+fn receiver_lambda(argument: &IrCtorArg) -> bool {
+    matches!(
+        argument.capture_identity,
+        Some(ClassCaptureIdentity::Receiver(_))
+    ) && matches!(argument.ty.kind(), TyKind::Obj(_, _))
+}
+
 // A source enclosing receiver is an ordinary reference only after its selected declaration,
-// semantic classifier and closure identity survived checking together. Other receiver profiles
-// still need their own transport contract; neither a field ordinal nor a type bound proves one.
+// semantic classifier and closure identity survived checking together.
 fn enclosing_receiver(ir: &IrFile, argument: &IrCtorArg, receiver: &IrCapturedReceiver) -> bool {
     let IrCapturedReceiver::Enclosing {
         classifier,
