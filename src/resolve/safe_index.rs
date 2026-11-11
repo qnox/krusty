@@ -280,16 +280,16 @@ impl Checker<'_> {
         argument_tys.push(resolution.updated_ty);
         let mut arguments = indices;
         arguments.push(updated);
-        let Some((_, call)) = self.operator_call_ret(
-            &selector_scope,
-            access,
-            member_ty,
-            "set",
-            &argument_tys,
-            &arguments,
-            self.span(expression),
-            None,
-        ) else {
+        let Some((_, call)) = self.operator_call_ret(super::operator_calls::OperatorCall {
+            scope: &selector_scope,
+            site: access,
+            receiver: member_ty,
+            name: "set",
+            arg_tys: &argument_tys,
+            arg_exprs: &arguments,
+            span: self.span(expression),
+            expected_result: None,
+        }) else {
             return self.set(expression, Ty::Error);
         };
         self.resolved_operator_calls
@@ -465,7 +465,16 @@ impl Checker<'_> {
         // Resolve `set` as a member, same-module extension, or library member. A single-index Map
         // store may resolve to `put`. Record the selected target so lowering does not choose again.
         let set_selected = self
-            .operator_call_ret(scope, array, at, "set", &set_args, &set_exprs, span, None)
+            .operator_call_ret(super::operator_calls::OperatorCall {
+                scope,
+                site: array,
+                receiver: at,
+                name: "set",
+                arg_tys: &set_args,
+                arg_exprs: &set_exprs,
+                span,
+                expected_result: None,
+            })
             .map(|(_, call)| (SyntheticOperatorCall::Set, call));
         if self.indexed_operator_ambiguous {
             return;
@@ -473,9 +482,16 @@ impl Checker<'_> {
         let selected = set_selected.or_else(|| {
             single_index
                 .then(|| {
-                    self.operator_call_ret(
-                        scope, array, at, "put", &set_args, &set_exprs, span, None,
-                    )
+                    self.operator_call_ret(super::operator_calls::OperatorCall {
+                        scope,
+                        site: array,
+                        receiver: at,
+                        name: "put",
+                        arg_tys: &set_args,
+                        arg_exprs: &set_exprs,
+                        span,
+                        expected_result: None,
+                    })
                 })
                 .flatten()
                 .map(|(_, call)| (SyntheticOperatorCall::Put, call))

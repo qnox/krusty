@@ -11,6 +11,7 @@ mod diagnostic_recovery;
 mod emission_session;
 mod local_visibility;
 mod metadata_handoff;
+mod primitive_implementations;
 #[cfg(test)]
 mod streaming_tests;
 

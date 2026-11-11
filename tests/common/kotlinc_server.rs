@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use super::server_pool::{self, server_pool_cap};
 use super::{
-    byte_dump, die_with_parent, java_home, jvm_gclog_args, kotlinc_lib_dir, read_exact_deadline,
-    spawn_owned, ProfGuard,
+    byte_dump, die_with_parent, java_home, kotlinc_lib_dir, protocol_jvm_log_args,
+    read_exact_deadline, spawn_owned, ProfGuard,
 };
 
 // The reference `kotlinc` is a JVM program; spawning its CLI per test pays a ~2-4s JVM + compiler cold
@@ -304,7 +304,7 @@ impl KotlincServer {
         // left to grow from the small default initial heap: every compile allocates far more short-lived
         // data than it retains, and the undersized default nursery collected so often that a cold box
         // corpus shard spent ~19% more time in kotlinc (and grew a larger heap) than with 256 MB.
-        cmd.args(jvm_gclog_args("kotlinc"));
+        cmd.args(protocol_jvm_log_args("kotlinc"));
         cmd.args([
             "-XX:TieredStopAtLevel=1",
             "-XX:+UseSerialGC",
@@ -396,9 +396,7 @@ pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
 ///
 /// Every call reaches the JVM, so every completed compile is reported like a recorded-path miss.
 pub fn kotlinc_compile_unrecorded(args: &[String]) -> Option<(i32, String)> {
-    let result = kotlinc_compile_live(args, None, None)?;
-    byte_dump::report_unrecorded_kotlinc(args);
-    Some(result)
+    kotlinc_compile_unrecorded_with_language_settings(args, None, None)
 }
 
 /// Compile with exact language/API levels installed in kotlinc's typed compiler configuration.

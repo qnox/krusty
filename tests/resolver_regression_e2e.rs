@@ -2067,7 +2067,7 @@ class Box<out T : Any?> private constructor(private val value: Any?) {
         receiver.kind(),
         krusty::types::TyKind::Obj(owner, arguments)
             if owner.matches("Box")
-                && matches!(arguments.as_ref(), [argument]
+                && matches!(arguments.as_slice(), [argument]
                     if matches!(argument.kind(), krusty::types::TyKind::TyParam(receiver_identity, receiver_bound)
                         if receiver_identity == parameter_identity && receiver_bound == parameter_bound))
     ));

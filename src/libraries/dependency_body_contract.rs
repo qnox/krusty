@@ -54,10 +54,6 @@ impl DependencyBodyProviderSnapshot {
             role,
         }
     }
-
-    pub(crate) fn has_content_fingerprint(&self, fingerprint: [u8; 32]) -> bool {
-        self.content_fingerprint == fingerprint
-    }
 }
 
 /// The exact producer graph from which one target session may retain dependency support.

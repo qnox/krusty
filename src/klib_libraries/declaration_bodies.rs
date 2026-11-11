@@ -24,6 +24,7 @@ use crate::metadata::klib_ir::{
 use crate::types::{type_name_child, TypeName};
 
 /// The decoded function declarations of a set of KLIB libraries, joined by exact signature.
+#[derive(Default)]
 pub struct KlibDeclarationBodies {
     /// Decoded trees are immutable and may be shared with other compilations over the same archive.
     libraries: Vec<std::sync::Arc<KlibIrModuleTrees>>,
@@ -68,18 +69,6 @@ pub(crate) struct KlibEnumEntryClass<'a> {
     pub(crate) module: &'a str,
     pub(crate) arena: &'a KlibIrArena,
     pub(crate) class: &'a crate::metadata::klib_ir::tree::KlibIrClass,
-}
-
-impl Default for KlibDeclarationBodies {
-    fn default() -> Self {
-        Self {
-            libraries: Vec::new(),
-            modules: HashMap::default(),
-            owners: HashMap::default(),
-            dependencies: HashMap::default(),
-            inherited: HashMap::default(),
-        }
-    }
 }
 
 /// One decoded KLIB together with the producer graph recorded in its manifest.
@@ -152,10 +141,13 @@ pub(crate) enum KlibCalleeOrigin {
 }
 
 /// Two library inputs claim one module identity, or duplicate one declaration inside it.
+///
+/// The signature is boxed so a conflict stays a small `Result` error. The signature is only
+/// read when reporting the conflict; the success path never carries it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KlibDeclarationBodiesError {
     module: String,
-    signature: Option<KlibIrSignature>,
+    signature: Option<Box<KlibIrSignature>>,
     libraries: [usize; 2],
 }
 
@@ -166,7 +158,7 @@ impl KlibDeclarationBodiesError {
 
     /// The exact duplicated declaration, or `None` when two archives claim the module itself.
     pub fn signature(&self) -> Option<&KlibIrSignature> {
-        self.signature.as_ref()
+        self.signature.as_deref()
     }
 
     /// The positions, in input order, of the two conflicting libraries.
@@ -370,7 +362,7 @@ impl KlibDeclarationBodies {
                 if let Some(previous) = owners.insert(identity, library) {
                     return Err(KlibDeclarationBodiesError {
                         module: input.module.clone(),
-                        signature: Some(signature.clone()),
+                        signature: Some(Box::new(signature.clone())),
                         libraries: [previous, library],
                     });
                 }
@@ -552,10 +544,9 @@ impl KlibDeclarationBodies {
             if self
                 .owners
                 .contains_key(&(module.clone(), signature.clone()))
+                && owner.replace(module.clone()).is_some()
             {
-                if owner.replace(module.clone()).is_some() {
-                    return KlibCalleeOrigin::Ambiguous;
-                }
+                return KlibCalleeOrigin::Ambiguous;
             }
             if let Some(dependencies) = self.dependencies.get(&module) {
                 pending.extend(dependencies.iter().cloned());

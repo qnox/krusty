@@ -6,7 +6,9 @@
 //! `Comparable`), as it is on every Kotlin target. Each such classifier has one box type: a
 //! struct of the dispatch table every object starts with, then the value itself. Its table holds
 //! that type's own `equals` and `hashCode`, which is what kotlinc's output observes. A box type
-//! and its table are declared the first time a file boxes a value of that classifier.
+//! and its table are declared the first time a file boxes a value of that classifier. A box also
+//! implements the members of the library classes above its classifier that a call goes through
+//! (`Number.toLong`, see [`members`]).
 //!
 //! The box type is keyed by the classifier's identity, never by the carrier: a `Long` box never
 //! equals an `Int` box holding the same number, a `UInt` box never equals an `Int` box holding the
@@ -16,14 +18,22 @@ use krusty::fx_hash::HashMap;
 use krusty::types::{Ty, TypeName};
 
 use super::encode::{BlockType, Code, CompositeType, Function, HeapType, Module, SubType, ValType};
+use super::interface_dispatch::ClassRef;
 use super::objects::immutable;
 use super::runtime::{Runtime, AND32, EQ32, EQ64, OR32};
+
+mod members;
+
+pub(super) use members::BoxMembers;
 
 /// A scalar type's box struct and the global holding its dispatch table.
 #[derive(Clone, Copy)]
 pub(super) struct BoxForm {
     pub(super) structure: u32,
     pub(super) table: u32,
+    /// The boxed type, and the class its box is in the program's dispatch.
+    boxed: Ty,
+    class: ClassRef,
     /// The globals holding the only two `Boolean` boxes, `false` then `true`: the JVM's
     /// `Boolean.valueOf` answers one instance per value, which `===` observes.
     pub(super) booleans: Option<[u32; 2]>,
@@ -69,25 +79,31 @@ impl BoxForm {
 pub(super) struct Boxes {
     /// By the boxed classifier's identity.
     forms: HashMap<TypeName, BoxForm>,
+    /// The library class members called on a value that may be a box.
+    members: BoxMembers,
     /// The global holding `kotlin.Unit`, once something reads it as a reference.
     unit: Option<u32>,
 }
 
 impl Runtime {
     /// The box of `ty`'s values, which are carried as `value`, declared on first use; `None` for a
-    /// type that names no classifier or has no scalar hash, which is not boxed here.
+    /// type that names no classifier or has no scalar hash, which is not boxed here. Declaring one
+    /// declines when a library class member called on such values has an implementation for the
+    /// classifier this generator cannot write.
     pub(super) fn box_form(
         &mut self,
         module: &mut Module,
         ty: Ty,
         value: ValType,
-    ) -> Option<BoxForm> {
-        let identity = ty.obj_internal()?;
+    ) -> Result<Option<BoxForm>, String> {
+        let Some(identity) = ty.obj_internal() else {
+            return Ok(None);
+        };
         if let Some(form) = self.boxes.forms.get(&identity) {
-            return Some(*form);
+            return Ok(Some(*form));
         }
         if !self.hashing.emit_scalar_hash(&mut Code::default(), ty) {
-            return None;
+            return Ok(None);
         }
         let objects = &self.objects;
         let structure = module.subtype(SubType {
@@ -105,7 +121,7 @@ impl Runtime {
         // receiver, which this backend does not lower yet.
         let to_string = self.objects.trap(module, to_string_ty);
         let objects = &mut self.objects;
-        let (_, itable) = objects
+        let (class, itable) = objects
             .interfaces
             .class(module, objects.itable, vec![structure]);
         let mut init = Code::default();
@@ -127,10 +143,13 @@ impl Runtime {
         let form = BoxForm {
             structure,
             table,
+            boxed: ty,
+            class,
             booleans,
         };
         self.boxes.forms.insert(identity, form);
-        Some(form)
+        self.implement_box_members(module, form)?;
+        Ok(Some(form))
     }
 }
 
