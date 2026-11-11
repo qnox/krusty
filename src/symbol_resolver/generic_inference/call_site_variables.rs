@@ -407,14 +407,16 @@ mod tests {
                 Ty::nullable(Ty::obj("kotlin/Any")),
             )]);
             super::super::apply_only_input_type_bindings(
-                &EmptySymbolSource,
-                call.signature(),
+                super::super::OnlyInputCall {
+                    source: &EmptySymbolSource,
+                    signature: call.signature(),
+                    receiver: Some(receiver),
+                    arguments: &actuals,
+                    vararg_index: None,
+                    expected_result: None,
+                },
                 &policy,
                 0usize,
-                Some(receiver),
-                &actuals,
-                None,
-                None,
                 &mut bindings,
             )
             .then(|| bindings[call.signature().formals[0].as_str()])

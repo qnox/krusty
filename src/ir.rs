@@ -154,7 +154,7 @@ pub use constructors::{
 };
 pub use enums::{EnumSwitchRegistration, IrCheckedEnumEntryBody, IrEnumEntry};
 pub use expression_provenance::{
-    EnumValueOfDeclaration, IrBuiltinCall, IrBuiltinCallKind, IrSafeCallRead, IrShortCircuitKind,
+    EnumValueOfDeclaration, IrBuiltinCall, IrBuiltinCallKind, IrShortCircuitKind,
 };
 pub use field_flags::IrfFlags;
 pub use fields::IrField;
@@ -1778,10 +1778,6 @@ pub struct IrFile {
     /// initializer. A later assignment can target the same field with the same value, so backend
     /// storage passes must consume this linkage instead of recognizing stores by shape or spelling.
     pub property_initializer_stores: crate::fx_hash::HashSet<ExprId>,
-    /// Sparse `ExprId` → 1-based source line for the `LineNumberTable`: statement roots, loop
-    /// updates, and the implicit `Unit` return (the block's closing-brace line, kotlinc's mapping).
-    /// Absent = no line mark starts at that expression.
-    pub expr_lines: crate::fx_hash::HashMap<u32, u32>,
     /// The source position of every expression node; see `node_positions`.
     positions: node_positions::IrNodePositions,
     /// Lines generated expressions map to at one physical point; see `debug_lines`.
@@ -2009,18 +2005,12 @@ pub struct IrFile {
     /// Anonymous initializer (`init { … }`) bodies. kotlinc gives such a block's opening and
     /// closing lines entries of their own, even where no instruction of the block sits on them.
     pub initializer_blocks: crate::fx_hash::HashSet<ExprId>,
-    /// Expressions whose own line keeps its entry when an operand marks another line at the same
-    /// offset, as kotlinc's line table does. A serializable property's default copied into a
-    /// generated method starts with a property read the plugin attributes to the class's line.
-    pub kept_start_lines: crate::fx_hash::HashSet<ExprId>,
     /// Source operator, conversion, indexing and member calls realized as builtin operations, on
     /// the node that realizes each.
     pub builtin_calls: crate::fx_hash::HashMap<ExprId, IrBuiltinCall>,
     /// Blocks that realize a source safe call `receiver?.selector`: a receiver temporary and a
     /// null-guarded selector.
     pub safe_calls: crate::fx_hash::HashSet<ExprId>,
-    /// Reads of a safe call's receiver temporary, by their role and source line.
-    pub safe_call_reads: crate::fx_hash::HashMap<ExprId, IrSafeCallRead>,
     /// Temporaries that hold an elvis's left value, by the line the elvis starts on.
     pub elvis_temporaries: crate::fx_hash::HashMap<ExprId, u32>,
     /// Compiler-generated `Variable` declarations whose semantic role is holding a call operand:

@@ -72,9 +72,12 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
     };
 
     // Pass 2: resolve signatures/properties against the now-complete type universe.
-    let mut table = SymbolTable::default();
-    table.source_fragments =
-        crate::source::SourceFragments::new(files.iter().map(|file| file.fragment));
+    let mut table = SymbolTable {
+        source_fragments: crate::source::SourceFragments::new(
+            files.iter().map(|file| file.fragment),
+        ),
+        ..SymbolTable::default()
+    };
     table
         .source_fragments
         .publish_alias_sources(file_type_aliases.iter().enumerate().flat_map(

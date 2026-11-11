@@ -1288,7 +1288,7 @@ fn external_serializers(
                 *serial_info_unsupported = annotations.iter().any(|application| {
                     classifiers
                         .classifier_annotations(application.annotation)
-                        .map_or(true, |meta| {
+                        .is_none_or(|meta| {
                             meta.iter()
                                 .any(|annotation| annotation.annotation == serial_info)
                         })
