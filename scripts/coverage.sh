@@ -249,13 +249,19 @@ export -f run_coverage_test_binary
 status_dir="$(mktemp -d)"
 slow_dir="$(mktemp -d)"
 export KRUSTY_SLOW_TEST_DIR="$slow_dir"
+# The e2e binary is the longest by far (568 s of a 785 s test phase in CI) and its tests mostly wait
+# on pooled JVMs, so it starts first and the small binaries run beside it, still one at a time.
+# Run after them, it left the cores to a single small binary for about three minutes.
+e2e_pid=""
+if [ -n "$e2e_bin" ]; then
+  echo "coverage: e2e (timeout=${e2e_timeout}s), beside the other binaries" >&2
+  run_coverage_test_binary "$e2e_bin" "$status_dir" "$test_threads" "$e2e_timeout" &
+  e2e_pid=$!
+fi
 printf '%s\0' "${run[@]}" | xargs -0 -P "$jobs" -I{} \
   bash -c 'run_coverage_test_binary "$@"' _ {} "$status_dir" "$test_threads" "$test_timeout"
-
-# The e2e binary is internally parallel and owns the cores, so it runs alone after the small binaries.
-if [ -n "$e2e_bin" ]; then
-  echo "coverage: e2e (timeout=${e2e_timeout}s)" >&2
-  run_coverage_test_binary "$e2e_bin" "$status_dir" "$test_threads" "$e2e_timeout"
+if [ -n "$e2e_pid" ]; then
+  wait "$e2e_pid"
 fi
 slow_combined="$(mktemp)"
 if compgen -G "$slow_dir/*.tsv" >/dev/null; then
