@@ -3932,8 +3932,6 @@ reified/reifiedIntersectionTypeArgument.kt
 reified/reifiedIntersectionTypeArgumentCrossModule.kt
 reified/reifiedNullableNothing1.kt
 reified/reifiedNullableNothing2.kt
-reified/reifiedTypeArgumentWithIntersectionTypeAsTypeArgument.kt
-reified/reifiedTypeArgumentWithRecursion.kt
 reified/safecast.kt
 reified/sameIndexRecursive.kt
 reified/spreads.kt
