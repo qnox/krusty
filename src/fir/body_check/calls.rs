@@ -5,8 +5,8 @@ use super::*;
 
 mod super_calls;
 mod targets;
-use targets::ExternalCallTarget;
 pub(super) use targets::{is_intrinsic_const, MemberExtensionFirTarget, SelectedOperatorTarget};
+use targets::{ExpressionMemberOperatorTarget, ExternalCallTarget};
 
 use crate::resolve::ResolvedCall;
 
@@ -967,17 +967,7 @@ impl BodyFirChecker<'_> {
         &self,
         expression: ExprId,
         convention: &str,
-    ) -> Result<
-        (
-            FirCallTarget,
-            Box<[FirTypeSubstitution]>,
-            bool,
-            Vec<Option<crate::resolve::ResolvedContextArgument>>,
-            Option<usize>,
-            Vec<Ty>,
-        ),
-        BodyCheckFailure,
-    > {
+    ) -> Result<ExpressionMemberOperatorTarget, BodyCheckFailure> {
         let selected = if convention == "get" {
             self.info.resolved_index_get_call(expression)
         } else {
@@ -991,14 +981,14 @@ impl BodyFirChecker<'_> {
                     selected.member.stable_declaration,
                     &selected.member.params,
                 )?;
-                Ok((
+                Ok(ExpressionMemberOperatorTarget {
                     target,
                     substitutions,
-                    false,
-                    selected.context_args.clone(),
-                    selected.member.call_sig.vararg_index,
+                    extension: false,
+                    context_arguments: selected.context_args.clone(),
+                    vararg_index: selected.member.call_sig.vararg_index,
                     parameters,
-                ))
+                })
             }
             Some(ResolvedCall::Extension(selected)) => {
                 let (target, substitutions) = self.extension_call_target(expression, selected)?;
@@ -1016,14 +1006,14 @@ impl BodyFirChecker<'_> {
                     selected.stable_declaration,
                     &parameters,
                 )?;
-                Ok((
+                Ok(ExpressionMemberOperatorTarget {
                     target,
                     substitutions,
-                    true,
-                    selected.context_args.clone(),
-                    selected.vararg_index,
+                    extension: true,
+                    context_arguments: selected.context_args.clone(),
+                    vararg_index: selected.vararg_index,
                     parameters,
-                ))
+                })
             }
             Some(
                 ResolvedCall::TopLevel(_)
@@ -1031,12 +1021,10 @@ impl BodyFirChecker<'_> {
                 | ResolvedCall::MemberExtension { .. }
                 | ResolvedCall::LocalFunction(_),
             )
-            | None => {
-                return Err(self.failure(
-                    self.file.expr_span(expression),
-                    BodyCheckFailureKind::UnsupportedCallShape,
-                ));
-            }
+            | None => Err(self.failure(
+                self.file.expr_span(expression),
+                BodyCheckFailureKind::UnsupportedCallShape,
+            )),
         }
     }
 
@@ -2273,7 +2261,7 @@ impl BodyFirChecker<'_> {
                 },
             });
         }
-        self.selected_member_call_with_receiver(expression, arguments, &selected, receiver)
+        self.selected_member_call_with_receiver(expression, arguments, selected, receiver)
     }
 
     /// Publish an exact member callable after another checked source construct (notably an
@@ -2552,7 +2540,7 @@ impl BodyFirChecker<'_> {
                     .flatten()
             })
         {
-            let target = self.member_extension_call_target(expression, &selected)?;
+            let target = self.member_extension_call_target(expression, selected)?;
             let cause = self.expression_origin(expression)?;
             let dispatch_receiver = self
                 .materialize_implicit_receiver(
@@ -2591,13 +2579,19 @@ impl BodyFirChecker<'_> {
                 substitutions: target.substitutions,
             });
         }
-        let (target, substitutions, extension, context_args, vararg_index, parameters) =
-            self.expression_member_operator_target(expression, convention)?;
+        let ExpressionMemberOperatorTarget {
+            target,
+            substitutions,
+            extension,
+            context_arguments,
+            vararg_index,
+            parameters,
+        } = self.expression_member_operator_target(expression, convention)?;
         let arguments = self.call_arguments_with_context(
             expression,
             operands,
             &parameters,
-            context_args.iter().map(Option::as_ref),
+            context_arguments.iter().map(Option::as_ref),
             vararg_index,
         )?;
         let receiver = FirReceiver {
