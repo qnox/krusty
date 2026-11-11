@@ -1,5 +1,3 @@
-1	crates/krusty-build/src/gradle.rs	you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`: help: try: `if let Ok(()) = result { panic!("a compiler plugin applied before krusty was ignored") }`
-1	crates/krusty-build/src/gradle.rs	you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`: help: try: `if let Ok(()) = result { panic!("the assignment plugin applied beside KSP was ignored") }`
 1	src/assignable.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `arguments`
 1	src/bin/blockers.rs	consider using `sort_by_key`
 1	src/compiler.rs	the method `accept_inline_bodies` doesn't need a mutable reference
@@ -44,8 +42,6 @@
 1	src/frontend/inline_preparation.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let selected_roots = roots.get_mut(root.source.raw() as usize)?;`
 1	src/frontend/inline_preparation.rs	this function has too many arguments (9/7)
 1	src/frontend/tests/streaming.rs	using `clone` on type `ResolvedCallableHeader` which implements the `Copy` trait: help: try removing the `clone` call: `callable`
-1	src/ir/generated_members.rs	all variants have the same prefix: `Serialization`
-1	src/ir/value_class_constructors.rs	redundant closure: help: replace the closure with the function itself: `&remap_ty`
 1	src/jvm/bytecode_passes/temporaries/null_check_folds.rs	this `if` can be collapsed into the outer `match`
 1	src/jvm/classfile/control_flow.rs	this function has too many arguments (8/7)
 1	src/jvm/classfile/local_variables.rs	this OR pattern can be rewritten using a range: help: try: `0x15..=0x19`
@@ -65,8 +61,6 @@
 1	src/parser.rs	field assignment outside of initializer for an instance created with Default::default()
 1	src/parser.rs	this manual char comparison can be written more succinctly: help: consider using an array of `char`: `['L', 'l', 'u', 'U']`
 1	src/parser.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if header_ctor_kw { self.tok().span.lo } else { 0 }`
-1	src/plugins/mod.rs	this `map_or` can be simplified
-1	src/plugins/serialization.rs	the following explicit lifetimes could be elided: 'ir
 1	src/resolve.rs	called `expect` on `current_owner` after checking its variant with `is_some`
 1	src/resolve.rs	redundant closure: help: replace the closure with the function itself: `&hidden`
 1	src/resolve.rs	redundant closure: help: replace the closure with the function itself: `matches_qual`
@@ -110,13 +104,6 @@
 1	src/resolve/type_parameter_owners.rs	this loop could be written as a `while let` loop: help: try: `while let Some(header) = index.declaration_header(current) { .. }`
 1	src/resolve/type_use_annotation_publication.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/resolve/variance_conflicts.rs	parameter is only used in recursion: help: if this is intentional, prefix it with an underscore: `_walk`
-1	src/symbol_resolver/generic_inference.rs	this function has too many arguments (8/7)
-1	src/symbol_resolver/generic_inference.rs	this function has too many arguments (9/7)
-1	src/symbol_resolver/member_specialization.rs	this function has too many arguments (8/7)
-1	src/symbol_resolver/overload_selection.rs	this function has too many arguments (8/7)
-1	src/symbol_resolver/overload_selection.rs	very complex type used. Consider factoring parts into `type` definitions
-1	src/types.rs	redundant guard
-1	src/types/interning.rs	unnecessary use of `to_string`: help: use: `"T"`
 1	tests/common/byte_dump.rs	unused import: `immutable_classpath_content_fingerprint`
 1	tests/common/byte_dump/fingerprint.rs	function `immutable_classpath_content_fingerprint` is never used
 1	tests/common/source_set_compile.rs	function `source_set_diagnostics` is never used
@@ -139,7 +126,6 @@
 2	src/resolve/streaming_signature_bridge/operator_conventions.rs	this function has too many arguments (8/7)
 2	src/resolve/streaming_signature_bridge/semantics.rs	this function has too many arguments (8/7)
 3	src/fir/body_check/calls.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `selected`
-3	src/module_symbols.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
 3	src/resolve.rs	unnecessary closure used to substitute value for `Option::None`
 3	src/resolve/streaming_signature_bridge/rejected_member_call.rs	this function has too many arguments (8/7)
 3	src/resolve/streaming_signature_bridge/type_parameter_publication.rs	this function has too many arguments (8/7)
