@@ -1135,21 +1135,21 @@ fn companion_extension_references_lower_as_receiverless_static_values() {
         platform,
     );
 
-    let receiverless_references = ir
+    let receiverless_property_references = ir
         .exprs
         .iter()
         .filter(|expression| {
             matches!(
                 expression,
-                IrExpr::Lambda {
-                    arity: 0,
-                    captures,
-                    ..
-                } if captures.is_empty()
+                IrExpr::CallableReference(reference)
+                    if matches!(reference.target, crate::ir::IrCallableReferenceTarget::Property(_))
+                        && reference.captures.is_empty()
+                        && reference.bound_receiver.is_none()
+                        && reference.declaration_parameters.is_empty()
             )
         })
         .count();
-    assert!(receiverless_references >= 1);
+    assert_eq!(receiverless_property_references, 1);
     assert!(ir.exprs.iter().all(|expression| {
         !matches!(
             expression,
