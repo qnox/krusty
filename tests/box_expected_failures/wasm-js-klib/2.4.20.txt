@@ -3042,7 +3042,6 @@ operatorConventions/assignToDotQualifiedWithSideEffect.kt
 operatorConventions/compareTo/comparable.kt
 operatorConventions/compareTo/doubleInt.kt
 operatorConventions/compareTo/doubleLong.kt
-operatorConventions/compareTo/extensionArray.kt
 operatorConventions/compareTo/intDouble.kt
 operatorConventions/compareTo/longDouble.kt
 operatorConventions/kt14201_2.kt
