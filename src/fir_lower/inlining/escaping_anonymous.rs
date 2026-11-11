@@ -1974,6 +1974,18 @@ fn append_lifted_captures(
             *order = extended.into_boxed_slice();
         }
     }
+    // A lifted capture is the inliner's constructor argument, not a source read at the object
+    // expression. A plain local or field load must not open its own line between `new` and
+    // `invokespecial`; a capture that is itself a call keeps the line of that call.
+    for &capture in captures {
+        if matches!(
+            ir.expr(capture),
+            IrExpr::GetValue(_) | IrExpr::GetField { .. }
+        ) {
+            let _ = ir.take_source_line(capture);
+            ir.mark_positionless(capture);
+        }
+    }
     let IrExpr::New {
         args,
         ctor_params,
@@ -2092,11 +2104,30 @@ fn replace_lifted_capture_reads(
     }
     for (expression, offset) in reads {
         let (receiver, _) = crate::ir::clone_expression_dag(ir, receiver);
+        // The field access keeps the capture use's line and marks before this receiver. The
+        // cloned receiver is the regenerated class's `this`, not a source read, so a line copied
+        // onto it would open a second entry on the same `aload`.
+        clear_capture_receiver_lines(ir, receiver);
         ir.exprs[expression as usize] = IrExpr::GetField {
             receiver,
             class,
             index: field_base + offset,
         };
+    }
+}
+
+/// A lifted capture's receiver is storage, not a source expression. Drop every line the clone
+/// carried so only the field access marks.
+fn clear_capture_receiver_lines(ir: &mut crate::ir::IrFile, receiver: ExprId) {
+    let mut pending = vec![receiver];
+    let mut seen = HashSet::default();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        let _ = ir.take_source_line(expression);
+        ir.mark_positionless(expression);
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
     }
 }
 
