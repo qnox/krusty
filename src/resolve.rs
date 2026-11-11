@@ -30031,6 +30031,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         this_labels: Vec::new(),
         lexical_class_context: Vec::new(),
         classifier_header: None,
+        annotated_classifier: None,
         exact_anonymous_class_roots: crate::fx_hash::HashSet::default(),
         extension_receiver_labels: Vec::new(),
         local_function_receivers: crate::fx_hash::HashSet::default(),
@@ -32467,6 +32468,9 @@ struct Checker<'a> {
     lexical_class_context: Vec<TypeName>,
     /// Classifier header currently being checked and its part. It never becomes an implicit receiver.
     classifier_header: Option<classifier_binding::ClassifierHeader>,
+    /// Classifier whose own annotations are being checked. They are resolved outside it, so it is
+    /// no implicit receiver there even where it is an enclosing class's companion.
+    annotated_classifier: Option<TypeName>,
     /// Anonymous classifiers in the current structural ownership chain. Their generated `$` names are
     /// exact roots, never evidence of lexical parents; those come only from `lexical_class_context`.
     exact_anonymous_class_roots: crate::fx_hash::HashSet<TypeName>,
