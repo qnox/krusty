@@ -51,6 +51,7 @@ pub mod ir_emit;
 mod lambda_classes;
 mod lifted_declaration_ownership;
 mod lifted_names;
+mod line_numbers;
 mod local_class_names;
 mod local_delegate_accessors;
 mod local_delegate_closures;

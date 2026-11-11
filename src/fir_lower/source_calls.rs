@@ -215,6 +215,7 @@ impl BodyLowering<'_> {
         extension_receiver: Option<ExprId>,
         arguments: &[crate::fir::FirCallArgument],
         result: ResolvedTy,
+        call_line: u32,
     ) -> Option<ExprId> {
         if dispatch_receiver.is_some() || extension_receiver.is_some() {
             return None;
@@ -266,6 +267,29 @@ impl BodyLowering<'_> {
                 callee: Some(callee),
             },
         )?;
+        // The primitive is `@InlineOnly`: where the block's body starts on the call's line,
+        // kotlinc's inliner separates the two with the synthetic inline line at the block's frame
+        // marker, as it does for every `@InlineOnly` call.
+        if call_line != 0 {
+            if let IrExpr::Block {
+                stmts,
+                value: Some(body),
+            } = self.ir.expr(invocation).clone()
+            {
+                let marker = stmts.iter().copied().find(|&statement| {
+                    matches!(
+                        self.ir.debug_local_provenance(statement),
+                        Some(crate::ir::IrDebugLocalProvenance::LambdaFrameMarker { .. })
+                    )
+                });
+                if let Some(marker) = marker {
+                    self.ir.set_statement_line(marker, call_line);
+                    if block_start_line(self.ir, body) == Some(call_line) {
+                        self.ir.inline_synthetic_lines.insert(marker);
+                    }
+                }
+            }
+        }
         self.ir.intrinsic_suspension_points.insert(
             invocation,
             crate::ir::IrIntrinsicSuspensionPoint {
@@ -400,6 +424,7 @@ impl BodyLowering<'_> {
             // A checked plan is an obligation, not an optimization hint. If its already-validated
             // operands cannot be materialized, propagate failure to `checked_call` as an unsupported
             // external call; never retry the same source as an ordinary dependency invocation.
+            let first_expanded = self.ir.exprs.len();
             let expanded = self.external_inline_call(ExternalInlineCallRequest {
                 target,
                 plan,
@@ -413,6 +438,7 @@ impl BodyLowering<'_> {
                 extension_receiver_parameter,
                 source_line,
             })?;
+            self.settle_inline_expansion_positions(first_expanded);
             self.ir.inline_regions.insert(expanded);
             return Some(expanded);
         }
@@ -1379,6 +1405,7 @@ impl BodyLowering<'_> {
             .iter()
             .map(|(name, ty)| (name.to_string(), ty.get()))
             .collect::<Vec<_>>();
+        let first_default = self.ir.exprs.len();
         let defaults = annotation
             .defaults
             .iter()
@@ -1387,6 +1414,13 @@ impl BodyLowering<'_> {
                 None => Some(None),
             })
             .collect::<Option<Vec<_>>>()?;
+        // The element defaults are the annotation declaration's values, which kotlinc builds
+        // without offsets in the implementation class it generates: no node of the construction
+        // site's call gives them a position.
+        self.ir.settle_positions(
+            first_default..self.ir.exprs.len(),
+            crate::ir::IrNodePosition::default(),
+        );
         let enclosing_class = self
             .body
             .lexical_class_owner()
@@ -1830,6 +1864,10 @@ impl BodyLowering<'_> {
                         .record_inline_copy_call_line(expression as u32, source_line);
                 }
             }
+            // The expansion is the callee's code, which kotlinc's inliner copies with the callee's
+            // own lines: what it copied keeps the template's positions, and what it built to bind
+            // operands and splice lambdas has none of the call's.
+            self.settle_inline_expansion_positions(first_generated);
             let expanded = if statements.is_empty() {
                 inlined
             } else {
@@ -2159,13 +2197,7 @@ impl BodyLowering<'_> {
         ty: Ty,
         statements: &mut Vec<ExprId>,
     ) -> ExprId {
-        let temporary = self.allocate_temporary();
-        let declaration = self.ir.add_expr(IrExpr::Variable {
-            index: temporary,
-            ty,
-            init: Some(value),
-            named: false,
-        });
+        let (declaration, temporary) = self.value_temporary(value, ty);
         self.ir.call_operand_bindings.insert(declaration);
         statements.push(declaration);
         let read = self.ir.add_expr(IrExpr::GetValue(temporary));
@@ -2322,4 +2354,23 @@ pub(super) fn rehome_inline_body_values(
         &mut crate::fx_hash::HashSet::default(),
     )?;
     Some(local_count)
+}
+
+/// The line a spliced block body starts on: the first statement's line, or the start of the first
+/// expression it reaches.
+fn block_start_line(ir: &crate::ir::IrFile, body: ExprId) -> Option<u32> {
+    let mut expression = body;
+    loop {
+        if let Some(line) = ir.statement_line(expression).filter(|&line| line != 0) {
+            return Some(line);
+        }
+        match ir.expr(expression) {
+            IrExpr::Block { stmts, value } => expression = *stmts.first().or(value.as_ref())?,
+            _ => {
+                return ir
+                    .start_line(expression)
+                    .or_else(|| ir.source_line(expression))
+            }
+        }
+    }
 }

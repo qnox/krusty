@@ -1392,6 +1392,10 @@ impl BodyLowering<'_> {
             && self.ir.suspend_funs.contains(&impl_fn)
         {
             let continuation = self.ir.add_expr(IrExpr::CurrentContinuation);
+            // The invocation is a suspend call, which kotlinc marks where it starts: the operand
+            // it passes is read at the invocation's position, not the inlined call's.
+            self.ir.copy_position(invocation, continuation);
+            self.ir.copy_inline_copy_mark(invocation, continuation);
             let ty = Ty::obj("kotlin/coroutines/Continuation");
             self.ir.set_logical_type(continuation, ty);
             let slot = self.allocate_temporary();
@@ -1438,7 +1442,7 @@ impl BodyLowering<'_> {
                 // physical instruction. Put that source point on the generated bindings; an
                 // enclosing inline copy maps it through the caller frame retained below.
                 for &declaration in &declarations {
-                    self.ir.expr_lines.insert(declaration, line);
+                    self.ir.set_statement_line(declaration, line);
                     self.ir.copy_inline_copy_mark(invocation, declaration);
                 }
                 self.ir.copy_inline_copy_mark(invocation, unit);

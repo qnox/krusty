@@ -254,8 +254,13 @@ pub(in super::super) fn apply(
             let IrExpr::Lambda { captures, .. } = &mut ir.exprs[copy as usize] else {
                 unreachable!("the specialized escaping value remains a lambda");
             };
-            for (capture, transferred) in inline_captures.iter().zip(transferred).rev() {
+            for (capture, transferred) in inline_captures.iter().zip(transferred.clone()).rev() {
                 captures.splice(capture.parameter..=capture.parameter, transferred);
+            }
+            // The caller's lambda is never built: kotlinc's inliner loads the values it captured
+            // for the regenerated closure with no line of the lambda's.
+            for value in transferred.into_iter().flatten() {
+                ir.clear_position(value);
             }
         }
     }

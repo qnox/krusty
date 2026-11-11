@@ -553,7 +553,7 @@ impl BodyLowering<'_> {
                             operand,
                             check: crate::ir::NullCheck::Source,
                         });
-                        let asserted = if operand_ty != target.get() {
+                        if operand_ty != target.get() {
                             self.ir.set_logical_type(asserted, operand_ty.non_null());
                             self.ir.add_expr(IrExpr::TypeOp {
                                 op: IrTypeOp::ImplicitCoercion,
@@ -562,11 +562,7 @@ impl BodyLowering<'_> {
                             })
                         } else {
                             asserted
-                        };
-                        // kotlinc states a `!!`'s own line before its operand, and keeps it when
-                        // the operand's first instruction marks another line there.
-                        self.ir.kept_start_lines.insert(asserted);
-                        asserted
+                        }
                     }
                     FirTypeOperation::SafeCast => {
                         self.safe_cast_expression(operand_id, target.get())?
@@ -653,7 +649,8 @@ impl BodyLowering<'_> {
                     }
                     FirUnaryOperation::BitwiseNot => {
                         // `inv` xors with every bit set in the carrier. `ULong` is that `long`
-                        // carrier, the same width `Long.inv` already uses.
+                        // carrier, the same width `Long.inv` already uses. The mask is code of
+                        // the member's body, not of the source: it has no position.
                         let carrier = expression.ty.get().canonical_semantic().non_null();
                         let all_bits = self.ir.add_expr(IrExpr::Const(
                             if matches!(carrier, crate::types::Ty::Long | crate::types::Ty::ULong) {
@@ -662,6 +659,9 @@ impl BodyLowering<'_> {
                                 IrConst::Int(-1)
                             },
                         ));
+                        let mask = all_bits as usize;
+                        self.ir
+                            .settle_positions(mask..mask + 1, crate::ir::IrNodePosition::default());
                         self.ir.add_arithmetic(
                             IrBinOp::BitXor,
                             operand,
@@ -1033,6 +1033,7 @@ impl BodyLowering<'_> {
             FirExprKind::Elvis { lhs, rhs } => {
                 // Set only while this elvis is the next link of an enclosing chain.
                 let chain_start = self.elvis_chain_start.take();
+                let first_link_node = self.ir.exprs.len();
                 let lhs_value = self.expression(*lhs)?;
                 let temporary = self.allocate_temporary();
                 let variable = self.ir.add_expr(IrExpr::Variable {
@@ -1047,11 +1048,14 @@ impl BodyLowering<'_> {
                     named: false,
                 });
                 // fir2ir declares the temporary where the elvis starts: for a later link of a
-                // chain, where the chain starts.
+                // chain, where the chain starts. Its store marks that line, after a multi-line left
+                // side has marked its own.
                 let start = chain_start
                     .unwrap_or_else(|| self.body.expression_debug_lines(expression_id).start);
                 if start != 0 {
                     self.ir.elvis_temporaries.insert(variable, start);
+                    self.ir.set_start_line_if_absent(variable, start);
+                    self.ir.set_source_line(variable, start);
                 }
                 let condition_lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
                 let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
@@ -1071,11 +1075,6 @@ impl BodyLowering<'_> {
                 let rhs = self.expression(*rhs);
                 self.elvis_chain_start = None;
                 let rhs = rhs?;
-                if chained {
-                    // `a ?: b ?: c` is one chain that begins with `a`, as kotlinc folds it: the
-                    // later elvis does not state a start line of its own.
-                    self.ir.kept_start_lines.remove(&rhs);
-                }
                 let rhs = self.coerce_result(rhs, expression.ty.get());
                 let lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
                 let lhs = self.coerce_result(lhs, expression.ty.get());
@@ -1092,6 +1091,21 @@ impl BodyLowering<'_> {
                     (None, None) => self.body.expression_debug_lines(expression_id).source,
                 };
                 self.ir.whens.elvises.insert(result, line);
+                if let Some(chain_start) = chain_start {
+                    // fir2ir builds a chain left-nested, `(a ?: b) ?: c`, so every link after the
+                    // first is an elvis starting where the chain starts; folding the chain leaves
+                    // that link's temporary and null test at that position, in the chain's block.
+                    self.ir.whens.elvis_chain_links.insert(result);
+                    let position = crate::ir::IrNodePosition {
+                        start_line: Some(chain_start),
+                        source_line: Some(chain_start),
+                        end_line: Some(self.body.expression_debug_lines(expression_id).end)
+                            .filter(|&end| end != 0),
+                        ..crate::ir::IrNodePosition::default()
+                    };
+                    self.ir
+                        .settle_positions(first_link_node..self.ir.exprs.len(), position);
+                }
                 // An elvis over a safe call is one more guard of that call's chain: its left
                 // value's null check joins the chain's, and every `null` reaches the right side.
                 let over_safe_call = matches!(
@@ -1102,14 +1116,10 @@ impl BodyLowering<'_> {
                     self.ir.null_guards.insert(result);
                     self.ir.elvis_safe_call_guards.insert(result);
                 }
-                let elvis = self.ir.add_expr(IrExpr::Block {
+                self.ir.add_expr(IrExpr::Block {
                     stmts: vec![variable],
                     value: Some(result),
-                });
-                // kotlinc states the elvis's own line where it begins and again where its value is
-                // stored, and keeps it when the left value or the store marks another line there.
-                self.ir.kept_start_lines.insert(elvis);
-                elvis
+                })
             }
             FirExprKind::Throw(value) => {
                 let operand = self.expression(*value)?;
@@ -1247,7 +1257,7 @@ impl BodyLowering<'_> {
                         // statements do; emission only consumes this map.
                         let line = self.body.expression_debug_lines(result).source;
                         if line != 0 {
-                            self.ir.expr_lines.insert(lowered, line);
+                            self.ir.set_statement_line(lowered, line);
                         }
                         Ok(lowered)
                     })
@@ -1468,50 +1478,14 @@ impl BodyLowering<'_> {
         if !matches!(expression.kind, FirExprKind::Lambda { .. }) {
             self.record_callable_reference_provenance(expression_id, first_generated);
         }
-        let mut debug = self.body.expression_debug_lines(expression_id);
-        // kotlinc replaces an array-factory call (`intArrayOf(a, b)`) by its vararg, whose offsets
-        // start at the first element, so the call's own line never opens. An empty factory call
-        // keeps its own position.
-        if let FirExprKind::ArrayLiteral { elements, .. } = &expression.kind {
-            let first = elements
-                .first()
-                .map(|first| self.body.expression_debug_lines(first.value).source);
-            if let Some(line) = first.filter(|&line| line != 0) {
-                debug.source = line;
-            }
-        }
-        if debug.positionless {
-            self.ir.mark_positionless(lowered);
-        }
+        let debug = self.expression_position(expression_id, &expression.kind);
+        // The builtin call this node realizes, when lowering made a node of its own for it.
         if debug.source != 0 {
-            self.ir.set_source_line(lowered, debug.source);
-            // The builtin call this node realizes, when lowering made a node of its own for it.
             if let Some(call) = builtin_call.filter(|_| lowered as usize >= first_generated) {
                 self.ir.builtin_calls.insert(lowered, call);
             }
-            // A call whose operands were stored first keeps the call's line on the call itself, which
-            // kotlinc marks once those operands are evaluated.
-            if let Some(&call) = self.operand_bound_calls.get(&lowered) {
-                self.ir.set_source_line_if_absent(call, debug.source);
-            }
-            for raw in first_generated..self.ir.exprs.len() {
-                let raw = raw as u32;
-                if !self.ir.suspend_calls.contains_key(&raw) {
-                    continue;
-                }
-                self.ir.set_source_line_if_absent(raw, debug.source);
-            }
         }
-        if debug.end != 0 {
-            self.ir.set_end_line(lowered, debug.end);
-            for raw in first_generated..self.ir.exprs.len() {
-                let raw = raw as u32;
-                if !self.ir.suspend_calls.contains_key(&raw) {
-                    continue;
-                }
-                self.ir.set_end_line_if_absent(raw, debug.end);
-            }
-        }
+        self.stamp_expression(debug, lowered, first_generated);
         self.record_expression_origins(first_generated, lowered, origin);
         if ends_inlined_call {
             self.ir.fir_origins.insert(
@@ -1693,7 +1667,11 @@ impl BodyLowering<'_> {
             return Ok(lowered);
         }
         let expression = self.expression(value)?;
+        let first_conversion = self.ir.exprs.len();
         let converted = self.lowered_with_conversion(expression, source_type, conversion)?;
+        // fir2ir builds an implicit conversion at the offsets of the value it converts.
+        self.ir
+            .settle_positions_of(first_conversion..self.ir.exprs.len(), expression);
         if conversion.is_some_and(|conversion| {
             matches!(conversion.kind, FirConversionKind::FunctionValue { .. })
         }) {
@@ -2084,13 +2062,7 @@ impl BodyLowering<'_> {
             .ok_or(FirLoweringFailure::MissingExpression(receiver.value))?
             .ty
             .get();
-        let temporary = self.allocate_temporary();
-        let variable = self.ir.add_expr(IrExpr::Variable {
-            index: temporary,
-            ty: receiver_type,
-            init: Some(receiver_value),
-            named: false,
-        });
+        let (variable, temporary) = self.value_temporary(receiver_value, receiver_type);
         // The selector executes only on the non-null branch. Publish that data-flow fact as an
         // explicit conversion so nullable primitive receivers are unboxed before their selected
         // operation; a raw nullable-slot read would put a wrapper into a primitive local.
@@ -2100,12 +2072,9 @@ impl BodyLowering<'_> {
         let safe_call_line = self.body.expression_debug_lines(safe_call).source;
         let receiver_line = self.body.expression_debug_lines(receiver.value).start;
         if receiver_line != 0 {
-            self.ir.safe_call_reads.insert(
-                selector_read,
-                crate::ir::IrSafeCallRead::Receiver {
-                    start_line: receiver_line,
-                },
-            );
+            self.ir
+                .set_start_line_if_absent(selector_read, receiver_line);
+            self.ir.set_source_line(selector_read, receiver_line);
         }
         let selector_read = self.ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
@@ -2118,19 +2087,15 @@ impl BodyLowering<'_> {
         self.constants.bind_temporary(receiver.value);
         let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
         let condition_read = self.ir.add_expr(IrExpr::GetValue(temporary));
-        let null_check = crate::ir::IrSafeCallRead::NullCheck {
-            line: safe_call_line,
-        };
-        if safe_call_line != 0 {
-            self.ir.safe_call_reads.insert(condition_read, null_check);
-        }
         let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
             op: IrBinOp::Eq,
             lhs: condition_read,
             rhs: null,
         });
         if safe_call_line != 0 {
-            self.ir.safe_call_reads.insert(condition, null_check);
+            for read in [condition_read, condition] {
+                self.ir.set_source_line(read, safe_call_line);
+            }
         }
         let selector = self.expression(selector)?;
         let selector = self.coerce_result(selector, result_type);
