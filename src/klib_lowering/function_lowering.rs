@@ -508,10 +508,17 @@ pub(super) fn raw_function_header(
 }
 
 /// The header of `selected`'s serialized declaration `function`. When `class_bodies` is
-/// given, a member is read through its class: the class is authenticated, the raw dispatch
-/// receiver is proved against it, and the member header binds that class's type parameters.
-/// Semantic conversion interns the receiver's class path, so the proof comes first. A
-/// top-level callable, or a member whose caller has no class bodies, keeps `function`.
+/// given, a member that already carries its provider-owned class contract is read through
+/// that class: the class is authenticated, the raw dispatch receiver is proved against it,
+/// and the member header binds that class's type parameters. Semantic conversion interns
+/// the receiver's class path, so the proof comes first.
+///
+/// A singleton edge does not carry that contract on the callable. Several edges share one
+/// declaration and differ only in [`KlibBodyCallable::singleton_dispatch`]. The serialized
+/// receiver is the contract: the variant it matches is the member, and a variant it does
+/// not match declines. Comparing before that match would decline every edge for a missing
+/// contract, so insertion order could never select one. A top-level callable, or a member
+/// whose caller has no class bodies, keeps `function`.
 pub(super) fn selected_function_header(
     selected: KlibBodyCallable<'_>,
     purpose: HeaderPurpose,
@@ -519,23 +526,28 @@ pub(super) fn selected_function_header(
     function: &KlibIrFunction,
     class_bodies: Option<&crate::klib_libraries::KlibDeclarationBodies>,
 ) -> Result<FunctionHeader, KlibBodyDeclineReason> {
-    match class_bodies.filter(|_| selected.is_member()) {
-        Some(bodies) => super::class_headers::authenticate(selected, bodies).and_then(|class| {
-            super::class_headers::authenticate_receiver(
-                class.contract,
-                class.arena,
-                class.function,
-            )?;
-            raw_function_header_with_class(
-                Some(selected),
-                purpose,
-                class.arena,
-                class.function,
-                class.types,
-            )
-        }),
-        None => raw_function_header(Some(selected), purpose, arena, function),
+    let Some(bodies) = class_bodies.filter(|_| selected.is_member()) else {
+        return raw_function_header(Some(selected), purpose, arena, function);
+    };
+    if selected.class_contract().is_some() {
+        let class = super::class_headers::authenticate(selected, bodies)?;
+        super::class_headers::authenticate_receiver(class.contract, class.arena, class.function)?;
+        return raw_function_header_with_class(
+            Some(selected),
+            purpose,
+            class.arena,
+            class.function,
+            class.types,
+        );
     }
+    // The header match is this edge's class contract. A member that is not a singleton
+    // edge still has to present the contract the provider recorded.
+    if selected.singleton_dispatch().is_none() {
+        return Err(mismatch(
+            "a selected member has no provider-owned class contract".to_owned(),
+        ));
+    }
+    raw_function_header(Some(selected), purpose, arena, function)
 }
 
 pub(super) fn raw_function_header_with_class(
