@@ -327,7 +327,6 @@ callableReference/adaptedReferences/unboundReferences.kt
 callableReference/adaptedReferences/unitCoercionOverloads.kt
 callableReference/adaptedReferences/varargFromBaseClass.kt
 callableReference/adaptedReferences/varargWithDefaultValue.kt
-callableReference/arrayConstructorArgument.kt
 callableReference/arrayOfNulls.kt
 callableReference/bound/array.kt
 callableReference/bound/boundReferenceToOverloadedFunction.kt
