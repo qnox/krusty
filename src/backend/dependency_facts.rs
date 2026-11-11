@@ -277,7 +277,8 @@ impl BackendCallableFact {
         singleton_dispatch: Option<SingletonDispatch>,
         class_contract: Option<&'a crate::libraries::KlibBodyClassContract>,
     ) -> Option<crate::libraries::KlibBodyCallable<'a>> {
-        let class_contract = self.edge_class_contract(singleton_dispatch, class_contract);
+        let (class_contract, serialized_member) =
+            self.edge_class_contract(singleton_dispatch, class_contract);
         crate::libraries::KlibBodyCallable::new(
             crate::libraries::KlibBodyCallableShape {
                 name: &self.name,
@@ -303,28 +304,42 @@ impl BackendCallableFact {
             self.klib_body_companion_receiver.as_ref(),
             self.declaration_owner,
             self.dependency_callable.as_ref(),
+            serialized_member,
         )
     }
 
-    /// The class a singleton edge authenticates through. `provided` is the class the provider
-    /// recorded for that singleton. A member fact that carries no class of its own takes the
-    /// class of the singleton it dispatches to.
+    /// The class a singleton edge authenticates through, and how that member is serialized.
+    /// `provided` is the class the provider recorded for that singleton. A member fact that
+    /// carries no class of its own takes the class of the singleton it dispatches to, and the
+    /// provider records that member as the serialized function.
     fn edge_class_contract<'a>(
         &'a self,
         singleton_dispatch: Option<SingletonDispatch>,
         provided: Option<&'a crate::libraries::KlibBodyClassContract>,
-    ) -> Option<&'a crate::libraries::KlibBodyClassContract> {
+    ) -> (
+        Option<&'a crate::libraries::KlibBodyClassContract>,
+        crate::libraries::KlibSerializedMember,
+    ) {
         if let Some(contract) = provided {
-            return Some(contract);
+            return (
+                Some(contract),
+                crate::libraries::KlibSerializedMember::Class,
+            );
         }
         if let Some(singleton) = singleton_dispatch.filter(|_| {
             self.kind == ExternalCallableKind::Member && self.klib_body_class_contract.is_none()
         }) {
             if let Some(contract) = self.singleton_class_contract(singleton) {
-                return Some(contract);
+                return (
+                    Some(contract),
+                    crate::libraries::KlibSerializedMember::Function,
+                );
             }
         }
-        self.klib_body_class_contract.as_ref()
+        (
+            self.klib_body_class_contract.as_ref(),
+            crate::libraries::KlibSerializedMember::Class,
+        )
     }
 
     fn singleton_class_contract(

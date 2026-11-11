@@ -627,9 +627,12 @@ pub(super) fn prepare_public<'a>(
     source: LocalClassSource<'a, '_>,
     selected: crate::libraries::KlibBodyCallable<'_>,
 ) -> Result<Option<(PreparedLocalClass<'a>, KlibDependencyCallable)>, KlibBodyDeclineReason> {
-    let header = super::class_headers::authenticate(selected, source.bodies)?;
+    let header = super::class_headers::authenticate(selected, source.bodies, None)?;
     let contract = header.contract;
     let Some(primary) = &contract.primary_constructor else {
+        return Ok(None);
+    };
+    let Some(class) = header.class else {
         return Ok(None);
     };
     if contract.kind != TypeKind::Class
@@ -638,8 +641,8 @@ pub(super) fn prepare_public<'a>(
         || contract.is_value
         || contract.is_inner
         || contract.is_expect
-        || header.class.value_class_representation.is_some()
-        || header.class.members.iter().any(|member| {
+        || class.value_class_representation.is_some()
+        || class.members.iter().any(|member| {
             matches!(
                 member,
                 KlibIrMember::Class(_) | KlibIrMember::EnumEntry(_) | KlibIrMember::TypeAlias(_)
@@ -649,7 +652,6 @@ pub(super) fn prepare_public<'a>(
         return Ok(None);
     }
     let arena = header.arena;
-    let class = header.class;
     let wanted = KlibIrSignature::Public(primary.clone());
     let mut constructors = class.members.iter().filter_map(|member| match member {
         KlibIrMember::Function(id) => Some(arena.function(*id)).filter(|f| f.constructor),
