@@ -396,9 +396,7 @@ pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
 ///
 /// Every call reaches the JVM, so every completed compile is reported like a recorded-path miss.
 pub fn kotlinc_compile_unrecorded(args: &[String]) -> Option<(i32, String)> {
-    let result = kotlinc_compile_live(args, None, None)?;
-    byte_dump::report_unrecorded_kotlinc(args);
-    Some(result)
+    kotlinc_compile_unrecorded_with_language_settings(args, None, None)
 }
 
 /// Compile with exact language/API levels installed in kotlinc's typed compiler configuration.
