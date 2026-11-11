@@ -312,6 +312,12 @@ impl CallableRegistry {
                         // realized through the receiver's own representation.
                         continue;
                     }
+                    if super::lower::box_members::dispatches_to_boxes(
+                        ir, callables, expression, callable,
+                    ) {
+                        // The boxes below a library class implement its member through a stub.
+                        continue;
+                    }
                     if callable
                         .compiler_operation()
                         .filter(|operation| {
@@ -739,6 +745,7 @@ mod tests {
             compiler_intrinsic: None,
             semantic_role: None,
             overridden_declarations: Box::new([]),
+            primitive_implementations: Box::new([]),
             member_realization: MemberRealization::Dispatch,
             params: vec![Ty::String, Ty::Int],
             physical_params: Vec::new(),

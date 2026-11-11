@@ -353,7 +353,7 @@ impl Body<'_> {
             Some(value) => {
                 let form = self
                     .runtime
-                    .box_form(self.module, ty, value)
+                    .box_form(self.module, ty, value)?
                     .ok_or_else(|| format!("a function value taking a `{}` value", describe(ty)))?;
                 form.emit_unbox(code);
                 Ok(())
@@ -379,7 +379,7 @@ impl Body<'_> {
             Some(value) => {
                 let form = self
                     .runtime
-                    .box_form(self.module, ty, value)
+                    .box_form(self.module, ty, value)?
                     .ok_or_else(|| {
                         format!("a function value answering a `{}` value", describe(ty))
                     })?;
