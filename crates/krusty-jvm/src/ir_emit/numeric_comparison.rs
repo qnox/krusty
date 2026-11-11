@@ -75,6 +75,10 @@ impl Emitter<'_> {
         if !int_cat {
             if !own_line {
                 self.return_to_statement_line(&[lhs, rhs], code);
+            } else if op == Ne {
+                // kotlinc's `a != b` is `not(a == b)`: the negation marks its line before the
+                // equality decides (`Not.BooleanNegation`), which is before the `*cmp`.
+                self.mark_comparison_decision(&[lhs, rhs], code);
             }
             // `>`/`>=` use the `*l` float-compare variant, `<`/`<=` the `*g` — so NaN yields false
             // (kotlinc). Long has no NaN distinction but shares the three-way-result branch below.

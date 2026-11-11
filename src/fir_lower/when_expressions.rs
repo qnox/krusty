@@ -48,13 +48,8 @@ impl BodyLowering<'_> {
                 // `JvmOptimizationLowering` deliberately keeps one initialized from a variable read
                 // (`dontTouchTemporaryVals`). Whether its store survives is then the bytecode
                 // temporaries pass's decision, exactly as in kotlinc.
-                let temporary = self.allocate_temporary();
-                prefix.push(self.ir.add_expr(IrExpr::Variable {
-                    index: temporary,
-                    ty: subject_ty,
-                    init: Some(value),
-                    named: false,
-                }));
+                let (declaration, temporary) = self.value_temporary(value, subject_ty);
+                prefix.push(declaration);
                 let read = self.when_subject_read(temporary, Some(subject), None);
                 self.set_expression_state(subject, LoweringState::Lowered(read));
                 temporary

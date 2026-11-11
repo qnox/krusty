@@ -121,11 +121,16 @@ pub(super) fn realize(
         .get(&owner)
         .map(|underlying| erase(underlying, under))
         .expect("a specialized value class has an underlying type");
+    // kotlinc's `specializeEqualsCall` builds the specialized comparison at the `==`'s offsets:
+    // every node built here takes its position.
+    let built = ir.exprs.len();
+    let position = ir.position(id);
     let left_check = left.nullable;
     let right_check = right.unboxed && right.nullable;
     if !left_check && !right_check {
         let equals = compare(ir, owner, &carrier, right.unboxed, lhs, rhs);
         ir.exprs[id as usize] = negated_if(ir, equals, matches!(op, IrBinOp::Ne));
+        ir.settle_positions(built..ir.exprs.len(), position);
         return;
     }
     let mut stmts = Vec::new();
@@ -175,6 +180,7 @@ pub(super) fn realize(
         value: Some(equals),
     });
     ir.exprs[id as usize] = negated_if(ir, block, matches!(op, IrBinOp::Ne));
+    ir.settle_positions(built..ir.exprs.len(), position);
 }
 
 /// `value`, or `value == false` for `!=`, which kotlinc emits as the negated branch over it.
@@ -239,9 +245,10 @@ fn if_null(ir: &mut IrFile, slot: u32, when_null: ExprId, otherwise: ExprId) -> 
         lhs: value,
         rhs: null,
     });
-    ir.add_expr(IrExpr::When {
-        branches: vec![(Some(is_null), when_null), (None, otherwise)],
-    })
+    ir.add_when(
+        vec![(Some(is_null), when_null), (None, otherwise)],
+        Ty::Boolean,
+    )
 }
 
 fn constant(ir: &mut IrFile, value: IrConst) -> ExprId {

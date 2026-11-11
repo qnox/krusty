@@ -318,7 +318,8 @@ fn overridable_declared_functions(
         .collect()
 }
 
-fn equivalent(source: &dyn SymbolSource, left: Ty, right: Ty) -> bool {
+/// Whether two semantic types are the same type: equal, or each a subtype of the other (`V`, `V!`).
+pub(super) fn equivalent(source: &dyn SymbolSource, left: Ty, right: Ty) -> bool {
     let left = left.canonical_semantic();
     let right = right.canonical_semantic();
     left == right

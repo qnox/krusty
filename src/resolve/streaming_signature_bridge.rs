@@ -3201,10 +3201,9 @@ pub(crate) fn finalized_streamed_signature_index(
         false
     }
 
-    /// `equals`/`hashCode`/`toString` stubs are recorded for every `value` keyword so a boxed
-    /// value class can fill them. An unboxed `@JvmInline` class, and a `value class` rejected
-    /// because `FullValueClasses` is off, must not keep those instance methods beside the inline
-    /// `-impl` family.
+    /// `equals`/`hashCode`/`toString` stubs are recorded for every final `value` keyword. A boxed
+    /// or an unboxed value class generates them; a `value class` rejected (for example because
+    /// `FullValueClasses` is off) is an ordinary class and keeps `Any`'s members.
     fn generated_value_keyword_method_is_suppressed(
         headers: &crate::fir::StreamedHeaderModule,
         table: &SymbolTable,
@@ -3246,7 +3245,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 classifier.render(),
             )
         });
-        !class.full_value
+        !class.full_value && class.value_field.is_none()
     }
 
     // A body inferred below may pass a value of a type variable with several bounds; the module
@@ -4540,10 +4539,11 @@ pub(crate) fn finalized_streamed_signature_index(
             classifier.internal,
             interface_delegations,
         ));
-        let sealed_subclasses = classifier
-            .is_sealed()
-            .then(|| table.subclass_names_of(classifier.internal))
-            .unwrap_or_default();
+        let sealed_subclasses = if classifier.is_sealed() {
+            table.subclass_names_of(classifier.internal)
+        } else {
+            Default::default()
+        };
         let signature_scope = crate::fir::SignatureScope {
             owner: stub.id,
             source: stub.source,
@@ -4560,7 +4560,7 @@ pub(crate) fn finalized_streamed_signature_index(
                         .filter(|_| {
                             parameter.context_kind == crate::types::ContextParameterKind::Named
                         })
-                        .map(|name| Box::<str>::from(name)),
+                        .map(Box::<str>::from),
                     parameter.context_kind,
                     semantics.resolve_compact_header_type(signature_scope, parameter.ty)?,
                 ))

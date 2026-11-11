@@ -860,6 +860,9 @@ mod tests {
             "src/plugins",
             &[
                 "ast",
+                // Dependency-free shared source-target identity passed at plugin activation;
+                // this contract does not grant access to a driver or representation backend.
+                "compilation_target",
                 "diag",
                 "ir",
                 "kt_string",

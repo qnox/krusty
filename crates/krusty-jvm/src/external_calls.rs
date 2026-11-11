@@ -1253,6 +1253,11 @@ fn realize_expressions(
                     }
                 }
                 krusty::libraries::MemberRealization::Direct { pass_receiver } => {
+                    if krusty::jvm::jvm_libraries::unsigned_intrinsics::realizes_jdk_unsigned_operation(
+                        &callable,
+                    ) {
+                        default_call_operands.record_intrinsic_call(expression);
+                    }
                     if pass_receiver {
                         args.insert(0, dispatch_receiver.take().ok_or(target)?);
                     } else {

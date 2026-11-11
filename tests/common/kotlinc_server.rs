@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use super::server_pool::{self, server_pool_cap};
 use super::{
-    byte_dump, die_with_parent, java_home, jvm_gclog_args, kotlinc_lib_dir, read_exact_deadline,
-    spawn_owned, ProfGuard,
+    byte_dump, die_with_parent, java_home, kotlinc_lib_dir, protocol_jvm_log_args,
+    read_exact_deadline, spawn_owned, ProfGuard,
 };
 
 // The reference `kotlinc` is a JVM program; spawning its CLI per test pays a ~2-4s JVM + compiler cold
@@ -284,6 +284,22 @@ fn kotlinc_lib_of(compiler_jar: &Path) -> Option<PathBuf> {
     compiler_jar.parent().map(Path::to_path_buf)
 }
 
+/// The reference compiler server's JVM options; [`KotlincServer::new`] explains the heap and JIT.
+///
+/// A C1-only JVM reserves a 48 MB code cache. The compiler's code fills it after about 200 warm
+/// compiles, and the JVM then disables its JIT for good ("CodeCache is full. Compiler has been
+/// disabled"), so a cold box corpus ran nearly all of its ~7,400 reference compiles interpreted.
+/// 808 box compiles in one server took 205 s (264 s CPU) with the default cache and 140 s (149 s
+/// CPU) with 256 MB, of which about 70 MB is used and stays flat over 2,000 compiles. The full tiered
+/// JIT was faster per compile (111 s) but cost 213 s CPU, which the busy test host pays for.
+const KOTLINC_SERVER_JVM_OPTIONS: [&str; 5] = [
+    "-XX:TieredStopAtLevel=1",
+    "-XX:ReservedCodeCacheSize=256m",
+    "-XX:+UseSerialGC",
+    "-Xmx1g",
+    "-Xmn256m",
+];
+
 /// A persistent JVM running the in-process `KotlincServer` compiler, fed compiler arg-lists over a pipe.
 struct KotlincServer {
     _child: Child,
@@ -304,13 +320,8 @@ impl KotlincServer {
         // left to grow from the small default initial heap: every compile allocates far more short-lived
         // data than it retains, and the undersized default nursery collected so often that a cold box
         // corpus shard spent ~19% more time in kotlinc (and grew a larger heap) than with 256 MB.
-        cmd.args(jvm_gclog_args("kotlinc"));
-        cmd.args([
-            "-XX:TieredStopAtLevel=1",
-            "-XX:+UseSerialGC",
-            "-Xmx1g",
-            "-Xmn256m",
-        ]);
+        cmd.args(protocol_jvm_log_args("kotlinc"));
+        cmd.args(KOTLINC_SERVER_JVM_OPTIONS);
         cmd.args(jvm_properties);
         // The JVM decodes file names in the host locale. Under a POSIX one a source whose name is
         // not ASCII (`withСallsinplace.kt`) cannot be opened, so the reference verdict would depend
@@ -400,9 +411,7 @@ pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
 ///
 /// Every call reaches the JVM, so every completed compile is reported like a recorded-path miss.
 pub fn kotlinc_compile_unrecorded(args: &[String]) -> Option<(i32, String)> {
-    let result = kotlinc_compile_live(args, None, None)?;
-    byte_dump::report_unrecorded_kotlinc(args);
-    Some(result)
+    kotlinc_compile_unrecorded_with_language_settings(args, None, None)
 }
 
 /// Compile with exact language/API levels installed in kotlinc's typed compiler configuration.
@@ -630,5 +639,41 @@ mod stats_tests {
             super::byte_dump::live_kotlinc_reasons(&test),
             vec![expected]
         );
+    }
+}
+
+#[cfg(test)]
+mod jvm_option_tests {
+    use super::KOTLINC_SERVER_JVM_OPTIONS;
+
+    /// The C1-only server must keep its JIT across a whole cold corpus: the JVM's default code cache
+    /// for that mode fills partway through and disables compilation for the rest of the process.
+    #[test]
+    fn the_reference_server_reserves_a_code_cache_that_outlasts_a_cold_corpus() {
+        let java = format!("{}/bin/java", super::super::java_home());
+        let output = std::process::Command::new(java)
+            .args(KOTLINC_SERVER_JVM_OPTIONS)
+            .args(["-XX:+PrintFlagsFinal", "-version"])
+            .output()
+            .expect("run the reference JVM");
+        assert!(
+            output.status.success(),
+            "the reference JVM rejected its options"
+        );
+        let flags = String::from_utf8_lossy(&output.stdout);
+        let flag = |name: &str| -> u64 {
+            flags
+                .lines()
+                .find_map(|line| {
+                    let mut fields = line.split_whitespace();
+                    let _kind = fields.next()?;
+                    (fields.next()? == name).then_some(())?;
+                    (fields.next()? == "=").then_some(())?;
+                    fields.next()?.parse().ok()
+                })
+                .unwrap_or_else(|| panic!("the JVM reports no {name}"))
+        };
+        assert_eq!(flag("TieredStopAtLevel"), 1);
+        assert_eq!(flag("ReservedCodeCacheSize"), 256 * 1024 * 1024);
     }
 }

@@ -142,7 +142,9 @@ mod provider_constructor_selection;
 use constructor_arguments::{
     ConstructionExpectations, ConstructorCandidateRejection, SourceConstructorSelection,
 };
-use provider_constructor_selection::{LibraryConstructorSelection, RejectedProviderConstructors};
+use provider_constructor_selection::{
+    InvisibleConstructor, LibraryConstructorSelection, RejectedProviderConstructors,
+};
 mod script_receivers;
 pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod call_argument_position;
@@ -221,9 +223,11 @@ mod lexical_bindings;
 mod lexical_policies;
 mod library_constructor_failure;
 mod local_call_applicability;
+mod local_call_arguments;
 mod local_callable_reference_selection;
 mod local_capture_dependencies;
 mod local_class_scope;
+use local_call_arguments::LocalArguments;
 mod local_extension_applicability;
 mod local_initialization;
 mod local_method_dependencies;
@@ -372,7 +376,6 @@ mod streaming_signature_tests;
 mod super_calls;
 pub use super_calls::ResolvedSuperCall;
 mod superclass_validation;
-mod type_join;
 mod type_parameter_owners;
 use type_parameter_owners::ty_param_names_into;
 mod uninferred_call_results;
@@ -455,7 +458,6 @@ pub(crate) use streaming_signature_bridge::{
 pub(crate) use streaming_signature_bridge::{
     publish_checked_local_signatures_in_active_root, publish_discovered_local_capture_declarations,
 };
-use type_join::join_type_projection;
 
 const MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES: usize = 64;
 const MAX_OVERLOAD_DIAGNOSTIC_BYTES: usize = 64 * 1024;
@@ -9979,232 +9981,6 @@ impl<'a> Checker<'a> {
         })
     }
 
-    fn select_property_read(
-        &self,
-        scope: &CheckerScope<'_>,
-        receiver: Ty,
-        name: &str,
-    ) -> Result<Option<PropertyReadSelection>, PropertyReadAmbiguity> {
-        if !receiver.is_nullable() {
-            let local = self.checked_body_local_property(receiver, name).cloned();
-            if let Some(local) = local {
-                return Ok(Some(PropertyReadSelection::Member(Box::new(
-                    PropertyReadMemberSelection {
-                        name: name.to_string(),
-                        ty: local.ty,
-                        owner: local.owner,
-                        interface: local.interface,
-                        publication: None,
-                        getter: None,
-                        accessor: None,
-                        producer: crate::libraries::PropertyProducer::KotlinAccessor,
-                        metadata_constant_read: false,
-                        context_access: None,
-                        compiler_intrinsic: None,
-                        compile_time_constant: None,
-                        source_member: Some(local.source_member),
-                        stable_declaration: local.stable_declaration,
-                        access: Some((local.visibility, local.owner)),
-                        stable_read: false,
-                    },
-                ))));
-            }
-            let resolver = self.resolver();
-            let declaration =
-                resolver.select_member_property_applicable_where(receiver, name, |property| {
-                    let context_types = property.getter.params.get(..property.context_count)?;
-                    self.select_context_arguments_with_types(scope, context_types)
-                        .ok()
-                        .map(|_| {
-                            (
-                                self.receiver_property_accessible(
-                                    property.visibility,
-                                    property.owner,
-                                    receiver,
-                                    property.getter.external_identity,
-                                ),
-                                property.context_count,
-                            )
-                        })
-                });
-            if let Some(selected) = declaration {
-                if !selected.competing_accessors.is_empty() {
-                    return Err(self.competing_accessor_ambiguity(name, &selected));
-                }
-                let owner = selected.owner;
-                let visibility = selected.visibility;
-                let publication = selected.read(receiver);
-                let mut selected_property = selected.property;
-                let checked_ty = selected_property.as_mut().and_then(|property| {
-                    self.apply_checked_source_property_result(receiver, property)
-                });
-                // A captured invariant argument is an out-projection (`Inv<out (X & Y)>`). The
-                // projection is the argument, not the value a read produces: the read is the upper
-                // bound, which is what exposes `X` and `Y` on `sel(Inv(A), Inv(B)).v`.
-                let ty = checked_ty.unwrap_or(selected.ty).projection_read_ty();
-                // Core property selection already incorporates a nearer covariant accessor override.
-                // The inherited declaration still owns the physical accessor/field shape; its erased
-                // return must not overwrite the selected logical property type.
-                let (getter, context_access) = if let Some(declaration) = selected_property.as_ref()
-                {
-                    if declaration.context_count == 0 {
-                        (
-                            (declaration.getter_declaration.is_some()
-                                || !declaration.getter.descriptor.is_empty()
-                                || (declaration.getter.is_abstract
-                                    && !declaration.getter.name.is_empty()
-                                    && declaration.getter.name != property_getter_name(name)))
-                            .then(|| {
-                                let mut getter =
-                                    crate::symbol_resolver::ResolvedMember::from_callable(
-                                        receiver,
-                                        declaration.getter.clone(),
-                                        false,
-                                    );
-                                getter.member.stable_declaration = declaration
-                                    .getter_declaration
-                                    .or(declaration.stable_declaration);
-                                getter
-                            }),
-                            None,
-                        )
-                    } else {
-                        let context_types = declaration
-                            .getter
-                            .params
-                            .get(..declaration.context_count)
-                            .ok_or(PropertyReadAmbiguity::MissingContext)?;
-                        let context_args = self
-                            .select_context_arguments(scope, context_types)
-                            .ok_or(PropertyReadAmbiguity::MissingContext)?;
-                        let mut getter = crate::symbol_resolver::ResolvedMember::from_callable(
-                            receiver,
-                            declaration.getter.clone(),
-                            false,
-                        );
-                        getter.member.context_count = declaration.context_count;
-                        getter.member.stable_declaration = declaration
-                            .getter_declaration
-                            .or(declaration.stable_declaration);
-                        (
-                            Some(getter),
-                            Some(Box::new(ResolvedPropertyAccess {
-                                property: declaration.clone(),
-                                context_args,
-                            })),
-                        )
-                    }
-                } else {
-                    (None, None)
-                };
-                return Ok(Some(PropertyReadSelection::Member(Box::new(
-                    PropertyReadMemberSelection {
-                        name: name.to_string(),
-                        ty,
-                        owner,
-                        interface: selected.interface,
-                        publication,
-                        getter,
-                        accessor: selected_property
-                            .as_ref()
-                            .map(|property| Box::new(property.getter.clone())),
-                        producer: selected_property.as_ref().map_or(
-                            crate::libraries::PropertyProducer::KotlinAccessor,
-                            |property| property.producer,
-                        ),
-                        metadata_constant_read: selected_property
-                            .as_ref()
-                            .is_some_and(|property| property.metadata_constant_read),
-                        context_access,
-                        compiler_intrinsic: selected_property
-                            .as_ref()
-                            .and_then(|property| property.getter.compiler_intrinsic),
-                        compile_time_constant: selected_property
-                            .as_ref()
-                            .and_then(|property| property.compile_time_constant.clone()),
-                        source_member: selected_property
-                            .as_ref()
-                            .and_then(|property| property.source_member),
-                        stable_declaration: selected_property
-                            .as_ref()
-                            .and_then(|property| property.stable_declaration),
-                        access: (visibility != Visibility::Public).then_some((visibility, owner)),
-                        stable_read: selected_property.as_ref().is_some_and(|property| {
-                            let receiver_final = receiver
-                                .obj_internal()
-                                .and_then(|owner| self.resolver().classifier(owner))
-                                .is_some_and(|class| class.is_final());
-                            property.read_stability.permits(receiver_final)
-                        }),
-                    },
-                ))));
-            }
-            // A body-local classifier's applied supertypes are finalized on this Pass-2 lexical
-            // rung, so it is not yet present in the immutable module provider borrowed by the
-            // active checker. Retry only the inherited MEMBER facet through that semantic edge;
-            // extension rungs remain selected against the original receiver below.
-            for supertype in self.body_local_supertypes(receiver) {
-                if let Ok(Some(selection)) = self.select_property_read(scope, supertype, name) {
-                    let private = match &selection {
-                        PropertyReadSelection::Member(member) => {
-                            member.access.is_some_and(|(visibility, _)| {
-                                !crate::symbol_resolver::member_is_inheritable(visibility)
-                            })
-                        }
-                        PropertyReadSelection::MemberExtension(_)
-                        | PropertyReadSelection::Extension(_, _) => false,
-                    };
-                    if private {
-                        continue;
-                    }
-                    if matches!(selection, PropertyReadSelection::Member(_)) {
-                        return Ok(Some(selection));
-                    }
-                }
-            }
-            match self.member_extension_property(scope, receiver, name) {
-                Ok(Some(property)) => {
-                    return Ok(Some(PropertyReadSelection::MemberExtension(Box::new(
-                        property,
-                    ))));
-                }
-                Err(()) => return Err(PropertyReadAmbiguity::MemberExtension),
-                Ok(None) => {}
-            }
-        }
-        // Extension properties are a lower scope-tower level than members. Do not even collect
-        // them while a member declaration can win: an ambiguous or inapplicable extension family
-        // cannot poison an otherwise exact member read.
-        let type_variables = self.postponed_type_variables_in(receiver);
-        let resolver = self.resolver().with_type_variables(&type_variables);
-        let extension = match resolver.select_extension_property(receiver, name) {
-            Ok(property) => property,
-            Err(_) => return Err(PropertyReadAmbiguity::Extension),
-        };
-        if let Some(property) = extension {
-            let context_args = if property.context_count == 0 {
-                Vec::new()
-            } else {
-                let start = usize::from(property.receiver.is_some());
-                let context_types = property
-                    .getter
-                    .params
-                    .get(start..start + property.context_count)
-                    .ok_or(PropertyReadAmbiguity::MissingContext)?;
-                self.select_context_arguments(scope, context_types)
-                    .ok_or(PropertyReadAmbiguity::MissingContext)?
-            };
-            return Ok(Some(PropertyReadSelection::Extension(
-                Box::new(ResolvedPropertyAccess {
-                    property,
-                    context_args,
-                }),
-                (!type_variables.is_empty()).then_some(receiver),
-            )));
-        }
-        Ok(None)
-    }
-
     fn active_source_member_declaration(
         &self,
         source: crate::libraries::SourceMember,
@@ -12501,7 +12277,7 @@ impl<'a> Checker<'a> {
                             param_names: &member.call_sig.param_names,
                             param_defaults: &member.call_sig.param_defaults,
                             required: member.call_sig.required,
-                            vararg: member.call_sig.vararg,
+                            vararg_index: member.call_sig.vararg_index,
                             context_count: member.context_count,
                             ret: member.ret,
                             // The selected member's normalized signature is stable across bounded
@@ -12804,11 +12580,13 @@ impl<'a> Checker<'a> {
         let explicit_type_args = self.resolved_explicit_type_args(scope, call);
         ret = self.commit_module_member_generic_call(
             call,
-            fi.generic_sig.as_ref(),
-            inferred_member_type_args,
-            &explicit_type_args,
-            &logical_arg_tys,
-            &fi.call_sig,
+            intersection_inference::ModuleMemberGenericCall {
+                signature: fi.generic_sig.as_ref(),
+                inferred_arguments: inferred_member_type_args,
+                explicit_type_args: &explicit_type_args,
+                logical_arg_tys: &logical_arg_tys,
+                call_sig: &fi.call_sig,
+            },
             ret,
         );
         let mut resolved = crate::symbol_resolver::ResolvedMember::from_member(
@@ -14236,6 +14014,10 @@ impl<'a> Checker<'a> {
                                 );
                             }
                             Ok(LibraryConstructorSelection::Rejected) => return Ty::Error,
+                            Ok(LibraryConstructorSelection::Invisible(invisible)) => {
+                                self.report_invisible_constructor(call, &invisible);
+                                return Ty::Error;
+                            }
                             Ok(LibraryConstructorSelection::NoMatch(_)) => {}
                             Err(error) => {
                                 constructor_mapping_error = Some(error);
@@ -14645,10 +14427,12 @@ impl<'a> Checker<'a> {
                             let return_info = selected.ret;
                             ret = self.commit_selected_call_intersections(
                                 call,
-                                &signature,
-                                &explicit_type_args,
-                                &shape.parameter_indices,
-                                &shape.call_sig,
+                                intersection_inference::GenericCallCommitment {
+                                    signature: &signature,
+                                    explicit_type_args: &explicit_type_args,
+                                    parameter_indices: &shape.parameter_indices,
+                                    call_sig: &shape.call_sig,
+                                },
                                 &mut selected.bindings,
                                 &mut selected.intersection_bindings,
                                 return_info,
@@ -14908,8 +14692,10 @@ impl<'a> Checker<'a> {
                         call,
                         rt,
                         &name,
-                        args,
-                        &generic_member_partial,
+                        invoke_selection::InvokeArguments {
+                            expressions: args,
+                            partial_types: &generic_member_partial,
+                        },
                         CallResultConstraint::direct(expected),
                     )
                 })
@@ -15409,8 +15195,10 @@ impl<'a> Checker<'a> {
                             args,
                             arg_tys: &arg_tys,
                         },
-                        callee,
-                        value_ty,
+                        invoke_selection::InvokeReceiver {
+                            expression: callee,
+                            ty: value_ty,
+                        },
                         span,
                         plan.invoke,
                         CallResultConstraint::direct(expected),
@@ -16083,14 +15871,14 @@ impl<'a> Checker<'a> {
                         let ctx_types = &sig.params[..ctx_count];
                         if let Some(sources) = self.select_context_arguments(scope, ctx_types) {
                             let value_count = sig.params.len() - ctx_count;
-                            let required_end =
-                                sig.params.len().saturating_sub(usize::from(sig.vararg()));
                             let missing_required = arg_names.is_none()
                                 && args.len() < value_count
-                                && (ctx_count + args.len()..required_end).any(|i| {
-                                    sig.param_defaults
-                                        .get(i)
-                                        .map_or(i < sig.required, |has_default| !*has_default)
+                                && (ctx_count + args.len()..sig.params.len()).any(|i| {
+                                    sig.vararg_index != Some(i)
+                                        && sig
+                                            .param_defaults
+                                            .get(i)
+                                            .map_or(i < sig.required, |has_default| !*has_default)
                                 });
                             if (!sig.vararg() && args.len() > value_count) || missing_required {
                                 self.arg_tys(scope, args);
@@ -16108,7 +15896,7 @@ impl<'a> Checker<'a> {
                                         param_names: &sig.param_names,
                                         param_defaults: &sig.param_defaults,
                                         required: sig.required,
-                                        vararg: sig.vararg(),
+                                        vararg_index: sig.vararg_index,
                                         context_count: ctx_count,
                                         ret: sig.ret,
                                         source_display,
@@ -16127,86 +15915,24 @@ impl<'a> Checker<'a> {
                             };
                             let trailing_lambda =
                                 self.file.call_has_trailing_lambda.contains(&call.0);
-                            let mapped_slots = if arg_names.is_some() || trailing_lambda {
-                                match map_call_args(
+                            let Some(slots) = self.check_local_call_arguments(
+                                scope,
+                                call,
+                                LocalArguments {
                                     args,
-                                    arg_names.as_deref(),
-                                    &sig.param_names[ctx_count..],
-                                    sig.params.len().saturating_sub(ctx_count),
-                                    sig.required.saturating_sub(ctx_count),
-                                    value_defaults,
-                                    sig.vararg_index
-                                        .and_then(|index| index.checked_sub(ctx_count)),
+                                    names: arg_names.as_deref(),
                                     trailing_lambda,
-                                ) {
-                                    Ok(slots) => Some(slots),
-                                    Err(error) => {
-                                        self.report_call_arg_mapping_error(call, args, error);
-                                        return sig.ret;
-                                    }
-                                }
-                            } else if !sig.vararg() && args.len() < value_count {
-                                Some(
-                                    args.iter()
-                                        .copied()
-                                        .map(Some)
-                                        .chain(std::iter::repeat_n(None, value_count - args.len()))
-                                        .collect(),
-                                )
-                            } else {
-                                None
+                                },
+                                &sig,
+                                ctx_count,
+                                &fname,
+                            ) else {
+                                return sig.ret;
                             };
-                            if let Some(slots) = &mapped_slots {
-                                for (i, argument) in slots.iter().enumerate() {
-                                    if let Some(argument) = argument {
-                                        let parameter_index = ctx_count + i;
-                                        let p = sig.params[parameter_index];
-                                        let aty = self.check_argument_expected(
-                                            scope,
-                                            *argument,
-                                            p,
-                                            sig.lambda_recv
-                                                .get(parameter_index)
-                                                .copied()
-                                                .unwrap_or(false),
-                                            Some(&fname),
-                                        );
-                                        self.expect_assignable(
-                                            p,
-                                            aty,
-                                            self.span(*argument),
-                                            "argument",
-                                        );
-                                    }
-                                }
-                            } else {
-                                for (i, a) in args.iter().enumerate() {
-                                    let p = if sig.vararg() && i >= value_count.saturating_sub(1) {
-                                        sig.params[sig.params.len() - 1]
-                                            .array_read_elem()
-                                            .unwrap_or(Ty::Error)
-                                    } else {
-                                        sig.params[ctx_count + i]
-                                    };
-                                    let parameter_index = ctx_count + i;
-                                    let aty = self.check_argument_expected(
-                                        scope,
-                                        *a,
-                                        p,
-                                        sig.lambda_recv
-                                            .get(parameter_index)
-                                            .copied()
-                                            .unwrap_or(false),
-                                        Some(&fname),
-                                    );
-                                    self.expect_call_arg(scope, p, *a, aty);
-                                }
-                            }
-                            if let Some(slots) = mapped_slots {
-                                if !self.commit_selected_argument_slots(call, slots, value_defaults)
-                                {
-                                    return Ty::Error;
-                                }
+                            if (arg_names.is_some() || trailing_lambda || slots.contains(&None))
+                                && !self.commit_selected_argument_slots(call, slots, value_defaults)
+                            {
+                                return Ty::Error;
                             }
                             self.mark_context_extension_receiver_used(scope, call, &sources);
                             self.mark_local_function_call(
@@ -16230,40 +15956,20 @@ impl<'a> Checker<'a> {
                     if ctx_count == 0 {
                         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
                         if arg_names.is_some() || trailing_lambda {
-                            let slots = match map_call_args(
-                                args,
-                                arg_names.as_deref(),
-                                &sig.param_names,
-                                sig.params.len(),
-                                sig.required,
-                                &sig.param_defaults,
-                                sig.vararg_index,
-                                trailing_lambda,
-                            ) {
-                                Ok(slots) => slots,
-                                Err(error) => {
-                                    self.report_call_arg_mapping_error(call, args, error);
-                                    return sig.ret;
-                                }
+                            let Some(slots) = self.check_local_call_arguments(
+                                scope,
+                                call,
+                                LocalArguments {
+                                    args,
+                                    names: arg_names.as_deref(),
+                                    trailing_lambda,
+                                },
+                                &sig,
+                                0,
+                                &fname,
+                            ) else {
+                                return sig.ret;
                             };
-                            for (index, argument) in slots.iter().enumerate() {
-                                if let Some(argument) = argument {
-                                    let parameter = sig.params[index];
-                                    let actual = self.check_argument_expected(
-                                        scope,
-                                        *argument,
-                                        parameter,
-                                        sig.lambda_recv.get(index).copied().unwrap_or(false),
-                                        Some(&fname),
-                                    );
-                                    self.expect_assignable(
-                                        parameter,
-                                        actual,
-                                        self.span(*argument),
-                                        "argument",
-                                    );
-                                }
-                            }
                             if !self.commit_selected_argument_slots(
                                 call,
                                 slots,
@@ -16312,7 +16018,7 @@ impl<'a> Checker<'a> {
                                 param_names: &sig.param_names,
                                 param_defaults: &sig.param_defaults,
                                 required: sig.required,
-                                vararg: sig.vararg(),
+                                vararg_index: sig.vararg_index,
                                 context_count: ctx_count,
                                 ret: sig.ret,
                                 source_display,
@@ -16325,37 +16031,28 @@ impl<'a> Checker<'a> {
                         // parameter must be checked WITH that parameter's block parameter types
                         // (`check_lambda_with_types`) — exactly as a top-level call does — so a
                         // destructured / `it` lambda parameter gets its real type instead of erased `Any`.
-                        for (i, &a) in args.iter().enumerate() {
-                            let parameter =
-                                sig.vararg_index.filter(|vararg| i >= *vararg).unwrap_or(i);
-                            let p = if sig.vararg_index == Some(parameter) {
-                                sig.params[parameter].array_read_elem().unwrap_or(Ty::Error)
-                            } else {
-                                sig.params[parameter]
-                            };
-                            let aty = self.check_argument_expected(
-                                scope,
-                                a,
-                                p,
-                                sig.lambda_recv.get(parameter).copied().unwrap_or(false),
-                                Some(&fname),
-                            );
-                            self.expect_call_arg(scope, p, a, aty);
-                        }
-                        if omitted_are_optional {
-                            let slots = args
-                                .iter()
-                                .copied()
-                                .map(Some)
-                                .chain(std::iter::repeat_n(None, sig.params.len() - args.len()))
-                                .collect();
-                            if !self.commit_selected_argument_slots(
+                        let Some(slots) = self.check_local_call_arguments(
+                            scope,
+                            call,
+                            LocalArguments {
+                                args,
+                                names: None,
+                                trailing_lambda: false,
+                            },
+                            &sig,
+                            0,
+                            &fname,
+                        ) else {
+                            return sig.ret;
+                        };
+                        if slots.contains(&None)
+                            && !self.commit_selected_argument_slots(
                                 call,
                                 slots,
                                 &sig.param_defaults,
-                            ) {
-                                return Ty::Error;
-                            }
+                            )
+                        {
+                            return Ty::Error;
                         }
                     }
                     let ret = sig.ret;
@@ -16363,22 +16060,40 @@ impl<'a> Checker<'a> {
                     return ret;
                 }
                 if let Some((implicit, selected)) = selected_local_extension {
-                    let arg_tys = candidate_arg_tys
-                        .as_deref()
-                        .expect("a selected local extension has checked argument types");
                     let SelectedLocalExtension {
                         statement: stmt_id,
                         signature,
                         context_args,
                     } = selected;
                     let context_count = signature.context_count.min(signature.params.len());
-                    self.expect_call_args(
+                    let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+                    let Some(slots) = self.check_local_call_arguments(
                         scope,
-                        &signature.params[context_count..],
-                        signature.vararg(),
-                        args,
-                        arg_tys,
-                    );
+                        call,
+                        LocalArguments {
+                            args,
+                            names: arg_names.as_deref(),
+                            trailing_lambda,
+                        },
+                        &signature,
+                        context_count,
+                        &fname,
+                    ) else {
+                        return signature.ret;
+                    };
+                    if arg_names.is_some() || trailing_lambda || slots.contains(&None) {
+                        let Some(value_defaults) = self.require_value_parameter_defaults(
+                            call,
+                            &signature.param_defaults,
+                            context_count,
+                            slots.len(),
+                        ) else {
+                            return Ty::Error;
+                        };
+                        if !self.commit_selected_argument_slots(call, slots, value_defaults) {
+                            return Ty::Error;
+                        }
+                    }
                     self.implicit_receiver_selections
                         .insert(callee, self.implicit_receiver_selection(implicit));
                     self.mark_extension_receiver_used(call, implicit);
@@ -18359,6 +18074,9 @@ impl<'a> Checker<'a> {
                 let mut low_priority_source_constructor = None;
                 let mut low_priority_provider_constructor = None;
                 let mut had_inapplicable_constructor = false;
+                // A selected constructor the site cannot see. It yields to every later callable
+                // level and is reported only once they have all declined.
+                let mut invisible_constructor: Option<Box<InvisibleConstructor>> = None;
                 if let Some(scoped_internal) = bare_constructor_classifier {
                     let (inherited, inherited_owner) =
                         self.inherited_nested_type_with_owner(&fname);
@@ -18426,6 +18144,9 @@ impl<'a> Checker<'a> {
                                     );
                                 }
                                 Ok(LibraryConstructorSelection::Rejected) => return Ty::Error,
+                                Ok(LibraryConstructorSelection::Invisible(invisible)) => {
+                                    invisible_constructor.get_or_insert(invisible);
+                                }
                                 Ok(LibraryConstructorSelection::NoMatch(rejections)) => {
                                     provider_constructor_rejections.extend(rejections);
                                     had_inapplicable_constructor |=
@@ -18446,7 +18167,7 @@ impl<'a> Checker<'a> {
                             .cloned(),
                         CheckerModuleSymbols::Streamed(_) => None,
                     };
-                    if let Some(cls) = ctor_cls {
+                    if let Some(cls) = ctor_cls.filter(|_| invisible_constructor.is_none()) {
                         if cls.source_decl.is_some() {
                             has_source_constructor_declaration = true;
                             // Pass 2 retains the stable semantic class header, not another file's
@@ -18584,6 +18305,9 @@ impl<'a> Checker<'a> {
                                     );
                                 }
                                 Ok(LibraryConstructorSelection::Rejected) => return Ty::Error,
+                                Ok(LibraryConstructorSelection::Invisible(invisible)) => {
+                                    invisible_constructor.get_or_insert(invisible);
+                                }
                                 Ok(LibraryConstructorSelection::NoMatch(rejections)) => {
                                     provider_constructor_rejections.extend(rejections);
                                     had_inapplicable_constructor |=
@@ -19240,6 +18964,9 @@ impl<'a> Checker<'a> {
                             );
                         }
                         Ok(LibraryConstructorSelection::Rejected) => return Ty::Error,
+                        Ok(LibraryConstructorSelection::Invisible(invisible)) => {
+                            invisible_constructor.get_or_insert(invisible);
+                        }
                         Ok(LibraryConstructorSelection::NoMatch(rejections)) => {
                             provider_constructor_rejections.extend(rejections);
                             had_inapplicable_constructor |= !classifier.constructors.is_empty();
@@ -19265,6 +18992,10 @@ impl<'a> Checker<'a> {
                         expected,
                         None,
                     );
+                }
+                if let Some(invisible) = invisible_constructor {
+                    self.report_invisible_constructor(call, &invisible);
+                    return Ty::Error;
                 }
                 let mut candidates = inapplicable_associated;
                 candidates.extend(self.resolver().top_level_candidates(&fname));
@@ -19428,16 +19159,13 @@ impl<'a> Checker<'a> {
                                 return Ty::Error;
                             }
                         }
-                        let required_end = signature
-                            .params
-                            .len()
-                            .saturating_sub(usize::from(signature.vararg()));
                         let missing_required = args.len() < value_count
-                            && (context_count + args.len()..required_end).any(|index| {
-                                signature
-                                    .param_defaults
-                                    .get(index)
-                                    .map_or(index < signature.required, |default| !*default)
+                            && (context_count + args.len()..signature.params.len()).any(|index| {
+                                signature.vararg_index != Some(index)
+                                    && signature
+                                        .param_defaults
+                                        .get(index)
+                                        .map_or(index < signature.required, |default| !*default)
                             });
                         if (!signature.vararg() && args.len() > value_count) || missing_required {
                             let source_display = match self.file.stmt(statement) {
@@ -19456,7 +19184,7 @@ impl<'a> Checker<'a> {
                                     param_names: &signature.param_names,
                                     param_defaults: &signature.param_defaults,
                                     required: signature.required,
-                                    vararg: signature.vararg(),
+                                    vararg_index: signature.vararg_index,
                                     context_count,
                                     ret: signature.ret,
                                     source_display,
@@ -19465,6 +19193,25 @@ impl<'a> Checker<'a> {
                             );
                             return Ty::Error;
                         }
+                        // The arguments map, so an argument's type is what makes the declaration
+                        // inapplicable; its mismatch is the terminal diagnostic.
+                        let fit = self.check_local_call_arguments(
+                            scope,
+                            call,
+                            LocalArguments {
+                                args,
+                                names: arg_names.as_deref(),
+                                trailing_lambda,
+                            },
+                            signature,
+                            context_count,
+                            &fname,
+                        );
+                        if fit.is_some() && !self.call_already_has_argument_diagnostic(call, args) {
+                            self.diags
+                                .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
+                        }
+                        return Ty::Error;
                     }
                 }
                 if !had_rejected_callable {
@@ -20697,7 +20444,10 @@ impl<'a> Checker<'a> {
                             })
                     })
             })
-            .flatten();
+            .flatten()
+            // An assignment resolves its property through the read's scope tower and checks the
+            // setter's visibility only after that.
+            .filter(|_| !self.invisible_member_property_yields(scope, rt, &name));
         if let Some(candidates) = selected_member_property
             .as_ref()
             .and_then(|selected| self.competing_accessor_candidates(&name, selected))
@@ -25690,13 +25440,20 @@ fun box(): String {
         let (_, _, diagnostics) = retained_platform_analysis(source, Box::new(FakeMemberPlatform));
         let mixing = "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.";
         let missing = "no value passed for parameter 'a'.";
+        // kotlinc reports in source order. Where the missing argument anchors on the value arguments
+        // (2.4.0 and 2.4.10), both diagnostics start at the positional `1` and the mixing error,
+        // reported while mapping arguments, comes first; on the callee it precedes the mixing error.
         let expected = ["knownPair", "known", "mixExt"]
             .into_iter()
             .flat_map(|callee| {
-                [
-                    (missing, missing_argument_anchor("1)", callee), Some(callee)),
-                    (mixing, "1", None),
-                ]
+                let missing = (missing, missing_argument_anchor("1)", callee), Some(callee));
+                let mixing = (mixing, "1", None);
+                match crate::diagnostic_wording::no_value_for_parameter_anchor() {
+                    crate::diagnostic_wording::Anchor::ValueArguments => [mixing, missing],
+                    crate::diagnostic_wording::Anchor::ReferencedNameByQualified => {
+                        [missing, mixing]
+                    }
+                }
             })
             .collect::<Vec<_>>();
         let actual = diagnostics
@@ -27145,7 +26902,7 @@ fun box(): String {
     }
 
     #[test]
-    fn same_contravariant_classifier_join_uses_the_bottom_argument() {
+    fn same_contravariant_classifier_join_meets_at_the_argument_intersection() {
         let mut diagnostics = DiagSink::new();
         let file = parse_file("class A\nclass B\ninterface Contra<in T>", &mut diagnostics);
         let files = vec![file];
@@ -27165,7 +26922,7 @@ fun box(): String {
                 Ty::obj_args("Contra", &[Ty::obj("B")]),
                 Span::new(0, 0),
             ),
-            Ty::obj_args("Contra", &[Ty::Nothing])
+            Ty::obj_args("Contra", &[Ty::intersection(&[Ty::obj("A"), Ty::obj("B")])])
         );
         assert_no_diags(&probe_diagnostics);
     }
@@ -29594,62 +29351,27 @@ pub(crate) fn join_applied_classifier(
     if left == right {
         return Some(left.non_null());
     }
-    let (TyKind::Obj(left_owner, left_args), TyKind::Obj(right_owner, right_args)) =
-        (left.non_null().kind(), right.non_null().kind())
-    else {
-        return None;
+    // A pair already being joined further up is recursive: its argument declines, and the
+    // classifier join falls back to the parameter's star bound.
+    let mut element_join = |types: &[Ty]| match types {
+        [left, right]
+            if visiting.contains(&(*left, *right)) || visiting.contains(&(*right, *left)) =>
+        {
+            None
+        }
+        [first, rest @ ..] => rest.iter().try_fold(*first, |joined, ty| {
+            semantic_common_supertype_inner(source, oracle, joined, *ty, visiting)
+        }),
+        [] => None,
     };
-    if left_owner != owner || right_owner != owner || left_args.len() != right_args.len() {
-        return None;
-    }
-    if left_args.is_empty() {
-        return Some(Ty::obj_name(owner));
-    }
-    let classifier = source.classifier(owner)?;
-    if classifier.type_params.len() != left_args.len() {
-        return None;
-    }
-    let mut arguments = Vec::with_capacity(left_args.len());
-    let mut left_formals = crate::symbol_resolver::GSigBinds::default();
-    let mut right_formals = crate::symbol_resolver::GSigBinds::default();
-    for (index, (&left, &right)) in left_args.iter().zip(right_args).enumerate() {
-        let declared_bound = classifier
-            .type_param_bounds
-            .get(index)
-            .and_then(|bounds| bounds.first())
-            .copied()
-            .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-        let left_bound =
-            crate::symbol_resolver::ty_subst_keep_unbound(declared_bound, &left_formals);
-        let right_bound =
-            crate::symbol_resolver::ty_subst_keep_unbound(declared_bound, &right_formals);
-        let star_upper_bound =
-            semantic_common_supertype_inner(source, oracle, left_bound, right_bound, visiting)?;
-        let argument = join_type_projection(
-            source,
-            oracle,
-            classifier
-                .type_param_variances
-                .get(index)
-                .copied()
-                .unwrap_or_default(),
-            star_upper_bound,
-            left,
-            right,
-            visiting,
-        )?;
-        let formal = classifier.type_params[index].clone();
-        left_formals.insert(
-            crate::types::TyParamName::new(&formal),
-            left.projection_inner().unwrap_or(left),
-        );
-        right_formals.insert(
-            crate::types::TyParamName::new(&formal),
-            right.projection_inner().unwrap_or(right),
-        );
-        arguments.push(argument);
-    }
-    Some(Ty::obj_args_name(owner, &arguments))
+    crate::symbol_resolver::join_classifier_applications(
+        source,
+        oracle,
+        owner,
+        &[left, right],
+        &mut element_join,
+    )
+    .ok()
 }
 
 /// `===`/`!==` operands kotlinc forbids: an unsigned type or a `@JvmInline value` class, neither of
@@ -32270,7 +31992,7 @@ struct DiagnosticFunction<'a> {
     param_names: &'a [String],
     param_defaults: &'a [bool],
     required: usize,
-    vararg: bool,
+    vararg_index: Option<usize>,
     context_count: usize,
     ret: Ty,
     source_display: Option<String>,
@@ -34527,7 +34249,7 @@ impl<'a> Checker<'a> {
                 param_names: &candidate.call_sig.param_names,
                 param_defaults: &candidate.call_sig.param_defaults,
                 required: candidate.call_sig.required,
-                vararg: candidate.call_sig.vararg,
+                vararg_index: candidate.call_sig.vararg_index,
                 context_count: candidate.context_count,
                 ret: candidate.callable.ret,
                 source_display: self.module_source_display(candidate, candidate.callable.ret),
@@ -36190,14 +35912,16 @@ impl<'a> Checker<'a> {
                 )
                 .collect::<Vec<_>>();
             if !crate::symbol_resolver::apply_only_input_type_bindings(
-                &source,
-                &result_signature,
+                crate::symbol_resolver::OnlyInputCall {
+                    source: &source,
+                    signature: &result_signature,
+                    receiver: candidate_receiver,
+                    arguments: &only_input_actuals,
+                    vararg_index: candidate.call_sig.vararg_index,
+                    expected_result: expected,
+                },
                 &call_variables.instantiate_formals(&candidate.call_sig.only_input_type_formals),
                 type_args,
-                candidate_receiver,
-                &only_input_actuals,
-                candidate.call_sig.vararg_index,
-                expected,
                 &mut bindings,
             ) {
                 crate::trace_compiler!(
@@ -38696,10 +38420,12 @@ impl<'a> Checker<'a> {
         if let Some(signature) = selected.generic_sig.clone() {
             ret = self.commit_selected_call_intersections(
                 call,
-                &signature,
-                explicit_type_args,
-                &shape.parameter_indices,
-                &shape.call_sig,
+                intersection_inference::GenericCallCommitment {
+                    signature: &signature,
+                    explicit_type_args,
+                    parameter_indices: &shape.parameter_indices,
+                    call_sig: &shape.call_sig,
+                },
                 &mut selected_bindings,
                 &mut intersection_bindings,
                 selected.ret,
@@ -40485,11 +40211,17 @@ impl<'a> Checker<'a> {
             SourceConstructorSelection::Selected {
                 resolved: selected, ..
             } => *selected,
-            SourceConstructorSelection::NoMatch { .. } => {
-                self.diags.error(
-                    span,
-                    format!("krusty: {label}(...) has no matching target constructor"),
-                );
+            SourceConstructorSelection::NoMatch { rejected, .. } => {
+                if !self.report_single_constructor_argument_mismatches(
+                    arguments,
+                    &candidates,
+                    &rejected,
+                ) {
+                    self.diags.error(
+                        span,
+                        format!("krusty: {label}(...) has no matching target constructor"),
+                    );
+                }
                 return;
             }
             SourceConstructorSelection::Ambiguous => {
@@ -42774,6 +42506,9 @@ impl<'a> Checker<'a> {
         if !self.fragment.is_type_use_annotations() {
             self.check_classifier_own_annotations(scope, cl, current_owner);
             self.check_supertype_usage(cl, current_owner);
+            // Member annotations see the classifier's own static rungs (nested classifiers and
+            // its companion), which the class body scope below has not opened yet.
+            let member_rung = self.enter_annotation_class_rung(current_owner);
             for entry in &cl.enum_entries {
                 self.check_non_property_annotation_applications_in_declaration_scope(
                     scope,
@@ -42812,6 +42547,7 @@ impl<'a> Checker<'a> {
                     "constructor",
                 );
             }
+            self.exit_annotation_class_rung(member_rung);
             // Compiler plugins' own class rules read the applications checked just above.
             self.check_plugin_class_rules(scope, cl);
         }
@@ -43449,15 +43185,19 @@ impl<'a> Checker<'a> {
                         };
                         return self.record_or_bind_deferred_constructor_property_type(
                             &classifier_header_scope,
-                            constructor,
-                            *property_declaration,
+                            resolved_type_occurrences::DeferredDeclarationSpelling {
+                                declaration: constructor,
+                                role: constructor_spellings
+                                    .as_ref()
+                                    .and_then(|spellings| spellings.param(index)),
+                            },
+                            resolved_type_occurrences::DeferredDeclarationSpelling {
+                                declaration: *property_declaration,
+                                role: spelling.as_ref().map(|role| role.as_binding()),
+                            },
                             &property.ty,
                             property.is_vararg,
                             constructor_semantic.or(*property_semantic),
-                            constructor_spellings
-                                .as_ref()
-                                .and_then(|spellings| spellings.param(index)),
-                            spelling.as_ref().map(|role| role.as_binding()),
                         );
                     }
                     if let Some(semantic) = constructor_semantic {
@@ -46178,14 +45918,20 @@ impl<'a> Checker<'a> {
                         self.record_whole_array_delegation_arguments(&arguments, &resolved);
                         *resolved
                     }
-                    SourceConstructorSelection::NoMatch { .. } => {
-                        self.diags.error(
+                    SourceConstructorSelection::NoMatch { rejected, .. } => {
+                        if !self.report_single_constructor_argument_mismatches(
+                            &arguments,
+                            &constructor_candidates,
+                            &rejected,
+                        ) {
+                            self.diags.error(
                             entry.span,
                             format!(
                                 "none of the constructors of '{}' can be called with the arguments supplied",
                                 cl.name
                             ),
                         );
+                        }
                         for &argument in &entry.args {
                             self.finish_executable_root(argument);
                         }
@@ -46561,7 +46307,7 @@ impl<'a> Checker<'a> {
             param_names,
             param_defaults,
             required,
-            vararg,
+            vararg_index,
             context_count,
             ret,
             source_display,
@@ -46570,11 +46316,15 @@ impl<'a> Checker<'a> {
         let value_count = params.len() - context_count;
         let got = args.len();
         let span = self.arity_diagnostic_span(call, args, value_count);
-        let required_end = params.len().saturating_sub(usize::from(vararg));
+        let vararg = vararg_index.is_some();
         let names_complete = param_names.len() == params.len();
         if got < value_count {
-            let missing = (context_count + got..required_end).find(|&index| {
-                if param_defaults.is_empty() {
+            // The vararg may be empty wherever it is declared; every other parameter the
+            // positional arguments do not reach needs a default.
+            let missing = (context_count + got..params.len()).find(|&index| {
+                if vararg_index == Some(index) {
+                    false
+                } else if param_defaults.is_empty() {
                     index < required
                 } else {
                     !param_defaults.get(index).copied().unwrap_or(false)
@@ -46617,7 +46367,7 @@ impl<'a> Checker<'a> {
                         } else {
                             ""
                         };
-                        let vararg = if vararg && index + 1 == params.len() {
+                        let vararg = if vararg_index == Some(index) {
                             "vararg "
                         } else {
                             ""
@@ -56075,7 +55825,7 @@ impl<'a> Checker<'a> {
                             param_names: &candidate.call_sig.param_names,
                             param_defaults: &candidate.call_sig.param_defaults,
                             required: candidate.call_sig.required,
-                            vararg: candidate.call_sig.vararg,
+                            vararg_index: candidate.call_sig.vararg_index,
                             context_count: candidate.context_count,
                             ret: candidate.callable.ret,
                             source_display: None,
@@ -56207,10 +55957,12 @@ impl<'a> Checker<'a> {
             let selected_result = selected.callable.ret;
             let result = self.commit_selected_call_intersections(
                 e,
-                &signature,
-                type_args,
-                &shape.parameter_indices,
-                &shape.call_sig,
+                intersection_inference::GenericCallCommitment {
+                    signature: &signature,
+                    explicit_type_args: type_args,
+                    parameter_indices: &shape.parameter_indices,
+                    call_sig: &shape.call_sig,
+                },
                 &mut selected.bindings,
                 &mut selected.intersection_bindings,
                 return_info,
@@ -56221,7 +55973,7 @@ impl<'a> Checker<'a> {
             self.clear_selected_generic_call(e);
         }
         self.mark_selected_inline_lambdas(e, selected.flags.inline, &shape.call_sig);
-        let context_args = shape.context_sources;
+        let context_args = shape.context_sources.clone();
         let implicit_context_args = context_args.iter().flatten().cloned().collect::<Vec<_>>();
         self.mark_context_extension_receiver_used(scope, e, &implicit_context_args);
         let selected_receiver = selected.receiver.unwrap_or(rt);
@@ -56397,7 +56149,7 @@ impl<'a> Checker<'a> {
             resolved.context_args = context_args;
             self.resolved_calls
                 .insert(e, ResolvedCall::Extension(Box::new(resolved)));
-            self.record_resolved_extension_sam_arguments(scope, e, args);
+            self.record_selected_sam_mapped_arguments(scope, e, args, argument_names, &shape);
             return Some(ret);
         }
 

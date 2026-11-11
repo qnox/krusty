@@ -18,10 +18,13 @@ use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrBody, KlibIrClass, KlibIrExprKind, KlibIrFunction, KlibIrMember,
     KlibIrStatement, KlibIrType,
 };
-use crate::metadata::klib_ir::{KlibIrModuleTrees, KlibIrSignature, KlibIrSymbolKind};
+use crate::metadata::klib_ir::{
+    KlibIrModuleTrees, KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind,
+};
 use crate::types::{type_name_child, TypeName};
 
 /// The decoded function declarations of a set of KLIB libraries, joined by exact signature.
+#[derive(Default)]
 pub struct KlibDeclarationBodies {
     /// Decoded trees are immutable and may be shared with other compilations over the same archive.
     libraries: Vec<std::sync::Arc<KlibIrModuleTrees>>,
@@ -31,6 +34,9 @@ pub struct KlibDeclarationBodies {
     /// The producer-declared module graph. These are manifest `depends` edges, not the roles the
     /// current compilation assigned its inputs.
     dependencies: HashMap<String, Vec<String>>,
+    /// Member references no library serializes, keyed by the referencing body module, bound to
+    /// the real declaration they inherit; `None` when the declared hierarchy offers several.
+    inherited: HashMap<(String, KlibIrSignature), Option<KlibDependencyCallable>>,
 }
 
 /// A public classifier search over one producer dependency closure.
@@ -65,17 +71,6 @@ pub(crate) struct KlibEnumEntryClass<'a> {
     pub(crate) class: &'a crate::metadata::klib_ir::tree::KlibIrClass,
 }
 
-impl Default for KlibDeclarationBodies {
-    fn default() -> Self {
-        Self {
-            libraries: Vec::new(),
-            modules: HashMap::default(),
-            owners: HashMap::default(),
-            dependencies: HashMap::default(),
-        }
-    }
-}
-
 /// One decoded KLIB together with the producer graph recorded in its manifest.
 pub struct KlibBodyLibrary {
     module: String,
@@ -104,6 +99,16 @@ impl KlibBodyLibrary {
             dependencies: manifest.depends().into_iter().map(str::to_owned).collect(),
             trees,
         })
+    }
+
+    /// Add the platform stdlib `module` as a dependency of this library. Every KLIB is compiled
+    /// and linked against its platform stdlib, which a producer need not record in `depends`:
+    /// kotlinc's Wasm and JS libraries record no `depends` at all.
+    pub(crate) fn depending_on_platform(mut self, module: &str) -> Self {
+        if self.module != module && !self.dependencies.iter().any(|known| known == module) {
+            self.dependencies.push(module.to_owned());
+        }
+        self
     }
 
     #[cfg(test)]
@@ -136,10 +141,13 @@ pub(crate) enum KlibCalleeOrigin {
 }
 
 /// Two library inputs claim one module identity, or duplicate one declaration inside it.
+///
+/// The signature is boxed so a conflict stays a small `Result` error. The signature is only
+/// read when reporting the conflict; the success path never carries it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KlibDeclarationBodiesError {
     module: String,
-    signature: Option<KlibIrSignature>,
+    signature: Option<Box<KlibIrSignature>>,
     libraries: [usize; 2],
 }
 
@@ -150,7 +158,7 @@ impl KlibDeclarationBodiesError {
 
     /// The exact duplicated declaration, or `None` when two archives claim the module itself.
     pub fn signature(&self) -> Option<&KlibIrSignature> {
-        self.signature.as_ref()
+        self.signature.as_deref()
     }
 
     /// The positions, in input order, of the two conflicting libraries.
@@ -180,13 +188,15 @@ impl std::fmt::Display for KlibDeclarationBodiesError {
 impl std::error::Error for KlibDeclarationBodiesError {}
 
 impl KlibDeclarationBodies {
-    /// Exactly one raw class header in this module with the requested function/constructor/getter
-    /// as a direct member. The current property primitives are reads: a getter stored in a setter
-    /// slot grants no authority. Equal names in other archives and inherited members do not join.
+    /// Exactly one raw class header in this module with the requested function/constructor or
+    /// accessor as a direct member. An accessor is found only in the slot of its `role`: a getter
+    /// stored in a setter slot grants no authority. Equal names in other archives and inherited
+    /// members do not join.
     pub(crate) fn class_member_header(
         &self,
         identity: &KlibDependencyCallable,
         signature: &KlibPublicIdSignature,
+        role: crate::libraries::KlibAccessorRole,
     ) -> Result<Option<KlibClassMember<'_>>, &'static str> {
         let Some(&library) = self.modules.get(&identity.module) else {
             return Ok(None);
@@ -231,7 +241,10 @@ impl KlibDeclarationBodies {
                     && property.base.symbol.signature
                         == KlibIrSignature::Public(accessor.property().clone()) =>
                 {
-                    [property.getter, None]
+                    match role {
+                        crate::libraries::KlibAccessorRole::Getter => [property.getter, None],
+                        crate::libraries::KlibAccessorRole::Setter => [property.setter, None],
+                    }
                 }
                 _ => [None, None],
             })
@@ -349,7 +362,7 @@ impl KlibDeclarationBodies {
                 if let Some(previous) = owners.insert(identity, library) {
                     return Err(KlibDeclarationBodiesError {
                         module: input.module.clone(),
-                        signature: Some(signature.clone()),
+                        signature: Some(Box::new(signature.clone())),
                         libraries: [previous, library],
                     });
                 }
@@ -370,6 +383,7 @@ impl KlibDeclarationBodies {
                 .into_iter()
                 .map(|(module, dependencies)| (module, dependencies.into_iter().collect()))
                 .collect(),
+            inherited: HashMap::default(),
         })
     }
 
@@ -424,8 +438,8 @@ impl KlibDeclarationBodies {
         reachable
     }
 
-    /// Exact references consumed by prepared template linking. No inherited alias enters the
-    /// declaration index or the narrower intrinsic-support call graph.
+    /// Exact callable references these bodies serialize, by the module serializing them. No
+    /// inherited alias enters the declaration index or the narrower intrinsic-support call graph.
     pub(super) fn callable_references(&self) -> Vec<(String, KlibDeclarationSignature)> {
         let mut references = HashSet::default();
         for (module, &library) in &self.modules {
@@ -438,6 +452,59 @@ impl KlibDeclarationBodies {
             }
         }
         references.into_iter().collect()
+    }
+
+    /// Member references of ordinary bodies that no reachable library serializes, as a fake
+    /// override is not. Only these may later bind to an inherited declaration.
+    pub(super) fn unserialized_member_references(&self) -> Vec<(String, KlibDeclarationSignature)> {
+        self.callable_references()
+            .into_iter()
+            .filter(|(module, reference)| {
+                matches!(reference, KlibDeclarationSignature::Public(public)
+                    if public.declaration().segments().len() > 1)
+                    && matches!(
+                        self.callee_origin(module, reference),
+                        KlibCalleeOrigin::Missing
+                    )
+            })
+            .collect()
+    }
+
+    /// Publish the frozen inherited bindings of [`Self::unserialized_member_references`].
+    pub(super) fn bind_inherited_members(
+        &mut self,
+        bindings: impl IntoIterator<
+            Item = (
+                (String, KlibDeclarationSignature),
+                Option<KlibDependencyCallable>,
+            ),
+        >,
+    ) {
+        self.inherited = bindings
+            .into_iter()
+            .map(|((module, reference), binding)| ((module, ir_signature(&reference)), binding))
+            .collect();
+    }
+
+    /// The declaration a call in an ordinary body links to: the serialized origin, or for a
+    /// member no library serializes, the real declaration it inherits through its declared
+    /// supertypes. A call never links to a declaration that is neither.
+    pub(crate) fn linked_origin(
+        &self,
+        body_module: &str,
+        declaration: &KlibDeclarationSignature,
+    ) -> KlibCalleeOrigin {
+        match self.callee_origin(body_module, declaration) {
+            KlibCalleeOrigin::Missing => match self
+                .inherited
+                .get(&(body_module.to_owned(), ir_signature(declaration)))
+            {
+                Some(Some(identity)) => KlibCalleeOrigin::Exact(identity.clone()),
+                Some(None) => KlibCalleeOrigin::Ambiguous,
+                None => KlibCalleeOrigin::Missing,
+            },
+            origin => origin,
+        }
     }
 
     /// Resolve a call symbol in the graph of the KLIB body which serialized it.
@@ -477,10 +544,9 @@ impl KlibDeclarationBodies {
             if self
                 .owners
                 .contains_key(&(module.clone(), signature.clone()))
+                && owner.replace(module.clone()).is_some()
             {
-                if owner.replace(module.clone()).is_some() {
-                    return KlibCalleeOrigin::Ambiguous;
-                }
+                return KlibCalleeOrigin::Ambiguous;
             }
             if let Some(dependencies) = self.dependencies.get(&module) {
                 pending.extend(dependencies.iter().cloned());
@@ -671,17 +737,54 @@ impl KlibDeclarationBodies {
         let Some((arena, function)) = self.function(identity) else {
             return Vec::new();
         };
-        arena
-            .emitted_callable_symbols(function, forms)
+        let mut symbols = arena.emitted_callable_symbols(function, forms);
+        // A file-local class the body constructs, an object literal's among them, is
+        // materialized with the body, every member included, since dispatch can run any of them.
+        let mut classes = crate::fx_hash::HashSet::default();
+        let mut next = 0;
+        while let Some(symbol) = symbols.get(next).copied() {
+            next += 1;
+            if let Some(class) = self.constructed_local_class(&identity.module, arena, symbol) {
+                if classes.insert(&class.base.symbol) {
+                    symbols.extend(
+                        arena.emitted_callable_symbols_from(arena.class_member_roots(class), forms),
+                    );
+                }
+            }
+        }
+        symbols
             .into_iter()
             .filter_map(|symbol| declaration_signature(&symbol.signature))
             .filter_map(
-                |declaration| match self.callee_origin(&identity.module, &declaration) {
+                |declaration| match self.linked_origin(&identity.module, &declaration) {
                     KlibCalleeOrigin::Exact(callee) => Some(callee),
                     KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
                 },
             )
             .collect()
+    }
+
+    /// The file-local class of `module` whose constructor `symbol` names, serialized in `arena`.
+    fn constructed_local_class<'a>(
+        &'a self,
+        module: &str,
+        arena: &'a KlibIrArena,
+        symbol: &KlibIrSymbol,
+    ) -> Option<&'a KlibIrClass> {
+        if symbol.kind != KlibIrSymbolKind::Constructor
+            || !matches!(symbol.signature, KlibIrSignature::FileLocal { .. })
+        {
+            return None;
+        }
+        let (function_arena, function) = self.module_local_function(module, &symbol.signature)?;
+        let KlibIrType::Simple { classifier, .. } = function_arena.ty(function.return_type) else {
+            return None;
+        };
+        let (class_arena, class) = self.module_local_class(module, &classifier.signature)?;
+        (function.constructor
+            && std::ptr::eq(arena, function_arena)
+            && std::ptr::eq(arena, class_arena))
+        .then_some(class)
     }
 
     /// Whether `identity` is an executable dependency-support root: its own serialized body has a

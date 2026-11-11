@@ -17,7 +17,7 @@ use krusty::backend::Entry;
 use krusty::conformance::TestTarget;
 use krusty_wasm::{WasmBackend, WasmTarget};
 
-use super::box_lane::{self, Lane, Libraries, Outcome};
+use super::box_lane::{self, Lane, ModuleCase, Outcome};
 use super::box_ratchet::Platform;
 
 /// The prefix the wasm backend puts on every decline; what follows names the construct.
@@ -133,13 +133,8 @@ impl Lane for WasmLane {
         }
     }
 
-    /// The exact target stdlib KLIB: wasm-js and wasm-wasi publish different platform surfaces.
-    fn libraries(&self) -> Libraries {
-        Libraries::StdlibKlib
-    }
-
     fn unavailable(&self) -> Option<String> {
-        if !self.libraries().available(self.test_target()) {
+        if !box_lane::stdlib_klib_available(self.test_target()) {
             return Some("no stdlib and JDK modules to analyze against".to_string());
         }
         node_unavailable()
@@ -176,7 +171,6 @@ impl Lane for WasmLane {
         let program = match box_lane::compile(
             sources,
             directive_source,
-            self.libraries(),
             self.test_target(),
             &backend,
             "box",
@@ -216,11 +210,12 @@ impl Lane for WasmLane {
         )
         .with_annotations_in_metadata(features.has("AnnotationsInMetadata"));
         let program = match box_lane::compile_modules(
-            scratch,
-            stem,
-            modules,
+            ModuleCase {
+                scratch,
+                stem,
+                modules,
+            },
             directive_source,
-            self.libraries(),
             self.test_target(),
             &backend,
             &metadata,
@@ -241,8 +236,6 @@ fn wasm_applicability_reads_both_the_family_and_the_exact_target() {
     let wasi = WasmLane {
         target: WasmTarget::Wasi,
     };
-    assert_eq!(js.libraries(), Libraries::StdlibKlib);
-    assert_eq!(wasi.libraries(), Libraries::StdlibKlib);
     assert_eq!(js.test_target(), TestTarget::WasmJs);
     assert_eq!(wasi.test_target(), TestTarget::WasmWasi);
     for (target, expected) in [
@@ -431,6 +424,41 @@ fun box(): String {
 "#,
         "wasmScopeFunctionSharedCell",
     );
+}
+
+/// Two function values of one property reference, made at different sites, are equal: the
+/// reference is identified by the property it reads, not by the adapter each site allocates.
+#[test]
+fn wasm_property_reference_function_values_are_equal_across_sites() {
+    const SOURCE: &str = include_str!("box_regressions/propertyReferenceFunctionValueIdentity.kt");
+    expect_reference_box(SOURCE, "wasmPropertyReferenceEquality");
+    expect_wasm_box(SOURCE, "wasmPropertyReferenceEquality");
+}
+
+/// A file that references a property declared in a later file reads it through the checked
+/// property, and its references equal the declaring file's.
+#[test]
+fn wasm_property_reference_function_values_are_equal_across_files() {
+    const SOURCE: &str = include_str!("box_regressions/propertyReferenceIdentityAcrossFiles.kt");
+    const STEM: &str = "wasmPropertyReferenceIdentityAcrossFiles";
+    super::box_reference_classes::checked_box(SOURCE, STEM)
+        .expect("the exact Kotlin compiler must run the whole fixture");
+    let (files, java) = krusty::conformance::split_files(SOURCE);
+    assert!(java.is_empty());
+    let files = files
+        .into_iter()
+        .map(|(name, content)| (format!("{name}.kt"), content))
+        .collect::<Vec<_>>();
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, STEM));
+        assert_eq!(
+            lane.compile_and_run(&std::env::temp_dir(), STEM, &files, SOURCE),
+            Outcome::Pass,
+            "{STEM} on {}",
+            target.name(),
+        );
+    }
 }
 
 /// What a constructor that reaches back into its own enum finds, as kotlinc-wasm builds an enum:
@@ -872,7 +900,6 @@ fn expect_reference_array_bounds(source: &str, name: &str) {
             let mut program = box_lane::compile(
                 &[("Bounds.kt".to_owned(), source.to_owned())],
                 source,
-                Libraries::StdlibKlib,
                 lane.test_target(),
                 &backend,
                 "box",
@@ -1305,3 +1332,9 @@ fn wasm_data_class_unit_property_uses_units_fixed_hash() {
         "wasmKnownPrimaryConstructorRoles",
     );
 }
+
+#[path = "wasm_unsigned_decimal.rs"]
+mod unsigned_decimal;
+
+#[path = "wasm_enclosing_instances.rs"]
+mod enclosing_instances;
