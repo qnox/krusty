@@ -35897,14 +35897,16 @@ impl<'a> Checker<'a> {
                 )
                 .collect::<Vec<_>>();
             if !crate::symbol_resolver::apply_only_input_type_bindings(
-                &source,
-                &result_signature,
+                crate::symbol_resolver::OnlyInputCall {
+                    source: &source,
+                    signature: &result_signature,
+                    receiver: candidate_receiver,
+                    arguments: &only_input_actuals,
+                    vararg_index: candidate.call_sig.vararg_index,
+                    expected_result: expected,
+                },
                 &call_variables.instantiate_formals(&candidate.call_sig.only_input_type_formals),
                 type_args,
-                candidate_receiver,
-                &only_input_actuals,
-                candidate.call_sig.vararg_index,
-                expected,
                 &mut bindings,
             ) {
                 crate::trace_compiler!(
