@@ -8,9 +8,7 @@
 //! the validator.
 
 use krusty::backend::class_tables::module_slots::PlanKey;
-use krusty::backend::class_tables::{
-    function_key, local_property_target, AnyMember, SlotKey,
-};
+use krusty::backend::class_tables::{function_key, local_property_target, AnyMember, SlotKey};
 use krusty::backend::interface_identity::member_identity;
 use krusty::fir::{
     CallableId, ExternalCallableId, PropertyId, ResolvedFunctionOverrideTarget,
