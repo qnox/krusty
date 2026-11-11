@@ -516,11 +516,16 @@ impl DependencyBodyUnit {
             );
         }
         if root.kind() == crate::libraries::ExternalCallableKind::Member
+            && callables
+                .iter()
+                .all(|callable| callable.singleton_dispatch().is_none())
             && root
                 .class_contract()
                 .is_some_and(|class| !class.is_value && !class.is_builtin_type())
         {
             // A member of an ordinary class is authenticated with the class that installs it.
+            // Singleton edges of one declaration differ in the class they dispatch to; the
+            // receiver proof selects among them.
             let [callable] = callables else {
                 return Err(KlibBodyDecline::new(
                     root.signature().clone(),
@@ -702,6 +707,7 @@ impl DependencyBodyUnit {
                     )?;
                     Ok(self.ir.classes[*class as usize].methods[0])
                 } else if callable.kind() == crate::libraries::ExternalCallableKind::Member
+                    && callable.singleton_dispatch().is_none()
                     && callable
                         .class_contract()
                         .is_some_and(|class| !class.is_value && !class.is_builtin_type())

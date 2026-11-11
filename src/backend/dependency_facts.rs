@@ -31,6 +31,22 @@ use crate::symbol_source::SymbolSource;
 pub use crate::types::SemanticCallRole as BackendSemanticCallRole;
 use crate::types::{InlineParameterModifier, SemanticCallableOwner, Ty, TypeName};
 
+/// The class contract synthesized for one singleton edge of a fact that did not carry it.
+#[derive(Debug, Default)]
+pub(crate) struct SingletonEdgeClass(
+    std::sync::OnceLock<Option<crate::libraries::KlibBodyClassContract>>,
+);
+
+impl Clone for SingletonEdgeClass {
+    fn clone(&self) -> Self {
+        let cloned = Self::default();
+        if let Some(contract) = self.0.get() {
+            let _ = cloned.0.set(contract.clone());
+        }
+        cloned
+    }
+}
+
 /// What the provider normalized for one selected dependency callable, copied without
 /// reinterpretation. None of it is recovered from a spelling.
 #[derive(Clone, Debug)]
@@ -105,6 +121,10 @@ pub struct BackendCallableFact {
     pub klib_body_type_parameters: Box<[Ty]>,
     pub klib_body_declaration_modifiers: Option<crate::libraries::KlibBodyDeclarationModifiers>,
     pub klib_body_class_contract: Option<crate::libraries::KlibBodyClassContract>,
+    /// Class of a singleton edge built from this fact when the provider record did not already
+    /// carry that class. Production selections store each singleton's contract beside the
+    /// selection; this cache is the one edge a fact holds on its own.
+    pub(crate) singleton_edge_class: SingletonEdgeClass,
     pub klib_body_accessor: Option<crate::libraries::KlibBodyAccessor>,
     pub klib_body_vararg_index: Option<usize>,
     pub klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
@@ -249,13 +269,15 @@ impl BackendCallableFact {
 
     /// The target-free declaration view used when a selected KLIB body is lowered to common IR.
     pub fn klib_body_callable(&self) -> Option<crate::libraries::KlibBodyCallable<'_>> {
-        self.klib_body_callable_with_singleton(self.singleton_dispatch)
+        self.klib_body_callable_with_singleton(self.singleton_dispatch, None)
     }
 
-    fn klib_body_callable_with_singleton(
-        &self,
+    fn klib_body_callable_with_singleton<'a>(
+        &'a self,
         singleton_dispatch: Option<SingletonDispatch>,
-    ) -> Option<crate::libraries::KlibBodyCallable<'_>> {
+        class_contract: Option<&'a crate::libraries::KlibBodyClassContract>,
+    ) -> Option<crate::libraries::KlibBodyCallable<'a>> {
+        let class_contract = self.edge_class_contract(singleton_dispatch, class_contract);
         crate::libraries::KlibBodyCallable::new(
             crate::libraries::KlibBodyCallableShape {
                 name: &self.name,
@@ -274,7 +296,7 @@ impl BackendCallableFact {
                 compiler_intrinsic: self.compiler_operation(),
                 range_construction: self.member_realization.range_construction(),
                 declaration_modifiers: self.klib_body_declaration_modifiers,
-                class_contract: self.klib_body_class_contract.as_ref(),
+                class_contract,
                 accessor: self.klib_body_accessor.as_ref(),
             },
             singleton_dispatch,
@@ -283,6 +305,99 @@ impl BackendCallableFact {
             self.dependency_callable.as_ref(),
         )
     }
+
+    /// The class a singleton edge authenticates through. `provided` is the class the provider
+    /// recorded for that singleton. A member fact that carries no class of its own takes the
+    /// class of the singleton it dispatches to.
+    fn edge_class_contract<'a>(
+        &'a self,
+        singleton_dispatch: Option<SingletonDispatch>,
+        provided: Option<&'a crate::libraries::KlibBodyClassContract>,
+    ) -> Option<&'a crate::libraries::KlibBodyClassContract> {
+        if let Some(contract) = provided {
+            return Some(contract);
+        }
+        if let Some(singleton) = singleton_dispatch.filter(|_| {
+            self.kind == ExternalCallableKind::Member && self.klib_body_class_contract.is_none()
+        }) {
+            if let Some(contract) = self.singleton_class_contract(singleton) {
+                return Some(contract);
+            }
+        }
+        self.klib_body_class_contract.as_ref()
+    }
+
+    fn singleton_class_contract(
+        &self,
+        singleton: SingletonDispatch,
+    ) -> Option<&crate::libraries::KlibBodyClassContract> {
+        if self.singleton_edge_class.0.get().is_none() {
+            let synthesized = synthesize_singleton_class(self, singleton);
+            let _ = self.singleton_edge_class.0.set(synthesized);
+        }
+        self.singleton_edge_class
+            .0
+            .get()
+            .and_then(Option::as_ref)
+            .filter(|contract| contract.classifier == singleton.classifier)
+    }
+}
+
+fn synthesize_singleton_class(
+    fact: &BackendCallableFact,
+    singleton: SingletonDispatch,
+) -> Option<crate::libraries::KlibBodyClassContract> {
+    let module = fact.dependency_callable.as_ref()?.module.clone();
+    let mut segments = Vec::new();
+    let mut current = singleton.classifier;
+    loop {
+        if current == TypeName::ROOT {
+            break;
+        }
+        segments.push(current.segment_ref());
+        match current.parent() {
+            Some(parent) if parent != TypeName::ROOT => current = parent,
+            _ => break,
+        }
+    }
+    segments.reverse();
+    let (name, package) = segments.split_last()?;
+    if name.contains('$') || name.contains('.') {
+        return None;
+    }
+    let package = package
+        .iter()
+        .map(|&segment| segment.to_owned())
+        .collect::<Vec<_>>();
+    let signature = crate::metadata::id_signature::metadata_class_signature(
+        crate::metadata::id_signature::MetadataContainer {
+            package: &package,
+            classes: &[],
+            native_interop_library: false,
+        },
+        crate::metadata::id_signature::MetadataClass {
+            name,
+            type_params: &[],
+            expect: false,
+        },
+    );
+    Some(crate::libraries::KlibBodyClassContract {
+        module,
+        signature,
+        classifier: singleton.classifier,
+        parameters: crate::libraries::KlibBodyClassParameters {
+            formals: Box::new([]),
+            bounds: Box::new([]),
+            variances: Box::new([]),
+            own_count: 0,
+        },
+        kind: crate::libraries::TypeKind::Object,
+        modality: crate::metadata::semantic::KotlinModality::Final,
+        is_value: false,
+        is_inner: false,
+        is_expect: false,
+        primary_constructor: None,
+    })
 }
 
 #[cfg(test)]
@@ -331,6 +446,7 @@ mod tests {
             klib_body_type_parameters: Box::new([]),
             klib_body_declaration_modifiers: None,
             klib_body_class_contract: None,
+            singleton_edge_class: SingletonEdgeClass::default(),
             klib_body_accessor: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
@@ -556,6 +672,7 @@ mod tests {
             klib_body_type_parameters: Box::new([]),
             klib_body_declaration_modifiers: None,
             klib_body_class_contract: None,
+            singleton_edge_class: SingletonEdgeClass::default(),
             klib_body_accessor: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
@@ -622,6 +739,13 @@ pub enum DependencyFactError {
     PluginRuntimeAbi(ExternalCallableId),
 }
 
+/// One checked singleton receiver of a declaration, with the class that singleton is.
+#[derive(Debug)]
+struct SingletonEdge {
+    dispatch: SingletonDispatch,
+    class_contract: Option<crate::libraries::KlibBodyClassContract>,
+}
+
 /// The frozen dependency facts of one checked file. It holds a fact for every dependency callable
 /// and property identity the file's IR references, including the accessors of each property.
 #[derive(Debug, Default)]
@@ -629,7 +753,7 @@ pub struct CheckedBackendCallables {
     callables: HashMap<ExternalCallableId, BackendCallableFact>,
     properties: HashMap<ExternalPropertyId, BackendPropertyFact>,
     singleton_dispatches: HashMap<crate::ir::ExprId, SingletonDispatch>,
-    singleton_selections: HashMap<ExternalCallableId, Vec<SingletonDispatch>>,
+    singleton_selections: HashMap<ExternalCallableId, Vec<SingletonEdge>>,
     /// The runtime declarations native plugins selected at the handoff for their generated code,
     /// with the parameters a plugin's transform appended to each.
     plugin_runtime: HashMap<ExternalCallableId, Box<[Ty]>>,
@@ -655,8 +779,17 @@ impl CheckedBackendCallables {
         expression: crate::ir::ExprId,
         target: ExternalCallableId,
     ) -> Option<crate::libraries::KlibBodyCallable<'_>> {
+        let dispatch = self.singleton_dispatch(expression);
+        let class_contract = dispatch.and_then(|dispatch| {
+            self.singleton_selections.get(&target).and_then(|edges| {
+                edges
+                    .iter()
+                    .find(|edge| edge.dispatch == dispatch)
+                    .and_then(|edge| edge.class_contract.as_ref())
+            })
+        });
         self.callable(target)?
-            .klib_body_callable_with_singleton(self.singleton_dispatch(expression))
+            .klib_body_callable_with_singleton(dispatch, class_contract)
     }
 
     /// Selected KLIB callables in provider-identity order. Dependency-body lowering consumes this
@@ -667,8 +800,11 @@ impl CheckedBackendCallables {
         let mut selected = Vec::new();
         for (identity, callable) in callables {
             match self.singleton_selections.get(identity) {
-                Some(singletons) => selected.extend(singletons.iter().filter_map(|singleton| {
-                    callable.klib_body_callable_with_singleton(Some(*singleton))
+                Some(edges) => selected.extend(edges.iter().filter_map(|edge| {
+                    callable.klib_body_callable_with_singleton(
+                        Some(edge.dispatch),
+                        edge.class_contract.as_ref(),
+                    )
                 })),
                 None => selected.extend(callable.klib_body_callable()),
             }
@@ -761,8 +897,11 @@ impl CheckedBackendCallables {
             let dispatch = SingletonDispatch { classifier };
             facts.singleton_dispatches.insert(expression, dispatch);
             let selections = facts.singleton_selections.entry(*target).or_default();
-            if !selections.contains(&dispatch) {
-                selections.push(dispatch);
+            if !selections.iter().any(|edge| edge.dispatch == dispatch) {
+                selections.push(SingletonEdge {
+                    dispatch,
+                    class_contract: provider.klib_body_class_contract(classifier),
+                });
             }
         }
         for (identity, overridden) in &ir.external_overridden_declarations {
@@ -917,6 +1056,7 @@ impl CheckedBackendCallables {
                     klib_body_type_parameters,
                     klib_body_declaration_modifiers,
                     klib_body_class_contract,
+                    singleton_edge_class: SingletonEdgeClass::default(),
                     klib_body_vararg_index,
                     klib_body_parameter_defaults,
                     declares_parameter_defaults,
