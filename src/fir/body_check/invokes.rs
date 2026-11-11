@@ -577,11 +577,48 @@ impl BodyFirChecker<'_> {
         };
         let origin = self.origins.synthetic(cause, kind);
         let value = match argument {
-            ResolvedContextArgument::Binding {
-                name, shadow_depth, ..
-            } => {
+            ResolvedContextArgument::Binding { name, source, .. } => {
+                return self.materialize_context_binding(span, cause, origin, name, *source);
+            }
+            ResolvedContextArgument::ImplicitReceiver(selection) => {
+                self.materialize_implicit_receiver(origin, span, selection)?
+                    .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?
+                    .value
+            }
+        };
+        Ok(FirReceiver {
+            value,
+            conversion: None,
+        })
+    }
+
+    /// Consume the selected source directly. A required capture is never retried as a
+    /// same-named lexical value when its retained inventory is missing.
+    pub(super) fn materialize_context_binding(
+        &mut self,
+        span: Option<Span>,
+        cause: OriginId,
+        origin: OriginId,
+        name: &str,
+        source: crate::resolve::ContextBindingSource,
+    ) -> Result<FirReceiver, BodyCheckFailure> {
+        use crate::resolve::ContextBindingSource;
+        let (ty, kind) = match source {
+            ContextBindingSource::RequiredClassCapture { lexical_binding } => {
+                let captured = self
+                    .class_value_by_lexical_binding(lexical_binding)
+                    .ok_or_else(|| {
+                        self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
+                    })?;
+                let kind = match self.constructor_parameter_capture_read(captured) {
+                    Some(read) => read,
+                    None => self.class_storage_read_kind(captured, origin)?,
+                };
+                (captured.ty, kind)
+            }
+            ContextBindingSource::ProvenLocalDepth { shadow_depth, .. } => {
                 let (enclosing_depth, binding) = self
-                    .binding_source_at_shadow_depth(name, *shadow_depth)
+                    .binding_source_at_shadow_depth(name, shadow_depth)
                     .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnknownLocal))?;
                 let kind = if let Some(enclosing_depth) = enclosing_depth {
                     self.body.add_capture(FirCapture {
@@ -598,18 +635,10 @@ impl BodyFirChecker<'_> {
                 } else {
                     FirExprKind::ValueRead(binding.value)
                 };
-                self.body.add_expr(FirExpr {
-                    origin,
-                    ty: binding.ty,
-                    kind,
-                })
-            }
-            ResolvedContextArgument::ImplicitReceiver(selection) => {
-                self.materialize_implicit_receiver(origin, span, selection)?
-                    .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?
-                    .value
+                (binding.ty, kind)
             }
         };
+        let value = self.body.add_expr(FirExpr { origin, ty, kind });
         Ok(FirReceiver {
             value,
             conversion: None,

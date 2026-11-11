@@ -323,6 +323,8 @@ pub enum DelegateGetValueTarget {
         name: String,
         extension_receiver: Ty,
         dispatch_receiver: ImplicitReceiverSelection,
+        /// Source role selected while the receiver declaration and lexical tower are live.
+        dispatch_receiver_role: crate::fir::FirCapturedReceiver,
         context_count: usize,
         params: Vec<Ty>,
         ret: Ty,
@@ -1256,9 +1258,11 @@ impl Checker<'_> {
             "selected delegate getValue delegate={delegate:?} receiver={stored_ty:?} target={target:?}",
         );
         if let Some(provide_target) = provide_target {
+            self.mark_delegate_dispatch_used(scope, delegate, &provide_target);
             self.delegate_provide_targets
                 .insert(delegate, *provide_target);
         }
+        self.mark_delegate_dispatch_used(scope, delegate, &target);
         self.delegate_getvalue_targets.insert(delegate, *target);
         DelegateGetValueAttempt::Complete(Some(ret))
     }
@@ -1370,8 +1374,36 @@ impl Checker<'_> {
             }
         };
         crate::trace_compiler!("fir", "selected delegate setValue target={target:?}");
+        self.mark_delegate_dispatch_used(scope, delegate, &target);
         self.delegate_setvalue_targets.insert(delegate, *target);
         Some(())
+    }
+
+    /// A committed convention reads its dispatch receiver even though the source has no
+    /// receiver expression. Record the demand without replacing the delegate expression's own
+    /// selected call. Provisional receiver-inference attempts do not publish a demand.
+    fn mark_delegate_dispatch_used(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        delegate: ExprId,
+        target: &DelegateGetValueTarget,
+    ) {
+        let DelegateGetValueTarget::MemberExtension {
+            dispatch_receiver, ..
+        } = target
+        else {
+            return;
+        };
+        if dispatch_receiver.singleton.is_some() {
+            return;
+        }
+        if let Some(receiver) = self
+            .implicit_receivers(scope)
+            .into_iter()
+            .find(|receiver| receiver.receiver_depth == dispatch_receiver.receiver_depth)
+        {
+            self.mark_extension_receiver_used(delegate, receiver);
+        }
     }
 
     fn select_delegate_operator(
@@ -1548,6 +1580,15 @@ impl Checker<'_> {
                             extension_receiver: selected.extension_receiver,
                             dispatch_receiver: self
                                 .implicit_receiver_selection(selected.dispatch_receiver),
+                            dispatch_receiver_role: self.captured_receiver(
+                                scope,
+                                selected.dispatch_receiver.identity,
+                                selected.dispatch_receiver.extension_receiver,
+                                selected
+                                    .dispatch_receiver
+                                    .class_receiver
+                                    .then_some(selected.dispatch_receiver.declared_ty),
+                            ),
                             context_count: selected.context_count,
                             params: selected.params,
                             ret: selected.ret,

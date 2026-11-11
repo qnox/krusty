@@ -7,6 +7,7 @@
 //! The final check records kotlinc's first-use order and which captures need storage. No pending
 //! semantic type may reach checked FIR.
 
+use super::capture_storage::local_class_capture_expressions;
 use super::context_capture::context_argument_sites;
 use super::scope::PathRoot;
 use super::CheckerScope;
@@ -228,7 +229,7 @@ impl super::Checker<'_> {
             return false;
         }
         if let Some(mut captures) = self.discovered_anonymous_captures.remove(&declaration) {
-            self.extend_anonymous_superclass_captures(scope, declaration, &mut captures);
+            self.extend_anonymous_selected_captures(scope, declaration, &mut captures);
             self.discovered_anonymous_captures
                 .insert(declaration, captures);
         }
@@ -368,7 +369,10 @@ impl super::Checker<'_> {
             })
             .collect::<Vec<_>>();
         let span = self.file.stmt_spans[statement.0 as usize];
-        let context_uses = self.context_argument_captures(function, &delegated);
+        let context_uses = self.context_argument_captures(
+            &callable_roots(&function.params, &function.body),
+            &delegated,
+        );
         let mut uses = FirstUses {
             checker: self,
             statement: Some(statement),
@@ -412,15 +416,14 @@ impl super::Checker<'_> {
             .insert(statement, order);
     }
 
-    /// The captures of `function` that each expression in it passes as an implicit context
-    /// argument or receiver. `delegated` maps a capture's binding (flow identity) to the capture;
-    /// each passed value is the flow identity the checker recorded when it selected the value.
+    /// The captures that each expression under `roots` passes as an implicit context argument or
+    /// receiver. `delegated` maps a capture's binding (flow identity) to the capture; each passed
+    /// value is the flow identity the checker recorded when it selected the value.
     fn context_argument_captures(
         &self,
-        function: &FunDecl,
+        roots: &[ExprId],
         delegated: &[(u32, u32)],
     ) -> HashMap<ExprId, Vec<u32>> {
-        let roots = callable_roots(&function.params, &function.body);
         let sources = SelectedContextSources {
             expr_types: &self.expr_types,
             implicit_receiver_selections: &self.implicit_receiver_selections,
@@ -430,7 +433,7 @@ impl super::Checker<'_> {
             stmt_lowers: &self.stmt_lowers,
         };
         let mut uses = HashMap::<ExprId, Vec<u32>>::default();
-        for (site, identity) in context_argument_sites(self.file, sources, &roots) {
+        for (site, identity) in context_argument_sites(self.file, sources, roots) {
             if let Some(&(_, capture)) = delegated.iter().find(|(binding, _)| *binding == identity)
             {
                 uses.entry(site).or_default().push(capture);
@@ -728,6 +731,23 @@ impl<'w, 'c> FirstUses<'w, 'c> {
                 Some((local.flow_identity, u32::try_from(field).ok()?))
             })
             .collect();
+        // An implicit context argument passes a captured value without spelling it; the checker
+        // recorded the binding it selected, which identifies the capture.
+        let captured_flows = captures
+            .iter()
+            .zip(bindings)
+            .enumerate()
+            .filter(|(_, (capture, _))| {
+                capture.source == AnonymousObjectCaptureSource::LexicalValue
+            })
+            .filter_map(|(field, (capture, binding))| {
+                let (local, _) =
+                    checker.lexical_binding_by_identity(scope, &capture.name, (*binding)?)?;
+                Some((local.flow_identity, u32::try_from(field).ok()?))
+            })
+            .collect::<Vec<_>>();
+        let context_uses = checker
+            .context_argument_captures(&local_class_capture_expressions(class), &captured_flows);
         Self {
             checker,
             statement,
@@ -741,7 +761,7 @@ impl<'w, 'c> FirstUses<'w, 'c> {
             lexical_reads,
             fields: Vec::new(),
             included: HashSet::default(),
-            context_uses: HashMap::default(),
+            context_uses,
             unordered: None,
             construction: false,
             stored: HashSet::default(),
@@ -1218,10 +1238,15 @@ impl<'w, 'c> FirstUses<'w, 'c> {
                 (None, _) => {}
             }
         }
-        // An implicit context argument is a use of the value it passes, where the call is.
+        // An implicit context argument is a use of the value it passes, where the call is. In
+        // constructor code it reads the constructor parameter, like a direct read of the name.
         let context = self.context_uses.get(&expression).cloned();
         for capture in context.into_iter().flatten() {
-            self.stored_use(capture, uses);
+            if self.construction {
+                uses.direct.push(capture);
+            } else {
+                self.stored_use(capture, uses);
+            }
         }
         let function = match checker.expr_lowers.get(&expression) {
             Some(
