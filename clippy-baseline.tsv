@@ -42,25 +42,7 @@
 1	src/jvm/method_node/stack_shape.rs	this OR pattern can be rewritten using a range: help: try: `0x59..=0x5b`
 1	src/jvm/method_node/stack_shape.rs	this OR pattern can be rewritten using a range: help: try: `0x5c..=0x5e`
 1	src/jvm/method_node/stack_shape.rs	very complex type used. Consider factoring parts into `type` definitions
-1	src/klib.rs	the borrowed expression implements the required traits: help: change this to: `bytes`
-1	src/klib/inline_ir.rs	called `expect` on `function.dispatch_receiver` after checking its variant with `is_some`
-1	src/klib_libraries/archives.rs	the `Err`-variant returned from this closure is very large
-1	src/klib_libraries/declaration_bodies.rs	this `if` statement can be collapsed
-1	src/klib_libraries/declaration_bodies.rs	this `impl` can be derived
-1	src/klib_libraries/external_identities.rs	this function has too many arguments (9/7)
-1	src/klib_libraries/inventory.rs	very complex type used. Consider factoring parts into `type` definitions
-1	src/klib_libraries/tests.rs	unnecessary closure used with `bool::then`
 1	src/lexer.rs	casting to the same type is unnecessary (`usize` -> `usize`): help: try: `self.i`
-1	src/libraries.rs	this method chain can be written more clearly with `if .. else ..`
-1	src/libraries.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if merged.as_slice() != arguments { Ty::obj_args_name(name, &merged) } else { declared }`
-1	src/libraries/builtin_top_level_realization.rs	function `function_realization` is never used
-1	src/libraries/call_realization.rs	this function has too many arguments (11/7)
-1	src/libraries/classifier_declaration.rs	large size difference between variants: the entire enum is at least 232 bytes
-1	src/libraries/dependency_body_contract.rs	method `has_content_fingerprint` is never used
-1	src/metadata/class_builder/schema.rs	empty line after doc comment
-1	src/metadata/class_builder/schema.rs	the loop variable `index` is used to index `func_msgs`
-1	src/metadata/class_builder/schema.rs	the loop variable `index` is used to index `prop_msgs`
-1	src/metadata/semantic/klib/semantic_decoder_tests.rs	unnecessary use of `clone` to create a slice from a reference
 1	src/parser.rs	field assignment outside of initializer for an instance created with Default::default()
 1	src/parser.rs	this manual char comparison can be written more succinctly: help: consider using an array of `char`: `['L', 'l', 'u', 'U']`
 1	src/parser.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if header_ctor_kw { self.tok().span.lo } else { 0 }`
@@ -90,19 +72,6 @@
 1	src/resolve/diagnostic_selection.rs	this `if` has identical blocks
 1	src/resolve/enhanced_values.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if !coerced_to_unit { self.value_enhancement(result) } else { Default::default() }`
 1	src/resolve/explicit_property_write.rs	very complex type used. Consider factoring parts into `type` definitions
-1	src/resolve/generic_call_bindings.rs	this function has too many arguments (8/7)
-1	src/resolve/interface_delegation.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if setter { Ty::Unit } else { property_type }`
-1	src/resolve/interface_delegation.rs	you are using an explicit closure for copying elements
-1	src/resolve/local_method_dependencies.rs	large size difference between variants: the entire enum is at least 1176 bytes
-1	src/resolve/local_method_dependencies.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let (inherited, provider) = self.inherited_body_local_default_candidate(owner, candidate)?;`
-1	src/resolve/member_extension_properties.rs	this function has too many arguments (8/7)
-1	src/resolve/member_extension_properties.rs	very complex type used. Consider factoring parts into `type` definitions
-1	src/resolve/member_extension_selection.rs	items after a test module
-1	src/resolve/operator_calls.rs	this function has too many arguments (10/7)
-1	src/resolve/operator_calls.rs	this function has too many arguments (9/7)
-1	src/resolve/property_read_selection.rs	called `map(..).flatten()` on `Option`: help: try replacing `map` with `and_then` and remove the `.flatten()`: `and_then(|getter| getter.member.external_identity)`
-1	src/resolve/reified_type_arguments.rs	this function has too many arguments (9/7)
-1	src/resolve/resolved_type_occurrences.rs	this function has too many arguments (9/7)
 1	src/resolve/scope.rs	this `if` can be collapsed into the outer `match`
 1	src/resolve/scope.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/resolve/selected_argument_commitment.rs	this function has too many arguments (8/7)
@@ -138,13 +107,8 @@
 2	src/fir/signature.rs	this function has too many arguments (11/7)
 2	src/fir/signature.rs	this function has too many arguments (8/7)
 2	src/jvm/jvm_libraries.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
-2	src/klib_libraries/declaration_bodies.rs	the `Err`-variant returned from this function is very large: the `Err`-variant is at least 136 bytes
 2	src/resolve.rs	returning the result of a `let` binding from a block
 2	src/resolve/call_diagnostics.rs	this function has too many arguments (8/7)
-2	src/resolve/intersection_inference.rs	this function has too many arguments (10/7)
-2	src/resolve/intersection_inference.rs	this function has too many arguments (8/7)
-2	src/resolve/invoke_selection.rs	this function has too many arguments (8/7)
-2	src/resolve/postponed_constraints.rs	unnecessary use of `clone` to create a slice from a reference: help: try: `std::slice::from_ref(&name)`
 2	src/resolve/selected_result_publication.rs	local variable doesn't need to be boxed here
 2	src/resolve/streaming_signature_bridge.rs	this function has too many arguments (8/7)
 2	src/resolve/streaming_signature_bridge/delegates.rs	this function has too many arguments (8/7)
@@ -156,11 +120,9 @@
 3	src/resolve.rs	unnecessary closure used to substitute value for `Option::None`
 3	src/resolve/streaming_signature_bridge/rejected_member_call.rs	this function has too many arguments (8/7)
 3	src/resolve/streaming_signature_bridge/type_parameter_publication.rs	this function has too many arguments (8/7)
-4	src/klib_lowering/body_unit.rs	the borrowed expression implements the required traits: help: change this to: `callee_declined`
 4	src/resolve/delegated_properties.rs	this function has too many arguments (8/7)
 5	src/resolve.rs	this function has too many arguments (9/7)
 5	src/resolve.rs	very complex type used. Consider factoring parts into `type` definitions
 5	src/resolve/callable_reference_selection.rs	redundant closure: help: replace the closure with the function itself: `&mut is_assignable`
 6	src/conformance.rs	doc list item without indentation
 9	src/fir/body_check/driver_tests.rs	the function `crate::resolve::publish_checked_local_signatures` doesn't need a mutable reference
-9	src/klib_libraries/archives.rs	the `Err`-variant returned from this function is very large
