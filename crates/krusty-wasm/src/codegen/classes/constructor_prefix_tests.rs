@@ -906,6 +906,87 @@ fn non_enclosing_receiver_profiles_remain_unsupported() {
 }
 
 #[test]
+fn proven_context_and_lambda_receivers_are_ordinary_references() {
+    let (original, class, parameter) = stored_enclosing_receiver();
+    let declared = original.classes[class as usize].ctor_args[parameter as usize].ty;
+    let identity = ClassCaptureIdentity::Receiver(0);
+    let expected = Err(format!(
+        "a class capturing its surroundings (`{}`)",
+        original.classes[class as usize].fq_name()
+    ));
+    let install = |ir: &mut IrFile, receiver: IrCapturedReceiver| {
+        let argument = &mut ir.classes[class as usize].ctor_args[parameter as usize];
+        argument.capture.as_mut().unwrap().receiver = Some(receiver);
+        argument.capture_identity = Some(identity);
+        ir.class_capture_identities
+            .insert((class, parameter), identity);
+    };
+
+    let mut context = copy_transport(&original);
+    install(
+        &mut context,
+        IrCapturedReceiver::Context {
+            kind: krusty::types::CapturedContextKind::Anonymous,
+            types: vec![declared].into_boxed_slice(),
+            index: 0,
+        },
+    );
+    assert_eq!(check_supported(&context, class), Ok(()));
+
+    let mut wrong_type = copy_transport(&context);
+    let IrCapturedReceiver::Context { types, .. } = wrong_type.classes[class as usize].ctor_args
+        [parameter as usize]
+        .capture
+        .as_mut()
+        .unwrap()
+        .receiver
+        .as_mut()
+        .unwrap()
+    else {
+        panic!("context receiver");
+    };
+    types[0] = Ty::Int;
+    assert_eq!(check_supported(&wrong_type, class), expected);
+
+    let mut wrong_index = copy_transport(&context);
+    let IrCapturedReceiver::Context { index, .. } = wrong_index.classes[class as usize].ctor_args
+        [parameter as usize]
+        .capture
+        .as_mut()
+        .unwrap()
+        .receiver
+        .as_mut()
+        .unwrap()
+    else {
+        panic!("context receiver");
+    };
+    *index = 1;
+    assert_eq!(check_supported(&wrong_index, class), expected);
+
+    let mut lambda = copy_transport(&original);
+    install(&mut lambda, IrCapturedReceiver::Lambda(Some("with".into())));
+    assert_eq!(check_supported(&lambda, class), Ok(()));
+
+    let mut scalar = copy_transport(&lambda);
+    let field = scalar.classes[class as usize].ctor_args[parameter as usize]
+        .field_index
+        .unwrap();
+    scalar.classes[class as usize].ctor_args[parameter as usize].ty = Ty::Unit;
+    scalar.classes[class as usize].fields[field as usize].ty = Ty::Unit;
+    assert_eq!(check_supported(&scalar, class), expected);
+
+    let mut callable = copy_transport(&original);
+    install(
+        &mut callable,
+        IrCapturedReceiver::Callable {
+            label: "callable".into(),
+            owner: krusty::fir::CapturedCallableOwner::Declaration,
+        },
+    );
+    assert_eq!(check_supported(&callable, class), expected);
+}
+
+#[test]
 fn enclosing_receivers_stay_stored_for_initializer_and_member_reads() {
     let ir = named_enclosing_receiver_classes();
     let captures = enclosing_capture_slots(&ir);
@@ -1193,77 +1274,4 @@ fn interface_delegate_prefix_requires_positive_role_and_unique_typed_storage() {
         assert_eq!(check_supported(&ir, class), expected, "{label}");
     }
     assert_eq!(check_supported(&original, class), Ok(()));
-}
-
-#[test]
-fn local_classes_that_capture_context_parameters_lower_on_wasm() {
-    for (stem, source) in [
-        (
-            "ContextCaptureLocalClasses",
-            include_str!("../../../../../tests/box_regressions/ContextCaptureLocalClasses.kt"),
-        ),
-        (
-            "CapturedContextDelegate",
-            include_str!("../../../../../tests/box_regressions/CapturedContextDelegate.kt"),
-        ),
-    ] {
-        let stdlib = krusty::toolchain::kotlin_stdlib_klib(
-            krusty::compilation_target::CompilationTarget::WasmWasi,
-        )
-        .expect("wasm-wasi stdlib");
-        let inputs = [krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
-            stdlib,
-            krusty::klib_libraries::KlibStdlibSemantics::Wasm,
-        )];
-        let libraries =
-            krusty::klib_libraries::KlibLibraries::open(&inputs).expect("wasm-wasi stdlib opens");
-        let mut diags = krusty::diag::DiagSink::new();
-        let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
-            &[krusty::source::SourceInput::kotlin(source).with_file_stem(stem)],
-            krusty::frontend::PlatformProvider::new(
-                krusty::compilation_target::CompilationTarget::WasmWasi,
-                Box::new(libraries),
-            ),
-            &krusty::features::LangFeatures::from_source(source),
-            &mut diags,
-        );
-        let outputs = krusty::compiler::emit_analyzed(
-            analysis,
-            &[stem.to_string()],
-            &crate::WasmBackend::new(crate::WasmTarget::Wasi)
-                .with_entry(krusty::backend::Entry::Box),
-            stem,
-            &mut diags,
-        );
-        let messages = diags
-            .diags
-            .iter()
-            .map(|diagnostic| diagnostic.msg.clone())
-            .collect::<Vec<_>>();
-        assert_eq!(messages, Vec::<String>::new(), "{stem}");
-        let directory =
-            std::env::temp_dir().join(format!("krusty-wasm-{stem}-{}", std::process::id()));
-        std::fs::remove_dir_all(&directory).ok();
-        std::fs::create_dir_all(&directory).expect("case directory");
-        for (name, bytes) in &outputs {
-            std::fs::write(directory.join(name), bytes).expect("artifact");
-        }
-        let ran = std::process::Command::new("node")
-            .arg("--no-warnings")
-            .arg(directory.join(format!("{stem}.mjs")))
-            .output()
-            .expect("node");
-        let stdout = String::from_utf8_lossy(&ran.stdout);
-        let stderr = String::from_utf8_lossy(&ran.stderr);
-        assert!(
-            ran.status.success(),
-            "{stem} exited {:?}\n{stderr}{stdout}",
-            ran.status.code()
-        );
-        assert!(
-            stdout.trim_end().ends_with("OK"),
-            "{stem} answered {stdout:?}"
-        );
-        std::fs::remove_dir_all(&directory).ok();
-    }
 }
