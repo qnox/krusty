@@ -252,9 +252,7 @@ impl<'a> KlibCalleeFacts<'a> {
     ) -> Result<Option<crate::libraries::CompilerIntrinsic>, super::decline::KlibBodyDeclineReason>
     {
         use super::decline::KlibBodyDeclineReason;
-        use super::function_lowering::{
-            raw_function_header_with_class, selected_function_header, HeaderPurpose,
-        };
+        use super::function_lowering::{selected_function_header, HeaderPurpose};
         let selected = match self.get(identity) {
             Some(KlibCalleeFact::Ambiguous) => {
                 return Err(KlibBodyDeclineReason::SignatureMismatch(
@@ -274,37 +272,14 @@ impl<'a> KlibCalleeFacts<'a> {
             .function(identity)
             .ok_or(KlibBodyDeclineReason::Unjoined)?;
         // A body-bearing target leaf still authenticates its complete declared header, not the
-        // narrower set of declarations whose executable bodies common lowering supports. A
-        // generic class binds its type parameters in `selected_function_header`, the header a
-        // call edge uses. A member whose class has no type parameters still authenticates that
-        // class and its receiver here.
-        if selected.is_member()
-            && selected
-                .class_contract()
-                .is_none_or(|class| class.parameters.formals.is_empty())
-        {
-            let class = super::class_headers::authenticate(selected, bodies)?;
-            super::class_headers::authenticate_receiver(
-                class.contract,
-                class.arena,
-                class.function,
-            )?;
-            raw_function_header_with_class(
-                Some(selected),
-                HeaderPurpose::External,
-                class.arena,
-                class.function,
-                class.types,
-            )?;
-        } else {
-            selected_function_header(
-                selected,
-                HeaderPurpose::External,
-                arena,
-                declaration,
-                Some(bodies),
-            )?;
-        }
+        // narrower set of declarations whose executable bodies common lowering supports.
+        selected_function_header(
+            selected,
+            HeaderPurpose::External,
+            arena,
+            declaration,
+            Some(bodies),
+        )?;
         Ok(Some(operation))
     }
 

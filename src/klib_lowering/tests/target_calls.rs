@@ -165,7 +165,7 @@ fn copy_type(source: &KlibIrArena, target: &mut KlibIrArena, ty: KlibIrTypeId) -
 
 /// [`target_tree`] of the member `selected`, inside the header of the class declaring it: a
 /// member's header is authenticated through its class.
-fn member_target_tree(
+pub(super) fn member_target_tree(
     libraries: &crate::klib_libraries::KlibLibraries,
     selected: crate::libraries::KlibBodyCallable<'_>,
     source: &KlibIrArena,

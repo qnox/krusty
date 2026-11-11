@@ -507,10 +507,11 @@ pub(super) fn raw_function_header(
     )
 }
 
-/// The header of `selected`'s serialized declaration `function`. A member of a generic class
-/// binds its class's type parameters from the class header `class_bodies` holds, so the header
-/// names them as the member's own declaration does. Semantic conversion of that header interns
-/// the dispatch receiver's class path, so the raw receiver is proved against the class first.
+/// The header of `selected`'s serialized declaration `function`. When `class_bodies` is
+/// given, a member is read through its class: the class is authenticated, the raw dispatch
+/// receiver is proved against it, and the member header binds that class's type parameters.
+/// Semantic conversion interns the receiver's class path, so the proof comes first. A
+/// top-level callable, or a member whose caller has no class bodies, keeps `function`.
 pub(super) fn selected_function_header(
     selected: KlibBodyCallable<'_>,
     purpose: HeaderPurpose,
@@ -518,10 +519,7 @@ pub(super) fn selected_function_header(
     function: &KlibIrFunction,
     class_bodies: Option<&crate::klib_libraries::KlibDeclarationBodies>,
 ) -> Result<FunctionHeader, KlibBodyDeclineReason> {
-    let generic_class = selected
-        .class_contract()
-        .is_some_and(|class| !class.parameters.formals.is_empty());
-    match class_bodies.filter(|_| generic_class) {
+    match class_bodies.filter(|_| selected.is_member()) {
         Some(bodies) => super::class_headers::authenticate(selected, bodies).and_then(|class| {
             super::class_headers::authenticate_receiver(
                 class.contract,
