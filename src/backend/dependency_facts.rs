@@ -60,6 +60,11 @@ pub struct BackendCallableFact {
     /// Exact declarations this declaration overrides, as checked FIR froze them from the member
     /// hierarchy. A target keys a specially implemented language declaration on them.
     pub overridden_declarations: Box<[crate::types::OverriddenDeclaration]>,
+    /// For a member of a supertype of builtin primitive classifiers (`Number.toLong`,
+    /// `Comparable.compareTo`), what each such primitive runs when a value of it is the receiver,
+    /// as the member hierarchy proves. A target carrying the primitive as an object dispatches the
+    /// call to these; every other callable has none.
+    pub primitive_implementations: Box<[PrimitiveImplementation]>,
     pub member_realization: MemberRealization,
     pub params: Vec<Ty>,
     pub physical_params: Vec<Ty>,
@@ -299,6 +304,7 @@ mod tests {
             compiler_intrinsic: None,
             semantic_role: None,
             overridden_declarations: Box::new([]),
+            primitive_implementations: Box::new([]),
             member_realization: MemberRealization::Dispatch,
             params: params.clone(),
             physical_params: params,
@@ -523,6 +529,7 @@ mod tests {
             compiler_intrinsic: None,
             semantic_role: None,
             overridden_declarations: Box::new([]),
+            primitive_implementations: Box::new([]),
             member_realization: MemberRealization::Dispatch,
             params: vec![Ty::Int],
             physical_params: vec![Ty::Int],
@@ -563,6 +570,25 @@ mod tests {
         });
         assert!(!fact.is_singleton_member_of(owner));
     }
+}
+
+/// What one builtin primitive runs for a call of a supertype's member on a value of it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PrimitiveImplementation {
+    /// The primitive, whose classifier is a proper subtype of the member's.
+    pub receiver: Ty,
+    /// The primitive classifier's override; `None` when it inherits the member's own body.
+    pub declaration: Option<PrimitiveOverrideDeclaration>,
+}
+
+/// One primitive classifier's override of a supertype's member, as its provider published it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PrimitiveOverrideDeclaration {
+    /// The operation the provider realizes the override as, if it is one.
+    pub operation: Option<BackendCompilerIntrinsic>,
+    /// The override's declared parameter and result types (`Int.compareTo(other: Int): Int`).
+    pub params: Box<[Ty]>,
+    pub ret: Ty,
 }
 
 /// What the provider normalized for one selected dependency property.
@@ -747,6 +773,28 @@ impl CheckedBackendCallables {
         Ok(facts)
     }
 
+    /// Record what each builtin primitive runs for every member of a library classifier this
+    /// file calls, as `implementations` answers it for the member's owner, name and identity.
+    /// The frontend answers it from the member hierarchy at the handoff; every other callable
+    /// keeps none.
+    pub fn record_primitive_implementations(
+        &mut self,
+        mut implementations: impl FnMut(
+            TypeName,
+            &str,
+            ExternalCallableId,
+        ) -> Box<[PrimitiveImplementation]>,
+    ) {
+        for (&identity, fact) in &mut self.callables {
+            let (ExternalCallableKind::Member, Some(SemanticCallableOwner::Classifier(owner))) =
+                (fact.kind, fact.declaration_owner)
+            else {
+                continue;
+            };
+            fact.primitive_implementations = implementations(owner, &fact.name, identity);
+        }
+    }
+
     /// Freeze dependency identities on `super` calls introduced after the initial handoff.
     ///
     /// Target plugins run inside the backend and may append checked super calls only after the
@@ -842,6 +890,7 @@ impl CheckedBackendCallables {
                     compiler_intrinsic: callable.compiler_intrinsic,
                     semantic_role: callable.semantic_role,
                     overridden_declarations: Box::new([]),
+                    primitive_implementations: Box::new([]),
                     member_realization: callable.member_realization,
                     params: callable.params,
                     physical_params: callable.physical_params,

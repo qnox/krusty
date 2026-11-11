@@ -433,6 +433,41 @@ fun box(): String {
     );
 }
 
+/// Two function values of one property reference, made at different sites, are equal: the
+/// reference is identified by the property it reads, not by the adapter each site allocates.
+#[test]
+fn wasm_property_reference_function_values_are_equal_across_sites() {
+    const SOURCE: &str = include_str!("box_regressions/propertyReferenceFunctionValueIdentity.kt");
+    expect_reference_box(SOURCE, "wasmPropertyReferenceEquality");
+    expect_wasm_box(SOURCE, "wasmPropertyReferenceEquality");
+}
+
+/// A file that references a property declared in a later file reads it through the checked
+/// property, and its references equal the declaring file's.
+#[test]
+fn wasm_property_reference_function_values_are_equal_across_files() {
+    const SOURCE: &str = include_str!("box_regressions/propertyReferenceIdentityAcrossFiles.kt");
+    const STEM: &str = "wasmPropertyReferenceIdentityAcrossFiles";
+    super::box_reference_classes::checked_box(SOURCE, STEM)
+        .expect("the exact Kotlin compiler must run the whole fixture");
+    let (files, java) = krusty::conformance::split_files(SOURCE);
+    assert!(java.is_empty());
+    let files = files
+        .into_iter()
+        .map(|(name, content)| (format!("{name}.kt"), content))
+        .collect::<Vec<_>>();
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, STEM));
+        assert_eq!(
+            lane.compile_and_run(&std::env::temp_dir(), STEM, &files, SOURCE),
+            Outcome::Pass,
+            "{STEM} on {}",
+            target.name(),
+        );
+    }
+}
+
 /// What a constructor that reaches back into its own enum finds, as kotlinc-wasm builds an enum:
 /// each constant is published once constructed, and a constant with a body right after its super
 /// call, so its own body already finds it. The expected log is kotlinc-wasm's for this program

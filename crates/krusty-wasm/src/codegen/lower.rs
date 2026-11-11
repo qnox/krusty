@@ -21,6 +21,7 @@ use krusty::fx_hash::{HashMap, HashSet};
 mod absent_arguments;
 pub(super) mod any_members;
 mod arrays;
+pub(super) mod box_members;
 mod boxing;
 mod callable_reference_identity;
 mod dependency_exports;
@@ -59,6 +60,7 @@ use krusty::ir::{Callee, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic, I
 use krusty::types::{EqualityMode, Ty, TyKind};
 
 use super::super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
+use super::super::numeric_conversions;
 use super::super::objects::REFERENCE;
 use super::super::runtime::*;
 use super::callable_registry::{CallableRegistry, FileCallTargets};
@@ -470,6 +472,33 @@ fn describe(ty: Ty) -> String {
     }
 }
 
+/// The class an enclosing-instance edge leaves and the field its constructor stores the outer
+/// instance in: the field of the leading enclosing-instance parameter.
+fn enclosing_field(
+    ir: &IrFile,
+    inner: krusty::types::TypeName,
+) -> Result<(krusty::ir::ClassId, u32), Unsupported> {
+    let class = ir.class_id_by_name(inner).ok_or_else(|| {
+        // Boundary conversion for a diagnostic.
+        format!(
+            "the enclosing instance of `{}`, which is not declared in this file",
+            inner.render()
+        )
+    })?;
+    let declaration = &ir.classes[class as usize];
+    let &(_, field) = declaration
+        .pre_super_param_fields
+        .iter()
+        .find(|&&(parameter, _)| parameter == 0)
+        .ok_or_else(|| {
+            format!(
+                "an enclosing instance with no stored field (`{}`)",
+                declaration.fq_name()
+            )
+        })?;
+    Ok((class, field))
+}
+
 /// The checked type carried into Wasm emission. A generated value block is a transparent
 /// sequencing node: when it has no checked type of its own, its final child retains the exact
 /// frontend type. This is the same common-IR contract used for physical block representation; it
@@ -513,6 +542,11 @@ fn expression_type(
         // which is what the instruction leaves on the stack; a use at a narrower type casts.
         IrExpr::GetField { class, index, .. } if ir.checked_type(id).is_none() => {
             ir.classes[*class as usize].fields[*index as usize].ty
+        }
+        // An inner class's outer instance is read at the type of the field that stores it.
+        IrExpr::EnclosingInstance { inner, .. } if ir.checked_type(id).is_none() => {
+            let (class, field) = enclosing_field(ir, *inner)?;
+            ir.classes[class as usize].fields[field as usize].ty
         }
         IrExpr::MethodCall { class, index, .. } if ir.checked_type(id).is_none() => {
             let function = ir.classes[*class as usize].methods[*index as usize];
@@ -572,20 +606,6 @@ fn widened(value: ValType) -> Ty {
         ValType::F32 => Ty::Float,
         _ => Ty::Double,
     }
-}
-
-/// Convert the numeric value on top of the stack from `from` to the wider `to`.
-fn widen(code: &mut Code, from: ValType, to: ValType) {
-    let opcode = match (from, to) {
-        (ValType::I32, ValType::I64) => EXTEND_I32_S,
-        (ValType::I32, ValType::F32) => 0xb2,
-        (ValType::I64, ValType::F32) => 0xb4,
-        (ValType::I32, ValType::F64) => 0xb7,
-        (ValType::I64, ValType::F64) => 0xb9,
-        (ValType::F32, ValType::F64) => 0xbb,
-        _ => return,
-    };
-    code.op(opcode);
 }
 
 /// A loop the body is inside: the absolute depths `break` and `continue` branch to.
@@ -769,39 +789,8 @@ impl<'a> Body<'a> {
         if !signed(target_ty) {
             return Err(unsupported());
         }
-        let (Some(source), Some(target)) = (carrier(source_ty)?, carrier(target_ty)?) else {
-            return Err(unsupported());
-        };
         self.expression(arg)?;
-        let carried = match (source, target) {
-            (ValType::I64, ValType::I32) => {
-                self.code.op(0xa7);
-                Ty::Int
-            }
-            (ValType::F32, ValType::I32) => {
-                self.code.trunc_sat(0);
-                Ty::Int
-            }
-            (ValType::F64, ValType::I32) => {
-                self.code.trunc_sat(2);
-                Ty::Int
-            }
-            (ValType::F32, ValType::I64) => {
-                self.code.trunc_sat(4);
-                Ty::Long
-            }
-            (ValType::F64, ValType::I64) => {
-                self.code.trunc_sat(6);
-                Ty::Long
-            }
-            (ValType::F64, ValType::F32) => {
-                self.code.op(0xb6);
-                Ty::Float
-            }
-            _ => return Err(unsupported()),
-        };
-        // A `Byte`, `Short` or `Char` result narrows the `Int` it came through.
-        self.coerce_emitted_value(carried, target_ty)
+        numeric_conversions::convert(&mut self.code, source_ty, target_ty)
     }
 
     /// Whether a cast of `arg` to `target` reads a scalar out of a reference: the operand is
@@ -882,23 +871,8 @@ impl<'a> Body<'a> {
         };
         if source == target {
             // An `Int` stored where a `Byte`, `Short` or `Char` is declared (`b++` on a `Byte`)
-            // wraps to that width: the 32-bit carrier must hold the narrow value's own bits.
-            let narrowing = match (source_ty, target_ty) {
-                (from, to) if from == to => None,
-                (_, Ty::Byte) => Some(0xc0),
-                (_, Ty::Short) => Some(0xc1),
-                (_, Ty::Char) => Some(0),
-                _ => None,
-            };
-            match narrowing {
-                Some(0) => {
-                    self.code.i32_const(0xffff).op(AND32);
-                }
-                Some(extend) => {
-                    self.code.op(extend);
-                }
-                None => {}
-            }
+            // wraps to that width.
+            numeric_conversions::fit(&mut self.code, source_ty, target_ty);
             return Ok(());
         }
         if let (ValType::Ref { .. }, ValType::Ref { heap, .. }) = (source, target) {
@@ -917,7 +891,7 @@ impl<'a> Body<'a> {
         }
         match (rank(source), rank(target)) {
             (Some(from), Some(to)) if from < to => {
-                widen(&mut self.code, source, target);
+                numeric_conversions::widen(&mut self.code, source, target);
                 Ok(())
             }
             _ => Err(format!(
@@ -929,6 +903,9 @@ impl<'a> Body<'a> {
     /// Emit `id`, leaving its value on the stack when it has one.
     fn expression(&mut self, id: u32) -> Result<(), Unsupported> {
         let node = self.ir.expr(id).clone();
+        if let Some(result) = self.box_member_expression(id, &node) {
+            return result;
+        }
         if let Some(result) = self.emitted_dependency_expression(id, &node) {
             return result;
         }
@@ -1363,18 +1340,15 @@ impl<'a> Body<'a> {
                 spreads,
                 elements,
             } => {
-                if arrays::is_int_array(array_type) {
-                    self.int_array_literal(&spreads, &elements)?;
-                } else {
-                    self.reference_array_literal(array_type, &spreads, &elements)?;
-                }
+                self.array_literal(array_type, &spreads, &elements)?;
             }
             IrExpr::NewArray { array_type, size } => {
-                if arrays::is_int_array(array_type) {
-                    self.new_int_array(size)?;
-                } else {
+                // Only `IntArray` is allocated by size yet.
+                let array = array_type.non_null();
+                if array.is_reference_array() || array.array_elem() != Some(Ty::Int) {
                     return Err("the expression `NewArray`".into());
                 }
+                self.new_array(array_type, size)?;
             }
             IrExpr::Try {
                 body,
@@ -1389,6 +1363,12 @@ impl<'a> Body<'a> {
                 class,
                 index,
             } => self.field_read(receiver, class, index)?,
+            IrExpr::EnclosingInstance {
+                receiver, inner, ..
+            } => {
+                let (class, field) = enclosing_field(self.ir, inner)?;
+                self.field_read(receiver, class, field)?;
+            }
             IrExpr::SetField {
                 receiver,
                 class,

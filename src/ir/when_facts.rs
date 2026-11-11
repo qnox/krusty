@@ -2,7 +2,7 @@
 //! identity, for a backend to emit it without re-deciding.
 
 use super::expression_copy::InheritedFacts;
-use super::ExprId;
+use super::{ExprId, IrExpr};
 use crate::fx_hash::HashMap;
 use crate::types::Ty;
 
@@ -34,5 +34,48 @@ impl InheritedFacts for IrWhenFacts {
         exhaustive.inherit(source, target);
         source_lines.inherit(source, target);
         elvises.inherit(source, target);
+    }
+}
+
+impl super::IrFile {
+    /// A `when` built after checking that yields `result`, `Unit` for a statement. Its producer
+    /// names the result, as the checker does for a source `when`, so no backend joins its
+    /// branches. A `when` with an `else` records it; one without is a `Unit` statement.
+    pub fn add_when(&mut self, branches: Vec<(Option<ExprId>, ExprId)>, result: Ty) -> ExprId {
+        let has_else = branches.iter().any(|(condition, _)| condition.is_none());
+        debug_assert!(
+            has_else || result == Ty::Unit,
+            "a `when` without an `else` is a `Unit` statement, not a {result:?}"
+        );
+        let when = self.add_expr(IrExpr::When { branches });
+        if has_else {
+            self.whens.exhaustive.insert(when, result);
+        }
+        when
+    }
+
+    /// The type a value `when` yields: the result common lowering recorded for it (as fir2ir types
+    /// it), or the checked type of the node when its producer recorded one there. A backend reads
+    /// it and chooses only the carrier; it never joins the branches' values.
+    pub fn when_result_type(&self, when: ExprId) -> Option<Ty> {
+        self.whens
+            .exhaustive
+            .get(&when)
+            .copied()
+            .or_else(|| self.physical_type(when))
+            .or_else(|| self.logical_type(when))
+    }
+
+    /// The first `when` with an `else` whose result type no producer recorded, if any.
+    pub fn unrecorded_when_result(&self) -> Option<ExprId> {
+        self.exprs.iter().enumerate().find_map(|(id, expression)| {
+            let id = ExprId::try_from(id).expect("too many expressions");
+            let IrExpr::When { branches } = expression else {
+                return None;
+            };
+            (branches.iter().any(|(condition, _)| condition.is_none())
+                && self.when_result_type(id).is_none())
+            .then_some(id)
+        })
     }
 }
