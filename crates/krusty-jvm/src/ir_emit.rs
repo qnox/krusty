@@ -17,7 +17,7 @@ use krusty::ir::{
 };
 use krusty::jvm::array_representation::prim_newarray_atype;
 use krusty::jvm::classfile::{
-    ClassWriter, CodeBuilder, InnerClassResolver, Label, VerifType, MAJOR_JAVA8,
+    ClassWriter, CodeBuilder, InlineSplice, InnerClassResolver, Label, VerifType, MAJOR_JAVA8,
 };
 use krusty::jvm::classreader::{MethodCode, C};
 use krusty::jvm::inline::MethodBodies;

@@ -13,21 +13,6 @@
 1	src/frontend/inline_preparation.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let selected_roots = roots.get_mut(root.source.raw() as usize)?;`
 1	src/frontend/inline_preparation.rs	this function has too many arguments (9/7)
 1	src/frontend/tests/streaming.rs	using `clone` on type `ResolvedCallableHeader` which implements the `Copy` trait: help: try removing the `clone` call: `callable`
-1	src/jvm/bytecode_passes/temporaries/null_check_folds.rs	this `if` can be collapsed into the outer `match`
-1	src/jvm/classfile/control_flow.rs	this function has too many arguments (8/7)
-1	src/jvm/classfile/local_variables.rs	this OR pattern can be rewritten using a range: help: try: `0x15..=0x19`
-1	src/jvm/classfile/stack_maps.rs	very complex type used. Consider factoring parts into `type` definitions
-1	src/jvm/classpath/inline_plan_cache.rs	large size difference between variants: the entire enum is at least 240 bytes
-1	src/jvm/inline/invoke_receiver.rs	this OR pattern can be rewritten using a range: help: try: `0xbc..=0xbe`
-1	src/jvm/inliner/default_lambda.rs	type `jvm::reified_arguments::ReifiedArguments` is more private than the item `jvm::inliner::default_lambda::load`: function `jvm::inliner::default_lambda::load` is reachable at visibility `pub(crate)`
-1	src/jvm/jvm_libraries.rs	method `unsigned_compare_callable` is never used
-1	src/jvm/jvm_libraries.rs	using `Option.and_then(|x| Some(y))`, which is more succinctly expressed as `map(|x| y)`
-1	src/jvm/jvm_libraries/dependency_registration.rs	using `map` over `inspect`
-1	src/jvm/jvm_libraries/java_nullability.rs	items after a test module
-1	src/jvm/metadata.rs	this function has too many arguments (8/7)
-1	src/jvm/method_node/stack_shape.rs	this OR pattern can be rewritten using a range: help: try: `0x59..=0x5b`
-1	src/jvm/method_node/stack_shape.rs	this OR pattern can be rewritten using a range: help: try: `0x5c..=0x5e`
-1	src/jvm/method_node/stack_shape.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/lexer.rs	casting to the same type is unnecessary (`usize` -> `usize`): help: try: `self.i`
 1	src/parser.rs	field assignment outside of initializer for an instance created with Default::default()
 1	src/parser.rs	this manual char comparison can be written more succinctly: help: consider using an array of `char`: `['L', 'l', 'u', 'U']`
@@ -70,7 +55,6 @@
 16	src/resolve.rs	this function has too many arguments (8/7)
 2	src/fir/signature.rs	this function has too many arguments (11/7)
 2	src/fir/signature.rs	this function has too many arguments (8/7)
-2	src/jvm/jvm_libraries.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
 2	src/resolve.rs	returning the result of a `let` binding from a block
 2	src/resolve/call_diagnostics.rs	this function has too many arguments (8/7)
 2	src/resolve/streaming_signature_bridge.rs	this function has too many arguments (8/7)

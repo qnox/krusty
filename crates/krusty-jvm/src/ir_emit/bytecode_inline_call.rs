@@ -541,15 +541,15 @@ impl Emitter<'_> {
         } else {
             0
         };
-        code.splice_inline(
-            &rewritten.bytes,
-            &rewritten.external_branches,
-            body.max_stack,
-            frame.top_local,
-            argument_words,
-            result_words,
-            rewritten.falls_through,
-        );
+        code.splice_inline(InlineSplice {
+            bytes: &rewritten.bytes,
+            external_branches: &rewritten.external_branches,
+            body_stack: body.max_stack,
+            top_local: frame.top_local,
+            arg_words: argument_words,
+            ret_words: result_words,
+            falls_through: rewritten.falls_through,
+        });
         self.frame.reserve_through(frame.top_local);
         self.record_spliced_lines(
             &rewritten.lines,
