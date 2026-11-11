@@ -1068,6 +1068,12 @@ impl<'a> CommonIrBodySink<'a> {
                     // this skeleton as an enum-entry subclass.
                     entry_class.is_enum_entry = true;
                     let entry_class = self.ir.add_class(entry_class);
+                    // An inner class in the entry body stores this subclass as its enclosing
+                    // instance. That field is authenticated against the declaration's self type.
+                    self.ir.record_declared_class_self_type(
+                        subclass,
+                        crate::types::Ty::obj_name(subclass),
+                    );
                     assert!(
                         self.ir
                             .property_overrides

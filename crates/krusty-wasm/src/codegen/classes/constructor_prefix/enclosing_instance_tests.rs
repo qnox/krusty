@@ -68,6 +68,40 @@ fn enclosing_role_selects_current_parameter_and_field_without_zero_or_name_assum
 }
 
 #[test]
+fn enum_entry_inner_class_authenticates_its_enclosing_instance() {
+    let source = r#"
+enum class A {
+    X {
+        val x = "OK"
+        inner class Inner {
+            fun read() = x
+        }
+        val z = Inner()
+        override val test: String
+            get() = z.read()
+    };
+    abstract val test: String
+}
+fun box() = A.X.test
+"#;
+    let ir = krusty::fir_lower::single_source_lowering::lower_single_source_with_jvm_stdlib(
+        source,
+        "EnumEntryInner",
+    );
+    let selected = edges(&ir);
+    assert_eq!(
+        selected.len(),
+        1,
+        "the entry body reads its enclosing entry"
+    );
+    let (inner, outer) = selected[0];
+    let (class, field) = enclosing_field(&ir, inner, outer).expect("checked enclosing edge");
+    let storage = ir.classes[class as usize].fields[field as usize].ty;
+    assert_eq!(storage, ir.declared_class_self_type(outer).unwrap());
+    assert!(ir.classes[ir.class_id_by_name(outer).unwrap() as usize].is_enum_entry);
+}
+
+#[test]
 fn absent_ambiguous_or_mismatched_enclosing_storage_is_refused() {
     type Mutation = fn(&mut IrClass, u32);
     let mutations: &[(&str, Mutation)] = &[
