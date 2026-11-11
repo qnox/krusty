@@ -637,7 +637,9 @@ impl Checker<'_> {
                 .params
                 .get(parameter + context_count)
                 .copied()
-                .map(|parameter| crate::symbol_resolver::ty_subst_keep_unbound(parameter, bindings))
+                .map(|parameter| {
+                    crate::types::ty_subst_formals(parameter, &signature.formals, bindings)
+                })
                 .filter(|expected| expected.non_null().is_fun())
             else {
                 continue;
