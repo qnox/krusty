@@ -28,7 +28,7 @@ impl IrFile {
             .retain(|owner, _| owners.contains(owner));
     }
 
-    pub(crate) fn declared_class_self_type(&self, classifier: TypeName) -> Option<Ty> {
+    pub fn declared_class_self_type(&self, classifier: TypeName) -> Option<Ty> {
         self.declared_class_self_types.get(&classifier).copied()
     }
 
