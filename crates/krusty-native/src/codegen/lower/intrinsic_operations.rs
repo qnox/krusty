@@ -3,6 +3,43 @@
 use super::*;
 
 impl BodyLowering<'_, '_, '_> {
+    /// A builtin scalar's `compareTo` at its comparison carrier `operand`: -1, 0 or 1.
+    pub(super) fn primitive_compare(
+        &mut self,
+        operand: Ty,
+        receiver: u32,
+        argument: u32,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        // The operand type named here is the erased one, which for an unsigned value is the
+        // signed number sharing its bits — and ordering is exactly the question that reads those
+        // bits differently. The receiver's own checked type decides.
+        if let Some(element) = self
+            .checked_type(receiver)
+            .map(Ty::non_null)
+            .filter(|ty| ty.is_unsigned())
+        {
+            return self.unsigned_compare(element, receiver, argument, ret);
+        }
+        let Some(suffix) = scalar_suffix(operand) else {
+            return Err("`compareTo` on a non-scalar operand".into());
+        };
+        let left = self.coerce(receiver, operand)?;
+        let right = self.coerce(argument, operand)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let (Some(left), Some(right)) = (left, right) else {
+            return Err("`compareTo` on `Unit`".into());
+        };
+        self.runtime_call(
+            &format!("kt_compare_{suffix}"),
+            &[operand, operand],
+            ret,
+            &[left, right],
+        )
+    }
+
     /// A compiler-selected operation on built-in types, realized by the runtime.
     pub(super) fn intrinsic(
         &mut self,
@@ -20,33 +57,7 @@ impl BodyLowering<'_, '_, '_> {
                 let (Some(receiver), [argument]) = (receiver, args) else {
                     return Err("a malformed `compareTo`".into());
                 };
-                // The operand type named here is the erased one, which for an unsigned value is
-                // the signed number sharing its bits — and ordering is exactly the question that
-                // reads those bits differently. The receiver's own checked type decides.
-                if let Some(element) = self
-                    .checked_type(receiver)
-                    .map(Ty::non_null)
-                    .filter(|ty| ty.is_unsigned())
-                {
-                    return self.unsigned_compare(element, receiver, *argument, ret);
-                }
-                let Some(suffix) = scalar_suffix(operand) else {
-                    return Err("`compareTo` on a non-scalar operand".into());
-                };
-                let left = self.coerce(receiver, operand)?;
-                let right = self.coerce(*argument, operand)?;
-                if self.terminated {
-                    return Ok(None);
-                }
-                let (Some(left), Some(right)) = (left, right) else {
-                    return Err("`compareTo` on `Unit`".into());
-                };
-                self.runtime_call(
-                    &format!("kt_compare_{suffix}"),
-                    &[operand, operand],
-                    ret,
-                    &[left, right],
-                )
+                self.primitive_compare(operand, receiver, *argument, ret)
             }
             IrIntrinsic::UnsignedCompare { operand } => {
                 let (None, [left, right]) = (receiver, args) else {

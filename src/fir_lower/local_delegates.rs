@@ -265,7 +265,7 @@ impl BodyLowering<'_> {
             (_, dispatch) => dispatch,
         };
         if let FirCallTarget::Module(target) = &call.target {
-            let target = *target;
+            let target = super::expect_realization::realized_callable(self.index, *target);
             let inline = {
                 let callable = self
                     .index

@@ -29,6 +29,8 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
     let mut entries = Vec::new();
     for stub in headers.stubs.iter().filter(|stub| {
         stub.kind == crate::fir::DeclarationKind::Function
+            // An `expect` and the `actual` replacing it are one declaration, not two overloads.
+            && !table.source_fragments.is_replaced_expect(stub.id)
             && headers
                 .declarations
                 .anchor(stub.id)
