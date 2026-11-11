@@ -2,28 +2,12 @@
 
 use super::*;
 use crate::fir::ResolvedTypeParameterFlags;
+use crate::resolve::signature_bridge_args::{CheckedLocalBodies, LocalSignatureSelection};
 use crate::resolve::TypeInfo;
 use crate::types::{TyKind, TypeVariance};
 
 #[cfg(test)]
 mod tests;
-
-/// The root declaration and the bodies published with one checked local-signature pass.
-pub(crate) struct CheckedLocalBodies<'a> {
-    pub(crate) root: crate::fir::DeclarationId,
-    pub(crate) bodies: &'a crate::fx_hash::HashSet<crate::fir::DeclarationId>,
-}
-
-struct LocalSignatureSelection<'a> {
-    inline_owners: Option<&'a [crate::fir::DeclarationId]>,
-    active_source: Option<&'a crate::fir::ActiveSourceDeclarations>,
-    active_root: Option<(
-        &'a crate::fir::ActiveSourceDeclarations,
-        crate::fir::DeclarationId,
-        &'a crate::fx_hash::HashSet<crate::fir::DeclarationId>,
-    )>,
-    exact_declarations: Option<&'a [crate::fir::DeclarationId]>,
-}
 
 /// Same-parse test adapter for capture storage discovered by the legacy retained-file fixture.
 /// Production ordinary bodies publish no capture declaration; their checked FIR carries field
@@ -117,12 +101,12 @@ pub(crate) fn publish_checked_local_signatures_in_active_root(
         table.libraries.as_ref(),
         info,
         index,
-        LocalSignatureSelection {
-            inline_owners: None,
-            active_source: Some(active),
-            active_root: Some((active, selected.root, selected.bodies)),
-            exact_declarations: None,
-        },
+        LocalSignatureSelection(
+            None,
+            Some(active),
+            Some((active, selected.0, selected.1)),
+            None,
+        ),
     )
 }
 
@@ -142,12 +126,12 @@ pub(crate) fn publish_checked_local_signatures_in_pass_two_root(
         platform,
         info,
         index,
-        LocalSignatureSelection {
-            inline_owners: None,
-            active_source: Some(active),
-            active_root: Some((active, selected.root, selected.bodies)),
-            exact_declarations: None,
-        },
+        LocalSignatureSelection(
+            None,
+            Some(active),
+            Some((active, selected.0, selected.1)),
+            None,
+        ),
     )
 }
 
@@ -168,12 +152,7 @@ pub(crate) fn publish_checked_local_signatures(
         table.libraries.as_ref(),
         info,
         index,
-        LocalSignatureSelection {
-            inline_owners: None,
-            active_source: Some(&active),
-            active_root: None,
-            exact_declarations: None,
-        },
+        LocalSignatureSelection(None, Some(&active), None, None),
     )
 }
 
@@ -193,12 +172,7 @@ pub(crate) fn publish_checked_inline_local_signatures(
         table.libraries.as_ref(),
         info,
         index,
-        LocalSignatureSelection {
-            inline_owners: Some(inline_owners),
-            active_source: active,
-            active_root: None,
-            exact_declarations: None,
-        },
+        LocalSignatureSelection(Some(inline_owners), active, None, None),
     )
 }
 
@@ -272,12 +246,7 @@ pub(crate) fn publish_checked_default_local_signatures(
         table.libraries.as_ref(),
         info,
         index,
-        LocalSignatureSelection {
-            inline_owners: Some(&owners),
-            active_source: Some(active),
-            active_root: None,
-            exact_declarations: Some(&exact),
-        },
+        LocalSignatureSelection(Some(&owners), Some(active), None, Some(&exact)),
     )
 }
 
@@ -327,12 +296,8 @@ fn publish_checked_local_signatures_selected(
     index: &mut crate::fir::ResolvedModuleIndex,
     selection: LocalSignatureSelection<'_>,
 ) -> Result<(), Vec<crate::fir::DeclarationId>> {
-    let LocalSignatureSelection {
-        inline_owners,
-        active_source,
-        active_root,
-        exact_declarations,
-    } = selection;
+    let LocalSignatureSelection(inline_owners, active_source, active_root, exact_declarations) =
+        selection;
     use crate::fir::{
         CallableId, DeclarationFlags, DeclarationId, DeclarationKind, PropertyId,
         ResolvedCallableShape, ResolvedTy, ResolvedTypeParameterFlags, ResolvedValueParameterFlags,

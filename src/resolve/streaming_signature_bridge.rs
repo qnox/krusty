@@ -74,6 +74,10 @@ use declaration_spellings::finalized_compact_declared_spellings;
 pub(super) use header_projection::*;
 use header_star_bounds::{compact_header_star_bounds, compact_header_value_parameter_star_bounds};
 
+pub(crate) use super::signature_bridge_args::CheckedLocalBodies;
+use super::signature_bridge_args::{
+    DemandedSourceInputs, SuperMemberCall, TypeParameterPublication,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use local_signatures::publish_checked_local_signatures;
 #[cfg(test)]
@@ -82,7 +86,7 @@ pub(crate) use local_signatures::publish_checked_local_signatures_in_active_root
 pub(crate) use local_signatures::publish_discovered_local_capture_declarations;
 pub(crate) use local_signatures::{
     publish_checked_default_local_signatures, publish_checked_inline_local_signatures,
-    publish_checked_local_signatures_in_pass_two_root, CheckedLocalBodies,
+    publish_checked_local_signatures_in_pass_two_root,
 };
 use postponed_argument_mapping::{typed_argument_evidence, MappedTopLevelSelection};
 pub(crate) use source_contracts::{extract_source_contract_candidates, SourceContractCandidate};
@@ -135,12 +139,6 @@ struct ExplicitContextCall {
     candidates: Vec<crate::libraries::FunctionInfo>,
     arguments: Vec<crate::symbol_resolver::CallArgKind>,
     argument_types: Vec<Ty>,
-}
-
-struct SuperMemberCall<'a> {
-    arguments: &'a [crate::fir::ResolvedSigCallArgument<'a>],
-    type_arguments: &'a [Ty],
-    trailing_lambda: bool,
 }
 
 const RECURSIVE_INFERENCE_MESSAGE: &str = "type checking has run into a recursive problem. Easiest workaround: specify the types of your declarations explicitly.";
@@ -1872,15 +1870,15 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         source: (u32, u32),
         signature: &crate::fir::ResolvedSignature,
-        inputs: demanded_source_call::DemandedSourceInputs<'_>,
+        inputs: DemandedSourceInputs<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        let demanded_source_call::DemandedSourceInputs {
+        let DemandedSourceInputs(
             receiver,
             arguments,
             argument_kinds,
             explicit_type_arguments,
             expected,
-        } = inputs;
+        ) = inputs;
         let declaration = DeclId(source.1);
         let Some(callable) = self
             .table
@@ -1913,13 +1911,13 @@ impl ProductionSignatureSemantics<'_> {
             &semantic_source,
             callable,
             signature,
-            demanded_source_call::DemandedSourceInputs {
+            DemandedSourceInputs(
                 receiver,
                 arguments,
                 argument_kinds,
                 explicit_type_arguments,
                 expected,
-            },
+            ),
         );
         crate::trace_compiler!(
             "signature",
@@ -2071,11 +2069,7 @@ impl ProductionSignatureSemantics<'_> {
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        let SuperMemberCall {
-            arguments,
-            type_arguments,
-            trailing_lambda,
-        } = call;
+        let SuperMemberCall(arguments, type_arguments, trailing_lambda) = call;
         let (class_super, interface_supers) = self.direct_super_receivers(scope, super_spelling)?;
         // `super.Inner(args)` is a constructor call on an inner classifier inherited through the
         // selected direct super receiver, not a method named `Inner`. Classifier construction is
@@ -4622,12 +4616,12 @@ pub(crate) fn finalized_streamed_signature_index(
         &mut index,
         &semantics,
         solver_diagnostics,
-        type_parameter_publication::TypeParameterPublication {
-            deferred_candidates: &deferred_local_candidates,
-            deferred_headers: &mut deferred_local_headers,
-            failed: &mut failed,
-            diagnostics: diags,
-        },
+        TypeParameterPublication(
+            &deferred_local_candidates,
+            &mut deferred_local_headers,
+            &mut failed,
+            diags,
+        ),
     );
     // Syntaxless frontend-plugin callables already carry their complete semantic generic shape.
     // Publish those formals on the generated stable declaration just as compact syntax publishes

@@ -5,6 +5,10 @@ use super::constructor_results::selected_sam_constructor_result;
 use super::top_level_call::SelectedTopLevelCall;
 use super::*;
 use crate::resolve::implicit_rungs::ImplicitRung;
+use crate::resolve::signature_bridge_args::{
+    ClassifierCall, DemandedSourceInputs, InPlaceAssignment, MemberExtensionReceivers,
+    RejectedMemberCall, SelectedMemberPublication, SuperMemberCall,
+};
 
 mod cast_narrowing;
 mod constructor_expectations;
@@ -16,13 +20,6 @@ mod value_invoke;
 
 pub(super) use constructor_expectations::ReceiverLevelCall;
 use result_constraints::signature_call_result_constraint;
-
-struct ClassifierCall<'a, A, T> {
-    spelling: &'a str,
-    arguments: &'a [A],
-    type_arguments: &'a [T],
-    trailing_lambda: bool,
-}
 
 impl ProductionSignatureSemantics<'_> {
     /// Capture storage visible from a compact inferred member signature. Pass-1 capture discovery
@@ -562,12 +559,7 @@ impl ProductionSignatureSemantics<'_> {
         call: ClassifierCall<'_, crate::fir::SigCallArgumentProbe<'_>, crate::fir::ResolvedTy>,
         refresh_typed_postponed: bool,
     ) -> Result<Box<[Option<crate::fir::ResolvedTy>]>, crate::fir::DiagnosticId> {
-        let ClassifierCall {
-            spelling,
-            arguments,
-            type_arguments,
-            trailing_lambda,
-        } = call;
+        let ClassifierCall(spelling, arguments, type_arguments, trailing_lambda) = call;
         let resolved_type_arguments = type_arguments
             .iter()
             .map(|argument| argument.get())
@@ -646,12 +638,7 @@ impl ProductionSignatureSemantics<'_> {
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
-        let ClassifierCall {
-            spelling,
-            arguments,
-            type_arguments,
-            trailing_lambda,
-        } = call;
+        let ClassifierCall(spelling, arguments, type_arguments, trailing_lambda) = call;
         let resolved_type_arguments = type_arguments
             .iter()
             .map(|argument| argument.get())
@@ -1124,11 +1111,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     scope,
                     qualifier,
                     name,
-                    super::SuperMemberCall {
-                        arguments,
-                        type_arguments: &resolved_type_arguments,
-                        trailing_lambda,
-                    },
+                    SuperMemberCall(arguments, &resolved_type_arguments, trailing_lambda),
                     demand,
                 );
             }
@@ -1261,12 +1244,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 if let Some(result) = self.select_classifier_call(
                     scope,
                     classifier,
-                    ClassifierCall {
-                        spelling: name,
-                        arguments,
-                        type_arguments,
-                        trailing_lambda,
-                    },
+                    ClassifierCall(name, arguments, type_arguments, trailing_lambda),
                     demand,
                 )? {
                     return Ok(result);
@@ -1507,13 +1485,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         return self.apply_demanded_source_callable(
                             source,
                             &signature,
-                            super::demanded_source_call::DemandedSourceInputs {
-                                receiver: Some(receiver),
-                                arguments: &selected_argument_types,
-                                argument_kinds: None,
-                                explicit_type_arguments: &resolved_type_arguments,
-                                expected: expected.map(crate::fir::ResolvedTy::get),
-                            },
+                            DemandedSourceInputs(
+                                Some(receiver),
+                                &selected_argument_types,
+                                None,
+                                &resolved_type_arguments,
+                                expected.map(crate::fir::ResolvedTy::get),
+                            ),
                         );
                     }
                 }
@@ -1566,10 +1544,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             for dispatch_receiver in self.signature_dispatch_receivers(scope) {
                 let selected = self.signature_member_extension_call(
                     scope,
-                    super::lookups::MemberExtensionReceivers {
-                        extension: receiver,
-                        dispatch: dispatch_receiver,
-                    },
+                    MemberExtensionReceivers(receiver, dispatch_receiver),
                     spelling,
                     super::lookups::SignatureMemberExtensionArguments {
                         arguments: &argument_kinds,
@@ -1646,12 +1621,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             if let Some(result) = self.select_classifier_call(
                 scope,
                 callable_owner,
-                ClassifierCall {
-                    spelling,
-                    arguments,
-                    type_arguments,
-                    trailing_lambda,
-                },
+                ClassifierCall(spelling, arguments, type_arguments, trailing_lambda),
                 demand,
             )? {
                 return Ok(result);
@@ -1663,12 +1633,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             if let Some(result) = self.select_classifier_call(
                 scope,
                 owner,
-                ClassifierCall {
-                    spelling: &declared_name,
-                    arguments,
-                    type_arguments,
-                    trailing_lambda,
-                },
+                ClassifierCall(&declared_name, arguments, type_arguments, trailing_lambda),
                 demand,
             )? {
                 return Ok(result);
@@ -1958,15 +1923,15 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         let result = self.apply_demanded_source_callable(
                             source,
                             &signature,
-                            super::demanded_source_call::DemandedSourceInputs {
-                                receiver: None,
-                                arguments: &selected_argument_types,
-                                argument_kinds: (!trailing_lambda
+                            DemandedSourceInputs(
+                                None,
+                                &selected_argument_types,
+                                (!trailing_lambda
                                     && arguments.iter().all(|argument| argument.name.is_none()))
                                 .then_some(argument_kinds.as_slice()),
-                                explicit_type_arguments: &resolved_type_arguments,
-                                expected: expected.map(crate::fir::ResolvedTy::get),
-                            },
+                                &resolved_type_arguments,
+                                expected.map(crate::fir::ResolvedTy::get),
+                            ),
                         )?;
                         self.record_final_selected_publication(origin, publication, result);
                         return Ok(result);
@@ -2287,12 +2252,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     if let Ok(expectations) = self.classifier_call_argument_expectations(
                         scope,
                         owner,
-                        ClassifierCall {
-                            spelling: &declared_name,
-                            arguments,
-                            type_arguments,
-                            trailing_lambda,
-                        },
+                        ClassifierCall(&declared_name, arguments, type_arguments, trailing_lambda),
                         refresh_typed_postponed,
                     ) {
                         return Ok(expectations);
@@ -2350,12 +2310,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         let expectations = self.classifier_call_argument_expectations(
                             scope,
                             classifier,
-                            ClassifierCall {
-                                spelling: member,
-                                arguments,
-                                type_arguments,
-                                trailing_lambda,
-                            },
+                            ClassifierCall(member, arguments, type_arguments, trailing_lambda),
                             refresh_typed_postponed,
                         );
                         crate::trace_compiler!(
@@ -2407,12 +2362,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         if let Ok(expectations) = self.classifier_call_argument_expectations(
                             scope,
                             classifier,
-                            ClassifierCall {
-                                spelling,
-                                arguments,
-                                type_arguments,
-                                trailing_lambda,
-                            },
+                            ClassifierCall(spelling, arguments, type_arguments, trailing_lambda),
                             refresh_typed_postponed,
                         ) {
                             return Ok(expectations);
@@ -3958,10 +3908,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 for dispatch_receiver in self.signature_dispatch_receivers(scope) {
                     let selected = self.signature_member_extension_call(
                         scope,
-                        super::lookups::MemberExtensionReceivers {
-                            extension: receiver.get(),
-                            dispatch: dispatch_receiver,
-                        },
+                        MemberExtensionReceivers(receiver.get(), dispatch_receiver),
                         spelling,
                         super::lookups::SignatureMemberExtensionArguments {
                             arguments: &argument_kinds,
@@ -4045,12 +3992,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         origin,
                         receiver.get(),
                         spelling,
-                        super::rejected_member_call::RejectedMemberCall {
+                        RejectedMemberCall(
                             arguments,
-                            type_arguments: &type_arguments,
+                            &type_arguments,
                             trailing_lambda,
-                            expected: expected.map(crate::fir::ResolvedTy::get),
-                        },
+                            expected.map(crate::fir::ResolvedTy::get),
+                        ),
                         demand,
                     )
                 };
@@ -4077,9 +4024,9 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         self.finish_selected_member_publication(
             scope,
             origin,
-            super::selected_result_publication::SelectedMemberPublication {
+            SelectedMemberPublication(
                 receiver,
-                type_arguments: &type_arguments,
+                &type_arguments,
                 expected,
                 result,
                 member,
@@ -4087,7 +4034,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 source_declaration,
                 argument_types,
                 publication,
-            },
+            ),
             demand,
         )
     }
@@ -4183,12 +4130,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             self,
             scope,
             origin,
-            super::operator_conventions::InPlaceAssignment {
-                operator,
-                receiver,
-                argument,
-                local_operator,
-            },
+            InPlaceAssignment(operator, receiver, argument, local_operator),
             demand,
         )
     }

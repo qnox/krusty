@@ -365,6 +365,7 @@ pub use singleton_receivers::SingletonValue;
 mod anonymous_capture_remap;
 mod constructor_receiver_frames;
 mod primary_constructor_arguments;
+mod signature_bridge_args;
 mod source_constructors;
 mod source_package;
 mod stable_path;

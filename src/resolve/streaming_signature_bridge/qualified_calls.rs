@@ -5,6 +5,7 @@
 //! resolver and call-signature operations used by ordinary frontend checking.
 
 use super::*;
+use crate::resolve::signature_bridge_args::DemandedSourceInputs;
 
 impl ProductionSignatureSemantics<'_> {
     fn qualified_package(
@@ -107,13 +108,7 @@ impl ProductionSignatureSemantics<'_> {
                 return self.apply_demanded_source_callable(
                     source,
                     &signature,
-                    super::demanded_source_call::DemandedSourceInputs {
-                        receiver: None,
-                        arguments: &selected_argument_types,
-                        argument_kinds: None,
-                        explicit_type_arguments: &type_arguments,
-                        expected: None,
-                    },
+                    DemandedSourceInputs(None, &selected_argument_types, None, &type_arguments, None),
                 );
             }
         }

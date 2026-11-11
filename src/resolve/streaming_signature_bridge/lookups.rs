@@ -2,6 +2,7 @@
 
 use super::super::alias_projection::{star_projected_alias_type, AliasArguments};
 use super::*;
+use crate::resolve::signature_bridge_args::MemberExtensionReceivers;
 
 impl ProductionSignatureSemantics<'_> {
     /// The classifier a call spelling constructs: `lexical` when a nearer rung bound it, else the
@@ -1208,10 +1209,7 @@ impl ProductionSignatureSemantics<'_> {
         result_constraint: super::super::CallResultConstraint,
         selection: super::super::MemberExtensionSelection,
     ) -> SignatureMemberExtensionCallSelection {
-        let MemberExtensionReceivers {
-            extension: extension_receiver,
-            dispatch: dispatch_receiver,
-        } = receivers;
+        let MemberExtensionReceivers(extension_receiver, dispatch_receiver) = receivers;
         let SignatureMemberExtensionArguments {
             arguments: argument_kinds,
             names,
@@ -1839,12 +1837,6 @@ pub(super) enum SignatureMemberExtensionCallSelection {
         Vec<super::super::member_extension_selection::MemberExtensionConventionDiagnosticCandidate>,
     ),
     Ambiguous(Vec<super::super::MemberExtensionFunctionCandidate>),
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct MemberExtensionReceivers {
-    pub(super) extension: Ty,
-    pub(super) dispatch: Ty,
 }
 
 #[derive(Clone, Copy, Default)]
