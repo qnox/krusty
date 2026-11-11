@@ -1919,15 +1919,15 @@ fn append_lifted_captures(
         for (offset, (ty, name)) in types.iter().zip(names.iter()).enumerate() {
             let field_index =
                 field_base + u32::try_from(offset).map_err(|_| malformed(class_name))?;
-            declaration.fields.push(
-                crate::ir::IrField::new(format!("${name}$inlined"), ty.clone()).with_is_final(true),
-            );
+            declaration
+                .fields
+                .push(crate::ir::IrField::new(format!("${name}$inlined"), *ty).with_is_final(true));
             declaration.ctor_args.insert(
                 insert_at + offset,
                 crate::ir::IrCtorArg {
                     name: None,
                     context_kind: crate::types::ContextParameterKind::None,
-                    ty: ty.clone(),
+                    ty: *ty,
                     declared_ty: None,
                     is_field: true,
                     field_index: Some(field_index),

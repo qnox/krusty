@@ -593,10 +593,12 @@ fn call_site_regenerated_lambdas(ir: &IrFile) -> HashSet<String> {
 /// An anonymous object copied into an inline caller. The caller's `new` does not list it;
 /// the class's own `InnerClasses` row still names itself.
 fn call_site_inlined_anonymous_objects(ir: &IrFile) -> impl Iterator<Item = String> + '_ {
-    ir.classes.iter().filter_map(|class| {
-        (class.is_anonymous_object && class.lambda.is_none() && !class.is_source_declared)
-            .then(|| class.fq_name())
-    })
+    ir.classes
+        .iter()
+        .filter(|class| {
+            class.is_anonymous_object && class.lambda.is_none() && !class.is_source_declared
+        })
+        .map(|class| class.fq_name())
 }
 
 /// Specialized non-suspend function classes. A copy nested in another such class stays
