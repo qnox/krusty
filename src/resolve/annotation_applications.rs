@@ -123,6 +123,9 @@ enum AnnotationApplicationHost {
     NonProperty {
         declaration_target: &'static str,
         constructor_parameter: bool,
+        /// A declaration no annotation target denotes (an initializer): an annotation that allows
+        /// an explicit use-site target is still wrong on it.
+        targetless: bool,
     },
 }
 
@@ -331,6 +334,7 @@ impl Checker<'_> {
                 AnnotationApplicationHost::NonProperty {
                     declaration_target: "value parameter",
                     constructor_parameter: true,
+                    targetless: false,
                 }
             };
             self.check_annotation_application_for_host(scope, annotation, arguments, host);
@@ -354,6 +358,7 @@ impl Checker<'_> {
             AnnotationApplicationHost::NonProperty {
                 declaration_target,
                 constructor_parameter: false,
+                targetless: false,
             },
         )
     }
@@ -632,6 +637,7 @@ impl Checker<'_> {
             AnnotationApplicationHost::NonProperty {
                 declaration_target,
                 constructor_parameter,
+                ..
             } => (
                 Some(declaration_target),
                 None,
@@ -711,7 +717,14 @@ impl Checker<'_> {
         {
             return true;
         }
-        if suppressed || (unavailable.is_some() && targets.allows(target)) {
+        let targetless = matches!(
+            host,
+            AnnotationApplicationHost::NonProperty {
+                targetless: true,
+                ..
+            }
+        );
+        if suppressed || (unavailable.is_some() && targets.allows(target) && !targetless) {
             self.discard_annotation_application(annotation);
             return false;
         }
@@ -854,14 +867,20 @@ impl Checker<'_> {
         let policy_depth =
             self.push_declaration_policies(scope, &header.annotations, &header.annotation_args);
         for (annotation, arguments) in header.annotations.iter().zip(&header.annotation_args) {
-            let Some(classifier) = self.check_non_property_annotation_application(
+            let Some(classifier) = self.check_annotation_application_for_host(
                 scope,
                 annotation,
                 arguments,
-                "initializer",
+                AnnotationApplicationHost::NonProperty {
+                    declaration_target: "initializer",
+                    constructor_parameter: false,
+                    targetless: true,
+                },
             ) else {
                 continue;
             };
+            // An explicit use-site was reported by the site validation above, which knows the
+            // initializer has no target.
             if annotation.property_site.is_some()
                 || self.suppresses_diagnostic("WRONG_ANNOTATION_TARGET")
             {

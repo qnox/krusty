@@ -79,3 +79,35 @@ fn an_initializer_annotation_in_a_local_class_checks_its_arguments_like_kotlinc(
         ],
     );
 }
+
+#[test]
+fn use_site_annotations_on_initializers_are_rejected_like_kotlinc() {
+    let source = "@Target(AnnotationTarget.FIELD, AnnotationTarget.PROPERTY_GETTER, \
+                  AnnotationTarget.VALUE_PARAMETER)\n\
+                  annotation class Anno\n\
+                  class C {\n\
+                  \x20   @field:Anno init {}\n\
+                  \x20   @get:Anno init {}\n\
+                  \x20   @param:Anno init {}\n\
+                  }\n";
+    let wrong_target = |site: &str| {
+        format!(
+            "this annotation is not applicable to target 'initializer' and use-site target \
+             '@{site}'. Applicable targets: field, getter, value parameter"
+        )
+    };
+    let field = wrong_target("field");
+    let get = wrong_target("get");
+    let param = wrong_target("param");
+    assert_errors_match_kotlinc(
+        "UseSiteInitializerAnnotations.kt",
+        source,
+        &[
+            field.as_str(),
+            "'@get:' annotations can only be applied to property declarations.",
+            get.as_str(),
+            "'@param:' annotations can only be applied to primary constructor parameters.",
+            param.as_str(),
+        ],
+    );
+}
