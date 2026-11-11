@@ -31,22 +31,6 @@ use crate::symbol_source::SymbolSource;
 pub use crate::types::SemanticCallRole as BackendSemanticCallRole;
 use crate::types::{InlineParameterModifier, SemanticCallableOwner, Ty, TypeName};
 
-/// The class contract synthesized for one singleton edge of a fact that did not carry it.
-#[derive(Debug, Default)]
-pub(crate) struct SingletonEdgeClass(
-    std::sync::OnceLock<Option<crate::libraries::KlibBodyClassContract>>,
-);
-
-impl Clone for SingletonEdgeClass {
-    fn clone(&self) -> Self {
-        let cloned = Self::default();
-        if let Some(contract) = self.0.get() {
-            let _ = cloned.0.set(contract.clone());
-        }
-        cloned
-    }
-}
-
 /// What the provider normalized for one selected dependency callable, copied without
 /// reinterpretation. None of it is recovered from a spelling.
 #[derive(Clone, Debug)]
@@ -121,10 +105,6 @@ pub struct BackendCallableFact {
     pub klib_body_type_parameters: Box<[Ty]>,
     pub klib_body_declaration_modifiers: Option<crate::libraries::KlibBodyDeclarationModifiers>,
     pub klib_body_class_contract: Option<crate::libraries::KlibBodyClassContract>,
-    /// Class of a singleton edge built from this fact when the provider record did not already
-    /// carry that class. Production selections store each singleton's contract beside the
-    /// selection; this cache is the one edge a fact holds on its own.
-    pub(crate) singleton_edge_class: SingletonEdgeClass,
     pub klib_body_accessor: Option<crate::libraries::KlibBodyAccessor>,
     pub klib_body_vararg_index: Option<usize>,
     pub klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
@@ -346,16 +326,36 @@ impl BackendCallableFact {
         &self,
         singleton: SingletonDispatch,
     ) -> Option<&crate::libraries::KlibBodyClassContract> {
-        if self.singleton_edge_class.0.get().is_none() {
-            let synthesized = synthesize_singleton_class(self, singleton);
-            let _ = self.singleton_edge_class.0.set(synthesized);
-        }
-        self.singleton_edge_class
-            .0
-            .get()
-            .and_then(Option::as_ref)
-            .filter(|contract| contract.classifier == singleton.classifier)
+        let module = &self.dependency_callable.as_ref()?.module;
+        synthesized_singleton_class(module, singleton, || {
+            synthesize_singleton_class(self, singleton)
+        })
     }
+}
+
+/// The class of a singleton edge whose fact did not already carry one. It is determined by the
+/// module and the singleton, so it lives with those identities rather than on the fact other
+/// crates construct.
+fn synthesized_singleton_class(
+    module: &str,
+    singleton: SingletonDispatch,
+    synthesize: impl FnOnce() -> Option<crate::libraries::KlibBodyClassContract>,
+) -> Option<&'static crate::libraries::KlibBodyClassContract> {
+    use std::sync::{Mutex, OnceLock};
+    static CLASSES: OnceLock<
+        Mutex<HashMap<(String, TypeName), &'static crate::libraries::KlibBodyClassContract>>,
+    > = OnceLock::new();
+    let classes = CLASSES.get_or_init(|| Mutex::new(HashMap::default()));
+    let mut classes = classes
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let key = (module.to_owned(), singleton.classifier);
+    if let Some(contract) = classes.get(&key) {
+        return Some(*contract);
+    }
+    let contract = Box::leak(Box::new(synthesize()?));
+    classes.insert(key, contract);
+    Some(contract)
 }
 
 fn synthesize_singleton_class(
@@ -461,7 +461,6 @@ mod tests {
             klib_body_type_parameters: Box::new([]),
             klib_body_declaration_modifiers: None,
             klib_body_class_contract: None,
-            singleton_edge_class: SingletonEdgeClass::default(),
             klib_body_accessor: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
@@ -687,7 +686,6 @@ mod tests {
             klib_body_type_parameters: Box::new([]),
             klib_body_declaration_modifiers: None,
             klib_body_class_contract: None,
-            singleton_edge_class: SingletonEdgeClass::default(),
             klib_body_accessor: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
@@ -1071,7 +1069,6 @@ impl CheckedBackendCallables {
                     klib_body_type_parameters,
                     klib_body_declaration_modifiers,
                     klib_body_class_contract,
-                    singleton_edge_class: SingletonEdgeClass::default(),
                     klib_body_vararg_index,
                     klib_body_parameter_defaults,
                     declares_parameter_defaults,
