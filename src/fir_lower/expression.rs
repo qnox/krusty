@@ -1800,6 +1800,9 @@ impl BodyLowering<'_> {
                     .contravariant_parameters
                     .iter()
                     .any(|parameter| *parameter);
+                if !project_adapter {
+                    self.fold_sam_converted_reference(&conversion, expression);
+                }
                 if !project_adapter
                     && matches!(
                         self.ir.exprs.get(expression as usize),
