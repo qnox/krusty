@@ -528,10 +528,15 @@ test-all *ARGS:
 
 # Build the krusty-build library test binary and print its path. Gradle lanes run this prebuilt
 # binary; they do not compile krusty again.
+#
+# CI builds this right after `cargo build --profile gate -p krusty-cli`. Selecting krusty-cli's
+# binary here as well resolves the same features as that build: on its own, krusty-build's graph
+# lacks the Native backend, so bumpalo (under zopfli) loses Cranelift's `allocator-api2` feature
+# and krusty, which links zopfli, compiled a second time (484 s of the 1157 s tool-bins build).
 krusty-build-tests:
     #!/usr/bin/env bash
     set -euo pipefail
-    scripts/cargo-test-binary.sh krusty_build -p krusty-build --lib
+    scripts/cargo-test-binary.sh krusty_build -p krusty-build --lib -p krusty-cli --bin krusty
 
 # The normal compiler unit suite, which exact-version CI rows run without rebuilding Rust.
 compiler-unit-tests:
