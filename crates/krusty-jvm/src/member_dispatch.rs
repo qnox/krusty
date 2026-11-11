@@ -219,6 +219,7 @@ mod tests {
             role: None,
             companion: None,
             enum_entries_accessor: None,
+            inert_singleton: false,
         })
     }
 

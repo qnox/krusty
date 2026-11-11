@@ -324,7 +324,7 @@ impl CallableRegistry {
                             *operation
                                 != krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
                         })
-                        .is_some_and(super::lower::is_direct_operation)
+                        .is_some_and(super::lower::realized_without_emitted_body)
                         && !callable
                             .dependency_callable
                             .as_ref()

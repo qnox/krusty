@@ -1502,7 +1502,6 @@ enum/enumValueOf.kt
 enum/interfaceCallNoEntryClass.kt
 enum/interfaceCallWithEntryClass.kt
 enum/k54079.kt
-enum/kt20651_inlineLambda.kt
 enum/kt38540.kt
 enum/kt44744_innerClass.kt
 enum/kt7257_boundReference2.kt

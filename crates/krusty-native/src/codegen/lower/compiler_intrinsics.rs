@@ -415,6 +415,445 @@ impl BodyLowering<'_, '_, '_> {
             &[value, fallback],
         )
     }
+
+    /// `receiver.startCoroutine(completion)` for a `suspend () -> T` value that takes no arguments.
+    ///
+    /// The receiver runs first, then the completion. The suspend lambda's implementation takes
+    /// that completion as its trailing argument and returns `Any?`; the result is then delivered
+    /// to the completion. A lambda whose body actually suspends declines where that suspension is
+    /// lowered. Another shape declines rather than calling the serialized body.
+    pub(super) fn parameterless_start_coroutine(
+        &mut self,
+        site: u32,
+        ret: Ty,
+        dispatch_receiver: Option<u32>,
+        args: &[u32],
+        params: &[Ty],
+    ) -> Result<Option<Value>, Unsupported> {
+        let Some(receiver) = dispatch_receiver else {
+            return Err("a startCoroutine of another shape".into());
+        };
+        if ret != Ty::Unit || params.len() != 1 || args.len() != 1 {
+            return Err("a startCoroutine of another shape".into());
+        }
+        let Some(ty) = self
+            .checked_type(receiver)
+            .or_else(|| self.file.ir.ext_call_source_receiver.get(&site).copied())
+        else {
+            return Err("a startCoroutine without a function type".into());
+        };
+        let krusty::types::TyKind::Fun(signature) = ty.non_null().kind() else {
+            return Err("a startCoroutine of another function".into());
+        };
+        if !signature.suspend
+            || !signature.params.is_empty()
+            || signature.context_count != 0
+            || signature.has_receiver
+        {
+            return Err("a startCoroutine of another function".into());
+        }
+        if self.foreign_completion(args[0])? {
+            return Err(declined!(
+                "a startCoroutine completion that is not the factory continuation"
+            ));
+        }
+        let Some(work) = self.receiver(receiver)? else {
+            return Ok(None);
+        };
+        let completion = self.reference(args[0])?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let Some(result) = self.invoke_value(work, &[completion], any())? else {
+            return Ok(None);
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        self.deliver_completion(completion, result)?;
+        Ok(None)
+    }
+
+    /// `Continuation(context, resumeWith)`. The context runs, then the completion function. The
+    /// result is an object that retains both and forwards `resumeWith` to that function.
+    pub(super) fn continuation_factory(
+        &mut self,
+        args: &[u32],
+        params: &[Ty],
+    ) -> Result<Option<Value>, Unsupported> {
+        if params.len() != 2 || args.len() != 2 {
+            return Err("a Continuation of another shape".into());
+        }
+        let context = self.continuation_operand(args[0])?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let resume = self.continuation_operand(args[1])?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.continuation_object(context, resume)
+    }
+
+    /// Evaluate a factory operand through the ordinary expression path, so a dependency object is
+    /// the instance its module exports.
+    fn continuation_operand(&mut self, id: u32) -> Result<Value, Unsupported> {
+        self.reference(id)
+    }
+
+    /// A completion whose value is known not to be the object this factory allocates.
+    ///
+    /// A cast does not change that. A call of the factory stays. A value whose static type is the
+    /// factory's interface is not proof: it may be another object, and delivery checks the value
+    /// before reading it. A value of a different type is refused here.
+    fn foreign_completion(&self, id: u32) -> Result<bool, Unsupported> {
+        let id = value_under_casts(self.file.ir, id);
+        if factory_continuation(self.file, id) {
+            return Ok(false);
+        }
+        if let IrExpr::New { internal, .. } = self.file.ir.expr(id) {
+            return Ok(!self
+                .file
+                .callables
+                .continuation_factory()
+                .declares(*internal));
+        }
+        let Some(ty) = self.checked_type(id) else {
+            return Ok(false);
+        };
+        Ok(ty
+            .non_null()
+            .obj_internal()
+            .is_some_and(|name| !self.file.callables.continuation_factory().declares(name)))
+    }
+
+    /// An object whose first fields are the context and the `resumeWith` function.
+    fn continuation_object(
+        &mut self,
+        context: Value,
+        resume: Value,
+    ) -> Result<Option<Value>, Unsupported> {
+        let descriptor = self.file.continuation_descriptor()?;
+        let object = self.allocate(descriptor, CONTINUATION_SIZE)?;
+        self.builder
+            .ins()
+            .store(trusted(), context, object, CONTINUATION_CONTEXT);
+        self.builder
+            .ins()
+            .store(trusted(), resume, object, CONTINUATION_RESUME);
+        Ok(Some(object))
+    }
+
+    /// Invoke the `resumeWith` function stored on the factory's continuation.
+    ///
+    /// A value whose static type is the interface may still be another object. The header's type
+    /// is within every object; only a match reads the continuation's fields or calls through the
+    /// function stored there. A different object, including `null`, is left untouched.
+    fn deliver_completion(&mut self, completion: Value, result: Value) -> Result<(), Unsupported> {
+        let class = self.file.continuation_descriptor()?;
+        let expected = self.data_address(class);
+        let skip = self.builder.create_block();
+        let check = self.builder.create_block();
+        let deliver = self.builder.create_block();
+        let is_null = self.is_null(completion);
+        self.builder.ins().brif(is_null, skip, &[], check, &[]);
+
+        self.continue_in(check);
+        self.builder.seal_block(check);
+        let header = self
+            .builder
+            .ins()
+            .load(types::I64, trusted(), completion, 0);
+        let same = self.builder.ins().icmp(IntCC::Equal, header, expected);
+        self.builder.ins().brif(same, deliver, &[], skip, &[]);
+
+        self.continue_in(deliver);
+        self.builder.seal_block(deliver);
+        let resume =
+            self.builder
+                .ins()
+                .load(types::I64, trusted(), completion, CONTINUATION_RESUME);
+        self.invoke_value(resume, &[result], Ty::Unit)?;
+        if !self.terminated {
+            self.builder.ins().jump(skip, &[]);
+        }
+
+        self.continue_in(skip);
+        self.builder.seal_block(skip);
+        Ok(())
+    }
+
+    /// `object`, checked to be the factory's continuation before one of its fields is read. A
+    /// `context` or `resumeWith` call on another continuation fails with `ClassCastException`
+    /// instead of reading that object's memory as those fields.
+    fn checked_continuation(&mut self, object: Value) -> Result<Option<Value>, Unsupported> {
+        let descriptor = self.file.continuation_descriptor()?;
+        let descriptor = self.data_address(descriptor);
+        let checked = self.runtime_call(
+            "kt_cast_non_null",
+            &[any(), any()],
+            any(),
+            &[object, descriptor],
+        )?;
+        Ok(checked.filter(|_| !self.terminated))
+    }
+
+    /// `receiver.context`: the context the factory stored.
+    pub(super) fn continuation_context(
+        &mut self,
+        receiver: u32,
+    ) -> Result<Option<Value>, Unsupported> {
+        let Some(object) = self.receiver(receiver)? else {
+            return Ok(None);
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let Some(object) = self.checked_continuation(object)? else {
+            return Ok(None);
+        };
+        Ok(Some(self.builder.ins().load(
+            types::I64,
+            trusted(),
+            object,
+            CONTINUATION_CONTEXT,
+        )))
+    }
+
+    /// `receiver.resumeWith(result)`: the function the factory stored, called with `result`.
+    pub(super) fn continuation_resume(
+        &mut self,
+        receiver: Option<u32>,
+        args: &[u32],
+    ) -> Result<Option<Value>, Unsupported> {
+        let Some(receiver) = receiver else {
+            return Err(declined!("a continuation resumeWith without a receiver"));
+        };
+        if args.len() != 1 {
+            return Err(declined!("a continuation resumeWith of another shape"));
+        }
+        let Some(object) = self.receiver(receiver)? else {
+            return Ok(None);
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let argument = self.reference(args[0])?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let Some(object) = self.checked_continuation(object)? else {
+            return Ok(None);
+        };
+        let resume = self
+            .builder
+            .ins()
+            .load(types::I64, trusted(), object, CONTINUATION_RESUME);
+        self.invoke_value(resume, &[argument], Ty::Unit)?;
+        Ok(None)
+    }
+
+    /// A read of the continuation interface's `context`, when `id` is that read.
+    pub(super) fn continuation_property(
+        &mut self,
+        id: u32,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        let owners = self.file.callables.continuation_factory();
+        let (target, receiver) = {
+            let IrExpr::Checked(operation) = self.file.ir.expr(id) else {
+                return None;
+            };
+            let IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver,
+                arguments,
+                parameters,
+                ..
+            } = &**operation
+            else {
+                return None;
+            };
+            if !arguments.is_empty() || !parameters.is_empty() {
+                return None;
+            }
+            (*target, *receiver)
+        };
+        let owner = self.file.callables.property(target)?.owner;
+        if !owners.declares(owner) {
+            return None;
+        }
+        let Some(receiver) = receiver else {
+            return Some(Err(declined!("a continuation context without a receiver")));
+        };
+        Some(self.continuation_context(receiver))
+    }
+}
+
+const CONTINUATION_CONTEXT: i32 = model::HEADER_SIZE as i32;
+const CONTINUATION_RESUME: i32 = model::HEADER_SIZE as i32 + 8;
+const CONTINUATION_SIZE: u32 = model::HEADER_SIZE + 16;
+
+impl<'a> FileLowering<'a> {
+    /// The descriptor of the continuation object, declared on first use.
+    fn continuation_descriptor(&mut self) -> Result<DataId, Unsupported> {
+        Ok(self.ensure_continuation()?.0)
+    }
+
+    /// The interface descriptor `is Continuation` asks about.
+    pub(super) fn continuation_interface_descriptor(&mut self) -> Result<DataId, Unsupported> {
+        Ok(self.ensure_continuation()?.1)
+    }
+
+    /// The class the factory allocates, and the interface that class implements.
+    fn ensure_continuation(&mut self) -> Result<(DataId, DataId), Unsupported> {
+        if let Some(descriptors) = self.continuation_descriptors {
+            return Ok(descriptors);
+        }
+        let owner = self
+            .callables
+            .continuation_factory()
+            .interface()
+            .ok_or_else(|| declined!("a continuation object without its factory"))?;
+        // Display text for the descriptor. The type test compares the descriptor, not this text.
+        let qualified = owner.render().replace('/', ".");
+        let simple = qualified
+            .rsplit('.')
+            .next()
+            .unwrap_or(qualified.as_str())
+            .to_string();
+        let namespace = super::super::super::symbols::module_namespace(self.module_name);
+        let interface_symbol = format!("kt_modtype_{namespace}_continuation_iface");
+        let class_symbol = format!("kt_modtype_{namespace}_continuation");
+        let interface = self.declare_module_data(&interface_symbol)?;
+        let class = self.declare_module_data(&class_symbol)?;
+        let superclass = self.import_data("kt_type_any")?;
+        self.define_shared_type_descriptor(
+            interface,
+            "kt_continuation_iface",
+            &format!(".data.rel.ro.{interface_symbol}"),
+            super::objects::DescriptorShape {
+                kotlin_name: &qualified,
+                instance_size: 0,
+                reference_offsets: &[],
+                vtable: &[],
+                itable: &[],
+                instantiable: false,
+                superclass,
+                interfaces: &[],
+                reference_target: None,
+                walk: super::objects::WalkMembers::default(),
+                qualified_name: Some(&qualified),
+                simple_name: Some(&simple),
+                class_names: 0,
+            },
+        )?;
+        let references = [model::HEADER_SIZE, model::HEADER_SIZE + 8];
+        let vtable = self.any_vtable()?;
+        self.define_shared_type_descriptor(
+            class,
+            "kt_continuation",
+            &format!(".data.rel.ro.{class_symbol}"),
+            super::objects::DescriptorShape {
+                kotlin_name: &qualified,
+                instance_size: CONTINUATION_SIZE,
+                reference_offsets: &references,
+                vtable: &vtable,
+                itable: &[],
+                instantiable: true,
+                superclass,
+                interfaces: &[interface],
+                reference_target: None,
+                walk: super::objects::WalkMembers::default(),
+                qualified_name: Some(&qualified),
+                simple_name: Some(&simple),
+                class_names: 0,
+            },
+        )?;
+        self.continuation_descriptors = Some((class, interface));
+        Ok((class, interface))
+    }
+
+    /// One stable instance of a dependency object whose published declaration stores nothing.
+    pub(super) fn inert_instance(
+        &mut self,
+        classifier: krusty::types::TypeName,
+    ) -> Result<DataId, Unsupported> {
+        if let Some(instance) = self.inert_objects.get(&classifier) {
+            return Ok(*instance);
+        }
+        let base = format!("kt_inert_{}", self.inert_objects.len());
+        let descriptor = self.declare_local_data(&format!("kt_type_{base}"), false)?;
+        let vtable = self.any_vtable()?;
+        let superclass = self.import_data("kt_type_any")?;
+        let kotlin_name = classifier.render().replace('/', ".");
+        self.define_type_descriptor(
+            descriptor,
+            &base,
+            super::objects::DescriptorShape {
+                kotlin_name: &kotlin_name,
+                instance_size: model::HEADER_SIZE,
+                reference_offsets: &[],
+                vtable: &vtable,
+                itable: &[],
+                instantiable: true,
+                superclass,
+                interfaces: &[],
+                reference_target: None,
+                walk: super::objects::WalkMembers::default(),
+                qualified_name: Some(&kotlin_name),
+                simple_name: None,
+                class_names: 0,
+            },
+        )?;
+        let instance = self.declare_local_data(&format!("{base}_instance"), false)?;
+        let mut description = DataDescription::new();
+        description.define(vec![0; model::HEADER_SIZE as usize].into_boxed_slice());
+        description.set_align(8);
+        let global = self
+            .module
+            .declare_data_in_data(descriptor, &mut description);
+        description.write_data_addr(0, global, 0);
+        self.module
+            .define_data(instance, &description)
+            .map_err(|error| format!("defining `{base}_instance` ({error})"))?;
+        self.inert_objects.insert(classifier, instance);
+        Ok(instance)
+    }
+}
+
+/// The expression under representation casts. A cast to the completion's static type does not
+/// make a different object into the factory's.
+fn value_under_casts(ir: &IrFile, mut id: u32) -> u32 {
+    loop {
+        match ir.expr(id) {
+            IrExpr::TypeOp {
+                op:
+                    IrTypeOp::ImplicitCoercion
+                    | IrTypeOp::Cast
+                    | IrTypeOp::CastNonNull
+                    | IrTypeOp::SafeCast,
+                arg,
+                ..
+            } => {
+                id = *arg;
+            }
+            _ => return id,
+        }
+    }
+}
+
+/// Whether `id` is a call of the continuation factory.
+fn factory_continuation(file: &FileLowering<'_>, id: u32) -> bool {
+    let IrExpr::Call { callee, .. } = file.ir.expr(id) else {
+        return false;
+    };
+    let Callee::External { target, .. } = &**callee else {
+        return false;
+    };
+    file.callables.callable(*target).is_some_and(|fact| {
+        fact.compiler_operation()
+            == Some(krusty::backend::BackendCompilerIntrinsic::ContinuationFactory)
+    })
 }
 
 /// The selected declaration's own operands: the classifier owning a member, the declared value

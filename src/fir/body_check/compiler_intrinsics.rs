@@ -50,6 +50,7 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::Print
         | CompilerIntrinsic::Println
         | CompilerIntrinsic::StartCoroutine
+        | CompilerIntrinsic::ContinuationFactory
         | CompilerIntrinsic::CoroutineContext
         | CompilerIntrinsic::CoroutineSuspended
         | CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn

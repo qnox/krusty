@@ -174,9 +174,17 @@ fn function_shape(ty: Ty, arity: usize, suspend: bool) -> bool {
 }
 
 fn continuation_argument(ty: Ty) -> Option<Ty> {
+    classifier_argument(ty, "kotlin/coroutines/Continuation")
+}
+
+fn result_argument(ty: Ty) -> Option<Ty> {
+    classifier_argument(ty, "kotlin/Result")
+}
+
+fn classifier_argument(ty: Ty, classifier: &str) -> Option<Ty> {
     let ty = ty.non_null();
     let internal = ty.obj_internal()?;
-    if !internal.matches("kotlin/coroutines/Continuation") {
+    if !internal.matches(classifier) {
         return None;
     }
     let [argument] = ty.type_args() else {
@@ -656,6 +664,30 @@ fn coroutine(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic
     }
     if facts.package.matches("kotlin/coroutines") {
         return match (facts.name, facts.kind, facts.receiver, facts.params) {
+            ("Continuation", FnKind::TopLevel, None, [context, resume])
+                if facts.type_parameter_count == 1
+                    && !facts.is_suspend
+                    && facts.context_count == 0
+                    && facts.vararg.is_none()
+                    && context
+                        .non_null()
+                        .obj_internal()
+                        .is_some_and(|name| name.matches("kotlin/coroutines/CoroutineContext"))
+                    && function_shape(*resume, 1, false)
+                    && resume.fun_ret() == Some(Ty::Unit)
+                    && matches!(
+                        (
+                            resume
+                                .fun_params()
+                                .and_then(|params| params.first().copied())
+                                .and_then(result_argument),
+                            continuation_argument(facts.ret),
+                        ),
+                        (Some(element), Some(resumed)) if element == resumed
+                    ) =>
+            {
+                Some(CompilerIntrinsic::ContinuationFactory)
+            }
             ("startCoroutine", FnKind::Extension, Some(receiver), parameters)
                 if facts.type_parameter_count >= 1
                     && !facts.is_suspend
@@ -1964,6 +1996,59 @@ mod tests {
                 package: crate::types::type_name("fixture"),
                 ..declaration
             }),
+            None
+        );
+    }
+
+    #[test]
+    fn continuation_factory_requires_the_context_and_result_callback() {
+        let parameter = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let resumed = Ty::obj_args("kotlin/Result", &[parameter]);
+        let params = [
+            Ty::obj("kotlin/coroutines/CoroutineContext"),
+            Ty::fun(vec![resumed], Ty::Unit),
+        ];
+        let declaration = BuiltinFunctionDeclaration {
+            package: crate::types::type_name("kotlin/coroutines"),
+            name: "Continuation",
+            kind: FnKind::TopLevel,
+            receiver: None,
+            params: &params,
+            ret: Ty::obj_args("kotlin/coroutines/Continuation", &[parameter]),
+            context_count: 0,
+            type_parameter_count: 1,
+            vararg: None,
+            is_suspend: false,
+            is_operator: false,
+            is_infix: false,
+        };
+        assert_eq!(
+            function_realization_with_stdlib_owner(declaration, true),
+            Some(CompilerIntrinsic::ContinuationFactory)
+        );
+        let other = Ty::ty_param("U", Ty::nullable(Ty::obj("kotlin/Any")));
+        let mismatched = [
+            params[0],
+            Ty::fun(vec![Ty::obj_args("kotlin/Result", &[other])], Ty::Unit),
+        ];
+        assert_eq!(
+            function_realization_with_stdlib_owner(
+                BuiltinFunctionDeclaration {
+                    params: &mismatched,
+                    ..declaration
+                },
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            function_realization_with_stdlib_owner(
+                BuiltinFunctionDeclaration {
+                    package: crate::types::type_name("fixture"),
+                    ..declaration
+                },
+                true,
+            ),
             None
         );
     }

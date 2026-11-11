@@ -358,8 +358,10 @@ impl<'a> FileLowering<'a> {
             if body.body.is_none() {
                 continue;
             }
-            // What the body takes beyond the captures is what a caller supplies. A SUSPEND lambda's
-            // body takes a continuation nobody here can pass, and that is what this catches.
+            // What the body takes beyond the captures is what a caller supplies. A suspend
+            // lambda's body takes its caller's continuation as its last parameter, and the
+            // declared arity counts that same parameter. A body that actually suspends declines
+            // where that suspension is lowered.
             let Some(arity) = body.params.len().checked_sub(captures.len()) else {
                 return Err(declined!(
                     "a function value whose body takes {} parameters for {} captures",

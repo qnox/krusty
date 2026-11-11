@@ -2390,3 +2390,45 @@ fn only_a_declared_function_invocation_has_invocation_semantics() {
         None
     );
 }
+
+#[test]
+fn a_suspend_function_classifier_is_the_suspend_function_type_it_denotes() {
+    use crate::metadata::klib_ir::tree::{KlibIrTypeArgument, KlibIrVariance};
+    let mut arena = KlibIrArena::default();
+    let unit = arena.push_type(demo_package::T::Unit.klib());
+    let argument = KlibIrTypeArgument::Type {
+        variance: KlibIrVariance::Invariant,
+        ty: unit,
+    };
+    let suspend_unit = arena.push_type(KlibIrType::Simple {
+        classifier: public_symbol(
+            KlibIrSymbolKind::Class,
+            KlibPublicIdSignature::classifier(type_name("kotlin/coroutines/SuspendFunction0")),
+        ),
+        nullability: KlibIrNullability::NotSpecified,
+        arguments: vec![argument],
+        annotations: vec![],
+        abbreviation: None,
+    });
+    assert_eq!(
+        super::klib_types::semantic_type(&arena, &Default::default(), suspend_unit)
+            .expect("SuspendFunction0 denotes a suspend function type"),
+        Ty::fun_suspend(Vec::new(), Ty::Unit)
+    );
+    let reflective = arena.push_type(KlibIrType::Simple {
+        classifier: public_symbol(
+            KlibIrSymbolKind::Class,
+            KlibPublicIdSignature::classifier(type_name("kotlin/reflect/KSuspendFunction0")),
+        ),
+        nullability: KlibIrNullability::NotSpecified,
+        arguments: vec![argument],
+        annotations: vec![],
+        abbreviation: None,
+    });
+    assert!(matches!(
+        super::klib_types::semantic_type(&arena, &Default::default(), reflective),
+        Err(super::decline::KlibBodyDeclineReason::UnsupportedType(
+            "a reflective suspend function type"
+        ))
+    ));
+}

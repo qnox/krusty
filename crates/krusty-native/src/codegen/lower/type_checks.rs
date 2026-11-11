@@ -105,6 +105,12 @@ impl<'a> FileLowering<'a> {
         // A named class another file of the module declares: that file defines its descriptor
         // under the module symbol.
         if let Some(name) = target.obj_internal() {
+            let continuation = self.callables.continuation_factory().declares(name);
+            if continuation {
+                return Ok(Some(self.continuation_interface_descriptor()?));
+            }
+        }
+        if let Some(name) = target.obj_internal() {
             if self
                 .classifiers
                 .classifier(name)

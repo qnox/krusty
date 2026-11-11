@@ -59,6 +59,19 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         )
 }
 
+/// The call is realized where it is written. Its serialized body is not a wasm function.
+pub(super) fn realized_without_emitted_body(
+    operation: krusty::backend::BackendCompilerIntrinsic,
+) -> bool {
+    use krusty::backend::BackendCompilerIntrinsic;
+    is_direct_operation(operation)
+        || matches!(
+            operation,
+            BackendCompilerIntrinsic::StartCoroutine
+                | BackendCompilerIntrinsic::ContinuationFactory
+        )
+}
+
 use krusty::backend::class_tables::module_interfaces::ModuleInterfaces;
 use krusty::backend::class_tables::module_slots::ModuleSlotPlan;
 use krusty::backend::class_tables::AnyMember;
@@ -74,6 +87,7 @@ use super::any_member_reach::FileReach;
 use super::callable_registry::{CallableRegistry, FileCallTargets};
 use super::classes::{FileClasses, RealizedProperties};
 use super::laid_out_classes::LaidOutClasses;
+use super::library_objects::ModuleRuntime;
 use super::property_registry::PropertyRegistry;
 
 pub(super) type Unsupported = String;
@@ -107,7 +121,7 @@ pub(super) struct FileInput<'a> {
 /// The program a file is lowered into.
 pub(super) struct ModuleState<'a> {
     pub(super) module: &'a mut Module,
-    pub(super) runtime: &'a mut Runtime,
+    pub(super) runtime: &'a mut ModuleRuntime,
     pub(super) callables: &'a mut CallableRegistry,
     pub(super) properties: &'a mut PropertyRegistry,
     /// The classes earlier files of the source module laid out; this file's join them.
@@ -466,8 +480,9 @@ pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
         TyKind::Obj(..) | TyKind::TyParam(..) => REFERENCE,
         TyKind::Intersection(..) if is_reference_intersection(ty) => REFERENCE,
         TyKind::DefinitelyNotNull(inner) if inner.is_ty_param() => REFERENCE,
-        // A function value is an object (see `super::super::function_values`); a suspend one is
-        // invoked with its caller's continuation as one more argument.
+        // A function value is an object (see `super::super::function_values`). A suspend one is
+        // invoked with its caller's continuation as one more argument. A body that actually
+        // suspends still declines where that suspension is lowered.
         TyKind::Fun(_) => REFERENCE,
         TyKind::Nullable(inner) if matches!(inner.kind(), TyKind::Fun(_)) => REFERENCE,
         TyKind::Nullable(inner)
@@ -643,7 +658,7 @@ struct Body<'a> {
     numbers: &'a ModuleInterfaces,
     ir: &'a IrFile,
     module: &'a mut Module,
-    runtime: &'a mut Runtime,
+    runtime: &'a mut ModuleRuntime,
     functions: &'a [Option<u32>],
     /// The global holding each of the file's top-level properties.
     globals: &'a [u32],
@@ -690,7 +705,7 @@ impl<'a> Body<'a> {
     fn new(
         context: &FileContext<'a>,
         module: &'a mut Module,
-        runtime: &'a mut Runtime,
+        runtime: &'a mut ModuleRuntime,
         parameters: &[Ty],
         mut declared: HashMap<u32, Ty>,
         result: Ty,
@@ -930,6 +945,17 @@ impl<'a> Body<'a> {
     /// Emit `id`, leaving its value on the stack when it has one.
     fn expression(&mut self, id: u32) -> Result<(), Unsupported> {
         let node = self.ir.expr(id).clone();
+        // `startCoroutine` on a parameterless suspend lambda evaluates the receiver, then the
+        // completion, runs the lambda, and delivers the result. It is not the stdlib body.
+        if let Some(result) = self.parameterless_start_coroutine(id, &node) {
+            return result;
+        }
+        if let Some(result) = self.continuation_factory(&node) {
+            return result;
+        }
+        if let Some(result) = self.continuation_member(&node) {
+            return result;
+        }
         if let Some(result) = self.box_member_expression(id, &node) {
             return result;
         }

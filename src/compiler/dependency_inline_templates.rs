@@ -66,6 +66,6 @@ impl DependencyInlineTemplates for KlibInlineTemplates {
         self.platform
             .external_callable(target)
             .and_then(|realization| realization.callable.compiler_intrinsic)
-            .is_some_and(crate::libraries::CompilerIntrinsic::replaces_its_body)
+            .is_some_and(crate::libraries::CompilerIntrinsic::skips_serialized_body)
     }
 }

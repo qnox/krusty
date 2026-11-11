@@ -10,6 +10,7 @@ mod callable_registry;
 mod classes;
 mod interface_members;
 mod laid_out_classes;
+mod library_objects;
 mod lower;
 mod property_registry;
 
@@ -86,7 +87,7 @@ pub struct WasmModule {
 struct Started {
     module: Module,
     host: Host,
-    runtime: Runtime,
+    runtime: library_objects::ModuleRuntime,
     callables: callable_registry::CallableRegistry,
     properties: property_registry::PropertyRegistry,
     classes: laid_out_classes::LaidOutClasses,
@@ -103,7 +104,7 @@ impl Started {
         Self {
             module,
             host,
-            runtime,
+            runtime: library_objects::ModuleRuntime::new(runtime),
             callables: Default::default(),
             properties: Default::default(),
             classes: Default::default(),
@@ -133,7 +134,7 @@ impl Backend for WasmBackend {
         &self,
         operation: krusty::backend::BackendCompilerIntrinsic,
     ) -> bool {
-        lower::is_direct_operation(operation)
+        lower::realized_without_emitted_body(operation)
     }
 
     fn lower_ir_file(

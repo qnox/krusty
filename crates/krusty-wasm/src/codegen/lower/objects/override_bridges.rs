@@ -10,16 +10,16 @@ use krusty::types::Ty;
 
 use super::super::super::super::encode::{Function, HeapType, Module};
 use super::super::super::super::objects::slot_field;
-use super::super::super::super::runtime::Runtime;
 use super::super::super::classes::{BridgedMember, FileClasses, OverrideBridge};
 use super::super::super::interface_members::accessor_types;
+use super::super::super::library_objects::ModuleRuntime;
 use super::{Body, FileContext, Unsupported};
 
 pub(super) fn define_override_bridges(
     context: &FileContext<'_>,
     classes: &FileClasses,
     module: &mut Module,
-    runtime: &mut Runtime,
+    runtime: &mut ModuleRuntime,
 ) -> Result<(), Unsupported> {
     let ir = context.ir;
     for &(bridge, function, ty) in &classes.bridges {

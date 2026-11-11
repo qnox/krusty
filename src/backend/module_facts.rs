@@ -90,6 +90,11 @@ pub struct BackendClassifierFact {
     /// published it: present for an enum of this module and for a dependency enum that declares
     /// one, absent for an enum without (a Java enum, or a Kotlin enum compiled before `entries`).
     pub enum_entries_accessor: Option<EnumEntriesAccessor>,
+    /// A dependency `object` whose published declaration has an empty constructor and no stored
+    /// property. The instance itself is the only initialization effect that declaration owns, so a
+    /// backend may materialize one canonical instance. Stored state keeps this false and the
+    /// operation that needs the instance declines.
+    pub inert_singleton: bool,
 }
 
 /// The exact static call target of an enum's `entries` accessor: its owner, physical name and
@@ -130,6 +135,36 @@ struct SourceDeclaration {
     serializable_elements: Option<crate::types::SerializableClassElements>,
 }
 
+/// Whether `shape` publishes a Kotlin `object` whose only initialization effect is the instance.
+///
+/// Ownership is the resolved object declaration. The effect is what that declaration publishes:
+/// an empty constructor and no stored property. A property, a constructor parameter, a value
+/// class, or an outer instance is state this proof does not run, so the object is not inert.
+fn publishes_inert_singleton(shape: &LibraryType) -> bool {
+    if shape.kind != crate::libraries::TypeKind::Object
+        || !shape.is_kotlin
+        || shape.is_data
+        || shape.value_underlying.is_some()
+        || shape.outer_instance.is_some()
+        || shape.inheritance.is_abstract
+    {
+        return false;
+    }
+    if shape
+        .constructors
+        .iter()
+        .any(|constructor| !constructor.params.is_empty())
+    {
+        return false;
+    }
+    !shape.declared_callables.values().any(|callable| {
+        matches!(
+            callable,
+            crate::libraries::Callables::Properties(_) | crate::libraries::Callables::Both { .. }
+        )
+    })
+}
+
 impl BackendClassifierFact {
     fn from_library(classifier: TypeName, shape: &LibraryType) -> Self {
         Self {
@@ -162,6 +197,7 @@ impl BackendClassifierFact {
                 .enum_entries_accessor
                 .as_ref()
                 .map(|accessor| EnumEntriesAccessor::from_member(classifier, accessor)),
+            inert_singleton: publishes_inert_singleton(shape),
         }
     }
 
@@ -454,6 +490,8 @@ impl BackendModuleFacts {
                         ),
                     )
                 }),
+                // This file emits its own objects. The inert proof is only for a dependency.
+                inert_singleton: false,
             };
             source_declarations.insert(
                 classifier.classifier,

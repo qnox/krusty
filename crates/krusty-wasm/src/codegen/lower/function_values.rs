@@ -6,9 +6,15 @@
 //! type the body declares, calls the body and hands its result back as a reference.
 
 use super::*;
-use crate::encode::{CompositeType, SubType};
+use crate::encode::{Code, CompositeType, SubType, ValType};
 use crate::function_values::INVOKE_FIELD;
 use crate::objects::immutable;
+use krusty::types::TyKind;
+
+/// The continuation object's context, after the dispatch table and the identity hash.
+const CONTEXT_FIELD: u32 = crate::identity::PREFIX_FIELDS;
+/// The continuation object's `resumeWith` function.
+const RESUME_FIELD: u32 = crate::identity::PREFIX_FIELDS + 1;
 
 /// What `==` on a function value compares.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -304,6 +310,462 @@ impl Body<'_> {
         self.coerce_emitted_value(any, ret)
     }
 
+    /// `receiver.startCoroutine(completion)` for a `suspend () -> T` value that takes no arguments.
+    ///
+    /// The receiver runs first, then the completion. The suspend lambda's implementation takes
+    /// that completion as its trailing argument and returns `Any?`; the result is then delivered
+    /// to the completion. A lambda whose body actually suspends declines where that suspension is
+    /// lowered. Another shape declines rather than calling the serialized body.
+    pub(super) fn parameterless_start_coroutine(
+        &mut self,
+        site: u32,
+        node: &IrExpr,
+    ) -> Option<Result<(), Unsupported>> {
+        let IrExpr::Call {
+            callee,
+            dispatch_receiver,
+            args,
+        } = node
+        else {
+            return None;
+        };
+        let Callee::External {
+            target,
+            params,
+            ret,
+            defaults,
+            extension_receiver_parameter,
+            ..
+        } = &**callee
+        else {
+            return None;
+        };
+        if self.callables.callable(*target).is_none_or(|fact| {
+            fact.compiler_operation() != Some(krusty::libraries::CompilerIntrinsic::StartCoroutine)
+        }) {
+            return None;
+        }
+        let Some(receiver) = *dispatch_receiver else {
+            return Some(Err("a startCoroutine of another shape".into()));
+        };
+        if !defaults.is_empty()
+            || extension_receiver_parameter.is_some()
+            || *ret != Ty::Unit
+            || params.len() != 1
+            || args.len() != 1
+        {
+            return Some(Err("a startCoroutine of another shape".into()));
+        }
+        let Some(ty) = self
+            .type_of(receiver)
+            .ok()
+            .flatten()
+            .or_else(|| self.ir.ext_call_source_receiver.get(&site).copied())
+        else {
+            return Some(Err("a startCoroutine without a function type".into()));
+        };
+        if !parameterless_suspend(ty) {
+            return Some(Err("a startCoroutine of another function".into()));
+        }
+        let completion = args[0];
+        match self.foreign_completion(completion) {
+            Ok(true) => {
+                return Some(Err(
+                    "a startCoroutine completion that is not the factory continuation".into(),
+                ));
+            }
+            Ok(false) => {}
+            Err(error) => return Some(Err(error)),
+        }
+        Some((|| {
+            self.expression(receiver)?;
+            let work = self.local(REFERENCE);
+            self.code.local_set(work);
+            self.expression(completion)?;
+            let completion = self.local(REFERENCE);
+            self.code.local_set(completion);
+            // The lambda's result is what the completion receives: one that suspends declines
+            // where that suspension is lowered.
+            let any = Ty::obj_name(krusty::types::wk::any());
+            self.call_function_value(work, completion, any)?;
+            let result = self.local(REFERENCE);
+            self.code.local_set(result);
+            self.deliver_completion(completion, result)
+        })())
+    }
+
+    /// `Continuation(context, resumeWith)`. The context runs, then the completion function. The
+    /// result is an object that retains both and forwards `resumeWith` to that function.
+    pub(super) fn continuation_factory(
+        &mut self,
+        node: &IrExpr,
+    ) -> Option<Result<(), Unsupported>> {
+        let IrExpr::Call {
+            callee,
+            dispatch_receiver,
+            args,
+        } = node
+        else {
+            return None;
+        };
+        let Callee::External {
+            target,
+            params,
+            defaults,
+            extension_receiver_parameter,
+            ..
+        } = &**callee
+        else {
+            return None;
+        };
+        if self.callables.callable(*target).is_none_or(|fact| {
+            fact.compiler_operation()
+                != Some(krusty::libraries::CompilerIntrinsic::ContinuationFactory)
+        }) {
+            return None;
+        }
+        if dispatch_receiver.is_some()
+            || !defaults.is_empty()
+            || extension_receiver_parameter.is_some()
+            || params.len() != 2
+            || args.len() != 2
+        {
+            return Some(Err("a Continuation of another shape".into()));
+        }
+        let [context, resume] = args.as_slice() else {
+            return Some(Err("a Continuation of another shape".into()));
+        };
+        Some((|| {
+            let (structure, table) = self.continuation_items()?;
+            self.continuation_operand(*context)?;
+            let context = self.local(REFERENCE);
+            self.code.local_set(context);
+            self.continuation_operand(*resume)?;
+            let resume = self.local(REFERENCE);
+            self.code.local_set(resume);
+            self.code.global_get(table);
+            self.code.call(self.runtime.identity.allocate);
+            self.code.local_get(context);
+            self.code.local_get(resume);
+            self.code.struct_new(structure);
+            Ok(())
+        })())
+    }
+
+    /// `c.context` and `c.resumeWith` on the factory's continuation.
+    pub(super) fn continuation_member(&mut self, node: &IrExpr) -> Option<Result<(), Unsupported>> {
+        match node {
+            IrExpr::Checked(operation) => self.continuation_property(operation),
+            IrExpr::Call {
+                callee,
+                dispatch_receiver,
+                args,
+            } => self.continuation_call(callee, *dispatch_receiver, args),
+            _ => None,
+        }
+    }
+
+    /// Evaluate a factory operand through the ordinary expression path, so a dependency object is
+    /// the instance its module exports.
+    fn continuation_operand(&mut self, id: u32) -> Result<(), Unsupported> {
+        self.expression(id)
+    }
+
+    /// Call the one-argument function value stored in `function` with the reference stored in
+    /// `argument`.
+    fn call_function_value(
+        &mut self,
+        function: u32,
+        argument: u32,
+        ret: Ty,
+    ) -> Result<(), Unsupported> {
+        let shape = self.runtime.function_shape(self.module, 1);
+        self.code.local_get(function).local_get(argument);
+        let object = self.runtime.objects.object;
+        self.code
+            .local_get(function)
+            .ref_cast(false, HeapType::Concrete(object))
+            .struct_get(object, 0)
+            .ref_cast(false, HeapType::Concrete(shape.table))
+            .struct_get(shape.table, INVOKE_FIELD)
+            .call_ref(shape.invoke);
+        self.coerce_emitted_value(Ty::obj_name(krusty::types::wk::any()), ret)
+    }
+
+    /// Invoke the `resumeWith` function stored on the factory's continuation.
+    ///
+    /// A value whose static type is `Continuation` may still be another object. The cast is a test:
+    /// a different object, including `null`, skips the call. A failing cast would trap, and reading
+    /// the field of that object would not.
+    fn deliver_completion(&mut self, completion: u32, result: u32) -> Result<(), Unsupported> {
+        let (structure, _) = self.continuation_items()?;
+        self.code
+            .local_get(completion)
+            .ref_test(false, HeapType::Concrete(structure));
+        self.code.if_(BlockType::Empty);
+        let resume = self.local(REFERENCE);
+        self.code
+            .local_get(completion)
+            .ref_cast(false, HeapType::Concrete(structure))
+            .struct_get(structure, RESUME_FIELD)
+            .local_set(resume);
+        self.call_function_value(resume, result, Ty::Unit)?;
+        self.code.end();
+        Ok(())
+    }
+
+    pub(super) fn continuation_items(&mut self) -> Result<(u32, u32), Unsupported> {
+        if let Some(items) = self.runtime.library_objects.continuation {
+            return Ok(items);
+        }
+        let any_table = self.runtime.objects.any_table;
+        let parent = self.runtime.identity.object;
+        let identity_equals = self.runtime.objects.identity_equals;
+        let hash_code = self.runtime.identity.hash_code;
+        let itable_type = self.runtime.objects.itable;
+        let [_, _, to_string_ty] = self.runtime.objects.any_slot_types;
+        // `toString` is the trap a lambda object uses. `hashCode` is that object's identity hash.
+        let to_string = self.runtime.objects.trap(self.module, to_string_ty);
+        let structure = self.module.subtype(SubType {
+            composite: CompositeType::Struct(vec![
+                immutable(ValType::reference(any_table)),
+                immutable(ValType::I32),
+                immutable(REFERENCE),
+                immutable(REFERENCE),
+            ]),
+            supertype: Some(parent),
+            open: false,
+        });
+        let (class, itable) =
+            self.runtime
+                .objects
+                .interfaces
+                .class(self.module, itable_type, vec![structure]);
+        for owner in self
+            .callables
+            .continuation_factory()
+            .names()
+            .into_iter()
+            .flatten()
+        {
+            self.runtime.objects.interfaces.instance_of(class, owner);
+        }
+        let mut init = Code::default();
+        for function in [identity_equals, hash_code, to_string] {
+            self.module.reference_function(function);
+            init.ref_func(function);
+        }
+        init.global_get(itable).struct_new(any_table);
+        let table = self
+            .module
+            .constant_global(ValType::reference(any_table), init);
+        self.runtime.library_objects.continuation = Some((structure, table));
+        Ok((structure, table))
+    }
+
+    fn continuation_property(
+        &mut self,
+        operation: &krusty::ir::IrCheckedOperation,
+    ) -> Option<Result<(), Unsupported>> {
+        let krusty::ir::IrCheckedOperation::ExternalPropertyRead {
+            target,
+            receiver,
+            arguments,
+            parameters,
+            ..
+        } = operation
+        else {
+            return None;
+        };
+        if !arguments.is_empty() || !parameters.is_empty() {
+            return None;
+        }
+        let owners = self.callables.continuation_factory();
+        let owner = self.callables.property(*target)?.owner;
+        if !owners.declares(owner) {
+            return None;
+        }
+        let Some(receiver) = *receiver else {
+            return Some(Err("a continuation context without a receiver".into()));
+        };
+        Some(self.load_continuation_field(receiver, CONTEXT_FIELD))
+    }
+
+    fn continuation_call(
+        &mut self,
+        callee: &Callee,
+        receiver: Option<u32>,
+        args: &[u32],
+    ) -> Option<Result<(), Unsupported>> {
+        let Callee::External {
+            target,
+            ret,
+            defaults,
+            extension_receiver_parameter,
+            ..
+        } = callee
+        else {
+            return None;
+        };
+        let owners = self.callables.continuation_factory();
+        let (declared, interface_member, parameters, result) = {
+            let fact = self.callables.callable(*target)?;
+            (
+                fact.declaration_owner,
+                fact.owner_is_interface,
+                fact.params.len(),
+                fact.ret,
+            )
+        };
+        let owner = match declared {
+            Some(krusty::types::SemanticCallableOwner::Classifier(name)) => Some(name),
+            _ => None,
+        };
+        let on_continuation = owner.is_some_and(|owner| owners.declares(owner));
+        let plain =
+            interface_member && defaults.is_empty() && extension_receiver_parameter.is_none();
+        if !(on_continuation && plain) {
+            return None;
+        }
+        if parameters == 0 && args.is_empty() {
+            let Some(receiver) = receiver else {
+                return Some(Err("a continuation context without a receiver".into()));
+            };
+            return Some(self.load_continuation_field(receiver, CONTEXT_FIELD));
+        }
+        if parameters == 1 && args.len() == 1 && result == Ty::Unit && *ret == Ty::Unit {
+            return Some(self.emit_continuation_resume(receiver, args[0]));
+        }
+        None
+    }
+
+    fn load_continuation_field(&mut self, receiver: u32, field: u32) -> Result<(), Unsupported> {
+        let (structure, _) = self.continuation_items()?;
+        self.expression(receiver)?;
+        self.code
+            .ref_cast(false, HeapType::Concrete(structure))
+            .struct_get(structure, field);
+        Ok(())
+    }
+
+    fn emit_continuation_resume(
+        &mut self,
+        receiver: Option<u32>,
+        argument: u32,
+    ) -> Result<(), Unsupported> {
+        let Some(receiver) = receiver else {
+            return Err("a continuation resumeWith without a receiver".into());
+        };
+        let (structure, _) = self.continuation_items()?;
+        self.expression(receiver)?;
+        let function = self.local(REFERENCE);
+        self.code
+            .ref_cast(false, HeapType::Concrete(structure))
+            .struct_get(structure, RESUME_FIELD)
+            .local_set(function);
+        let any = Ty::obj_name(krusty::types::wk::any());
+        let argument_ty = self.type_of(argument)?.unwrap_or(any);
+        self.value(argument, argument_ty)?;
+        self.coerce_emitted_value(argument_ty, any)?;
+        let argument = self.local(REFERENCE);
+        self.code.local_set(argument);
+        let shape = self.runtime.function_shape(self.module, 1);
+        let object = self.runtime.objects.object;
+        self.code.local_get(function).local_get(argument);
+        self.code
+            .local_get(function)
+            .ref_cast(false, HeapType::Concrete(object))
+            .struct_get(object, 0)
+            .ref_cast(false, HeapType::Concrete(shape.table))
+            .struct_get(shape.table, INVOKE_FIELD)
+            .call_ref(shape.invoke);
+        self.coerce_emitted_value(any, Ty::Unit)
+    }
+
+    /// A completion whose value is known not to be the object this factory allocates.
+    fn foreign_completion(&self, id: u32) -> Result<bool, Unsupported> {
+        let id = value_under_casts(self.ir, id);
+        if factory_continuation(self, id) {
+            return Ok(false);
+        }
+        if let IrExpr::New { internal, .. } = self.ir.expr(id) {
+            return Ok(!self.callables.continuation_factory().declares(*internal));
+        }
+        let Some(ty) = self.type_of(id)? else {
+            return Ok(false);
+        };
+        Ok(ty
+            .non_null()
+            .obj_internal()
+            .is_some_and(|name| !self.callables.continuation_factory().declares(name)))
+    }
+
+    /// One stable instance of a dependency object whose published declaration stores nothing.
+    pub(super) fn inert_instance(
+        &mut self,
+        classifier: krusty::types::TypeName,
+    ) -> Result<u32, Unsupported> {
+        if let Some(global) = self
+            .runtime
+            .library_objects
+            .inert_objects
+            .get(&classifier)
+            .copied()
+        {
+            return Ok(global);
+        }
+        let (structure, table) = self.inert_layout()?;
+        // A constant global cannot call the allocator. The hash is still per instance and stable.
+        let hash = self.runtime.library_objects.inert_objects.len() as i32 + 1;
+        let mut init = Code::default();
+        init.global_get(table).i32_const(hash).struct_new(structure);
+        let global = self
+            .module
+            .constant_global(ValType::reference(structure), init);
+        self.runtime
+            .library_objects
+            .inert_objects
+            .insert(classifier, global);
+        Ok(global)
+    }
+
+    fn inert_layout(&mut self) -> Result<(u32, u32), Unsupported> {
+        if let Some(layout) = self.runtime.library_objects.inert_layout {
+            return Ok(layout);
+        }
+        let any_table = self.runtime.objects.any_table;
+        let parent = self.runtime.identity.object;
+        let identity_equals = self.runtime.objects.identity_equals;
+        let hash_code = self.runtime.identity.hash_code;
+        let itable_type = self.runtime.objects.itable;
+        let [_, _, to_string_ty] = self.runtime.objects.any_slot_types;
+        let to_string = self.runtime.objects.trap(self.module, to_string_ty);
+        let structure = self.module.subtype(SubType {
+            composite: CompositeType::Struct(vec![
+                immutable(ValType::reference(any_table)),
+                immutable(ValType::I32),
+            ]),
+            supertype: Some(parent),
+            open: false,
+        });
+        let (_, itable) =
+            self.runtime
+                .objects
+                .interfaces
+                .class(self.module, itable_type, vec![structure]);
+        let mut init = Code::default();
+        for function in [identity_equals, hash_code, to_string] {
+            self.module.reference_function(function);
+            init.ref_func(function);
+        }
+        init.global_get(itable).struct_new(any_table);
+        let table = self
+            .module
+            .constant_global(ValType::reference(any_table), init);
+        self.runtime.library_objects.inert_layout = Some((structure, table));
+        Ok((structure, table))
+    }
+
     /// `value as F` for a function type `F`: the value, which must be a function value invoked
     /// with `F`'s arguments. A suspend function type is invoked with its caller's continuation as
     /// one more argument, so `suspend () -> R` and `(Continuation<R>) -> Any?` share a shape, as
@@ -393,4 +855,48 @@ impl Body<'_> {
         }
         Ok(())
     }
+}
+
+fn parameterless_suspend(ty: Ty) -> bool {
+    let TyKind::Fun(signature) = ty.non_null().kind() else {
+        return false;
+    };
+    signature.suspend
+        && signature.params.is_empty()
+        && signature.context_count == 0
+        && !signature.has_receiver
+}
+
+/// The expression under representation casts. A cast to the completion's static type does not
+/// make a different object into the factory's.
+fn value_under_casts(ir: &IrFile, mut id: u32) -> u32 {
+    loop {
+        match ir.expr(id) {
+            IrExpr::TypeOp {
+                op:
+                    IrTypeOp::ImplicitCoercion
+                    | IrTypeOp::Cast
+                    | IrTypeOp::CastNonNull
+                    | IrTypeOp::SafeCast,
+                arg,
+                ..
+            } => {
+                id = *arg;
+            }
+            _ => return id,
+        }
+    }
+}
+
+/// Whether `id` is a call of the continuation factory.
+fn factory_continuation(body: &Body<'_>, id: u32) -> bool {
+    let IrExpr::Call { callee, .. } = body.ir.expr(id) else {
+        return false;
+    };
+    let Callee::External { target, .. } = &**callee else {
+        return false;
+    };
+    body.callables.callable(*target).is_some_and(|fact| {
+        fact.compiler_operation() == Some(krusty::libraries::CompilerIntrinsic::ContinuationFactory)
+    })
 }
