@@ -6,7 +6,7 @@ use crate::types::{Ty, TyKind};
 
 use super::source_calls::{
     inline_argument_template, rehome_inline_body_values, SelectedDefaultMode, SelectedOperandMode,
-    SelectedOperandRequest,
+    SelectedOperandRequest, SelectedSemanticOperands,
 };
 use super::BodyLowering;
 
@@ -109,6 +109,13 @@ pub(super) struct ExternalCollectionTransformPlan<'a> {
     pub(super) accumulator_ty: ResolvedTy,
 }
 
+/// The lambda argument an external inline call has already lowered, with its parameter slot.
+struct ExternalInlineLambdaArgument<'a> {
+    arguments: &'a [ExprId],
+    parameter: usize,
+    ty: Ty,
+}
+
 impl BodyLowering<'_> {
     pub(super) fn external_inline_call(
         &mut self,
@@ -137,29 +144,32 @@ impl BodyLowering<'_> {
             if result.get() != Ty::Boolean {
                 return None;
             }
-            let runtime = substitutions.iter().find_map(|substitution| {
+            let runtime = substitutions.iter().find(|substitution| {
                 matches!(
                     substitution.parameter,
                     crate::fir::FirTypeParameterRef::External { callable, ordinal }
                         if callable == target && ordinal == *type_parameter
                 )
-                .then_some(substitution)
             })?;
             if !runtime.reified {
                 return None;
             }
-            let (statements, receiver, mut arguments, defaults) =
-                self.selected_semantic_operands(SelectedOperandRequest {
-                    receiver_ty,
-                    parameter_types,
-                    dispatch_receiver,
-                    extension_receiver,
-                    arguments,
-                    defaults: SelectedDefaultMode::Materialize,
-                    preserve_inline_lambdas: false,
-                    extension_receiver_parameter,
-                    mode: SelectedOperandMode::Materialized,
-                })?;
+            let SelectedSemanticOperands {
+                statements,
+                receiver,
+                args: mut arguments,
+                defaults,
+            } = self.selected_semantic_operands(SelectedOperandRequest {
+                receiver_ty,
+                parameter_types,
+                dispatch_receiver,
+                extension_receiver,
+                arguments,
+                defaults: SelectedDefaultMode::Materialize,
+                preserve_inline_lambdas: false,
+                extension_receiver_parameter,
+                mode: SelectedOperandMode::Materialized,
+            })?;
             for omitted in &defaults {
                 let default = plan_defaults
                     .iter()
@@ -284,18 +294,22 @@ impl BodyLowering<'_> {
             ),
         };
         let lambda_parameter = lambda_parameter as usize;
-        let (mut statements, receiver, mut args, defaults) =
-            self.selected_semantic_operands(SelectedOperandRequest {
-                receiver_ty,
-                parameter_types,
-                dispatch_receiver,
-                extension_receiver,
-                arguments,
-                defaults: SelectedDefaultMode::Materialize,
-                preserve_inline_lambdas: false,
-                extension_receiver_parameter: None,
-                mode: SelectedOperandMode::Materialized,
-            })?;
+        let SelectedSemanticOperands {
+            mut statements,
+            receiver,
+            mut args,
+            defaults,
+        } = self.selected_semantic_operands(SelectedOperandRequest {
+            receiver_ty,
+            parameter_types,
+            dispatch_receiver,
+            extension_receiver,
+            arguments,
+            defaults: SelectedDefaultMode::Materialize,
+            preserve_inline_lambdas: false,
+            extension_receiver_parameter: None,
+            mode: SelectedOperandMode::Materialized,
+        })?;
         self.record_inlined_type_parameter_receiver(&statements, receiver, declared_receiver);
         self.reuse_plain_function_argument(&mut statements, &mut args, lambda_parameter);
         for omitted in &defaults {
@@ -345,9 +359,11 @@ impl BodyLowering<'_> {
             .collect::<Option<Vec<_>>>()?;
         let (inline_body, callee_receiver) = self.materialize_external_inline_lambda(
             &mut statements,
-            &args,
-            lambda_parameter,
-            *parameter_types.get(lambda_parameter)?,
+            ExternalInlineLambdaArgument {
+                arguments: &args,
+                parameter: lambda_parameter,
+                ty: *parameter_types.get(lambda_parameter)?,
+            },
             &invocation_operands,
             frame,
             source_line,
@@ -477,18 +493,22 @@ impl BodyLowering<'_> {
             traversal,
             source_line: call_line,
         } = plan;
-        let (mut statements, receiver, args, defaults) =
-            self.selected_semantic_operands(SelectedOperandRequest {
-                receiver_ty,
-                parameter_types,
-                dispatch_receiver,
-                extension_receiver,
-                arguments,
-                defaults: SelectedDefaultMode::Reject,
-                preserve_inline_lambdas: false,
-                extension_receiver_parameter: None,
-                mode: SelectedOperandMode::Materialized,
-            })?;
+        let SelectedSemanticOperands {
+            mut statements,
+            receiver,
+            args,
+            defaults,
+        } = self.selected_semantic_operands(SelectedOperandRequest {
+            receiver_ty,
+            parameter_types,
+            dispatch_receiver,
+            extension_receiver,
+            arguments,
+            defaults: SelectedDefaultMode::Reject,
+            preserve_inline_lambdas: false,
+            extension_receiver_parameter: None,
+            mode: SelectedOperandMode::Materialized,
+        })?;
         debug_assert!(defaults.is_empty());
         let mut iterable = receiver?;
         let lambda_slot = match self.ir.expr(*args.get(lambda_parameter as usize)?) {
@@ -1355,14 +1375,17 @@ impl BodyLowering<'_> {
     fn materialize_external_inline_lambda(
         &mut self,
         statements: &mut Vec<ExprId>,
-        args: &[ExprId],
-        lambda_parameter: usize,
-        lambda_ty: Ty,
+        lambda: ExternalInlineLambdaArgument<'_>,
         invocation_operands: &[(ExprId, Ty)],
         frame: &crate::fir::FirInlineBodyFrame,
         call_line: Option<u32>,
         preamble_in_body: bool,
     ) -> Option<(ExprId, Option<u32>)> {
+        let ExternalInlineLambdaArgument {
+            arguments: args,
+            parameter: lambda_parameter,
+            ty: lambda_ty,
+        } = lambda;
         let function = *args.get(lambda_parameter)?;
         let invoke_function = |lowering: &mut Self| {
             lowering

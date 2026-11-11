@@ -1172,7 +1172,7 @@ impl<'a> CommonIrBodySink<'a> {
                 (outer_ty, field_ty)
             } else if let Some(outer) = self.ir.checked_enum_entry_classes.get(&outer).copied() {
                 let outer_ty = crate::types::Ty::obj_name(self.ir.classes[outer as usize].fq_name);
-                (outer_ty.clone(), outer_ty)
+                (outer_ty, outer_ty)
             } else {
                 return Err(FirFileLoweringFailure::MissingClassifier(outer));
             };

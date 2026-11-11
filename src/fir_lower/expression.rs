@@ -236,9 +236,11 @@ impl BodyLowering<'_> {
                 let source_line = self.body.expression_debug_lines(expression_id).source;
                 let lowered = self.checked_property_read(
                     target,
-                    *dispatch_receiver,
-                    *extension_receiver,
-                    context_arguments,
+                    super::checked::CheckedPropertyReceivers {
+                        dispatch_receiver: *dispatch_receiver,
+                        extension_receiver: *extension_receiver,
+                        context_arguments,
+                    },
                     substitutions,
                 )?;
                 let declared = match target {
@@ -263,9 +265,11 @@ impl BodyLowering<'_> {
                 substitutions,
             } => self.checked_property_write(
                 target,
-                *dispatch_receiver,
-                *extension_receiver,
-                context_arguments,
+                super::checked::CheckedPropertyReceivers {
+                    dispatch_receiver: *dispatch_receiver,
+                    extension_receiver: *extension_receiver,
+                    context_arguments,
+                },
                 *value,
                 *conversion,
                 substitutions,

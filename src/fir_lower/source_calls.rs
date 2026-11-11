@@ -74,6 +74,36 @@ pub(super) struct DispatchOperand {
     pub(super) class: Option<TypeName>,
 }
 
+/// One intrinsic call: the selected operation and the operands already lowered for it.
+pub(super) struct IntrinsicCall<'a> {
+    pub(super) operation: crate::ir::IrIntrinsic,
+    pub(super) receiver_ty: Option<ResolvedTy>,
+    pub(super) parameters: &'a [ResolvedTy],
+    pub(super) result: ResolvedTy,
+    pub(super) dispatch_receiver: Option<ExprId>,
+    pub(super) extension_receiver: Option<ExprId>,
+    pub(super) arguments: &'a [IrCheckedArgument],
+}
+
+/// One same-file call after its receivers and arguments have been lowered.
+pub(super) struct SameFileCall<'a> {
+    pub(super) target: CallableId,
+    pub(super) dispatch: DispatchOperand,
+    pub(super) extension_receiver: Option<ExprId>,
+    pub(super) arguments: &'a [IrCheckedArgument],
+    pub(super) specialized_parameters: &'a [Ty],
+    pub(super) substitutions: &'a [crate::fir::FirTypeSubstitution],
+    pub(super) source_line: Option<u32>,
+}
+
+/// The statements, dispatch receiver, positional arguments, and default ordinals of one call.
+pub(super) struct SelectedSemanticOperands {
+    pub(super) statements: Vec<ExprId>,
+    pub(super) receiver: Option<ExprId>,
+    pub(super) args: Vec<ExprId>,
+    pub(super) defaults: Vec<u32>,
+}
+
 impl DispatchOperand {
     /// A receiver whose static class does not name the call's owner.
     pub(super) fn plain(receiver: Option<ExprId>) -> Self {
@@ -304,18 +334,22 @@ impl BodyLowering<'_> {
             .iter()
             .map(|parameter| parameter.get())
             .collect::<Vec<_>>();
-        let (statements, receiver, arguments, defaults) =
-            self.selected_semantic_operands(SelectedOperandRequest {
-                receiver_ty,
-                parameter_types: &parameter_types,
-                dispatch_receiver,
-                extension_receiver,
-                arguments,
-                defaults: SelectedDefaultMode::Reject,
-                preserve_inline_lambdas: false,
-                extension_receiver_parameter,
-                mode: SelectedOperandMode::DirectWhenOrdered,
-            })?;
+        let SelectedSemanticOperands {
+            statements,
+            receiver,
+            args: arguments,
+            defaults,
+        } = self.selected_semantic_operands(SelectedOperandRequest {
+            receiver_ty,
+            parameter_types: &parameter_types,
+            dispatch_receiver,
+            extension_receiver,
+            arguments,
+            defaults: SelectedDefaultMode::Reject,
+            preserve_inline_lambdas: false,
+            extension_receiver_parameter,
+            mode: SelectedOperandMode::DirectWhenOrdered,
+        })?;
         debug_assert!(defaults.is_empty());
         let operation = if write {
             crate::ir::IrCheckedOperation::ExternalPropertyWrite {
@@ -450,18 +484,22 @@ impl BodyLowering<'_> {
                 None => {}
             }
         }
-        let (statements, receiver, args, mut defaults) =
-            self.selected_semantic_operands(SelectedOperandRequest {
-                receiver_ty,
-                parameter_types: &parameter_types,
-                dispatch_receiver,
-                extension_receiver,
-                arguments,
-                defaults: SelectedDefaultMode::Omit,
-                preserve_inline_lambdas: inline.can_inline(),
-                extension_receiver_parameter,
-                mode: SelectedOperandMode::DirectWhenOrdered,
-            })?;
+        let SelectedSemanticOperands {
+            statements,
+            receiver,
+            args,
+            mut defaults,
+        } = self.selected_semantic_operands(SelectedOperandRequest {
+            receiver_ty,
+            parameter_types: &parameter_types,
+            dispatch_receiver,
+            extension_receiver,
+            arguments,
+            defaults: SelectedDefaultMode::Omit,
+            preserve_inline_lambdas: inline.can_inline(),
+            extension_receiver_parameter,
+            mode: SelectedOperandMode::DirectWhenOrdered,
+        })?;
         let boundary_defaults = defaults.clone();
         let boundary_parameters = parameter_types.clone();
         // The external FIR target temporarily inserts a MEMBER EXTENSION receiver into its parameter
@@ -569,18 +607,22 @@ impl BodyLowering<'_> {
             append,
             accumulator_ty,
         } = plan;
-        let (mut statements, receiver, args, defaults) =
-            self.selected_semantic_operands(SelectedOperandRequest {
-                receiver_ty,
-                parameter_types,
-                dispatch_receiver,
-                extension_receiver,
-                arguments,
-                defaults: SelectedDefaultMode::Reject,
-                preserve_inline_lambdas: false,
-                extension_receiver_parameter: None,
-                mode: SelectedOperandMode::Materialized,
-            })?;
+        let SelectedSemanticOperands {
+            mut statements,
+            receiver,
+            args,
+            defaults,
+        } = self.selected_semantic_operands(SelectedOperandRequest {
+            receiver_ty,
+            parameter_types,
+            dispatch_receiver,
+            extension_receiver,
+            arguments,
+            defaults: SelectedDefaultMode::Reject,
+            preserve_inline_lambdas: false,
+            extension_receiver_parameter: None,
+            mode: SelectedOperandMode::Materialized,
+        })?;
         debug_assert!(defaults.is_empty());
         let iterable = receiver?;
         let lambda_slot = match self.ir.expr(*args.get(lambda_parameter as usize)?) {
@@ -919,16 +961,16 @@ impl BodyLowering<'_> {
         }))
     }
 
-    pub(super) fn intrinsic_call(
-        &mut self,
-        operation: crate::ir::IrIntrinsic,
-        receiver_ty: Option<ResolvedTy>,
-        parameters: &[ResolvedTy],
-        result: ResolvedTy,
-        dispatch_receiver: Option<ExprId>,
-        extension_receiver: Option<ExprId>,
-        arguments: &[IrCheckedArgument],
-    ) -> Option<ExprId> {
+    pub(super) fn intrinsic_call(&mut self, call: IntrinsicCall<'_>) -> Option<ExprId> {
+        let IntrinsicCall {
+            operation,
+            receiver_ty,
+            parameters,
+            result,
+            dispatch_receiver,
+            extension_receiver,
+            arguments,
+        } = call;
         let parameter_types = parameters
             .iter()
             .map(|parameter| parameter.get())
@@ -955,18 +997,22 @@ impl BodyLowering<'_> {
         extension_receiver: Option<ExprId>,
         arguments: &[IrCheckedArgument],
     ) -> Option<ExprId> {
-        let (statements, receiver, args, defaults) =
-            self.selected_semantic_operands(SelectedOperandRequest {
-                receiver_ty,
-                parameter_types: &parameter_types,
-                dispatch_receiver,
-                extension_receiver,
-                arguments,
-                defaults: SelectedDefaultMode::Reject,
-                preserve_inline_lambdas: false,
-                extension_receiver_parameter: None,
-                mode: SelectedOperandMode::DirectWhenOrdered,
-            })?;
+        let SelectedSemanticOperands {
+            statements,
+            receiver,
+            args,
+            defaults,
+        } = self.selected_semantic_operands(SelectedOperandRequest {
+            receiver_ty,
+            parameter_types: &parameter_types,
+            dispatch_receiver,
+            extension_receiver,
+            arguments,
+            defaults: SelectedDefaultMode::Reject,
+            preserve_inline_lambdas: false,
+            extension_receiver_parameter: None,
+            mode: SelectedOperandMode::DirectWhenOrdered,
+        })?;
         debug_assert!(defaults.is_empty());
         let call = self.ir.add_expr(IrExpr::Call {
             callee: Box::new(callee),
@@ -980,7 +1026,7 @@ impl BodyLowering<'_> {
     pub(super) fn selected_semantic_operands(
         &mut self,
         request: SelectedOperandRequest<'_>,
-    ) -> Option<(Vec<ExprId>, Option<ExprId>, Vec<ExprId>, Vec<u32>)> {
+    ) -> Option<SelectedSemanticOperands> {
         let SelectedOperandRequest {
             receiver_ty,
             parameter_types,
@@ -1075,7 +1121,12 @@ impl BodyLowering<'_> {
         } else {
             (statements, receiver, args)
         };
-        Some((statements, receiver, args, normalized.defaults))
+        Some(SelectedSemanticOperands {
+            statements,
+            receiver,
+            args,
+            defaults: normalized.defaults,
+        })
     }
 
     /// Call `visit` for every caller local this expression reads, including nested operands and a
@@ -1308,18 +1359,22 @@ impl BodyLowering<'_> {
             .iter()
             .map(|parameter| parameter.get())
             .collect::<Vec<_>>();
-        let (statements, receiver, mut args, mut defaults) =
-            self.selected_semantic_operands(SelectedOperandRequest {
-                receiver_ty: None,
-                parameter_types: &parameter_types,
-                dispatch_receiver: None,
-                extension_receiver: None,
-                arguments,
-                defaults: SelectedDefaultMode::Omit,
-                preserve_inline_lambdas: false,
-                extension_receiver_parameter: None,
-                mode: SelectedOperandMode::DirectWhenOrdered,
-            })?;
+        let SelectedSemanticOperands {
+            statements,
+            receiver,
+            mut args,
+            mut defaults,
+        } = self.selected_semantic_operands(SelectedOperandRequest {
+            receiver_ty: None,
+            parameter_types: &parameter_types,
+            dispatch_receiver: None,
+            extension_receiver: None,
+            arguments,
+            defaults: SelectedDefaultMode::Omit,
+            preserve_inline_lambdas: false,
+            extension_receiver_parameter: None,
+            mode: SelectedOperandMode::DirectWhenOrdered,
+        })?;
         debug_assert!(receiver.is_none());
         if context_parameter_count as usize > parameter_types.len() {
             return None;
@@ -1527,7 +1582,12 @@ impl BodyLowering<'_> {
             "module constructor classifier={classifier} parameters={argument_parameter_types:?} arguments={arguments:?} selected={}",
             selected.is_some(),
         );
-        let (statements, receiver, mut args, mut defaults) = selected?;
+        let SelectedSemanticOperands {
+            statements,
+            receiver,
+            mut args,
+            mut defaults,
+        } = selected?;
         debug_assert!(receiver.is_none());
         if context_parameter_count as usize > argument_parameter_types.len() {
             return None;
@@ -1625,14 +1685,17 @@ impl BodyLowering<'_> {
     /// rather than reconstructed by the backend.
     pub(super) fn same_file_call(
         &mut self,
-        target: CallableId,
-        dispatch: DispatchOperand,
-        extension_receiver: Option<ExprId>,
-        arguments: &[IrCheckedArgument],
-        specialized_parameters: &[Ty],
-        substitutions: &[crate::fir::FirTypeSubstitution],
-        source_line: Option<u32>,
+        call: SameFileCall<'_>,
     ) -> Option<Result<ExprId, FirLoweringFailure>> {
+        let SameFileCall {
+            target,
+            dispatch,
+            extension_receiver,
+            arguments,
+            specialized_parameters,
+            substitutions,
+            source_line,
+        } = call;
         let DispatchOperand {
             receiver: dispatch_receiver,
             class: dispatch_class,

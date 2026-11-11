@@ -229,13 +229,10 @@ pub(super) fn prepare_inline_template(
 fn record_evaluated_result_end(ir: &mut IrFile, root: ExprId) {
     let template_end = ir.end_line(root);
     let mut result = root;
-    loop {
-        let IrExpr::Block {
-            value: Some(inner), ..
-        } = ir.expr(result)
-        else {
-            break;
-        };
+    while let IrExpr::Block {
+        value: Some(inner), ..
+    } = ir.expr(result)
+    {
         result = *inner;
     }
     if let Some(line) = ir.end_line(result).filter(|line| {
