@@ -35,6 +35,7 @@ use crate::types::TypeName;
 
 pub use archives::OpenedKlibLibraries;
 pub use archives::{KlibLibrariesOpenError, KlibLibraryInput, KlibStdlibSemantics};
+pub(crate) use builtin_realizations::realize_class_name_property;
 pub use declaration_bodies::{KlibBodyLibrary, KlibDeclarationBodies, KlibDeclarationBodiesError};
 pub(crate) use declaration_bodies::{
     KlibCalleeOrigin, KlibEnumEntryClass, LocatedClass, LocatedMember,

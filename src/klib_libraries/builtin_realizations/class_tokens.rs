@@ -8,7 +8,7 @@
 use crate::libraries::{ClassNameKind, CompilerIntrinsic, PropKind, PropertyInfo};
 use crate::types::{wk, Ty, TypeName};
 
-pub(in super::super) fn realize_class_name_property(
+pub(crate) fn realize_class_name_property(
     owner: TypeName,
     compiler_builtin_owner: bool,
     property: &mut PropertyInfo,
@@ -18,11 +18,27 @@ pub(in super::super) fn realize_class_name_property(
         "qualifiedName" => ClassNameKind::Qualified,
         _ => return,
     };
+    // A KLIB member records no dispatch receiver and no signature. The JVM provider records the
+    // owner as the dispatch receiver and copies this property's parameter-less signature onto the
+    // getter. Both are the same abstract interface declaration.
+    let dispatch_receiver = match property.receiver {
+        None => true,
+        Some(receiver) => receiver == Ty::obj_name(owner),
+    };
+    let signature = match property.getter.generic_sig.as_deref() {
+        None => true,
+        Some(signature) => {
+            signature.formals.is_empty()
+                && signature.receiver.is_none()
+                && signature.params.is_empty()
+                && signature.ret == property.ty
+        }
+    };
     if compiler_builtin_owner
         && owner == wk::kclass()
         && property.owner == owner
         && property.kind == PropKind::Member
-        && property.receiver.is_none()
+        && dispatch_receiver
         && property.formals.is_empty()
         && property.associated_classifier.is_none()
         && property.context_count == 0
@@ -31,7 +47,7 @@ pub(in super::super) fn realize_class_name_property(
         && property.ty == Ty::nullable(Ty::String)
         && property.getter.params.is_empty()
         && property.getter.context_count == 0
-        && property.getter.generic_sig.is_none()
+        && signature
         && property.getter.source_receiver.is_none()
         && property.getter.owner_is_interface
         && property.getter.is_abstract
