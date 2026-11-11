@@ -92,7 +92,9 @@ pub enum ShapeError {
     UnpairedInlineMarker(usize),
 }
 
-fn method_categories(desc: &str) -> Option<(Vec<Category>, Option<Category>)> {
+type CategoryList = Vec<Category>;
+
+fn method_categories(desc: &str) -> Option<(CategoryList, Option<Category>)> {
     let (parameters, result) = crate::jvm::names::parse_method_descriptor(desc)?;
     Some((
         parameters
@@ -105,7 +107,7 @@ fn method_categories(desc: &str) -> Option<(Vec<Category>, Option<Category>)> {
 
 /// What an instruction other than a stack manipulation (`pop`, `dup*`, `swap`) pops, bottom first,
 /// and pushes. `None` for the manipulations, which move values by word rather than by kind.
-fn signature(insn: &Insn) -> Result<Option<(Vec<Category>, Vec<Category>)>, ()> {
+fn signature(insn: &Insn) -> Result<Option<(CategoryList, CategoryList)>, ()> {
     use Category::*;
     let arithmetic = |base: u8, op: u8| [Int, Long, Float, Double][((op - base) % 4) as usize];
     let pure = |pops: &[Category], pushes: &[Category]| Ok(Some((pops.to_vec(), pushes.to_vec())));
@@ -254,8 +256,8 @@ pub fn word_delta(insn: &Insn) -> Option<i32> {
         None => Some(match insn {
             Insn::Op(0x57) => -1,
             Insn::Op(0x58) => -2,
-            Insn::Op(0x59 | 0x5a | 0x5b) => 1,
-            Insn::Op(0x5c | 0x5d | 0x5e) => 2,
+            Insn::Op(0x59..=0x5b) => 1,
+            Insn::Op(0x5c..=0x5e) => 2,
             _ => 0,
         }),
     }

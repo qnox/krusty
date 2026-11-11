@@ -42,6 +42,7 @@ mod utf8_pool;
 
 pub use annotation_values::split_declaration_annotations;
 use annotation_values::{NOT_NULL, NULLABLE};
+pub use control_flow::InlineSplice;
 use descriptor_mentions::DescriptorMentionCache;
 
 pub use coroutine_markers::{markers_in, CoroutineMarker, MARKER_LEN};
@@ -89,6 +90,9 @@ pub enum VerifType {
     /// uses this; instruction-referenced classes stay `Object(idx)`.
     ObjectName(String),
 }
+
+/// Locals or operand-stack slots of one instruction's verification frame.
+pub type VerifSlots = Vec<VerifType>;
 
 /// One property-backed primary-constructor parameter, as the plain-class pool seeder sees it: the
 /// annotations the constructor's header visit interns for it.

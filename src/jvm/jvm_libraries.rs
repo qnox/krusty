@@ -1988,9 +1988,9 @@ impl JvmLibraries {
             }
             // Kotlin metadata is authoritative for Kotlin companion identity. The structural field
             // pattern is only a Java/classfile fallback when no Kotlin companion fact exists.
-            let metadata_companion = super::metadata::class_companion_name(&ci).and_then(|field| {
+            let metadata_companion = super::metadata::class_companion_name(&ci).map(|field| {
                 let companion = crate::types::type_name_nested_child(internal_name, &field);
-                Some((field, companion))
+                (field, companion)
             });
             let classfile_companion = (!ci.meta.is_present())
                 .then(|| {

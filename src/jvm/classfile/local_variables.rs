@@ -26,7 +26,7 @@ fn gap_is_only_local_loads(bytes: &[u8]) -> bool {
     while index < bytes.len() {
         let opcode = bytes[index];
         let len = match opcode {
-            0x15 | 0x16 | 0x17 | 0x18 | 0x19 => 2,
+            0x15..=0x19 => 2,
             0x1a..=0x2d => 1,
             _ => return false,
         };
