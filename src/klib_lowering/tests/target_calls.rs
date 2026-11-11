@@ -163,6 +163,48 @@ fn copy_type(source: &KlibIrArena, target: &mut KlibIrArena, ty: KlibIrTypeId) -
     target.push_type(copied)
 }
 
+/// [`target_tree`] of the member `selected`, inside the header of the class declaring it: a
+/// member's header is authenticated through its class.
+fn member_target_tree(
+    libraries: &crate::klib_libraries::KlibLibraries,
+    selected: crate::libraries::KlibBodyCallable<'_>,
+    source: &KlibIrArena,
+    function: &KlibIrFunction,
+) -> KlibIrDeclarationTree {
+    let contract = selected.class_contract().unwrap();
+    let raw = libraries
+        .declaration_bodies()
+        .class_member_header(
+            selected.identity(),
+            &contract.signature,
+            selected
+                .accessor()
+                .map_or(crate::libraries::KlibAccessorRole::Getter, |accessor| {
+                    accessor.role
+                }),
+        )
+        .unwrap()
+        .unwrap();
+    let KlibIrDeclarationTree {
+        mut arena,
+        declaration: KlibIrMember::Function(member),
+    } = target_tree(source, function)
+    else {
+        unreachable!("a target tree declares its function")
+    };
+    let mut class = raw.class.clone();
+    class.members = vec![KlibIrMember::Function(member)];
+    class.supertypes.clear();
+    if let Some(this) = &mut class.this_receiver {
+        this.ty = copy_type(raw.arena, &mut arena, this.ty);
+    }
+    let class = arena.push_class(class);
+    KlibIrDeclarationTree {
+        arena,
+        declaration: KlibIrMember::Class(class),
+    }
+}
+
 pub(super) fn target_tree(
     source: &KlibIrArena,
     function: &KlibIrFunction,
@@ -248,7 +290,12 @@ fn assert_string_plus_leaf(
         KlibBodyLibrary::new(
             selected.identity().module.clone(),
             [],
-            KlibIrModuleTrees::from_trees(vec![target_tree(arena, function)]).unwrap(),
+            KlibIrModuleTrees::from_trees(vec![if selected.is_member() {
+                member_target_tree(libraries, selected, arena, function)
+            } else {
+                target_tree(arena, function)
+            }])
+            .unwrap(),
         ),
     ])
     .unwrap();
@@ -730,6 +777,44 @@ fn klib_target_primitive_iterator_nexts_are_target_dependency_leaves() {
                     .unwrap(),
                 Some(CompilerIntrinsic::PrimitiveIteratorNext),
                 "{iterator}"
+            );
+        }
+    }
+}
+
+/// `Array<T>.size` and `Array<T>.get` are target leaves whose serialized headers name the class's
+/// own type parameter, which only the authenticated declaring class binds.
+#[test]
+fn klib_target_members_of_a_generic_class_authenticate_through_their_class() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let array = libraries.classifier(type_name("kotlin/Array")).unwrap();
+    let size = &array.declared_callables["size"].properties()[0].getter;
+    let get = &array.declared_callables["get"].functions()[0].callable;
+    let providers = [size.external_identity, get.external_identity]
+        .map(|identity| libraries.external_callable(identity.unwrap()).unwrap());
+    let leaves =
+        [&providers[0], &providers[1]].map(|provider| provider.klib_body_callable().unwrap());
+    let operations = leaves.map(|selected| selected.compiler_intrinsic().unwrap());
+    assert_eq!(
+        operations,
+        [CompilerIntrinsic::ArraySize, CompilerIntrinsic::ArrayGet]
+    );
+    for (selected, operation) in leaves.into_iter().zip(operations) {
+        for facts in [
+            KlibCalleeFacts::new([selected]),
+            KlibCalleeFacts::with_declarations([], [selected]),
+        ] {
+            assert_eq!(
+                facts
+                    .target_intrinsic(selected.identity(), libraries.declaration_bodies(), &|_| {
+                        true
+                    })
+                    .unwrap(),
+                Some(operation),
+                "a target realizing {operation:?} owns the leaf of its generic class member",
             );
         }
     }

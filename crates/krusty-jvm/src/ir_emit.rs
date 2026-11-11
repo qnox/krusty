@@ -5983,11 +5983,6 @@ impl<'a> Emitter<'a> {
         if let Some(result) = self.transformed_result(e) {
             return jvm_declared_ty(&result);
         }
-        if matches!(self.ir.expr(e), IrExpr::When { .. }) {
-            if let Some(result) = self.ir.whens.exhaustive.get(&e) {
-                return ir_ty_to_jvm(result);
-            }
-        }
         match self.ir.expr(e) {
             IrExpr::StringConcat(_) => Ty::String,
             // A JVM class literal is a reference, so equality uses reference comparison.
@@ -6104,7 +6099,7 @@ impl<'a> Emitter<'a> {
                 },
             },
             IrExpr::PrimitiveNeg { ty, .. } => ir_ty_to_jvm(ty),
-            IrExpr::When { branches } => self.value_ty_of_when(branches),
+            IrExpr::When { .. } => self.when_value_ty(e),
             IrExpr::EnumEntry { classifier, .. } => Ty::obj_name(*classifier),
             IrExpr::EnumValueOf { classifier, .. } => Ty::obj_name(*classifier),
             IrExpr::StaticInstance { ty, .. } => {
@@ -6733,9 +6728,10 @@ mod invariant_tests {
             value: None,
         });
         let condition = ir.add_expr(IrExpr::GetValue(0));
-        let branch = ir.add_expr(IrExpr::When {
-            branches: vec![(Some(condition), then_branch), (None, else_branch)],
-        });
+        let branch = ir.add_when(
+            vec![(Some(condition), then_branch), (None, else_branch)],
+            Ty::Unit,
+        );
         let body = ir.add_expr(IrExpr::Block {
             stmts: vec![branch],
             value: None,
