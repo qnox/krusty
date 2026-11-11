@@ -2,7 +2,6 @@
 
 use super::*;
 use crate::fir::ResolvedTypeParameterFlags;
-use crate::resolve::signature_bridge_args::{CheckedLocalBodies, LocalSignatureSelection};
 use crate::resolve::TypeInfo;
 use crate::types::{TyKind, TypeVariance};
 
@@ -92,7 +91,8 @@ pub(crate) fn publish_checked_local_signatures_in_active_root(
     table: &SymbolTable,
     info: &super::super::TypeInfo,
     index: &mut crate::fir::ResolvedModuleIndex,
-    selected: CheckedLocalBodies<'_>,
+    selected_root: crate::fir::DeclarationId,
+    selected_bodies: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
 ) -> Result<(), Vec<crate::fir::DeclarationId>> {
     publish_checked_local_signatures_selected(
         file,
@@ -101,12 +101,10 @@ pub(crate) fn publish_checked_local_signatures_in_active_root(
         table.libraries.as_ref(),
         info,
         index,
-        LocalSignatureSelection(
-            None,
-            Some(active),
-            Some((active, selected.0, selected.1)),
-            None,
-        ),
+        None,
+        Some(active),
+        Some((active, selected_root, selected_bodies)),
+        None,
     )
 }
 
@@ -117,7 +115,8 @@ pub(crate) fn publish_checked_local_signatures_in_pass_two_root(
     platform: &dyn crate::libraries::SemanticPlatform,
     info: &super::super::TypeInfo,
     index: &mut crate::fir::ResolvedModuleIndex,
-    selected: CheckedLocalBodies<'_>,
+    selected_root: crate::fir::DeclarationId,
+    selected_bodies: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
 ) -> Result<(), Vec<crate::fir::DeclarationId>> {
     publish_checked_local_signatures_selected(
         file,
@@ -126,12 +125,10 @@ pub(crate) fn publish_checked_local_signatures_in_pass_two_root(
         platform,
         info,
         index,
-        LocalSignatureSelection(
-            None,
-            Some(active),
-            Some((active, selected.0, selected.1)),
-            None,
-        ),
+        None,
+        Some(active),
+        Some((active, selected_root, selected_bodies)),
+        None,
     )
 }
 
@@ -152,7 +149,10 @@ pub(crate) fn publish_checked_local_signatures(
         table.libraries.as_ref(),
         info,
         index,
-        LocalSignatureSelection(None, Some(&active), None, None),
+        None,
+        Some(&active),
+        None,
+        None,
     )
 }
 
@@ -172,7 +172,10 @@ pub(crate) fn publish_checked_inline_local_signatures(
         table.libraries.as_ref(),
         info,
         index,
-        LocalSignatureSelection(Some(inline_owners), active, None, None),
+        Some(inline_owners),
+        active,
+        None,
+        None,
     )
 }
 
@@ -246,7 +249,10 @@ pub(crate) fn publish_checked_default_local_signatures(
         table.libraries.as_ref(),
         info,
         index,
-        LocalSignatureSelection(Some(&owners), Some(active), None, Some(&exact)),
+        Some(&owners),
+        Some(active),
+        None,
+        Some(&exact),
     )
 }
 
@@ -294,10 +300,15 @@ fn publish_checked_local_signatures_selected(
     platform: &dyn crate::libraries::SemanticPlatform,
     info: &super::super::TypeInfo,
     index: &mut crate::fir::ResolvedModuleIndex,
-    selection: LocalSignatureSelection<'_>,
+    inline_owners: Option<&[crate::fir::DeclarationId]>,
+    active_source: Option<&crate::fir::ActiveSourceDeclarations>,
+    active_root: Option<(
+        &crate::fir::ActiveSourceDeclarations,
+        crate::fir::DeclarationId,
+        &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    )>,
+    exact_declarations: Option<&[crate::fir::DeclarationId]>,
 ) -> Result<(), Vec<crate::fir::DeclarationId>> {
-    let LocalSignatureSelection(inline_owners, active_source, active_root, exact_declarations) =
-        selection;
     use crate::fir::{
         CallableId, DeclarationFlags, DeclarationId, DeclarationKind, PropertyId,
         ResolvedCallableShape, ResolvedTy, ResolvedTypeParameterFlags, ResolvedValueParameterFlags,

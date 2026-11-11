@@ -6,7 +6,6 @@
 
 use super::ProductionSignatureSemantics;
 use crate::resolve::selected_result_publication::CompactSelectedResultPublication;
-use crate::resolve::signature_bridge_args::{DemandedSourceInputs, SelectedMemberPublication};
 use crate::types::{Ty, TyKind};
 
 fn whole_array_arguments(arguments: &[crate::fir::ResolvedSigCallArgument<'_>]) -> Box<[bool]> {
@@ -118,23 +117,20 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         scope: crate::fir::SignatureScope,
         origin: crate::fir::OriginId,
-        selected: SelectedMemberPublication<'_>,
+        receiver: crate::fir::ResolvedTy,
+        type_arguments: &[Ty],
+        expected: Option<crate::fir::ResolvedTy>,
+        result: Ty,
+        member: Option<crate::libraries::LibraryMember>,
+        source: Option<(u32, u32)>,
+        source_declaration: Option<crate::fir::DeclarationId>,
+        argument_types: Vec<Ty>,
+        publication: CompactSelectedResultPublication,
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<crate::fir::ResolvedMemberCall, crate::fir::DiagnosticId> {
-        let SelectedMemberPublication(
-            receiver,
-            type_arguments,
-            expected,
-            result,
-            member,
-            source,
-            source_declaration,
-            argument_types,
-            publication,
-        ) = selected;
         if let Some(member) = member.as_ref() {
             if let Some(declaration) = member.stable_declaration {
                 if self
@@ -218,14 +214,12 @@ impl ProductionSignatureSemantics<'_> {
             {
                 let ty = self.apply_demanded_source_callable(
                     source,
+                    Some(receiver.get()),
                     &signature,
-                    DemandedSourceInputs(
-                        Some(receiver.get()),
-                        &argument_types,
-                        None,
-                        type_arguments,
-                        expected.map(crate::fir::ResolvedTy::get),
-                    ),
+                    &argument_types,
+                    None,
+                    type_arguments,
+                    expected.map(crate::fir::ResolvedTy::get),
                 )?;
                 self.record_final_selected_publication(origin, publication, ty);
                 return Ok(crate::fir::ResolvedMemberCall {

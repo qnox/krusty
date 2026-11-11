@@ -3,7 +3,6 @@
 
 use super::super::classifier_associated::Demand;
 use super::*;
-use crate::resolve::signature_bridge_args::{DemandedSourceInputs, MemberExtensionReceivers};
 
 impl ProductionSignatureSemantics<'_> {
     pub(super) fn select_value_invoke(
@@ -105,14 +104,12 @@ impl ProductionSignatureSemantics<'_> {
                     return self
                         .apply_demanded_source_callable(
                             source,
+                            Some(callee.get()),
                             &signature,
-                            DemandedSourceInputs(
-                                Some(callee.get()),
-                                &argument_types,
-                                None,
-                                &[],
-                                None,
-                            ),
+                            &argument_types,
+                            None,
+                            &[],
+                            None,
                         )
                         .map(crate::fir::InvokeSelection::Selected);
                 }
@@ -135,7 +132,8 @@ impl ProductionSignatureSemantics<'_> {
         for dispatch in self.signature_dispatch_receivers(scope) {
             let selected = self.signature_member_extension_call(
                 scope,
-                MemberExtensionReceivers(callee.get(), dispatch),
+                callee.get(),
+                dispatch,
                 "invoke",
                 super::super::lookups::SignatureMemberExtensionArguments {
                     arguments: &argument_kinds,

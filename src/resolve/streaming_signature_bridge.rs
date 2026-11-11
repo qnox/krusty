@@ -74,10 +74,6 @@ use declaration_spellings::finalized_compact_declared_spellings;
 pub(super) use header_projection::*;
 use header_star_bounds::{compact_header_star_bounds, compact_header_value_parameter_star_bounds};
 
-pub(crate) use super::signature_bridge_args::CheckedLocalBodies;
-use super::signature_bridge_args::{
-    DemandedSourceInputs, SuperMemberCall, TypeParameterPublication,
-};
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use local_signatures::publish_checked_local_signatures;
 #[cfg(test)]
@@ -1869,16 +1865,13 @@ impl ProductionSignatureSemantics<'_> {
     fn apply_demanded_source_callable(
         &self,
         source: (u32, u32),
+        receiver: Option<Ty>,
         signature: &crate::fir::ResolvedSignature,
-        inputs: DemandedSourceInputs<'_>,
+        arguments: &[Ty],
+        argument_kinds: Option<&[crate::symbol_resolver::CallArgKind]>,
+        explicit_type_arguments: &[Ty],
+        expected: Option<Ty>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        let DemandedSourceInputs(
-            receiver,
-            arguments,
-            argument_kinds,
-            explicit_type_arguments,
-            expected,
-        ) = inputs;
         let declaration = DeclId(source.1);
         let Some(callable) = self
             .table
@@ -1911,13 +1904,11 @@ impl ProductionSignatureSemantics<'_> {
             &semantic_source,
             callable,
             signature,
-            DemandedSourceInputs(
-                receiver,
-                arguments,
-                argument_kinds,
-                explicit_type_arguments,
-                expected,
-            ),
+            receiver,
+            arguments,
+            argument_kinds,
+            explicit_type_arguments,
+            expected,
         );
         crate::trace_compiler!(
             "signature",
@@ -2063,13 +2054,14 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         super_spelling: &str,
         member_spelling: &str,
-        call: SuperMemberCall<'_>,
+        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
+        type_arguments: &[Ty],
+        trailing_lambda: bool,
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        let SuperMemberCall(arguments, type_arguments, trailing_lambda) = call;
         let (class_super, interface_supers) = self.direct_super_receivers(scope, super_spelling)?;
         // `super.Inner(args)` is a constructor call on an inner classifier inherited through the
         // selected direct super receiver, not a method named `Inner`. Classifier construction is
@@ -4616,12 +4608,10 @@ pub(crate) fn finalized_streamed_signature_index(
         &mut index,
         &semantics,
         solver_diagnostics,
-        TypeParameterPublication(
-            &deferred_local_candidates,
-            &mut deferred_local_headers,
-            &mut failed,
-            diags,
-        ),
+        &deferred_local_candidates,
+        &mut deferred_local_headers,
+        &mut failed,
+        diags,
     );
     // Syntaxless frontend-plugin callables already carry their complete semantic generic shape.
     // Publish those formals on the generated stable declaration just as compact syntax publishes

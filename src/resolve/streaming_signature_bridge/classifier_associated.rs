@@ -8,7 +8,6 @@
 //! declaration a reference names.
 
 use super::*;
-use crate::resolve::signature_bridge_args::DemandedSourceInputs;
 use crate::types::TyKind;
 
 /// The outcome of one associated rung in compact signature solving.
@@ -233,14 +232,12 @@ impl ProductionSignatureSemantics<'_> {
                     return self
                         .apply_demanded_source_callable(
                             source,
+                            None,
                             &signature,
-                            DemandedSourceInputs(
-                                None,
-                                &argument_types,
-                                None,
-                                &resolved_type_arguments,
-                                expected,
-                            ),
+                            &argument_types,
+                            None,
+                            &resolved_type_arguments,
+                            expected,
                         )
                         .map(AssociatedSignatureCall::Selected);
                 }

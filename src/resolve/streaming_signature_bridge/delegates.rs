@@ -7,9 +7,6 @@
 //! and lives here rather than in the signature facade or the general semantics implementation.
 
 use super::*;
-use crate::resolve::signature_bridge_args::{
-    DelegateConventionAmbiguity, MemberExtensionReceivers,
-};
 
 impl ProductionSignatureSemantics<'_> {
     pub(super) fn select_delegate_signature(
@@ -85,7 +82,8 @@ impl ProductionSignatureSemantics<'_> {
                 for dispatch in self.implicit_receivers(scope) {
                     match self.signature_member_extension_call(
                         scope,
-                        MemberExtensionReceivers(delegate.get(), dispatch),
+                        delegate.get(),
+                        dispatch,
                         "provideDelegate",
                         super::lookups::SignatureMemberExtensionArguments {
                             arguments: &provide_arguments
@@ -201,7 +199,8 @@ impl ProductionSignatureSemantics<'_> {
                 for dispatch in self.implicit_receivers(scope) {
                     let selection = self.signature_member_extension_call(
                         scope,
-                        MemberExtensionReceivers(stored.get(), dispatch),
+                        stored.get(),
+                        dispatch,
                         "getValue",
                         super::lookups::SignatureMemberExtensionArguments {
                             arguments: &get_arguments
@@ -227,13 +226,11 @@ impl ProductionSignatureSemantics<'_> {
                         ) => {
                             return Err(self
                                 .record_member_extension_delegate_convention_ambiguity(
-                                    DelegateConventionAmbiguity(
-                                        scope,
-                                        site,
-                                        stored.get(),
-                                        "getValue",
-                                        this_ref,
-                                    ),
+                                    scope,
+                                    site,
+                                    stored.get(),
+                                    "getValue",
+                                    this_ref,
                                     &candidates,
                                     demand,
                                 ));
@@ -282,7 +279,11 @@ impl ProductionSignatureSemantics<'_> {
                         candidates,
                     ) => {
                         return Err(self.record_delegate_convention_ambiguity(
-                            DelegateConventionAmbiguity(scope, site, stored.get(), "getValue", this_ref),
+                            scope,
+                            site,
+                            stored.get(),
+                            "getValue",
+                            this_ref,
                             &candidates,
                             demand,
                         ))
@@ -327,7 +328,11 @@ impl ProductionSignatureSemantics<'_> {
             crate::resolve::delegated_properties::DelegateConventionSelection::Ambiguous(
                 candidates,
             ) => Err(self.record_delegate_convention_ambiguity(
-                DelegateConventionAmbiguity(scope, site, stored.get(), "getValue", this_ref),
+                scope,
+                site,
+                stored.get(),
+                "getValue",
+                this_ref,
                 &candidates,
                 demand,
             )),
@@ -387,14 +392,17 @@ impl ProductionSignatureSemantics<'_> {
 
     fn record_delegate_convention_ambiguity(
         &self,
-        convention: DelegateConventionAmbiguity<'_>,
+        scope: crate::fir::SignatureScope,
+        site: crate::fir::ResolvedSignatureDelegateSite,
+        delegate: Ty,
+        name: &str,
+        this_ref: Ty,
         candidates: &[crate::libraries::FunctionInfo],
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> crate::fir::DiagnosticId {
-        let DelegateConventionAmbiguity(scope, site, delegate, name, this_ref) = convention;
         let (source, by_span) = self.delegate_by_location(&site);
         assert_eq!(
             source, scope.source,
@@ -427,14 +435,17 @@ impl ProductionSignatureSemantics<'_> {
 
     fn record_member_extension_delegate_convention_ambiguity(
         &self,
-        convention: DelegateConventionAmbiguity<'_>,
+        scope: crate::fir::SignatureScope,
+        site: crate::fir::ResolvedSignatureDelegateSite,
+        delegate: Ty,
+        name: &str,
+        this_ref: Ty,
         candidates: &[super::super::MemberExtensionFunctionCandidate],
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> crate::fir::DiagnosticId {
-        let DelegateConventionAmbiguity(scope, site, delegate, name, this_ref) = convention;
         let (source, by_span) = self.delegate_by_location(&site);
         assert_eq!(
             source, scope.source,

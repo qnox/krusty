@@ -963,7 +963,8 @@ fn local_class_member_keeps_the_enclosing_body_local_callable_identity() {
         &analysis.symbols,
         info,
         &mut index,
-        crate::resolve::CheckedLocalBodies(selected_root, &selected_bodies),
+        selected_root,
+        &selected_bodies,
     )
     .expect("checked local signatures must publish before FIR body checking");
     let mut session = BodyCheckSession::default();

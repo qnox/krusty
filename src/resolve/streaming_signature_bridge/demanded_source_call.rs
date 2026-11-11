@@ -9,21 +9,17 @@ use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
 use super::super::Signature;
-use crate::resolve::signature_bridge_args::DemandedSourceInputs;
 
 pub(super) fn demanded_source_result(
     source: &dyn SymbolSource,
     callable: &Signature,
     signature: &crate::fir::ResolvedSignature,
-    inputs: DemandedSourceInputs<'_>,
+    receiver: Option<Ty>,
+    arguments: &[Ty],
+    argument_kinds: Option<&[CallArgKind]>,
+    explicit_type_arguments: &[Ty],
+    expected: Option<Ty>,
 ) -> Ty {
-    let DemandedSourceInputs(
-        receiver,
-        arguments,
-        argument_kinds,
-        explicit_type_arguments,
-        expected,
-    ) = inputs;
     let mut bindings = GSigBinds::default();
     if let Some(generic) = callable.generic_sig.as_ref() {
         bindings.extend(

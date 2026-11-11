@@ -8,15 +8,6 @@
 //! body check resolves; that list stays for a call no candidate's shape accepts.
 
 use super::*;
-use crate::resolve::signature_bridge_args::{
-    RejectedArgumentMapping, RejectedMemberCall, SoleMappedCandidateQuery,
-};
-
-/// `candidate`, `source`.
-struct DeterminedRejectedCandidate<'a>(
-    &'a crate::libraries::FunctionInfo,
-    Option<&'a super::receiver_member_level::ReceiverCandidateSource>,
-);
 
 enum RejectedCandidateResult {
     Fixed(crate::fir::ResolvedTy),
@@ -37,13 +28,15 @@ impl ProductionSignatureSemantics<'_> {
         origin: crate::fir::OriginId,
         receiver: Ty,
         spelling: &str,
-        call: RejectedMemberCall<'_>,
+        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
+        type_arguments: &[Ty],
+        trailing_lambda: bool,
+        expected: Option<Ty>,
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<crate::fir::ResolvedMemberCall, crate::fir::DiagnosticId> {
-        let RejectedMemberCall(arguments, type_arguments, trailing_lambda, expected) = call;
         let level = self.with_resolver(scope, |resolver| {
             Some(
                 self.receiver_member_level_with_context_status_and_constraints(
@@ -212,7 +205,10 @@ impl ProductionSignatureSemantics<'_> {
             scope,
             receiver,
             &recovery_candidates,
-            SoleMappedCandidateQuery(arguments, names, type_arguments.len(), trailing_lambda),
+            arguments,
+            names,
+            type_arguments.len(),
+            trailing_lambda,
         ) {
             let candidate_source = candidate_sources.iter().find(|source| {
                 super::receiver_member_level::same_candidate_declaration(
@@ -223,7 +219,8 @@ impl ProductionSignatureSemantics<'_> {
             let candidate = self.determined_rejected_candidate(
                 scope,
                 receiver,
-                DeterminedRejectedCandidate(candidate, candidate_source),
+                candidate,
+                candidate_source,
                 type_arguments,
                 expected,
                 demand,
@@ -232,7 +229,8 @@ impl ProductionSignatureSemantics<'_> {
                 scope,
                 receiver,
                 &candidate,
-                RejectedArgumentMapping(arguments, &parameter_by_argument),
+                arguments,
+                &parameter_by_argument,
                 type_arguments,
                 expected,
             ) {
@@ -296,7 +294,8 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         scope: crate::fir::SignatureScope,
         receiver: Ty,
-        determined: DeterminedRejectedCandidate<'_>,
+        candidate: &crate::libraries::FunctionInfo,
+        candidate_source: Option<&super::receiver_member_level::ReceiverCandidateSource>,
         type_arguments: &[Ty],
         expected: Option<Ty>,
         demand: &mut dyn FnMut(
@@ -304,7 +303,6 @@ impl ProductionSignatureSemantics<'_> {
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<crate::libraries::FunctionInfo, crate::fir::DiagnosticId> {
-        let DeterminedRejectedCandidate(candidate, candidate_source) = determined;
         // `candidate` is the exact declaration shape already chosen from the available or
         // unavailable-context family. Do not project the source declaration through the receiver
         // tower a second time: signature demand may run after that transient tower has changed.
@@ -460,14 +458,11 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         receiver: Ty,
         candidates: &'a [crate::libraries::FunctionInfo],
-        query: SoleMappedCandidateQuery<'_>,
+        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
+        argument_names: Option<&[Option<String>]>,
+        type_argument_count: usize,
+        trailing_lambda: bool,
     ) -> Option<(usize, &'a crate::libraries::FunctionInfo, Vec<usize>)> {
-        let SoleMappedCandidateQuery(
-            arguments,
-            argument_names,
-            type_argument_count,
-            trailing_lambda,
-        ) = query;
         let mut mapped = candidates
             .iter()
             .enumerate()
@@ -613,11 +608,11 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         receiver: Ty,
         candidate: &crate::libraries::FunctionInfo,
-        mapping: RejectedArgumentMapping<'_>,
+        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
+        parameter_by_argument: &[usize],
         type_arguments: &[Ty],
         expected: Option<Ty>,
     ) -> RejectedCandidateResult {
-        let RejectedArgumentMapping(arguments, parameter_by_argument) = mapping;
         let signature = candidate.semantic_signature();
         if !type_arguments.is_empty() && type_arguments.len() != signature.formals.len() {
             // The body checker owns the explicit-arity diagnostic, but signature inference still

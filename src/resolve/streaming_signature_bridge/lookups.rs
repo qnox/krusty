@@ -2,7 +2,6 @@
 
 use super::super::alias_projection::{star_projected_alias_type, AliasArguments};
 use super::*;
-use crate::resolve::signature_bridge_args::MemberExtensionReceivers;
 
 impl ProductionSignatureSemantics<'_> {
     /// The classifier a call spelling constructs: `lexical` when a nearer rung bound it, else the
@@ -1203,13 +1202,13 @@ impl ProductionSignatureSemantics<'_> {
     pub(super) fn signature_member_extension_call(
         &self,
         scope: crate::fir::SignatureScope,
-        receivers: MemberExtensionReceivers,
+        extension_receiver: Ty,
+        dispatch_receiver: Ty,
         name: &str,
         call: SignatureMemberExtensionArguments<'_>,
         result_constraint: super::super::CallResultConstraint,
         selection: super::super::MemberExtensionSelection,
     ) -> SignatureMemberExtensionCallSelection {
-        let MemberExtensionReceivers(extension_receiver, dispatch_receiver) = receivers;
         let SignatureMemberExtensionArguments {
             arguments: argument_kinds,
             names,
@@ -1413,19 +1412,27 @@ impl ProductionSignatureSemantics<'_> {
     /// mirroring the top-level selection above one receiver rung at a time.
     pub(super) fn bare_member_call_expectations(
         &self,
-        call: super::semantics::ReceiverLevelCall<'_, '_>,
+        scope: crate::fir::SignatureScope,
+        spelling: &str,
+        arguments: &[crate::fir::SigCallArgumentProbe<'_>],
+        type_arguments: &[Ty],
+        trailing_lambda: bool,
+        refresh_typed_postponed: bool,
+        expected: Option<Ty>,
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<Box<[Option<crate::fir::ResolvedTy>]>, crate::fir::DiagnosticId> {
-        let super::semantics::ReceiverLevelCall {
+        let call = super::semantics::ReceiverLevelCall {
             scope,
             spelling,
             arguments,
+            type_arguments,
+            trailing_lambda,
             refresh_typed_postponed,
-            ..
-        } = call;
+            result_constraint: super::super::CallResultConstraint::direct(expected),
+        };
         for receiver in self
             .implicit_receivers(scope)
             .into_iter()

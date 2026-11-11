@@ -365,7 +365,6 @@ pub use singleton_receivers::SingletonValue;
 mod anonymous_capture_remap;
 mod constructor_receiver_frames;
 mod primary_constructor_arguments;
-mod signature_bridge_args;
 mod source_constructors;
 mod source_package;
 mod stable_path;
@@ -452,7 +451,6 @@ pub(crate) use streaming_signature_bridge::{
     finalized_streamed_signature_index, install_streamed_anonymous_capture_declarations,
     install_streamed_plugin_declarations, publish_checked_default_local_signatures,
     publish_checked_inline_local_signatures, publish_checked_local_signatures_in_pass_two_root,
-    CheckedLocalBodies,
 };
 #[cfg(test)]
 pub(crate) use streaming_signature_bridge::{
