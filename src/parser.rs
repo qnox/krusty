@@ -1479,14 +1479,22 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Consume an `init` keyword and its block, recording the KEYWORD's span against the resulting
-    /// block expression. A diagnostic about an initializer block points at `init`, which the block
-    /// expression's own span (starting at `{`) does not cover.
+    /// Consume an `init` keyword and its block, recording the keyword's span and the annotations
+    /// of the member prefix before it against the resulting block expression.
     fn parse_init_block(&mut self) -> ExprId {
+        let annotations = self.take_pending_annotations();
+        let annotation_args = self.take_pending_annotation_args();
         let keyword = self.tok().span;
         self.bump(); // 'init'
         let block = self.parse_block_expr(false);
-        self.file.init_block_keywords.insert(block, keyword);
+        self.file.init_blocks.insert(
+            block,
+            InitBlockHeader {
+                keyword,
+                annotations,
+                annotation_args,
+            },
+        );
         block
     }
 

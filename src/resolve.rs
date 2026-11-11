@@ -42508,14 +42508,7 @@ impl<'a> Checker<'a> {
                     "enum entry",
                 );
             }
-            for constructor in &cl.secondary_ctors {
-                self.check_non_property_annotation_applications_in_declaration_scope(
-                    scope,
-                    &constructor.annotations,
-                    &constructor.annotation_args,
-                    "constructor",
-                );
-            }
+            self.check_secondary_constructor_annotations(scope, cl);
             // Property and primary-constructor annotations are ordinary checked applications. Their
             // selected targets and folded arguments are the same payload handed to lowering.
             for property in cl.body_props.iter() {
