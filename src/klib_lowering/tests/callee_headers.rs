@@ -1218,13 +1218,25 @@ fn a_member_call_declines_by_its_form() {
         serialized.declined("a", &[]),
         "the KLIB body of `demo.a` (it uses a call of a member function)"
     );
-    // A member the library does not serialize, as a fake override is not: the real declaration
-    // is reached only through the serialized class declarations.
+    // An unserialized member keeps its complete selected signature, just like a top-level call.
     let unserialized = demo(&CALLER, caller);
+    let mut unit = DependencyBodyUnit::default();
+    let decline = unserialized
+        .lower(&mut unit, "a", &[])
+        .expect_err("unserialized member");
+    assert_unit_is_empty(&unit);
     assert_eq!(
-        unserialized.declined("a", &[]),
+        decline.declaration(),
+        &unserialized.callable("a").identity().declaration
+    );
+    assert_eq!(
+        decline.reason(),
+        &KlibBodyDeclineReason::UndeclaredCallee(Box::new(member))
+    );
+    assert_eq!(
+        decline.to_string(),
         "the KLIB body of `demo.a` \
-         (it uses a call of a member no library serializes, such as a fake override)"
+         (it calls `demo.Box.get`, which no reachable library serializes its declaration)"
     );
 }
 
@@ -1464,8 +1476,8 @@ fn stdlib_records(
 }
 
 /// The stdlib under lowering with no selected callee: every callee a body reaches is declared from
-/// its serialized header. The stdlib is closed over its own calls (no call names a declaration no
-/// loaded library declares), and the bodies that call another function now lower past that call
+/// its serialized header. Every top-level call has a serialized declaration; an unserialized
+/// member retains its exact signature and remains unsupported. Bodies with declared callees lower past the call
 /// and decline, if at all, inside the callee by the callee's own form.
 #[test]
 fn stdlib_calls_reach_header_declared_callees() {
@@ -1478,6 +1490,7 @@ fn stdlib_calls_reach_header_declared_callees() {
     let mut lowered_with_callees = Vec::new();
     let mut undeclared = Vec::new();
     let mut opaque_pointed = Vec::new();
+    let mut undeclared_members = 0;
     for (package, record) in stdlib_records(&root, &libraries) {
         let mut unit = DependencyBodyUnit::default();
         let callable = record.klib_body_callable().expect("signed");
@@ -1488,30 +1501,48 @@ fn stdlib_calls_reach_header_declared_callees() {
             Ok(_) => {}
             Err(decline) => {
                 assert_unit_is_empty(&unit);
-                if matches!(decline.reason(), KlibBodyDeclineReason::UndeclaredCallee(_)) {
-                    undeclared.push(decline.to_string());
+                if let KlibBodyDeclineReason::UndeclaredCallee(callee) = decline.reason() {
+                    if callee.declaration().segments().len() <= 1 {
+                        undeclared.push(decline.to_string());
+                    }
                 }
                 let mut innermost = &decline;
                 while let KlibBodyDeclineReason::CalleeDeclined(callee) = innermost.reason() {
                     innermost = callee;
                 }
                 if !std::ptr::eq(innermost, &decline) {
-                    let text = innermost.to_string();
-                    let (_, reason) = text.split_once(" (").expect("a decline names its reason");
-                    if package == "kotlinx/cinterop"
-                        && matches!(
-                            record.name.as_str(),
-                            "interpretOpaquePointed" | "interpretNullableOpaquePointed"
-                        )
-                    {
-                        opaque_pointed.push(decline.to_string());
+                    let missing_member = matches!(
+                        innermost.reason(),
+                        KlibBodyDeclineReason::UndeclaredCallee(callee)
+                            if callee.declaration().segments().len() > 1
+                    );
+                    if missing_member {
+                        // Inherited members link to the declaration they inherit and
+                        // decline there. A member that still has no producer declaration
+                        // keeps its exact signature in this count.
+                        undeclared_members += 1;
+                    } else {
+                        let text = innermost.to_string();
+                        let (_, reason) =
+                            text.split_once(" (").expect("a decline names its reason");
+                        if package == "kotlinx/cinterop"
+                            && matches!(
+                                record.name.as_str(),
+                                "interpretOpaquePointed" | "interpretNullableOpaquePointed"
+                            )
+                        {
+                            opaque_pointed.push(decline.to_string());
+                        }
+                        *reached.entry(reason.to_owned()).or_default() += 1;
                     }
-                    *reached.entry(reason.to_owned()).or_default() += 1;
                 }
             }
         }
     }
     assert_eq!(undeclared, Vec::<String>::new());
+    // The members that used to decline as unserialized fake overrides now link to the
+    // declarations they inherit, so this stdlib records no remaining unlinked member.
+    assert_eq!(undeclared_members, 0);
     assert_eq!(lowered_with_callees, Vec::<String>::new());
     // Both name the same-library private class `OpaqueNativePointed` and then call
     // `interpretNullablePointed`, an external identity intrinsic. That declaration serializes
