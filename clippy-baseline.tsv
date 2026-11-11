@@ -121,19 +121,6 @@
 1	src/resolve/diagnostic_selection.rs	this `if` has identical blocks
 1	src/resolve/enhanced_values.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if !coerced_to_unit { self.value_enhancement(result) } else { Default::default() }`
 1	src/resolve/explicit_property_write.rs	very complex type used. Consider factoring parts into `type` definitions
-1	src/resolve/generic_call_bindings.rs	this function has too many arguments (8/7)
-1	src/resolve/interface_delegation.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if setter { Ty::Unit } else { property_type }`
-1	src/resolve/interface_delegation.rs	you are using an explicit closure for copying elements
-1	src/resolve/local_method_dependencies.rs	large size difference between variants: the entire enum is at least 1176 bytes
-1	src/resolve/local_method_dependencies.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let (inherited, provider) = self.inherited_body_local_default_candidate(owner, candidate)?;`
-1	src/resolve/member_extension_properties.rs	this function has too many arguments (8/7)
-1	src/resolve/member_extension_properties.rs	very complex type used. Consider factoring parts into `type` definitions
-1	src/resolve/member_extension_selection.rs	items after a test module
-1	src/resolve/operator_calls.rs	this function has too many arguments (10/7)
-1	src/resolve/operator_calls.rs	this function has too many arguments (9/7)
-1	src/resolve/property_read_selection.rs	called `map(..).flatten()` on `Option`: help: try replacing `map` with `and_then` and remove the `.flatten()`: `and_then(|getter| getter.member.external_identity)`
-1	src/resolve/reified_type_arguments.rs	this function has too many arguments (9/7)
-1	src/resolve/resolved_type_occurrences.rs	this function has too many arguments (9/7)
 1	src/resolve/scope.rs	this `if` can be collapsed into the outer `match`
 1	src/resolve/scope.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/resolve/selected_argument_commitment.rs	this function has too many arguments (8/7)
@@ -213,10 +200,6 @@
 2	src/klib_libraries/declaration_bodies.rs	the `Err`-variant returned from this function is very large: the `Err`-variant is at least 136 bytes
 2	src/resolve.rs	returning the result of a `let` binding from a block
 2	src/resolve/call_diagnostics.rs	this function has too many arguments (8/7)
-2	src/resolve/intersection_inference.rs	this function has too many arguments (10/7)
-2	src/resolve/intersection_inference.rs	this function has too many arguments (8/7)
-2	src/resolve/invoke_selection.rs	this function has too many arguments (8/7)
-2	src/resolve/postponed_constraints.rs	unnecessary use of `clone` to create a slice from a reference: help: try: `std::slice::from_ref(&name)`
 2	src/resolve/selected_result_publication.rs	local variable doesn't need to be boxed here
 2	src/resolve/streaming_signature_bridge.rs	this function has too many arguments (8/7)
 2	src/resolve/streaming_signature_bridge.rs	this method chain can be written more clearly with `if .. else ..`
