@@ -23,6 +23,7 @@ mod hashing;
 mod host;
 mod identity;
 mod interface_dispatch;
+mod numeric_conversions;
 mod objects;
 mod runtime;
 mod target;

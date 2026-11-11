@@ -183,7 +183,7 @@ pub(in crate::resolve) fn report_inapplicable_callable_candidates(
                         param_names: &candidate.call_sig.param_names,
                         param_defaults: &candidate.call_sig.param_defaults,
                         required: candidate.call_sig.required,
-                        vararg: candidate.call_sig.vararg,
+                        vararg_index: candidate.call_sig.vararg_index,
                         context_count: candidate.context_count,
                         ret: candidate.callable.ret,
                         source_display: checker
@@ -328,7 +328,7 @@ pub(in crate::resolve) fn report_inapplicable_callable_candidates(
                     param_names: &candidate.call_sig.param_names,
                     param_defaults: &candidate.call_sig.param_defaults,
                     required: candidate.call_sig.required,
-                    vararg: candidate.call_sig.vararg,
+                    vararg_index: candidate.call_sig.vararg_index,
                     context_count: candidate.context_count,
                     ret: candidate.callable.ret,
                     source_display: checker

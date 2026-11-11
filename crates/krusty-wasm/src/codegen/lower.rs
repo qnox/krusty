@@ -21,6 +21,7 @@ use krusty::fx_hash::{HashMap, HashSet};
 mod absent_arguments;
 pub(super) mod any_members;
 mod arrays;
+pub(super) mod box_members;
 mod boxing;
 mod callable_reference_identity;
 mod dependency_exports;
@@ -59,6 +60,7 @@ use krusty::ir::{Callee, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic, I
 use krusty::types::{EqualityMode, Ty, TyKind};
 
 use super::super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
+use super::super::numeric_conversions;
 use super::super::objects::REFERENCE;
 use super::super::runtime::*;
 use super::callable_registry::{CallableRegistry, FileCallTargets};
@@ -606,20 +608,6 @@ fn widened(value: ValType) -> Ty {
     }
 }
 
-/// Convert the numeric value on top of the stack from `from` to the wider `to`.
-fn widen(code: &mut Code, from: ValType, to: ValType) {
-    let opcode = match (from, to) {
-        (ValType::I32, ValType::I64) => EXTEND_I32_S,
-        (ValType::I32, ValType::F32) => 0xb2,
-        (ValType::I64, ValType::F32) => 0xb4,
-        (ValType::I32, ValType::F64) => 0xb7,
-        (ValType::I64, ValType::F64) => 0xb9,
-        (ValType::F32, ValType::F64) => 0xbb,
-        _ => return,
-    };
-    code.op(opcode);
-}
-
 /// A loop the body is inside: the absolute depths `break` and `continue` branch to.
 struct Loop {
     label: Option<String>,
@@ -801,39 +789,8 @@ impl<'a> Body<'a> {
         if !signed(target_ty) {
             return Err(unsupported());
         }
-        let (Some(source), Some(target)) = (carrier(source_ty)?, carrier(target_ty)?) else {
-            return Err(unsupported());
-        };
         self.expression(arg)?;
-        let carried = match (source, target) {
-            (ValType::I64, ValType::I32) => {
-                self.code.op(0xa7);
-                Ty::Int
-            }
-            (ValType::F32, ValType::I32) => {
-                self.code.trunc_sat(0);
-                Ty::Int
-            }
-            (ValType::F64, ValType::I32) => {
-                self.code.trunc_sat(2);
-                Ty::Int
-            }
-            (ValType::F32, ValType::I64) => {
-                self.code.trunc_sat(4);
-                Ty::Long
-            }
-            (ValType::F64, ValType::I64) => {
-                self.code.trunc_sat(6);
-                Ty::Long
-            }
-            (ValType::F64, ValType::F32) => {
-                self.code.op(0xb6);
-                Ty::Float
-            }
-            _ => return Err(unsupported()),
-        };
-        // A `Byte`, `Short` or `Char` result narrows the `Int` it came through.
-        self.coerce_emitted_value(carried, target_ty)
+        numeric_conversions::convert(&mut self.code, source_ty, target_ty)
     }
 
     /// Whether a cast of `arg` to `target` reads a scalar out of a reference: the operand is
@@ -914,23 +871,8 @@ impl<'a> Body<'a> {
         };
         if source == target {
             // An `Int` stored where a `Byte`, `Short` or `Char` is declared (`b++` on a `Byte`)
-            // wraps to that width: the 32-bit carrier must hold the narrow value's own bits.
-            let narrowing = match (source_ty, target_ty) {
-                (from, to) if from == to => None,
-                (_, Ty::Byte) => Some(0xc0),
-                (_, Ty::Short) => Some(0xc1),
-                (_, Ty::Char) => Some(0),
-                _ => None,
-            };
-            match narrowing {
-                Some(0) => {
-                    self.code.i32_const(0xffff).op(AND32);
-                }
-                Some(extend) => {
-                    self.code.op(extend);
-                }
-                None => {}
-            }
+            // wraps to that width.
+            numeric_conversions::fit(&mut self.code, source_ty, target_ty);
             return Ok(());
         }
         if let (ValType::Ref { .. }, ValType::Ref { heap, .. }) = (source, target) {
@@ -949,7 +891,7 @@ impl<'a> Body<'a> {
         }
         match (rank(source), rank(target)) {
             (Some(from), Some(to)) if from < to => {
-                widen(&mut self.code, source, target);
+                numeric_conversions::widen(&mut self.code, source, target);
                 Ok(())
             }
             _ => Err(format!(
@@ -961,6 +903,9 @@ impl<'a> Body<'a> {
     /// Emit `id`, leaving its value on the stack when it has one.
     fn expression(&mut self, id: u32) -> Result<(), Unsupported> {
         let node = self.ir.expr(id).clone();
+        if let Some(result) = self.box_member_expression(id, &node) {
+            return result;
+        }
         if let Some(result) = self.emitted_dependency_expression(id, &node) {
             return result;
         }
