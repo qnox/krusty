@@ -1,22 +1,8 @@
-1	src/assignable.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `arguments`
-1	src/bin/blockers.rs	consider using `sort_by_key`
-1	src/compiler.rs	the method `accept_inline_bodies` doesn't need a mutable reference
-1	src/compiler.rs	this function has too many arguments (8/7)
-1	src/compiler.rs	this function has too many arguments (9/7)
-1	src/compiler/dependency_body_emission.rs	redundant guard
 1	src/fir/signature.rs	this function has too many arguments (10/7)
 1	src/fir/signature.rs	this function has too many arguments (12/7)
 1	src/fir/signature/classifier_headers.rs	this function has too many arguments (8/7)
 1	src/fir/signature/local_type_aliases.rs	this function has too many arguments (10/7)
 1	src/fir/signature_extract/condition_facts.rs	this function has too many arguments (8/7)
-1	src/frontend/inline_preparation.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let selected_bodies = bodies.get_mut(provider.source.raw() as usize)?;`
-1	src/frontend/inline_preparation.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let selected_roots = roots.get_mut(root.source.raw() as usize)?;`
-1	src/frontend/inline_preparation.rs	this function has too many arguments (9/7)
-1	src/frontend/tests/streaming.rs	using `clone` on type `ResolvedCallableHeader` which implements the `Copy` trait: help: try removing the `clone` call: `callable`
-1	src/lexer.rs	casting to the same type is unnecessary (`usize` -> `usize`): help: try: `self.i`
-1	src/parser.rs	field assignment outside of initializer for an instance created with Default::default()
-1	src/parser.rs	this manual char comparison can be written more succinctly: help: consider using an array of `char`: `['L', 'l', 'u', 'U']`
-1	src/parser.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if header_ctor_kw { self.tok().span.lo } else { 0 }`
 1	src/resolve/selected_result_publication.rs	this function has too many arguments (9/7)
 1	src/resolve/streaming_signature_bridge/demanded_source_call.rs	this function has too many arguments (8/7)
 1	src/resolve/streaming_signature_bridge/local_signatures.rs	this function has too many arguments (10/7)
@@ -27,7 +13,6 @@
 1	tests/common/byte_dump.rs	unused import: `immutable_classpath_content_fingerprint`
 1	tests/common/byte_dump/fingerprint.rs	function `immutable_classpath_content_fingerprint` is never used
 1	tests/common/source_set_compile.rs	function `source_set_diagnostics` is never used
-12	src/parser.rs	this `map_or` can be simplified
 2	src/fir/signature.rs	this function has too many arguments (11/7)
 2	src/fir/signature.rs	this function has too many arguments (8/7)
 2	src/resolve/streaming_signature_bridge.rs	this function has too many arguments (8/7)
@@ -37,4 +22,3 @@
 2	src/resolve/streaming_signature_bridge/semantics.rs	this function has too many arguments (8/7)
 3	src/resolve/streaming_signature_bridge/rejected_member_call.rs	this function has too many arguments (8/7)
 3	src/resolve/streaming_signature_bridge/type_parameter_publication.rs	this function has too many arguments (8/7)
-6	src/conformance.rs	doc list item without indentation

@@ -87,11 +87,13 @@ pub fn emit_analyzed_with_origins_to<B: Backend>(
     emit_analyzed_into(
         analysis,
         stems,
-        backend,
-        &mut state,
+        TargetEmission {
+            backend,
+            state: &mut state,
+            dependency_support: &mut dependency_support,
+        },
         module_name,
         diags,
-        &mut dependency_support,
         PassTwoHooks {
             before_target: &mut |_, _| {},
             checked_bodies: &mut NoObserver,
@@ -107,6 +109,13 @@ pub fn emit_analyzed_with_origins_to<B: Backend>(
             .into_iter()
             .for_each(|artifact| sink(ArtifactOrigin::Module, artifact));
     }
+}
+
+/// Backend state shared by every source module of one target program.
+struct TargetEmission<'a, B: Backend> {
+    backend: &'a B,
+    state: &'a mut B::State,
+    dependency_support: &'a mut dependency_body_emission::DependencySupportState,
 }
 
 /// Only the successful complete-source path below creates this handoff value. Header-only or
@@ -134,13 +143,16 @@ struct PassTwoHooks<'a> {
 fn emit_analyzed_into<B: Backend>(
     analysis: impl Into<StreamingSourceSetAnalysis>,
     stems: &[String],
-    backend: &B,
-    state: &mut B::State,
+    target: TargetEmission<'_, B>,
     module_name: &str,
     diags: &mut DiagSink,
-    dependency_support: &mut dependency_body_emission::DependencySupportState,
     hooks: PassTwoHooks<'_>,
 ) {
+    let TargetEmission {
+        backend,
+        state,
+        dependency_support,
+    } = target;
     let PassTwoHooks {
         before_target,
         checked_bodies,
@@ -284,7 +296,7 @@ fn emit_analyzed_into<B: Backend>(
                 crate::trace_compiler!("lower", "the platform serializes no inline templates");
             }
         }
-        if let Err(error) = sink.accept_inline_bodies(&index, &mut inline_bodies) {
+        if let Err(error) = sink.accept_inline_bodies(&index, &inline_bodies) {
             diags.error(
                 Span::new(0, 0),
                 format!("internal error: cannot consume inline FIR: {error:?}"),
@@ -555,11 +567,13 @@ pub(crate) fn lower_analyzed_observing(
     emit_analyzed_into(
         analysis,
         stems,
-        &backend,
-        &mut (),
+        TargetEmission {
+            backend: &backend,
+            state: &mut (),
+            dependency_support: &mut dependency_support,
+        },
         module_name,
         diags,
-        &mut dependency_support,
         PassTwoHooks {
             before_target: &mut |_, _| {},
             checked_bodies: observer,
@@ -750,16 +764,19 @@ fn active_body_check_groups(
 }
 
 fn check_body_group(
-    active_file: &File,
-    raw_source: usize,
-    source_id: crate::fir::SourceFileId,
-    group: &BodyCheckGroup,
-    active: &crate::fir::ActiveSourceDeclarations,
+    active_group: ActiveBodyGroup<'_>,
     symbols: &mut crate::resolve::PassTwoSymbols,
     index: &mut crate::fir::ResolvedModuleIndex,
-    streamed_cache: &crate::fir::StreamedModuleProjectionCache,
     diags: &mut DiagSink,
 ) -> Option<crate::resolve::TypeInfo> {
+    let ActiveBodyGroup {
+        file: active_file,
+        declarations: active,
+        raw_source,
+        source: source_id,
+        group,
+        streamed_cache,
+    } = active_group;
     let diagnostics_start = diags.diags.len();
     let selected_roots =
         crate::fx_hash::HashSet::from_iter([active.span(active_file, group.root)?]);
@@ -977,14 +994,16 @@ fn consume_body_group(
         diags,
     } = consumers;
     let Some(info) = check_body_group(
-        active_file,
-        raw_source,
-        source_id,
-        group,
-        active,
+        ActiveBodyGroup {
+            file: active_file,
+            declarations: active,
+            raw_source,
+            source: source_id,
+            group,
+            streamed_cache,
+        },
         symbols,
         index,
-        streamed_cache,
         diags,
     ) else {
         return false;
@@ -1307,14 +1326,16 @@ pub fn check_frontend_only(
             for group in active_body_check_groups(work, &active_file, &active, &index) {
                 let before = diags.diags.len();
                 let Some(info) = check_body_group(
-                    &active_file,
-                    raw_source,
-                    source_id,
-                    &group,
-                    &active,
+                    ActiveBodyGroup {
+                        file: &active_file,
+                        declarations: &active,
+                        raw_source,
+                        source: source_id,
+                        group: &group,
+                        streamed_cache: &streamed_cache,
+                    },
                     &mut symbols,
                     &mut index,
-                    &streamed_cache,
                     diags,
                 ) else {
                     let reported = diags.diags[before..]
