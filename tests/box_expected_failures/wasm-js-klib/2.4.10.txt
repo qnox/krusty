@@ -2500,7 +2500,6 @@ inlineClasses/unboxGenericParameter/funInterface/anyGeneric.kt
 inlineClasses/unboxGenericParameter/funInterface/anyN.kt
 inlineClasses/unboxGenericParameter/funInterface/anyNGeneric.kt
 inlineClasses/unboxGenericParameter/funInterface/anyNGeneric2.kt
-inlineClasses/unboxGenericParameter/funInterface/iface.kt
 inlineClasses/unboxGenericParameter/funInterface/ifaceChild.kt
 inlineClasses/unboxGenericParameter/funInterface/ifaceChildGeneric.kt
 inlineClasses/unboxGenericParameter/funInterface/ifaceGeneric.kt
@@ -2517,7 +2516,6 @@ inlineClasses/unboxGenericParameter/lambda/anyGeneric.kt
 inlineClasses/unboxGenericParameter/lambda/anyN.kt
 inlineClasses/unboxGenericParameter/lambda/anyNGeneric.kt
 inlineClasses/unboxGenericParameter/lambda/anyNGeneric2.kt
-inlineClasses/unboxGenericParameter/lambda/iface.kt
 inlineClasses/unboxGenericParameter/lambda/ifaceChild.kt
 inlineClasses/unboxGenericParameter/lambda/ifaceChildGeneric.kt
 inlineClasses/unboxGenericParameter/lambda/ifaceGeneric.kt
@@ -2569,7 +2567,6 @@ inlineClasses/useThisInsideInlineClassGeneric.kt
 inlineClasses/valueClassInstanceOfNumberAndComparable.kt
 inlineClasses/valueClassInstanceOfNumberAndComparableInFunction.kt
 inlineClasses/valueClassInstanceOfNumberAndComparableInInlineFunction.kt
-inlineClasses/whenWithSubjectGeneric.kt
 inlineClasses/withReturnTypeManglingGeneric.kt
 inlineEvaluationOrder/argumentOfCall.kt
 inlineEvaluationOrder/argumentOfCallMultipleInlineCalls.kt
