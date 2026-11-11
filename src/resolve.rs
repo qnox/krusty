@@ -25440,13 +25440,20 @@ fun box(): String {
         let (_, _, diagnostics) = retained_platform_analysis(source, Box::new(FakeMemberPlatform));
         let mixing = "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.";
         let missing = "no value passed for parameter 'a'.";
+        // kotlinc reports in source order. Where the missing argument anchors on the value arguments
+        // (2.4.0 and 2.4.10), both diagnostics start at the positional `1` and the mixing error,
+        // reported while mapping arguments, comes first; on the callee it precedes the mixing error.
         let expected = ["knownPair", "known", "mixExt"]
             .into_iter()
             .flat_map(|callee| {
-                [
-                    (missing, missing_argument_anchor("1)", callee), Some(callee)),
-                    (mixing, "1", None),
-                ]
+                let missing = (missing, missing_argument_anchor("1)", callee), Some(callee));
+                let mixing = (mixing, "1", None);
+                match crate::diagnostic_wording::no_value_for_parameter_anchor() {
+                    crate::diagnostic_wording::Anchor::ValueArguments => [mixing, missing],
+                    crate::diagnostic_wording::Anchor::ReferencedNameByQualified => {
+                        [missing, mixing]
+                    }
+                }
             })
             .collect::<Vec<_>>();
         let actual = diagnostics
