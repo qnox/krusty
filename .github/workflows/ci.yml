@@ -885,8 +885,14 @@ jobs:
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
           KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE: "1"
         run: just conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
+      # Also after a failed or timed-out run: each entry is published whole (an OK or FAILED marker
+      # renamed into place) and only for a complete compile, so what a cut-short run saves is exact.
+      # A cold cache after a change to the files the key hashes takes longer than the lane's
+      # deadline on the slower runners; saving only on success left it cold for every queue run.
       - name: save kotlinc box references (${{ matrix.version }})
-        if: matrix.target == 'jvm' && github.ref == 'refs/heads/master' && steps.box-references.outputs.cache-hit != 'true'
+        if: >-
+          !cancelled() && matrix.target == 'jvm' && github.ref == 'refs/heads/master'
+          && steps.box-references.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/ref-classes
