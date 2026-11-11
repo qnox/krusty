@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use super::server_pool::{self, server_pool_cap};
 use super::{
-    byte_dump, die_with_parent, java_home, jvm_gclog_args, kotlinc_lib_dir, read_exact_deadline,
-    spawn_owned, ProfGuard,
+    byte_dump, die_with_parent, java_home, kotlinc_lib_dir, protocol_jvm_log_args,
+    read_exact_deadline, spawn_owned, ProfGuard,
 };
 
 // The reference `kotlinc` is a JVM program; spawning its CLI per test pays a ~2-4s JVM + compiler cold
@@ -304,7 +304,7 @@ impl KotlincServer {
         // left to grow from the small default initial heap: every compile allocates far more short-lived
         // data than it retains, and the undersized default nursery collected so often that a cold box
         // corpus shard spent ~19% more time in kotlinc (and grew a larger heap) than with 256 MB.
-        cmd.args(jvm_gclog_args("kotlinc"));
+        cmd.args(protocol_jvm_log_args("kotlinc"));
         cmd.args([
             "-XX:TieredStopAtLevel=1",
             "-XX:+UseSerialGC",

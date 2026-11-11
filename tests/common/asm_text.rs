@@ -19,8 +19,8 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use super::common::{
-    die_with_parent, java_home, kotlin_compiler_jar, producing_jdk, read_exact_deadline,
-    server_pool, spawn_owned,
+    die_with_parent, java_home, kotlin_compiler_jar, producing_jdk, protocol_jvm_log_args,
+    read_exact_deadline, server_pool, spawn_owned,
 };
 
 /// The server's sources, by file name.
@@ -195,6 +195,7 @@ impl Server {
     fn start(classpath: &str) -> Option<Self> {
         let mut command = Command::new(Path::new(&java_home()).join("bin/java"));
         command
+            .args(protocol_jvm_log_args("asmtext"))
             .args(["-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-Xmx512m"])
             .args(["-cp", classpath, "AsmText"])
             .stdin(Stdio::piped())

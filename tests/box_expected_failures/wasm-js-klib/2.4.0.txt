@@ -356,7 +356,6 @@ callableReference/adaptedReferences/unboundReferences.kt
 callableReference/adaptedReferences/unitCoercionOverloads.kt
 callableReference/adaptedReferences/varargFromBaseClass.kt
 callableReference/adaptedReferences/varargViewedAsArray.kt
-callableReference/adaptedReferences/varargViewedAsPrimitiveArray.kt
 callableReference/adaptedReferences/varargWithDefaultValue.kt
 callableReference/arrayConstructor.kt
 callableReference/arrayConstructorArgument.kt
@@ -1528,7 +1527,6 @@ directInvokeOptimization/contextParameters.kt
 directInvokeOptimization/unboundMemberRef.kt
 elvis/genericElvisWithMoreSpecificLHS.kt
 elvis/genericElvisWithNullLHS.kt
-elvis/genericNull.kt
 elvis/ofNonNullableResultType.kt
 elvis/primitive.kt
 enum/companionAccessingEnumValue.kt
@@ -2689,7 +2687,6 @@ inlineClasses/useThisInsideInlineClassGeneric.kt
 inlineClasses/valueClassInstanceOfNumberAndComparable.kt
 inlineClasses/valueClassInstanceOfNumberAndComparableInFunction.kt
 inlineClasses/valueClassInstanceOfNumberAndComparableInInlineFunction.kt
-inlineClasses/whenWithSubject.kt
 inlineClasses/whenWithSubjectGeneric.kt
 inlineClasses/withReturnTypeManglingGeneric.kt
 inlineEvaluationOrder/argumentOfCall.kt
@@ -3151,8 +3148,6 @@ primitiveTypes/equalityWithObject/whenNullableBoxed.kt
 primitiveTypes/equalsHashCodeToString.kt
 primitiveTypes/kt1093.kt
 primitiveTypes/kt13023.kt
-primitiveTypes/kt14868.kt
-primitiveTypes/kt1508.kt
 primitiveTypes/kt16732.kt
 primitiveTypes/kt2269.kt
 primitiveTypes/kt2269NotOptimizable.kt
@@ -4220,7 +4215,6 @@ reified/vararg.kt
 reified/varargs.kt
 reified/withInlineTurnedOff.kt
 rtti/isReifiedObject.kt
-safeCall/genericNull.kt
 safeCall/kt245.kt
 safeCall/kt247.kt
 safeCall/kt3430.kt
