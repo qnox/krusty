@@ -75,6 +75,12 @@ impl<T> CompanionExtension<T> {
     }
 }
 
+/// One package fragment before target-stdlib facts are attached.
+///
+/// In order: package segments, the decoded package, stdlib authority, friend visibility, and the
+/// declaring module when the fragment came from an archive.
+type PackageInput = (Vec<String>, KotlinPackage, bool, bool, Option<String>);
+
 /// Signed declarations by namespace, plus every package namespace a qualifier walk may pass
 /// through.
 pub(super) struct PackageInventory {
@@ -138,7 +144,7 @@ impl PackageInventory {
 
     /// Build an inventory while retaining which archive supplied friend-visible internals.
     pub(super) fn from_package_inputs(
-        packages: Vec<(Vec<String>, KotlinPackage, bool, bool, Option<String>)>,
+        packages: Vec<PackageInput>,
     ) -> Result<Self, KlibLibraryError> {
         Self::from_target_package_inputs(
             packages
