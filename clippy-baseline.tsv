@@ -167,10 +167,6 @@
 1	src/symbol_resolver/overload_selection.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/types.rs	redundant guard
 1	src/types/interning.rs	unnecessary use of `to_string`: help: use: `"T"`
-1	tests/box_lane.rs	this function has too many arguments (8/7)
-1	tests/box_lane.rs	this function has too many arguments (9/7)
-1	tests/box_lane.rs	variant `JvmArtifacts` is never constructed
-1	tests/ci_required_check_e2e.rs	this function has too many arguments (8/7)
 1	tests/common/byte_dump.rs	function `flush_recorded_class_dumps` is never used
 1	tests/common/byte_dump.rs	unused import: `immutable_classpath_content_fingerprint`
 1	tests/common/byte_dump/fingerprint.rs	function `immutable_classpath_content_fingerprint` is never used
@@ -191,13 +187,6 @@
 1	tests/common/reference_compiler.rs	function `compiler_warnings` is never used
 1	tests/common/reference_compiler.rs	function `rendered_error_blocks` is never used
 1	tests/common/source_set_compile.rs	function `source_set_diagnostics` is never used
-1	tests/full_value_classes_e2e.rs	unnecessary use of `clone` to create a slice from a reference: help: try: `std::slice::from_ref(&stdlib)`
-1	tests/klib_class_surface_e2e.rs	unnecessary use of `clone` to create a slice from a reference
-1	tests/kotlin_box_ir_jvm_conformance.rs	consider using `sort_by_key`
-1	tests/local_class_nullability_e2e.rs	called `Iterator::last` on a `DoubleEndedIterator`; this will needlessly iterate the entire iterator
-1	tests/resolver_regression_e2e.rs	this call to `as_ref` does nothing: help: try: `arguments`
-1	tests/safe_call_origin_narrowing_e2e.rs	this function has too many arguments (8/7)
-1	tests/serialization_explicit_companion_e2e.rs	for loop over a single element
 12	src/parser.rs	this `map_or` can be simplified
 16	src/resolve.rs	this function has too many arguments (8/7)
 2	src/fir/body_check/references.rs	this function has too many arguments (8/7)
@@ -225,8 +214,6 @@
 2	src/resolve/streaming_signature_bridge/operator_conventions.rs	this function has too many arguments (8/7)
 2	src/resolve/streaming_signature_bridge/qualified_calls.rs	explicit call to `.into_iter()` in function argument accepting `IntoIterator`
 2	src/resolve/streaming_signature_bridge/semantics.rs	this function has too many arguments (8/7)
-2	tests/private_inline_property_ref_e2e.rs	writing `&PathBuf` instead of `&Path` involves a new object where a slice will do
-2	tests/reified_anonymous_object_e2e.rs	very complex type used. Consider factoring parts into `type` definitions
 3	src/fir/body_check/calls.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `selected`
 3	src/fir/header.rs	this function has too many arguments (9/7)
 3	src/fir/module_symbols.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
