@@ -66,7 +66,7 @@ pub struct MetaProp {
     /// This exact property is the value class's underlying storage declaration, joined by wire id.
     pub is_inline_underlying: bool,
     /// This property is a component of its value class: a primary-constructor property of any value
-    /// class, inline or full, joined to the constructor's parameter by wire id.
+    /// class, inline or full, stamped from the decoded primary constructor once both are known.
     pub is_value_class_component: bool,
     /// The getter is declared `inline`, from its accessor flag word. kotlinc omits a word equal
     /// to the property's default, which is never inline.
@@ -93,7 +93,6 @@ pub(super) fn decode_properties(
     class_tparam_bounds: &[Vec<Ty>],
 ) -> MetadataResult<Vec<MetaProp>> {
     let inline_underlying_property_name_id = inline_underlying_property_name_id(ctx.msg);
-    let value_class_component_name_ids = value_class_component_name_ids(ctx.msg);
     let declared_classifier = |ty: Ty| match ty.non_null().kind() {
         TyKind::Obj(internal, _) => Some(internal),
         _ => None,
@@ -482,7 +481,7 @@ pub(super) fn decode_properties(
             is_final: (flags >> 4) & 0x3 == 0,
             is_var,
             is_inline_underlying: inline_underlying_property_name_id == Some(name_id),
-            is_value_class_component: value_class_component_name_ids.contains(&name_id),
+            is_value_class_component: false,
             getter_inline: accessor_is_inline(getter_flags),
             setter_inline: accessor_is_inline(setter_flags),
             receiver_class,

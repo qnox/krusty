@@ -16,96 +16,6 @@ pub(super) fn inline_underlying_property_name_id(message: &[u8]) -> Option<u64> 
     None
 }
 
-/// `Class.flags` (field 1) bit 13: the `value` modifier.
-const CLASS_IS_VALUE: u64 = 1 << 13;
-/// `Constructor.flags` (field 1) bit 4: a secondary constructor.
-const CONSTRUCTOR_IS_SECONDARY: u64 = 1 << 4;
-
-/// The string-table identities of a value class's components: the value parameters of its primary
-/// constructor, in declaration order. Empty for any class without the `value` flag. Metadata names
-/// a single underlying property for an inline value class and names nothing for a full one, but
-/// both declare their components as primary-constructor properties, so the constructor is the one
-/// edge every representation shares.
-pub(super) fn value_class_component_name_ids(message: &[u8]) -> Vec<u64> {
-    let mut flags = None;
-    let mut constructors: Vec<&[u8]> = Vec::new();
-    let mut pb = super::Pb::new(message);
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            (1, 0) => flags = pb.varint(),
-            (8, 2) => match pb.varint().and_then(|n| pb.bytes(n as usize)) {
-                Some(constructor) => constructors.push(constructor),
-                None => break,
-            },
-            (_, wire) => {
-                if pb.skip(wire).is_none() {
-                    break;
-                }
-            }
-        }
-    }
-    if flags.is_none_or(|flags| flags & CLASS_IS_VALUE == 0) {
-        return Vec::new();
-    }
-    constructors
-        .into_iter()
-        .find(|constructor| constructor_flags(constructor) & CONSTRUCTOR_IS_SECONDARY == 0)
-        .map(parameter_name_ids)
-        .unwrap_or_default()
-}
-
-fn constructor_flags(constructor: &[u8]) -> u64 {
-    let mut pb = super::Pb::new(constructor);
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            (1, 0) => return pb.varint().unwrap_or(0),
-            (_, wire) => {
-                if pb.skip(wire).is_none() {
-                    break;
-                }
-            }
-        }
-    }
-    0
-}
-
-fn parameter_name_ids(constructor: &[u8]) -> Vec<u64> {
-    let mut ids = Vec::new();
-    let mut pb = super::Pb::new(constructor);
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            (2, 2) => {
-                let Some(parameter) = pb.varint().and_then(|n| pb.bytes(n as usize)) else {
-                    break;
-                };
-                let mut inner = super::Pb::new(parameter);
-                while !inner.at_end() {
-                    let Some(tag) = inner.varint() else { break };
-                    match (tag >> 3, tag & 7) {
-                        (2, 0) => {
-                            ids.extend(inner.varint());
-                        }
-                        (_, wire) => {
-                            if inner.skip(wire).is_none() {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            (_, wire) => {
-                if pb.skip(wire).is_none() {
-                    break;
-                }
-            }
-        }
-    }
-    ids
-}
-
 /// Parse the getter and setter declaration identities from a `JvmPropertySignature` extension.
 /// Keeping this beside the property-name identity decoder makes the protobuf edges explicit before
 /// the main decoder normalizes them into semantic property facts.
@@ -199,19 +109,5 @@ mod tests {
         ];
 
         assert_eq!(super::inline_underlying_property_name_id(&message), Some(7));
-    }
-
-    #[test]
-    fn a_value_class_components_are_its_primary_constructor_parameters() {
-        let message = [
-            0x08, 0x80, 0x40, // flags: value (bit 13)
-            0x42, 0x0a, // constructor, 10 bytes
-            0x12, 0x03, 0x10, 0x07, 0x1a, // value_parameter name = d2[7] (type bytes elided)
-            0x12, 0x02, 0x10, 0x0b, //   value_parameter name = d2[11]
-            0x42, 0x04, 0x08, 0x10, 0x12, 0x00, // a secondary constructor
-        ];
-        assert_eq!(super::value_class_component_name_ids(&message), vec![7, 11]);
-        let not_value = [0x08, 0x00, 0x42, 0x04, 0x12, 0x02, 0x10, 0x07];
-        assert!(super::value_class_component_name_ids(&not_value).is_empty());
     }
 }
