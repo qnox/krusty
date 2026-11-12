@@ -259,10 +259,6 @@ impl<'a> RegenerationSite<'a> {
     ) -> RegenerationSite<'a> {
         Self::special("<clinit>", "()V", symbols)
     }
-
-    pub(in crate::ir_emit) fn is_class_initializer(&self) -> bool {
-        self.special && self.method == "<clinit>" && self.descriptor == "()V"
-    }
 }
 
 /// The per-class name generators of one emit run, by class.

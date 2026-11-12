@@ -47,22 +47,22 @@ pub(crate) fn publish_checked_declaration_annotations(
         }
         diags.set_file(file_index as u32);
         let no_bodies = crate::fx_hash::HashSet::default();
-        let info = check_file_at_impl_mode_with_index(
+        let info = check_file_at_impl_mode_with_index(IndexedFileCheck {
             file,
-            file_index as u32,
-            Some(files),
-            table,
-            None,
+            file_index: file_index as u32,
+            source_files: Some(files),
+            syms: table,
+            resolved_index: None,
             diags,
-            CaptureDiscovery::Published,
-            Some(&selected),
-            Some(&no_bodies),
-            None,
-            None,
-            None,
-            SourceFragmentMode::DeclarationAnnotations,
-            None,
-        );
+            captures: CaptureDiscovery::Published,
+            selected_declarations: Some(&selected),
+            selected_body_declarations: Some(&no_bodies),
+            active_declarations: None,
+            selected_stable_roots: None,
+            selected_stable_bodies: None,
+            fragment: SourceFragmentMode::DeclarationAnnotations,
+            streamed_cache: None,
+        });
         let mut checked = Vec::new();
         for &(internal, declaration) in &declarations {
             let Decl::Class(class) = file.decl(declaration) else {

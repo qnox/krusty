@@ -53,7 +53,7 @@ pub(super) fn authenticate(
             "a constructor has an incompatible selected invocation contract",
         ));
     }
-    let header = class_headers::authenticate(selected, bodies)?;
+    let header = class_headers::authenticate(selected, bodies, None)?;
     let function = header.function;
     require_constructor_kind(function)?;
     if !function.type_parameters.is_empty() {

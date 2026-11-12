@@ -92,6 +92,14 @@ pub(super) struct SelectedParameters<'p> {
     pub(super) call_site: Option<&'p [Ty]>,
 }
 
+/// Source facts frozen together for one selected argument: the declaration-owned occurrence, its
+/// intersection fact, and the actual type provenance is read from.
+struct SelectedArgumentSource {
+    declared_type: Option<Ty>,
+    intersection: Option<super::intersection_inference::InferredIntersection>,
+    actual: Ty,
+}
+
 impl Checker<'_> {
     /// Freeze one selected argument only after its contextual check has committed the nested
     /// winner. A pre-check snapshot can retain a discarded probe or miss an intersection that the
@@ -102,25 +110,23 @@ impl Checker<'_> {
         argument: ExprId,
         parameter: usize,
         vararg_element: bool,
-        source_declared_type: Option<Ty>,
-        mut source_intersection: Option<super::intersection_inference::InferredIntersection>,
-        actual: Ty,
+        mut source: SelectedArgumentSource,
     ) -> SelectedArgumentBinding {
         let source_provenance = self.finalized_selected_argument_reified_provenance(
             scope,
             argument,
-            source_declared_type.unwrap_or(actual),
+            source.declared_type.unwrap_or(source.actual),
         );
-        if let Some(intersection) = &mut source_intersection {
+        if let Some(intersection) = &mut source.intersection {
             intersection.through_flexible |= source_provenance.crossed_flexible_boundary();
         }
         SelectedArgumentBinding {
             argument,
             parameter,
             vararg_element,
-            source_declared_type,
+            source_declared_type: source.declared_type,
             source_provenance,
-            source_intersection,
+            source_intersection: source.intersection,
         }
     }
 
@@ -357,9 +363,11 @@ impl Checker<'_> {
                     argument,
                     parameter,
                     vararg_element,
-                    source_declared_type,
-                    source_intersection,
-                    probed_actual,
+                    SelectedArgumentSource {
+                        declared_type: source_declared_type,
+                        intersection: source_intersection,
+                        actual: probed_actual,
+                    },
                 ));
                 continue;
             }
@@ -368,8 +376,10 @@ impl Checker<'_> {
                 argument,
                 probed_actual,
                 expected,
-                call_sig,
-                parameter,
+                SelectedFormal {
+                    signature: call_sig,
+                    index: parameter,
+                },
                 implicit_lambda_label.as_deref(),
             );
             if whole_array {
@@ -384,9 +394,11 @@ impl Checker<'_> {
                     argument,
                     parameter,
                     vararg_element,
-                    source_declared_type,
-                    source_intersection,
-                    actual,
+                    SelectedArgumentSource {
+                        declared_type: source_declared_type,
+                        intersection: source_intersection,
+                        actual,
+                    },
                 ));
                 continue;
             }
@@ -404,9 +416,11 @@ impl Checker<'_> {
                     argument,
                     parameter,
                     vararg_element,
-                    source_declared_type,
-                    source_intersection,
-                    actual,
+                    SelectedArgumentSource {
+                        declared_type: source_declared_type,
+                        intersection: source_intersection,
+                        actual,
+                    },
                 ));
                 continue;
             }
@@ -420,8 +434,7 @@ impl Checker<'_> {
             };
             self.expect_call_arg_labeled(
                 scope,
-                expected,
-                declared,
+                ParameterTypeExpectation { expected, declared },
                 argument,
                 actual,
                 call_sig
@@ -436,9 +449,11 @@ impl Checker<'_> {
                 argument,
                 parameter,
                 vararg_element,
-                source_declared_type,
-                source_intersection,
-                actual,
+                SelectedArgumentSource {
+                    declared_type: source_declared_type,
+                    intersection: source_intersection,
+                    actual,
+                },
             ));
         }
         if !self.commit_selected_argument_slots(call, slots, &call_sig.param_defaults) {

@@ -4,6 +4,14 @@
 use super::expression_qualifiers::QualifierBinding;
 use super::*;
 
+struct AppliedCallableRefSegment<'a> {
+    expression: ExprId,
+    internal: TypeName,
+    display_name: &'a str,
+    alias: Option<super::classifier_binding::SelectedTypeAlias>,
+    bound_outer: Option<Ty>,
+}
+
 impl Checker<'_> {
     /// Resolve a bare unbound class-literal receiver through the ordinary type-reference channel,
     /// including parser-owned type arguments. Values remain bound literals and type parameters use
@@ -148,12 +156,14 @@ impl Checker<'_> {
                 (ResolvedQualifier::Classifier(internal), alias) => {
                     let (applied, checked) = self.applied_callable_ref_classifier(
                         scope,
-                        *root_expression,
+                        AppliedCallableRefSegment {
+                            expression: *root_expression,
+                            internal,
+                            display_name: root_name,
+                            alias,
+                            bound_outer: None,
+                        },
                         diagnostic_site,
-                        internal,
-                        root_name,
-                        alias,
-                        None,
                         class_literal,
                     );
                     (Some(applied), checked)
@@ -180,12 +190,14 @@ impl Checker<'_> {
                 ResolvedQualifier::Classifier(internal) => {
                     let (applied, checked) = self.applied_callable_ref_classifier(
                         scope,
-                        *segment_expression,
+                        AppliedCallableRefSegment {
+                            expression: *segment_expression,
+                            internal,
+                            display_name: segment,
+                            alias: selected_alias,
+                            bound_outer: applied_parent,
+                        },
                         diagnostic_site,
-                        internal,
-                        segment,
-                        selected_alias,
-                        applied_parent,
                         class_literal,
                     );
                     (Some(applied), checked)
@@ -217,14 +229,17 @@ impl Checker<'_> {
     fn applied_callable_ref_classifier(
         &mut self,
         scope: &CheckerScope<'_>,
-        segment_expression: ExprId,
+        segment: AppliedCallableRefSegment<'_>,
         diagnostic_site: ExprId,
-        internal: TypeName,
-        display_name: &str,
-        alias: Option<super::classifier_binding::SelectedTypeAlias>,
-        bound_outer: Option<Ty>,
         class_literal: bool,
     ) -> (Ty, bool) {
+        let AppliedCallableRefSegment {
+            expression: segment_expression,
+            internal,
+            display_name,
+            alias,
+            bound_outer,
+        } = segment;
         let arguments = self
             .file
             .call_type_args

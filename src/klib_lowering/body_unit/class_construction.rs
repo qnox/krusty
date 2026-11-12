@@ -30,7 +30,7 @@ impl<'u, 's> Linker<'u, 's> {
         let module = identity.module.clone();
         // A class installed through another of its members is not prepared again: the member
         // need only belong to it.
-        let header = super::super::class_headers::authenticate(selected, bodies)?;
+        let header = super::super::class_headers::authenticate(selected, bodies, None)?;
         if let Some(primary) = &header.contract.primary_constructor {
             let constructor = KlibDependencyCallable {
                 module: header.contract.module.clone(),
@@ -63,21 +63,26 @@ impl<'u, 's> Linker<'u, 's> {
         ir: &mut IrFile,
         selected: KlibBodyCallable<'s>,
     ) -> Result<super::ValueMember<'s>, KlibBodyDeclineReason> {
-        let header = super::super::class_headers::authenticate(selected, self.sources.bodies)?;
+        let header =
+            super::super::class_headers::authenticate(selected, self.sources.bodies, None)?;
         let contract = header.contract;
         if contract.is_builtin_type() {
             return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
                 "a member of a builtin type",
             ));
         }
-        if !contract.is_value || header.class.value_class_representation.is_none() {
+        let Some(class) = header.class else {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a value class member's class is not a serialized value class".to_owned(),
+            ));
+        };
+        if !contract.is_value || class.value_class_representation.is_none() {
             return Err(KlibBodyDeclineReason::SignatureMismatch(
                 "a value class member's class is not a serialized value class".to_owned(),
             ));
         }
         let mut identities = HashSet::default();
-        let mut fields = header
-            .class
+        let mut fields = class
             .members
             .iter()
             .filter_map(super::super::class_storage::member_field);
