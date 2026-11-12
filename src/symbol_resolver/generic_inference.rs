@@ -1718,6 +1718,19 @@ pub(crate) fn specialize_typed_call_signature(
     ))
 }
 
+/// One call's `@OnlyInputTypes` evidence: the declaration signature, its receiver, each mapped
+/// value argument, and the expected result. These occurrences travel together into the search that
+/// keeps a solution only when every input admits it.
+#[derive(Clone, Copy)]
+pub(crate) struct OnlyInputCall<'a> {
+    pub(crate) source: &'a dyn SymbolSource,
+    pub(crate) signature: &'a GenericSig,
+    pub(crate) receiver: Option<Ty>,
+    pub(crate) arguments: &'a [(usize, CallArgKind, bool)],
+    pub(crate) vararg_index: Option<usize>,
+    pub(crate) expected_result: Option<Ty>,
+}
+
 /// Enforce Kotlin's `@OnlyInputTypes` inference policy for selected declaration formals.
 ///
 /// Ordinary lower-bound solving may synthesize a common supertype which was never present in the
@@ -1728,16 +1741,19 @@ pub(crate) fn specialize_typed_call_signature(
 /// every input. This is provider- and callable-name-neutral; metadata merely supplies the formal
 /// names carrying the policy.
 pub(crate) fn apply_only_input_type_bindings<F: crate::types::TyParamKey>(
-    source: &dyn SymbolSource,
-    signature: &GenericSig,
+    call: OnlyInputCall<'_>,
     only_input_formals: &[F],
     explicit_type_arguments: impl ExplicitTypeArgumentFixity,
-    actual_receiver: Option<Ty>,
-    actual_arguments: &[(usize, CallArgKind, bool)],
-    vararg_index: Option<usize>,
-    expected_result: Option<Ty>,
     bindings: &mut GSigBinds,
 ) -> bool {
+    let OnlyInputCall {
+        source,
+        signature,
+        receiver: actual_receiver,
+        arguments: actual_arguments,
+        vararg_index,
+        expected_result,
+    } = call;
     if only_input_formals.is_empty() {
         return true;
     }
@@ -1810,14 +1826,15 @@ pub(crate) fn apply_only_input_type_bindings<F: crate::types::TyParamKey>(
         constrained.push((formal, candidates));
     }
 
-    fn inputs_admit(
-        source: &dyn SymbolSource,
-        signature: &GenericSig,
-        receiver: Option<Ty>,
-        arguments: &[(usize, CallArgKind, bool)],
-        vararg_index: Option<usize>,
-        bindings: &GSigBinds,
-    ) -> bool {
+    fn inputs_admit(call: OnlyInputCall<'_>, bindings: &GSigBinds) -> bool {
+        let OnlyInputCall {
+            source,
+            signature,
+            receiver,
+            arguments,
+            vararg_index,
+            ..
+        } = call;
         if let (Some(declared), Some(actual)) = (signature.receiver, receiver) {
             let declared = ty_subst_keep_unbound(declared, bindings);
             if !resolution_subtype(source, actual, declared) {
@@ -1844,35 +1861,22 @@ pub(crate) fn apply_only_input_type_bindings<F: crate::types::TyParamKey>(
     }
 
     fn choose(
-        source: &dyn SymbolSource,
-        signature: &GenericSig,
-        receiver: Option<Ty>,
-        arguments: &[(usize, CallArgKind, bool)],
-        vararg_index: Option<usize>,
+        call: OnlyInputCall<'_>,
         constrained: &[(&str, Vec<Ty>)],
         index: usize,
         trial: &mut GSigBinds,
     ) -> bool {
         if index == constrained.len() {
-            return inputs_admit(source, signature, receiver, arguments, vararg_index, trial)
-                && generic_bindings_satisfy_bounds(signature, trial, |actual, bound| {
-                    resolution_subtype(source, actual, bound)
+            return inputs_admit(call, trial)
+                && generic_bindings_satisfy_bounds(call.signature, trial, |actual, bound| {
+                    resolution_subtype(call.source, actual, bound)
                 });
         }
         let (formal, candidates) = &constrained[index];
         let previous = trial.remove(*formal);
         for &candidate in candidates {
             trial.insert(crate::types::TyParamName::new(formal), candidate);
-            if choose(
-                source,
-                signature,
-                receiver,
-                arguments,
-                vararg_index,
-                constrained,
-                index + 1,
-                trial,
-            ) {
+            if choose(call, constrained, index + 1, trial) {
                 return true;
             }
         }
@@ -1884,16 +1888,7 @@ pub(crate) fn apply_only_input_type_bindings<F: crate::types::TyParamKey>(
     }
 
     let mut trial = bindings.clone();
-    if !choose(
-        source,
-        signature,
-        actual_receiver,
-        actual_arguments,
-        vararg_index,
-        &constrained,
-        0,
-        &mut trial,
-    ) {
+    if !choose(call, &constrained, 0, &mut trial) {
         return false;
     }
     *bindings = trial;

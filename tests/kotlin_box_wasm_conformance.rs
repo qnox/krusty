@@ -567,6 +567,29 @@ fun box(): String = if (2.0.pow(3.0) == 8.0) "OK" else "pow"
     );
 }
 
+/// A discarded `if` over sealed value classes lowers `toString` of the underlying interface.
+/// The lambda in the same file stays a function value.
+#[test]
+fn wasm_discarded_if_over_a_sealed_value_class_runs() {
+    let source = include_str!("box_regressions/discardedIfOverSealedValueClasses.kt");
+    let stem = "discardedIfOverSealedValueClasses";
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(
+            focused_wasm_lane_available(&lane, stem),
+            "{stem} requires its Wasm lane"
+        );
+        let sources = box_lane::prepare_sources(source, stem, lane.test_target())
+            .expect("the owned regression prepares");
+        assert_eq!(
+            lane.compile_and_run(&std::env::temp_dir(), stem, &sources, source),
+            Outcome::Pass,
+            "{stem} on {}",
+            target.name()
+        );
+    }
+}
+
 #[test]
 fn kotlin_codegen_box_wasm_js_conformance() {
     box_lane::run(&WasmLane {
@@ -964,24 +987,14 @@ fn expect_reference_box(src: &str, stem: &str) {
     );
 }
 
-// PLATFORM-SPECIFIC: a reference assertion cannot implement nullable scalar unboxing.
+/// The shared `ArrayOfNullsAnyElement` program, prepared for each target the way the box lanes
+/// prepare it: `OPTIONAL_JVM_INLINE_ANNOTATION` is `@JvmInline` on the JVM and absent on Wasm.
 #[test]
-fn wasm_nullable_scalar_assertions_decline_without_an_unboxing_contract() {
-    for (stem, scalar) in [
-        ("nullableIntAssertion", "Int"),
-        ("nullableLongAssertion", "Long"),
-        ("nullableFloatAssertion", "Float"),
-        ("nullableDoubleAssertion", "Double"),
-    ] {
-        let src =
-            format!("fun read(value: {scalar}?): {scalar} = value!!\nfun box(): String = \"OK\"");
-        expect_reference_box(&src, stem);
-        expect_wasm_decline(
-            &src,
-            stem,
-            "a not-null assertion requiring a scalar reference conversion",
-        );
-    }
+fn wasm_shared_array_of_nulls_program() {
+    let source = include_str!("box_regressions/ArrayOfNullsAnyElement.kt");
+    let prepared = |target| krusty::conformance::prepare_test_source(source, target);
+    expect_reference_box(&prepared(TestTarget::Jvm), "ArrayOfNullsAnyElement");
+    expect_wasm_box(&prepared(TestTarget::WasmJs), "ArrayOfNullsAnyElement");
 }
 
 // PLATFORM-SPECIFIC: a suspend function value is a function value whose implementation takes the
@@ -1157,48 +1170,57 @@ fun box(): String {
     );
 }
 
+// `kotlin.Any.toString`'s own rendering is the class's name and its identity hash.
 #[test]
-fn wasm_declines_kotlin_any_rendering_it_has_no_body_for() {
-    expect_wasm_decline(
+fn wasm_renders_kotlin_any_default_to_string() {
+    expect_wasm_box(
         "class Plain\nfun box(): String = if (\"${Plain()}\" == \"\") \"fail\" else \"OK\"",
         "wasmClassesDefaultToString",
-        "`kotlin.Any.toString`'s own rendering",
     );
 }
 
-// A generated hash dispatches a property's value through its table's `hashCode` slot. A class
-// that keeps `kotlin.Any`'s identity hash has no body there, whether the property names that class
-// or erases it to `Any`, which can hold an instance of every class in the file. Each `Holder`
-// renders itself, since its generated `toString` would reach `Any`'s rendering first.
+// A floating box has no printer for Kotlin's form, so an erased `toString` that can reach one
+// declines rather than emit the trap of a slot with no body.
 #[test]
-fn wasm_declines_a_generated_hash_that_can_reach_the_identity_hash() {
-    let reason = "`kotlin.Any.hashCode`'s identity hash";
+fn wasm_declines_an_erased_to_string_reaching_a_floating_box() {
     expect_wasm_decline(
+        "fun show(value: Any?): String = \"$value\"\n\
+         fun box(): String = if (show(1.5) == \"\") \"fail\" else \"OK\"",
+        "wasmErasedToStringOfAFloatingBox",
+        "a `toString` of `kotlin.Any?` reaching a runtime object this target cannot print",
+    );
+}
+
+// A generated hash dispatches a property's value through its table's `hashCode` slot. Every class
+// and every runtime exception object carries an identity hash, so a property naming a class, or
+// erased to `Any` and holding an instance of one of the file's classes or a runtime exception the
+// file constructs or catches, hashes through `kotlin.Any.hashCode`. Each `Holder` renders itself.
+#[test]
+fn wasm_generated_hash_reaches_the_identity_hash() {
+    expect_wasm_box(
         "class Plain\ndata class Holder(val value: Plain) { override fun toString() = \"Holder\" }\n\
-         fun box(): String = if (Holder(Plain()).hashCode() == 0) \"zero\" else \"OK\"",
+         fun box(): String { val plain = Plain()\n\
+         return if (Holder(plain).hashCode() == Holder(plain).hashCode()) \"OK\" else \"unstable\" }",
         "wasmGeneratedHashOfAClassProperty",
-        reason,
     );
-    expect_wasm_decline(
+    expect_wasm_box(
         "class Plain\ndata class Holder(val value: Any) { override fun toString() = \"Holder\" }\n\
-         fun box(): String = if (Holder(Plain()).hashCode() == 0) \"zero\" else \"OK\"",
+         fun box(): String { val plain = Plain()\n\
+         return if (Holder(plain).hashCode() == Holder(plain).hashCode()) \"OK\" else \"unstable\" }",
         "wasmGeneratedHashOfAnErasedProperty",
-        reason,
     );
-    // Runtime exception objects come from the exception runtime rather than this file's classes,
-    // and an erased property can hold one that the file constructs or catches.
-    expect_wasm_decline(
+    expect_wasm_box(
         "data class Holder(val value: Any) { override fun toString() = \"Holder\" }\n\
-         fun box(): String = if (Holder(IllegalStateException()).hashCode() == 0) \"zero\" else \"OK\"",
+         fun box(): String { val failure = IllegalStateException()\n\
+         return if (Holder(failure).hashCode() == failure.hashCode()) \"OK\" else \"lost\" }",
         "wasmGeneratedHashOfAConstructedRuntimeException",
-        reason,
     );
-    expect_wasm_decline(
+    expect_wasm_box(
         "data class Holder(val value: Any) { override fun toString() = \"Holder\" }\n\
          fun caught(text: String?): Any = try { text!! } catch (e: NullPointerException) { e }\n\
-         fun box(): String = if (Holder(caught(null)).hashCode() == 0) \"zero\" else \"OK\"",
+         fun box(): String { val failure = caught(null)\n\
+         return if (Holder(failure).hashCode() == failure.hashCode()) \"OK\" else \"lost\" }",
         "wasmGeneratedHashOfACaughtRuntimeException",
-        reason,
     );
 }
 
@@ -1269,6 +1291,10 @@ fn wasm_callable_references_share_identity_across_independent_module_analyses() 
             include_str!("box_regressions/constructorReferenceAcrossModules.kt"),
             "wasmConstructorReferenceAcrossModules",
         ),
+        (
+            include_str!("box_regressions/propertyReferenceIdentityAcrossModules.kt"),
+            "wasmPropertyReferenceIdentityAcrossModules",
+        ),
     ] {
         super::box_reference_classes::checked_box(source, stem)
             .expect("the exact Kotlin compiler must run the whole reference-identity fixture");
@@ -1308,6 +1334,9 @@ fn wasm_runs_an_enum_class() {
 #[path = "wasm_value_hash.rs"]
 mod value_hash;
 
+#[path = "wasm_value_class_equality.rs"]
+mod value_class_equality;
+
 #[path = "wasm_dependency_constructor_exports.rs"]
 mod dependency_constructor_exports;
 
@@ -1335,3 +1364,6 @@ fn wasm_data_class_unit_property_uses_units_fixed_hash() {
 
 #[path = "wasm_unsigned_decimal.rs"]
 mod unsigned_decimal;
+
+#[path = "wasm_enclosing_instances.rs"]
+mod enclosing_instances;

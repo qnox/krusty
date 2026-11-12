@@ -92,11 +92,13 @@ impl<'a, B: Backend> EmissionSession<'a, B> {
         emit_analyzed_into(
             analysis,
             stems,
-            self.backend,
-            state,
+            super::TargetEmission {
+                backend: self.backend,
+                state,
+                dependency_support: &mut self.dependency_support,
+            },
             module_name,
             diags,
-            &mut self.dependency_support,
             super::PassTwoHooks {
                 before_target: &mut |file, diags| {
                     file.dependency_exports =

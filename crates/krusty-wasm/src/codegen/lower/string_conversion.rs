@@ -1,5 +1,9 @@
 //! The string a template makes of each operand, which is also `Any?.toString()`.
 
+use krusty::backend::class_tables::AnyMember;
+
+use super::super::super::encode::ValType;
+use super::super::super::runtime::AND32;
 use super::*;
 
 impl Body<'_> {
@@ -17,6 +21,13 @@ impl Body<'_> {
         if ty.is_unsigned() {
             return self.unsigned_string_of(id, ty);
         }
+        self.expression(id)?;
+        self.stacked_string_of(ty)
+    }
+
+    /// Replace the `ty` value on the stack with its non-null `String`, as a string template
+    /// renders it. `Unit` is not one of these values: it may have no carrier to replace.
+    pub(super) fn stacked_string_of(&mut self, ty: Ty) -> Result<(), Unsupported> {
         let nullable_scalar = match ty.kind() {
             TyKind::Nullable(inner) => self
                 .scalar_string_function(inner)
@@ -26,7 +37,6 @@ impl Body<'_> {
         if let Some((inner, function)) = nullable_scalar {
             // A nullable scalar is its box or `null`.
             let value = self.local(REFERENCE);
-            self.expression(id)?;
             self.code
                 .local_tee(value)
                 .ref_is_null()
@@ -39,23 +49,26 @@ impl Body<'_> {
             self.code.call(function).end().ref_as_non_null();
             return Ok(());
         }
-        self.expression(id)?;
         let function = match ty {
             Ty::String | Ty::Null => self.runtime.string_or_null,
             ty if ty == Ty::nullable(Ty::String) => self.runtime.string_or_null,
             ty if self.scalar_string_function(ty).is_some() => {
                 self.scalar_string_function(ty).expect("checked above")
             }
-            ty if self.class_of_type(ty).is_some() => return self.object_to_string(ty),
             // A builder's table answers its contents, and a `null` one renders as `"null"`.
             ty if super::string_builders::is_string_builder_type(ty) => {
                 self.dispatch_to_string();
                 return Ok(());
             }
+            // A `KType` object prints through its own slot. Every other reference, including a
+            // class and an erased `Any`, prints through the shared runtime `toString`.
             ty if ty.non_null().obj_internal()
                 == Some(super::super::super::type_objects::ktype()) =>
             {
-                return self.type_object_to_string(ty)
+                return self.type_object_to_string(ty);
+            }
+            ty if matches!(carrier(ty)?, Some(ValType::Ref { .. })) => {
+                return self.reference_string(ty);
             }
             other => {
                 return Err(format!(
@@ -87,6 +100,19 @@ impl Body<'_> {
         Ok(())
     }
 
+    /// Replace the reference on the stack, statically of type `ty`, with `toString()` of whatever
+    /// it holds at run time, or `"null"`.
+    fn reference_string(&mut self, ty: Ty) -> Result<(), Unsupported> {
+        if self.may_reach_unrealized(ty, AnyMember::ToString)? {
+            return Err(format!(
+                "a `toString` of `{}` reaching a runtime object this target cannot print",
+                describe(ty)
+            ));
+        }
+        self.code.call(self.runtime.object_strings.any_to_string);
+        Ok(())
+    }
+
     /// The runtime function printing a `ty` scalar carrier.
     fn scalar_string_function(&self, ty: Ty) -> Option<u32> {
         Some(match ty {
@@ -98,7 +124,7 @@ impl Body<'_> {
         })
     }
 
-    fn string_constant(&mut self, text: &str) {
+    pub(super) fn string_constant(&mut self, text: &str) {
         let units = text.encode_utf16().collect::<Vec<_>>();
         self.runtime
             .string_constant(self.module, &mut self.code, &units);

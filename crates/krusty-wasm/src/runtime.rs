@@ -16,13 +16,18 @@
 //! `String` is on every target. A string constant is copied out of the module's passive data
 //! segment with `array.new_data`.
 
+mod exception_classes;
 mod object_equality;
+mod object_strings;
+
+pub(super) use object_strings::ObjectStrings;
 
 use krusty::fx_hash::HashMap;
 
 use super::array_objects::ArrayObjects;
 use super::boxes::Boxes;
 use super::callable_references::CallableReferences;
+use super::class_tokens::{ClassTokens, TokenRuntime};
 use super::encode::{
     BlockType, Code, CompositeType, FieldType, Function, HeapType, Module, StorageType, ValType,
 };
@@ -70,6 +75,8 @@ pub(super) struct Runtime {
     /// Kotlin's `hashCode()` rules.
     pub(super) hashing: Hashing,
     pub(super) exceptions: ExceptionTransport,
+    /// `toString()` of a runtime reference, and `kotlin.Any`'s and `kotlin.Throwable`'s defaults.
+    pub(super) object_strings: ObjectStrings,
     /// The box types of the primitives this module carries as references.
     pub(super) boxes: Boxes,
     /// The table types of the function values this module creates.
@@ -77,6 +84,8 @@ pub(super) struct Runtime {
     pub(super) callable_references: CallableReferences,
     /// The `KType` objects `typeOf` sites make.
     type_objects: TypeObjects,
+    /// What a class literal evaluates to.
+    pub(super) class_tokens: ClassTokens,
     /// Offsets of string constants already in the data segment.
     constants: HashMap<Vec<u16>, u32>,
 }
@@ -113,26 +122,41 @@ impl Runtime {
     /// run after every import is declared and before any program function.
     pub(super) fn start(module: &mut Module, host: &Host) -> Self {
         let (chars, string) = Self::declare_types(module);
-        let mut objects = ObjectRoot::declare(module, ValType::nullable(string));
+        let mut objects = ObjectRoot::declare(module, chars, string);
+        let identity = IdentityObjects::declare(module, &objects);
         let exceptions =
-            ExceptionTransport::declare(module, &mut objects, ValType::nullable(string));
+            ExceptionTransport::declare(module, &objects, &identity, ValType::nullable(string));
         let references = module.ty(CompositeType::Array(FieldType {
             storage: StorageType::Val(super::objects::REFERENCE),
             mutable: true,
         }));
-        let identity = IdentityObjects::declare(module, &objects);
-        let arrays = ArrayObjects::declare(module, &mut objects, &identity, references);
+        let object_strings = ObjectStrings::declare(module, host.target());
+        let array_to_string = module.declare();
+        let arrays =
+            ArrayObjects::declare(module, &mut objects, &identity, references, array_to_string);
         let string_builders =
             StringBuilders::declare(module, &mut objects, &identity, chars, string);
         let object_equals = module.declare();
         let callable_references = CallableReferences::declare(module, &objects, object_equals);
+        let string_concat = module.declare();
+        let hashing = Hashing::declare(module);
+        let class_tokens = ClassTokens::declare(
+            module,
+            &mut objects,
+            TokenRuntime {
+                string,
+                string_concat,
+                string_hash: hashing.string_hash,
+            },
+            &"class ".encode_utf16().collect::<Vec<_>>(),
+        );
         let mut runtime = Self {
             chars,
             string,
             arrays,
             string_equals: module.declare(),
             object_equals,
-            string_concat: module.declare(),
+            string_concat,
             string_of_i32: module.declare(),
             string_of_i64: module.declare(),
             string_of_u32: module.declare(),
@@ -146,8 +170,10 @@ impl Runtime {
             objects,
             identity,
             string_builders,
-            hashing: Hashing::declare(module),
+            hashing,
+            class_tokens,
             exceptions,
+            object_strings,
             boxes: Boxes::default(),
             functions: FunctionShapes::default(),
             callable_references,
@@ -166,6 +192,8 @@ impl Runtime {
         runtime.define_string_or_null(module);
         runtime.define_write_string(module, host);
         runtime.define_division(module);
+        runtime.define_object_strings(module);
+        runtime.define_reference_array_to_string(module, array_to_string);
         runtime
             .hashing
             .define(module, &runtime.objects, runtime.string, runtime.chars);

@@ -40,6 +40,13 @@ fn constructor_frame(
     Ok(())
 }
 
+/// One of the two fields the platform's `Throwable` storage holds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum ThrowableField {
+    Message,
+    Cause,
+}
+
 /// A jump out of protected code: the function's `return`, or a `br` to the structured instruction
 /// opened at an absolute depth (a loop's `break` or `continue` target).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -121,7 +128,7 @@ impl Body<'_> {
         operand: u32,
         reference: ValType,
     ) -> Result<(), Unsupported> {
-        let structure = self.runtime.exceptions.ensure_class(
+        let structure = self.runtime.exception_class(
             self.module,
             self.classifiers,
             krusty::libraries::RuntimeExceptionKind::NullPointer.classifier(),
@@ -138,7 +145,7 @@ impl Body<'_> {
             structure,
             None,
             self.runtime.string,
-        );
+        )?;
         self.code
             .throw(self.runtime.exceptions.tag)
             .end()
@@ -183,10 +190,9 @@ impl Body<'_> {
             return self.construction(site, internal, args, params);
         };
         constructor_frame(internal, params, args.len(), kind, message, declaration)?;
-        let structure =
-            self.runtime
-                .exceptions
-                .ensure_class(self.module, self.classifiers, internal)?;
+        let structure = self
+            .runtime
+            .exception_class(self.module, self.classifiers, internal)?;
         let message = match (message, args) {
             (false, []) => None,
             (true, [message]) => {
@@ -204,41 +210,52 @@ impl Body<'_> {
             structure,
             message,
             self.runtime.string,
-        );
+        )?;
         Ok(())
     }
 
-    pub(super) fn is_throwable_message(&self, target: ExternalCallableId) -> bool {
-        self.callables.callable(target).is_some_and(|fact| {
-            fact.compiler_operation() == Some(CompilerIntrinsic::ThrowableMessage)
-        })
+    /// Which of the platform's two `Throwable` fields the authenticated getter `target` reads.
+    pub(super) fn throwable_field(&self, target: ExternalCallableId) -> Option<ThrowableField> {
+        match self.callables.callable(target)?.compiler_operation()? {
+            CompilerIntrinsic::ThrowableMessage => Some(ThrowableField::Message),
+            CompilerIntrinsic::ThrowableCause => Some(ThrowableField::Cause),
+            _ => None,
+        }
     }
 
-    pub(super) fn is_throwable_message_property(
+    pub(super) fn throwable_field_property(
         &self,
         target: krusty::fir::ExternalPropertyId,
-    ) -> bool {
+    ) -> Option<ThrowableField> {
         self.callables
             .property(target)
-            .is_some_and(|property| self.is_throwable_message(property.getter))
+            .and_then(|property| self.throwable_field(property.getter))
     }
 
-    pub(super) fn throwable_message(
+    /// Read `field` of the throwable `receiver`.
+    pub(super) fn throwable_field_read(
         &mut self,
+        field: ThrowableField,
         receiver: Option<u32>,
         args: &[u32],
         result: Ty,
     ) -> Result<(), Unsupported> {
+        let throwable = Ty::obj("kotlin/Throwable");
         let (Some(receiver), []) = (receiver, args) else {
-            return Err("an authenticated Throwable.message with malformed operands".into());
+            return Err("an authenticated Throwable field read with malformed operands".into());
         };
-        if result != Ty::nullable(Ty::String) {
-            return Err(
-                "an authenticated Throwable.message with a non-nullable-String result".into(),
-            );
+        let declared = match field {
+            ThrowableField::Message => Ty::nullable(Ty::String),
+            ThrowableField::Cause => Ty::nullable(throwable),
+        };
+        if result != declared {
+            return Err("an authenticated Throwable field read of another result type".into());
         }
-        self.value(receiver, Ty::obj("kotlin/Throwable"))?;
-        self.runtime.exceptions.message(&mut self.code);
+        self.value(receiver, throwable)?;
+        match field {
+            ThrowableField::Message => self.runtime.exceptions.message(&mut self.code),
+            ThrowableField::Cause => self.runtime.exceptions.cause(&mut self.code),
+        }
         Ok(())
     }
 
@@ -249,8 +266,7 @@ impl Body<'_> {
             return Ok(self.file_classes()?.structure(class));
         }
         self.runtime
-            .exceptions
-            .ensure_class(self.module, self.classifiers, identity)
+            .exception_class(self.module, self.classifiers, identity)
     }
 
     pub(super) fn throw_value(&mut self, operand: u32) -> Result<(), Unsupported> {
