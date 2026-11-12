@@ -31,9 +31,11 @@ pub(crate) fn publish_file_annotations(
             file_index as u32,
             Some(files),
             symbols,
-            None,
-            None,
-            None,
+            CheckerIndexes {
+                resolved_index: None,
+                active_declarations: None,
+                streamed_cache: None,
+            },
             &mut diagnostics,
         );
         let policies = checker.file_annotation_policies(&CheckerScope::root());

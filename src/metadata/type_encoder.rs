@@ -223,6 +223,17 @@ impl<'a> StringTable<'a> {
         }
     }
 
+    /// The same table, approximating a non-denotable intersection with `approximate`.
+    pub fn with_intersection_approximation(
+        self,
+        approximate: &'a dyn Fn(Ty) -> Option<Ty>,
+    ) -> Self {
+        Self {
+            intersection_approximation: Some(approximate),
+            ..self
+        }
+    }
+
     /// Project a checked application onto this carrier's metadata policy. KLIB retains its existing
     /// flattened lexical applications; JVM inner types with a local outer retain their flat form.
     fn classifier_application(

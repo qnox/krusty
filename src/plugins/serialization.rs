@@ -31,7 +31,6 @@ pub use external_serializer::ExternalSerializer;
 pub(crate) use external_serializer::{custom_class_serializer, generated_external_serializer};
 mod generated_classifier;
 mod generated_members;
-mod plugin_release;
 mod program_order_metadata;
 mod property_default;
 mod runtime_abi;
@@ -56,6 +55,7 @@ use crate::plugins::{
 };
 use crate::types::{type_name, Ty, TyKind, TypeName};
 
+pub use super::PluginRelease;
 use crate::fx_hash::HashMap;
 use constructed_standard_serializers::constructed_standard_serializer;
 use declared_serializer::build_field_serializer_instance;
@@ -70,7 +70,6 @@ use generated_members::{
     add_serializer_members, descriptor_property, install_inherited_type_parameter_serializers,
     publish_write_self, write_self_is_public, write_self_visibility, GeneratedSerializerMembers,
 };
-pub use plugin_release::PluginRelease;
 pub use runtime_abi::SerializationAbi;
 use serial_elements::{SerialElements, SerializedProperties, WireElement};
 use serialize_body::SerializeBody;
@@ -687,6 +686,7 @@ fn specialize_expression_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
                 continue;
             };
             let (class_internal, selected_owner) = (*class_internal, *selected_owner);
+            let first_built = ir.exprs.len();
             let realized = if let Some(accessor) =
                 generated_serializer_accessor(ir, class_internal, exprs.len())
             {
@@ -716,6 +716,9 @@ fn specialize_expression_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
                 };
                 call
             };
+            // kotlinc builds the call and its companion or object receiver at the call's offsets.
+            let position = ir.position(mid as ExprId);
+            ir.settle_positions(first_built..ir.exprs.len(), position);
             ir.exprs[mid] = ir.exprs[realized as usize].clone();
             continue;
         }

@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use super::server_pool::{self, server_pool_cap};
 use super::{
-    byte_dump, die_with_parent, java_home, jvm_gclog_args, kotlinc_lib_dir, read_exact_deadline,
-    spawn_owned, ProfGuard,
+    byte_dump, die_with_parent, java_home, kotlinc_lib_dir, protocol_jvm_log_args,
+    read_exact_deadline, spawn_owned, ProfGuard,
 };
 
 // The reference `kotlinc` is a JVM program; spawning its CLI per test pays a ~2-4s JVM + compiler cold
@@ -62,13 +62,13 @@ public class KotlincServer {
         // ONE loader for the whole session: the compiler classes load once (this is the warmth). Parent is
         // the platform loader only, so the compiler's classes stay private to it.
         URLClassLoader cl = new URLClassLoader(urls.toArray(new URL[0]), ClassLoader.getPlatformClassLoader());
-        Class<?> k = cl.loadClass("org.jetbrains.kotlin.cli.jvm.K2JVMCompiler");
+        Class<?> k = cl.loadClass(a[2]);
         Method exec = k.getMethod("exec", PrintStream.class, String[].class);
         Class<?> typedSettings = cl.loadClass("TypedLanguageSettingsUpdater");
         Object typedSettingsUpdater = typedSettings.getDeclaredConstructor().newInstance();
         Method selectLanguageSettings = typedSettings.getMethod("select", String.class, String.class);
         Object configurationPhase = cl
-            .loadClass("org.jetbrains.kotlin.cli.pipeline.jvm.JvmConfigurationPipelinePhase")
+            .loadClass(a[3])
             .getField("INSTANCE").get(null);
         Field updatersField = cl.loadClass("org.jetbrains.kotlin.cli.pipeline.AbstractConfigurationPhase")
             .getDeclaredField("configurationUpdaters");
@@ -131,7 +131,7 @@ public class KotlincServer {
 const TYPED_LANGUAGE_SETTINGS_UPDATER_SRC: &str = r#"
 import java.util.Collections;
 import java.util.Map;
-import org.jetbrains.kotlin.cli.common.arguments.K2JVMCompilerArguments;
+import org.jetbrains.kotlin.cli.common.arguments.CommonCompilerArguments;
 import org.jetbrains.kotlin.cli.pipeline.ArgumentsPipelineArtifact;
 import org.jetbrains.kotlin.cli.pipeline.ConfigurationUpdater;
 import org.jetbrains.kotlin.config.AnalysisFlag;
@@ -143,7 +143,7 @@ import org.jetbrains.kotlin.config.LanguageVersion;
 import org.jetbrains.kotlin.config.LanguageVersionSettings;
 import org.jetbrains.kotlin.config.LanguageVersionSettingsImpl;
 
-public final class TypedLanguageSettingsUpdater extends ConfigurationUpdater<K2JVMCompilerArguments> {
+public final class TypedLanguageSettingsUpdater extends ConfigurationUpdater<CommonCompilerArguments> {
     private static String selectedLanguageVersion;
     private static String selectedApiVersion;
 
@@ -154,7 +154,7 @@ public final class TypedLanguageSettingsUpdater extends ConfigurationUpdater<K2J
 
     @Override
     public void fillConfiguration(
-        ArgumentsPipelineArtifact<? extends K2JVMCompilerArguments> input,
+        ArgumentsPipelineArtifact<? extends CommonCompilerArguments> input,
         CompilerConfiguration configuration
     ) {
         if (selectedLanguageVersion == null && selectedApiVersion == null) return;
@@ -225,6 +225,7 @@ fn setup_kotlinc_server(java_home: &str, _compiler_jar: &Path) -> Option<PathBuf
         .bytes()
         .chain(TYPED_LANGUAGE_SETTINGS_UPDATER_SRC.bytes())
         .chain(super::producing_jdk::driver_cache_key(java_home))
+        .chain(_compiler_jar.to_string_lossy().bytes())
     {
         hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
     }
@@ -284,6 +285,22 @@ fn kotlinc_lib_of(compiler_jar: &Path) -> Option<PathBuf> {
     compiler_jar.parent().map(Path::to_path_buf)
 }
 
+/// The reference compiler server's JVM options; [`KotlincServer::new`] explains the heap and JIT.
+///
+/// A C1-only JVM reserves a 48 MB code cache. The compiler's code fills it after about 200 warm
+/// compiles, and the JVM then disables its JIT for good ("CodeCache is full. Compiler has been
+/// disabled"), so a cold box corpus ran nearly all of its ~7,400 reference compiles interpreted.
+/// 808 box compiles in one server took 205 s (264 s CPU) with the default cache and 140 s (149 s
+/// CPU) with 256 MB, of which about 70 MB is used and stays flat over 2,000 compiles. The full tiered
+/// JIT was faster per compile (111 s) but cost 213 s CPU, which the busy test host pays for.
+const KOTLINC_SERVER_JVM_OPTIONS: [&str; 5] = [
+    "-XX:TieredStopAtLevel=1",
+    "-XX:ReservedCodeCacheSize=256m",
+    "-XX:+UseSerialGC",
+    "-Xmx1g",
+    "-Xmn256m",
+];
+
 /// A persistent JVM running the in-process `KotlincServer` compiler, fed compiler arg-lists over a pipe.
 struct KotlincServer {
     _child: Child,
@@ -295,7 +312,12 @@ impl KotlincServer {
     /// `cp` is the driver's run classpath (just its `server_dir` — the driver is pure JDK and loads the
     /// compiler itself); `lib_dir` is passed as argv[0] so the driver builds its compiler `URLClassLoader`.
     /// `jvm_properties` are `-D` arguments applied before the compiler class loads.
-    fn new(java: &str, cp: &str, lib_dir: &str, jvm_properties: &[String]) -> Option<Self> {
+    fn new(
+        java: &str,
+        cp: &str,
+        compiler: &SelectedCompiler,
+        jvm_properties: &[String],
+    ) -> Option<Self> {
         let mut cmd = Command::new(java);
         // One persistent JVM that compiles in-process. 1 GB holds a single compile's working set (the leaky
         // global state is reset after each — see the driver), so it stays flat across compiles. C1-only JIT
@@ -304,18 +326,21 @@ impl KotlincServer {
         // left to grow from the small default initial heap: every compile allocates far more short-lived
         // data than it retains, and the undersized default nursery collected so often that a cold box
         // corpus shard spent ~19% more time in kotlinc (and grew a larger heap) than with 256 MB.
-        cmd.args(jvm_gclog_args("kotlinc"));
-        cmd.args([
-            "-XX:TieredStopAtLevel=1",
-            "-XX:+UseSerialGC",
-            "-Xmx1g",
-            "-Xmn256m",
-        ]);
+        cmd.args(protocol_jvm_log_args("kotlinc"));
+        cmd.args(KOTLINC_SERVER_JVM_OPTIONS);
         cmd.args(jvm_properties);
-        cmd.args(["-cp", cp, "KotlincServer", lib_dir, cp])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+        cmd.args([
+            "-cp",
+            cp,
+            "KotlincServer",
+            &compiler.lib_dir,
+            cp,
+            compiler.class,
+            compiler.phase,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
         die_with_parent(&mut cmd);
         let mut child = spawn_owned(cmd).ok()?;
         let stdin = child.stdin.take()?;
@@ -396,9 +421,7 @@ pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
 ///
 /// Every call reaches the JVM, so every completed compile is reported like a recorded-path miss.
 pub fn kotlinc_compile_unrecorded(args: &[String]) -> Option<(i32, String)> {
-    let result = kotlinc_compile_live(args, None, None)?;
-    byte_dump::report_unrecorded_kotlinc(args);
-    Some(result)
+    kotlinc_compile_unrecorded_with_language_settings(args, None, None)
 }
 
 /// Compile with exact language/API levels installed in kotlinc's typed compiler configuration.
@@ -465,6 +488,28 @@ fn kotlinc_compile_live(
     language_version: Option<&str>,
     api_version: Option<&str>,
 ) -> Option<(i32, String)> {
+    kotlinc_compile_for_target(
+        krusty::compilation_target::CompilationTarget::Jvm,
+        args,
+        language_version,
+        api_version,
+    )
+}
+
+struct SelectedCompiler {
+    lib_dir: String,
+    class: &'static str,
+    phase: &'static str,
+}
+
+/// The same bounded persistent compiler pool for JVM, JS, Wasm and Native library oracles.
+/// Compiler classes and typed configuration phases are selected explicitly, never retried as JVM.
+pub fn kotlinc_compile_for_target(
+    target: krusty::compilation_target::CompilationTarget,
+    args: &[String],
+    language_version: Option<&str>,
+    api_version: Option<&str>,
+) -> Option<(i32, String)> {
     static POOLS: OnceLock<KotlincPools> = OnceLock::new();
     let _pg = ProfGuard::new("kotlinc");
     REQUESTS.fetch_add(1, Ordering::Relaxed);
@@ -473,19 +518,48 @@ fn kotlinc_compile_live(
     if !Path::new(&java).exists() {
         return None;
     }
-    let compiler_jar = kotlin_compiler_jar()?;
+    use krusty::compilation_target::CompilationTarget;
+    let mut properties = Vec::new();
+    let (compiler_jar, class, phase) = match target {
+        CompilationTarget::Jvm => (
+            kotlin_compiler_jar()?,
+            "org.jetbrains.kotlin.cli.jvm.K2JVMCompiler",
+            "org.jetbrains.kotlin.cli.pipeline.jvm.JvmConfigurationPipelinePhase",
+        ),
+        CompilationTarget::Js => (
+            kotlin_compiler_jar()?,
+            "org.jetbrains.kotlin.cli.js.K2JSCompiler",
+            "org.jetbrains.kotlin.cli.pipeline.web.JsConfigurationPhase",
+        ),
+        CompilationTarget::WasmJs | CompilationTarget::WasmWasi => (
+            kotlin_compiler_jar()?,
+            "org.jetbrains.kotlin.cli.js.KotlinWasmCompiler",
+            "org.jetbrains.kotlin.cli.pipeline.web.WasmConfigurationPhase",
+        ),
+        CompilationTarget::Native => {
+            let root = PathBuf::from(std::env::var_os("KRUSTY_KOTLIN_NATIVE")?);
+            properties.push(format!("-Dkonan.home={}", root.display()));
+            (
+                root.join("konan/lib/kotlin-native-compiler-embeddable.jar"),
+                "org.jetbrains.kotlin.cli.bc.K2Native",
+                "org.jetbrains.kotlin.native.pipeline.NativeConfigurationPhase",
+            )
+        }
+    };
     let server_dir = setup_kotlinc_server(&java_home, &compiler_jar)?;
-    let lib_dir = kotlinc_lib_of(&compiler_jar)?
-        .to_string_lossy()
-        .into_owned();
-    // The driver is pure JDK and loads the compiler itself (from `lib_dir`), so its OWN classpath is just
-    // its `server_dir`.
+    let compiler = SelectedCompiler {
+        lib_dir: kotlinc_lib_of(&compiler_jar)?
+            .to_string_lossy()
+            .into_owned(),
+        class,
+        phase,
+    };
     let cp = server_dir.to_string_lossy().into_owned();
-    // `-D` stays in `args` for the invocation fingerprint. The compiler itself rejects it, and a
-    // test-only language feature latches from the JVM property the first time `-XXLanguage` is
-    // parsed, so the property is applied at process start on a server that no other compile shares.
     let (jvm_properties, compiler_args) = kotlinc_jvm_properties(args);
-    let pool_key = kotlinc_server_key(&cp, &jvm_properties);
+    properties.extend(jvm_properties);
+    // A compiler kind/distribution/property set owns its own pool and class loader.
+    let pool_identity = format!("{cp}\0{}\0{}", compiler.lib_dir, compiler.class);
+    let pool_key = kotlinc_server_key(&pool_identity, &properties);
     let pool = {
         let pools = POOLS.get_or_init(|| Mutex::new(HashMap::new()));
         let mut pools = pools.lock().unwrap_or_else(|err| err.into_inner());
@@ -500,7 +574,7 @@ fn kotlinc_compile_live(
         server_pool_cap(),
         || {
             let started = Instant::now();
-            let server = KotlincServer::new(&java, &cp, &lib_dir, &jvm_properties);
+            let server = KotlincServer::new(&java, &cp, &compiler, &properties);
             spawning.set(add_elapsed(&START_NANOS, started));
             STARTS.fetch_add(1, Ordering::Relaxed);
             server
@@ -517,7 +591,7 @@ fn kotlinc_compile_live(
                 Err(_) => {
                     // Server JVM died — restart once and retry.
                     RESTARTS.fetch_add(1, Ordering::Relaxed);
-                    match KotlincServer::new(&java, &cp, &lib_dir, &jvm_properties) {
+                    match KotlincServer::new(&java, &cp, &compiler, &properties) {
                         Some(restarted) => {
                             *server = restarted;
                             server
@@ -626,5 +700,41 @@ mod stats_tests {
             super::byte_dump::live_kotlinc_reasons(&test),
             vec![expected]
         );
+    }
+}
+
+#[cfg(test)]
+mod jvm_option_tests {
+    use super::KOTLINC_SERVER_JVM_OPTIONS;
+
+    /// The C1-only server must keep its JIT across a whole cold corpus: the JVM's default code cache
+    /// for that mode fills partway through and disables compilation for the rest of the process.
+    #[test]
+    fn the_reference_server_reserves_a_code_cache_that_outlasts_a_cold_corpus() {
+        let java = format!("{}/bin/java", super::super::java_home());
+        let output = std::process::Command::new(java)
+            .args(KOTLINC_SERVER_JVM_OPTIONS)
+            .args(["-XX:+PrintFlagsFinal", "-version"])
+            .output()
+            .expect("run the reference JVM");
+        assert!(
+            output.status.success(),
+            "the reference JVM rejected its options"
+        );
+        let flags = String::from_utf8_lossy(&output.stdout);
+        let flag = |name: &str| -> u64 {
+            flags
+                .lines()
+                .find_map(|line| {
+                    let mut fields = line.split_whitespace();
+                    let _kind = fields.next()?;
+                    (fields.next()? == name).then_some(())?;
+                    (fields.next()? == "=").then_some(())?;
+                    fields.next()?.parse().ok()
+                })
+                .unwrap_or_else(|| panic!("the JVM reports no {name}"))
+        };
+        assert_eq!(flag("TieredStopAtLevel"), 1);
+        assert_eq!(flag("ReservedCodeCacheSize"), 256 * 1024 * 1024);
     }
 }

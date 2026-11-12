@@ -27,18 +27,21 @@
 //!   - an `-Xplugin` jar krusty neither reimplements nor can host (any third-party FIR/IR plugin)
 //!     → ERROR. Silently ignoring it would emit wrong bytecode, so a drop-in must fail loudly.
 
+use crate::compilation_target::CompilationTarget;
 use crate::plugins::allopen::AllOpenPlugin;
 use crate::plugins::assignment::AssignmentPlugin;
+use crate::plugins::atomicfu::AtomicfuPlugin;
 use crate::plugins::cli::{
-    PluginConfig, PluginOption, ALLOPEN_PLUGIN_ID, ASSIGNMENT_PLUGIN_ID, COMPOSE_PLUGIN_ID,
-    KAPT_PLUGIN_ID, KSP_PLUGIN_ID, NOARG_PLUGIN_ID, SAM_WITH_RECEIVER_PLUGIN_ID,
-    SCRIPTING_PLUGIN_ID, SERIALIZATION_PLUGIN_ID,
+    PluginConfig, PluginOption, ALLOPEN_PLUGIN_ID, ASSIGNMENT_PLUGIN_ID, ATOMICFU_PLUGIN_ID,
+    COMPOSE_PLUGIN_ID, KAPT_PLUGIN_ID, KSP_PLUGIN_ID, NOARG_PLUGIN_ID, PARCELIZE_PLUGIN_ID,
+    SAM_WITH_RECEIVER_PLUGIN_ID, SCRIPTING_PLUGIN_ID, SERIALIZATION_PLUGIN_ID,
 };
 use crate::plugins::compose::{ComposeOptions, ComposePlugin};
 use crate::plugins::noarg::NoArgPlugin;
+use crate::plugins::parcelize::ParcelizePlugin;
 use crate::plugins::sam_with_receiver::SamWithReceiverPlugin;
-use crate::plugins::serialization::{PluginRelease, SerializationAbi, SerializationPlugin};
-use crate::plugins::{IrPlugin, PluginHost};
+use crate::plugins::serialization::{SerializationAbi, SerializationPlugin};
+use crate::plugins::{IrPlugin, PluginHost, PluginRelease};
 
 /// Per-compilation context handed to a native extension's builder.
 pub struct Activation<'a> {
@@ -54,7 +57,8 @@ pub struct Activation<'a> {
 /// Builds the native `IrPlugin` for an extension, configured from the activation context and the
 /// release of the compiler-plugin jar that activated it (see [`declared_release`]), when one did.
 /// The options are the ones configuring that extension, from either syntax.
-type NativeBuilder = fn(&Activation, Option<&str>, &[PluginOption]) -> Box<dyn IrPlugin>;
+type NativeBuilder =
+    fn(&Activation, Option<&str>, &[PluginOption], Option<CompilationTarget>) -> Box<dyn IrPlugin>;
 
 /// What a registered extension *is* to krusty.
 pub enum ExtensionKind {
@@ -274,6 +278,9 @@ pub struct NativePlugins {
     /// The reference compiler's release, which is the release of every plugin it bundles. It
     /// stands in for an extension activated without a jar that declares its own release.
     reference_release: Option<String>,
+    /// The compilation these extensions were stamped for. A plugin reads it when it selects a
+    /// target representation.
+    compilation_target: Option<CompilationTarget>,
 }
 
 #[derive(Clone, Debug)]
@@ -294,6 +301,16 @@ impl NativePlugins {
             config: PluginConfig::none(),
             classpath: Vec::new(),
             reference_release: None,
+            compilation_target: None,
+        }
+    }
+
+    /// Record the compilation these extensions run in, so a plugin can select its target
+    /// representation.
+    pub fn with_compilation_target(self, target: CompilationTarget) -> Self {
+        Self {
+            compilation_target: Some(target),
+            ..self
         }
     }
 
@@ -333,6 +350,7 @@ impl NativePlugins {
                     .as_deref()
                     .or(self.reference_release.as_deref()),
                 &native.options,
+                self.compilation_target,
             ));
         }
         host
@@ -358,6 +376,7 @@ fn build_compose(
     _act: &Activation,
     _release: Option<&str>,
     options: &[PluginOption],
+    _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
     Box::new(ComposePlugin::new(ComposeOptions::from_options(options)))
 }
@@ -366,6 +385,7 @@ fn build_serialization(
     act: &Activation,
     release: Option<&str>,
     _options: &[PluginOption],
+    _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
     let abi = SerializationAbi::from_classpath(act.classpath).unwrap_or_default();
     Box::new(
@@ -379,6 +399,7 @@ fn build_allopen(
     _act: &Activation,
     _release: Option<&str>,
     options: &[PluginOption],
+    _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
     Box::new(AllOpenPlugin::from_options(options))
 }
@@ -388,6 +409,7 @@ fn build_noarg(
     _act: &Activation,
     _release: Option<&str>,
     options: &[PluginOption],
+    _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
     Box::new(NoArgPlugin::from_options(options))
 }
@@ -397,8 +419,33 @@ fn build_sam_with_receiver(
     _act: &Activation,
     _release: Option<&str>,
     options: &[PluginOption],
+    _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
     Box::new(SamWithReceiverPlugin::from_options(options))
+}
+
+/// Build the native atomicfu plugin. Its registrar declares no command-line processor, so it has
+/// no options.
+fn build_atomicfu(
+    _act: &Activation,
+    release: Option<&str>,
+    _options: &[PluginOption],
+    target: Option<CompilationTarget>,
+) -> Box<dyn IrPlugin> {
+    Box::new(AtomicfuPlugin::new(
+        release.and_then(PluginRelease::parse),
+        target,
+    ))
+}
+
+/// Build the native Parcelize plugin from the compilation's options for it.
+fn build_parcelize(
+    _act: &Activation,
+    _release: Option<&str>,
+    options: &[PluginOption],
+    _target: Option<CompilationTarget>,
+) -> Box<dyn IrPlugin> {
+    Box::new(ParcelizePlugin::from_options(options))
 }
 
 /// Build the native assignment plugin from the compilation's options for it.
@@ -406,6 +453,7 @@ fn build_assignment(
     _act: &Activation,
     _release: Option<&str>,
     options: &[PluginOption],
+    _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
     Box::new(AssignmentPlugin::from_options(options))
 }
@@ -466,6 +514,24 @@ impl PluginRegistry {
             kind: ExtensionKind::PartialNative(build_compose),
             option_keys: Some(ComposeOptions::KEYS),
             unimplemented_options: ComposeOptions::UNIMPLEMENTED,
+        });
+        r.register(RegisteredExtension {
+            plugin_id: ATOMICFU_PLUGIN_ID,
+            registrar:
+                "org.jetbrains.kotlinx.atomicfu.compiler.extensions.AtomicfuComponentRegistrar",
+            kind: ExtensionKind::PartialNative(build_atomicfu),
+            option_keys: Some(&[]),
+            unimplemented_options: &[],
+        });
+        r.register(RegisteredExtension {
+            plugin_id: PARCELIZE_PLUGIN_ID,
+            registrar: "org.jetbrains.kotlin.parcelize.ParcelizeComponentRegistrar",
+            kind: ExtensionKind::PartialNative(build_parcelize),
+            option_keys: Some(&["additionalAnnotation", "experimentalCodeGeneration"]),
+            unimplemented_options: &[(
+                "experimentalCodeGeneration",
+                OptionSetting::Exactly("true"),
+            )],
         });
         r.register(RegisteredExtension {
             plugin_id: KSP_PLUGIN_ID,
@@ -547,6 +613,7 @@ impl PluginRegistry {
             config: act.config.clone(),
             classpath: act.classpath.to_vec(),
             reference_release: None,
+            compilation_target: None,
         };
         let mut ksp_active = false;
         let mut diagnostics = Vec::new();
@@ -758,7 +825,27 @@ mod tests {
         assert!(r.is_registered(NOARG_PLUGIN_ID));
         assert!(r.is_registered(SAM_WITH_RECEIVER_PLUGIN_ID));
         assert!(r.is_registered(COMPOSE_PLUGIN_ID));
+        assert!(r.is_registered(ATOMICFU_PLUGIN_ID));
+        assert!(r.is_registered(PARCELIZE_PLUGIN_ID));
         assert!(r.is_registered(KSP_PLUGIN_ID));
+    }
+
+    #[test]
+    fn atomicfu_runs_natively_but_a_build_is_refused_it_until_coverage_is_complete() {
+        let jar = plugin_jar(
+            "kotlin-atomicfu-compiler-plugin-embeddable.jar",
+            &[registrar_of(ATOMICFU_PLUGIN_ID)],
+        );
+        let c = cfg(&[&format!("-Xplugin={jar}")]);
+        let resolved = PluginRegistry::with_builtins().resolve(&activation(&c, &[]));
+        assert_eq!(resolved.native.host("app").plugin_names(), vec!["atomicfu"]);
+        assert!(!resolved.has_errors());
+        assert_eq!(resolved.diagnostics.len(), 1);
+        assert!(matches!(
+            &resolved.diagnostics[0],
+            PluginDiagnostic::PartialSubstitution { plugin_id } if plugin_id == ATOMICFU_PLUGIN_ID
+        ));
+        assert!(resolved.diagnostics[0].is_refusal());
     }
 
     #[test]
@@ -1353,7 +1440,12 @@ mod tests {
     fn third_party_native_extension_can_be_registered() {
         // The registry is OPEN: registering a new native extension makes krusty honor its plugin —
         // proving registration is general, not hardcoded to the two builtins.
-        fn build_noop(_: &Activation, _: Option<&str>, _: &[PluginOption]) -> Box<dyn IrPlugin> {
+        fn build_noop(
+            _: &Activation,
+            _: Option<&str>,
+            _: &[PluginOption],
+            _: Option<CompilationTarget>,
+        ) -> Box<dyn IrPlugin> {
             struct NoOp;
             impl IrPlugin for NoOp {
                 fn name(&self) -> &str {

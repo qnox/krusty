@@ -1283,7 +1283,7 @@ fn write_flamegraph(guard: &pprof::ProfilerGuard<'_>) {
     }
 
     let mut v: Vec<_> = leaf.into_iter().collect();
-    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.sort_by_key(|frame| std::cmp::Reverse(frame.1));
     eprintln!("--- profiler: top krusty frames ({total} samples) ---");
     for (name, c) in v.into_iter().take(25) {
         eprintln!("  {:>5.1}%  {name}", 100.0 * c as f64 / total.max(1) as f64);
@@ -1389,6 +1389,16 @@ fun box(): String = Registry.value()\n";
     );
 }
 
+/// The shared atomicfu regression's JVM classes are kotlinc's and its atomicfu plugin's, byte for
+/// byte.
+#[test]
+fn atomicfu_field_updaters_are_byte_identical_to_kotlinc() {
+    assert_plugin_case_matches_kotlinc(
+        include_str!("box_regressions/atomicfu/fieldUpdaters.kt"),
+        "fieldUpdaters",
+    );
+}
+
 /// Each Compose fixture, JVM-only and so outside the portable box regressions, compiles to exactly
 /// the classes the reference compiler and its Compose plugin emit, byte for byte, and both builds
 /// pass its `box()`, which composes and recomposes the transformed functions through a recording
@@ -1468,8 +1478,14 @@ fn assert_compose_fixture_matches_kotlinc(stem: &str) {
         .join("tests/fixtures/compose")
         .join(format!("{stem}.kt"));
     let source = fs::read_to_string(&path).expect("read the Compose fixture");
+    assert_plugin_case_matches_kotlinc(&source, stem);
+}
+
+/// A compiler plugin's case compiles to exactly the classes the reference compiler and that plugin
+/// emit, byte for byte, and both builds pass its `box()`.
+fn assert_plugin_case_matches_kotlinc(source: &str, stem: &str) {
     let source =
-        krusty::conformance::prepare_test_source(&source, krusty::conformance::TestTarget::Jvm);
+        krusty::conformance::prepare_test_source(source, krusty::conformance::TestTarget::Jvm);
     let reference = box_reference_classes::checked_prepared_box(&source, stem)
         .expect("the reference compiler compiles the fixture and its box() returns OK");
     let classpath = common::classpath_jars_for(&source);
@@ -1692,8 +1708,8 @@ fn kotlin_codegen_box_conformance() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(usize::MAX);
 
-    let mut files =
-        super::box_inventory::discover(&box_dir).unwrap_or_else(|error| panic!("{error}"));
+    let mut files = super::box_inventory::discover(&box_dir, krusty::conformance::TestTarget::Jvm)
+        .unwrap_or_else(|error| panic!("{error}"));
     let corpus: BTreeSet<String> = files
         .iter()
         .map(|file| box_ratchet::corpus_key(&box_dir, file))
@@ -2225,7 +2241,7 @@ fn kotlin_codegen_box_conformance() {
     );
     if byte_diff_on {
         let mut diffs = byte_diffs.into_inner().unwrap();
-        diffs.sort_by(|a, b| a.0.cmp(&b.0));
+        diffs.sort_by_key(|(path, _)| path.clone());
         let (mut identical, mut divergent, mut ref_fail) = (0usize, 0, 0);
         let report_path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/byte_diff_report.txt");

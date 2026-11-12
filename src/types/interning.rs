@@ -105,9 +105,8 @@ mod tests {
         let interner = ShardedInterner::<str>::default();
         let first =
             interner.intern_ref_with("T", |value| Box::leak(value.to_owned().into_boxed_str()));
-        let second = interner.intern_ref_with(&"T".to_string(), |value| {
-            Box::leak(value.to_owned().into_boxed_str())
-        });
+        let second =
+            interner.intern_ref_with("T", |value| Box::leak(value.to_owned().into_boxed_str()));
 
         assert!(std::ptr::eq(first, second));
     }

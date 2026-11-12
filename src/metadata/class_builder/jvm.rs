@@ -145,7 +145,11 @@ impl ClassCarrier for JvmCarrier<'_, '_> {
             .unwrap_or(&NO_PROPERTY_SIGNATURE);
         let mut extensions = Pb::new();
         let signature = property_jvm_signature(st, property);
-        extensions.field_message(100, &signature); // JvmProtoBuf.propertySignature = 100
+        // kotlinc records no signature for a property with neither storage nor accessors (an
+        // atomic a compiler plugin realized as other declarations): `takeIf { serializedSize > 0 }`.
+        if !signature.is_empty() {
+            extensions.field_message(100, &signature); // JvmProtoBuf.propertySignature = 100
+        }
         if property.moved_from_interface_companion {
             extensions.field_varint(101, 1); // JvmProtoBuf.flags = 101: IS_MOVED_FROM_INTERFACE_COMPANION
         }

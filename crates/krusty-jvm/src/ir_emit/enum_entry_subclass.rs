@@ -205,6 +205,7 @@ pub(super) fn emit_enum_entry_subclass(
         env,
         markers: &markers,
         byte_parity: false,
+        owner_prefix: &OwnerConstructorPrefix::none(),
     };
     for member in source_ordered_members(ir, c, None) {
         emit_scheduled_member(&members, member, &mut cw);

@@ -65,6 +65,7 @@ pub(crate) fn package_fragment(
         classes,
         annotations_in_metadata,
         crate::metadata::MetadataTypeLookups::default().classifier_applications,
+        None,
     )
     .expect("valid metadata fixture declarations")
 }
@@ -76,8 +77,12 @@ pub(crate) fn package_fragment_with_classifier_applications(
     classes: &[KlibClass<'_>],
     annotations_in_metadata: bool,
     classifier_applications: crate::metadata::ClassifierApplications<'_>,
+    intersection_approximation: Option<&dyn Fn(crate::types::Ty) -> Option<crate::types::Ty>>,
 ) -> Result<Vec<u8>, crate::metadata::class_id::ClassIdError> {
     let mut st = StringTable::klib(classifier_applications);
+    if let Some(approximate) = intersection_approximation {
+        st = st.with_intersection_approximation(approximate);
+    }
     let mut requirements = VersionRequirementTable::default();
     let mut contract_types = ContractTypeTable::default();
     let mut package_message = Pb::new();
@@ -348,6 +353,7 @@ mod tests {
             &[],
             true,
             &lexical,
+            None,
         )
         .unwrap();
         let expected = package_fragment_with_classifier_applications(
@@ -356,6 +362,7 @@ mod tests {
             &[],
             true,
             &direct,
+            None,
         )
         .unwrap();
         assert_eq!(actual, expected);
@@ -399,6 +406,7 @@ mod tests {
             &[],
             true,
             &lookup,
+            None,
         )
         .expect("valid declared metadata class names");
         let package = parse_package_fragment_checked(&fragment).expect("a decodable fragment");

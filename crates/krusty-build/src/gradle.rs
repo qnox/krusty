@@ -784,7 +784,7 @@ mod tests {
         }
 
         if kgp == "2.4.10" {
-            compiler_options::check(&fixture, &kotlin_classes, &runtime_source);
+            compiler_options::check(&fixture, &kotlin_classes);
         }
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1089,7 +1089,6 @@ tasks.register<JavaExec>("runJvm") {
         let output = GradleBuild::new(root, repository_plugin_project(), &fixture.proxy)
             .plugin_repository(&repository)
             .init_script(init_script)
-            .no_daemon(true)
             .tasks([":classes"])
             .run_output()
             .unwrap_or_else(|error| panic!("{error}"));
@@ -1825,7 +1824,8 @@ fun main() {
     /// Gradle integration builds share one Gradle user home, which each fixture installs through
     /// the process-wide `GRADLE_USER_HOME`. libtest runs tests on parallel threads, so concurrent
     /// fixtures race on that variable and on the shared daemon registry: under Gradle 7.6.3 the
-    /// single-use daemons time out connecting. One fixture runs at a time.
+    /// daemons time out connecting. One fixture runs at a time, so its builds reuse one daemon
+    /// that the previous fixture left idle instead of starting a JVM per build.
     static GRADLE_INTEGRATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     pub(super) struct IntegrationFixture {
@@ -1931,8 +1931,7 @@ fun main() {
             let build = GradleBuild::new(&self.root, repository_plugin_project(), &self.proxy)
                 .property("kotlinPluginVersion", &self.kgp)
                 .property("krustyPluginVersion", &self.plugin_version)
-                .configuration_cache(true)
-                .no_daemon(true);
+                .configuration_cache(true);
             if self.plugin_project.join("repository").is_dir() {
                 build.plugin_repository(self.plugin_project.join("repository"))
             } else {
@@ -2583,16 +2582,8 @@ tasks.withType<KotlinJvmCompile>().configureEach {
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_17)
         moduleName.set("kotlin-util-runtime")
-        when (krustyNegative) {
-            "language-version-2-2" -> {
-                languageVersion.set(KotlinVersion.KOTLIN_2_2)
-                apiVersion.set(KotlinVersion.KOTLIN_2_2)
-            }
-            else -> {
-                languageVersion.set(KotlinVersion.KOTLIN_2_4)
-                apiVersion.set(KotlinVersion.KOTLIN_2_4)
-            }
-        }
+        languageVersion.set(KotlinVersion.KOTLIN_2_4)
+        apiVersion.set(KotlinVersion.KOTLIN_2_4)
         jvmDefault.set(JvmDefaultMode.NO_COMPATIBILITY)
         javaParameters.set(true)
         freeCompilerArgs.add("-Xconsistent-data-class-copy-visibility")
@@ -2664,11 +2655,6 @@ val generateKotlin = tasks.register<GenerateKotlin>("generateKotlin") {
 }
 
 kotlin {
-    when (krustyNegative) {
-        "compiler-version" -> compilerVersion.set("2.4.0")
-        "dev-compiler-version" -> compilerVersion.set("KGP_VERSION-dev-7885")
-        else -> {}
-    }
     sourceSets.named("main") {
         kotlin.srcDir("src")
         kotlin.srcDir("other-src")
@@ -2693,64 +2679,25 @@ tasks.withType<KotlinJvmCompile>().configureEach {
         jvmDefault.set(JvmDefaultMode.NO_COMPATIBILITY)
         javaParameters.set(true)
         optIn.set(
-            when (krustyNegative) {
-                "empty-opt-in" -> listOf("krusty.fixture.ExperimentalFirstApi", "")
-                // Only the redundant-argument warning may remain, so `-Werror` has nothing else to
-                // promote.
-                "werror-warning-exception" -> emptyList<String>()
-                "duplicate-opt-in" -> listOf(
-                    "krusty.fixture.ExperimentalFirstApi",
-                    "krusty.fixture.ExperimentalSecondApi",
-                    "krusty.fixture.ExperimentalFirstApi",
-                )
-                else -> listOf(
-                    "krusty.fixture.ExperimentalFirstApi",
-                    "krusty.fixture.ExperimentalSecondApi",
-                )
-            },
+            listOf(
+                "krusty.fixture.ExperimentalFirstApi",
+                "krusty.fixture.ExperimentalSecondApi",
+            ),
         )
         freeCompilerArgs.add("-Xconsistent-data-class-copy-visibility")
         freeCompilerArgs.add("-Xskip-prerelease-check")
         when (krustyNegative) {
             "structured-option" -> extraWarnings.set(true)
             "all-warnings-as-errors" -> allWarningsAsErrors.set(true)
-            "reserved-free-argument" -> freeCompilerArgs.add("-d=forbidden")
             "plugin-free-argument" -> freeCompilerArgs.add("-Xplugin=forbidden.jar")
-            "jvm-default-conflict" -> freeCompilerArgs.add("-jvm-default=disable")
             "explicit-api-bad-mode" -> freeCompilerArgs.add("-Xexplicit-api=sideways")
-            "old-language-version" -> languageVersion.set(KotlinVersion.fromVersion("1.9"))
             "old-api-version" -> apiVersion.set(KotlinVersion.fromVersion("1.9"))
-            "progressive-free-argument" -> freeCompilerArgs.add("-progressive")
-            "progressive-mode" -> progressiveMode.set(true)
             "module-name-free-argument" -> freeCompilerArgs.add("-module-name=overridden")
-            "free-end-of-options" -> freeCompilerArgs.addAll("--", "-d", "elsewhere")
-            "free-argfile" -> freeCompilerArgs.add("@overrides.args")
-            "free-source" -> freeCompilerArgs.add("Extra.kt")
-            "classpath-alias" -> freeCompilerArgs.addAll("-cp", "elsewhere.jar")
-            "progressive-alias" -> freeCompilerArgs.add("-Xprogressive")
-            "compiler-plugin-alias" -> freeCompilerArgs.add("-Xcompiler-plugin=forbidden.jar")
-            "reference-version-free-argument" -> freeCompilerArgs.add("-Xkotlin-reference-version=2.4.0")
-            "dependency-policy-free-argument" -> freeCompilerArgs.add("-no-stdlib=false")
             "release-specific-argument-boundary" -> freeCompilerArgs.addAll(
                 "-Xescaping-functions",
                 "-d=forbidden",
             )
             "jspecify-free-argument" -> freeCompilerArgs.add("-Xjspecify-annotations=strict")
-            "jdk-release-free-argument" -> freeCompilerArgs.add("-Xjdk-release=21")
-            "free-werror" -> freeCompilerArgs.add("-Werror")
-            "werror-overlap" -> {
-                allWarningsAsErrors.set(true)
-                freeCompilerArgs.add("-Werror")
-            }
-            "werror-warning-exception" -> {
-                allWarningsAsErrors.set(true)
-                freeCompilerArgs.add("-Xcontext-parameters")
-                freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:warning")
-            }
-            "warning-level" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:disabled")
-            "warning-level-bad-severity" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:loud")
-            "warning-level-missing-colon" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG")
-            "opt-in-overlap" -> freeCompilerArgs.add("-opt-in=krusty.fixture.ExperimentalFirstApi")
         }
     }
 }

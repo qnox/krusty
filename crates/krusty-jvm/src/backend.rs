@@ -1391,7 +1391,7 @@ impl Backend for JvmBackend {
             );
             return Vec::new();
         }
-        if let Err(target) = crate::function_references::realize(
+        let spliced_getters = match crate::function_references::realize(
             &mut file.ir,
             &file.callables,
             crate::function_references::Facades {
@@ -1399,14 +1399,17 @@ impl Backend for JvmBackend {
                 facades: &facades,
             },
         ) {
-            diags.error(
-                krusty::diag::Span::new(0, 0),
-                format!(
-                    "internal error: missing JVM function-reference realization for {target:?}"
-                ),
-            );
-            return Vec::new();
-        }
+            Ok(spliced_getters) => spliced_getters,
+            Err(target) => {
+                diags.error(
+                    krusty::diag::Span::new(0, 0),
+                    format!(
+                        "internal error: missing JVM function-reference realization for {target:?}"
+                    ),
+                );
+                return Vec::new();
+            }
+        };
         // A lambda the metafactory cannot adapt is a class of its own; decided before any lambda
         // is numbered, as kotlinc numbers only the lambdas it lifts.
         let current_source = krusty::ir::IrModuleSource {
@@ -1452,6 +1455,7 @@ impl Backend for JvmBackend {
             &file.callables,
             &facade,
             &local_delegate_access,
+            spliced_getters,
         ) {
             Ok(realizations) => realizations,
             Err(target) => {
@@ -1785,13 +1789,7 @@ pub fn facade_package_metadata_from_ir(
         .iter()
         .map(krusty::metadata::declaration_records::package_alias)
         .collect::<Vec<_>>();
-    let approximate = |ty| {
-        krusty::types::declaration_approximation(ty, &mut |classifier, index| {
-            symbols
-                .classifier(classifier)
-                .and_then(|declaration| declaration.type_param_variances.get(index).copied())
-        })
-    };
+    let approximate = |ty| krusty::metadata::declaration_approximation::approximate(symbols, ty);
     let classifier_application = |classifier| {
         krusty::metadata::classifier_applications::classifier_application(ir, symbols, classifier)
     };

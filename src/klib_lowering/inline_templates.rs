@@ -90,6 +90,12 @@ pub fn lower_inline_template(
     let declaration = Declaration {
         callable,
         formals: &formals,
+        formal_bounds: selected
+            .callable
+            .generic_sig
+            .as_deref()
+            .map_or(&[][..], |generic| &generic.formal_bounds),
+        reified: &selected.callable.reified_type_parameter_ordinals,
         inline_modifiers: &selected.callable.inline_modifiers,
         suspend: selected.callable.suspend,
     };
@@ -114,6 +120,10 @@ struct Declaration<'a> {
     callable: KlibBodyCallable<'a>,
     /// The semantic type parameters the record's types name, in declaration order.
     formals: &'a [Ty],
+    /// Each formal's declared upper bounds, parallel to [`Self::formals`]; empty for none.
+    formal_bounds: &'a [Vec<Ty>],
+    /// The ordinals of the formals the record declares `reified`.
+    reified: &'a [u32],
     /// Each value parameter's `noinline`/`crossinline` modifier, context parameters included and
     /// the extension receiver excluded, in declaration order.
     inline_modifiers: &'a [InlineParameterModifier],
@@ -186,6 +196,7 @@ fn lower(
         header.extension_receiver_index(),
     );
     info.expansion_modes = modes;
+    sign_template(ir, template, declaration, function, &calls)?;
     let builtins = IrBuiltinOperators::new();
     let body = BodyLowering::new(
         arena,
@@ -214,6 +225,80 @@ fn lower(
     ir.inline_fns.insert(template);
     ir.inline_only_fns.insert(template);
     Ok((template, class_type_parameters))
+}
+
+/// Record the template's own type parameters, as checked FIR records a source declaration's.
+///
+/// The template keeps the declaration's body in the file together with the anonymous objects and
+/// lambdas it declares. Its signature is the provenance that tells every target which of their
+/// type operations name a parameter the template itself declares `reified`.
+fn sign_template(
+    ir: &mut IrFile,
+    template: FunId,
+    declaration: Declaration<'_>,
+    function: &crate::metadata::klib_ir::tree::KlibIrFunction,
+    calls: &TemplateCalls<'_>,
+) -> Result<(), KlibBodyDeclineReason> {
+    if declaration.formals.is_empty() {
+        return Ok(());
+    }
+    if function.type_parameters.len() != declaration.formals.len()
+        || !(declaration.formal_bounds.is_empty()
+            || declaration.formal_bounds.len() == declaration.formals.len())
+        || declaration
+            .reified
+            .iter()
+            .any(|&ordinal| ordinal as usize >= declaration.formals.len())
+    {
+        return Err(KlibBodyDeclineReason::SignatureMismatch(
+            "the template's type parameters are not parallel to its selected formals".to_owned(),
+        ));
+    }
+    let mut type_params = Vec::with_capacity(declaration.formals.len());
+    for (index, (formal, serialized)) in declaration
+        .formals
+        .iter()
+        .zip(&function.type_parameters)
+        .enumerate()
+    {
+        let TyKind::TyParam(semantic, _) = formal.kind() else {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+                "the type parameter `{}` is selected as {formal:?}",
+                serialized.name
+            )));
+        };
+        let mut bounds = Vec::new();
+        for &bound in declaration
+            .formal_bounds
+            .get(index)
+            .map_or(&[][..], Vec::as_slice)
+        {
+            // A bound naming another type parameter names no classifier.
+            let interface = match bound.non_null().kotlin_class_internal() {
+                Some(classifier) => calls.is_interface(classifier)?,
+                None => false,
+            };
+            bounds.push((bound, interface));
+        }
+        type_params.push(crate::ir::IrTypeParameter {
+            name: serialized.name.clone(),
+            semantic_name: semantic.as_str().to_owned(),
+            bounds,
+            // Kotlin declares no variance on a function's type parameter.
+            variance: crate::types::TypeVariance::Invariant,
+            reified: declaration.reified.contains(&(index as u32)),
+            captured_from_enclosing: false,
+        });
+    }
+    let declared = &ir.functions[template as usize];
+    let signature = crate::ir::IrGenericSig {
+        type_params,
+        params: declared.params.clone(),
+        ret: Some(declared.ret),
+        supers: Vec::new(),
+    };
+    ir.signatures.insert(template, signature);
+    Ok(())
 }
 
 /// How a call expands each parameter, as checked FIR publishes it for a source inline function:
@@ -480,43 +565,13 @@ impl CallLinker for TemplateCalls<'_> {
                 }
             }
         };
-        let Some((_, realization)) = self
-            .callees
-            .source
-            .external_callable_by_dependency(&binding.declaration)
-        else {
-            return Ok(None);
-        };
-        let accessor = realization
-            .klib_body_accessor
-            .as_ref()
-            .map(|accessor| matches!(accessor.role, crate::libraries::KlibAccessorRole::Getter));
-        match accessor {
-            Some(false) => {
-                return Err(KlibBodyDeclineReason::SignatureMismatch(
-                    "an object literal overrides a property setter".to_owned(),
-                ))
-            }
-            Some(true) if !property => {
-                return Err(KlibBodyDeclineReason::SignatureMismatch(
-                    "a function overrides a property".to_owned(),
-                ))
-            }
-            None if property => {
-                return Err(KlibBodyDeclineReason::SignatureMismatch(
-                    "a property overrides a function".to_owned(),
-                ))
-            }
-            Some(true) | None => {}
-        }
-        super::same_library_class::realized_member_override(
+        super::same_library_class::declared_override(
             binding.declaration,
-            &realization,
-            property,
+            self.callees.source,
             supertypes,
+            property,
             &|sub, owner| self.applied_supertype(sub, owner),
         )
-        .map(Some)
     }
 
     fn is_interface(&self, name: crate::types::TypeName) -> Result<bool, KlibBodyDeclineReason> {

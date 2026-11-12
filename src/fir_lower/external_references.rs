@@ -14,6 +14,12 @@ pub(super) struct CheckedExternalReference {
     pub(super) reflection_owner: Option<crate::types::TypeName>,
 }
 
+/// The dispatch and extension receivers bound into one dependency callable reference.
+pub(super) struct ExternalReferenceReceivers {
+    pub(super) dispatch: Option<FirReceiver>,
+    pub(super) extension: Option<FirReceiver>,
+}
+
 impl BodyLowering<'_> {
     /// A dependency callable reference is an ordinary [`IrExpr::CallableReference`]: a generated
     /// adapter calls the provider-selected declaration, and the target backend chooses its carrier
@@ -22,12 +28,15 @@ impl BodyLowering<'_> {
         &mut self,
         target: FirCallableReferenceTarget,
         binding: FirCallableReferenceBinding,
-        dispatch_receiver: Option<FirReceiver>,
-        extension_receiver: Option<FirReceiver>,
+        receivers: ExternalReferenceReceivers,
         substitutions: &[crate::fir::FirTypeSubstitution],
         adaptation: Option<&FirReferenceAdaptation>,
         reference: CheckedExternalReference,
     ) -> Result<ExprId, FirLoweringFailure> {
+        let ExternalReferenceReceivers {
+            dispatch: dispatch_receiver,
+            extension: extension_receiver,
+        } = receivers;
         let FirCallableReferenceTarget::External {
             declaration,
             singleton_dispatch,
@@ -81,9 +90,9 @@ impl BodyLowering<'_> {
         let own_start = captures.len() as u32;
         let mut own_parameter_slots = (0..reference.params.len() as u32).collect::<Vec<_>>();
         let unbound_receiver = if binding == FirCallableReferenceBinding::Unbound {
-            receiver.ok_or_else(|| {
-                FirLoweringFailure::UnsupportedExternalCallableReference(declaration)
-            })?;
+            receiver.ok_or(FirLoweringFailure::UnsupportedExternalCallableReference(
+                declaration,
+            ))?;
             if reference.params.is_empty() {
                 return Err(FirLoweringFailure::UnsupportedExternalCallableReference(
                     declaration,
