@@ -185,11 +185,14 @@ const MODELED_FEATURES: &[&str] = &[
     "ForbidArrayOfNothingInLhsOfClassLiteral",
     "ForbidExternalEnumEntriesAndPrimaryConstructorProperties",
     "ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects",
+    "ForbidSamConstructorCallsWithMissingDependencySupertype",
     "ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds",
     "ForbidUselessTypeArgumentsIn25",
+    "ForbidUselessTypeArgumentsIn26",
     "ForbidValueClassRecursionViaTypeParameters",
     "FullValueClasses",
     "ImplicitSignedToUnsignedIntegerConversion",
+    "JvmInlineScopesNumbers",
     "JvmSupportRecursiveTypeOf",
     "MultiDollarInterpolation",
     "MultiPlatformProjects",
@@ -521,12 +524,14 @@ mod tests {
     #[test]
     fn modeled_features_are_sorted_kotlinc_features() {
         assert!(MODELED_FEATURES.windows(2).all(|pair| pair[0] < pair[1]));
-        let table =
-            FeatureTable::for_version(crate::kotlin_version::KotlinVersion::newest()).unwrap();
+        let tables: Vec<_> = crate::kotlin_version::KotlinVersion::supported()
+            .into_iter()
+            .map(|version| FeatureTable::for_version(version).unwrap())
+            .collect();
         for name in MODELED_FEATURES {
             assert!(
-                table.get(name).is_some(),
-                "{name} is not a kotlinc language feature"
+                tables.iter().any(|table| table.get(name).is_some()),
+                "{name} is not a kotlinc language feature of a supported release"
             );
         }
     }

@@ -99,6 +99,25 @@ impl LocalValues {
         })
     }
 
+    /// The slot of `variable`, declared without an initializer and of semantic type `ty`, before
+    /// it is declared. Checked FIR lowers such a source `val` or `var` as a reassignable binding,
+    /// so its later definite assignments and reads are a `var`'s.
+    pub(super) fn deferred(
+        &self,
+        variable: &KlibIrVariable,
+        ty: Ty,
+    ) -> Result<LocalValue, KlibBodyDeclineReason> {
+        if variable.base.origin != DEFINED {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a compiler-introduced variable without an initializer",
+            ));
+        }
+        Ok(LocalValue {
+            mutable: true,
+            ..self.slot(variable, ty)?
+        })
+    }
+
     /// The slot of a `catch` clause's parameter `variable`, of semantic type `ty`, before it is
     /// declared: an immutable binding the source names.
     pub(super) fn catch_parameter(

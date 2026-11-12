@@ -47,8 +47,18 @@ impl BodyLowering<'_> {
 
     /// A parameter's default, lowered as checked FIR lowers the source default: a value of the
     /// parameter's declared type, which may read the parameters before it.
+    ///
+    /// A default of a proper subtype of the parameter's type, such as `joinToString`'s `", "` for
+    /// its `CharSequence` separator, carries the coercion to the declared type that checked FIR
+    /// lowering places on a source default.
     fn default_value(mut self, default: KlibIrExprId, declared: Ty) -> Lowered<ExprId> {
-        self.declared_operand(default, declared)
+        let lowered = self.expression(default)?;
+        let actual = self.lowered_type(lowered);
+        if actual != declared && actual != Ty::Nothing && self.is_supertype_of(declared, actual) {
+            let coerced = self.coercion(lowered, declared);
+            return Ok(self.typed(coerced, declared));
+        }
+        self.declared_lowered(lowered, declared)
     }
 }
 
