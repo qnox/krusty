@@ -1408,10 +1408,19 @@ impl BodyLowering<'_> {
                     parameter,
                     value,
                     conversion,
-                } => Ok(IrCheckedArgument::Expression {
-                    parameter: *parameter,
-                    value: self.expression_with_conversion(*value, *conversion)?,
-                }),
+                } => {
+                    let lowered = self.expression_with_conversion(*value, *conversion)?;
+                    if self.body.is_implicit_context_argument(*value) {
+                        self.implicit_context_operands.insert(lowered);
+                    }
+                    if self.body.is_receiver_ordered_context_argument(*value) {
+                        self.receiver_ordered_context_operands.insert(lowered);
+                    }
+                    Ok(IrCheckedArgument::Expression {
+                        parameter: *parameter,
+                        value: lowered,
+                    })
+                }
                 FirCallArgument::Default { parameter, .. } => Ok(IrCheckedArgument::Default {
                     parameter: *parameter,
                 }),

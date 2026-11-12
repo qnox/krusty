@@ -610,6 +610,7 @@ impl BodyFirChecker<'_> {
                     .value
             }
         };
+        self.body.record_implicit_context_argument(value);
         Ok(FirReceiver {
             value,
             conversion: None,
