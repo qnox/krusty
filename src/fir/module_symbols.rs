@@ -294,9 +294,7 @@ impl<'a> StreamedModuleSymbols<'a> {
         // its type-parameter layout did not finalize: projecting it would publish an empty
         // type-parameter list.
         let classifier_header = self.index.classifier_header(owner)?;
-        if self.index.classifier_type_arguments(owner).is_none() {
-            return None;
-        }
+        self.index.classifier_type_arguments(owner)?;
         let anchor = self.index.declaration_anchor(owner)?;
         let flags = declaration_header.flags;
         let mut projected = crate::libraries::LibraryType::declaration_header();
@@ -438,9 +436,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             }
         }
 
-        let Some(parameters) = self.index.classifier_type_arguments(owner) else {
-            return None;
-        };
+        let parameters = self.index.classifier_type_arguments(owner)?;
         let parameter_names = parameters
             .iter()
             .map(|parameter| {
