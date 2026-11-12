@@ -483,46 +483,6 @@ jobs:
           run_with_deadline "$KRUSTY_E2E_TIMEOUT_SECONDS" "$E2E_BINARY" plugin_host_compiler_e2e:: --include-ignored --test-threads=1
       - *save-plugin-host-runtime
 
-  # Each artifact family has one producer. They run on separate hosted runners so the conformance
-  # matrix waits for the slowest required build instead of serializing every unrelated target graph
-  # on one runner. Consumers never compile krusty again.
-  build-conformance-bin:
-    runs-on: [self-hosted, rust-4c-8gb]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
-        with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          # Queue branches restore master's entries but never save their own: per-branch copies
-          # overflowed the repository cache and evicted the master entries every branch restores.
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-      # Self-hosted runners have no JDK on PATH (ubuntu-latest defaults to 17); the justfile runs
-      # `java -version`.
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
-        with:
-          distribution: zulu
-          java-version: '17'
-      - *just-on-path
-      - *install-just
-      - name: build conformance binary
-        run: |
-          set -euo pipefail
-          source scripts/phase-timing.sh
-          phase_log_prefix=conformance-bin
-          PHASE_TIMING_LOG="$(mktemp)"
-          trap 'phase_report || true' EXIT
-          phase_begin conformance-test-binary
-          bin=$(just conformance-bin)
-          phase_end conformance-test-binary
-          cp "$bin" conformance-bin
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: conformance-bin
-          path: conformance-bin
-          if-no-files-found: error
-
   # The KLIB implementation-coverage ratchet needs the compiler unit binary, whose build takes about
   # three times as long as the conformance binary. Its own job keeps that build off the conformance
   # rows' critical path; no row waits for it, and it checks every release's exact Native and Wasm
@@ -601,21 +561,30 @@ jobs:
         run: |
           echo "matrix=$(just matrix-json)" >> "$GITHUB_OUTPUT"
           echo "max=$(just max-version)" >> "$GITHUB_OUTPUT"
-      - name: build compiler and Gradle test binaries
+      # One job builds every prebuilt Rust binary the later jobs run: the conformance binary, the
+      # krusty CLI and the krusty-build test binary all link one krusty library. In separate jobs
+      # the conformance build compiled krusty a second time, with its test dependencies' features.
+      - name: build conformance, compiler and Gradle test binaries
         run: |
           set -euo pipefail
           source scripts/phase-timing.sh
           phase_log_prefix=tool-bins
           PHASE_TIMING_LOG="$(mktemp)"
           trap 'phase_report || true' EXIT
-          phase_begin krusty-cli
-          cargo build --profile gate -p krusty-cli
-          phase_end krusty-cli
+          phase_begin conformance-and-cli
+          bin=$(just conformance-bin-and-cli)
+          phase_end conformance-and-cli
+          cp "$bin" conformance-bin
           cp target/gate/krusty krusty
           phase_begin krusty-build-tests
           bin=$(just krusty-build-tests)
           phase_end krusty-build-tests
           cp "$bin" krusty-build-tests
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: conformance-bin
+          path: conformance-bin
+          if-no-files-found: error
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tool-bins
@@ -626,7 +595,7 @@ jobs:
 
   conformance:
     name: conformance (${{ matrix.version }}, ${{ matrix.target }})
-    needs: [build-conformance-bin, build-tool-bins]
+    needs: build-tool-bins
     strategy:
       fail-fast: false
       matrix:
