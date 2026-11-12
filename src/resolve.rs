@@ -19618,6 +19618,10 @@ impl<'a> Checker<'a> {
                 self.check_local_fun(scope, &f.clone(), s);
             }
             Stmt::LocalTypeAlias(alias) => {
+                for diagnostic in crate::declaration_validation::type_alias_diagnostics(&alias) {
+                    self.diags
+                        .error(diagnostic.span, diagnostic.message.to_string());
+                }
                 self.declare_lexical_type_alias(scope, &alias);
             }
             Stmt::CompoundAssign {
@@ -42715,14 +42719,7 @@ impl<'a> Checker<'a> {
                     "enum entry",
                 );
             }
-            for constructor in &cl.secondary_ctors {
-                self.check_non_property_annotation_applications_in_declaration_scope(
-                    scope,
-                    &constructor.annotations,
-                    &constructor.annotation_args,
-                    "constructor",
-                );
-            }
+            self.check_secondary_constructor_annotations(scope, cl);
             // Property and primary-constructor annotations are ordinary checked applications. Their
             // selected targets and folded arguments are the same payload handed to lowering.
             for property in cl.body_props.iter() {
@@ -56786,17 +56783,7 @@ impl<'a> Checker<'a> {
             let size_type = self.expr_expected(scope, *size, Ty::Int);
             self.expect_assignable(Ty::Int, size_type, self.span(*size), "array size");
             let elem = element_hint.unwrap_or_else(|| Ty::obj("kotlin/Any"));
-            if elem.is_reference() {
-                return Some(Ty::obj_args("kotlin/Array", &[Ty::nullable(elem)]));
-            }
-            if elem.jvm_boxed_ref().is_some() {
-                return Some(Ty::obj_args("kotlin/Array", &[Ty::nullable(elem)]));
-            }
-            self.diags.error(
-                span,
-                "krusty: arrayOfNulls of this element type is not supported".to_string(),
-            );
-            return Some(Ty::Error);
+            return Some(Ty::obj_args("kotlin/Array", &[Ty::nullable(elem)]));
         }
         None
     }
