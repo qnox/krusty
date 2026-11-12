@@ -1124,6 +1124,9 @@ jobs:
           - { kotlin: 2.4.10, gradle: 8.14.3, ksp: true }
           - { kotlin: 2.4.20, gradle: 7.6.3,  ksp: false }
     runs-on: [self-hosted, rust-4c-8gb]
+    # A lane takes under 10 minutes; one stuck on its runner (a download that never finished) ran for
+    # hours, holding the batch that waits on it.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
