@@ -434,7 +434,7 @@ impl ClassInitializations {
         bodies: &crate::klib_libraries::KlibDeclarationBodies,
     ) -> Result<Option<Vec<KlibDependencyCallable>>, super::decline::KlibBodyDeclineReason> {
         let selected = facts.initialized_class_member(identity)?;
-        let header = super::class_headers::authenticate(selected, bodies, None)?;
+        let header = super::class_headers::authenticate(selected, bodies)?;
         let key = (
             header.contract.module.clone(),
             header.contract.signature.clone(),

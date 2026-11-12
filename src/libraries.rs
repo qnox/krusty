@@ -54,7 +54,6 @@ pub use annotation_argument_provenance::AnnotationArgumentProvenance;
 pub use call_arg_mapping_failure::{CallArgMappingError, CallArgMappingFailure};
 pub(crate) use call_realization::KlibBodyCallableShape;
 pub use call_realization::KlibBodyCompanionReceiver;
-pub(crate) use call_realization::KlibSerializedMember;
 pub use call_realization::{
     DefaultCallRealization, DirectCFunction, ExternalCallableKind, ExternalCallableRealization,
     ExternalPropertyRealization, KlibBodyCallable, KlibDeclarationSignature,
