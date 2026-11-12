@@ -215,6 +215,17 @@ impl<'a> StringTable<'a> {
         }
     }
 
+    /// The same table, approximating a non-denotable intersection with `approximate`.
+    pub fn with_intersection_approximation(
+        self,
+        approximate: &'a dyn Fn(Ty) -> Option<Ty>,
+    ) -> Self {
+        Self {
+            intersection_approximation: Some(approximate),
+            ..self
+        }
+    }
+
     /// How `classifier`'s application splits. A missing frozen classifier fact is an emission
     /// error, never permission to serialize the flattened shape.
     ///
