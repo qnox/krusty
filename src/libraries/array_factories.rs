@@ -16,10 +16,6 @@ pub(crate) fn kotlin_array_factory_kind(name: &str) -> Option<ArrayFactoryKind> 
         "charArrayOf" => ArrayFactoryKind::PrimitiveVararg(Ty::Char),
         "byteArrayOf" => ArrayFactoryKind::PrimitiveVararg(Ty::Byte),
         "shortArrayOf" => ArrayFactoryKind::PrimitiveVararg(Ty::Short),
-        "ubyteArrayOf" => ArrayFactoryKind::PrimitiveVararg(Ty::UByte),
-        "ushortArrayOf" => ArrayFactoryKind::PrimitiveVararg(Ty::UShort),
-        "uintArrayOf" => ArrayFactoryKind::PrimitiveVararg(Ty::UInt),
-        "ulongArrayOf" => ArrayFactoryKind::PrimitiveVararg(Ty::ULong),
         "IntArray" => ArrayFactoryKind::PrimitiveSize(Ty::Int),
         "LongArray" => ArrayFactoryKind::PrimitiveSize(Ty::Long),
         "DoubleArray" => ArrayFactoryKind::PrimitiveSize(Ty::Double),
@@ -43,9 +39,12 @@ mod tests {
     #[test]
     fn recognizes_only_declared_kotlin_array_factories() {
         assert_eq!(
-            kotlin_array_factory_kind("uintArrayOf"),
-            Some(ArrayFactoryKind::PrimitiveVararg(Ty::UInt))
+            kotlin_array_factory_kind("intArrayOf"),
+            Some(ArrayFactoryKind::PrimitiveVararg(Ty::Int))
         );
+        // The unsigned factories are ordinary stdlib functions (`kotlin.UIntArrayKt`), not
+        // compiler-provided ones.
+        assert_eq!(kotlin_array_factory_kind("uintArrayOf"), None);
         assert_eq!(
             kotlin_array_factory_kind("Array"),
             Some(ArrayFactoryKind::ReferenceSize)

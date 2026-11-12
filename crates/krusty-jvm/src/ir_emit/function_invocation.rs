@@ -181,6 +181,14 @@ impl Emitter<'_> {
                     let ci = self.cw.class_ref("java/lang/String");
                     code.checkcast(ci);
                 }
+                // An unsigned array class and its signed carrier share one descriptor, but the
+                // erased result is the class's box: the carrier is read from it by `unbox-impl`.
+                _ if unsigned_array_class(ret).is_some() => {
+                    let ci = self
+                        .cw
+                        .class_ref(&unsigned_array_class(ret).unwrap_or_default());
+                    code.checkcast(ci);
+                }
                 _ if rt.is_array() => {
                     let ci = self.cw.class_ref(&type_descriptor(rt));
                     code.checkcast(ci);
@@ -255,4 +263,14 @@ impl Emitter<'_> {
         }
         self.narrow_invocation_result(ret, code);
     }
+}
+
+/// The internal name of `ty` when it is one of the unsigned array classes (`kotlin/UIntArray`).
+fn unsigned_array_class(ty: Ty) -> Option<String> {
+    let classifier = ty.non_null().obj_internal()?;
+    matches!(
+        krusty::types::prim_array_element(classifier)?,
+        Ty::UByte | Ty::UShort | Ty::UInt | Ty::ULong
+    )
+    .then(|| classifier.render())
 }
