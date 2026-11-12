@@ -328,7 +328,7 @@ impl BackendCallableFact {
     ) -> Option<&crate::libraries::KlibBodyClassContract> {
         let module = &self.dependency_callable.as_ref()?.module;
         synthesized_singleton_class(module, singleton, || {
-            synthesize_singleton_class(self, singleton)
+            crate::libraries::KlibBodyClassContract::singleton_object(module, singleton.classifier)
         })
     }
 }
@@ -356,63 +356,6 @@ fn synthesized_singleton_class(
     let contract = Box::leak(Box::new(synthesize()?));
     classes.insert(key, contract);
     Some(contract)
-}
-
-fn synthesize_singleton_class(
-    fact: &BackendCallableFact,
-    singleton: SingletonDispatch,
-) -> Option<crate::libraries::KlibBodyClassContract> {
-    let module = fact.dependency_callable.as_ref()?.module.clone();
-    let mut segments = Vec::new();
-    let mut current = singleton.classifier;
-    loop {
-        if current == TypeName::ROOT {
-            break;
-        }
-        segments.push(current.segment_ref());
-        match current.parent() {
-            Some(parent) if parent != TypeName::ROOT => current = parent,
-            _ => break,
-        }
-    }
-    segments.reverse();
-    let (name, package) = segments.split_last()?;
-    if name.contains('$') || name.contains('.') {
-        return None;
-    }
-    let package = package
-        .iter()
-        .map(|&segment| segment.to_owned())
-        .collect::<Vec<_>>();
-    let signature = crate::metadata::id_signature::metadata_class_signature(
-        crate::metadata::id_signature::MetadataContainer {
-            package: &package,
-            classes: &[],
-            native_interop_library: false,
-        },
-        crate::metadata::id_signature::MetadataClass {
-            name,
-            type_params: &[],
-            expect: false,
-        },
-    );
-    Some(crate::libraries::KlibBodyClassContract {
-        module,
-        signature,
-        classifier: singleton.classifier,
-        parameters: crate::libraries::KlibBodyClassParameters {
-            formals: Box::new([]),
-            bounds: Box::new([]),
-            variances: Box::new([]),
-            own_count: 0,
-        },
-        kind: crate::libraries::TypeKind::Object,
-        modality: crate::metadata::semantic::KotlinModality::Final,
-        is_value: false,
-        is_inner: false,
-        is_expect: false,
-        primary_constructor: None,
-    })
 }
 
 #[cfg(test)]
