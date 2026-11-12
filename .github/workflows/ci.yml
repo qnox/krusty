@@ -641,6 +641,8 @@ jobs:
     runs-on: [self-hosted, rust-4c-8gb]
     env:
       KRUSTY_BOX_CASE_TIMEOUT_MS: '8000'
+      # Each target row keeps its own kotlinc box reference cache; see its restore step.
+      BOX_REFERENCES: box-reference-classes-${{ matrix.target != 'jvm' && format('{0}-', matrix.target) || '' }}${{ matrix.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - *mq-base
@@ -770,14 +772,24 @@ jobs:
       # Owned Native/Wasm cases require these same JVM oracle inventories.
       # The bytecodeText and bytecodeListing reference checks in the non-box step compile through
       # the same cache, so master saves it after that step and pull requests replay those compiles.
+      # The focused Native and Wasm tests compile JVM oracles no JVM row reads (about 30 per Kotlin
+      # version), so each of those rows saves its own copy. The JVM row's cache seeds a row that has
+      # none yet, and that row's first save keeps only the entries its own run read or compiled.
       - name: restore kotlinc box references (${{ matrix.version }})
         id: box-references
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/ref-classes
-          key: box-reference-classes-${{ matrix.version }}-${{ steps.base.outputs.sha }}
+          key: ${{ env.BOX_REFERENCES }}-${{ steps.base.outputs.sha }}
           restore-keys: |
+            ${{ env.BOX_REFERENCES }}-
             box-reference-classes-${{ matrix.version }}-
+      - name: mark seeded kotlinc box references (${{ matrix.version }})
+        id: box-references-seeded
+        if: >-
+          matrix.target != 'jvm' && github.ref == 'refs/heads/master'
+          && !startsWith(steps.box-references.outputs.cache-matched-key, format('{0}-', env.BOX_REFERENCES))
+        run: mkdir -p target && touch target/ref-classes-seeded
       - name: download conformance binary
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -893,21 +905,23 @@ jobs:
       # a cut-short run never reached stay until they have gone a week unread.
       - name: prune kotlinc box references (${{ matrix.version }})
         if: >-
-          !cancelled() && matrix.target == 'jvm' && github.ref == 'refs/heads/master'
+          !cancelled() && github.ref == 'refs/heads/master'
           && steps.box-references.outputs.cache-hit != 'true'
-        run: scripts/prune-reference-cache.sh target/cache/ref-classes 7
+        run: >-
+          scripts/prune-reference-cache.sh target/cache/ref-classes 7
+          ${{ steps.box-references-seeded.outcome == 'success' && 'target/ref-classes-seeded' || '' }}
       # Also after a failed or timed-out run: each entry is published whole (an OK or FAILED marker
       # renamed into place) and only for a complete compile, so what a cut-short run saves is exact.
       # A cold cache takes longer than the lane's deadline on the slower runners; saving only on
       # success left it cold for every queue run.
       - name: save kotlinc box references (${{ matrix.version }})
         if: >-
-          !cancelled() && matrix.target == 'jvm' && github.ref == 'refs/heads/master'
+          !cancelled() && github.ref == 'refs/heads/master'
           && steps.box-references.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/ref-classes
-          key: box-reference-classes-${{ matrix.version }}-${{ github.sha }}
+          key: ${{ env.BOX_REFERENCES }}-${{ github.sha }}
       - name: save recorded kotlinc bytes (${{ matrix.version }})
         if: matrix.target == 'jvm' && steps.recorded-mode.outputs.write == '1'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

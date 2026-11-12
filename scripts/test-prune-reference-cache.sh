@@ -39,6 +39,22 @@ for dropped in stale-ok stale-failed 0123.stage42-0; do
   [ ! -e "$cache/$dropped" ] || fail "$dropped was kept"
 done
 
+# A read-since file keeps only the entries read after it, within the age limit.
+entry seeded-ok OK 2
+entry read-ok OK 0
+touch -d '-1 days' "$work/restored"
+touch "$cache/read-ok/OK"
+out=$("$prune" "$cache" 7 "$work/restored")
+[ "$out" = "reference cache: kept 2 entries, dropped 3 unread for 7+ days, unread since $work/restored, or unpublished" ] \
+  || fail "read-since summary: $out"
+for kept in fresh-ok read-ok; do
+  [ -f "$cache/$kept/main/pkg/A.class" ] || fail "$kept was dropped with a read-since file"
+done
+for dropped in recent-ok fresh-failed seeded-ok; do
+  [ ! -e "$cache/$dropped" ] || fail "$dropped was kept with a read-since file"
+done
+if "$prune" "$cache" 7 "$work/absent" 2>/dev/null; then fail "accepted a missing read-since file"; fi
+
 out=$("$prune" "$work/missing" 7)
 [ -z "$out" ] || fail "a missing cache printed: $out"
 

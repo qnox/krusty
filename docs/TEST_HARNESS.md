@@ -377,7 +377,10 @@ names only the Kotlin version: a change to how references are planned, invoked, 
 `REF_CACHE_SALT` in `tests/box_reference_classes.rs`, which re-keys every entry, while any other
 harness edit keeps the cache. A read refreshes an entry's `OK`/`FAILED` marker time, and before
 master saves, `scripts/prune-reference-cache.sh` drops entries unread for a week, so the cache
-tracks the current suite instead of growing with every input it ever compiled. Each entry additionally uses the recorded-byte archive's process-memoized content
+tracks the current suite instead of growing with every input it ever compiled. The Native and Wasm
+rows keep their own copy (`box-reference-classes-<target>-<version>-…`) for the JVM oracles of their
+focused tests. A row without one starts from the JVM row's cache, and its first save keeps only the
+entries that run read or compiled. Each entry additionally uses the recorded-byte archive's process-memoized content
 identity for the complete selected kotlinc installation, the exact JDK selected to run kotlinc and
 javac (`KRUSTY_REF_JAVA_HOME` before `JAVA_HOME`), the mock JDK when selected, and every explicit
 classpath dependency. Those immutable inputs are hashed once per process. Replacing a distribution
