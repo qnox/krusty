@@ -1,8 +1,8 @@
 //! The runtime shapes Kotlin's `is` expands into, built once for every common-IR producer.
 //!
-//! Checked FIR lowering and KLIB body lowering both lower `is`. Each decides which test applies
-//! from the facts it owns. The IR they produce for that test is built here, so the two cannot
-//! drift apart.
+//! Checked FIR lowering and KLIB body lowering both lower `is`. The test a nullable target takes,
+//! and the IR every test produces, are chosen and built here, so the two cannot drift apart. Each
+//! caller keeps only the facts it owns, such as reified targets or an erased upper bound.
 
 use super::{ExprId, IrBinOp, IrBindingStability, IrConst, IrExpr, IrFile, IrTypeOp};
 use crate::types::Ty;
@@ -20,7 +20,7 @@ pub(crate) fn admits_null_at_runtime(ty: Ty) -> bool {
 
 /// Where a tested operand is read from twice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TestedOperand {
+enum TestedOperand {
     /// The operand is a stable read of this slot, tested in place.
     Stable(u32),
     /// The operand is evaluated once into this fresh temporary slot.
@@ -67,14 +67,41 @@ impl IrFile {
         })
     }
 
+    /// `operand is target` (or `!is`) for a target that admits `null` and is not a reified type
+    /// parameter, as kotlinc's `TypeOperatorLowering.lowerInstanceOf` shapes it from the operand's
+    /// type: an operand that admits `null` is bound once (`irLetS`) and becomes
+    /// `tmp == null || tmp is T`, negated for `!is`; any other operand tests the non-null target,
+    /// so `x is String?` for a non-null `x` is `x is String`.
+    ///
+    /// A stable read is tested in place. Any other operand is evaluated once into the temporary
+    /// slot `temporary` allocates, which is asked for only then.
+    pub(crate) fn nullable_target_type_test(
+        &mut self,
+        negated: bool,
+        operand: ExprId,
+        operand_type: Ty,
+        target: Ty,
+        temporary: impl FnOnce() -> u32,
+    ) -> ExprId {
+        let tested = target.non_null();
+        if !admits_null_at_runtime(operand_type) {
+            return self.instance_check(negated, operand, tested);
+        }
+        let read = match self.stable_value_read(operand) {
+            Some(slot) => TestedOperand::Stable(slot),
+            None => TestedOperand::Temporary(temporary()),
+        };
+        let test = self.null_or_instance(operand, tested, read);
+        if negated {
+            self.add_negation(test)
+        } else {
+            test
+        }
+    }
+
     /// kotlinc's `irLetS(operand) { tmp -> tmp == null || tmp is target }`, for a nullable
     /// operand tested against a nullable target. `target` is the non-null classifier tested.
-    pub(crate) fn null_or_instance(
-        &mut self,
-        operand: ExprId,
-        target: Ty,
-        tested: TestedOperand,
-    ) -> ExprId {
+    fn null_or_instance(&mut self, operand: ExprId, target: Ty, tested: TestedOperand) -> ExprId {
         let (declaration, slot) = match tested {
             TestedOperand::Stable(slot) => (None, slot),
             TestedOperand::Temporary(slot) => {
