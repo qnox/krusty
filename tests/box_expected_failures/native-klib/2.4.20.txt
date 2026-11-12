@@ -21,9 +21,7 @@ annotations/instances/multifileEqHc.kt
 annotations/instances/multimoduleTypeParams.kt
 annotations/instances/nested.kt
 annotations/instances/typeAliasesAndGenericsInterop.kt
-annotations/selfReferentialAnnotation.kt
 annotations/typeAnnotations/checkingNotincorporatedInputTypes.kt
-argumentOrder/varargAndDefaultParameters_ForNative.kt
 arithmetic/basic_charConversions.kt
 arithmetic/basic_charCornerCases.kt
 arithmetic/basic_compareIntToFloat.kt
@@ -1560,11 +1558,7 @@ multiplatform/k2/hmpp/typealiasNameClash.kt
 multiplatform/k2/internalOverride2.kt
 multiplatform/k2/kt66970.kt
 nameBasedDestructuring/fullFormExtraPropType.kt
-nameBasedDestructuring/fullFormFromSmartCast.kt
-nameBasedDestructuring/fullFormLoopsAndLambdas.kt
 nameBasedDestructuring/shortFormExtraPropType.kt
-nameBasedDestructuring/shortFormFromSmartCast.kt
-nameBasedDestructuring/shortFormLoopsAndLambdas.kt
 nonLocalReturns/suspendConversion.kt
 nothingValue/nothingValueException.kt
 object/constructor0.kt
@@ -2483,8 +2477,6 @@ syntheticAccessors/kt10047.kt
 syntheticAccessors/kt9958.kt
 syntheticAccessors/kt9958Interface.kt
 syntheticAccessors/protectedMemberReferenceAccessor/kt46597_property.kt
-toArray/kt3177-toTypedArray.kt
-toArray/returnToTypedArray.kt
 topLevelInitializtion/concurrent.kt
 topLevelInitializtion/failInInitializer1.kt
 topLevelInitializtion/failInInitializer2.kt
@@ -2554,7 +2546,6 @@ when/enumOptimization/manyWhensWithinClass.kt
 when/enumOptimization/nullability.kt
 when/enumOptimization/subjectAny.kt
 when/enumOptimization/withoutElse.kt
-when/guard/whenWithGuard.kt
 when/is.kt
 when/kt45081.kt
 when/range.kt
@@ -2567,16 +2558,7 @@ when/stringOptimization/nullability.kt
 when/stringOptimization/sameHashCode.kt
 when/stringOptimization/statement.kt
 when/stringOptimization/temporaryVarInWhenByStringIsDisposedProperly.kt
-when/switchOptimizationDense.kt
-when/switchOptimizationMultipleConditions.kt
-when/switchOptimizationSparse.kt
-when/switchOptimizationStatement.kt
-when/switchOptimizationTypes.kt
-when/switchOptimizationUnordered.kt
-when/switchOptimizationWithGap.kt
 when/whenArgumentIsEvaluatedOnlyOnce.kt
-when/whenSubjectVariable/denseIntSwitchWithSubjectVariable.kt
-when/whenSubjectVariable/sparseIntSwitchWithSubjectVariable.kt
 when/whenSubjectVariable/whenByEnum.kt
 when/whenSubjectVariable/whenByNullableEnum.kt
 when/whenSubjectVariable/whenByString.kt
