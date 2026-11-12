@@ -483,46 +483,6 @@ jobs:
           run_with_deadline "$KRUSTY_E2E_TIMEOUT_SECONDS" "$E2E_BINARY" plugin_host_compiler_e2e:: --include-ignored --test-threads=1
       - *save-plugin-host-runtime
 
-  # Each artifact family has one producer. They run on separate hosted runners so the conformance
-  # matrix waits for the slowest required build instead of serializing every unrelated target graph
-  # on one runner. Consumers never compile krusty again.
-  build-conformance-bin:
-    runs-on: [self-hosted, rust-4c-8gb]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
-        with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          # Queue branches restore master's entries but never save their own: per-branch copies
-          # overflowed the repository cache and evicted the master entries every branch restores.
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-      # Self-hosted runners have no JDK on PATH (ubuntu-latest defaults to 17); the justfile runs
-      # `java -version`.
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
-        with:
-          distribution: zulu
-          java-version: '17'
-      - *just-on-path
-      - *install-just
-      - name: build conformance binary
-        run: |
-          set -euo pipefail
-          source scripts/phase-timing.sh
-          phase_log_prefix=conformance-bin
-          PHASE_TIMING_LOG="$(mktemp)"
-          trap 'phase_report || true' EXIT
-          phase_begin conformance-test-binary
-          bin=$(just conformance-bin)
-          phase_end conformance-test-binary
-          cp "$bin" conformance-bin
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: conformance-bin
-          path: conformance-bin
-          if-no-files-found: error
-
   # The KLIB implementation-coverage ratchet needs the compiler unit binary, whose build takes about
   # three times as long as the conformance binary. Its own job keeps that build off the conformance
   # rows' critical path; no row waits for it, and it checks every release's exact Native and Wasm
@@ -601,21 +561,30 @@ jobs:
         run: |
           echo "matrix=$(just matrix-json)" >> "$GITHUB_OUTPUT"
           echo "max=$(just max-version)" >> "$GITHUB_OUTPUT"
-      - name: build compiler and Gradle test binaries
+      # One job builds every prebuilt Rust binary the later jobs run: the conformance binary, the
+      # krusty CLI and the krusty-build test binary all link one krusty library. In separate jobs
+      # the conformance build compiled krusty a second time, with its test dependencies' features.
+      - name: build conformance, compiler and Gradle test binaries
         run: |
           set -euo pipefail
           source scripts/phase-timing.sh
           phase_log_prefix=tool-bins
           PHASE_TIMING_LOG="$(mktemp)"
           trap 'phase_report || true' EXIT
-          phase_begin krusty-cli
-          cargo build --profile gate -p krusty-cli
-          phase_end krusty-cli
+          phase_begin conformance-and-cli
+          bin=$(just conformance-bin-and-cli)
+          phase_end conformance-and-cli
+          cp "$bin" conformance-bin
           cp target/gate/krusty krusty
           phase_begin krusty-build-tests
           bin=$(just krusty-build-tests)
           phase_end krusty-build-tests
           cp "$bin" krusty-build-tests
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: conformance-bin
+          path: conformance-bin
+          if-no-files-found: error
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tool-bins
@@ -626,7 +595,7 @@ jobs:
 
   conformance:
     name: conformance (${{ matrix.version }}, ${{ matrix.target }})
-    needs: [build-conformance-bin, build-tool-bins]
+    needs: build-tool-bins
     strategy:
       fail-fast: false
       matrix:
@@ -641,6 +610,8 @@ jobs:
     runs-on: [self-hosted, rust-4c-8gb]
     env:
       KRUSTY_BOX_CASE_TIMEOUT_MS: '8000'
+      # Each target row keeps its own kotlinc box reference cache; see its restore step.
+      BOX_REFERENCES: box-reference-classes-${{ matrix.target != 'jvm' && format('{0}-', matrix.target) || '' }}${{ matrix.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - *mq-base
@@ -770,19 +741,32 @@ jobs:
       # Owned Native/Wasm cases require these same JVM oracle inventories.
       # The bytecodeText and bytecodeListing reference checks in the non-box step compile through
       # the same cache, so master saves it after that step and pull requests replay those compiles.
+      # The focused Native and Wasm tests compile JVM oracles no JVM row reads (about 30 per Kotlin
+      # version), so each of those rows saves its own copy. The JVM row's cache seeds a row that has
+      # none yet, and that row's first save keeps only the entries its own run read or compiled.
       - name: restore kotlinc box references (${{ matrix.version }})
         id: box-references
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/ref-classes
-          key: box-reference-classes-${{ matrix.version }}-${{ steps.base.outputs.sha }}
+          key: ${{ env.BOX_REFERENCES }}-${{ steps.base.outputs.sha }}
           restore-keys: |
+            ${{ env.BOX_REFERENCES }}-
             box-reference-classes-${{ matrix.version }}-
+      - name: mark seeded kotlinc box references (${{ matrix.version }})
+        id: box-references-seeded
+        if: >-
+          matrix.target != 'jvm' && github.ref == 'refs/heads/master'
+          && !startsWith(steps.box-references.outputs.cache-matched-key, format('{0}-', env.BOX_REFERENCES))
+        run: mkdir -p target && touch target/ref-classes-seeded
       - name: download conformance binary
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: conformance-bin
+      # Only the JVM row runs the compiler binary (its box step and the CLI conformance). The Native
+      # and Wasm rows drive the compiler in-process from the conformance binary.
       - name: download compiler binary
+        if: matrix.target == 'jvm'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
@@ -899,21 +883,23 @@ jobs:
       # a cut-short run never reached stay until they have gone a week unread.
       - name: prune kotlinc box references (${{ matrix.version }})
         if: >-
-          !cancelled() && matrix.target == 'jvm' && github.ref == 'refs/heads/master'
+          !cancelled() && github.ref == 'refs/heads/master'
           && steps.box-references.outputs.cache-hit != 'true'
-        run: scripts/prune-reference-cache.sh target/cache/ref-classes 7
+        run: >-
+          scripts/prune-reference-cache.sh target/cache/ref-classes 7
+          ${{ steps.box-references-seeded.outcome == 'success' && 'target/ref-classes-seeded' || '' }}
       # Also after a failed or timed-out run: each entry is published whole (an OK or FAILED marker
       # renamed into place) and only for a complete compile, so what a cut-short run saves is exact.
       # A cold cache takes longer than the lane's deadline on the slower runners; saving only on
       # success left it cold for every queue run.
       - name: save kotlinc box references (${{ matrix.version }})
         if: >-
-          !cancelled() && matrix.target == 'jvm' && github.ref == 'refs/heads/master'
+          !cancelled() && github.ref == 'refs/heads/master'
           && steps.box-references.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/ref-classes
-          key: box-reference-classes-${{ matrix.version }}-${{ github.sha }}
+          key: ${{ env.BOX_REFERENCES }}-${{ github.sha }}
       - name: save recorded kotlinc bytes (${{ matrix.version }})
         if: matrix.target == 'jvm' && steps.recorded-mode.outputs.write == '1'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1103,19 +1089,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Every release in the kotlin-versions manifest runs on the newest validated Gradle; the
-        # rows below add the older Gradle boundaries.
+        # Every release in the kotlin-versions manifest runs the full suite on the newest validated
+        # Gradle. The rows below add the older Gradle boundaries, which run the boundary suite: the
+        # builds whose Gradle API surface differs by Gradle release (task wiring, the configuration
+        # and build caches, kotlin-dsl's embedded compiler, kapt, KSP, multiplatform and the verify
+        # report). Every other test exercises the plugin and KGP, which the full lanes cover.
         kotlin: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
         gradle: [9.7.0]
         ksp: [true]
+        suite: [full]
         include:
           # KSP's Gradle plugin does not load on Gradle 7.6 (its build-script metadata is newer than
           # Gradle 7.6's embedded Kotlin compiler reads), so the KSP2 test runs on the other lanes.
-          - { kotlin: 2.4.0,  gradle: 7.6.3,  ksp: false }
-          - { kotlin: 2.4.0,  gradle: 9.5.0,  ksp: true }
-          - { kotlin: 2.4.10, gradle: 8.14.3, ksp: true }
-          - { kotlin: 2.4.20, gradle: 7.6.3,  ksp: false }
+          - { kotlin: 2.4.0,  gradle: 7.6.3,  ksp: false, suite: boundary }
+          - { kotlin: 2.4.0,  gradle: 9.5.0,  ksp: true,  suite: boundary }
+          - { kotlin: 2.4.10, gradle: 8.14.3, ksp: true,  suite: boundary }
+          - { kotlin: 2.4.20, gradle: 7.6.3,  ksp: false, suite: boundary }
     runs-on: [self-hosted, rust-4c-8gb]
+    # A lane takes under 10 minutes; one stuck on its runner (a download that never finished) ran for
+    # hours, holding the batch that waits on it.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1198,13 +1191,15 @@ jobs:
         run: |
           chmod +x krusty krusty-build-tests
           tests="kotlin_compiler_slice_compiles_through_krusty kotlin_dsl_build_src_compiles_through_krusty"
-          tests="$tests serialization_plugin_compiles_through_krusty kapt_project_compiles_through_krusty"
-          tests="$tests verify_task_reports_krusty_against_kotlinc verify_task_reports_only_the_current_invocation"
-          tests="$tests verify_task_reports_an_unsupported_kotlin_gradle_plugin verify_task_reports_projects_that_each_load_the_plugin"
-          tests="$tests verify_task_reports_kotlin_dsl_compiles_after_kotlinc_compiles_them"
-          tests="$tests verify_task_reports_a_kotlin_gradle_plugin_older_than_the_plugin_api"
-          tests="$tests multiplatform_jvm_compiles_through_krusty body_only_dependency_edit_keeps_dependent_compile_up_to_date"
-          tests="$tests oss_corpus_init_script_applies_the_packaged_plugin"
+          tests="$tests kapt_project_compiles_through_krusty multiplatform_jvm_compiles_through_krusty"
+          tests="$tests verify_task_reports_krusty_against_kotlinc verify_task_reports_kotlin_dsl_compiles_after_kotlinc_compiles_them"
+          if [ "${{ matrix.suite }}" = full ]; then
+            tests="$tests serialization_plugin_compiles_through_krusty verify_task_reports_only_the_current_invocation"
+            tests="$tests verify_task_reports_an_unsupported_kotlin_gradle_plugin verify_task_reports_projects_that_each_load_the_plugin"
+            tests="$tests verify_task_reports_a_kotlin_gradle_plugin_older_than_the_plugin_api"
+            tests="$tests body_only_dependency_edit_keeps_dependent_compile_up_to_date"
+            tests="$tests oss_corpus_init_script_applies_the_packaged_plugin"
+          fi
           if [ "${{ matrix.ksp }}" = true ]; then
             tests="$tests ksp2_generated_sources_compile_through_krusty"
           fi

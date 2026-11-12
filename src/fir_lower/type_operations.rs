@@ -6,16 +6,7 @@ use crate::types::{stored_value_ty, Ty, TyKind};
 
 use super::{BodyLowering, FirLoweringFailure};
 
-/// The language-defined answer for an instance check which does not depend on the operand.
-fn settled_instance_answer(target: Ty) -> Option<bool> {
-    (target.non_null().canonical_semantic() == Ty::Nothing).then_some(false)
-}
-
-/// kotlin IR's `IrType.isNullable()`: a nullable or flexible occurrence, or a type parameter whose
-/// bound admits `null`. A definitely-non-null `T & Any` does not.
-fn admits_null_at_runtime(ty: Ty) -> bool {
-    ty.admits_null() || (ty.is_ty_param() && ty.upper_bound_admits_null())
-}
+use crate::ir::{admits_null_at_runtime, settled_instance_answer};
 
 impl BodyLowering<'_> {
     /// `operand is target` (or `!is`), with the one case the LANGUAGE settles folded.
@@ -44,31 +35,7 @@ impl BodyLowering<'_> {
         operand: crate::ir::ExprId,
         target: crate::types::Ty,
     ) -> crate::ir::ExprId {
-        if let Some(answer) = settled_instance_answer(target) {
-            let answer = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(if negated {
-                !answer
-            } else {
-                answer
-            })));
-            let block = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![operand],
-                value: Some(answer),
-            });
-            // This synthesized value-bearing block has no source FIR node whose finalization can
-            // attach the result of the settled semantic check.
-            self.ir.set_logical_type(block, Ty::Boolean);
-            return block;
-        }
-        let op = if negated {
-            IrTypeOp::NotInstanceOf
-        } else {
-            IrTypeOp::InstanceOf
-        };
-        self.ir.add_expr(IrExpr::TypeOp {
-            op,
-            arg: operand,
-            type_operand: target,
-        })
+        self.ir.instance_check(negated, operand, target)
     }
 
     /// `operand is target` (or `!is`) as kotlinc's `TypeOperatorLowering.lowerInstanceOf` shapes
@@ -96,13 +63,21 @@ impl BodyLowering<'_> {
         if self.is_reified_type_parameter(target) {
             return self.instance_check(negated, operand, target);
         }
-        if admits_null_at_runtime(operand_type) && admits_null_at_runtime(target) {
-            let test = self.null_or_instance(operand, target.non_null());
-            return if negated {
-                self.ir.add_negation(test)
-            } else {
-                test
-            };
+        if admits_null_at_runtime(target) {
+            let next_temporary = &mut self.next_temporary;
+            return self.ir.nullable_target_type_test(
+                negated,
+                operand,
+                operand_type,
+                target,
+                || {
+                    let temporary = *next_temporary;
+                    *next_temporary = next_temporary
+                        .checked_add(1)
+                        .expect("too many FIR lowering temporaries");
+                    temporary
+                },
+            );
         }
         if admits_null_at_runtime(operand_type) && same_erased_upper_bound {
             let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
@@ -117,52 +92,6 @@ impl BodyLowering<'_> {
             });
         }
         self.instance_check(negated, operand, target.non_null())
-    }
-
-    /// `irLetS(operand) { tmp -> tmp == null || tmp is target }`: a stable read is tested in place,
-    /// any other operand is evaluated once into an `Any?` temporary.
-    fn null_or_instance(&mut self, operand: ExprId, target: Ty) -> ExprId {
-        let (declaration, slot) = match self.stable_value_read(operand) {
-            Some(slot) => (None, slot),
-            None => {
-                let temporary = self.allocate_temporary();
-                let declaration = self.ir.add_expr(IrExpr::Variable {
-                    index: temporary,
-                    ty: Ty::nullable(Ty::obj("kotlin/Any")),
-                    init: Some(operand),
-                    named: false,
-                });
-                self.ir.safe_cast_temporaries.insert(declaration);
-                (Some(declaration), temporary)
-            }
-        };
-        let nullable_read = self.ir.add_expr(IrExpr::GetValue(slot));
-        let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-        let null_test = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::RefEq,
-            lhs: nullable_read,
-            rhs: null,
-        });
-        let instance_read = self.ir.add_expr(IrExpr::GetValue(slot));
-        let instance_test = self.instance_check(false, instance_read, target);
-        // `JvmBackendContext.oror` is a plain `when`, not a source `||`: its true branch is a
-        // constant and its else branch the instance test's value.
-        let true_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
-        let test = self.ir.add_expr(IrExpr::When {
-            branches: vec![(Some(null_test), true_value), (None, instance_test)],
-        });
-        self.ir.set_logical_type(test, Ty::Boolean);
-        match declaration {
-            Some(declaration) => {
-                let block = self.ir.add_expr(IrExpr::Block {
-                    stmts: vec![declaration],
-                    value: Some(test),
-                });
-                self.ir.set_logical_type(block, Ty::Boolean);
-                block
-            }
-            None => test,
-        }
     }
 
     /// Whether `target` (or `target?`) is a reified type parameter, whose test an inline call site

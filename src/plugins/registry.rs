@@ -33,11 +33,12 @@ use crate::plugins::assignment::AssignmentPlugin;
 use crate::plugins::atomicfu::AtomicfuPlugin;
 use crate::plugins::cli::{
     PluginConfig, PluginOption, ALLOPEN_PLUGIN_ID, ASSIGNMENT_PLUGIN_ID, ATOMICFU_PLUGIN_ID,
-    COMPOSE_PLUGIN_ID, KAPT_PLUGIN_ID, KSP_PLUGIN_ID, NOARG_PLUGIN_ID, SAM_WITH_RECEIVER_PLUGIN_ID,
-    SCRIPTING_PLUGIN_ID, SERIALIZATION_PLUGIN_ID,
+    COMPOSE_PLUGIN_ID, KAPT_PLUGIN_ID, KSP_PLUGIN_ID, NOARG_PLUGIN_ID, PARCELIZE_PLUGIN_ID,
+    SAM_WITH_RECEIVER_PLUGIN_ID, SCRIPTING_PLUGIN_ID, SERIALIZATION_PLUGIN_ID,
 };
 use crate::plugins::compose::{ComposeOptions, ComposePlugin};
 use crate::plugins::noarg::NoArgPlugin;
+use crate::plugins::parcelize::ParcelizePlugin;
 use crate::plugins::sam_with_receiver::SamWithReceiverPlugin;
 use crate::plugins::serialization::{SerializationAbi, SerializationPlugin};
 use crate::plugins::{IrPlugin, PluginHost, PluginRelease};
@@ -437,6 +438,16 @@ fn build_atomicfu(
     ))
 }
 
+/// Build the native Parcelize plugin from the compilation's options for it.
+fn build_parcelize(
+    _act: &Activation,
+    _release: Option<&str>,
+    options: &[PluginOption],
+    _target: Option<CompilationTarget>,
+) -> Box<dyn IrPlugin> {
+    Box::new(ParcelizePlugin::from_options(options))
+}
+
 /// Build the native assignment plugin from the compilation's options for it.
 fn build_assignment(
     _act: &Activation,
@@ -511,6 +522,16 @@ impl PluginRegistry {
             kind: ExtensionKind::PartialNative(build_atomicfu),
             option_keys: Some(&[]),
             unimplemented_options: &[],
+        });
+        r.register(RegisteredExtension {
+            plugin_id: PARCELIZE_PLUGIN_ID,
+            registrar: "org.jetbrains.kotlin.parcelize.ParcelizeComponentRegistrar",
+            kind: ExtensionKind::PartialNative(build_parcelize),
+            option_keys: Some(&["additionalAnnotation", "experimentalCodeGeneration"]),
+            unimplemented_options: &[(
+                "experimentalCodeGeneration",
+                OptionSetting::Exactly("true"),
+            )],
         });
         r.register(RegisteredExtension {
             plugin_id: KSP_PLUGIN_ID,
@@ -805,6 +826,7 @@ mod tests {
         assert!(r.is_registered(SAM_WITH_RECEIVER_PLUGIN_ID));
         assert!(r.is_registered(COMPOSE_PLUGIN_ID));
         assert!(r.is_registered(ATOMICFU_PLUGIN_ID));
+        assert!(r.is_registered(PARCELIZE_PLUGIN_ID));
         assert!(r.is_registered(KSP_PLUGIN_ID));
     }
 
