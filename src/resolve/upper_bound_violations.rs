@@ -89,9 +89,11 @@ pub(crate) fn check_finalized_top_level_type_alias_bounds(
             file_index as u32,
             Some(files),
             symbols,
-            Some(index),
-            None,
-            None,
+            super::CheckerIndexes {
+                resolved_index: Some(index),
+                active_declarations: None,
+                streamed_cache: None,
+            },
             diags,
         );
         checker.push_file_policies(index.file_lexical_policies(source));

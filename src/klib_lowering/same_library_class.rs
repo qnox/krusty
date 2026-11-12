@@ -117,6 +117,9 @@ pub(super) struct PreparedMember<'a> {
     pub(super) header: FunctionHeader,
     /// Interface members this function overrides, authenticated against the admitted supertypes.
     pub(super) overrides: Vec<MemberOverride>,
+    pub(super) visibility: Visibility,
+    /// Whether the function is its property's setter.
+    pub(super) setter: bool,
 }
 
 /// An overridden member, joined by its checked dependency identity.
@@ -172,6 +175,44 @@ pub(super) fn substitute_applied_signature(
             .collect(),
         crate::types::ty_subst_applied_arguments(result, &bindings),
     ))
+}
+
+/// The override edge of an object member to the declaration `identity`, which the producer
+/// published as the member's overridden symbol.
+///
+/// `declarations` is the provider's registry. `None` when it realizes no declaration of that exact
+/// identity. A getter answers only a property member and a function only a function member; a
+/// setter is never an object literal's override.
+pub(super) fn declared_override(
+    identity: KlibDependencyCallable,
+    declarations: &dyn crate::symbol_source::SymbolSource,
+    supertypes: &[Ty],
+    property: bool,
+    applied_supertype: &dyn Fn(Ty, TypeName) -> Option<Ty>,
+) -> Result<Option<MemberOverride>, KlibBodyDeclineReason> {
+    let Some((_, realization)) = declarations.external_callable_by_dependency(&identity) else {
+        return Ok(None);
+    };
+    let getter = realization
+        .klib_body_accessor
+        .as_ref()
+        .map(|accessor| matches!(accessor.role, crate::libraries::KlibAccessorRole::Getter));
+    match getter {
+        Some(false) => {
+            return Err(mismatch("an object literal overrides a property setter"));
+        }
+        Some(true) if !property => return Err(mismatch("a function overrides a property")),
+        None if property => return Err(mismatch("a property overrides a function")),
+        Some(true) | None => {}
+    }
+    realized_member_override(
+        identity,
+        &realization,
+        property,
+        supertypes,
+        applied_supertype,
+    )
+    .map(Some)
 }
 
 /// The override `realization` declares, viewed through one of `supertypes`.
@@ -328,6 +369,8 @@ pub(super) struct PreparedLocalClass<'a> {
     pub(super) access: IrConstructorAccess,
     pub(super) formals: Vec<Ty>,
     pub(super) class_type_parameters: Vec<String>,
+    /// The declared bounds of each class type parameter, in its order.
+    pub(super) class_type_parameter_bounds: Vec<Vec<Ty>>,
     pub(super) constructor_symbol: &'a KlibIrSymbol,
     pub(super) arena: &'a KlibIrArena,
     pub(super) receiver_symbol: &'a KlibIrSymbol,
@@ -550,6 +593,189 @@ fn prepare<'a>(
 ) -> Result<PreparedLocalClass<'a>, KlibBodyDeclineReason> {
     let class_name = classifier(source.bodies, source.module, &class.base.symbol.signature)?
         .ok_or_else(non_public_type)?;
+    let resolve = |signature: &KlibIrSignature| classifier(source.bodies, source.module, signature);
+    let formals = class_formals(arena, class, &resolve)?;
+    prepare_class(
+        source,
+        signature,
+        ClassDeclaration {
+            arena,
+            class,
+            function,
+            key,
+            class_name,
+        },
+        formals,
+    )
+}
+
+/// One class declaration and the constructor that builds it, with the identity it is cached by.
+struct ClassDeclaration<'a> {
+    arena: &'a KlibIrArena,
+    class: &'a KlibIrClass,
+    function: &'a KlibIrFunction,
+    key: LocalIdentity,
+    class_name: TypeName,
+}
+
+/// The public class that declares `selected`, a constructor or member of it, prepared as a
+/// file-local class is, with the identity of the constructor that publishes its allocation. Its
+/// formals are its provider contract's, so the members it publishes carry the same type
+/// parameters a source call substitutes. A class of a shape this path does not materialize,
+/// such as an open class or one with nested classes, is not prepared.
+pub(super) fn prepare_public<'a>(
+    source: LocalClassSource<'a, '_>,
+    selected: crate::libraries::KlibBodyCallable<'_>,
+) -> Result<Option<(PreparedLocalClass<'a>, KlibDependencyCallable)>, KlibBodyDeclineReason> {
+    let header = super::class_headers::authenticate(selected, source.bodies)?;
+    let contract = header.contract;
+    let Some(primary) = &contract.primary_constructor else {
+        return Ok(None);
+    };
+    if contract.kind != TypeKind::Class
+        || contract.is_builtin_type()
+        || contract.modality != crate::metadata::semantic::KotlinModality::Final
+        || contract.is_value
+        || contract.is_inner
+        || contract.is_expect
+        || header.class.value_class_representation.is_some()
+        || header.class.members.iter().any(|member| {
+            matches!(
+                member,
+                KlibIrMember::Class(_) | KlibIrMember::EnumEntry(_) | KlibIrMember::TypeAlias(_)
+            )
+        })
+    {
+        return Ok(None);
+    }
+    let arena = header.arena;
+    let class = header.class;
+    let wanted = KlibIrSignature::Public(primary.clone());
+    let mut constructors = class.members.iter().filter_map(|member| match member {
+        KlibIrMember::Function(id) => Some(arena.function(*id)).filter(|f| f.constructor),
+        _ => None,
+    });
+    let (Some(function), None) = (constructors.next(), constructors.next()) else {
+        // A class with secondary constructors is not this path's yet.
+        return Ok(None);
+    };
+    if !materializes_shape(source.bodies, &contract.module, arena, class, function) {
+        return Ok(None);
+    }
+    if function.base.symbol.signature != wanted {
+        return Err(mismatch(
+            "a class's only constructor is not its primary constructor",
+        ));
+    }
+    let formals = ClassFormals {
+        formals: contract.parameters.formals.to_vec(),
+        variances: contract.parameters.variances.to_vec(),
+        bounds: contract.parameters.bounds.to_vec(),
+        types: header.types,
+    };
+    let key = LocalIdentity {
+        module: contract.module.clone(),
+        signature: class.base.symbol.signature.clone(),
+    };
+    let constructor = KlibDependencyCallable {
+        module: contract.module.clone(),
+        declaration: KlibDeclarationSignature::Public(primary.clone()),
+    };
+    let prepared = prepare_class(
+        source,
+        &wanted,
+        ClassDeclaration {
+            arena,
+            class,
+            function,
+            key,
+            class_name: contract.classifier,
+        },
+        formals,
+    )?;
+    Ok(Some((prepared, constructor)))
+}
+
+/// Whether `class` has a shape this path materializes, decided from its declarations before any
+/// authentication can fail: every supertype is `kotlin.Any` or an interface; every member function
+/// and accessor has a body, and overrides only non-generic interface functions; and its only
+/// constructor takes no vararg and does nothing but delegate and initialize its instance. Another
+/// shape, such as a subclass, an override of a class member or of a property accessor, or a vararg
+/// constructor, is left to its target realization.
+fn materializes_shape(
+    bodies: &KlibDeclarationBodies,
+    module: &str,
+    arena: &KlibIrArena,
+    class: &KlibIrClass,
+    constructor: &KlibIrFunction,
+) -> bool {
+    let any = KlibIrSignature::Public(KlibPublicIdSignature::classifier(crate::types::wk::any()));
+    let interface_supertypes = class.supertypes.iter().all(|supertype| {
+        let KlibIrType::Simple { classifier, .. } = arena.ty(*supertype) else {
+            return false;
+        };
+        if classifier.signature == any {
+            return true;
+        }
+        let KlibIrSignature::Public(signature) = &classifier.signature else {
+            return false;
+        };
+        matches!(
+            bodies.public_class(module, signature),
+            LocatedClass::One(found) if class_kind(found.base.flags) == TypeKind::Interface
+        )
+    });
+    let mut functions = class.members.iter().flat_map(|member| match member {
+        KlibIrMember::Function(id) => vec![arena.function(*id)],
+        KlibIrMember::Property(property) => [property.getter, property.setter]
+            .into_iter()
+            .flatten()
+            .map(|id| arena.function(id))
+            .collect(),
+        _ => Vec::new(),
+    });
+    let members = functions.all(|function| {
+        function.constructor
+            || (matches!(function.body, Some(KlibIrBody::Block(_)))
+                && function.overridden.iter().all(|symbol| {
+                    symbol.kind == KlibIrSymbolKind::Function
+                        && matches!(symbol.signature, KlibIrSignature::Public(_))
+                        && matches!(
+                            bodies.function_owner(module, &symbol.signature),
+                            LocatedMember::One { class, function, .. }
+                                if class_kind(class.base.flags) == TypeKind::Interface
+                                    && function.type_parameters.is_empty()
+                                    && !function.constructor
+                        )
+                }))
+    });
+    let constructor_shape = constructor
+        .regular_parameters
+        .iter()
+        .all(|parameter| parameter.vararg_element_type.is_none())
+        && matches!(
+            &constructor.body,
+            Some(KlibIrBody::Block(statements)) if matches!(
+                statements.as_slice(),
+                [KlibIrStatement::Expression(_), KlibIrStatement::Expression(_)]
+            )
+        );
+    interface_supertypes && members && constructor_shape
+}
+
+fn prepare_class<'a>(
+    source: LocalClassSource<'a, '_>,
+    signature: &KlibIrSignature,
+    declaration: ClassDeclaration<'a>,
+    formals: ClassFormals,
+) -> Result<PreparedLocalClass<'a>, KlibBodyDeclineReason> {
+    let ClassDeclaration {
+        arena,
+        class,
+        function,
+        key,
+        class_name,
+    } = declaration;
     if declaration_modality(class.base.flags).is_abstract() {
         return Err(unsupported("a non-public abstract class"));
     }
@@ -584,7 +810,7 @@ fn prepare<'a>(
         formals,
         variances,
         bounds,
-    } = class_formals(arena, class, &resolve)?;
+    } = formals;
     let (supertypes, interfaces) =
         authenticate_supertypes(source.bodies, source.module, arena, class, &types, &resolve)?;
     let self_type = Ty::obj_args_name(class_name, &formals);
@@ -630,6 +856,7 @@ fn prepare<'a>(
         .collect::<Result<Vec<_>, _>>()?;
     let init_header =
         local_initializer_header(function, receiver, self_type, arena, &types, &resolve)?;
+    let class_type_parameter_bounds = bounds.clone();
     Ok(PreparedLocalClass {
         key,
         classifier: class_name,
@@ -656,6 +883,7 @@ fn prepare<'a>(
         },
         formals,
         class_type_parameters,
+        class_type_parameter_bounds,
         constructor_symbol: &function.base.symbol,
         arena,
         receiver_symbol: &receiver.base.symbol,
@@ -764,12 +992,15 @@ fn members_and_storage<'a>(
             KlibIrMember::Function(id) => {
                 let function = arena.function(*id);
                 if !function.constructor {
-                    members.push(prepare_member(arena, function, scope)?);
+                    members.push(prepare_member(arena, function, scope, false)?);
                 }
             }
             KlibIrMember::Property(property) => {
-                for id in [property.getter, property.setter].into_iter().flatten() {
-                    members.push(prepare_member(arena, arena.function(id), scope)?);
+                if let Some(id) = property.getter {
+                    members.push(prepare_member(arena, arena.function(id), scope, false)?);
+                }
+                if let Some(id) = property.setter {
+                    members.push(prepare_member(arena, arena.function(id), scope, true)?);
                 }
             }
             KlibIrMember::Field(_) | KlibIrMember::AnonymousInitializer { .. } => {}
@@ -794,6 +1025,7 @@ fn prepare_member<'a>(
     arena: &'a KlibIrArena,
     function: &'a KlibIrFunction,
     scope: &MemberScope<'_>,
+    setter: bool,
 ) -> Result<PreparedMember<'a>, KlibBodyDeclineReason> {
     let statements = match &function.body {
         Some(KlibIrBody::Block(statements)) => statements.as_slice(),
@@ -808,6 +1040,8 @@ fn prepare_member<'a>(
         statements,
         header: local_member_header(function, arena, scope.types, scope.self_type, scope.resolve)?,
         overrides: member_overrides(function, scope)?,
+        visibility: declaration_visibility(function.base.flags),
+        setter,
     })
 }
 
@@ -1125,6 +1359,17 @@ pub(super) fn installed_class(prepared: &PreparedLocalClass<'_>) -> IrClass {
     class.supertypes = prepared.supertypes.clone();
     for interface in &prepared.interfaces {
         class.interfaces.push_name(*interface);
+    }
+    // A generic class keeps its declared formals and their bounds.
+    for (identity, bounds) in prepared
+        .class_type_parameters
+        .iter()
+        .zip(&prepared.class_type_parameter_bounds)
+    {
+        class.type_params.push(identity.clone());
+        class
+            .type_param_bounds
+            .extend(bounds.iter().map(|bound| (identity.clone(), *bound)));
     }
     class.fields = prepared.fields.clone();
     class.ctor_args = prepared.ctor_args.clone();

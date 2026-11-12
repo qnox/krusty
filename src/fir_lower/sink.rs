@@ -390,6 +390,8 @@ impl<'a> CommonIrBodySink<'a> {
         callable: CallableId,
         visiting: &mut crate::fx_hash::HashSet<CallableId>,
     ) -> Result<(), FirFileLoweringFailure> {
+        // A common call of an `expect` inlines the template of the `actual` replacing it.
+        let callable = super::expect_realization::realized_callable(index, callable);
         if self.materialized_inline_callables.contains(&callable) {
             return Ok(());
         }
@@ -1067,6 +1069,12 @@ impl<'a> CommonIrBodySink<'a> {
                     // this skeleton as an enum-entry subclass.
                     entry_class.is_enum_entry = true;
                     let entry_class = self.ir.add_class(entry_class);
+                    // An inner class in the entry body stores this subclass as its enclosing
+                    // instance. That field is authenticated against the declaration's self type.
+                    self.ir.record_declared_class_self_type(
+                        subclass,
+                        crate::types::Ty::obj_name(subclass),
+                    );
                     assert!(
                         self.ir
                             .property_overrides
@@ -1171,7 +1179,7 @@ impl<'a> CommonIrBodySink<'a> {
                 (outer_ty, field_ty)
             } else if let Some(outer) = self.ir.checked_enum_entry_classes.get(&outer).copied() {
                 let outer_ty = crate::types::Ty::obj_name(self.ir.classes[outer as usize].fq_name);
-                (outer_ty.clone(), outer_ty)
+                (outer_ty, outer_ty)
             } else {
                 return Err(FirFileLoweringFailure::MissingClassifier(outer));
             };

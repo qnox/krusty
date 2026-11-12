@@ -312,6 +312,23 @@ impl CallableRegistry {
                         // realized through the receiver's own representation.
                         continue;
                     }
+                    // A published exact export owns even a specialized generic call. Its actual
+                    // operand roles are authenticated from checked substitutions during emission,
+                    // not by comparing specialized parameters to the uninstantiated declaration.
+                    let published = callable
+                        .dependency_callable
+                        .as_ref()
+                        .is_some_and(|identity| self.dependencies.contains_key(identity));
+                    if dispatch_receiver.is_some()
+                        && extension_receiver_parameter.is_none()
+                        && defaults.is_empty()
+                        && super::lower::library_members::dispatches_through_library_member(
+                            ir, callables, expression, callable, published,
+                        )
+                    {
+                        // The member's implementations are reached through its library member.
+                        continue;
+                    }
                     if callable
                         .compiler_operation()
                         .filter(|operation| {
@@ -319,10 +336,7 @@ impl CallableRegistry {
                                 != krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
                         })
                         .is_some_and(super::lower::is_direct_operation)
-                        && !callable
-                            .dependency_callable
-                            .as_ref()
-                            .is_some_and(|identity| self.dependencies.contains_key(identity))
+                        && !published
                     {
                         // Emission realizes this exact operation; there is no dependency entry.
                         continue;
@@ -332,13 +346,6 @@ impl CallableRegistry {
                         *extension_receiver_parameter,
                         dispatch_receiver.is_some(),
                     );
-                    // A published exact export owns even a specialized generic call. Its actual
-                    // operand roles are authenticated from checked substitutions during emission,
-                    // not by comparing specialized parameters to the uninstantiated declaration.
-                    let published = callable
-                        .dependency_callable
-                        .as_ref()
-                        .is_some_and(|identity| self.dependencies.contains_key(identity));
                     let serialized_companion_candidate = dispatch_receiver.is_none()
                         && callable.is_top_level_function()
                         && extension_receiver_parameter
@@ -739,6 +746,7 @@ mod tests {
             compiler_intrinsic: None,
             semantic_role: None,
             overridden_declarations: Box::new([]),
+            builtin_implementations: Box::new([]),
             member_realization: MemberRealization::Dispatch,
             params: vec![Ty::String, Ty::Int],
             physical_params: Vec::new(),

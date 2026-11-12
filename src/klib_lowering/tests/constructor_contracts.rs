@@ -105,7 +105,11 @@ fn klib_constructor_class_contract_survives_declared_and_frozen_views() {
     );
     let raw = libraries
         .declaration_bodies()
-        .class_member_header(&identity, &contract.signature)
+        .class_member_header(
+            &identity,
+            &contract.signature,
+            crate::libraries::KlibAccessorRole::Getter,
+        )
         .expect("the exact declaring class")
         .expect("the constructor is a direct class member");
     assert!(raw.function.constructor);

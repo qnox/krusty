@@ -4,7 +4,8 @@
 //! The families follow Kotlin's scope tower: a declared member property, a member setter, a
 //! read-only member, a member extension from an implicit dispatch receiver, and only then a
 //! top-level extension property. A family is queried only while every higher-priority family is
-//! absent, and only the selected family records facts. In particular an extension's receiver
+//! absent, and only the selected family records facts. A member property the site cannot see
+//! yields all three member families when the read's tower selects an extension instead. In particular an extension's receiver
 //! constraint on a postponed builder call belongs to the extension's selection: a shadowed
 //! `B<String>.p` must not fix `T` when the member `B<T>.p` wins the write.
 
@@ -22,6 +23,7 @@ struct ExplicitWriteSite<'n> {
     value_ty: Ty,
 }
 
+#[derive(Clone, Copy)]
 struct SourcePropertyWrite {
     owner: TypeName,
     ty: Ty,
@@ -63,25 +65,15 @@ impl ExplicitPropertyWrite {
 }
 
 impl Checker<'_> {
-    fn lookup_property_for_write(
-        &self,
-        receiver: Ty,
-        name: &str,
-    ) -> Option<(
-        TypeName,
-        Ty,
-        bool,
-        Option<Visibility>,
-        Option<crate::fir::DeclarationId>,
-    )> {
+    fn lookup_property_for_write(&self, receiver: Ty, name: &str) -> Option<SourcePropertyWrite> {
         if let Some(property) = self.checked_body_local_property_for_write(receiver, name) {
-            return Some((
-                property.owner,
-                property.ty,
-                property.mutable,
-                property.mutable.then_some(property.visibility),
-                property.stable_declaration,
-            ));
+            return Some(SourcePropertyWrite {
+                owner: property.owner,
+                ty: property.ty,
+                is_var: property.mutable,
+                setter_visibility: property.mutable.then_some(property.visibility),
+                stable_declaration: property.stable_declaration,
+            });
         }
         let selected = self
             .resolver()
@@ -89,13 +81,13 @@ impl Checker<'_> {
                 Some((true, 0))
             })?;
         let property = selected.property?;
-        Some((
-            selected.owner,
-            selected.ty,
-            property.setter.is_some(),
-            property.setter.as_ref().map(|_| property.setter_visibility),
-            property.stable_declaration,
-        ))
+        Some(SourcePropertyWrite {
+            owner: selected.owner,
+            ty: selected.ty,
+            is_var: property.setter.is_some(),
+            setter_visibility: property.setter.as_ref().map(|_| property.setter_visibility),
+            stable_declaration: property.stable_declaration,
+        })
     }
 
     /// Select the write target of `receiver.name` on the non-accessor member rungs, in priority
@@ -106,33 +98,31 @@ impl Checker<'_> {
         rt: Ty,
         name: &str,
     ) -> ExplicitPropertyWrite {
-        let source_property = if rt.is_nullable() {
-            None
-        } else {
+        // A member property the site cannot see yields its member rungs to the member extension
+        // or extension property the read's tower selects.
+        let member_rungs =
+            !rt.is_nullable() && !self.invisible_member_property_yields(scope, rt, name);
+        let source_property = if member_rungs {
             rt.obj_internal()
                 .and_then(|_| self.lookup_property_for_write(rt, name))
+        } else {
+            None
         };
-        let setter = (!rt.is_nullable())
+        let setter = member_rungs
             .then(|| self.select_property_setter(rt, name))
             .flatten();
-        if let Some((owner, ty, is_var, setter_visibility, stable_declaration)) = source_property {
-            if is_var || setter.is_none() {
-                return ExplicitPropertyWrite::Source(SourcePropertyWrite {
-                    owner,
-                    ty,
-                    is_var,
-                    setter_visibility,
-                    stable_declaration,
-                });
+        if let Some(property) = source_property {
+            if property.is_var || setter.is_none() {
+                return ExplicitPropertyWrite::Source(property);
             }
         }
         if let Some(setter) = setter {
             return ExplicitPropertyWrite::Setter {
                 setter: Box::new(setter),
-                declared_ty: source_property.map(|(_, ty, _, _, _)| ty),
+                declared_ty: source_property.map(|property| property.ty),
             };
         }
-        if let Some(property) = (!rt.is_nullable())
+        if let Some(property) = member_rungs
             .then(|| self.resolver().select_member_property(rt, name))
             .flatten()
             .and_then(|selected| selected.property)

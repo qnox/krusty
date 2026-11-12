@@ -12,6 +12,7 @@ pub mod class_declarations;
 pub mod class_id;
 pub(crate) mod classifier_inventory;
 pub(crate) mod contract_decoder;
+pub mod declaration_approximation;
 pub(crate) mod declaration_flags;
 pub mod declaration_records;
 pub mod decode;

@@ -2,7 +2,11 @@
 
 The `oss corpus` workflow (`.github/workflows/oss-corpus.yml`, nightly on master and on demand,
 never on pull requests) builds the most-starred Kotlin projects listed in `projects.tsv`, and Now
-in Android as the Android sample, each from a pinned commit with its own Gradle build:
+in Android as the Android sample, each from a pinned commit with its own Gradle build. A row whose
+last field is `lsp` stays in that project set for the language server (`scripts/parity-scan.py`)
+and is not built here; `intellij-community` and `kotlin` are those rows. The scan reports whether
+each module opened completely and how many errors it produced, and it does not time parsing, type
+information, or navigation separately. Each built project runs three builds:
 
 1. **Reference:** a plain build, which compiles with kotlinc.
 2. **krusty:** the same build with the krusty Gradle plugin applied by `krusty.init.gradle`. The
@@ -29,7 +33,9 @@ fails counts as a miss with the first error it logged. With `$CORPUS_VERIFY_RECO
 and lists the record each writes; `run.sh` names `krustyVerify`, which turns verify mode on, and
 excludes it, so only the listed compilations are verified rather than every module and variant.
 `compare.py` adds each compilation's verify outcome and all of its errors. Android modules take part only in a project
-that names a variant in `projects.tsv`, and then only that variant's compiles.
+that names a variant in `projects.tsv`, and then only that variant's compiles. A comma-separated
+list names, in order, the variant each Android module contributes: the first one it has, so an
+app's flavored variant and the build type of the library modules it consumes are compared together.
 
 After each measured build, an unmeasured test build runs the project's own JVM tests on the classes
 that build compiled. `outputs.py --keep` first snapshots the measured outputs and leaves them in

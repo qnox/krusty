@@ -59,18 +59,20 @@ NAMED_UNRESOLVED = [
     re.compile(r"unresolved Java static '([^']+)'"),
 ]
 
-# Mirrors PARITY_SKIP_DIRECTORIES in crates/krusty-lsp/src/main.rs. The Rust list decides which
+# Mirrors IGNORED_DIRECTORIES in crates/krusty-lsp/src/project/walk.rs. The Rust list decides which
 # files are compiled; this one decides which names are excused, so they must agree — a name excused
 # here that the scan never had a chance to see is exactly the case this filter exists for.
 SKIP_DIRECTORIES = {
     ".git",
+    ".gradle",
+    ".idea",
+    "build",
+    "node_modules",
+    "out",
+    "target",
     "testData",
     "test-data",
     "testdata",
-    "out",
-    "build",
-    "target",
-    "node_modules",
 }
 
 
@@ -349,6 +351,18 @@ def summarize(
             modules_clean_but_for_unseen += 1
     checked = sum(report.get("checked_files", 0) for report in reports)
     clean = status.get("ok", 0)
+    # Absent on a record written before the field existed. Zero would claim every such module
+    # failed to open, which that scan did not measure.
+    def counted(key):
+        if not reports or any(key not in report for report in reports):
+            return None
+        return sum(report[key] for report in reports)
+
+    def flagged(key):
+        if not reports or any(key not in report for report in reports):
+            return None
+        return sum(1 for report in reports if report[key])
+
     return {
         "run": metadata or {},
         "truncated_modules": sum(1 for report in reports if report.get("truncated")),
@@ -365,6 +379,14 @@ def summarize(
         "status": dict(status),
         "unseen_declaration_errors": unseen,
         "total_errors": sum(report.get("error_count", 0) for report in reports),
+        "open_complete_modules": flagged("open_complete"),
+        "missing_classpath_entries": counted("missing_classpath_entries"),
+        # The scan times a whole module analysis. It does not separate parsing from signature
+        # extraction, does not time type checking on its own, and does not issue a definition or
+        # references query. Those latencies stay unset rather than being copied from elapsed_ms.
+        "parse_ms": None,
+        "type_info_ms": None,
+        "navigation_ms": None,
         "slowest": sorted(
             ((report["elapsed_ms"], report["module"]) for report in reports), reverse=True
         )[:top],
@@ -397,6 +419,23 @@ def render_text(summary: dict) -> str:
     lines.append(f"modules      {clean}/{modules} clean ({share:.1f}%)")
     lines.append(f"kotlin files {summary['checked_files']}")
     lines.append(f"errors       {summary['total_errors']} total")
+    opened = summary["open_complete_modules"]
+    lines.append(
+        "open         "
+        + ("not measured" if opened is None else f"{opened}/{modules} modules complete")
+    )
+    missing = summary["missing_classpath_entries"]
+    lines.append(
+        "classpath    "
+        + (
+            "not measured"
+            if missing is None
+            else f"{missing} declared entries missing from disk"
+        )
+    )
+    lines.append("parse        not measured")
+    lines.append("type info    not measured")
+    lines.append("navigation   not measured")
     lines.append(
         f"  of which   {summary['unseen_declaration_errors']} name a declaration the scan could "
         f"not see (unbuilt dependency module)"
@@ -498,6 +537,15 @@ def render_markdown(summary: dict, root: Path, jsonl: Path) -> str:
         f"| modules that hit the input budget | {summary['truncated_modules']} |",
         f"| checked files that could not be read | {summary['unreadable_checked_files']} |",
         f"| modules whose Java stub overlay failed | {summary['java_stub_failed_modules']} |",
+        f"| modules that opened completely | {summary['open_complete_modules'] if summary['open_complete_modules'] is not None else 'not measured'} |",
+        f"| classpath entries missing from disk | {summary['missing_classpath_entries'] if summary['missing_classpath_entries'] is not None else 'not measured'} |",
+        "| parse time | not measured |",
+        "| type-information latency | not measured |",
+        "| navigation latency | not measured |",
+        "",
+        "Parse time, type-information latency, and navigation latency are not measured: one module",
+        "analysis is timed as a whole, and the scan does not issue a go-to-definition or",
+        "find-references query. `elapsed_ms` is that combined analysis, not any of those three.",
         "",
         "## Module outcomes",
         "",

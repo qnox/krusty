@@ -26,6 +26,12 @@ pub(super) enum ElementSerializerPlan {
         arguments: Vec<ElementSerializerPlan>,
     },
     Nullable(Box<ElementSerializerPlan>),
+    /// A reference `Array<E>`: `ReferenceArraySerializer(E::class, <E's serializer>)`. The class
+    /// operand is the element's checked type, which the backend realizes as its boxed class token.
+    ReferenceArray {
+        element: Ty,
+        serializer: Box<ElementSerializerPlan>,
+    },
     /// A contextual property's or file-contextual element's serializer: `ContextualSerializer(T::class,
     /// <fallback>, [<type argument serializers>])`, the fallback being `T`'s own serializer when it
     /// has one.
@@ -94,6 +100,7 @@ pub(super) fn child_cache_element_plan(
     // class's generated serializer, a sealed or abstract class's runtime serializer, or an external
     // companion's accessor.
     let cacheable = constructed_standard_serializer(classifier).is_some()
+        || is_reference_array(classifier)
         || ir
             .classes
             .iter()
@@ -112,6 +119,10 @@ pub(super) fn child_cache_element_plan(
     element_serializer_plan_in(ir, ctx, ty, TypeParameterSerializers::NONE, annotated)
         .map(Some)
         .ok_or(UnderivableChildCacheElement)
+}
+
+fn is_reference_array(classifier: TypeName) -> bool {
+    classifier == type_name("kotlin/Array")
 }
 
 /// Whether `classifier` is declared in this file with a `@Serializable(with = …)` naming a
@@ -503,6 +514,22 @@ fn serializer_plan(
     if let Some(plain) = super::enum_serializer::local_plain_enum_serializer(ir, ctx, fq_name) {
         return Some(ElementSerializerPlan::PlainEnum(plain));
     }
+    // A reference array serializes through a `ReferenceArraySerializer` over its element's class
+    // and serializer. A type-parameter element has no class literal of its own to supply.
+    if is_reference_array(fq_name) {
+        let [argument] = type_args else {
+            return None;
+        };
+        let element = readable_type_argument(argument)?;
+        if element.non_null().ty_param_name().is_some() {
+            return None;
+        }
+        let serializer = type_argument_serializer_plan(ir, ctx, argument, scope, annotated.arg(0))?;
+        return Some(ElementSerializerPlan::ReferenceArray {
+            element: element.non_null(),
+            serializer: Box::new(serializer),
+        });
+    }
     // A constructed standard type (`List<T>`, `Pair<A, B>`, `Map.Entry<K, V>`, …) serializes
     // through the runtime serializer selected for its classifier. Its operands come from every
     // checked semantic type argument; the classifier-to-serializer ABI table owns no arity fact.
@@ -840,6 +867,22 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
             serializer,
             arguments,
         } => emit_constructed_standard_serializer(ir, serializer, arguments),
+        ElementSerializerPlan::ReferenceArray {
+            element,
+            serializer,
+        } => {
+            let class = ir.add_expr(IrExpr::KClassLiteral {
+                classifier: Some(element),
+                value: None,
+                type_argument: true,
+            });
+            let serializer = emit_narrowed_argument(ir, *serializer);
+            ir.new_external(
+                "kotlinx/serialization/internal/ReferenceArraySerializer",
+                "(Lkotlin/reflect/KClass;Lkotlinx/serialization/KSerializer;)V",
+                vec![class, serializer],
+            )
+        }
         ElementSerializerPlan::Nullable(inner) => {
             let inner = emit_element_serializer(ir, *inner);
             let inner = narrow_to_kserializer(ir, inner);

@@ -1,11 +1,10 @@
-//! Operations over an already-selected property read.
+//! Property read selection and the operations over its result.
 //!
-//! Candidate collection and selection remain in the resolver facade. This boundary exposes only
+//! [`Checker::select_property_read`] walks a read's scope-tower levels: the receiver's member
+//! property, its member extensions, then extension properties. The rest of this boundary exposes
 //! the semantic type, visibility check, and external-property identity consumed after selection.
 
-use super::{
-    Checker, Origin, PropertyReadSelection, ResolvedPropertyAccess, Ty, TypeName, Visibility,
-};
+use super::*;
 
 pub(super) struct PropertyReadMemberSelection {
     pub(super) name: String,
@@ -73,8 +72,7 @@ impl PropertyReadSelection {
             Self::Member(member) => member
                 .getter
                 .as_ref()
-                .map(|getter| getter.member.external_identity)
-                .flatten()
+                .and_then(|getter| getter.member.external_identity)
                 .or_else(|| {
                     member
                         .accessor
@@ -124,6 +122,288 @@ impl PropertyReadSelection {
 }
 
 impl Checker<'_> {
+    pub(super) fn select_property_read(
+        &self,
+        scope: &CheckerScope<'_>,
+        receiver: Ty,
+        name: &str,
+    ) -> Result<Option<PropertyReadSelection>, PropertyReadAmbiguity> {
+        // The first candidate the use site cannot see. Each later level is still asked for a
+        // visible one; this is the answer only when none has it, so its access is what is reported.
+        let mut invisible = None;
+        if !receiver.is_nullable() {
+            let local = self.checked_body_local_property(receiver, name).cloned();
+            if let Some(local) = local {
+                return Ok(Some(PropertyReadSelection::Member(Box::new(
+                    PropertyReadMemberSelection {
+                        name: name.to_string(),
+                        ty: local.ty,
+                        owner: local.owner,
+                        interface: local.interface,
+                        publication: None,
+                        getter: None,
+                        accessor: None,
+                        producer: crate::libraries::PropertyProducer::KotlinAccessor,
+                        metadata_constant_read: false,
+                        context_access: None,
+                        compiler_intrinsic: None,
+                        compile_time_constant: None,
+                        source_member: Some(local.source_member),
+                        stable_declaration: local.stable_declaration,
+                        access: Some((local.visibility, local.owner)),
+                        stable_read: false,
+                    },
+                ))));
+            }
+            let resolver = self.resolver();
+            let declaration =
+                resolver.select_member_property_applicable_where(receiver, name, |property| {
+                    let context_types = property.getter.params.get(..property.context_count)?;
+                    self.select_context_arguments_with_types(scope, context_types)
+                        .ok()
+                        .map(|_| {
+                            (
+                                self.receiver_property_accessible(
+                                    property.visibility,
+                                    property.owner,
+                                    receiver,
+                                    property.getter.external_identity,
+                                ),
+                                property.context_count,
+                            )
+                        })
+                });
+            if let Some(selected) = declaration {
+                if !selected.competing_accessors.is_empty() {
+                    return Err(self.competing_accessor_ambiguity(name, &selected));
+                }
+                let owner = selected.owner;
+                let visibility = selected.visibility;
+                let publication = selected.read(receiver);
+                let mut selected_property = selected.property;
+                let checked_ty = selected_property.as_mut().and_then(|property| {
+                    self.apply_checked_source_property_result(receiver, property)
+                });
+                // A captured invariant argument is an out-projection (`Inv<out (X & Y)>`). The
+                // projection is the argument, not the value a read produces: the read is the upper
+                // bound, which is what exposes `X` and `Y` on `sel(Inv(A), Inv(B)).v`.
+                let ty = checked_ty.unwrap_or(selected.ty).projection_read_ty();
+                // Core property selection already incorporates a nearer covariant accessor override.
+                // The inherited declaration still owns the physical accessor/field shape; its erased
+                // return must not overwrite the selected logical property type.
+                let (getter, context_access) = if let Some(declaration) = selected_property.as_ref()
+                {
+                    if declaration.context_count == 0 {
+                        (
+                            (declaration.getter_declaration.is_some()
+                                || !declaration.getter.descriptor.is_empty()
+                                || (declaration.getter.is_abstract
+                                    && !declaration.getter.name.is_empty()
+                                    && declaration.getter.name != property_getter_name(name)))
+                            .then(|| {
+                                let mut getter =
+                                    crate::symbol_resolver::ResolvedMember::from_callable(
+                                        receiver,
+                                        declaration.getter.clone(),
+                                        false,
+                                    );
+                                getter.member.stable_declaration = declaration
+                                    .getter_declaration
+                                    .or(declaration.stable_declaration);
+                                getter
+                            }),
+                            None,
+                        )
+                    } else {
+                        let context_types = declaration
+                            .getter
+                            .params
+                            .get(..declaration.context_count)
+                            .ok_or(PropertyReadAmbiguity::MissingContext)?;
+                        let context_args = self
+                            .select_context_arguments(scope, context_types)
+                            .ok_or(PropertyReadAmbiguity::MissingContext)?;
+                        let mut getter = crate::symbol_resolver::ResolvedMember::from_callable(
+                            receiver,
+                            declaration.getter.clone(),
+                            false,
+                        );
+                        getter.member.context_count = declaration.context_count;
+                        getter.member.stable_declaration = declaration
+                            .getter_declaration
+                            .or(declaration.stable_declaration);
+                        (
+                            Some(getter),
+                            Some(Box::new(ResolvedPropertyAccess {
+                                property: declaration.clone(),
+                                context_args,
+                            })),
+                        )
+                    }
+                } else {
+                    (None, None)
+                };
+                let member = PropertyReadSelection::Member(Box::new(PropertyReadMemberSelection {
+                    name: name.to_string(),
+                    ty,
+                    owner,
+                    interface: selected.interface,
+                    publication,
+                    getter,
+                    accessor: selected_property
+                        .as_ref()
+                        .map(|property| Box::new(property.getter.clone())),
+                    producer: selected_property.as_ref().map_or(
+                        crate::libraries::PropertyProducer::KotlinAccessor,
+                        |property| property.producer,
+                    ),
+                    metadata_constant_read: selected_property
+                        .as_ref()
+                        .is_some_and(|property| property.metadata_constant_read),
+                    context_access,
+                    compiler_intrinsic: selected_property
+                        .as_ref()
+                        .and_then(|property| property.getter.compiler_intrinsic),
+                    compile_time_constant: selected_property
+                        .as_ref()
+                        .and_then(|property| property.compile_time_constant.clone()),
+                    source_member: selected_property
+                        .as_ref()
+                        .and_then(|property| property.source_member),
+                    stable_declaration: selected_property
+                        .as_ref()
+                        .and_then(|property| property.stable_declaration),
+                    access: (visibility != Visibility::Public).then_some((visibility, owner)),
+                    stable_read: selected_property.as_ref().is_some_and(|property| {
+                        let receiver_final = receiver
+                            .obj_internal()
+                            .and_then(|owner| self.resolver().classifier(owner))
+                            .is_some_and(|class| class.is_final());
+                        property.read_stability.permits(receiver_final)
+                    }),
+                }));
+                // kotlinc's tower does not stop at an invisible member: a visible candidate at a
+                // later level wins, and the member is reported only when no level has one.
+                if self.hidden_property_read(&member, receiver).is_none() {
+                    return Ok(Some(member));
+                }
+                invisible = Some(member);
+            }
+            // A body-local classifier's applied supertypes are finalized on this Pass-2 lexical
+            // rung, so it is not yet present in the immutable module provider borrowed by the
+            // active checker. Retry only the inherited MEMBER facet through that semantic edge;
+            // extension rungs remain selected against the original receiver below.
+            for supertype in invisible
+                .is_none()
+                .then(|| self.body_local_supertypes(receiver))
+                .into_iter()
+                .flatten()
+            {
+                if let Ok(Some(selection)) = self.select_property_read(scope, supertype, name) {
+                    let private = match &selection {
+                        PropertyReadSelection::Member(member) => {
+                            member.access.is_some_and(|(visibility, _)| {
+                                !crate::symbol_resolver::member_is_inheritable(visibility)
+                            })
+                        }
+                        PropertyReadSelection::MemberExtension(_)
+                        | PropertyReadSelection::Extension(_, _) => false,
+                    };
+                    if private {
+                        continue;
+                    }
+                    if matches!(selection, PropertyReadSelection::Member(_)) {
+                        return Ok(Some(selection));
+                    }
+                }
+            }
+            match self.member_extension_property(scope, receiver, name) {
+                Ok(Some(property)) => {
+                    let member_extension =
+                        PropertyReadSelection::MemberExtension(Box::new(property));
+                    if self
+                        .hidden_property_read(&member_extension, receiver)
+                        .is_none()
+                    {
+                        return Ok(Some(member_extension));
+                    }
+                    invisible.get_or_insert(member_extension);
+                }
+                Err(()) => return Err(PropertyReadAmbiguity::MemberExtension),
+                Ok(None) => {}
+            }
+        }
+        // Extension properties are a lower scope-tower level than members. Do not even collect
+        // them while a member declaration can win: an ambiguous or inapplicable extension family
+        // cannot poison an otherwise exact member read. An invisible member does not win.
+        let type_variables = self.postponed_type_variables_in(receiver);
+        let resolver = self.resolver().with_type_variables(&type_variables);
+        let extension = match resolver.select_extension_property(receiver, name) {
+            Ok(property) => property,
+            Err(_) => return Err(PropertyReadAmbiguity::Extension),
+        };
+        if let Some(property) = extension {
+            let context_args = if property.context_count == 0 {
+                Vec::new()
+            } else {
+                let start = usize::from(property.receiver.is_some());
+                let context_types = property
+                    .getter
+                    .params
+                    .get(start..start + property.context_count)
+                    .ok_or(PropertyReadAmbiguity::MissingContext)?;
+                self.select_context_arguments(scope, context_types)
+                    .ok_or(PropertyReadAmbiguity::MissingContext)?
+            };
+            let extension = PropertyReadSelection::Extension(
+                Box::new(ResolvedPropertyAccess {
+                    property,
+                    context_args,
+                }),
+                (!type_variables.is_empty()).then_some(receiver),
+            );
+            if self.hidden_property_read(&extension, receiver).is_none() {
+                return Ok(Some(extension));
+            }
+            invisible.get_or_insert(extension);
+        }
+        Ok(invisible)
+    }
+
+    /// Whether the read's scope tower passes over the receiver's member property `name`, which
+    /// the site cannot see, for a visible member extension or extension property. A write
+    /// resolves its property through that same tower before it checks the setter's visibility.
+    pub(super) fn invisible_member_property_yields(
+        &self,
+        scope: &CheckerScope<'_>,
+        receiver: Ty,
+        name: &str,
+    ) -> bool {
+        if receiver.is_nullable() {
+            return false;
+        }
+        let Some(member) = self.resolver().select_member_property(receiver, name) else {
+            return false;
+        };
+        let visible = self.receiver_property_accessible(
+            member.visibility,
+            member.owner,
+            receiver,
+            member
+                .property
+                .as_ref()
+                .and_then(|property| property.getter.external_identity),
+        );
+        !visible
+            && matches!(
+                self.select_property_read(scope, receiver, name),
+                Ok(Some(
+                    PropertyReadSelection::MemberExtension(_)
+                        | PropertyReadSelection::Extension(..)
+                ))
+            )
+    }
+
     pub(super) fn hidden_property_read(
         &self,
         selection: &PropertyReadSelection,

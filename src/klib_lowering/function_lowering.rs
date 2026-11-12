@@ -25,9 +25,7 @@ use crate::types::{Ty, TyKind, TypeName};
 
 mod class_initializers;
 mod closure_headers;
-pub(super) use class_initializers::{
-    initializer_header, local_initializer_header, local_member_header,
-};
+pub(super) use class_initializers::{local_initializer_header, local_member_header};
 mod declared_type_parameters;
 pub(super) use closure_headers::{closure_header, CaptureParameter};
 mod reference_headers;
@@ -507,6 +505,38 @@ pub(super) fn raw_function_header(
         function,
         KlibTypeParameters::default(),
     )
+}
+
+/// The header of `selected`'s serialized declaration `function`. When `class_bodies` is
+/// given, a member is read through its class: the class is authenticated, the raw dispatch
+/// receiver is proved against it, and the member header binds that class's type parameters.
+/// Semantic conversion interns the receiver's class path, so the proof comes first. A
+/// singleton edge carries the class it dispatches to, so the same proof selects that edge.
+/// A top-level callable, or a member whose caller has no class bodies, keeps `function`.
+pub(super) fn selected_function_header(
+    selected: KlibBodyCallable<'_>,
+    purpose: HeaderPurpose,
+    arena: &KlibIrArena,
+    function: &KlibIrFunction,
+    class_bodies: Option<&crate::klib_libraries::KlibDeclarationBodies>,
+) -> Result<FunctionHeader, KlibBodyDeclineReason> {
+    match class_bodies.filter(|_| selected.is_member()) {
+        Some(bodies) => super::class_headers::authenticate(selected, bodies).and_then(|class| {
+            super::class_headers::authenticate_receiver(
+                class.contract,
+                class.arena,
+                class.function,
+            )?;
+            raw_function_header_with_class(
+                Some(selected),
+                purpose,
+                class.arena,
+                class.function,
+                class.types,
+            )
+        }),
+        None => raw_function_header(Some(selected), purpose, arena, function),
+    }
 }
 
 pub(super) fn raw_function_header_with_class(
