@@ -69,7 +69,8 @@ pub(in crate::codegen) fn library_member_signature(
 
 /// Whether a call of `fact` with a dispatch receiver at `expression` goes through its library
 /// member: a member of a library classifier that dispatches on its receiver, with no `published`
-/// body to call, which an interface's classes or the builtin classes below it implement.
+/// body to call and no compiler operation realizing it (`KClass.simpleName`), which an
+/// interface's classes or the builtin classes below it implement.
 pub(in crate::codegen) fn dispatches_through_library_member(
     ir: &IrFile,
     callables: &CheckedBackendCallables,
@@ -80,6 +81,7 @@ pub(in crate::codegen) fn dispatches_through_library_member(
     !published
         && fact.kind == ExternalCallableKind::Member
         && fact.member_realization == MemberRealization::Dispatch
+        && fact.compiler_operation().is_none()
         && fact.dependency_callable.is_some()
         && library_member_owner(fact).is_some()
         && (fact.owner_is_interface || !fact.builtin_implementations.is_empty())
