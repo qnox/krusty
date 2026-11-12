@@ -667,10 +667,7 @@ fn left_with_target(bodies: &KlibDeclarationBodies, module: &str, symbol: &KlibI
         } => {
             class_kind(class.base.flags) == TypeKind::Interface
                 && !function.overridden.is_empty()
-                && function
-                    .overridden
-                    .iter()
-                    .all(|overridden| any_member_signature(overridden))
+                && function.overridden.iter().all(any_member_signature)
         }
         LocatedMember::Missing => interface_classifier(bodies, module, signature),
         LocatedMember::Several => false,
