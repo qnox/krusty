@@ -16587,14 +16587,13 @@ impl<'a> Checker<'a> {
                 });
                 // With no same-named receiver-less function, the classifier's constructors are the
                 // bare call's candidate family, and they shape its lambdas through the same
-                // operation a function family uses. Only a call with a lambda argument has a
-                // shape to take from them.
+                // operation a function family uses, and the constructor path commits the one
+                // shared selection chooses among them.
                 let receiverless_family = {
                     let functions = self.resolver().top_level_candidates(&fname);
                     match bare_constructor_classifier {
                         Some(internal)
-                            if has_lambda_argument
-                                && functions.is_empty()
+                            if functions.is_empty()
                                 && !self.lexical_value_declares(scope, &fname) =>
                         {
                             (
@@ -18152,6 +18151,24 @@ impl<'a> Checker<'a> {
                 // A selected constructor the site cannot see. It yields to every later callable
                 // level and is reported only once they have all declined.
                 let mut invisible_constructor: Option<Box<InvisibleConstructor>> = None;
+                // The scope tower's constructors are ordinary candidates of this bare call: shared
+                // selection chooses among them, and the provider path materializes only the
+                // declaration it chose. A low-priority winner keeps its place after the implicit
+                // receiver rungs.
+                let selected_scope_constructor = self.scope_constructor_choice(
+                    scope,
+                    CallArgs {
+                        call,
+                        args,
+                        arg_tys: &arg_tys,
+                    },
+                    &explicit_type_args,
+                    expected,
+                    &scope_constructors,
+                );
+                let deferred_scope_constructor = selected_scope_constructor
+                    .as_ref()
+                    .filter(|selected| self.is_low_priority_constructor(selected));
                 if let Some(scoped_internal) = bare_constructor_classifier {
                     let (inherited, inherited_owner) =
                         self.inherited_nested_type_with_owner(&fname);
@@ -18179,9 +18196,9 @@ impl<'a> Checker<'a> {
                             .or_else(|| self.resolved_type_name(scoped_internal));
                         if let Some(classifier) = argument_classifier.as_deref() {
                             let requires_outer = classifier.outer_instance.is_some();
-                            let has_low_priority =
-                                self.has_low_priority_constructor(scoped_internal, classifier);
-                            if has_low_priority {
+                            let has_low_priority = selected_scope_constructor.is_none()
+                                && self.has_low_priority_constructor(scoped_internal, classifier);
+                            if has_low_priority || deferred_scope_constructor.is_some() {
                                 low_priority_provider_constructor =
                                     Some((scoped_internal, classifier.clone(), requires_outer));
                             }
@@ -18196,12 +18213,14 @@ impl<'a> Checker<'a> {
                                     applied_classifier: bare_alias_target,
                                     bound_outer: None,
                                     expected,
-                                    priority: if has_low_priority {
+                                    priority: if has_low_priority
+                                        || deferred_scope_constructor.is_some()
+                                    {
                                         ConstructorPriorityTier::Ordinary
                                     } else {
                                         ConstructorPriorityTier::All
                                     },
-                                    selected: None,
+                                    selected: selected_scope_constructor.as_ref(),
                                 },
                             ) {
                                 Ok(LibraryConstructorSelection::Selected) => {
@@ -18343,9 +18362,9 @@ impl<'a> Checker<'a> {
                             .or_else(|| self.resolved_type_name(scoped_internal));
                         if let Some(classifier) = argument_classifier.as_deref() {
                             let requires_outer = classifier.outer_instance.is_some();
-                            let has_low_priority =
-                                self.has_low_priority_constructor(scoped_internal, classifier);
-                            if has_low_priority {
+                            let has_low_priority = selected_scope_constructor.is_none()
+                                && self.has_low_priority_constructor(scoped_internal, classifier);
+                            if has_low_priority || deferred_scope_constructor.is_some() {
                                 low_priority_provider_constructor =
                                     Some((scoped_internal, classifier.clone(), requires_outer));
                             }
@@ -18360,12 +18379,14 @@ impl<'a> Checker<'a> {
                                     applied_classifier: bare_alias_target,
                                     bound_outer: None,
                                     expected,
-                                    priority: if has_low_priority {
+                                    priority: if has_low_priority
+                                        || deferred_scope_constructor.is_some()
+                                    {
                                         ConstructorPriorityTier::Ordinary
                                     } else {
                                         ConstructorPriorityTier::All
                                     },
-                                    selected: None,
+                                    selected: selected_scope_constructor.as_ref(),
                                 },
                             ) {
                                 Ok(LibraryConstructorSelection::Selected) => {
@@ -19033,8 +19054,12 @@ impl<'a> Checker<'a> {
                             applied_classifier: bare_alias_target,
                             bound_outer: None,
                             expected,
-                            priority: ConstructorPriorityTier::Low,
-                            selected: None,
+                            priority: if deferred_scope_constructor.is_some() {
+                                ConstructorPriorityTier::All
+                            } else {
+                                ConstructorPriorityTier::Low
+                            },
+                            selected: deferred_scope_constructor,
                         },
                     ) {
                         Ok(LibraryConstructorSelection::Selected) => {
@@ -58271,25 +58296,6 @@ impl<'a> Checker<'a> {
         for (&argument, &parameter) in args.iter().zip(argument_types) {
             recheck(self, parameter, argument);
         }
-    }
-
-    /// Whether this provider family contains the annotation-defined fallback constructor tier.
-    fn has_low_priority_constructor(
-        &self,
-        internal: TypeName,
-        classifier: &crate::libraries::LibraryType,
-    ) -> bool {
-        let annotation = crate::types::type_name("kotlin/internal/LowPriorityInOverloadResolution");
-        classifier
-            .constructors
-            .iter()
-            .chain(
-                self.checked_local_constructors
-                    .get(&internal)
-                    .into_iter()
-                    .flatten(),
-            )
-            .any(|constructor| constructor.annotations.contains(&annotation))
     }
 
     fn record_resolved_library_constructor(
