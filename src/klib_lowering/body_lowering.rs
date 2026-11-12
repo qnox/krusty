@@ -142,6 +142,18 @@ pub(super) trait CallLinker {
         Ok(None)
     }
 
+    /// The range literal kotlinc's `ForLoopsLowering` counts through when a `for` loop iterates
+    /// the progression a call of `callee` builds: a builtin scalar's `rangeTo`/`rangeUntil`, or
+    /// the `until`/`downTo` builder. `None` keeps the loop an iterator-protocol loop over the
+    /// call, as template linkers do; a linker whose dependency preparation omits the loop's
+    /// protocol edges declines a call it does not prove instead.
+    fn range_literal(
+        &self,
+        _callee: &KlibPublicIdSignature,
+    ) -> Lowered<Option<crate::fir::FirRangeOperation>> {
+        Ok(None)
+    }
+
     /// The function a call of the public declaration `callee` invokes.
     fn link(&mut self, ir: &mut IrFile, callee: &KlibPublicIdSignature) -> Lowered<LinkedCallee>;
 
@@ -942,30 +954,46 @@ impl<'a> BodyLowering<'a> {
         Ok(self.declared_value(lowered, declared))
     }
 
-    /// A local `val` or `var` with its initializer, lowered as checked FIR lowers the source
-    /// declaration: a named variable in the next value slot, with no type of its own.
+    /// A local `val` or `var`, lowered as checked FIR lowers the source declaration: a named
+    /// variable in the next value slot, with no type of its own. One declared without an
+    /// initializer (`val start: Int`) is initialized by the assignments that follow it.
     fn variable(&mut self, id: KlibIrVariableId) -> Lowered<ExprId> {
         let variable = self.arena.variable(id);
         let ty = self.semantic(variable.ty)?;
-        let initializer =
-            variable
-                .initializer
-                .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
-                    "a variable without an initializer",
-                ))?;
-        let init = self.operand(initializer, ty)?;
+        let init = variable
+            .initializer
+            .map(|initializer| self.operand(initializer, ty))
+            .transpose()?;
+        // A local declared without an initializer, which the producer's frontend proved is
+        // assigned before each read, lowers as checked FIR lowers the deferred declaration: a
+        // binding its assignments write, seeded with its type's zero and recorded as deferred.
+        let deferred = init.is_none();
+        let init = init.or_else(|| {
+            let zero = self
+                .ir
+                .add_expr(IrExpr::Const(IrConst::zero_for_value_type(ty)));
+            self.ir.set_logical_type(zero, ty);
+            Some(zero)
+        });
         // Initializers can declare locals of their own. Allocate the enclosing declaration only
         // after those locals, as checked FIR does, and keep its symbol invisible until then.
-        let local = self.locals.slot(variable, ty)?;
+        let mut local = self.locals.slot(variable, ty)?;
+        if deferred {
+            local.mutable = true;
+        }
         self.locals.declare(&variable.base.symbol, local)?;
         self.locals
             .record_name(&variable.base.symbol, &variable.name);
-        Ok(self.ir.add_expr(IrExpr::Variable {
+        let declaration = self.ir.add_expr(IrExpr::Variable {
             index: local.index,
             ty,
-            init: Some(init),
+            init,
             named: true,
-        }))
+        });
+        if deferred {
+            self.ir.deferred_local_types.insert(declaration, ty);
+        }
+        Ok(declaration)
     }
 
     /// An assignment to a local `var`, typed `Unit` as the source assignment is.

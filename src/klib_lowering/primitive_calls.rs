@@ -21,6 +21,13 @@ pub(super) enum CommonPrimitive {
     /// A builtin scalar's `rangeTo`/`rangeUntil`, the source range operator over its receiver
     /// and its one argument.
     RangeConstruction(crate::fir::FirRangeOperation),
+    /// A builtin scalar's `compareTo` over its receiver and its one argument, compared as
+    /// `operand` (`Char` as `Int`, mixed numbers at their promoted type).
+    Compare {
+        operand: Ty,
+    },
+    /// A builtin scalar's `toInt()` … `toChar()`, Kotlin's numeric conversion of its receiver.
+    Conversion,
 }
 
 pub(crate) struct CommonPrimitiveCall {
@@ -47,6 +54,34 @@ pub(super) fn authenticate(
         Some(operation @ (CompilerIntrinsic::ArraySize | CompilerIntrinsic::StringLength)) => {
             CommonPrimitive::PropertyRead(operation)
         }
+        // An unsigned class's conversion to its carrier is a value-class operation, not this one.
+        Some(CompilerIntrinsic::NumericConversion)
+            if selected.ret().is_numeric_or_char()
+                && selected
+                    .class_contract()
+                    .map(super::class_headers::declared_receiver)
+                    .is_some_and(Ty::is_numeric_or_char) =>
+        {
+            CommonPrimitive::Conversion
+        }
+        Some(CompilerIntrinsic::PrimitiveCompare) => {
+            let &[parameter] = selected.params() else {
+                return Err(mismatch(
+                    "a common primitive has a different selected call shape",
+                ));
+            };
+            let receiver = selected
+                .class_contract()
+                .map(super::class_headers::declared_receiver)
+                .ok_or_else(|| mismatch("a primitive comparison has no class contract"))?;
+            let operand = crate::libraries::builtin_member_realization::primitive_compare_operand(
+                receiver, parameter,
+            )
+            .ok_or_else(|| {
+                mismatch("a primitive comparison has incompatible declared operand types")
+            })?;
+            CommonPrimitive::Compare { operand }
+        }
         None => match selected.range_construction() {
             Some(operation) => CommonPrimitive::RangeConstruction(operation),
             None => return Ok(None),
@@ -55,8 +90,10 @@ pub(super) fn authenticate(
         _ => return Ok(None),
     };
     let arity = match operation {
-        CommonPrimitive::RangeConstruction(_) => 1,
-        CommonPrimitive::Unary(_) | CommonPrimitive::PropertyRead(_) => 0,
+        CommonPrimitive::RangeConstruction(_) | CommonPrimitive::Compare { .. } => 1,
+        CommonPrimitive::Unary(_)
+        | CommonPrimitive::PropertyRead(_)
+        | CommonPrimitive::Conversion => 0,
     };
     if !selected.is_member()
         || selected.params().len() != arity
@@ -68,7 +105,10 @@ pub(super) fn authenticate(
         ));
     }
     let signature_kind_matches = match operation {
-        CommonPrimitive::Unary(_) | CommonPrimitive::RangeConstruction(_) => {
+        CommonPrimitive::Unary(_)
+        | CommonPrimitive::RangeConstruction(_)
+        | CommonPrimitive::Compare { .. }
+        | CommonPrimitive::Conversion => {
             matches!(selected.signature(), KlibDeclarationSignature::Public(_))
         }
         CommonPrimitive::PropertyRead(_) => {
@@ -113,6 +153,18 @@ pub(super) fn authenticate(
                 && ret == selected.ret()
                 && ret.is_reference()
         }
+        // The serialized header states the same scalar pair the provider compared, and `Int`.
+        CommonPrimitive::Compare { operand } => {
+            ret == Ty::Int
+                && params == selected.params()
+                && matches!(params.as_slice(), &[param]
+                    if crate::libraries::builtin_member_realization::primitive_compare_operand(
+                        receiver, param,
+                    ) == Some(operand))
+        }
+        CommonPrimitive::Conversion => {
+            receiver.is_numeric_or_char() && ret.is_numeric_or_char() && ret == selected.ret()
+        }
         _ => false,
     };
     if !valid {
@@ -127,7 +179,10 @@ pub(super) fn authenticate(
                 .ok_or_else(|| mismatch("a common property read has no accessor contract"))?
                 .property,
         ),
-        CommonPrimitive::Unary(_) | CommonPrimitive::RangeConstruction(_) => None,
+        CommonPrimitive::Unary(_)
+        | CommonPrimitive::RangeConstruction(_)
+        | CommonPrimitive::Compare { .. }
+        | CommonPrimitive::Conversion => None,
     };
     Ok(Some(CommonPrimitiveCall {
         operation,
