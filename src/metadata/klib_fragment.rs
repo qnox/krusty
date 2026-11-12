@@ -65,6 +65,7 @@ pub(crate) fn package_fragment(
         classes,
         annotations_in_metadata,
         crate::metadata::MetadataTypeLookups::default().inner_classifiers,
+        None,
     )
     .expect("valid metadata fixture declarations")
 }
@@ -76,8 +77,12 @@ pub(crate) fn package_fragment_with_inner_classifiers(
     classes: &[KlibClass<'_>],
     annotations_in_metadata: bool,
     inner_classifiers: crate::metadata::InnerClassifiers<'_>,
+    intersection_approximation: Option<&dyn Fn(crate::types::Ty) -> Option<crate::types::Ty>>,
 ) -> Result<Vec<u8>, crate::metadata::class_id::ClassIdError> {
     let mut st = StringTable::klib(inner_classifiers);
+    if let Some(approximate) = intersection_approximation {
+        st = st.with_intersection_approximation(approximate);
+    }
     let mut requirements = VersionRequirementTable::default();
     let mut contract_types = ContractTypeTable::default();
     let mut package_message = Pb::new();
@@ -347,9 +352,15 @@ mod tests {
             }
         };
 
-        let fragment =
-            package_fragment_with_inner_classifiers(&["fixture"], &members, &[], true, &lookup)
-                .expect("valid declared metadata class names");
+        let fragment = package_fragment_with_inner_classifiers(
+            &["fixture"],
+            &members,
+            &[],
+            true,
+            &lookup,
+            None,
+        )
+        .expect("valid declared metadata class names");
         let package = parse_package_fragment_checked(&fragment).expect("a decodable fragment");
         assert_eq!(
             package.functions[0].ret,
