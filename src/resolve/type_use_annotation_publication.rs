@@ -53,22 +53,22 @@ pub(crate) fn publish_checked_type_use_annotations(
         let no_bodies = crate::fx_hash::HashSet::default();
         diags.set_file(file_index);
         let info = diags.with_authoritative_ranges(&owned_ranges, |diags| {
-            check_file_at_impl_mode_with_index(
+            check_file_at_impl_mode_with_index(IndexedFileCheck {
                 file,
                 file_index,
-                Some(files),
-                table,
-                None,
+                source_files: Some(files),
+                syms: table,
+                resolved_index: None,
                 diags,
-                CaptureDiscovery::Published,
-                Some(&selected),
-                Some(&no_bodies),
-                None,
-                None,
-                None,
-                SourceFragmentMode::TypeUseAnnotations,
-                None,
-            )
+                captures: CaptureDiscovery::Published,
+                selected_declarations: Some(&selected),
+                selected_body_declarations: Some(&no_bodies),
+                active_declarations: None,
+                selected_stable_roots: None,
+                selected_stable_bodies: None,
+                fragment: SourceFragmentMode::TypeUseAnnotations,
+                streamed_cache: None,
+            })
         });
         for annotation in applications {
             let Some(applied) = info.applied_annotation(annotation) else {

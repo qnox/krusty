@@ -425,6 +425,31 @@ fn nested_class_block_members_belong_to_the_nested_class() {
     assert_eq!(run(SRC).expect("nested block"), "OK");
 }
 
+/// An enum class's block members are declared members like an ordinary class's: the property's
+/// storage is a private static behind a public static accessor, and the accessors and functions
+/// precede the synthesized `values`/`valueOf`/`getEntries`.
+#[test]
+fn enum_class_block_members_are_declared_members() {
+    const SRC: &str = "var initOrder = \"\"\n\
+        enum class Foo(val f: String) {\n\
+        \x20   Alpha(\"alpha\");\n\
+        \x20   fun first() = f\n\
+        \x20   companion {\n\
+        \x20       val blockProp: String = run { initOrder += \"2\"; \"block\" }\n\
+        \x20       var counter: Int = 0\n\
+        \x20       fun describe() = blockProp + counter\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   if (Foo.Alpha.first() != \"alpha\") return \"first\"\n\
+        \x20   Foo.counter++\n\
+        \x20   if (Foo.describe() != \"block1\") return Foo.describe()\n\
+        \x20   return if (initOrder == \"2\") \"OK\" else initOrder\n\
+        }\n";
+    assert_members_and_metadata_match_kotlinc("EnumBlock", SRC, &["Foo"]);
+    assert_eq!(run(SRC).expect("enum block members"), "OK");
+}
+
 #[test]
 fn block_property_beside_companion_object_property_keeps_its_field_name() {
     const SRC: &str = "class E {\n\

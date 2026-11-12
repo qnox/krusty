@@ -377,7 +377,10 @@ names only the Kotlin version: a change to how references are planned, invoked, 
 `REF_CACHE_SALT` in `tests/box_reference_classes.rs`, which re-keys every entry, while any other
 harness edit keeps the cache. A read refreshes an entry's `OK`/`REJECTED` marker time, and before
 master saves, `scripts/prune-reference-cache.sh` drops entries unread for a week, so the cache
-tracks the current suite instead of growing with every input it ever compiled. Each entry additionally uses the recorded-byte archive's process-memoized content
+tracks the current suite instead of growing with every input it ever compiled. The Native and Wasm
+rows keep their own copy (`box-reference-classes-<target>-<version>-…`) for the JVM oracles of their
+focused tests. A row without one starts from the JVM row's cache, and its first save keeps only the
+entries that run read or compiled. Each entry additionally uses the recorded-byte archive's process-memoized content
 identity for the complete selected kotlinc installation, the exact JDK selected to run kotlinc and
 javac (`KRUSTY_REF_JAVA_HOME` before `JAVA_HOME`), the mock JDK when selected, and every explicit
 classpath dependency. Those immutable inputs are hashed once per process. Replacing a distribution
@@ -728,10 +731,11 @@ is compiled once and the cfg(test) harness overlaps the binaries. Nightly rustc 
 job per core (`-Z threads`). The run ends with `coverage: phases` repeating every
 finished phase and `coverage: phase total <seconds>s`, which is wall time from the first phase rather than
 the sum of the rows. The conformance box runner prints the same shape as
-`conformance-run: phase box-conformance <seconds>s`. The conformance producer prints
-`conformance-bin: phase conformance-test-binary`, the KLIB coverage job prints
-`klib-implementation-coverage: phase compiler-unit-tests`, and the tool producer prints `tool-bins: phase krusty-cli` and
-`tool-bins: phase krusty-build-tests`. Conformance lanes and Gradle lanes run those binaries. A
+`conformance-run: phase box-conformance <seconds>s`. The KLIB coverage job prints
+`klib-implementation-coverage: phase compiler-unit-tests`, and the tool producer, which builds the
+conformance binary, the CLI and the krusty-build tests over one krusty library, prints
+`tool-bins: phase conformance-and-cli` and `tool-bins: phase krusty-build-tests`. Conformance lanes
+and Gradle lanes run those binaries. A
 Gradle lane does not compile krusty.
 
 Performance-relevant harness state:

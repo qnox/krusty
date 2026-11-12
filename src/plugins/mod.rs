@@ -23,6 +23,7 @@ pub mod cli;
 pub mod compose;
 pub mod deps;
 pub mod noarg;
+pub mod parcelize;
 mod plugin_release;
 pub use plugin_release::PluginRelease;
 pub mod registry;
@@ -203,6 +204,9 @@ pub struct FrontendCallable {
     pub ret: Ty,
     pub generic_sig: Option<crate::libraries::GenericSig>,
     pub plugin_expression: Option<crate::libraries::PluginExpressionDeclaration>,
+    /// The declaration overrides a member of a supertype, as one written with `override` does:
+    /// Parcelize's `writeToParcel` implements `Parcelable.writeToParcel`.
+    pub is_override: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -222,6 +226,16 @@ pub struct FrontendClassContext<'a> {
     pub annotations: &'a [TypeName],
     /// Resolved class-literal arguments grouped by the ordinal of the annotation occurrence.
     pub annotation_class_arguments: &'a [(u32, TypeName)],
+    /// The functions the class itself declares in source. A plugin that generates a member only
+    /// where the class does not declare it reads its decision from here.
+    pub declared_functions: &'a [FrontendDeclaredFunction],
+}
+
+/// A function a source class declares itself, as a frontend plugin sees it.
+pub struct FrontendDeclaredFunction {
+    pub name: String,
+    /// The value parameter types, without receivers.
+    pub params: Vec<Ty>,
 }
 
 /// A source class as a frontend plugin CHECKER sees it: the resolved identities of its
@@ -243,6 +257,9 @@ pub struct FrontendClassCheckContext<'a> {
 pub struct FrontendPropertyFacts {
     /// Resolved annotation identities, in source order.
     pub annotations: Vec<TypeName>,
+    /// Resolved identities of the type-use annotations written anywhere in the declared type, in
+    /// source order: `@RawValue` in `val items: List<@RawValue Any>`.
+    pub type_annotations: Vec<TypeName>,
     /// Whether the property stores a value: not abstract, delegated or external, and either
     /// accessor-less or with a getter that reads `field`.
     pub has_backing_field: bool,
@@ -1010,6 +1027,7 @@ fn triggered(ir: &IrFile, plugins: &registry::NativePlugins, ctx: &PluginContext
     uses_serialization
         || ir.compose.is_some()
         || ir.atomicfu.is_some()
+        || ir.parcelize.is_some()
         || !ctx
             .classes_with(crate::types::type_name(serialization::SERIALIZABLE_FQ))
             .is_empty()
@@ -1513,6 +1531,17 @@ impl PluginHost {
             p.transform_bodies(ir, ctx);
         }
     }
+}
+
+/// The byte offset where 1-based `line` of `text` starts: where a plugin reports a rejected
+/// declaration that has no span of its own.
+pub(crate) fn line_start(text: &str, line: u32) -> u32 {
+    let offset = text
+        .match_indices('\n')
+        .nth(line.saturating_sub(2) as usize)
+        .filter(|_| line > 1)
+        .map_or(0, |(index, _)| index + 1);
+    offset as u32
 }
 
 /// Fill all `IrClass` fields with empty defaults for a synthesized class named by its spelling.
