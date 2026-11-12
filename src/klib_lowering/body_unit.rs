@@ -1713,6 +1713,13 @@ impl<'s> Linker<'_, 's> {
             KlibCalleeOrigin::Ambiguous => Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(
                 Box::new(callee.clone()),
             )),
+            KlibCalleeOrigin::Missing if callee.declaration().segments().len() > 1 => {
+                // A member no library serializes is, in a complete library set, a fake override
+                // whose declared hierarchy did not bind it to one real declaration.
+                Err(KlibBodyDeclineReason::UnsupportedOperation(
+                    "a call of a member no library serializes, such as a fake override",
+                ))
+            }
             KlibCalleeOrigin::Missing => Err(KlibBodyDeclineReason::UndeclaredCallee(Box::new(
                 callee.clone(),
             ))),
