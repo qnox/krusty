@@ -74,13 +74,16 @@ fn a_forward_source_read_reserves_the_defining_files_real_getter() {
         &ir,
         &mut started.module,
         &mut started.runtime,
-        &classifiers,
         super::super::classes::ClassEntryPoints {
             functions: &[],
             singletons: &definition,
         },
         &[],
-        &krusty::backend::class_tables::module_slots::ModuleSlotPlan::empty(),
+        super::super::classes::BeyondFile {
+            classifiers: &classifiers,
+            plan: &krusty::backend::class_tables::module_slots::ModuleSlotPlan::empty(),
+            laid_out: &super::super::laid_out_classes::LaidOutClasses::default(),
+        },
     )
     .unwrap();
     assert_eq!(
