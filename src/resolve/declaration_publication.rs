@@ -608,12 +608,90 @@ struct FlexibleLocalDeclaration {
 }
 
 /// A literal `null` is an expression-only sentinel. Once inference publishes it as a declaration
-/// type, Kotlin's semantic type is the nullable bottom type `Nothing?`.
+/// type, Kotlin's semantic type is the nullable bottom type `Nothing?`. An inferred intersection
+/// is not a signature type either: publish the denotable supertype (`A & B` is `Any`, so
+/// `In<A & B>` keeps `In` and approximates the argument) before any backend writes metadata.
 pub(super) fn inferred_declaration_ty(ty: Ty) -> Ty {
-    if ty == Ty::Null {
+    let ty = if ty == Ty::Null {
         Ty::nullable(Ty::Nothing)
     } else {
         ty
+    };
+    approximate_published_intersection(ty)
+}
+
+fn approximate_published_intersection(ty: Ty) -> Ty {
+    match ty.kind() {
+        TyKind::Intersection(_) => {
+            match crate::types::declaration_approximation(ty, &mut |_: TypeName, _: usize| None) {
+                Some(approximated) if approximated != ty => {
+                    approximate_published_intersection(approximated)
+                }
+                _ => ty,
+            }
+        }
+        TyKind::Nullable(inner) => rebuild(ty, inner, Ty::nullable),
+        TyKind::PlatformNullable(inner) => rebuild(ty, inner, Ty::platform_nullable),
+        TyKind::MutabilityFlexible(inner) => rebuild(ty, inner, Ty::mutability_flexible),
+        TyKind::DefinitelyNotNull(inner) => rebuild(ty, inner, Ty::definitely_non_null),
+        TyKind::InProjection(inner) => rebuild(ty, inner, Ty::in_projection),
+        TyKind::OutProjection(inner) => rebuild(ty, inner, Ty::out_projection),
+        TyKind::StarProjection(inner) => rebuild(ty, inner, Ty::star_projection),
+        TyKind::RawProjection(inner) => rebuild(ty, inner, Ty::raw_projection),
+        TyKind::Obj(name, arguments) => {
+            let arguments = arguments.as_slice();
+            if arguments.is_empty() {
+                return ty;
+            }
+            let approximated = arguments
+                .iter()
+                .copied()
+                .map(approximate_published_intersection)
+                .collect::<Vec<_>>();
+            if approximated.as_slice() == arguments {
+                ty
+            } else {
+                Ty::obj_args_name(name, &approximated)
+            }
+        }
+        TyKind::Fun(signature) => {
+            let params = signature
+                .params
+                .iter()
+                .copied()
+                .map(approximate_published_intersection)
+                .collect::<Vec<_>>();
+            let ret = approximate_published_intersection(signature.ret);
+            if params == signature.params && ret == signature.ret {
+                ty
+            } else {
+                Ty::fun_with_shape(
+                    params,
+                    ret,
+                    signature.context_count,
+                    signature.has_receiver,
+                    signature.suspend,
+                )
+            }
+        }
+        TyKind::TyParam(name, bound) => {
+            let approximated = approximate_published_intersection(bound);
+            if approximated == bound {
+                ty
+            } else {
+                Ty::from(TyKind::TyParam(name, approximated))
+            }
+        }
+        _ => ty,
+    }
+}
+
+fn rebuild(ty: Ty, inner: Ty, wrap: impl FnOnce(Ty) -> Ty) -> Ty {
+    let approximated = approximate_published_intersection(inner);
+    if approximated == inner {
+        ty
+    } else {
+        wrap(approximated)
     }
 }
 
@@ -1662,5 +1740,29 @@ mod tests {
         spelling.record_flexible_upper_bounds(provider, &|lower| lower);
         projected.apply_to_inferred_declaration(provider, &mut spelling);
         assert_eq!(spelling.args[0].flexible_upper_bound, Some(Ty::String));
+    }
+
+    #[test]
+    fn an_inferred_intersection_publishes_a_denotable_declaration_type() {
+        let intersection = Ty::intersection(&[Ty::obj("sample/A"), Ty::obj("sample/B")]);
+        assert_eq!(
+            super::inferred_declaration_ty(intersection),
+            Ty::obj("kotlin/Any")
+        );
+        // `fun foobar(a: A, b: B) = select(a, b)` infers `In<A & B>`. The argument is what
+        // metadata would otherwise try to write.
+        assert_eq!(
+            super::inferred_declaration_ty(Ty::obj_args("sample/In", &[intersection])),
+            Ty::obj_args("sample/In", &[Ty::obj("kotlin/Any")])
+        );
+        assert_eq!(
+            super::inferred_declaration_ty(Ty::nullable(intersection)),
+            Ty::nullable(Ty::obj("kotlin/Any"))
+        );
+        assert_eq!(
+            super::inferred_declaration_ty(Ty::Null),
+            Ty::nullable(Ty::Nothing)
+        );
+        assert_eq!(super::inferred_declaration_ty(Ty::Int), Ty::Int);
     }
 }

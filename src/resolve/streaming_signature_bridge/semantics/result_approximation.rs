@@ -1,5 +1,6 @@
 //! Projection of solver-local types into denotable declaration results.
 
+use super::super::super::declaration_publication::inferred_declaration_ty;
 use crate::types::{Ty, TyKind};
 
 mod anonymous_results;
@@ -44,7 +45,7 @@ pub(super) fn declaration_result(
     // context. Retain a separate body view only for anonymous exposure, using the same lexical
     // normalization without applying anonymous exposure to that body.
     Ok(crate::fir::DeclarationResultTypes {
-        published: resolve(exposed)?,
+        published: resolve(inferred_declaration_ty(exposed))?,
         inferred_body_result: if exposed != result.get() {
             Some(resolve(evaluated_body.get())?)
         } else {
@@ -70,18 +71,6 @@ pub(super) fn denotable_signature_result(
             // `Null` is the solver's literal-only bottom marker. A declaration inferred from that
             // expression publishes Kotlin's denotable `Nothing?`; the marker must not escape.
             TyKind::Null => Ty::nullable(Ty::Nothing),
-            // An inferred `A & B` is not a signature type. Approximate it to the denotable
-            // supertype kotlinc publishes (`Any` when the parts share no classifier) before the
-            // result is lowered. A same-classifier intersection stays when its parameter variance
-            // is unknown: inventing one would disagree with the checked approximation.
-            TyKind::Intersection(_) => {
-                match crate::types::declaration_approximation(ty, &mut |_, _| None) {
-                    Some(approximated) if approximated != ty => {
-                        result(approximated, denotable, visiting)
-                    }
-                    _ => ty,
-                }
-            }
             TyKind::TyParam(name, bound) | TyKind::Var(name, bound)
                 if !denotable.contains(name.as_str()) =>
             {
@@ -155,32 +144,4 @@ pub(super) fn denotable_signature_result(
         denotable_parameters,
         &mut crate::fx_hash::HashSet::default(),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::denotable_signature_result;
-    use crate::types::Ty;
-
-    fn publish(ty: Ty) -> Ty {
-        denotable_signature_result(ty, &crate::fx_hash::HashSet::default())
-    }
-
-    #[test]
-    fn an_inferred_intersection_publishes_a_denotable_declaration_type() {
-        let intersection = Ty::intersection(&[Ty::obj("sample/A"), Ty::obj("sample/B")]);
-        assert_eq!(publish(intersection), Ty::obj("kotlin/Any"));
-        // `fun foobar(a: A, b: B) = select(a, b)` infers `In<A & B>`. The argument is what
-        // metadata would otherwise try to write.
-        assert_eq!(
-            publish(Ty::obj_args("sample/In", &[intersection])),
-            Ty::obj_args("sample/In", &[Ty::obj("kotlin/Any")])
-        );
-        assert_eq!(
-            publish(Ty::nullable(intersection)),
-            Ty::nullable(Ty::obj("kotlin/Any"))
-        );
-        assert_eq!(publish(Ty::Null), Ty::nullable(Ty::Nothing));
-        assert_eq!(publish(Ty::Int), Ty::Int);
-    }
 }
