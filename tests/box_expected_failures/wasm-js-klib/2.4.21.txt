@@ -192,7 +192,6 @@ boxingOptimization/fold.kt
 boxingOptimization/foldRange.kt
 boxingOptimization/intCompareTo.kt
 boxingOptimization/kt19767_2.kt
-boxingOptimization/kt46859.kt
 boxingOptimization/kt48394.kt
 boxingOptimization/kt49548.kt
 boxingOptimization/kt49548a.kt
@@ -2642,7 +2641,6 @@ multiplatform/k2/basic/extensionFunctionAsASupertypeConversion.kt
 multiplatform/k2/basic/extensionFunctionInDelegatedSam.kt
 multiplatform/k2/basic/interfaceMethodFromSuperTypeIsImplementedInOtherExpectSuperClass.kt
 multiplatform/k2/basic/intersectionOverrideWithDefaultParameterInCommonModule.kt
-multiplatform/k2/basic/localIntersectionOverrideInCommonModule.kt
 multiplatform/k2/basic/localIntersectionOverrideWithDefaultParameterInCommonModule.kt
 multiplatform/k2/basic/localSubstitutionOverrideInCommonModule.kt
 multiplatform/k2/basic/nameBasedDestructuringFullForm.kt
@@ -2677,7 +2675,6 @@ multiplatform/k2/delegation/delegationToExpectInterface_withOverrideInDelegated.
 multiplatform/k2/delegation/delegationWithIntersection.kt
 multiplatform/k2/enumStaticMethods.kt
 multiplatform/k2/exhaustiveness/commonSealedClass.kt
-multiplatform/k2/expectRefinement.kt
 multiplatform/k2/expectStatic.kt
 multiplatform/k2/expectValueClassWithNoPrimaryConstructor.kt
 multiplatform/k2/extensionPropertiesOverloads.kt
@@ -2694,9 +2691,7 @@ multiplatform/k2/hmpp/expectActualInheritanceTwoLibs.kt
 multiplatform/k2/hmpp/expectActualOverload2-2.kt
 multiplatform/k2/hmpp/expectActualOverload3-3.kt
 multiplatform/k2/hmpp/expectActualOverloadTwoLibs.kt
-multiplatform/k2/hmpp/expectRefinement.kt
 multiplatform/k2/hmpp/expectRefinement3-3.kt
-multiplatform/k2/hmpp/expectRefinementLibVsApp.kt
 multiplatform/k2/hmpp/fakeOverrideExpectSuperType.kt
 multiplatform/k2/hmpp/fakeOverrideExpectSuperTypeFromLib.kt
 multiplatform/k2/hmpp/friendDependency.kt
@@ -2718,7 +2713,6 @@ multiplatform/k2/hmpp/overloadAliasTwoLibs.kt
 multiplatform/k2/hmpp/propertyAlias3-3.kt
 multiplatform/k2/hmpp/propertyAliasTwoLibs.kt
 multiplatform/k2/hmpp/typealiasNameClash.kt
-multiplatform/k2/hmpp/typealiasReturnTypeIntersectionBound.kt
 multiplatform/k2/internalOverride.kt
 multiplatform/k2/internalOverride2.kt
 multiplatform/k2/kt66970.kt
@@ -3787,7 +3781,6 @@ regressions/floatingRangeContainsMixedWidths.kt
 regressions/generic.kt
 regressions/hashCodeNPE.kt
 regressions/inlineCallsInInitializerLambda.kt
-regressions/kt10143.kt
 regressions/kt15196.kt
 regressions/kt1779.kt
 regressions/kt1800.kt
@@ -3996,8 +3989,6 @@ syntheticAccessors/kt10047.kt
 syntheticAccessors/kt9717DifferentPackages.kt
 syntheticAccessors/kt9958.kt
 syntheticAccessors/kt9958Interface.kt
-syntheticAccessors/protectedMemberReferenceAccessor/kt46597_crossinline_method.kt
-syntheticAccessors/protectedMemberReferenceAccessor/kt46597_method.kt
 syntheticAccessors/protectedMemberReferenceAccessor/kt46597_property.kt
 toArray/kt3177-toTypedArray.kt
 toArray/returnToTypedArray.kt

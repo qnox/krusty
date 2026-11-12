@@ -292,6 +292,15 @@ fn pass_continuations(ir: &mut IrFile, suspend_set: &HashSet<u32>) {
     }
 }
 
+/// What a suspend function answering `result` takes last and answers once it passes its
+/// continuation: `Continuation<result>`, and `Any?`.
+pub fn continuation_passing(result: Ty) -> (Ty, Ty) {
+    (
+        Ty::obj_args_name(wk::continuation(), &[result]),
+        Ty::nullable(Ty::obj_name(wk::any())),
+    )
+}
+
 fn add_continuation_parameter(ir: &mut IrFile, function: u32) {
     let declared = {
         let declaration = &ir.functions[function as usize];
@@ -302,11 +311,10 @@ fn add_continuation_parameter(ir: &mut IrFile, function: u32) {
     let declaration = &mut ir.functions[function as usize];
     let receiver = u32::from(declaration.dispatch_receiver.is_some() && !declaration.is_static);
     let completion = receiver + declaration.params.len() as u32;
-    declaration
-        .params
-        .push(Ty::obj_args_name(wk::continuation(), &[result]));
+    let (continuation, completed) = continuation_passing(result);
+    declaration.params.push(continuation);
     declaration.param_checks.push(None);
-    declaration.ret = Ty::nullable(Ty::obj_name(wk::any()));
+    declaration.ret = completed;
     let body = declaration.body;
     if let Some(parameters) = ir.fn_params.get_mut(&function) {
         parameters.identities.push(IrParameterIdentity::generated(

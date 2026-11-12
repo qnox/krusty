@@ -32,7 +32,7 @@ mod value_when;
 
 pub use block_splicing::{diverging_control_core, splice_return_blocks};
 pub use bottom_completion::{suspension_completion, unwrap_suspend_cast, SuspensionCompletion};
-pub use continuation_parameters::add_continuation_parameters;
+pub use continuation_parameters::{add_continuation_parameters, continuation_passing};
 pub use control_flow::{expr_contains_owned_loop_jump, expr_has_return, stmt_diverges};
 pub use hoisting::{hoist_spliced_inline_bodies, hoist_suspensions};
 pub use statement_normalization::{
