@@ -228,6 +228,8 @@ impl KlibBackend {
         let inner_classifier = |classifier| {
             crate::metadata::inner_classifiers::inner_classifier(ir, &file.classifiers, classifier)
         };
+        let approximate =
+            |ty| crate::metadata::declaration_approximation::approximate(&file.classifiers, ty);
         let tails = records
             .iter()
             .zip(secondary_constructors.iter().zip(&nested))
@@ -237,7 +239,7 @@ impl KlibBackend {
                         param_assertions: false,
                         annotations_in_metadata: self.annotations_in_metadata,
                         compiler_version_requirement: None,
-                        intersection: None,
+                        intersection: Some(&approximate),
                         inner_classifiers: &inner_classifier,
                         primary_ctor_annotations: None,
                     },
@@ -292,6 +294,7 @@ impl KlibBackend {
             &declarations,
             self.annotations_in_metadata,
             &inner_classifier,
+            Some(&approximate),
         ) {
             Ok(fragment) => fragment,
             Err(error) => {
