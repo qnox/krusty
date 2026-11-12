@@ -1050,7 +1050,8 @@ fn realize_expressions(
             }
             Some(
                 krusty::libraries::CompilerIntrinsic::ThrowableConstructor { .. }
-                | krusty::libraries::CompilerIntrinsic::ThrowableMessage,
+                | krusty::libraries::CompilerIntrinsic::ThrowableMessage
+                | krusty::libraries::CompilerIntrinsic::ThrowableCause,
             ) => unreachable!("target KLIB Throwable storage cannot reach JVM call realization"),
             Some(
                 krusty::libraries::CompilerIntrinsic::ArraySize

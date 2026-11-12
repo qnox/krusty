@@ -34,6 +34,8 @@ pub enum CompilerIntrinsic {
     },
     /// The authenticated `Throwable.message: String?` getter, not a same-named user property.
     ThrowableMessage,
+    /// The authenticated `Throwable.cause: Throwable?` getter, not a same-named user property.
+    ThrowableCause,
     /// Reinterpret one scalar's bits as the equal-width floating or integral scalar selected by
     /// the authenticated declaration. Checked FIR/IR records both semantic endpoint types.
     ReinterpretBits,
