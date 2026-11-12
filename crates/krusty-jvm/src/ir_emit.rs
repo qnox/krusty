@@ -140,6 +140,7 @@ mod method_signatures;
 mod must_inline_lambdas;
 mod non_local_jumps;
 mod non_null_operands;
+mod null_assertions;
 mod nullable_sam;
 mod numeric_comparison;
 mod object_static_initialization;
@@ -5190,28 +5191,13 @@ impl<'a> Emitter<'a> {
                 match local_updates::iinc_delta(self.ir, e, var, value, jt) {
                     Some(delta) if !deferred => code.iinc(self.slots[&var].0, delta),
                     _ => {
-                        // An erased `FunctionN.invoke` stored into an `Object` slot stays `Object`.
-                        // The consumer after the store narrows it; casting at the store would put
-                        // the checkcast inside the protected range.
-                        // `FunctionN.invoke` returns `Object` even when the function type says
-                        // `Unit`. A `Unit` consumer pops that object; an `Object` slot stores it.
-                        let keep_erased_invoke = jvm_is_erased_top(jt)
-                            && matches!(
-                                self.ir.expr(value),
-                                IrExpr::InvokeFunction { ret, .. } if *ret != Ty::Nothing
-                            );
-                        if keep_erased_invoke {
-                            self.erased_invocations.insert(value);
-                        }
-                        self.emit_value(value, code);
-                        if keep_erased_invoke {
-                            self.erased_invocations.remove(&value);
-                        }
+                        let (source, keep_erased_invoke) =
+                            self.emit_assignment_operand(value, jt, code);
                         // Coerced to the slot's type as the initializer is: a value of another
                         // class is cast to the declared one, which is what a join of the two
                         // stores reads back. The erased invoke already left `Object`.
                         if !keep_erased_invoke {
-                            self.adapt_physical_operand_for(value, self.value_ty(value), jt, code);
+                            self.adapt_physical_operand_for(value, source, jt, code);
                         }
                         // An inlined `return` stores on the return's line, after the value.
                         self.mark_expression_start(e, code);

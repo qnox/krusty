@@ -451,6 +451,14 @@ pub(crate) struct ModuleDependencies<'a> {
     friends: &'a [PathBuf],
 }
 
+impl ModuleDependencies<'static> {
+    /// A module with no dependency KLIB beyond the target's stdlib.
+    pub(crate) const NONE: Self = Self {
+        klibs: &[],
+        friends: &[],
+    };
+}
+
 /// Analyze one independently built corpus module against the exact KLIB artifacts of its
 /// dependencies. `common_file_count` is the dependency-first `dependsOn` prefix folded into this
 /// unit; those sources remain common rather than being flattened into platform sources.

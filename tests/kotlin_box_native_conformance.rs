@@ -368,11 +368,14 @@ fn native_a_declined_required_inline_body_rejects_the_caller() {
     let lane = NativeLane {
         target: Some(target),
     };
+    let expected = super::dependency_template_rejections::count_of_from_lib_producer(
+        super::dependency_template_rejections::DependencyTarget::native(target),
+    );
     let outcome =
         lane.compile_modules_and_run(&std::env::temp_dir(), case.stem, &units, case.source);
     assert!(
         matches!(&outcome, Outcome::Frontend(message)
-            if super::dependency_template_rejections::required_inline_rejection(message).is_some()),
+            if super::dependency_template_rejections::required_inline_rejection(message, &expected).is_some()),
         "{}: {outcome:?}",
         case.stem
     );
@@ -394,6 +397,9 @@ fn native_a_declined_required_stdlib_template_rejects_the_caller() {
     let lane = NativeLane {
         target: Some(target),
     };
+    let expected = super::dependency_template_rejections::selected_compare_by(
+        super::dependency_template_rejections::DependencyTarget::native(target),
+    );
     let outcome = lane.compile_and_run(
         &std::env::temp_dir(),
         stem,
@@ -402,7 +408,7 @@ fn native_a_declined_required_stdlib_template_rejects_the_caller() {
     );
     assert!(
         matches!(&outcome, Outcome::Frontend(message)
-            if super::dependency_template_rejections::required_inline_rejection(message).is_some()),
+            if super::dependency_template_rejections::required_inline_rejection(message, &expected).is_some()),
         "{stem}: {outcome:?}"
     );
 }
