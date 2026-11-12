@@ -824,3 +824,49 @@ fn an_expression_bodied_setter_returns_at_its_last_line() {
         &["line 6: 0", "line 7: 1", "line 5: 2", "line 8: 5"],
     );
 }
+
+/// kotlinc decides each line entry from the kind of node it visits: a node that has no operands to
+/// evaluate first (`E.values()`), an intrinsic (`UInt.toString()` realized on the JDK), and an
+/// inlined lambda's invocation mark where their code starts; a `var` without an initializer marks
+/// its declaration before the default it stores; a discarded implicit `Unit` branch value is no
+/// code and marks nothing; and nothing puts the declaration's line ahead of the body's first mark.
+// PLATFORM-SPECIFIC: complete JVM class bytes and line tables; the whole runtime program is shared.
+#[test]
+fn line_entries_follow_kotlincs_rule_by_node_kind() {
+    let source = KIND_LINE_RULE;
+    common::byte_diff_against_kotlinc_cp(
+        "KindLineRule",
+        source,
+        "KindLineRuleKt",
+        &[common::stdlib_jar()],
+    )
+    .expect("the reference kotlinc is provisioned")
+    .unwrap_or_else(|why| panic!("{why}"));
+    // Every class the program writes, `Shade` included, is the reference compiler's class byte for
+    // byte, and both compilers write the same classes.
+    let classes = common::classes_against_kotlinc_module_without_script_runtime(&[(
+        "KindLineRule.kt",
+        source,
+    )]);
+    assert_eq!(
+        classes.reference.keys().collect::<Vec<_>>(),
+        classes.krusty.keys().collect::<Vec<_>>(),
+        "both compilers write the same classes"
+    );
+    for (class, reference) in &classes.reference {
+        assert!(
+            classes.krusty[class] == *reference,
+            "{class} is not kotlinc's class:\n\n{}",
+            classes.differences().join("\n\n")
+        );
+    }
+}
+
+/// The same complete shared program calls every function down each of its paths.
+#[test]
+fn the_node_kind_line_rule_program_runs_like_kotlincs() {
+    let source = KIND_LINE_RULE;
+    common::expect_box_same_as_kotlinc(source, "KindLineRuleBox");
+}
+
+const KIND_LINE_RULE: &str = include_str!("box_regressions/nodeKindLineRule.kt");

@@ -24,6 +24,17 @@ type SelectedPropertyRead = (
     Box<[FirTypeSubstitution]>,
 );
 
+/// The getter, receivers, context arguments, and substitutions of one selected property read.
+/// A prefix increment publishes this same access twice.
+#[derive(Clone, Copy)]
+struct PropertyReadAccess<'a> {
+    target: &'a FirPropertyTarget,
+    dispatch_receiver: Option<FirReceiver>,
+    extension_receiver: Option<FirReceiver>,
+    context_arguments: &'a [FirReceiver],
+    substitutions: &'a [FirTypeSubstitution],
+}
+
 /// The property an increment reads and writes, once resolution has chosen it.
 struct PropertyIncDecTarget<'a> {
     declaration: Option<DeclarationId>,
@@ -1872,15 +1883,14 @@ impl BodyFirChecker<'_> {
             span.ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
         let receiver_ty = self.resolved_type(span, resolution.receiver_ty)?;
         let substitutions: Box<[FirTypeSubstitution]> = Box::new([]);
-        let read = self.selected_property_read(
-            origin,
-            receiver_ty,
-            &read_target,
+        let property_read = PropertyReadAccess {
+            target: &read_target,
             dispatch_receiver,
             extension_receiver,
-            &context_arguments,
-            &substitutions,
-        );
+            context_arguments: &context_arguments,
+            substitutions: &substitutions,
+        };
+        let read = self.selected_property_read(origin, receiver_ty, property_read);
         // A postfix statement keeps kotlinc's shape `{ val t = read; write(t.inc()); t }`: the old
         // value is stored in a temporary before the write, even though the value is discarded.
         let mut statements = Vec::new();
@@ -1991,15 +2001,7 @@ impl BodyFirChecker<'_> {
             origin,
             kind: FirStatementKind::Expression(write),
         })]);
-        let reread = self.selected_property_read(
-            origin,
-            updated_ty,
-            &read_target,
-            dispatch_receiver,
-            extension_receiver,
-            &context_arguments,
-            &substitutions,
-        );
+        let reread = self.selected_property_read(origin, updated_ty, property_read);
         Ok(Some(FirExprKind::Block {
             statements,
             result: Some(reread),
@@ -2017,12 +2019,15 @@ impl BodyFirChecker<'_> {
         &mut self,
         origin: OriginId,
         ty: ResolvedTy,
-        target: &FirPropertyTarget,
-        dispatch_receiver: Option<FirReceiver>,
-        extension_receiver: Option<FirReceiver>,
-        context_arguments: &[FirReceiver],
-        substitutions: &[FirTypeSubstitution],
+        access: PropertyReadAccess<'_>,
     ) -> FirExprId {
+        let PropertyReadAccess {
+            target,
+            dispatch_receiver,
+            extension_receiver,
+            context_arguments,
+            substitutions,
+        } = access;
         self.body.add_expr(FirExpr {
             origin,
             ty,
@@ -2250,15 +2255,14 @@ impl BodyFirChecker<'_> {
         let read_ty = self.resolved_type(span, resolution.receiver_ty)?;
         let updated_ty = self.resolved_type(span, resolution.updated_ty)?;
         let substitutions: Box<[FirTypeSubstitution]> = Box::new([]);
-        let read = self.selected_property_read(
-            cause,
-            read_ty,
-            &read_target,
+        let property_read = PropertyReadAccess {
+            target: &read_target,
             dispatch_receiver,
             extension_receiver,
-            &context_arguments,
-            &substitutions,
-        );
+            context_arguments: &context_arguments,
+            substitutions: &substitutions,
+        };
+        let read = self.selected_property_read(cause, read_ty, property_read);
         let convention = if decrement { "dec" } else { "inc" };
         let increment = |checker: &mut Self, operand| -> Result<FirExprId, BodyCheckFailure> {
             let kind = if checker.selected_operator(expression, convention) {
@@ -2348,15 +2352,7 @@ impl BodyFirChecker<'_> {
             }),
             // Prefix re-reads the property after the write, exactly as kotlinc does — the same
             // selected access as the first read, context arguments included.
-            None => self.selected_property_read(
-                cause,
-                result_ty,
-                &read_target,
-                dispatch_receiver,
-                extension_receiver,
-                &context_arguments,
-                &substitutions,
-            ),
+            None => self.selected_property_read(cause, result_ty, property_read),
         };
         Ok(Some(FirExprKind::Block {
             statements: statements.into_boxed_slice(),
@@ -2824,7 +2820,7 @@ impl BodyFirChecker<'_> {
             })?;
         let selected = self.selected_call_target(span, Some(&selected))?;
         if !selected.context_arguments.is_empty()
-            || selected.vararg_index.is_some()
+            || selected.vararg.is_some()
             || !selected.value_parameters.is_empty()
         {
             return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));

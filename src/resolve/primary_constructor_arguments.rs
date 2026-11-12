@@ -205,8 +205,7 @@ impl Checker<'_> {
                             };
                             c.expect_call_arg_labeled(
                                 header_scope,
-                                expected,
-                                declared,
+                                ParameterTypeExpectation { expected, declared },
                                 arg,
                                 actual,
                                 has_receiver,

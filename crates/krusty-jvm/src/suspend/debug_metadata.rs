@@ -38,7 +38,7 @@ fn branch_entry_line(ir: &IrFile, expression: ExprId) -> Option<u32> {
 
 fn direct_expression_source_line(ir: &IrFile, expression: ExprId) -> Option<u32> {
     ir.source_line(expression)
-        .or_else(|| ir.expr_lines.get(&expression).copied())
+        .or_else(|| ir.statement_line(expression))
 }
 
 fn expression_source_line(ir: &IrFile, expression: ExprId) -> Option<u32> {
@@ -67,7 +67,7 @@ fn nearest_expression_source_line(ir: &IrFile, root: ExprId) -> Option<u32> {
         }
         if let Some(line) = ir
             .source_line(expression)
-            .or_else(|| ir.expr_lines.get(&expression).copied())
+            .or_else(|| ir.statement_line(expression))
         {
             best = Some(best.map_or(line, |current: u32| current.min(line)));
         }

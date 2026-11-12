@@ -730,16 +730,14 @@ fn decode_metadata_type_ref(
 ) -> Option<Ty> {
     let (body, table_nullable) = resolved?;
     let context = context?;
-    decode_metadata_type(
-        body,
+    let source = MetadataTypeSource {
         type_table,
         records,
         d2,
-        &context.names,
-        &context.erasure_bounds,
-        table_nullable,
-        0,
-    )
+        tparams: &context.names,
+        bounds: &context.erasure_bounds,
+    };
+    decode_metadata_type(body, &source, table_nullable, 0)
 }
 
 fn decode_value_parameter_types(
@@ -793,31 +791,23 @@ fn type_parameter_context(
     }
     let mut formal_bounds = inherited_bounds.to_vec();
     formal_bounds.resize(inherited.len(), Vec::new());
+    // Upper bounds are decoded before the erasure map exists, so they see an empty bound table.
+    let bounds = HashMap::default();
+    let source = MetadataTypeSource {
+        type_table,
+        records,
+        d2,
+        tparams: &names,
+        bounds: &bounds,
+    };
     formal_bounds.extend(resolved.into_iter().map(|parameter| {
-        let inline = parameter.upper_bound_bodies.iter().filter_map(|body| {
-            decode_metadata_type(
-                body,
-                type_table,
-                records,
-                d2,
-                &names,
-                &HashMap::default(),
-                false,
-                0,
-            )
-        });
+        let inline = parameter
+            .upper_bound_bodies
+            .iter()
+            .filter_map(|body| decode_metadata_type(body, &source, false, 0));
         let indexed = parameter.upper_bound_ids.iter().filter_map(|id| {
             let (body, nullable) = type_table_entry(type_table?, *id as usize)?;
-            decode_metadata_type(
-                body,
-                type_table,
-                records,
-                d2,
-                &names,
-                &HashMap::default(),
-                nullable,
-                0,
-            )
+            decode_metadata_type(body, &source, nullable, 0)
         });
         inline.chain(indexed).collect()
     }));
@@ -857,20 +847,18 @@ fn build_generic_sig(
         d2,
         type_table,
     )?;
+    let source = MetadataTypeSource {
+        type_table,
+        records,
+        d2,
+        tparams: &context.names,
+        bounds: &context.erasure_bounds,
+    };
     let receiver_ref =
         metadata_type_ref(pf.receiver_body.as_deref(), pf.receiver_type_id, type_table);
     let receiver = if let Some((body, table_nullable)) = receiver_ref {
         // An EXTENSION: its `receiver_type` is the receiver gsig node (`T`, `Ch`, `List<T>`, …).
-        Some(decode_metadata_type(
-            body,
-            type_table,
-            records,
-            d2,
-            &context.names,
-            &context.erasure_bounds,
-            table_nullable,
-            0,
-        )?)
+        Some(decode_metadata_type(body, &source, table_nullable, 0)?)
     } else {
         // A MEMBER: the declaring class parameterized by its own type parameters, so unifying it with the
         // actual receiver binds `T` exactly like an extension. `None` for a top-level function.
@@ -909,16 +897,7 @@ fn build_generic_sig(
             )
             .map(|(body, id)| {
                 let (body, table_nullable) = metadata_type_ref(body, id, type_table)?;
-                decode_metadata_type(
-                    body,
-                    type_table,
-                    records,
-                    d2,
-                    &context.names,
-                    &context.erasure_bounds,
-                    table_nullable,
-                    0,
-                )
+                decode_metadata_type(body, &source, table_nullable, 0)
             })
             .collect::<Option<Vec<_>>>()?
     };
@@ -931,16 +910,7 @@ fn build_generic_sig(
     );
     let ret = metadata_type_ref(pf.return_body.as_deref(), pf.return_type_id, type_table)
         .and_then(|(body, table_nullable)| {
-            decode_metadata_type(
-                body,
-                type_table,
-                records,
-                d2,
-                &context.names,
-                &context.erasure_bounds,
-                table_nullable,
-                0,
-            )
+            decode_metadata_type(body, &source, table_nullable, 0)
         })?;
     // Enclosing class parameters belong in the DECODING context because a member extension may use
     // one in its receiver/value/return shape. They do not become function formals: consumers render
@@ -985,48 +955,30 @@ fn build_property_generic_sig(
         d2,
         type_table,
     )?;
-    let receiver = match property.receiver_body {
-        Some(body) => {
-            let receiver = decode_metadata_type(
-                body,
-                type_table,
-                records,
-                d2,
-                &context.names,
-                &context.erasure_bounds,
-                property.receiver_nullable,
-                0,
-            )?;
-            Some(receiver)
-        }
-        None => None,
-    };
-    let ret = decode_metadata_type(
-        property.return_body?,
+    let source = MetadataTypeSource {
         type_table,
         records,
         d2,
-        &context.names,
-        &context.erasure_bounds,
-        property.return_nullable,
-        0,
-    )?;
+        tparams: &context.names,
+        bounds: &context.erasure_bounds,
+    };
+    let receiver = match property.receiver_body {
+        Some(body) => Some(decode_metadata_type(
+            body,
+            &source,
+            property.receiver_nullable,
+            0,
+        )?),
+        None => None,
+    };
+    let ret = decode_metadata_type(property.return_body?, &source, property.return_nullable, 0)?;
     let params = if !property.context_params.is_empty() {
         property
             .context_params
             .iter()
             .map(|parameter| {
                 let (body, table_nullable) = value_parameter_type(parameter, type_table)?;
-                decode_metadata_type(
-                    body,
-                    type_table,
-                    records,
-                    d2,
-                    &context.names,
-                    &context.erasure_bounds,
-                    table_nullable,
-                    0,
-                )
+                decode_metadata_type(body, &source, table_nullable, 0)
             })
             .collect::<Option<Vec<_>>>()?
     } else {
@@ -1042,16 +994,7 @@ fn build_property_generic_sig(
             )
             .map(|(body, id)| {
                 let (body, table_nullable) = metadata_type_ref(body, id, type_table)?;
-                decode_metadata_type(
-                    body,
-                    type_table,
-                    records,
-                    d2,
-                    &context.names,
-                    &context.erasure_bounds,
-                    table_nullable,
-                    0,
-                )
+                decode_metadata_type(body, &source, table_nullable, 0)
             })
             .collect::<Option<Vec<_>>>()?
     };
@@ -1451,34 +1394,21 @@ fn decode_class_signature(ctx: &MetaCtx<'_>) -> MetadataResult<ClassSignature> {
         return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new()));
     };
 
-    let decode = |body| {
-        decode_metadata_type(
-            body,
-            table,
-            ctx.records,
-            ctx.d2,
-            &parameters.names,
-            &parameters.erasure_bounds,
-            false,
-            0,
-        )
+    let source = MetadataTypeSource {
+        type_table: table,
+        records: ctx.records,
+        d2: ctx.d2,
+        tparams: &parameters.names,
+        bounds: &parameters.erasure_bounds,
     };
+    let decode = |body| decode_metadata_type(body, &source, false, 0);
     let spelled = |body| type_aliases::parse_type_alias_name(body, ctx.records, ctx.d2);
     let (supertypes, supertype_aliases) = inline_supertypes
         .into_iter()
         .filter_map(|body| Some((decode(body)?, spelled(body))))
         .chain(supertype_ids.into_iter().filter_map(|id| {
             let (body, nullable) = type_table_entry(table?, id as usize)?;
-            let ty = decode_metadata_type(
-                body,
-                table,
-                ctx.records,
-                ctx.d2,
-                &parameters.names,
-                &parameters.erasure_bounds,
-                nullable,
-                0,
-            )?;
+            let ty = decode_metadata_type(body, &source, nullable, 0)?;
             Some((ty, spelled(body)))
         }))
         .unzip();
@@ -1491,16 +1421,31 @@ fn decode_class_signature(ctx: &MetaCtx<'_>) -> MetadataResult<ClassSignature> {
     ))
 }
 
+/// The type table, string table, and type-parameter bindings one metadata `Type` is decoded
+/// against. Nested types share this source; each occurrence supplies its own body, table
+/// nullability, and depth.
+#[derive(Clone, Copy)]
+struct MetadataTypeSource<'a> {
+    type_table: Option<&'a [u8]>,
+    records: &'a [Rec],
+    d2: &'a [String],
+    tparams: &'a HashMap<u64, String>,
+    bounds: &'a HashMap<String, Ty>,
+}
+
 fn decode_metadata_type(
     body: &[u8],
-    type_table: Option<&[u8]>,
-    records: &[Rec],
-    d2: &[String],
-    tparams: &HashMap<u64, String>,
-    bounds: &HashMap<String, Ty>,
+    source: &MetadataTypeSource<'_>,
     table_nullable: bool,
     depth: u32,
 ) -> Option<Ty> {
+    let MetadataTypeSource {
+        type_table,
+        records,
+        d2,
+        tparams,
+        bounds,
+    } = *source;
     if depth > BUILTIN_TYPE_DEPTH_LIMIT {
         return None;
     }
@@ -1509,30 +1454,14 @@ fn decode_metadata_type(
         .arguments
         .into_iter()
         .map(|argument| match argument {
-            ParsedTypeArgument::Inline(body, projection) => decode_metadata_type(
-                body,
-                type_table,
-                records,
-                d2,
-                tparams,
-                bounds,
-                false,
-                depth + 1,
-            )
-            .map(|ty| project_ty(projection, ty)),
+            ParsedTypeArgument::Inline(body, projection) => {
+                decode_metadata_type(body, source, false, depth + 1)
+                    .map(|ty| project_ty(projection, ty))
+            }
             ParsedTypeArgument::Table(id, projection) => {
                 let (body, nullable) = type_table_entry(type_table?, id as usize)?;
-                decode_metadata_type(
-                    body,
-                    type_table,
-                    records,
-                    d2,
-                    tparams,
-                    bounds,
-                    nullable,
-                    depth + 1,
-                )
-                .map(|ty| project_ty(projection, ty))
+                decode_metadata_type(body, source, nullable, depth + 1)
+                    .map(|ty| project_ty(projection, ty))
             }
             ParsedTypeArgument::Star => {
                 Some(Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))))
@@ -1540,28 +1469,10 @@ fn decode_metadata_type(
         })
         .collect::<Option<Vec<_>>>()?;
     let outer = match (node.outer_type, node.outer_type_id) {
-        (Some(body), _) => Some(decode_metadata_type(
-            body,
-            type_table,
-            records,
-            d2,
-            tparams,
-            bounds,
-            false,
-            depth + 1,
-        )?),
+        (Some(body), _) => Some(decode_metadata_type(body, source, false, depth + 1)?),
         (None, Some(id)) => {
             let (body, nullable) = type_table_entry(type_table?, id as usize)?;
-            Some(decode_metadata_type(
-                body,
-                type_table,
-                records,
-                d2,
-                tparams,
-                bounds,
-                nullable,
-                depth + 1,
-            )?)
+            Some(decode_metadata_type(body, source, nullable, depth + 1)?)
         }
         (None, None) => None,
     };
@@ -1635,31 +1546,11 @@ fn decode_metadata_type(
         ty
     };
     let flexible_upper = flexible_upper_bound
-        .and_then(|body| {
-            decode_metadata_type(
-                body,
-                type_table,
-                records,
-                d2,
-                tparams,
-                bounds,
-                false,
-                depth + 1,
-            )
-        })
+        .and_then(|body| decode_metadata_type(body, source, false, depth + 1))
         .or_else(|| {
             let (body, nullable) =
                 type_table_entry(type_table?, flexible_upper_bound_id? as usize)?;
-            decode_metadata_type(
-                body,
-                type_table,
-                records,
-                d2,
-                tparams,
-                bounds,
-                nullable,
-                depth + 1,
-            )
+            decode_metadata_type(body, source, nullable, depth + 1)
         });
     Some(if flexible_upper.is_some_and(Ty::is_nullable) {
         Ty::platform_nullable(ty.non_null())
@@ -2725,11 +2616,13 @@ mod module_reader_tests {
         assert_eq!(
             super::decode_metadata_type(
                 &lower,
-                Some(&table),
-                &[],
-                &["kotlin/String".to_string()],
-                &HashMap::default(),
-                &HashMap::default(),
+                &super::MetadataTypeSource {
+                    type_table: Some(&table),
+                    records: &[],
+                    d2: &["kotlin/String".to_string()],
+                    tparams: &HashMap::default(),
+                    bounds: &HashMap::default(),
+                },
                 false,
                 0,
             ),
@@ -2745,11 +2638,13 @@ mod module_reader_tests {
         assert_eq!(
             decode_metadata_type(
                 &type_parameter,
-                None,
-                &[],
-                &[],
-                &parameters,
-                &HashMap::default(),
+                &super::MetadataTypeSource {
+                    type_table: None,
+                    records: &[],
+                    d2: &[],
+                    tparams: &parameters,
+                    bounds: &HashMap::default(),
+                },
                 false,
                 0,
             ),
@@ -2792,11 +2687,13 @@ mod module_reader_tests {
             assert_eq!(
                 decode_metadata_type(
                     &body,
-                    None,
-                    &[],
-                    &d2,
-                    &HashMap::default(),
-                    &HashMap::default(),
+                    &super::MetadataTypeSource {
+                        type_table: None,
+                        records: &[],
+                        d2: &d2,
+                        tparams: &HashMap::default(),
+                        bounds: &HashMap::default(),
+                    },
                     false,
                     0,
                 ),
@@ -2831,11 +2728,13 @@ mod module_reader_tests {
         assert_eq!(
             decode_metadata_type(
                 &body,
-                None,
-                &[],
-                &d2,
-                &HashMap::default(),
-                &HashMap::default(),
+                &super::MetadataTypeSource {
+                    type_table: None,
+                    records: &[],
+                    d2: &d2,
+                    tparams: &HashMap::default(),
+                    bounds: &HashMap::default(),
+                },
                 false,
                 0,
             ),
@@ -2855,11 +2754,13 @@ mod module_reader_tests {
         assert_eq!(
             decode_metadata_type(
                 &nullable_string,
-                None,
-                &[],
-                &["kotlin/String".to_string()],
-                &HashMap::default(),
-                &HashMap::default(),
+                &super::MetadataTypeSource {
+                    type_table: None,
+                    records: &[],
+                    d2: &["kotlin/String".to_string()],
+                    tparams: &HashMap::default(),
+                    bounds: &HashMap::default(),
+                },
                 false,
                 0,
             ),
@@ -2882,11 +2783,13 @@ mod module_reader_tests {
                 .collect::<Vec<_>>();
             decode_metadata_type(
                 &body,
-                None,
-                &[],
-                &names,
-                &HashMap::default(),
-                &HashMap::default(),
+                &super::MetadataTypeSource {
+                    type_table: None,
+                    records: &[],
+                    d2: &names,
+                    tparams: &HashMap::default(),
+                    bounds: &HashMap::default(),
+                },
                 false,
                 0,
             )
@@ -2932,11 +2835,13 @@ mod module_reader_tests {
         assert_eq!(
             decode_metadata_type(
                 &body,
-                None,
-                &[],
-                &names,
-                &HashMap::default(),
-                &HashMap::default(),
+                &super::MetadataTypeSource {
+                    type_table: None,
+                    records: &[],
+                    d2: &names,
+                    tparams: &HashMap::default(),
+                    bounds: &HashMap::default(),
+                },
                 false,
                 0,
             ),

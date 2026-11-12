@@ -9,7 +9,7 @@
 
 use super::super::super::type_objects::{Classifier, Projection, TypeDescription};
 use super::*;
-use krusty::backend::class_tables::{AnyMember, Slot};
+use krusty::backend::class_tables::AnyMember;
 use krusty::ir::ClassId;
 
 impl Body<'_> {
@@ -40,10 +40,12 @@ impl Body<'_> {
     }
 
     /// Replace the `KType` reference on the stack, statically of type `ty`, with its `toString()`.
+    /// The same reach analysis as a template `toString` of an erased reference: a slot with no
+    /// body declines, and a realized `kotlin.Any.toString` does not.
     pub(super) fn type_object_to_string(&mut self, ty: Ty) -> Result<(), Unsupported> {
-        if self.may_reach_any_default(ty, AnyMember::ToString)? {
+        if self.may_reach_unrealized(ty, AnyMember::ToString)? {
             return Err(format!(
-                "a string of `{}` where this file implements `KType` with `kotlin.Any.toString`",
+                "a `toString` of `{}` reaching a runtime object this target cannot print",
                 describe(ty)
             ));
         }
@@ -51,21 +53,16 @@ impl Body<'_> {
         Ok(())
     }
 
-    /// Whether a `KType` value can be an instance of a class of this file reaching `kotlin.Any`'s
-    /// own `member`. Every object this target makes as a `KType` answers all three members, so
-    /// only this file's classes implementing `KType` can.
-    pub(super) fn ktype_may_reach_any_default(
-        &self,
-        member: AnyMember,
-    ) -> Result<bool, Unsupported> {
+    /// Whether a class of this file implements `KType` and has no body for `member`. The runtime's
+    /// own `KType` object answers every member, so only those classes can.
+    pub(super) fn ktype_reaches_unrealized(&self, member: AnyMember) -> Result<bool, Unsupported> {
         let Some(classes) = self.classes else {
             return Ok(false);
         };
         Ok(self.ir.classes.iter().enumerate().any(|(id, class)| {
             !class.is_interface
                 && self.is_ktype_subtype(class.fq_name, &mut Vec::new())
-                && classes.tables.table(id as ClassId).vtable[member.slot() as usize]
-                    == Slot::AnyMember(member)
+                && !classes.realizes(id as ClassId, member)
         }))
     }
 

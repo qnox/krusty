@@ -24,6 +24,11 @@ pub(super) struct Host {
 }
 
 impl Host {
+    /// The target this host runs a module on.
+    pub(super) fn target(&self) -> WasmTarget {
+        self.target
+    }
+
     /// Declare the target's imports. Runs before any function is defined.
     pub(super) fn import(module: &mut Module, target: WasmTarget) -> Self {
         module.memory(1);

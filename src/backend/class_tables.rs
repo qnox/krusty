@@ -31,10 +31,14 @@
 //! override is carried the way the member it overrides is. Where it is not, the overridden slot
 //! keeps its signature and holds a bridge that converts and forwards ([`Slot::Bridge`]).
 //!
-//! **Refusals.** A superclass declared in another file and an override of a method declared
-//! outside it decline — an interface member the module plan numbers excepted, under
-//! [`build_numbered`] — so the file declines with a diagnostic instead of emitting something
-//! unverified.
+//! **Superclasses of other files.** A class may extend one that another file of the module
+//! already laid out ([`LaidOutSuperclass`]), when the module plan numbers both: the plan gives the
+//! numbers, and each one this file has no member for is [`Slot::Inherited`], which the target fills
+//! from the table that file built.
+//!
+//! **Refusals.** A superclass declared in another file that laid out no table for it, and an
+//! override of a method declared outside the file that the module plan does not number, decline,
+//! so the file declines with a diagnostic instead of emitting something unverified.
 
 mod class_vtable;
 #[cfg(any(test, feature = "test-support"))]
@@ -176,6 +180,11 @@ pub enum Slot {
         setter: bool,
         target_slot: u32,
     },
+    /// What the class's nearest superclass laid out by another file of the module holds at
+    /// `slot` ([`ClassTable::laid_out_superclass`]): a member this file neither declares nor
+    /// overrides, so it has no function to name. The target reads it off the table that file built.
+    /// It names its number because an interface table copies the entry to another index.
+    Inherited { slot: u32 },
 }
 
 /// The identity of a virtual member, independent of which class's implementation fills it.
@@ -192,12 +201,29 @@ pub enum SlotKey {
     Setter(ResolvedPropertyOverrideTarget),
 }
 
+/// A superclass another file of the module laid out, as a file extending it sees it: what its table
+/// holds, by number, and never its IR.
+#[derive(Clone, Debug, Default)]
+pub struct LaidOutSuperclass {
+    /// How many numbers its class table has.
+    pub slots: u32,
+    /// The module interfaces its instances implement.
+    pub interfaces: Vec<TypeName>,
+    /// Each interface member number its interface table fills with a member of the class rather
+    /// than an interface's default, with the class slot that member stands at, or `None` for a
+    /// bridge. A default is not listed: the class extending it finds the same one.
+    pub interface_entries: HashMap<u32, Option<u32>>,
+}
+
 /// One class's place in the hierarchy and its dispatch table.
 #[derive(Clone, Debug)]
 pub struct ClassTable {
-    /// The superclass in this file, or `None` for a class extending `kotlin.Any` or a base the
-    /// target owns.
+    /// The superclass in this file, or `None` for a class extending `kotlin.Any`, a base the
+    /// target owns, or a class another file laid out.
     pub superclass: Option<ClassId>,
+    /// The nearest superclass outside this file that another file of the module laid out: this
+    /// class's own superclass, or the one its superclass in this file inherits from.
+    pub laid_out_superclass: Option<TypeName>,
     /// How many fields the superclasses in this file declare between them: this class's own
     /// field `i` is field `first_field + i` of the whole object.
     pub first_field: u32,
@@ -229,14 +255,25 @@ fn any_vtable() -> (Vec<Slot>, HashMap<SlotKey, u32>) {
 /// The class tables of every class in `ir`, with the interface members' module-wide numbers in a
 /// table of each class's own ([`planned_itable`]) rather than in its class table. An interface's
 /// class table keeps only `kotlin.Any`'s slots and the function slot.
+///
+/// `laid_out` answers, for a superclass no class of `ir` declares, the table another file of the
+/// module built for it, if one did.
 pub fn build_numbered(
     representation: &dyn Representation,
     ir: &IrFile,
     plan: &module_slots::ModuleSlotPlan,
+    laid_out: &dyn Fn(TypeName) -> Option<LaidOutSuperclass>,
 ) -> Result<NumberedClassTables, Unsupported> {
-    let (mut tables, order, interfaces) = class_tables(representation, ir, plan)?;
-    let interface_tables =
-        planned_itable::interface_tables(representation, ir, plan.interfaces(), &order, &tables)?;
+    let superclasses = laid_out_superclasses(ir, laid_out);
+    let (mut tables, order, interfaces) = class_tables(representation, ir, plan, &superclasses)?;
+    let interface_tables = planned_itable::interface_tables(
+        representation,
+        ir,
+        plan.interfaces(),
+        &order,
+        &tables,
+        &superclasses,
+    )?;
     for (id, class) in ir.classes.iter().enumerate() {
         if !class.is_interface {
             continue;
@@ -277,34 +314,66 @@ impl NumberedClassTables {
 
 type FileTables = (Vec<ClassTable>, Vec<ClassId>, Vec<Vec<ClassId>>);
 
+/// The superclasses of `ir`'s classes that no class of `ir` declares and another file laid out.
+fn laid_out_superclasses(
+    ir: &IrFile,
+    laid_out: &dyn Fn(TypeName) -> Option<LaidOutSuperclass>,
+) -> HashMap<TypeName, LaidOutSuperclass> {
+    ir.classes
+        .iter()
+        .map(|class| class.superclass)
+        .filter(|&superclass| ir.class_id_by_name(superclass).is_none())
+        .filter_map(|superclass| laid_out(superclass).map(|table| (superclass, table)))
+        .collect()
+}
+
 fn class_tables(
     representation: &dyn Representation,
     ir: &IrFile,
     plan: &module_slots::ModuleSlotPlan,
+    superclasses: &HashMap<TypeName, LaidOutSuperclass>,
 ) -> Result<FileTables, Unsupported> {
-    let order = hierarchy::hierarchy_order(representation, ir)?;
+    let order = hierarchy::hierarchy_order(representation, ir, superclasses)?;
     // Before the tables because the program-wide interface region uses the complete transitive
     // set after each class has consumed its exact override edges.
     let interfaces = hierarchy::interface_closure(ir);
     let mut tables: Vec<Option<ClassTable>> = vec![None; ir.classes.len()];
     for &id in &order {
-        let superclass = ir.class_id_by_name(ir.classes[id as usize].superclass);
+        let class = &ir.classes[id as usize];
+        let superclass = ir.class_id_by_name(class.superclass);
         let table = {
             let parent = superclass.map(|parent| {
                 tables[parent as usize]
                     .as_ref()
                     .expect("superclasses are tabled first")
             });
-            match plan.table(ir.classes[id as usize].fq_name) {
+            let laid_out = match parent {
+                Some(parent) => parent
+                    .laid_out_superclass
+                    .map(|name| (name, &superclasses[&name])),
+                None => superclasses
+                    .get_key_value(&class.superclass)
+                    .map(|(name, table)| (*name, table)),
+            };
+            match plan.table(class.fq_name) {
                 Some(Ok(planned)) => planned_vtable::planned_class_table(
                     representation,
                     ir,
-                    id,
-                    superclass,
-                    parent,
+                    planned_vtable::PlannedClass {
+                        id,
+                        superclass,
+                        parent,
+                        laid_out,
+                    },
                     planned,
                     plan.interfaces(),
                 )?,
+                _ if laid_out.is_some() => {
+                    return Err(format!(
+                        "a class extending one of another file with no module-wide layout (`{}`)",
+                        class.fq_name()
+                    ))
+                }
                 _ => class_vtable::class_table(
                     representation,
                     ir,
