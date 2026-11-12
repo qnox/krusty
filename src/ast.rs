@@ -1966,6 +1966,9 @@ pub struct File {
     /// `+FullValueClasses`: a `value class` without `@JvmInline` is a boxed class with structural
     /// `equals`/`hashCode`/`toString`. Without the feature that declaration is an error.
     pub full_value_classes: bool,
+    /// `+AllowSmartCastsOnValueClassUnderlyingProperties`: a value class's component declared in
+    /// another module is a stable smart-cast subject.
+    pub smart_cast_value_class_components: bool,
     /// `+ForbidValueClassRecursionViaTypeParameters`: a value class whose underlying type reaches
     /// itself through a type parameter's bound is an error rather than a deprecation warning.
     pub forbid_value_class_recursion_via_type_parameters: bool,

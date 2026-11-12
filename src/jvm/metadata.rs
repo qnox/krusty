@@ -35,7 +35,8 @@ pub use function::{MetaFn, MfnFlags};
 
 use property_declarations::decode_properties;
 use property_identity::{
-    inline_underlying_property_name_id, parse_jvm_property_signature, ParsedJvmPropertySignature,
+    inline_underlying_property_name_id, parse_jvm_property_signature,
+    value_class_component_name_ids, ParsedJvmPropertySignature,
 };
 #[cfg(test)]
 pub(crate) use string_table::PREDEFINED_STRINGS;
