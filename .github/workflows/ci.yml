@@ -39,9 +39,10 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 # Every cache below is restored everywhere but saved only by a master run, after the step that
-# fills it. A queue branch's own entries are visible only to that branch, and one run's
-# copies of the toolchains and Gradle caches (several GB) evicted the master entries that every
-# branch restores, so later runs downloaded the toolchains again.
+# fills it (the Gradle user homes only by the daily scheduled one). A queue branch's own entries
+# are visible only to that branch, and one run's copies of the toolchains and Gradle caches
+# (several GB) evicted the master entries that every branch restores, so later runs downloaded
+# the toolchains again.
 jobs:
   # Asks the runner controller where this run's jobs should run (infragnite/route-runner). In shadow
   # mode the answer is only logged and recorded beside where each job really ran; every job keeps
@@ -1076,7 +1077,11 @@ jobs:
         with:
           # The wrapper's distribution and the dependencies live in Gradle's user home. The default
           # provider keys an entry per job and matrix lane, stores the dependencies each lane
-          # shares once, writes only on master, and drops whatever this run did not read.
+          # shares once, and drops whatever this run did not read. Only the daily scheduled run
+          # writes: every master run wrote a fresh copy of each lane's transforms and instrumented
+          # jars (1.4 to 2.9 GB a run), and three runs of those filled the 10 GB cache and evicted
+          # the toolchain and reference entries every queue run restores.
+          cache-read-only: ${{ github.event_name != 'schedule' }}
           cache-cleanup: on-success
           # A fixture's build cache serves only the run that filled it.
           gradle-home-cache-excludes: caches/build-cache-1
@@ -1209,6 +1214,8 @@ jobs:
           gradle-version: ${{ steps.gradle-on-path.outputs.found != 'true' && matrix.gradle || '' }}
           # One entry per matrix lane, since each has its own Gradle/KGP/KSP/AGP graph. Dependencies
           # the lanes share are stored once, and cleanup drops whatever the lane's tests did not read.
+          # Written by the daily scheduled run only, as build-gradle-plugin explains.
+          cache-read-only: ${{ github.event_name != 'schedule' }}
           cache-cleanup: on-success
           # A fixture's build cache serves only the run that filled it.
           gradle-home-cache-excludes: caches/build-cache-1
