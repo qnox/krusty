@@ -22,7 +22,6 @@ mod declaration_bodies;
 mod declaration_modifiers;
 mod declaration_stream;
 mod destructuring;
-mod enum_primary_constructor;
 mod expressions;
 mod file_features;
 mod for_loops;
@@ -34,6 +33,7 @@ mod lambda_literals;
 mod lexical_type_parameters;
 mod line_breaks;
 mod nesting;
+mod primary_constructor_parameters;
 mod properties;
 mod qualified_type_arguments;
 mod return_labels;
@@ -2001,7 +2001,8 @@ impl<'a> Parser<'a> {
         }
         let has_primary_ctor = self.at(TokenKind::LParen);
         let (props, ctor_close_lo) = if has_primary_ctor {
-            self.parse_enum_primary_constructor_parameters()
+            let parsed = self.parse_primary_constructor_parameters(false);
+            (parsed.parameters, parsed.close_lo)
         } else {
             (Vec::new(), 0)
         };
@@ -2796,85 +2797,16 @@ impl<'a> Parser<'a> {
         if ctor_decl_offset == 0 && self.at(TokenKind::LParen) {
             ctor_decl_offset = primary_ctor_open;
         }
-        let has_primary_ctor_parens = self.eat(TokenKind::LParen);
+        let has_primary_ctor_parens = self.at(TokenKind::LParen);
         let mut primary_constructor_parameters_span = None;
         let header_has_primary = header_ctor_kw || has_primary_ctor_parens;
         if has_primary_ctor_parens {
-            self.skip_semicolons();
-            while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-                let declaration_start = self.tok().span.lo;
-                let mut pannos = Vec::new();
-                let mut pannos_args = Vec::new();
-                let mut cpmods = Vec::new();
-                self.begin_declaration_prefix();
-                if self.at(TokenKind::At)
-                    || (self.at(TokenKind::Ident) && self.at_modifier() && self.text() != "value")
-                {
-                    cpmods = self.skip_decl_prefix(); // `private val x`, `@Anno val y`, `vararg xs`
-                    pannos = self.take_pending_annotations();
-                    pannos_args = self.take_pending_annotation_args();
-                }
-                self.record_declaration_prefix(declaration_start);
-                let is_vararg = cpmods.iter().any(|m| m == "vararg");
-                let (is_property, is_var) = match self.kind() {
-                    TokenKind::KwVal => {
-                        self.bump();
-                        (true, false)
-                    }
-                    TokenKind::KwVar => {
-                        self.bump();
-                        (true, true)
-                    }
-                    _ => (false, false), // a plain constructor parameter (not a property)
-                };
-                if is_property {
-                    self.record_external_property_parameter(&cpmods);
-                }
-                let pspan = self.tok().span;
-                let pname = self.ident_or_error("parameter name");
-                self.expect(TokenKind::Colon, "':'");
-                self.skip_semicolons(); // a wrapped declaration puts the type on the next line (`val x:\n  T`)
-                let ty = self.parse_vararg_aware_type(is_vararg);
-                let default = self.primary_parameter_default(annotation_parameters);
-                let declaration_end = self.t[self.i.saturating_sub(1)].span.hi;
-                props.push(PropParam {
-                    name: pname,
-                    ty,
-                    span: pspan,
-                    declaration_span: Span::new(declaration_start, declaration_end),
-                    decl_line: 0,
-                    decl_start_line: 0,
-                    is_vararg,
-                    is_var,
-                    is_property,
-                    is_script_parameter: false,
-                    is_actual: cpmods.iter().any(|modifier| modifier == "actual"),
-                    is_override: cpmods.iter().any(|modifier| modifier == "override"),
-                    has_open_modifier: cpmods.iter().any(|modifier| modifier == "open"),
-                    is_final: cpmods.iter().any(|modifier| modifier == "final"),
-                    is_open: !cpmods.iter().any(|modifier| modifier == "final")
-                        && cpmods
-                            .iter()
-                            .any(|modifier| modifier == "open" || modifier == "override"),
-                    visibility: visibility_of(&cpmods),
-                    has_visibility_modifier: has_visibility_modifier(&cpmods),
-                    default,
-                    annotations: pannos,
-                    annotation_args: pannos_args,
-                });
-                self.skip_semicolons();
-                if !self.eat(TokenKind::Comma) {
-                    break;
-                }
-                self.skip_semicolons();
-            }
+            let parsed = self.parse_primary_constructor_parameters(annotation_parameters);
+            props = parsed.parameters;
             // The byte offset of the primary ctor's `)` — rewritten to a source LINE by the
             // decl-line post-pass; kotlinc maps the ctor `$default`'s `return` to it.
-            ctor_close_lo = self.tok().span.lo;
-            let close = self.tok().span;
-            if self.expect(TokenKind::RParen, "')'") {
-                primary_constructor_parameters_span = Some(Span::new(primary_ctor_open, close.hi));
-            }
+            ctor_close_lo = parsed.close_lo;
+            primary_constructor_parameters_span = parsed.span;
         }
         // Optional supertype list: `: Iface1, Base(args), Iface2`. Supertypes with `()` are the
         // base class (v0: unsupported → flagged); the rest are implemented interfaces.

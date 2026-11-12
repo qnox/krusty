@@ -64,9 +64,17 @@ impl Body<'_> {
         };
         let underlying = [declaration.underlying];
         Some(match args {
-            [argument] if selected.is_none_or(|selected| selected == underlying) => {
-                self.value(*argument, declaration.underlying)
-            }
+            // The argument arrives in its own type's carrier form, which need not be the class's:
+            // a `Byte` is sign-extended where a `UByte` holds its zero-extended bits. The
+            // ordinary coercion between the two types converts it.
+            [argument] if selected.is_none_or(|selected| selected == underlying) => self
+                .value(*argument, declaration.underlying)
+                .and_then(|()| {
+                    self.coerce_emitted_value(
+                        declaration.underlying,
+                        Ty::obj_name(internal).canonical_semantic(),
+                    )
+                }),
             _ => Err(format!(
                 // Boundary conversion for a diagnostic.
                 "a construction of the value class `{}` other than from its underlying value",

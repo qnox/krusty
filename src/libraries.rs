@@ -55,7 +55,6 @@ pub use annotation_argument_provenance::AnnotationArgumentProvenance;
 pub use call_arg_mapping_failure::{CallArgMappingError, CallArgMappingFailure};
 pub(crate) use call_realization::KlibBodyCallableShape;
 pub use call_realization::KlibBodyCompanionReceiver;
-pub(crate) use call_realization::KlibSerializedMember;
 pub use call_realization::{
     DefaultCallRealization, DirectCFunction, ExternalCallableKind, ExternalCallableRealization,
     ExternalPropertyRealization, KlibBodyCallable, KlibDeclarationSignature,
@@ -565,6 +564,12 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// means this provider takes no part in source-set diagnostics, and a check that needs the
     /// name reports an internal error rather than inventing one.
     fn diagnostic_target_name(&self) -> Option<&str> {
+        None
+    }
+
+    /// The error this platform reports for a value of type `Array<Nothing?>`, which it cannot
+    /// represent. `None` where such an array is an ordinary value.
+    fn array_of_nullable_nothing_error(&self) -> Option<&'static str> {
         None
     }
 
