@@ -311,8 +311,10 @@ pub(super) fn emit_dependencies<B: Backend>(
             }
             if let Some(&receiver) = unit.ir().singleton_extension_unread_receivers.get(function) {
                 let inert_platform_singleton = match receiver.kind() {
-                    TyKind::Obj(classifier, arguments) if arguments.is_empty() => {
-                        bodies.singleton_initialization_is_inert(&identity.module, classifier)
+                    TyKind::Obj(classifier, arguments) => {
+                        arguments.is_empty()
+                            && bodies
+                                .singleton_initialization_is_inert(&identity.module, classifier)
                     }
                     _ => false,
                 };
@@ -405,7 +407,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             }
             published.push((identity.clone(), PublishedDependency::AllocatingConstructor));
         }
-        let callables = match CheckedBackendCallables::freeze(unit.ir(), platform) {
+        let mut callables = match CheckedBackendCallables::freeze(unit.ir(), platform) {
             Ok(callables) => callables,
             Err(error) => {
                 diags.error(
@@ -417,6 +419,7 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         };
+        super::primitive_implementations::record(&mut callables, platform);
         let ordinal = support_state.emitted.len();
         let support_module = format!(
             "{}$klib_body${}${ordinal}",

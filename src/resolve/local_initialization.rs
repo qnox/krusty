@@ -155,6 +155,7 @@ impl Checker<'_> {
     /// Type-check an `init` block. It has no function to return from, so a `return` in it is
     /// prohibited.
     pub(super) fn check_initializer_block(&mut self, scope: &CheckerScope<'_>, body: ExprId) {
+        self.check_initializer_annotation_applications(scope, body);
         self.with_ret_allowed(Ty::Unit, false, |checker| {
             checker.check_executable_body(scope, body);
         });

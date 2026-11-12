@@ -370,6 +370,10 @@ pub struct PropRef {
     /// accessor is static in the same way. Which of the two this is, is a JVM selection answer,
     /// recorded with the rest of them in `jvm::property_references::PropertyReferenceRealization`.
     pub ext_facade: Option<Option<TypeName>>,
+    /// The carrier's own `get`, holding a spliced (inline) getter's body: kotlinc writes the splice
+    /// into the carrier because such a getter is never called. `None` for a carrier whose `get`
+    /// calls the selected accessor.
+    pub get: Option<super::FunId>,
 }
 
 impl FuncRef {

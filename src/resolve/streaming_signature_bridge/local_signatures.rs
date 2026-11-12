@@ -977,14 +977,13 @@ fn publish_checked_local_signatures_selected(
             })
             .collect::<Vec<_>>();
         if index.classifier_header(declaration).is_none() {
-            let sealed_subclasses = class
-                .is_sealed()
-                .then(|| {
-                    table
-                        .expect("legacy local classifier publication requires Pass-1 symbols")
-                        .subclass_names_of(class.internal)
-                })
-                .unwrap_or_default();
+            let sealed_subclasses = if class.is_sealed() {
+                table
+                    .expect("legacy local classifier publication requires Pass-1 symbols")
+                    .subclass_names_of(class.internal)
+            } else {
+                Default::default()
+            };
             if index
                 .publish_classifier_header(
                     declaration,

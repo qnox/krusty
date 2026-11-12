@@ -508,6 +508,23 @@ fn package_exports(
             crate::ir::IrLocalPropertyLayout::Member { .. }
             | crate::ir::IrLocalPropertyLayout::MemberExtension { .. } => continue,
         };
+        match package_property_accessor_signature(container, declaration, MetadataAccessor::Getter)
+        {
+            Ok(signature) => exports.record_property_declaration(
+                source.property,
+                crate::libraries::KlibDependencyCallable {
+                    module: module_name.to_owned(),
+                    declaration: crate::libraries::KlibDeclarationSignature::Accessor(signature),
+                },
+            ),
+            Err(error) => {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    format!("internal error: cannot sign generated KLIB property: {error}"),
+                );
+                return None;
+            }
+        }
         for (callable, accessor) in [
             getter.map(|getter| (getter, MetadataAccessor::Getter)),
             setter.map(|setter| (setter, MetadataAccessor::Setter)),
@@ -913,8 +930,11 @@ fn record_class_property_exports(
                 })
                 .map_err(|error| format!("{}.{}: {error}", source.fq_name(), declaration.name))
         };
-        if let (true, Some(property)) = (source.is_interface, property) {
-            exports.record_interface_property(property, accessor(MetadataAccessor::Getter)?);
+        if let Some(property) = property {
+            exports.record_property_declaration(property, accessor(MetadataAccessor::Getter)?);
+            if source.is_interface {
+                exports.record_interface_property(property, accessor(MetadataAccessor::Getter)?);
+            }
         }
         for (function, role, modifiers, present) in [
             (
