@@ -19,6 +19,7 @@ mod annotation_strings;
 mod declaration;
 mod executable_owners;
 mod flags;
+mod inventory_args;
 mod nested_classifiers;
 mod property_flags;
 mod source_classifiers;
@@ -31,6 +32,7 @@ use annotation_strings::HeaderAnnotationStringArena;
 pub use declaration::{HeaderDeclaration, HeaderDeclarationKind, HeaderResultType};
 use executable_owners::local_executable_owner;
 pub use flags::{HeaderParameterFlags, HeaderTypeFlags, HeaderTypeParameterFlags};
+use inventory_args::{header_arenas, stub_build, ClassStubKind, HeaderArenas, StubBuild};
 use nested_classifiers::{
     bind_parser_identity, classifier_identity, companion_declarations, nested_classifier_owners,
 };
@@ -829,9 +831,7 @@ fn extract_file_stub_inventory(
     }
 
     fn generated_function_stub(
-        source: SourceFileId,
-        ids: &mut DeclarationIds,
-        names: &mut LookupNames,
+        build: &mut StubBuild<'_>,
         owner: DeclarationId,
         range: TextRange,
         sibling: u32,
@@ -839,6 +839,9 @@ fn extract_file_stub_inventory(
         flags: DeclarationFlags,
         visibility: Visibility,
     ) -> DeclarationStub {
+        let source = build.source;
+        let ids = &mut *build.ids;
+        let names = &mut *build.names;
         let id = ids.intern(DeclarationAnchor {
             source,
             range,
@@ -862,15 +865,16 @@ fn extract_file_stub_inventory(
 
     fn property_stubs(
         file: &File,
-        source: SourceFileId,
-        ids: &mut DeclarationIds,
-        names: &mut LookupNames,
+        build: &mut StubBuild<'_>,
         property: &PropDecl,
         owner: Option<DeclarationId>,
         sibling: u32,
         initialization_order: Option<u32>,
         out: &mut Vec<DeclarationStub>,
     ) {
+        let source = build.source;
+        let ids = &mut *build.ids;
+        let names = &mut *build.names;
         let id = ids.intern(DeclarationAnchor {
             source,
             range: property.span,
@@ -882,14 +886,14 @@ fn extract_file_stub_inventory(
             .delegate
             .map(|_| BodyKind::Delegate)
             .or_else(|| property.init.map(|_| BodyKind::Initializer));
-        let inferred_expression = if property
+        let inferred_expression = if let Some(initializer) = property
             .explicit_backing_field
             .as_ref()
-            .is_some_and(|field| field.ty.is_none())
-            && property.init.is_some()
+            .filter(|field| field.ty.is_none())
+            .and(property.init)
         {
             Some((
-                property.init.expect("checked above"),
+                initializer,
                 BodyKind::Initializer,
                 InferredSignatureKind::BackingFieldInitializer,
             ))
@@ -1000,16 +1004,20 @@ fn extract_file_stub_inventory(
 
     fn class_stubs(
         file: &File,
-        source: SourceFileId,
-        ids: &mut DeclarationIds,
-        names: &mut LookupNames,
+        build: &mut StubBuild<'_>,
         class: &ClassDecl,
-        is_companion: bool,
-        classifier_member: bool,
+        kind: ClassStubKind,
         owner: Option<DeclarationId>,
         sibling: u32,
         out: &mut Vec<DeclarationStub>,
     ) {
+        let ClassStubKind {
+            companion: is_companion,
+            classifier_member,
+        } = kind;
+        let source = build.source;
+        let ids = &mut *build.ids;
+        let names = &mut *build.names;
         let class_id = ids.intern(DeclarationAnchor {
             source,
             range: class.span,
@@ -1079,12 +1087,12 @@ fn extract_file_stub_inventory(
             };
             class_stubs(
                 file,
-                source,
-                ids,
-                names,
+                &mut stub_build(source, ids, names),
                 companion,
-                true,
-                true,
+                ClassStubKind {
+                    companion: true,
+                    classifier_member: true,
+                },
                 Some(class_id),
                 0,
                 out,
@@ -1138,9 +1146,7 @@ fn extract_file_stub_inventory(
                     .checked_sub(ordinal as u32)
                     .expect("too many generated data-class components");
                 out.push(generated_function_stub(
-                    source,
-                    ids,
-                    names,
+                    &mut stub_build(source, ids, names),
                     class_id,
                     class.span,
                     sibling,
@@ -1152,9 +1158,7 @@ fn extract_file_stub_inventory(
                 ));
             }
             out.push(generated_function_stub(
-                source,
-                ids,
-                names,
+                &mut stub_build(source, ids, names),
                 class_id,
                 class.span,
                 u32::MAX / 2,
@@ -1167,11 +1171,11 @@ fn extract_file_stub_inventory(
                 Visibility::Public,
             ));
         }
-        // A final `value class` gets the same structural trio as a data class. `componentN`/`copy`
-        // stay data-only. An abstract or sealed value class has no constructor properties and does
-        // not generate the trio, so a regular subclass keeps `Any`'s identity members. `@JvmInline`
-        // later suppresses these stubs and unboxes the class instead.
-        if class.is_data || (class.value_modifier_span.is_some() && class.is_final()) {
+        // A final `value class` (or legacy `inline class`) gets the same structural trio as a data
+        // class. `componentN`/`copy` stay data-only. An abstract or sealed value class has no
+        // constructor properties and does not generate the trio, so a regular subclass keeps
+        // `Any`'s identity members. A target realizes the trio of an unboxed class over its carrier.
+        if class.is_data || (class.is_value && class.is_final()) {
             for (ordinal, (name, parameter_count)) in
                 [("toString", 0), ("hashCode", 0), ("equals", 1)]
                     .into_iter()
@@ -1186,9 +1190,7 @@ fn extract_file_stub_inventory(
                     continue;
                 }
                 out.push(generated_function_stub(
-                    source,
-                    ids,
-                    names,
+                    &mut stub_build(source, ids, names),
                     class_id,
                     class.span,
                     u32::MAX / 2 - ordinal as u32 - 1,
@@ -1240,9 +1242,7 @@ fn extract_file_stub_inventory(
         for (index, property) in class.body_props.iter().enumerate() {
             property_stubs(
                 file,
-                source,
-                ids,
-                names,
+                &mut stub_build(source, ids, names),
                 property,
                 Some(class_id),
                 u32::try_from(index).expect("too many class properties"),
@@ -1344,9 +1344,7 @@ fn extract_file_stub_inventory(
             for (property_index, property) in entry.props.iter().enumerate() {
                 property_stubs(
                     file,
-                    source,
-                    ids,
-                    names,
+                    &mut stub_build(source, ids, names),
                     property,
                     Some(entry_id),
                     u32::try_from(property_index).expect("too many enum-entry properties"),
@@ -1423,9 +1421,7 @@ fn extract_file_stub_inventory(
             )),
             Decl::Property(property) => property_stubs(
                 file,
-                source,
-                ids,
-                names,
+                &mut stub_build(source, ids, names),
                 property,
                 None,
                 u32::try_from(index).expect("too many file declarations"),
@@ -1446,12 +1442,12 @@ fn extract_file_stub_inventory(
                 let class_stub = stubs.len();
                 class_stubs(
                     file,
-                    source,
-                    ids,
-                    names,
+                    &mut stub_build(source, ids, names),
                     class,
-                    false,
-                    classifier_member,
+                    ClassStubKind {
+                        companion: false,
+                        classifier_member,
+                    },
                     nested_owners.get(declaration).copied(),
                     u32::try_from(index).expect("too many file declarations"),
                     &mut stubs,
@@ -1928,10 +1924,11 @@ pub fn extract_file_header_syntax(
         owner: Option<DeclarationId>,
         sibling: u32,
         function: &FunDecl,
-        ids: &mut DeclarationIds,
-        names: &mut LookupNames,
-        headers: &mut HeaderSyntaxArena,
+        arenas: &mut HeaderArenas<'_>,
     ) {
+        let ids = &mut *arenas.ids;
+        let names = &mut *arenas.names;
+        let headers = &mut *arenas.headers;
         let declaration = id_for(
             ids,
             source,
@@ -1991,10 +1988,11 @@ pub fn extract_file_header_syntax(
         owner: Option<DeclarationId>,
         sibling: u32,
         property: &PropDecl,
-        ids: &mut DeclarationIds,
-        names: &mut LookupNames,
-        headers: &mut HeaderSyntaxArena,
+        arenas: &mut HeaderArenas<'_>,
     ) {
+        let ids = &mut *arenas.ids;
+        let names = &mut *arenas.names;
+        let headers = &mut *arenas.headers;
         let declaration = id_for(
             ids,
             source,
@@ -2103,10 +2101,11 @@ pub fn extract_file_header_syntax(
         sibling: u32,
         source_name: &str,
         class: &ClassDecl,
-        ids: &mut DeclarationIds,
-        names: &mut LookupNames,
-        headers: &mut HeaderSyntaxArena,
+        arenas: &mut HeaderArenas<'_>,
     ) {
+        let ids = &mut *arenas.ids;
+        let names = &mut *arenas.names;
+        let headers = &mut *arenas.headers;
         let declaration = id_for(
             ids,
             source,
@@ -2258,9 +2257,7 @@ pub fn extract_file_header_syntax(
                     .map(String::as_str)
                     .unwrap_or(&companion.name),
                 companion,
-                ids,
-                names,
-                headers,
+                &mut header_arenas(ids, names, headers),
             );
         }
         for (index, parameter) in class.props.iter().enumerate() {
@@ -2330,9 +2327,7 @@ pub fn extract_file_header_syntax(
                 Some(declaration),
                 u32::try_from(index).expect("too many class methods"),
                 method,
-                ids,
-                names,
-                headers,
+                &mut header_arenas(ids, names, headers),
             );
         }
         for (index, value) in class.body_props.iter().enumerate() {
@@ -2342,9 +2337,7 @@ pub fn extract_file_header_syntax(
                 Some(declaration),
                 u32::try_from(index).expect("too many class properties"),
                 value,
-                ids,
-                names,
-                headers,
+                &mut header_arenas(ids, names, headers),
             );
         }
         for (index, value) in class.type_aliases.iter().enumerate() {
@@ -2374,9 +2367,7 @@ pub fn extract_file_header_syntax(
                     Some(entry_id),
                     u32::try_from(index).expect("too many enum-entry methods"),
                     method,
-                    ids,
-                    names,
-                    headers,
+                    &mut header_arenas(ids, names, headers),
                 );
             }
             for (index, value) in entry.props.iter().enumerate() {
@@ -2386,9 +2377,7 @@ pub fn extract_file_header_syntax(
                     Some(entry_id),
                     u32::try_from(index).expect("too many enum-entry properties"),
                     value,
-                    ids,
-                    names,
-                    headers,
+                    &mut header_arenas(ids, names, headers),
                 );
             }
         }
@@ -2407,9 +2396,7 @@ pub fn extract_file_header_syntax(
                 None,
                 u32::try_from(index).expect("too many file declarations"),
                 value,
-                ids,
-                names,
-                headers,
+                &mut header_arenas(ids, names, headers),
             ),
             Decl::Property(value) => property(
                 file,
@@ -2417,9 +2404,7 @@ pub fn extract_file_header_syntax(
                 None,
                 u32::try_from(index).expect("too many file declarations"),
                 value,
-                ids,
-                names,
-                headers,
+                &mut header_arenas(ids, names, headers),
             ),
             Decl::Class(value) => classifier(
                 file,
@@ -2431,9 +2416,7 @@ pub fn extract_file_header_syntax(
                     .map(String::as_str)
                     .unwrap_or(&value.name),
                 value,
-                ids,
-                names,
-                headers,
+                &mut header_arenas(ids, names, headers),
             ),
         }
     }

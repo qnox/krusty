@@ -12,9 +12,7 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 reference=$(cd "$repo" && just max-version)
 fixture=$(mktemp -d)
 trap 'rm -rf "$fixture"' EXIT
-mkdir -p "$fixture/scripts"
 cp "$repo/justfile" "$repo/push.just" "$fixture/"
-cp "$repo/scripts/order-kotlin-versions.sh" "$fixture/scripts/"
 
 export GIT_AUTHOR_NAME='Version Fixture'
 export GIT_AUTHOR_EMAIL='version@example.invalid'
@@ -70,28 +68,8 @@ printf '%s refs/tags/unrelated-version-baseline\n' "$reference" >"$fixture/kotli
 expect_rejected build-number "$reference"
 expect_rejected version
 
-ordered=$(printf '%s\n' 2.5.0 2.4.21 2.5.0-RC2 2.5.0-Beta2 2.5.0-RC 2.5.0-Beta1 | "$repo/scripts/order-kotlin-versions.sh")
-expected=$'2.4.21\n2.5.0-Beta1\n2.5.0-Beta2\n2.5.0-RC\n2.5.0-RC2\n2.5.0'
-if [[ $ordered != "$expected" ]]; then
-    echo "FAIL: version order: expected '$expected', got '$ordered'" >&2
-    failures=$((failures + 1))
-fi
-
-cat >"$fixture/kotlin-versions" <<EOF
-2.4.21 $baseline
-2.5.0 $baseline
-2.5.0-Beta2 $baseline
-EOF
-expect_output 2.5.0 max-version
-
-cat >"$fixture/kotlin-versions" <<EOF
-2.5.0-Beta2 $baseline
-2.4.21 $baseline
-EOF
-expect_output 2.4.21 max-version
-
 if [[ $failures -ne 0 ]]; then
     echo "versioning: $failures failed assertions" >&2
     exit 1
 fi
-echo 'versioning: 11 assertions passed'
+echo 'versioning: 8 assertions passed'

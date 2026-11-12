@@ -100,9 +100,7 @@ impl BodyFirChecker<'_> {
                 self.reference_to_declaration(
                     expression,
                     declaration,
-                    FirCallableReferenceBinding::Static,
-                    None,
-                    None,
+                    ReferenceReceivers::static_binding(),
                     None,
                     None,
                 )
@@ -113,9 +111,7 @@ impl BodyFirChecker<'_> {
                         &reference.target,
                         &reference.target.params,
                     ),
-                    FirCallableReferenceBinding::Static,
-                    None,
-                    None,
+                    ReferenceReceivers::static_binding(),
                     None,
                     None,
                 )
@@ -184,9 +180,7 @@ impl BodyFirChecker<'_> {
                 self.reference_to_declaration(
                     expression,
                     declaration,
-                    FirCallableReferenceBinding::Static,
-                    None,
-                    None,
+                    ReferenceReceivers::static_binding(),
                     Some(adaptation),
                     None,
                 )
@@ -194,9 +188,7 @@ impl BodyFirChecker<'_> {
                 self.reference_to_external(
                     expression,
                     ExternalReferenceDeclaration::callable(&target, &target.params),
-                    FirCallableReferenceBinding::Static,
-                    None,
-                    None,
+                    ReferenceReceivers::static_binding(),
                     Some(adaptation),
                     None,
                 )
@@ -606,9 +598,11 @@ impl BodyFirChecker<'_> {
                     self.reference_to_declaration(
                         expression,
                         declaration,
-                        binding,
-                        dispatch_receiver,
-                        None,
+                        ReferenceReceivers {
+                            binding,
+                            dispatch_receiver,
+                            extension_receiver: None,
+                        },
                         adaptation,
                         reflection_owner,
                     )
@@ -619,9 +613,11 @@ impl BodyFirChecker<'_> {
                             receiver: Some(receiver_ty),
                             ..ExternalReferenceDeclaration::member(&member)
                         },
-                        binding,
-                        dispatch_receiver,
-                        None,
+                        ReferenceReceivers {
+                            binding,
+                            dispatch_receiver,
+                            extension_receiver: None,
+                        },
                         adaptation,
                         reflection_owner,
                     )
@@ -643,9 +639,11 @@ impl BodyFirChecker<'_> {
                     self.reference_to_declaration(
                         expression,
                         declaration,
-                        binding,
-                        None,
-                        extension_receiver,
+                        ReferenceReceivers {
+                            binding,
+                            dispatch_receiver: None,
+                            extension_receiver,
+                        },
                         adaptation,
                         None,
                     )
@@ -665,9 +663,11 @@ impl BodyFirChecker<'_> {
                             extension_receiver_target: extension_target,
                             ..ExternalReferenceDeclaration::callable(&callable, parameters)
                         },
-                        binding,
-                        None,
-                        extension_receiver,
+                        ReferenceReceivers {
+                            binding,
+                            dispatch_receiver: None,
+                            extension_receiver,
+                        },
                         adaptation,
                         None,
                     )
@@ -719,9 +719,7 @@ impl BodyFirChecker<'_> {
                     self.reference_to_declaration(
                         expression,
                         declaration,
-                        FirCallableReferenceBinding::Static,
-                        None,
-                        None,
+                        ReferenceReceivers::static_binding(),
                         adaptation,
                         None,
                     )
@@ -729,9 +727,7 @@ impl BodyFirChecker<'_> {
                     self.reference_to_external(
                         expression,
                         ExternalReferenceDeclaration::member(&member),
-                        FirCallableReferenceBinding::Static,
-                        None,
-                        None,
+                        ReferenceReceivers::static_binding(),
                         adaptation,
                         None,
                     )
@@ -975,12 +971,15 @@ impl BodyFirChecker<'_> {
         &self,
         expression: ExprId,
         declaration: DeclarationId,
-        binding: FirCallableReferenceBinding,
-        dispatch_receiver: Option<FirReceiver>,
-        extension_receiver: Option<FirReceiver>,
+        receivers: ReferenceReceivers,
         adaptation: Option<FirReferenceAdaptation>,
         reflection_owner: Option<crate::types::TypeName>,
     ) -> Result<FirExprKind, BodyCheckFailure> {
+        let ReferenceReceivers {
+            binding,
+            dispatch_receiver,
+            extension_receiver,
+        } = receivers;
         let span = self.file.expr_span(expression);
         let callable = self
             .index
@@ -1003,12 +1002,15 @@ impl BodyFirChecker<'_> {
         &self,
         expression: ExprId,
         target: ExternalReferenceDeclaration<'_>,
-        binding: FirCallableReferenceBinding,
-        dispatch_receiver: Option<FirReceiver>,
-        extension_receiver: Option<FirReceiver>,
+        receivers: ReferenceReceivers,
         adaptation: Option<FirReferenceAdaptation>,
         reflection_owner: Option<crate::types::TypeName>,
     ) -> Result<FirExprKind, BodyCheckFailure> {
+        let ReferenceReceivers {
+            binding,
+            dispatch_receiver,
+            extension_receiver,
+        } = receivers;
         let ExternalReferenceDeclaration {
             declaration,
             mut singleton_dispatch,
@@ -1448,12 +1450,22 @@ impl BodyFirChecker<'_> {
     }
 }
 
-/// How a property reference to a source declaration is bound: its binding kind and the receivers
-/// the reference captured.
+/// How a callable or property reference is bound: its binding kind and the receivers the
+/// reference captured.
 struct ReferenceReceivers {
     binding: FirCallableReferenceBinding,
     dispatch_receiver: Option<FirReceiver>,
     extension_receiver: Option<FirReceiver>,
+}
+
+impl ReferenceReceivers {
+    fn static_binding() -> Self {
+        Self {
+            binding: FirCallableReferenceBinding::Static,
+            dispatch_receiver: None,
+            extension_receiver: None,
+        }
+    }
 }
 
 /// The selected property as the reference sees it: specialized receiver and property types, and

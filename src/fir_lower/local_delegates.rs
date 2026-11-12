@@ -265,7 +265,7 @@ impl BodyLowering<'_> {
             (_, dispatch) => dispatch,
         };
         if let FirCallTarget::Module(target) = &call.target {
-            let target = *target;
+            let target = super::expect_realization::realized_callable(self.index, *target);
             let inline = {
                 let callable = self
                     .index
@@ -307,15 +307,15 @@ impl BodyLowering<'_> {
                 (Some(delegate), None)
             };
             let expression = self
-                .same_file_call(
+                .same_file_call(super::source_calls::SameFileCall {
                     target,
-                    super::source_calls::DispatchOperand::plain(dispatch_receiver),
+                    dispatch: super::source_calls::DispatchOperand::plain(dispatch_receiver),
                     extension_receiver,
-                    &checked,
-                    &selected_parameters,
-                    &call.substitutions,
-                    Some(source_line),
-                )
+                    arguments: &checked,
+                    specialized_parameters: &selected_parameters,
+                    substitutions: &call.substitutions,
+                    source_line: Some(source_line),
+                })
                 .ok_or(FirLoweringFailure::MissingCallable(target))??;
             return Ok(expression);
         }

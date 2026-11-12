@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use super::server_pool::{self, server_pool_cap};
 use super::{
-    byte_dump, die_with_parent, java_home, jvm_gclog_args, kotlinc_lib_dir, read_exact_deadline,
-    spawn_owned, ProfGuard,
+    byte_dump, die_with_parent, java_home, kotlinc_lib_dir, protocol_jvm_log_args,
+    read_exact_deadline, spawn_owned, ProfGuard,
 };
 
 // The reference `kotlinc` is a JVM program; spawning its CLI per test pays a ~2-4s JVM + compiler cold
@@ -216,18 +216,15 @@ pub fn kotlin_compiler_jar() -> Option<PathBuf> {
 
 /// Compile the pure-JDK `KotlincServer.java` driver once (via `javac`) into a stable cache dir; return it.
 /// The driver uses only reflection + `URLClassLoader`, so it needs no compiler jar to compile OR to run.
-fn setup_kotlinc_server(java_home: &str, compiler_jar: &Path) -> Option<PathBuf> {
+fn setup_kotlinc_server(java_home: &str, _compiler_jar: &Path) -> Option<PathBuf> {
     // The JDK is part of the cache key: a class compiled by a NEWER javac (another session's
     // JAVA_HOME) is unloadable by an older runtime, and the server-spawn failure then reads as
     // "kotlinc unavailable" — silently disabling every reference compile and cross-check.
-    // The compiler jar is part of it too: the settings updater is compiled against that
-    // distribution and loaded by its class loader, so two releases do not share one class file.
     let mut hash: u64 = 0xcbf29ce484222325;
     for b in KOTLINC_SERVER_SRC
         .bytes()
         .chain(TYPED_LANGUAGE_SETTINGS_UPDATER_SRC.bytes())
         .chain(super::producing_jdk::driver_cache_key(java_home))
-        .chain(compiler_jar.to_string_lossy().as_bytes().iter().copied())
     {
         hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
     }
@@ -263,7 +260,7 @@ fn setup_kotlinc_server(java_home: &str, compiler_jar: &Path) -> Option<PathBuf>
     }
     let out = Command::new(&javac)
         .arg("-cp")
-        .arg(format!("{}/*", compiler_jar.parent()?.to_string_lossy()))
+        .arg(format!("{}/*", _compiler_jar.parent()?.to_string_lossy()))
         .arg("-d")
         .arg(&dir)
         .arg(&src_path)
@@ -287,6 +284,22 @@ fn kotlinc_lib_of(compiler_jar: &Path) -> Option<PathBuf> {
     compiler_jar.parent().map(Path::to_path_buf)
 }
 
+/// The reference compiler server's JVM options; [`KotlincServer::new`] explains the heap and JIT.
+///
+/// A C1-only JVM reserves a 48 MB code cache. The compiler's code fills it after about 200 warm
+/// compiles, and the JVM then disables its JIT for good ("CodeCache is full. Compiler has been
+/// disabled"), so a cold box corpus ran nearly all of its ~7,400 reference compiles interpreted.
+/// 808 box compiles in one server took 205 s (264 s CPU) with the default cache and 140 s (149 s
+/// CPU) with 256 MB, of which about 70 MB is used and stays flat over 2,000 compiles. The full tiered
+/// JIT was faster per compile (111 s) but cost 213 s CPU, which the busy test host pays for.
+const KOTLINC_SERVER_JVM_OPTIONS: [&str; 5] = [
+    "-XX:TieredStopAtLevel=1",
+    "-XX:ReservedCodeCacheSize=256m",
+    "-XX:+UseSerialGC",
+    "-Xmx1g",
+    "-Xmn256m",
+];
+
 /// A persistent JVM running the in-process `KotlincServer` compiler, fed compiler arg-lists over a pipe.
 struct KotlincServer {
     _child: Child,
@@ -307,13 +320,8 @@ impl KotlincServer {
         // left to grow from the small default initial heap: every compile allocates far more short-lived
         // data than it retains, and the undersized default nursery collected so often that a cold box
         // corpus shard spent ~19% more time in kotlinc (and grew a larger heap) than with 256 MB.
-        cmd.args(jvm_gclog_args("kotlinc"));
-        cmd.args([
-            "-XX:TieredStopAtLevel=1",
-            "-XX:+UseSerialGC",
-            "-Xmx1g",
-            "-Xmn256m",
-        ]);
+        cmd.args(protocol_jvm_log_args("kotlinc"));
+        cmd.args(KOTLINC_SERVER_JVM_OPTIONS);
         cmd.args(jvm_properties);
         cmd.args(["-cp", cp, "KotlincServer", lib_dir, cp])
             .stdin(Stdio::piped())
@@ -378,143 +386,17 @@ type KotlincPools = Mutex<HashMap<String, Arc<server_pool::Pool<KotlincServer>>>
 /// On a cache miss the live compiler applies it as a JVM system property, on a server that no
 /// other compile shares, and does not pass it through to the compiler.
 pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
-    let jar = kotlin_compiler_jar()?;
-    let release = krusty::kotlin_version::target().to_string();
-    // The provisioned distribution of the process release is that compiler. An override
-    // (`KRUSTY_KOTLINC`) names a different jar and keeps this function on that jar.
-    if compiler_jar_for_release(&release).as_deref() == Some(jar.as_ref()) {
-        return kotlinc_compile_for_release(&release, args);
-    }
-    compile_jar(&jar, args)
-}
-
-/// Compile `args` with the kotlinc distribution of `release`, through the same server and
-/// recorded-byte replay as [`kotlinc_compile`].
-///
-/// A release or RC replays under that distribution's identity and `lib/` fingerprint. A beta
-/// compiles live and is not archived. The distribution is
-/// `target/cache/kotlinc/<release>/`, downloaded when it is absent. The process compiler, the one
-/// [`kotlinc_compile`] uses, keeps its own replay key.
-pub fn kotlinc_compile_for_release(release: &str, args: &[String]) -> Option<(i32, String)> {
-    compile_jar(&compiler_jar_for_release(release)?, args)
-}
-
-fn compile_jar(compiler_jar: &Path, args: &[String]) -> Option<(i32, String)> {
-    let lib = compiler_jar.parent()?;
-    // The process compiler keeps its existing replay key. Another release fingerprints that
-    // release's `lib/` and build identity, and a beta compiles live.
-    let process_compiler = kotlin_compiler_jar().as_deref() == Some(compiler_jar);
-    let identity = build_identity(lib);
-    let replayed = if process_compiler {
-        byte_dump::replay_class_dump(args)
-    } else {
-        byte_dump::replay_class_dump_for_compiler(args, identity.as_deref(), Some(lib))
-    };
-    if let Some(replayed) = replayed {
+    if let Some(replayed) = byte_dump::replay_class_dump(args) {
         if replayed.code == 0 {
             byte_dump::write_replayed_classes(args, &replayed.files);
         }
         return Some((replayed.code, replayed.stderr));
     }
-    let result = kotlinc_compile_with_jar(compiler_jar, args, None, None)?;
-    if process_compiler {
-        byte_dump::report_live_kotlinc(args);
-        byte_dump::remember_class_dump(args, result.0, &result.1);
-    } else {
-        byte_dump::report_live_kotlinc_for(args, identity.is_some(), Some(lib));
-        byte_dump::remember_class_dump_for_compiler(
-            args,
-            result.0,
-            &result.1,
-            identity.as_deref(),
-            Some(lib),
-        );
-    }
+    let result = kotlinc_compile_live(args, None, None)?;
+    // A replay returns above and prints nothing. This line names the test that reached the JVM.
+    byte_dump::report_live_kotlinc(args);
+    byte_dump::remember_class_dump(args, result.0, &result.1);
     Some(result)
-}
-
-/// The `lib/` directory of `release`'s kotlinc distribution, provisioning it when needed.
-pub fn kotlinc_lib_for_release(release: &str) -> Option<PathBuf> {
-    let jar = cached_compiler_jar(release);
-    if jar.is_file() {
-        return jar.parent().map(Path::to_path_buf);
-    }
-    if release == krusty::kotlin_version::target().to_string() {
-        if let Some(jar) = kotlin_compiler_jar() {
-            return jar.parent().map(Path::to_path_buf);
-        }
-    }
-    provision_kotlinc(release).and_then(|jar| jar.parent().map(Path::to_path_buf))
-}
-
-fn compiler_jar_for_release(release: &str) -> Option<PathBuf> {
-    let jar = kotlinc_lib_for_release(release)?.join("kotlin-compiler.jar");
-    jar.is_file().then_some(jar)
-}
-
-fn cached_compiler_jar(release: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
-        "target/cache/kotlinc/{release}/kotlinc/lib/kotlin-compiler.jar"
-    ))
-}
-
-fn build_identity(lib: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(lib.parent()?.join("build.txt")).ok()?;
-    let line = text.lines().next()?.trim();
-    byte_dump::cacheable_build_identity(line)
-}
-
-fn provision_kotlinc(release: &str) -> Option<PathBuf> {
-    let dest =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/cache/kotlinc/{release}"));
-    let jar = dest.join("kotlinc/lib/kotlin-compiler.jar");
-    std::fs::create_dir_all(&dest).ok()?;
-    let lock_path = dest.join(".provision.lock");
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-        .ok()?;
-    // SAFETY: `flock` on a descriptor this function owns until it returns.
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return None;
-    }
-    if jar.is_file() {
-        return Some(jar);
-    }
-    let url = format!(
-        "https://github.com/JetBrains/kotlin/releases/download/v{release}/kotlin-compiler-{release}.zip"
-    );
-    let tmp = std::env::temp_dir().join(format!("kotlinc-{release}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).ok()?;
-    let zip = tmp.join("kotlinc.zip");
-    let downloaded = Command::new("curl")
-        .args(["-fsSL", &url, "-o"])
-        .arg(&zip)
-        .status()
-        .ok()
-        .is_some_and(|status| status.success());
-    if !downloaded {
-        let _ = std::fs::remove_dir_all(&tmp);
-        return None;
-    }
-    let unpacked = Command::new("unzip")
-        .args(["-q"])
-        .arg(&zip)
-        .arg("-d")
-        .arg(&dest)
-        .status()
-        .ok()
-        .is_some_and(|status| status.success());
-    let _ = std::fs::remove_dir_all(&tmp);
-    if !unpacked || !jar.is_file() {
-        return None;
-    }
-    let bin = dest.join("kotlinc/bin/kotlinc");
-    let _ = std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755));
-    Some(jar)
 }
 
 /// [`kotlinc_compile`] without the recorded-byte archive: always the live persistent compiler, and
@@ -525,9 +407,7 @@ fn provision_kotlinc(release: &str) -> Option<PathBuf> {
 ///
 /// Every call reaches the JVM, so every completed compile is reported like a recorded-path miss.
 pub fn kotlinc_compile_unrecorded(args: &[String]) -> Option<(i32, String)> {
-    let result = kotlinc_compile_live(args, None, None)?;
-    byte_dump::report_unrecorded_kotlinc(args);
-    Some(result)
+    kotlinc_compile_unrecorded_with_language_settings(args, None, None)
 }
 
 /// Compile with exact language/API levels installed in kotlinc's typed compiler configuration.
@@ -594,15 +474,6 @@ fn kotlinc_compile_live(
     language_version: Option<&str>,
     api_version: Option<&str>,
 ) -> Option<(i32, String)> {
-    kotlinc_compile_with_jar(&kotlin_compiler_jar()?, args, language_version, api_version)
-}
-
-fn kotlinc_compile_with_jar(
-    compiler_jar: &Path,
-    args: &[String],
-    language_version: Option<&str>,
-    api_version: Option<&str>,
-) -> Option<(i32, String)> {
     static POOLS: OnceLock<KotlincPools> = OnceLock::new();
     let _pg = ProfGuard::new("kotlinc");
     REQUESTS.fetch_add(1, Ordering::Relaxed);
@@ -611,16 +482,19 @@ fn kotlinc_compile_with_jar(
     if !Path::new(&java).exists() {
         return None;
     }
-    let server_dir = setup_kotlinc_server(&java_home, compiler_jar)?;
-    let lib_dir = kotlinc_lib_of(compiler_jar)?.to_string_lossy().into_owned();
+    let compiler_jar = kotlin_compiler_jar()?;
+    let server_dir = setup_kotlinc_server(&java_home, &compiler_jar)?;
+    let lib_dir = kotlinc_lib_of(&compiler_jar)?
+        .to_string_lossy()
+        .into_owned();
     // The driver is pure JDK and loads the compiler itself (from `lib_dir`), so its OWN classpath is just
-    // its `server_dir`. The pool key includes `lib_dir`: two releases must not share a JVM.
+    // its `server_dir`.
     let cp = server_dir.to_string_lossy().into_owned();
     // `-D` stays in `args` for the invocation fingerprint. The compiler itself rejects it, and a
     // test-only language feature latches from the JVM property the first time `-XXLanguage` is
     // parsed, so the property is applied at process start on a server that no other compile shares.
     let (jvm_properties, compiler_args) = kotlinc_jvm_properties(args);
-    let pool_key = kotlinc_server_key(&format!("{cp}\n{lib_dir}"), &jvm_properties);
+    let pool_key = kotlinc_server_key(&cp, &jvm_properties);
     let pool = {
         let pools = POOLS.get_or_init(|| Mutex::new(HashMap::new()));
         let mut pools = pools.lock().unwrap_or_else(|err| err.into_inner());
@@ -761,5 +635,41 @@ mod stats_tests {
             super::byte_dump::live_kotlinc_reasons(&test),
             vec![expected]
         );
+    }
+}
+
+#[cfg(test)]
+mod jvm_option_tests {
+    use super::KOTLINC_SERVER_JVM_OPTIONS;
+
+    /// The C1-only server must keep its JIT across a whole cold corpus: the JVM's default code cache
+    /// for that mode fills partway through and disables compilation for the rest of the process.
+    #[test]
+    fn the_reference_server_reserves_a_code_cache_that_outlasts_a_cold_corpus() {
+        let java = format!("{}/bin/java", super::super::java_home());
+        let output = std::process::Command::new(java)
+            .args(KOTLINC_SERVER_JVM_OPTIONS)
+            .args(["-XX:+PrintFlagsFinal", "-version"])
+            .output()
+            .expect("run the reference JVM");
+        assert!(
+            output.status.success(),
+            "the reference JVM rejected its options"
+        );
+        let flags = String::from_utf8_lossy(&output.stdout);
+        let flag = |name: &str| -> u64 {
+            flags
+                .lines()
+                .find_map(|line| {
+                    let mut fields = line.split_whitespace();
+                    let _kind = fields.next()?;
+                    (fields.next()? == name).then_some(())?;
+                    (fields.next()? == "=").then_some(())?;
+                    fields.next()?.parse().ok()
+                })
+                .unwrap_or_else(|| panic!("the JVM reports no {name}"))
+        };
+        assert_eq!(flag("TieredStopAtLevel"), 1);
+        assert_eq!(flag("ReservedCodeCacheSize"), 256 * 1024 * 1024);
     }
 }

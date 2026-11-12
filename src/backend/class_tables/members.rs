@@ -187,6 +187,7 @@ pub(crate) type PropertyOverrideSlots =
 
 pub(crate) fn property_type(
     ir: &IrFile,
+    owner: &IrClass,
     target: ResolvedPropertyOverrideTarget,
     overrides: &PropertyOverrideSlots,
 ) -> Option<Ty> {
@@ -199,7 +200,14 @@ pub(crate) fn property_type(
                 .checked_properties
                 .get(&property)
                 .map(|property| property.ty),
-            ResolvedPropertyOverrideTarget::External(_) => None,
+            // A property lowered from a dependency body has no checked declaration: the class's
+            // override edge records the type its accessors implement.
+            ResolvedPropertyOverrideTarget::External(_) => ir
+                .property_overrides
+                .get(&owner.fq_name_id())?
+                .iter()
+                .find(|edge| edge.implementation == target)
+                .map(|edge| edge.implementation_type),
         })
 }
 
@@ -251,11 +259,14 @@ pub(crate) fn overridden_property_slot(
 /// Implementation method → the method it overrides, for the methods `class` declares. Both ends
 /// must be functions of this file, except an override of an interface member another file
 /// declares, which `numbered` gives a module-wide number: its interface table entry is filled from
-/// the override edge itself ([`super::planned_itable`]).
+/// the override edge itself ([`super::planned_itable`]); and, where `class` extends a superclass
+/// another file laid out (`laid_out`), an override of a class member of another file, whose number
+/// the module plan already gave the override.
 pub(crate) fn overridden_functions(
     ir: &IrFile,
     class: &IrClass,
     numbered: &ModuleInterfaces,
+    laid_out: bool,
 ) -> Result<HashMap<FunId, Vec<FunId>>, Unsupported> {
     let mut map: HashMap<FunId, Vec<FunId>> = HashMap::default();
     let Some(overrides) = ir.function_overrides.get(&class.fq_name_id()) else {
@@ -292,6 +303,7 @@ pub(crate) fn overridden_functions(
                             .number(super::module_slots::PlanKey::Callable(*callable))
                             .is_some()
                             || numbered.fixed_slot(*callable).is_some()) => {}
+                    None if laid_out && !edge.overridden_is_interface => {}
                     None => {
                         return Err(format!(
                             "an override of a method declared in another file (`{}.{}`)",

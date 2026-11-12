@@ -238,27 +238,38 @@ impl<'a> Checker<'a> {
 
     /// Reject an inaccessible selected constructor after diagnosing its local inference result.
     /// Evidence from the rejected call is never published into the committed-call sidecar.
-    pub(super) fn reject_ctor_access(
+    /// Whether the call site may use the selected constructor `member` of `owner`.
+    pub(super) fn constructor_accessible(
+        &self,
+        owner: TypeName,
+        member: &crate::libraries::LibraryMember,
+    ) -> bool {
+        self.callable_accessible(member.visibility, owner, member.external_identity)
+            || self.suppresses_diagnostic("INVISIBLE_REFERENCE")
+    }
+
+    /// Report a selected constructor that no later tower level displaced.
+    pub(super) fn report_invisible_constructor(
         &mut self,
         call: ExprId,
-        owner: TypeName,
-        classifier: &crate::libraries::LibraryType,
-        member: &crate::libraries::LibraryMember,
-        bindings: Option<&crate::symbol_resolver::GSigBinds>,
-    ) -> bool {
-        if self.callable_accessible(member.visibility, owner, member.external_identity)
-            || self.suppresses_diagnostic("INVISIBLE_REFERENCE")
-        {
-            return false;
-        }
-        if let Some(bindings) = bindings {
-            self.report_rejected_constructor_type_arguments(call, owner, classifier, bindings);
+        invisible: &super::provider_constructor_selection::InvisibleConstructor,
+    ) {
+        if let Some(bindings) = &invisible.bindings {
+            self.report_rejected_constructor_type_arguments(
+                call,
+                invisible.owner,
+                &invisible.classifier,
+                bindings,
+            );
         }
         self.diags.error(
             self.call_callee_name_span(call),
-            diagnostics::constructor_message(&self.fed_source(), owner, member),
+            diagnostics::constructor_message(
+                &self.fed_source(),
+                invisible.owner,
+                &invisible.member,
+            ),
         );
-        true
     }
 
     /// Whether a member candidate is accessible through the call's receiver. Kotlin ranks an

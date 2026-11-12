@@ -46,7 +46,11 @@ ci: lint coverage-gate
 # Lint gate (enforced locally + in CI + by the pre-commit hook): formatting must be clean, and
 # clippy must introduce NO new findings beyond the frozen baseline (clippy-baseline.tsv). Existing
 # findings are tolerated; any new one fails. Identical behaviour everywhere — it's plain cargo + sh.
-lint: versioning-tests release-tests legacy-ratchet-tests fmt-check legacy-baseline-check clippy-baseline-check
+lint: versioning-tests release-tests legacy-ratchet-tests reference-cache-tests fmt-check legacy-baseline-check clippy-baseline-check
+
+# The CI step that drops kotlinc reference inventories no recent run read, before master saves them.
+reference-cache-tests:
+    bash scripts/test-prune-reference-cache.sh
 
 # Cheap release-version contracts, without a compiler build or reference-toolchain download.
 versioning-tests:
@@ -304,9 +308,8 @@ kotlinc-arguments VERSION=`just max-version`:
         java -cp "$lib/kotlin-compiler.jar:$lib/kotlin-stdlib.jar" \
             "scripts/kotlinc-arguments/$main.java" > "$own"
         previous=$(find "$releases" -maxdepth 1 -name "*$suffix" -printf '%f\n' |
-            sed -nE "s/^([0-9]+\\.[0-9]+\\.[0-9]+(-RC[1-9][0-9]*|-RC|-Beta[1-9][0-9]*)?)${suffix//./\\.}\$/\\1/p" |
-            { cat; echo "{{VERSION}}"; } | scripts/order-kotlin-versions.sh |
-            awk -v version="{{VERSION}}" '$0 == version { exit } { previous = $0 } END { print previous }')
+            sed -n "s/^\([0-9]*\.[0-9]*\.[0-9]*\)${suffix//./\\.}\$/\1/p" |
+            { cat; echo "{{VERSION}}"; } | sort -uV | sed -n '/^{{VERSION}}$/{x;p;q};h')
         if [ -n "$previous" ] && cmp -s "$own" "$releases/$previous$suffix"; then
             rm "$own"
         fi
@@ -529,16 +532,49 @@ test-all *ARGS:
 
 # Build the krusty-build library test binary and print its path. Gradle lanes run this prebuilt
 # binary; they do not compile krusty again.
+#
+# CI builds this right after `just conformance-bin-and-cli`, and must reuse that build's krusty.
+# Selecting krusty-cli's binary here keeps the Native backend in the graph: without it bumpalo
+# (under zopfli) loses Cranelift's `allocator-api2` feature and krusty, which links zopfli,
+# compiled a second time (484 s of a 1157 s build). krusty-build's own dev-dependencies add the
+# libc, object and once_cell features that the root package's dev-dependencies add there.
 krusty-build-tests:
     #!/usr/bin/env bash
     set -euo pipefail
-    scripts/cargo-test-binary.sh krusty_build -p krusty-build --lib
+    scripts/cargo-test-binary.sh krusty_build -p krusty-build --lib -p krusty-cli --bin krusty
+
+# The normal compiler unit suite, which exact-version CI rows run without rebuilding Rust.
+compiler-unit-tests:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scripts/cargo-test-binary.sh krusty -p krusty --lib
+
+# Hold one release's Native, Wasm/JS and Wasm/WASI stdlib KLIBs to their exact-identity
+# implementation backlogs (`tests/klib_uncovered_implementations/`), using the compiler unit binary
+# BIN (`just compiler-unit-tests`). Each target reads that release's own stdlib.
+klib-implementation-coverage BIN VERSION=`just max-version`:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bin="$(realpath "{{BIN}}")"
+    export KRUSTY_LANGUAGE_VERSION="{{VERSION}}"
+    export KRUSTY_KOTLIN_NATIVE="$(just kotlin-native "{{VERSION}}")"
+    export KRUSTY_KOTLINC="$(just kotlinc "{{VERSION}}")"
+    KRUSTY_REQUIRE_KLIB=1 KRUSTY_REQUIRE_KLIB_IMPLEMENTATION_TARGETS=native,wasm-js,wasm-wasi \
+      "$bin" klib_libraries::tests::implementation_coverage:: --nocapture
 
 # Build the conformance test binary and print its path.
 conformance-bin:
     #!/usr/bin/env bash
     set -euo pipefail
     scripts/cargo-test-binary.sh conformance --test conformance
+
+# CI's tool-bins job: the conformance binary and the `krusty` CLI (target/gate/krusty) from one
+# Cargo invocation. The CLI alone resolves libc, object and once_cell without the features the
+# root package's dev-dependencies add, so building the two apart compiled krusty twice.
+conformance-bin-and-cli:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scripts/cargo-test-binary.sh --build conformance -p krusty-cli -p krusty --test conformance --bin krusty
 
 # Run the codegen/box conformance suite and print the case report "<pct> <passed> <applicable>":
 # applicable cases whose box() returns "OK". The same run's JVM byte report "<pct> <matched> <total>",
@@ -679,29 +715,26 @@ install-hooks:
 
 # --- versioning: krusty's release version = supported Kotlin reference version + build number ---
 #
-# The kotlin-versions manifest lists the Kotlin reference versions (major.minor.patch, or the same
-# with -BetaN, -RC, or -RCN) krusty is validated against. The MAX is krusty's headline release
-# version: the newest stable entry. A pre-release precedes the stable release of the same numbers
-# and stays supported, but it is not the headline. Every entry is also tested in parallel by CI
-# against that kotlinc. The build number resets per reference version (commits since its baseline),
-# so 2.4.20-build.3 is the 3rd krusty build supporting Kotlin 2.4.20.
+# The kotlin-versions manifest lists the Kotlin reference versions (full major.minor.patch, e.g.
+# 2.4.20) krusty is validated against. The MAX is krusty's headline release version; every entry is
+# also tested in parallel by CI against that kotlinc. The build number resets per reference version
+# (commits since its baseline), so 2.4.20-build.3 is the 3rd krusty build supporting Kotlin 2.4.20.
 
-# Supported Kotlin reference versions, oldest first.
+# Supported Kotlin reference versions, one per line.
 kotlin-versions:
-    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | scripts/order-kotlin-versions.sh
+    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}'
 
 # Comma-separated list of supported Kotlin reference versions (advertised by `krusty -version`).
 supported-kotlin:
-    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | scripts/order-kotlin-versions.sh | paste -sd, -
+    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | sort -V | paste -sd, -
 
-# Newest stable Kotlin reference version — krusty's release version (without the build suffix).
-# A pre-release can sort last and still not be this version.
+# Highest supported Kotlin reference version — krusty's release version (without the build suffix).
 max-version:
-    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | scripts/order-kotlin-versions.sh | awk '!/-/ { stable = $0 } END { print stable }'
+    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | sort -V | tail -1
 
 # JSON array of supported Kotlin reference versions, for the GitHub Actions test matrix.
 matrix-json:
-    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | scripts/order-kotlin-versions.sh | awk 'BEGIN{printf "["} {printf "%s\"%s\"",(NR>1?",":""),$0} END{print "]"}'
+    @grep -vE '^\s*(#|$)' {{manifest}} | awk 'BEGIN{printf "["} {printf "%s\"%s\"",(NR>1?",":""),$1} END{print "]"}'
 
 # Build number for a Kotlin reference version: commits since its baseline + 1 (resets per version,
 # reproducible from any clone, no CI state).

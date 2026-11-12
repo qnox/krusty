@@ -110,10 +110,10 @@ fn only_jumps_to(
     for id in body.instructions() {
         match body.insn(id) {
             Insn::Jump { target, .. } if standing.contains(target) => jumps.push(id),
-            insn @ (Insn::TableSwitch { .. } | Insn::LookupSwitch { .. }) => {
-                if insn.jump_targets().iter().any(|to| standing.contains(to)) {
-                    return None;
-                }
+            insn @ (Insn::TableSwitch { .. } | Insn::LookupSwitch { .. })
+                if insn.jump_targets().iter().any(|to| standing.contains(to)) =>
+            {
+                return None;
             }
             _ => {}
         }

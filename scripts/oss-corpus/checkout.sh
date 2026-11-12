@@ -21,7 +21,7 @@ if [ -z "$row" ]; then
 fi
 IFS=$'\t' read -r _ url commit _ _ pin _ <<<"$row"
 
-kotlin=$(sed 's/#.*//' "$repo_root/kotlin-versions" | awk 'NF { print $1 }' | "$repo_root/scripts/order-kotlin-versions.sh" | tail -n 1)
+kotlin=$(sed 's/#.*//' "$repo_root/kotlin-versions" | awk 'NF { print $1 }' | sort -V | tail -n 1)
 if [ -z "$kotlin" ]; then
   echo "kotlin-versions lists no release" >&2
   exit 2

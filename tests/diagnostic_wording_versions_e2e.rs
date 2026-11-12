@@ -125,6 +125,6 @@ fn an_invalid_environment_version_is_a_clean_configuration_error() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "krusty: invalid Kotlin reference version \"not-a-version\"; expected major.minor.patch, major.minor.patch-BetaN, major.minor.patch-RC, or major.minor.patch-RCN\n"
+        "krusty: invalid Kotlin reference version \"not-a-version\"; expected major.minor.patch\n"
     );
 }

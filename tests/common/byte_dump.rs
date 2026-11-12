@@ -1029,7 +1029,7 @@ fn ensure_flush_at_exit() {
 extern "C" fn flush_at_exit() {
     // No panic may cross the C ABI boundary. Normal test-time explicit flushes retain their exact
     // diagnostics; process teardown is best-effort and must never abort an otherwise valid run.
-    let _ = std::panic::catch_unwind(flush_dirty_archives);
+    let _ = std::panic::catch_unwind(flush_recorded_class_dumps);
 }
 
 fn file_stamp(path: &Path) -> Option<Stamp> {
@@ -1250,27 +1250,6 @@ pub fn replay_class_dump(args: &[String]) -> Option<ReplayedClasses> {
     )
 }
 
-/// Replay `args` against one compiler's recorded bytes.
-///
-/// `build_identity` is `cacheable_build_identity` of that distribution's `build.txt`. `None` is a
-/// snapshot, dev, or beta build: it never reads the archive, so the caller compiles.
-/// `kotlinc_lib` is that distribution's `lib/` directory; the invocation fingerprint uses it
-/// instead of the process compiler when it is set.
-pub(crate) fn replay_class_dump_for_compiler(
-    args: &[String],
-    build_identity: Option<&str>,
-    kotlinc_lib: Option<&Path>,
-) -> Option<ReplayedClasses> {
-    replay_class_dump_for(
-        args,
-        &dumps_root(),
-        build_identity.and_then(parse_dump_version),
-        record_forced(),
-        compile_missing_allowed(),
-        kotlinc_lib,
-    )
-}
-
 fn replay_class_dump_with_policy(
     args: &[String],
     root: &Path,
@@ -1278,22 +1257,11 @@ fn replay_class_dump_with_policy(
     force: bool,
     compile_missing: bool,
 ) -> Option<ReplayedClasses> {
-    replay_class_dump_for(args, root, compiler, force, compile_missing, None)
-}
-
-fn replay_class_dump_for(
-    args: &[String],
-    root: &Path,
-    compiler: Option<DumpVersion>,
-    force: bool,
-    compile_missing: bool,
-    kotlinc_lib: Option<&Path>,
-) -> Option<ReplayedClasses> {
     let compiler = compiler?;
     if force {
         return None;
     }
-    let invocation = match parse_invocation_for(args, kotlinc_lib) {
+    let invocation = match parse_invocation(args) {
         Ok(Some(invocation)) => invocation,
         Ok(None) => refuse_missing_dump(
             "a kotlinc invocation that does not name an output directory and source files",
@@ -1366,26 +1334,6 @@ pub fn remember_class_dump(args: &[String], code: i32, stderr: &str) {
     );
 }
 
-/// Store a live compile under `build_identity`, fingerprinting with `kotlinc_lib` when the compile
-/// did not use the process compiler. A beta identity stores nothing.
-pub(crate) fn remember_class_dump_for_compiler(
-    args: &[String],
-    code: i32,
-    stderr: &str,
-    build_identity: Option<&str>,
-    kotlinc_lib: Option<&Path>,
-) {
-    remember_live_compile_for(
-        args,
-        code,
-        stderr,
-        &dumps_root(),
-        build_identity.and_then(parse_dump_version),
-        ci_allows_write() && (record_forced() || compile_missing_allowed()),
-        kotlinc_lib,
-    );
-}
-
 fn remember_live_compile(
     args: &[String],
     code: i32,
@@ -1394,25 +1342,13 @@ fn remember_live_compile(
     compiler: Option<DumpVersion>,
     store: bool,
 ) {
-    remember_live_compile_for(args, code, stderr, root, compiler, store, None);
-}
-
-fn remember_live_compile_for(
-    args: &[String],
-    code: i32,
-    stderr: &str,
-    root: &Path,
-    compiler: Option<DumpVersion>,
-    store: bool,
-    kotlinc_lib: Option<&Path>,
-) {
     if !store {
         return;
     }
     let Some(compiler) = compiler else {
         return;
     };
-    let invocation = match parse_invocation_for(args, kotlinc_lib) {
+    let invocation = match parse_invocation(args) {
         Ok(Some(invocation)) => invocation,
         Ok(None) => return,
         Err(err) => panic!("{err}"),
@@ -1641,13 +1577,6 @@ fn exit_code(bytes: &[u8]) -> i32 {
 }
 
 fn parse_invocation(args: &[String]) -> Result<Option<Invocation>, String> {
-    parse_invocation_for(args, None)
-}
-
-fn parse_invocation_for(
-    args: &[String],
-    kotlinc_lib: Option<&Path>,
-) -> Result<Option<Invocation>, String> {
     let mut out = None;
     let mut source_args = Vec::new();
     let mut fragment_source_args = Vec::new();
@@ -1716,14 +1645,7 @@ fn parse_invocation_for(
         blob.extend_from_slice(bytes);
     }
     let legacy_classpath = legacy_classpath_fingerprint(&classpath)?;
-    let classpath = match kotlinc_lib {
-        Some(lib) => classpath_content_fingerprint_with_platform(
-            &classpath,
-            Some(lib),
-            krusty::toolchain::jdk_modules().as_deref(),
-        )?,
-        None => classpath_content_fingerprint(&classpath)?,
-    };
+    let classpath = classpath_content_fingerprint(&classpath)?;
     let flags = flags.join("\n");
     let fingerprint_of = |classpath: &str| {
         fingerprint_parts(&[blob.as_slice(), flags.as_bytes(), classpath.as_bytes()])
@@ -1908,21 +1830,6 @@ pub(crate) fn report_live_kotlinc(args: &[String]) {
     log_live_kotlinc(
         classify_live_kotlinc(compiler_dump_version().is_some(), record_forced()),
         args,
-        None,
-    );
-}
-
-/// Report a live compile that used `kotlinc_lib` rather than the process compiler.
-/// `cached_compiler` is whether that distribution reads the recorded-byte archive.
-pub(crate) fn report_live_kotlinc_for(
-    args: &[String],
-    cached_compiler: bool,
-    kotlinc_lib: Option<&Path>,
-) {
-    log_live_kotlinc(
-        classify_live_kotlinc(cached_compiler, record_forced()),
-        args,
-        kotlinc_lib,
     );
 }
 
@@ -1934,16 +1841,15 @@ pub(crate) fn report_unrecorded_kotlinc(args: &[String]) {
     log_live_kotlinc(
         classify_live_kotlinc(compiler_dump_version().is_some(), false),
         args,
-        None,
     );
 }
 
-fn log_live_kotlinc(reason: &'static str, args: &[String], kotlinc_lib: Option<&Path>) {
+fn log_live_kotlinc(reason: &'static str, args: &[String]) {
     let test = std::thread::current()
         .name()
         .unwrap_or("unknown")
         .to_string();
-    let (sources, fingerprint) = match parse_invocation_for(args, kotlinc_lib) {
+    let (sources, fingerprint) = match parse_invocation(args) {
         Ok(Some(invocation)) => (invocation.label, hex128(invocation.fingerprint)),
         Ok(None) => ("(no sources)".to_string(), "-".to_string()),
         Err(_) => ("(unreadable sources)".to_string(), "-".to_string()),

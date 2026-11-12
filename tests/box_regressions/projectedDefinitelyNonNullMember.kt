@@ -1,7 +1,8 @@
 // A member written with a definitely-non-null `T & Any` keeps that `& Any` when it is read
 // through a projected receiver: through `Holder<*>` the value is `Any` and `Box<T & Any>` is
 // `Box<out Any>`, through `Holder<out Named?>` they are `Named` and `Box<out Named>`, and
-// through `Holder<in String?>` the box is `Box<in String>`.
+// through `Holder<in String?>` the box is `Box<in String>`. A concrete override that narrows the
+// members to `String` reads the same way.
 
 class Box<T>(val item: T)
 
@@ -22,6 +23,10 @@ class Text<T>(override val value: T & Any) : Holder<T>() {
     override val box: Box<T & Any> = Box(value)
 }
 
+class Word(override val value: String) : Holder<String?>() {
+    override val box: Box<String> = Box(value)
+}
+
 fun star(holder: Holder<*>): Boolean {
     val value: Any = holder.value
     val box: Box<out Any> = holder.box
@@ -34,6 +39,8 @@ fun covariant(holder: Holder<out Named?>): String {
     return value.name + box.item.name
 }
 
+fun starString(holder: Holder<*>): String = (holder.value as String) + (holder.box.item as String)
+
 fun contravariant(holder: Holder<in String?>): Box<in String> = holder.box
 
 // A safe cast without written type arguments takes them from the cast value: `Holder<*>`.
@@ -45,6 +52,11 @@ fun box(): String {
     val covariant = covariant(Text<Label?>(Label("K")))
     if (covariant != "KK") return "covariant: $covariant"
     if (contravariant(text).item != "O") return "contravariant"
+    val word = Word("O")
+    if (!star(word)) return "word star"
+    if (starString(word) != "OO") return "word: ${starString(word)}"
+    if (contravariant(word).item != "O") return "word contravariant"
+    if (cast(word)?.item != "O") return "word cast"
     if (cast(text)?.item != "O") return "cast"
     return "OK"
 }

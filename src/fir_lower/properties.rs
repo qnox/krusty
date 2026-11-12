@@ -184,6 +184,11 @@ pub(super) fn predeclare_properties(
                     property.id,
                     IrCheckedProperty {
                         declaration,
+                        declaration_source: None,
+                        annotations: index
+                            .declaration_annotations(declaration)
+                            .to_vec()
+                            .into_boxed_slice(),
                         diagnostic_span: None,
                         getter_diagnostic_span: None,
                         setter_diagnostic_span: None,
@@ -370,12 +375,14 @@ pub(super) fn finalize_properties(
         match property.class {
             Some(class) if extension_receiver.is_some() => materialize_member_extension_property(
                 index,
-                source_order,
-                property_id,
-                property,
+                PropertyMaterialization {
+                    source_order,
+                    property_id,
+                    property,
+                    context_parameters,
+                },
                 class,
                 extension_receiver.expect("guarded member extension receiver"),
-                context_parameters,
                 ir,
                 &mut realizations,
                 &mut initialization,
@@ -396,11 +403,13 @@ pub(super) fn finalize_properties(
             )?,
             None => materialize_top_level_property(
                 index,
-                source_order,
-                property_id,
-                property,
+                PropertyMaterialization {
+                    source_order,
+                    property_id,
+                    property,
+                    context_parameters,
+                },
                 extension_receiver,
-                context_parameters,
                 ir,
                 &mut realizations,
             )?,
@@ -504,18 +513,29 @@ pub(super) fn apply_property_decl_line(
     }
 }
 
-fn materialize_member_extension_property(
-    index: &ResolvedModuleIndex,
+/// A checked property together with the source position its realization keeps.
+struct PropertyMaterialization {
     source_order: u32,
     property_id: crate::fir::PropertyId,
     property: IrCheckedProperty,
+    context_parameters: Vec<Ty>,
+}
+
+fn materialize_member_extension_property(
+    index: &ResolvedModuleIndex,
+    materialization: PropertyMaterialization,
     class_id: crate::ir::ClassId,
     receiver: Ty,
-    context_parameters: Vec<Ty>,
     ir: &mut IrFile,
     realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
     initialization: &mut HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>>,
 ) -> Result<(), FirFileLoweringFailure> {
+    let PropertyMaterialization {
+        source_order,
+        property_id,
+        property,
+        context_parameters,
+    } = materialization;
     if property.delegate.is_some() || property.delegate_plan.is_some() {
         return super::delegated_properties::materialize_member_extension_delegate(
             index,
@@ -679,14 +699,17 @@ fn materialize_member_extension_property(
 
 fn materialize_top_level_property(
     index: &ResolvedModuleIndex,
-    source_order: u32,
-    property_id: crate::fir::PropertyId,
-    property: IrCheckedProperty,
+    materialization: PropertyMaterialization,
     extension_receiver: Option<Ty>,
-    context_parameters: Vec<Ty>,
     ir: &mut IrFile,
     realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
 ) -> Result<(), FirFileLoweringFailure> {
+    let PropertyMaterialization {
+        source_order,
+        property_id,
+        property,
+        context_parameters,
+    } = materialization;
     if property.delegate.is_some() || property.delegate_plan.is_some() {
         return super::delegated_properties::materialize_top_level_delegate(
             super::delegated_properties::DelegatedDeclaration {
@@ -1294,7 +1317,8 @@ fn materialize_member_property(
             ir.property_initializer_stores.insert(store);
             // kotlinc's initializer store sits at its initializer expression, not the declaration.
             if let Some(line) = ir.source_line(initializer) {
-                ir.expr_lines.insert(store, line);
+                ir.set_statement_line(store, line);
+                ir.set_source_line(store, line);
             }
             initialization.entry(class_id).or_default().push((
                 property.initialization_order.ok_or(

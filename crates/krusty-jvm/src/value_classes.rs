@@ -3,6 +3,7 @@
 
 mod accessor_names;
 mod aggregate_boundaries;
+mod any_member_calls;
 mod body_scopes;
 mod boxed_generic_overrides;
 mod boxedness;
@@ -55,6 +56,7 @@ mod unboxing_rewrites;
 mod value_boundaries;
 use tail_boxing::{box_nullable_vc_tail, box_ref_tail, box_tail, restore_boxed_suspension_tails};
 mod value_members;
+mod when_merges;
 use crate::operation_relocation::clone_below_representation_wrapper;
 use body_scopes::{append_inline_body_scopes, collect_reachable, collect_reachable_scoped};
 use boxing_rewrites::{box_wrap, box_wrap_nullable, to_string_wrap};
@@ -1563,14 +1565,7 @@ pub(crate) fn lower_value_classes(
                 IrExpr::Const(krusty::ir::IrConst::zero_for_value_type(erased));
         }
     }
-    // The exhaustive `when` result drives the emitter's verifier-visible merge type, not Kotlin type checking.
-    // Once a value class has been realized as its carrier, the merge frame must use that same carrier
-    // (`SampleId?` over a non-null `String` field is `String`, including its null branch). Leaving the
-    // semantic classifier here while branch expressions have been erased produces a StackMapTable that
-    // claims `LSampleId;` above an actual `String`.
-    for result in ir.whens.exhaustive.values_mut() {
-        *result = erase(result, &under);
-    }
+    when_merges::erase_when_merges(ir, &under);
 
     // 4. Rewrite construction / property access. Each body carries its pre-erasure semantic slot types,
     //    so the same representation analysis used by step 5 distinguishes an unboxed carrier from a box.
@@ -2225,9 +2220,8 @@ pub(crate) fn lower_value_classes(
                     _ => None,
                 }
             }
-            // A source call resolved by class+method index before value-class realization may still
-            // point at a user-written Any override after `synth_value_members` turns that exact
-            // function into static `toString-impl`/`hashCode-impl`/`equals-impl`. Retain the selected
+            // A source call resolved by class+method index before value-class realization names a
+            // member `synth_value_members` realized over the carrier. Retain the selected
             // declaration, but realize its new ABI: the former dispatch receiver is parameter zero.
             IrExpr::MethodCall {
                 class,
@@ -2235,13 +2229,8 @@ pub(crate) fn lower_value_classes(
                 receiver,
                 args,
             } if is_vc[*class as usize]
-                && ir.classes[*class as usize]
-                    .methods
-                    .get(*index as usize)
-                    .and_then(|fid| ir.functions.get(*fid as usize))
-                    .is_some_and(|function| function.is_static) =>
+                && let Some(fid) = any_member_calls::realized_static(ir, *class, *index) =>
             {
-                let fid = ir.classes[*class as usize].methods[*index as usize];
                 let function = &ir.functions[fid as usize];
                 Some(Rw::ImplCall {
                     receiver: *receiver,
@@ -3357,6 +3346,10 @@ pub(crate) fn lower_value_classes(
                 IrExpr::RefSet { value, .. } => match orig_ref_elems.get(&id) {
                     Some(t) if t.is_nullable() => vec![(*value, *t)],
                     _ => continue,
+                },
+                IrExpr::When { .. } => match value_boundaries::when_merge_pairs(ir, id, &under) {
+                    Some(pairs) => pairs,
+                    None => continue,
                 },
                 _ => continue,
             };

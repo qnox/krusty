@@ -73,18 +73,25 @@ fn integer_constant_sibling_primitive(
     (fits && has_constant).then_some(target)
 }
 
+/// One conditional branch's value expression and the type it produced.
+pub(super) struct BranchValue {
+    pub(super) expression: ExprId,
+    pub(super) ty: Ty,
+}
+
 /// Adapt integer-constant branches, then join the pair the way `if` and elvis do.
 pub(super) fn join_adapted_branches(
     checker: &mut Checker<'_>,
     scope: &CheckerScope<'_>,
     expected: Option<Ty>,
-    left_expr: ExprId,
-    left: Ty,
-    right_expr: ExprId,
-    right: Ty,
+    left: BranchValue,
+    right: BranchValue,
     expression: ExprId,
 ) -> Ty {
-    let adapted = integer_constant_branch_types(checker, &[(left_expr, left), (right_expr, right)]);
+    let adapted = integer_constant_branch_types(
+        checker,
+        &[(left.expression, left.ty), (right.expression, right.ty)],
+    );
     join_types(checker, scope, expected, adapted[0], adapted[1], expression)
 }
 
