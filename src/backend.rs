@@ -20,6 +20,7 @@ pub mod enums;
 pub mod interface_identity;
 pub mod local_properties;
 mod module_facts;
+pub mod module_links;
 pub mod property_entries;
 mod source_class_members;
 pub mod value_classes;

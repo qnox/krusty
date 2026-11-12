@@ -282,9 +282,6 @@ pub(super) fn emit_dependencies<B: Backend>(
             }
         }
         let mut exports = DependencyExportSignatures::default();
-        for class in unit.materialized_enums() {
-            exports.record_enum(class);
-        }
         let closed = unit
             .callable_functions()
             // A reachable bodyless declaration remains an exact provider edge which the target may

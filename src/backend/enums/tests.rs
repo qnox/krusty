@@ -506,15 +506,14 @@ fn an_enum_another_file_declares_keeps_its_use_nodes() {
     assert!(matches!(ir.expr(elsewhere), IrExpr::EnumEntry { .. }));
 }
 
-/// Another file reads a published enum's constant through an entry of this file, which reads the
+/// Another file reads an enum's constant through an entry of this file, which reads the
 /// one constant this file holds.
 #[test]
-fn a_published_enum_exports_an_entry_answering_each_constant() {
+fn an_enum_publishes_an_entry_answering_each_constant() {
     let mut ir = IrFile::default();
     let class = shade(&mut ir);
     ir.record_declared_class_self_type(type_name("Shade"), Ty::obj("Shade"));
     let mut exports = super::super::DependencyExportSignatures::default();
-    exports.record_enum(class);
     super::publish_constants(&mut ir, &mut exports);
     let ir = lowered(ir);
 

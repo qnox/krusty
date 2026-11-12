@@ -647,13 +647,6 @@ impl DependencyBodyUnit {
         }
     }
 
-    /// The enum classes this unit materialized, whose constants it exports.
-    pub(crate) fn materialized_enums(&self) -> impl Iterator<Item = crate::ir::ClassId> + '_ {
-        let mut classes = self.enum_classes.values().copied().collect::<Vec<_>>();
-        classes.sort_unstable();
-        classes.into_iter()
-    }
-
     /// Classes owned by this closed unit, keyed by their authenticated constructor.
     pub(crate) fn materialized_classes(
         &self,
