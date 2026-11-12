@@ -127,9 +127,6 @@ fun box(): String {
 
 #[test]
 fn a_library_equality_bound_reaches_a_consuming_override() {
-    if krusty::kotlin_version::target() < KotlinVersion::V2_5_0_BETA2 {
-        return;
-    }
     let library = common::compile_libs_build("LibraryBound", &[("Lib.kt", LIBRARY_BOUND)])
         .expect("krusty builds the library module");
     assert_eq!(
