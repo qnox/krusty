@@ -243,15 +243,19 @@ fn captured_lambda_substitution_refreshes_the_retained_inline_body() {
         plan,
         &HashMap::default(),
         &HashMap::default(),
-        crate::fir::DeclarationId::from_raw(0),
-        None,
-        false,
-        "caller",
-        implementation,
-        None,
-        crate::fir::SourceFileId::from_raw(0),
-        crate::fir::CallableId::from_raw(0),
-        "inlineCall",
+        super::EscapingLambdaCaller {
+            declaration: crate::fir::DeclarationId::from_raw(0),
+            enclosure: None,
+            is_default: false,
+            source_name: "caller",
+        },
+        super::EscapingInlineTemplate {
+            function: implementation,
+            owner: None,
+            source: crate::fir::SourceFileId::from_raw(0),
+            callee: crate::ir::IrInlineCallee::Module(crate::fir::CallableId::from_raw(0)),
+            callee_source_name: "inlineCall",
+        },
     );
 
     assert_eq!(suppressions, [actual_implementation]);
@@ -697,15 +701,19 @@ fn caller_captures_transfer_into_the_specialized_declaration_closure() {
         transfer_plan,
         &HashMap::default(),
         &HashMap::default(),
-        crate::fir::DeclarationId::from_raw(0),
-        None,
-        false,
-        "caller",
-        escaping_implementation,
-        None,
-        crate::fir::SourceFileId::from_raw(0),
-        crate::fir::CallableId::from_raw(0),
-        "inlineCall",
+        super::EscapingLambdaCaller {
+            declaration: crate::fir::DeclarationId::from_raw(0),
+            enclosure: None,
+            is_default: false,
+            source_name: "caller",
+        },
+        super::EscapingInlineTemplate {
+            function: escaping_implementation,
+            owner: None,
+            source: crate::fir::SourceFileId::from_raw(0),
+            callee: crate::ir::IrInlineCallee::Module(crate::fir::CallableId::from_raw(0)),
+            callee_source_name: "inlineCall",
+        },
     );
     assert_eq!(suppressions, [actual_implementation]);
     let IrExpr::Lambda {
@@ -845,15 +853,19 @@ fn captured_substituted_lambda_stays_materialized_while_capture_free_copy_specia
         plan,
         &HashMap::default(),
         &HashMap::default(),
-        crate::fir::DeclarationId::from_raw(0),
-        None,
-        false,
-        "caller",
-        implementation,
-        None,
-        crate::fir::SourceFileId::from_raw(0),
-        crate::fir::CallableId::from_raw(0),
-        "inlineCall",
+        super::EscapingLambdaCaller {
+            declaration: crate::fir::DeclarationId::from_raw(0),
+            enclosure: None,
+            is_default: false,
+            source_name: "caller",
+        },
+        super::EscapingInlineTemplate {
+            function: implementation,
+            owner: None,
+            source: crate::fir::SourceFileId::from_raw(0),
+            callee: crate::ir::IrInlineCallee::Module(crate::fir::CallableId::from_raw(0)),
+            callee_source_name: "inlineCall",
+        },
     );
     assert!(suppressions.is_empty());
     assert_eq!(ir.functions[implementation as usize].body, Some(body));
@@ -1088,10 +1100,12 @@ fn duplicate_function_requests_require_identical_capture_provenance() {
             None,
             &HashMap::default(),
             &exact_request,
-            &mut decisions,
-            &mut planned,
-            &mut requests,
-            &mut visiting,
+            &mut super::EscapingFunctionPlans {
+                decisions: &mut decisions,
+                planned: &mut planned,
+                requests: &mut requests,
+                visiting: &mut visiting,
+            },
         ),
         FunctionPlan::Planned
     );
@@ -1103,10 +1117,12 @@ fn duplicate_function_requests_require_identical_capture_provenance() {
             None,
             &HashMap::default(),
             &exact_request,
-            &mut decisions,
-            &mut planned,
-            &mut requests,
-            &mut visiting,
+            &mut super::EscapingFunctionPlans {
+                decisions: &mut decisions,
+                planned: &mut planned,
+                requests: &mut requests,
+                visiting: &mut visiting,
+            },
         ),
         FunctionPlan::Planned
     );

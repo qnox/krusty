@@ -70,7 +70,7 @@ impl ProductionSignatureSemantics<'_> {
         self.with_qualified_package_resolver(scope, qualifier, |package, resolver| {
         let candidates = self.implicit_context_candidates(
             scope,
-            resolver.accessible_top_level_candidates(name).into_iter(),
+            resolver.accessible_top_level_candidates(name),
         );
         let (selected_arguments, selected_argument_types) =
             Self::mapped_call_arguments(&candidates, arguments, trailing_lambda)
@@ -145,7 +145,7 @@ impl ProductionSignatureSemantics<'_> {
             let candidates = Self::structurally_applicable_call_candidates(
                 self.implicit_context_candidates(
                     scope,
-                    resolver.accessible_top_level_candidates(name).into_iter(),
+                    resolver.accessible_top_level_candidates(name),
                 ),
                 &argument_names,
                 arguments.len(),

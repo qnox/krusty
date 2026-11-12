@@ -50,6 +50,7 @@ const SOURCES: &[&str] = &[
     "krusty_maps.c",
     "krusty_classes.c",
     "krusty_lang.c",
+    "krusty_appendable.c",
     "krusty_fp.c",
     "krusty_gc.c",
     "krusty_threads.c",

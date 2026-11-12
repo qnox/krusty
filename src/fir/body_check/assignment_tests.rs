@@ -464,7 +464,7 @@ fn plus_assign_contextually_types_nested_generic_rhs_calls() {
         })
         .collect::<Vec<_>>();
     assert!(
-        expression_types.iter().any(|&actual| actual == expected),
+        expression_types.contains(&expected),
         "the nested Pair/emptySet RHS must publish its selected expected result type: {expression_types:?}"
     );
 }

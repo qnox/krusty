@@ -74,6 +74,18 @@ fn official_receiver_captures_preserve_values_and_once_only_inputs() {
 }
 
 #[test]
+fn official_inline_objects_read_their_captured_parameter_reified_type_and_lambda() {
+    let library = include_str!("fixtures/klib_closure_frames/InlineObject.kt");
+    let consumer = include_str!("fixtures/klib_closure_frames/InlineObjectConsumer.kt");
+    assert_official_dependency_closures(
+        library,
+        consumer,
+        "SerializedInlineObject",
+        DependencyConsumer::Native,
+    );
+}
+
+#[test]
 fn official_dependency_closures_preserve_nested_values_and_once_only_operands() {
     assert_official_dependency_closures(
         LIBRARY,

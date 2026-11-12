@@ -47,6 +47,18 @@ pub(super) struct ExternalCallTarget<'a> {
     pub(super) reified_type_parameter_ordinals: &'a [u32],
 }
 
+/// A member or extension operator selected in expression position, before its source operands
+/// are mapped onto the checked call. These facts travel together from selection to argument
+/// mapping.
+pub(super) struct ExpressionMemberOperatorTarget {
+    pub(super) target: FirCallTarget,
+    pub(super) substitutions: Box<[FirTypeSubstitution]>,
+    pub(super) extension: bool,
+    pub(super) context_arguments: Vec<Option<crate::resolve::ResolvedContextArgument>>,
+    pub(super) vararg_index: Option<usize>,
+    pub(super) parameters: Vec<Ty>,
+}
+
 /// One already-selected operator target. Context parameters stay separate while source operands
 /// are mapped, then join the value parameters in the checked call's semantic parameter list.
 pub(in crate::fir::body_check) struct SelectedOperatorTarget {

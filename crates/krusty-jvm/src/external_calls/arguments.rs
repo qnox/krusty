@@ -47,7 +47,6 @@ pub(super) fn copy_call_facts(
         };
     }
     copy!(fir_origins);
-    copy!(expr_lines);
     ir.copy_position(source, target);
     ir.copy_types(source, target);
     copy!(ext_call_source_receiver);

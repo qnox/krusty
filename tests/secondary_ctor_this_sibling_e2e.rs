@@ -119,18 +119,18 @@ fn constructor_delegation_combines_listed_and_spread_varargs() {
 
 #[test]
 fn constructor_delegation_requires_spread_for_an_array_vararg_argument() {
+    // An unspread array is one element of the vararg, so kotlinc reports the ordinary argument
+    // mismatch at it, exactly as it would at a call.
     const SRC: &str = "class A(vararg val values: Int) {\n\
         \x20 constructor(values: IntArray, marker: Boolean): this(values)\n\
         }\n";
-    let stdlib = common::stdlib_jar();
-    let diagnostics =
-        common::front_end_diagnostics(SRC, &[stdlib], Some(common::jdk_modules().as_path()));
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("has no matching target constructor")),
-        "expected unspread array delegation diagnostic, got {diagnostics:?}"
+    let sources = [("Main.kt", SRC)];
+    let reference_args = common::language_directives::kotlinc_args(SRC);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        ["Main.kt:2:56: argument type mismatch: actual type is 'IntArray', but 'Int' was expected."]
     );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
 }
 
 #[test]

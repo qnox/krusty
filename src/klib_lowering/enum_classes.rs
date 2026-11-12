@@ -258,7 +258,11 @@ fn authenticate_constructor(
     };
     let enum_class = KlibPublicIdSignature::classifier(crate::types::wk::kotlin_enum());
     let delegated = bodies
-        .class_member_header(&enum_constructor, &enum_class)
+        .class_member_header(
+            &enum_constructor,
+            &enum_class,
+            crate::libraries::KlibAccessorRole::Getter,
+        )
         .map_err(mismatch)?
         .ok_or_else(|| mismatch("an enum constructor delegates past kotlin.Enum"))?;
     // `kotlin.Enum`'s `name` and `ordinal` are absent operands: the target supplies each

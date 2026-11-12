@@ -103,6 +103,15 @@ pub struct ModuleReport {
     /// analyze the source set it claims and therefore cannot count as clean.
     #[serde(default)]
     pub java_stub_failed: bool,
+    /// Classpath entries the plan names that are not on disk. A missing jar is an incomplete open:
+    /// the errors it causes are not a measure of the sources that were actually checked.
+    #[serde(default)]
+    pub missing_classpath_entries: usize,
+    /// Every source the plan reads was readable, nothing was dropped for the plan budget, Java stubs
+    /// were built when Java sources existed, and every classpath entry exists. Errors do not clear
+    /// this: a fully opened module can still fail to check.
+    #[serde(default)]
+    pub open_complete: bool,
     pub error_count: usize,
     pub warning_count: usize,
     pub diagnostics: Vec<DiagnosticRecord>,
@@ -392,6 +401,7 @@ pub fn run_plan(plan: &ModulePlan) -> ModuleReport {
         .into_iter()
         .collect::<Vec<_>>();
 
+    let missing_classpath_entries = plan.classpath.iter().filter(|path| !path.exists()).count();
     let classpath = Rc::new(Classpath::new(plan.classpath.clone()));
     classpath.prepare_for_source_analysis();
     let java_stub_failed = !java.is_empty() && !set_java_stub_overlay(&classpath, &java);
@@ -454,6 +464,11 @@ pub fn run_plan(plan: &ModulePlan) -> ModuleReport {
         unreadable_checked_files: unreadable_checked,
         visible_declarations,
         java_stub_failed,
+        missing_classpath_entries,
+        open_complete: unreadable == 0
+            && !java_stub_failed
+            && !plan.truncated
+            && missing_classpath_entries == 0,
         error_count,
         warning_count,
         diagnostics,
@@ -962,6 +977,27 @@ mod tests {
             "only the broken file may be reported: {:?}",
             report.diagnostics
         );
+        assert!(
+            report.open_complete,
+            "errors do not mean the module failed to open"
+        );
+        assert_eq!(report.missing_classpath_entries, 0);
+    }
+
+    #[test]
+    fn a_missing_classpath_entry_is_an_incomplete_open() {
+        let tree = crate::project::TempTree::new("parity-missing-classpath");
+        tree.write("app/src/Ok.kt", "package app\nfun fine(): Int = 1\n");
+        let plan = ModulePlan {
+            module: "app".to_string(),
+            checked: vec![tree.path("app/src/Ok.kt")],
+            classpath: vec![tree.path("missing-stdlib.jar")],
+            ..ModulePlan::default()
+        };
+        let report = run_plan(&plan);
+        assert_eq!(report.missing_classpath_entries, 1);
+        assert!(!report.open_complete);
+        assert_eq!(report.unreadable_files, 0);
     }
 
     #[test]
