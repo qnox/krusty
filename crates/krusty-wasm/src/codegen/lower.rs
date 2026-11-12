@@ -294,6 +294,7 @@ pub(super) fn lower_file(
             function.ret,
         );
         body.scope = krusty::ir::IrEnclosure::Function(id as FunId);
+        body.initializers = ir.single_assignment_initializers(root);
         body.shared_cell_parameters(id as FunId)?;
         match body.function_body(root, function.ret) {
             Ok(()) => {
@@ -671,6 +672,9 @@ struct Body<'a> {
     /// is emitted: a block's type is its value's, and that value can be a variable the block
     /// itself declares (`n++` is `{ val old = n; n = old + 1; old }`).
     declared: HashMap<u32, Ty>,
+    /// The initializer of each variable of the body that nothing assigns again; empty where the
+    /// body's variables are not inventoried.
+    initializers: HashMap<u32, krusty::ir::ExprId>,
     result: Ty,
     /// How many structured instructions enclose the current position.
     depth: u32,
@@ -733,6 +737,7 @@ impl<'a> Body<'a> {
             unit_values: HashSet::default(),
             cells: HashMap::default(),
             declared,
+            initializers: HashMap::default(),
             result,
             depth: 0,
             loops: Vec::new(),

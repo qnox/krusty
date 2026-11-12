@@ -478,6 +478,42 @@ mod tests {
         }
     }
 
+    /// A `val` of type `Any` holds the string its initializer computed, so rendering it cannot
+    /// reach the function value the file also creates.
+    #[test]
+    fn an_erased_to_string_of_a_val_renders_its_initializer() {
+        let source = "fun box(): String { val supplier = { 1 }\n\
+                      val message: Any = \"O\"\n\
+                      return if (supplier() == 1) \"$message\" + \"K\" else \"fail\" }";
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(target, source);
+            assert_eq!(diagnostics, Vec::<String>::new(), "{target:?}");
+            assert!(!outputs.is_empty(), "{target:?}");
+        }
+    }
+
+    /// A `var` can be assigned anything after its initializer, so rendering it still declines
+    /// while the file creates a function value.
+    #[test]
+    fn an_erased_to_string_of_a_reassigned_var_declines() {
+        let source = "fun box(): String { val supplier = { 1 }\n\
+                      var message: Any = \"O\"\n\
+                      if (supplier() == 2) message = supplier\n\
+                      return \"$message\" + \"K\" }";
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(target, source);
+            assert_eq!(
+                diagnostics,
+                vec![format!(
+                    "{}a `toString` of `kotlin.Any` reaching a runtime object this target cannot \
+                     print yet",
+                    super::DECLINE_PREFIX
+                )]
+            );
+            assert!(outputs.is_empty());
+        }
+    }
+
     /// Another file's local classes and anonymous objects print, so an erased `toString` reaching
     /// them is lowered.
     #[test]
