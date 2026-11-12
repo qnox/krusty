@@ -43,7 +43,7 @@ pub(super) fn authenticate(
     if selected.kind() != crate::libraries::ExternalCallableKind::Member {
         return Ok(None);
     }
-    let class = super::class_headers::authenticate(selected, bodies, None)?;
+    let class = super::class_headers::authenticate(selected, bodies)?;
     super::class_headers::authenticate_receiver(class.contract, class.arena, class.function)?;
     let declared_receiver = super::class_headers::declared_receiver(class.contract);
     let header = raw_function_header_with_class(

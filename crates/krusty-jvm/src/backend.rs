@@ -1789,13 +1789,7 @@ pub fn facade_package_metadata_from_ir(
         .iter()
         .map(krusty::metadata::declaration_records::package_alias)
         .collect::<Vec<_>>();
-    let approximate = |ty| {
-        krusty::types::declaration_approximation(ty, &mut |classifier, index| {
-            symbols
-                .classifier(classifier)
-                .and_then(|declaration| declaration.type_param_variances.get(index).copied())
-        })
-    };
+    let approximate = |ty| krusty::metadata::declaration_approximation::approximate(symbols, ty);
     let inner_classifier =
         |classifier| krusty::metadata::inner_classifiers::inner_classifier(ir, symbols, classifier);
     build_facade_metadata(

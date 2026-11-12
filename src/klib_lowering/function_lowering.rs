@@ -521,24 +521,20 @@ pub(super) fn selected_function_header(
     class_bodies: Option<&crate::klib_libraries::KlibDeclarationBodies>,
 ) -> Result<FunctionHeader, KlibBodyDeclineReason> {
     match class_bodies.filter(|_| selected.is_member()) {
-        Some(bodies) => {
-            super::class_headers::authenticate(selected, bodies, Some((arena, function))).and_then(
-                |class| {
-                    super::class_headers::authenticate_receiver(
-                        class.contract,
-                        class.arena,
-                        class.function,
-                    )?;
-                    raw_function_header_with_class(
-                        Some(selected),
-                        purpose,
-                        class.arena,
-                        class.function,
-                        class.types,
-                    )
-                },
+        Some(bodies) => super::class_headers::authenticate(selected, bodies).and_then(|class| {
+            super::class_headers::authenticate_receiver(
+                class.contract,
+                class.arena,
+                class.function,
+            )?;
+            raw_function_header_with_class(
+                Some(selected),
+                purpose,
+                class.arena,
+                class.function,
+                class.types,
             )
-        }
+        }),
         None => raw_function_header(Some(selected), purpose, arena, function),
     }
 }

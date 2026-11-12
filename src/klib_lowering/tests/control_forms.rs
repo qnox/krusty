@@ -941,6 +941,20 @@ fn type_checks_and_casts_lower_as_the_source_operators_do() {
             "a as String?",
         ),
         (KlibIrTypeOperator::Cast, T::Int, T::Int, "Int", "a as Int"),
+        (
+            KlibIrTypeOperator::InstanceOf,
+            T::NullableString,
+            T::Boolean,
+            "Boolean",
+            "a is String?",
+        ),
+        (
+            KlibIrTypeOperator::NotInstanceOf,
+            T::NullableString,
+            T::Boolean,
+            "Boolean",
+            "a !is String?",
+        ),
     ];
     for (operator, target, result, result_source, expression) in cases {
         let source = format!("fun f(a: Any?): {result_source} {{\n return {expression}\n}}\n");
@@ -965,12 +979,6 @@ fn type_operators_checked_fir_expands_decline_by_name() {
             T::NullableString,
             T::NullableString,
             "a safe cast",
-        ),
-        (
-            KlibIrTypeOperator::InstanceOf,
-            T::NullableString,
-            T::Boolean,
-            "an `is` check of a nullable type",
         ),
         (
             KlibIrTypeOperator::ImplicitNotNull,

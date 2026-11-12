@@ -8,19 +8,36 @@
 //!
 //! The target is process-wide, like the reference toolchain [`crate::toolchain`] already selects:
 //! the `-Xkotlin-reference-version=` flag ([`set_target`]) wins, then `KRUSTY_LANGUAGE_VERSION`
-//! (already part of the build-cache key), then the newest manifest entry. A worker or daemon
-//! therefore serves one reference version for its lifetime.
+//! (already part of the build-cache key), then the newest stable manifest entry. A pre-release
+//! stays supported, but it is not the default. A worker or daemon therefore serves one reference
+//! version for its lifetime.
 
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-/// A full Kotlin release version, `major.minor.patch`, ordered numerically.
+/// Where a release sits before its stable `major.minor.patch`.
+///
+/// `Beta(1)` is `-Beta1`, `Rc(0)` is a bare `-RC`, and `Rc(2)` is `-RC2`. Ordering is beta, then
+/// release candidate, then the stable release of the same numbers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum PreRelease {
+    Beta(u16),
+    Rc(u16),
+    Stable,
+}
+
+/// A Kotlin release identity, `major.minor.patch` with an optional `-BetaN`, `-RC`, or `-RCN`.
+///
+/// The qualifier is part of the identity: `2.5.0-Beta2` is not `2.5.0`. A pre-release precedes the
+/// stable release of the same numbers, and the numbers themselves order numerically, so `2.4.21` is
+/// older than `2.5.0-Beta1` and `2.10.0` is newer than `2.9.9`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct KotlinVersion {
     pub major: u16,
     pub minor: u16,
     pub patch: u16,
+    pre: PreRelease,
 }
 
 impl KotlinVersion {
@@ -28,20 +45,45 @@ impl KotlinVersion {
     pub const V2_4_10: Self = Self::new(2, 4, 10);
     pub const V2_4_20: Self = Self::new(2, 4, 20);
     pub const V2_4_21: Self = Self::new(2, 4, 21);
+    pub const V2_5_0_BETA2: Self = Self {
+        major: 2,
+        minor: 5,
+        patch: 0,
+        pre: PreRelease::Beta(2),
+    };
 
     pub const fn new(major: u16, minor: u16, patch: u16) -> Self {
         Self {
             major,
             minor,
             patch,
+            pre: PreRelease::Stable,
         }
     }
 
-    /// Parse `major.minor.patch`; anything else (a qualifier, a missing part) is `None`.
+    /// Parse `major.minor.patch`, or the same with `-BetaN`, `-RC`, or `-RCN`.
+    ///
+    /// `N` is a positive integer without a leading zero. A missing part, an extra numeric part, or
+    /// any other qualifier (`-SNAPSHOT`, `-dev`, `-release-N`) is `None`.
     pub fn parse(text: &str) -> Option<Self> {
-        let mut parts = text.trim().split('.');
-        let mut next = || parts.next()?.parse().ok();
-        let version = Self::new(next()?, next()?, next()?);
+        let text = text.trim();
+        let (numbers, qualifier) = match text.split_once('-') {
+            Some((numbers, qualifier)) => (numbers, Some(qualifier)),
+            None => (text, None),
+        };
+        if numbers.is_empty() || qualifier.is_some_and(str::is_empty) {
+            return None;
+        }
+        let mut parts = numbers.split('.');
+        let version = Self {
+            major: parts.next()?.parse().ok()?,
+            minor: parts.next()?.parse().ok()?,
+            patch: parts.next()?.parse().ok()?,
+            pre: match qualifier {
+                None => PreRelease::Stable,
+                Some(qualifier) => parse_pre_release(qualifier)?,
+            },
+        };
         parts.next().is_none().then_some(version)
     }
 
@@ -52,18 +94,54 @@ impl KotlinVersion {
         versions
     }
 
-    /// The newest reference version the manifest lists: krusty's headline version.
+    /// The newest stable reference version the manifest lists: krusty's headline version, and the
+    /// reference a compilation uses when nothing pins one.
+    ///
+    /// A pre-release sorts after every older stable release, so it can be last in [`Self::supported`]
+    /// without becoming this version. `2.5.0-Beta2` stays supported and does not replace `2.4.21`.
     pub fn newest() -> Self {
         Self::supported()
-            .pop()
-            .expect("the kotlin-versions manifest lists at least one reference version")
+            .into_iter()
+            .rev()
+            .find(|version| version.pre == PreRelease::Stable)
+            .expect("the kotlin-versions manifest lists at least one stable reference version")
     }
 }
 
 impl fmt::Display for KotlinVersion {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}.{}.{}", self.major, self.minor, self.patch)
+        write!(formatter, "{}.{}.{}", self.major, self.minor, self.patch)?;
+        match self.pre {
+            PreRelease::Stable => Ok(()),
+            PreRelease::Beta(number) => write!(formatter, "-Beta{number}"),
+            PreRelease::Rc(0) => write!(formatter, "-RC"),
+            PreRelease::Rc(number) => write!(formatter, "-RC{number}"),
+        }
     }
+}
+
+/// The user-facing form of a version [`KotlinVersion::parse`] refuses.
+const VERSION_FORM: &str =
+    "major.minor.patch, major.minor.patch-BetaN, major.minor.patch-RC, or major.minor.patch-RCN";
+
+fn parse_pre_release(qualifier: &str) -> Option<PreRelease> {
+    if let Some(number) = qualifier.strip_prefix("Beta") {
+        return Some(PreRelease::Beta(parse_pre_release_number(number)?));
+    }
+    if qualifier == "RC" {
+        return Some(PreRelease::Rc(0));
+    }
+    if let Some(number) = qualifier.strip_prefix("RC") {
+        return Some(PreRelease::Rc(parse_pre_release_number(number)?));
+    }
+    None
+}
+
+fn parse_pre_release_number(text: &str) -> Option<u16> {
+    if text.is_empty() || text.starts_with('0') || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
 }
 
 fn manifest_versions(manifest: &str) -> Vec<KotlinVersion> {
@@ -233,7 +311,7 @@ fn target_from(env: Option<String>) -> Result<KotlinVersion, String> {
         return Ok(KotlinVersion::newest());
     };
     let version = KotlinVersion::parse(&value).ok_or_else(|| {
-        format!("invalid Kotlin reference version {value:?}; expected major.minor.patch")
+        format!("invalid Kotlin reference version {value:?}; expected {VERSION_FORM}")
     })?;
     let supported = KotlinVersion::supported();
     if supported.contains(&version) {
@@ -264,10 +342,41 @@ mod tests {
     }
 
     #[test]
-    fn only_a_full_release_version_parses() {
-        for text in ["2.4", "2.4.20-RC", "2.4.20.1", "", "x.y.z"] {
+    fn a_pre_release_precedes_the_stable_release_of_the_same_numbers() {
+        let version = |text| KotlinVersion::parse(text).unwrap();
+        assert!(version("2.4.21") < version("2.5.0-Beta1"));
+        assert!(version("2.5.0-Beta1") < version("2.5.0-Beta2"));
+        assert!(version("2.5.0-Beta2") < version("2.5.0-RC"));
+        assert!(version("2.5.0-RC") < version("2.5.0-RC2"));
+        assert!(version("2.5.0-RC2") < version("2.5.0"));
+        assert_eq!(version("2.5.0-Beta2"), KotlinVersion::V2_5_0_BETA2);
+        assert_eq!(version("2.5.0-Beta2").to_string(), "2.5.0-Beta2");
+        assert_eq!(version("2.5.0-RC").to_string(), "2.5.0-RC");
+        assert_eq!(version("2.5.0-RC2").to_string(), "2.5.0-RC2");
+    }
+
+    #[test]
+    fn only_a_release_identity_parses() {
+        for text in [
+            "2.4",
+            "2.4.20.1",
+            "",
+            "x.y.z",
+            "2.4.20-SNAPSHOT",
+            "2.4.20-dev-2181",
+            "2.4.20-Beta",
+            "2.4.20-Beta0",
+            "2.4.20-Beta01",
+            "2.4.20-RC0",
+            "2.4.20-release-123",
+            "2.5.0-Beta2-1",
+        ] {
             assert_eq!(KotlinVersion::parse(text), None, "{text:?}");
         }
+        assert_eq!(
+            KotlinVersion::parse("2.4.20-RC").unwrap().to_string(),
+            "2.4.20-RC"
+        );
     }
 
     #[test]
@@ -275,7 +384,9 @@ mod tests {
         let supported = KotlinVersion::supported();
         assert!(supported.contains(&KotlinVersion::V2_4_10));
         assert!(supported.contains(&KotlinVersion::V2_4_20));
-        assert_eq!(KotlinVersion::newest(), *supported.last().unwrap());
+        assert!(supported.contains(&KotlinVersion::V2_5_0_BETA2));
+        assert_eq!(supported.last().copied(), Some(KotlinVersion::V2_5_0_BETA2));
+        assert_eq!(KotlinVersion::newest(), KotlinVersion::V2_4_21);
         assert_eq!(
             manifest_versions("# c\n2.4.0 a\n\n2.4.10 b # note\n"),
             [KotlinVersion::V2_4_0, KotlinVersion::V2_4_10]
@@ -302,12 +413,17 @@ mod tests {
     }
 
     #[test]
-    fn the_environment_selects_the_target_and_defaults_to_the_newest() {
+    fn the_environment_selects_the_target_and_defaults_to_the_newest_stable() {
         assert_eq!(
             target_from(Some("2.4.10".into())),
             Ok(KotlinVersion::V2_4_10)
         );
+        assert_eq!(target_from(None), Ok(KotlinVersion::V2_4_21));
         assert_eq!(target_from(None), Ok(KotlinVersion::newest()));
+        assert_eq!(
+            target_from(Some("2.5.0-Beta2".into())),
+            Ok(KotlinVersion::V2_5_0_BETA2)
+        );
         assert!(target_from(Some(String::new())).is_err());
         assert!(target_from(Some("2.4.99".into())).is_err());
     }
