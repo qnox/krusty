@@ -694,7 +694,9 @@ fn an_argument_through_a_contravariant_receiver_is_checked_against_the_parameter
         })
         .collect();
     let oracle = crate::symbol_resolver::SourceOracle(&libraries);
-    let facts = KlibCalleeFacts::with_declarations([root], leaves).with_type_oracle(&oracle);
+    let facts = KlibCalleeFacts::with_declarations([root], leaves)
+        .with_member_edges(super::non_overriding_edges(leaves))
+        .with_type_oracle(&oracle);
     let mut unit = DependencyBodyUnit::default();
     unit.lower_function_with_intrinsics_and_externals(
         root,
@@ -794,7 +796,9 @@ fn an_argument_through_a_contravariant_receiver_is_checked_against_the_bound_ins
         })
         .collect();
     let oracle = crate::symbol_resolver::SourceOracle(&libraries);
-    let facts = KlibCalleeFacts::with_declarations([root], leaves).with_type_oracle(&oracle);
+    let facts = KlibCalleeFacts::with_declarations([root], leaves)
+        .with_member_edges(super::non_overriding_edges(leaves))
+        .with_type_oracle(&oracle);
     let mut unit = DependencyBodyUnit::default();
     unit.lower_function_with_intrinsics_and_externals(
         root,

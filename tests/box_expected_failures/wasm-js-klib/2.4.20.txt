@@ -1525,7 +1525,6 @@ evaluate/inJavaLangPackage.kt
 evaluate/inJavaPackage.kt
 evaluate/intrinsicConst/charConstructor.kt
 evaluate/intrinsicConst/constTrim.kt
-evaluate/intrinsicConst/incDec.kt
 evaluate/intrinsicConst/kCallableName.kt
 evaluate/intrinsicConst/kCallableNameWithSideEffect.kt
 evaluate/intrinsicConst/kt58717.kt
@@ -2887,7 +2886,6 @@ primitiveTypes/kt36952_identityEqualsWithBooleanInLocalFunction.kt
 primitiveTypes/kt46864_double.kt
 primitiveTypes/kt6590_identityEquals.kt
 primitiveTypes/kt711.kt
-primitiveTypes/kt756.kt
 primitiveTypes/kt79977.kt
 primitiveTypes/kt79977_withIncrementalCompilation.kt
 primitiveTypes/kt887.kt
