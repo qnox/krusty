@@ -6,7 +6,7 @@ use crate::types::{stored_value_ty, Ty, TyKind};
 
 use super::{BodyLowering, FirLoweringFailure};
 
-use crate::ir::{admits_null_at_runtime, settled_instance_answer, TestedOperand};
+use crate::ir::{admits_null_at_runtime, settled_instance_answer};
 
 impl BodyLowering<'_> {
     /// `operand is target` (or `!is`), with the one case the LANGUAGE settles folded.
@@ -63,13 +63,21 @@ impl BodyLowering<'_> {
         if self.is_reified_type_parameter(target) {
             return self.instance_check(negated, operand, target);
         }
-        if admits_null_at_runtime(operand_type) && admits_null_at_runtime(target) {
-            let test = self.null_or_instance(operand, target.non_null());
-            return if negated {
-                self.ir.add_negation(test)
-            } else {
-                test
-            };
+        if admits_null_at_runtime(target) {
+            let next_temporary = &mut self.next_temporary;
+            return self.ir.nullable_target_type_test(
+                negated,
+                operand,
+                operand_type,
+                target,
+                || {
+                    let temporary = *next_temporary;
+                    *next_temporary = next_temporary
+                        .checked_add(1)
+                        .expect("too many FIR lowering temporaries");
+                    temporary
+                },
+            );
         }
         if admits_null_at_runtime(operand_type) && same_erased_upper_bound {
             let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
@@ -84,16 +92,6 @@ impl BodyLowering<'_> {
             });
         }
         self.instance_check(negated, operand, target.non_null())
-    }
-
-    /// `irLetS(operand) { tmp -> tmp == null || tmp is target }`: a stable read is tested in place,
-    /// any other operand is evaluated once into an `Any?` temporary.
-    fn null_or_instance(&mut self, operand: ExprId, target: Ty) -> ExprId {
-        let tested = match self.stable_value_read(operand) {
-            Some(slot) => TestedOperand::Stable(slot),
-            None => TestedOperand::Temporary(self.allocate_temporary()),
-        };
-        self.ir.null_or_instance(operand, target, tested)
     }
 
     /// Whether `target` (or `target?`) is a reified type parameter, whose test an inline call site

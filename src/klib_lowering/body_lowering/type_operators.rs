@@ -76,19 +76,17 @@ impl BodyLowering<'_> {
         Ok(self.typed(lowered, ty))
     }
 
-    /// `argument is target` (or `!is`) for a nullable `target`, as checked FIR lowering shapes it:
-    /// a nullable operand becomes `tmp == null || tmp is T`, testing a stable read in place and
-    /// anything else through a temporary, and a non-null operand tests the non-null target.
-    /// A nullable type-parameter target names a reified parameter only in a declaration this
-    /// lowering does not prepare, and declines.
+    /// `argument is target` (or `!is`) for a nullable `target`, through the test checked FIR
+    /// lowering chooses for it ([`crate::ir::IrFile::nullable_target_type_test`]). This lowering owns only
+    /// its own declines: a nullable type-parameter target names a reified parameter only in a
+    /// declaration this lowering does not prepare, and a `Unit` operand has no value of its own.
     fn nullable_type_test(
         &mut self,
         negated: bool,
         target: Ty,
         argument: KlibIrExprId,
     ) -> Lowered<ExprId> {
-        let tested = target.non_null();
-        if tested.is_ty_param() {
+        if target.non_null().is_ty_param() {
             return unsupported("an `is` check of a nullable type parameter");
         }
         let arg = self.expression(argument)?;
@@ -97,20 +95,10 @@ impl BodyLowering<'_> {
             // Checked FIR lowering first gives a `Unit` operand a value of its own.
             return unsupported("a type operator on a `Unit` value");
         }
-        let test = if crate::ir::admits_null_at_runtime(actual) {
-            let operand = match self.ir.stable_value_read(arg) {
-                Some(slot) => crate::ir::TestedOperand::Stable(slot),
-                None => crate::ir::TestedOperand::Temporary(self.locals.anonymous_slot()),
-            };
-            let test = self.ir.null_or_instance(arg, tested, operand);
-            if negated {
-                self.ir.add_negation(test)
-            } else {
-                test
-            }
-        } else {
-            self.ir.instance_check(negated, arg, tested)
-        };
+        let locals = &mut self.locals;
+        let test = self
+            .ir
+            .nullable_target_type_test(negated, arg, actual, target, || locals.anonymous_slot());
         Ok(self.typed(test, Ty::Boolean))
     }
 

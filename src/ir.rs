@@ -106,7 +106,7 @@ mod reified_markers;
 mod reified_templates;
 mod sam_target;
 mod type_tests;
-pub(crate) use type_tests::{admits_null_at_runtime, settled_instance_answer, TestedOperand};
+pub(crate) use type_tests::{admits_null_at_runtime, settled_instance_answer};
 mod source_debug;
 pub(crate) use source_debug::SourceDebug;
 mod static_properties;
