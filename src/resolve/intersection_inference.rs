@@ -986,6 +986,15 @@ impl Checker<'_> {
                 .get(formal.as_str())
                 .copied()
                 .unwrap_or(parts[0]);
+            // The lower inputs' common supertype is an intersection only when it is what the
+            // formal was inferred to. Another constraint (an expected `Array<Any>`) can fix the
+            // formal to a proper supertype of every part; that type is denotable.
+            if !parts
+                .iter()
+                .any(|part| *part == selected_result || *part == selected_result.non_null())
+            {
+                continue;
+            }
             let through_flexible = propagated
                 .get(formal.as_str())
                 .is_some_and(|fact| fact.through_flexible);

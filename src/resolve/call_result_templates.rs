@@ -107,8 +107,7 @@ impl Checker<'_> {
         if matches!(
             self.expr_lowers.get(&expression),
             Some(ExprLowering::CompilerSynthetic(
-                crate::synthetics::SyntheticKind::EmptyReference
-                    | crate::synthetics::SyntheticKind::ReferenceVararg
+                crate::synthetics::SyntheticKind::ReferenceVararg
             ))
         ) {
             let expected = expected.non_null();
@@ -233,9 +232,55 @@ impl Checker<'_> {
         argument: ExprId,
         expected: Ty,
     ) -> bool {
-        self.call_arg_kind(scope, argument)
-            .may_bind_result_during_overload_selection(expected)
+        let kind = self.call_arg_kind(scope, argument);
+        (kind.may_bind_result_during_overload_selection(expected)
+            || self.input_evidence_fits_expected_result(&kind, expected))
             && self.call_result_can_bind_expected(argument, expected)
+    }
+
+    /// Whether the type arguments a nested generic call takes from its own inputs stay below the
+    /// ones `expected` gives its result. Inputs are lower bounds of the call's variables, so
+    /// `arrayOf("OK")` completes to an expected `Array<Any>` while `listOf(1, 2)` cannot
+    /// complete to `Collection<String>`.
+    fn input_evidence_fits_expected_result(
+        &self,
+        kind: &crate::symbol_resolver::CallArgKind,
+        expected: Ty,
+    ) -> bool {
+        let crate::symbol_resolver::CallArgKind::ExpectedTypeCallable {
+            provisional,
+            generic_sig,
+            ..
+        } = kind
+        else {
+            return false;
+        };
+        let source = self.fed_source();
+        let Some(expected_bindings) =
+            crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
+                &source,
+                generic_sig,
+                expected,
+                |actual, bound| self.receiver_is_assignable(actual, bound),
+            )
+        else {
+            return false;
+        };
+        // The provisional result carries the input evidence; read it through the same
+        // result-binding path as the expectation so both sides bind the same formals.
+        let input_bindings = crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
+            &source,
+            generic_sig,
+            *provisional,
+            |actual, bound| self.receiver_is_assignable(actual, bound),
+        )
+        .unwrap_or_default();
+        generic_sig.formals.iter().all(|formal| {
+            match (input_bindings.get(formal), expected_bindings.get(formal)) {
+                (Some(&input), Some(&expected)) => self.receiver_is_assignable(input, expected),
+                _ => true,
+            }
+        })
     }
 
     /// Record the type-parameter identities lexically in scope at `call`.
