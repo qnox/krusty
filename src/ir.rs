@@ -66,7 +66,9 @@ pub mod fields;
 mod function_scope;
 mod generic_signature;
 pub use generic_signature::{IrGenericSig, IrTypeParameter};
+mod coroutine_runtime;
 mod inline_copies;
+pub use coroutine_runtime::IrCoroutineRuntime;
 mod suspension_points;
 pub use suspension_points::{IrIntrinsicSuspensionPoint, IrValueClassSuspendResult};
 mod intrinsic;
@@ -2187,6 +2189,10 @@ pub struct IrFile {
     /// with suspension points, builds the state machine + continuation class. Common lowering keeps a
     /// `suspend fun` plain, mirroring how value classes stay plain until their target pass.
     pub suspend_funs: Vec<u32>,
+    /// The stdlib declarations the coroutine lowering of this file calls, selected by the handoff
+    /// for a file that declares a suspend function. `None` when the file has none or the
+    /// compilation's classpath does not declare them.
+    pub coroutine_runtime: Option<IrCoroutineRuntime>,
     /// Functions that exist only to forward an interface member to its delegate (`: I by d`).
     /// A suspend forwarder threads its own continuation into that one call. It is not a user tail
     /// call: a reference-carrier value class still forwards, and the backend checkcasts the carrier
