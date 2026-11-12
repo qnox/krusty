@@ -798,8 +798,9 @@ fn normalized_function_realization_with_stdlib_owner(
         if let Some(plan) = list_storage_construction(&facts, function, array_list_classifier) {
             return Some(CompilerIntrinsic::ListStorageConstruction(plan));
         }
+        return function_realization(facts);
     }
-    function_realization_with_stdlib_owner(facts, compiler_builtin_owner)
+    function_realization_with_stdlib_owner(facts, false)
 }
 
 /// Authenticate the complete generic declaration while the provider still owns it. In particular,

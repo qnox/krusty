@@ -939,3 +939,106 @@ class Deleg private constructor(private val p: Impl) : Iface by p {\n\
 fun box(): String = Deleg().f()\n";
     common::expect_box_same_as_kotlinc(SRC, "RetainedDefaultClassHeaders");
 }
+
+const JAVA_MEMBER_OVERRIDE: &str = "import java.util.function.Consumer
+
+class Recording<T>(private val delegate: Consumer<T>) : Consumer<T> by delegate {
+    var seen: T? = null
+    override fun accept(t: T) {
+        seen = t
+        delegate.accept(t)
+    }
+}
+
+class Reversed(private val order: Comparator<String>) : Comparator<String> by order {
+    override fun compare(a: String, b: String): Int = -order.compare(a, b)
+}
+
+fun box(): String {
+    val recording = Recording<String>(Consumer { })
+    recording.accept(\"a\")
+    val reversed = Reversed(naturalOrder())
+    return if (recording.seen == \"a\" && reversed.compare(\"a\", \"b\") > 0) \"OK\" else \"fail\"
+}
+";
+
+/// A class's own override of a delegated Java member (`accept(p0: T!)`, `compare(p0: String!, …)`)
+/// takes its slot under the shared override rule, which reads `T` and `String` as overriding the
+/// flexible Java parameters. Delegation therefore writes no forwarder beside it, as kotlinc does.
+#[test]
+fn an_explicit_override_of_a_delegated_java_member_replaces_its_forwarder() {
+    common::expect_box_same_as_kotlinc(JAVA_MEMBER_OVERRIDE, "JavaMemberDelegationOverride");
+    common::assert_classes_identical_to_kotlinc(
+        "JavaMemberDelegationOverride",
+        JAVA_MEMBER_OVERRIDE,
+        &["Recording", "Reversed"],
+    );
+}
+
+const KOTLIN_AND_JAVA_DECLARATIONS: &str = "import java.util.function.Predicate
+
+interface Check {
+    fun test(t: String): Boolean
+}
+
+interface Both : Check, Predicate<String>
+
+class Short : Both {
+    override fun test(t: String): Boolean = t.length < 3
+}
+
+class Forwarding(both: Both) : Both by both
+
+fun box(): String {
+    val forwarding = Forwarding(Short())
+    val check: Check = forwarding
+    val predicate: Predicate<String> = forwarding
+    return if (check.test(\"a\") && !predicate.test(\"long\")) \"OK\" else \"fail\"
+}
+";
+
+/// A Kotlin `test(t: String)` and a Java `test(p0: T!)` applied to `String` share one override
+/// slot under the shared override rule. The single forwarder therefore overrides both, and its
+/// bridge `test(Object)` implements `Predicate`, as kotlinc writes it.
+#[test]
+fn one_forwarder_overrides_kotlin_and_java_declarations_of_one_slot() {
+    common::expect_box_same_as_kotlinc(
+        KOTLIN_AND_JAVA_DECLARATIONS,
+        "KotlinAndJavaDelegatedDeclarations",
+    );
+}
+
+const JAVA_DECLARATION_FIRST: &str = "import java.util.function.Predicate
+
+interface Check {
+    fun test(t: String): Boolean
+}
+
+interface Both : Predicate<String>, Check
+
+class Short : Both {
+    override fun test(t: String): Boolean = t.length < 3
+}
+
+class Forwarding(both: Both) : Both by both
+
+fun box(): String {
+    val forwarding = Forwarding(Short())
+    val check: Check = forwarding
+    val predicate: Predicate<String> = forwarding
+    return if (check.test(\"a\") && !predicate.test(\"long\")) \"OK\" else \"fail\"
+}
+";
+
+/// With `Predicate` listed first, the forwarder forwards its `test(p0)`, but `Check` declares the
+/// parameter non-null `String` rather than `String!`. kotlinc's forwarder therefore checks it for
+/// null, and so does krusty's.
+#[test]
+fn a_forwarder_checks_a_parameter_its_kotlin_declaration_makes_non_null() {
+    common::expect_box_same_as_kotlinc(JAVA_DECLARATION_FIRST, "JavaDeclarationFirstDelegation");
+    common::assert_classes_identical_to_kotlinc(
+        "JavaDeclarationFirstDelegation",
+        JAVA_DECLARATION_FIRST,
+        &["Forwarding"],
+    );
+}

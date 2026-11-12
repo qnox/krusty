@@ -29,7 +29,7 @@ fn member(
 }
 
 #[test]
-fn stdlib_array_walk_reads_its_captured_iterator() {
+fn stdlib_array_walk_reads_its_captured_element() {
     let Some(root) = distribution_root() else {
         return;
     };
@@ -56,52 +56,20 @@ fn stdlib_array_walk_reads_its_captured_iterator() {
         helper.semantic_params().as_ref(),
     );
     let root = fact.klib_body_callable().expect("signed");
-    let providers = [
-        member(&libraries, "kotlin/Array", "iterator"),
-        member(&libraries, "kotlin/collections/Iterator", "hasNext"),
-        member(&libraries, "kotlin/collections/Iterator", "next"),
-        member(&libraries, "kotlin/collections/MutableCollection", "add"),
-    ];
-    let [iterator, has_next, next, add] = providers
-        .each_ref()
-        .map(|provider| provider.klib_body_callable().unwrap());
-    let leaves = [
-        (
-            iterator.identity().clone(),
-            super::super::EmittedDependencyCallable::target_member(
-                crate::fir::ExternalCallableId::from_raw(70),
-            ),
+    let add = member(&libraries, "kotlin/collections/MutableCollection", "add");
+    let add = add.klib_body_callable().unwrap();
+    let leaves = [(
+        add.identity().clone(),
+        super::super::EmittedDependencyCallable::new(
+            crate::fir::ExternalCallableId::from_raw(73),
+            None,
+            None,
         ),
-        (
-            has_next.identity().clone(),
-            super::super::EmittedDependencyCallable::new(
-                crate::fir::ExternalCallableId::from_raw(71),
-                None,
-                None,
-            ),
-        ),
-        (
-            next.identity().clone(),
-            super::super::EmittedDependencyCallable::new(
-                crate::fir::ExternalCallableId::from_raw(72),
-                None,
-                None,
-            ),
-        ),
-        (
-            add.identity().clone(),
-            super::super::EmittedDependencyCallable::new(
-                crate::fir::ExternalCallableId::from_raw(73),
-                None,
-                None,
-            ),
-        ),
-    ]
+    )]
     .into_iter()
     .collect();
     let oracle = crate::symbol_resolver::SourceOracle(&libraries);
-    let facts = KlibCalleeFacts::with_declarations([root], [iterator, has_next, next, add])
-        .with_type_oracle(&oracle);
+    let facts = KlibCalleeFacts::with_declarations([root], [add]).with_type_oracle(&oracle);
     let mut unit = DependencyBodyUnit::default();
     let lowered = unit
         .lower_function_with_intrinsics_and_externals(
@@ -113,8 +81,8 @@ fn stdlib_array_walk_reads_its_captured_iterator() {
         )
         .unwrap_or_else(|decline| panic!("{decline}"));
     validated(unit.ir());
-    // `iterator()` on the `Array<out T>` receiver answers `Iterator<out T>`, which kotlinc writes
-    // as the `Iterator<T>` it equals; the call is typed as serialized, over the root's own `T`.
+    // kotlinc loops over the `Array<out T>` receiver by index, so the walk makes no iterator
+    // call; each element read answers the `T` the out-projection reads, over the root's own `T`.
     let ir = unit.ir();
     let [receiver, ..] = ir.functions[lowered as usize].params.as_slice() else {
         panic!("`toCollection` takes its receiver first")
@@ -124,7 +92,7 @@ fn stdlib_array_walk_reads_its_captured_iterator() {
     };
     let root_t = element.projection_read_ty();
     assert!(matches!(root_t.kind(), crate::types::TyKind::TyParam(..)));
-    let iterators = ir
+    let elements = ir
         .exprs
         .iter()
         .enumerate()
@@ -132,7 +100,10 @@ fn stdlib_array_walk_reads_its_captured_iterator() {
             IrExpr::Call { callee, .. }
                 if matches!(
                     &**callee,
-                    crate::ir::Callee::External { target, .. } if target.raw() == 70
+                    crate::ir::Callee::Intrinsic {
+                        operation: crate::ir::IrIntrinsic::ArrayGet,
+                        ..
+                    }
                 ) =>
             {
                 ir.checked_type(index as u32)
@@ -140,10 +111,7 @@ fn stdlib_array_walk_reads_its_captured_iterator() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        iterators,
-        [Ty::obj_args("kotlin/collections/Iterator", &[root_t])]
-    );
+    assert_eq!(elements, [root_t]);
 }
 
 /// The provider realization of the `kotlin.collections` function `name` over an object array,
@@ -668,4 +636,188 @@ fn a_nullable_result_through_a_contravariant_receiver_reads_as_any() {
         })
         .collect::<Vec<_>>();
     assert_eq!(puts, [Ty::nullable(Ty::obj("kotlin/Any"))]);
+}
+
+/// `Iterable<T?>.filterNotNullTo(destination: C)`, with `C : MutableCollection<in T>`, passes the
+/// `T?` element it checked against `null` to `add` with no cast: kotlinc approximates the
+/// parameter `E`, captured from `in T`, to `E`'s bound `Any?`, and the body lowers as serialized.
+#[test]
+fn an_argument_through_a_contravariant_receiver_is_checked_against_the_parameter_bound() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(type_name("kotlin/collections")),
+        "filterNotNullTo",
+    );
+    let filter = symbols
+        .callables
+        .functions()
+        .iter()
+        .find(|function| {
+            function.semantic_receiver().is_some_and(|receiver| {
+                receiver.kotlin_class_internal() == Some(type_name("kotlin/collections/Iterable"))
+            })
+        })
+        .expect("`Iterable<T?>.filterNotNullTo(destination: C)`");
+    let fact = frozen_function(
+        &libraries,
+        "kotlin/collections",
+        "filterNotNullTo",
+        filter.semantic_receiver(),
+        filter.semantic_params().as_ref(),
+    );
+    let root = fact.klib_body_callable().expect("signed");
+    let providers = [
+        member(&libraries, "kotlin/collections/Iterable", "iterator"),
+        member(&libraries, "kotlin/collections/Iterator", "hasNext"),
+        member(&libraries, "kotlin/collections/Iterator", "next"),
+        member(&libraries, "kotlin/collections/MutableCollection", "add"),
+    ];
+    let leaves = providers
+        .each_ref()
+        .map(|provider| provider.klib_body_callable().unwrap());
+    let externals = leaves
+        .iter()
+        .enumerate()
+        .map(|(index, leaf)| {
+            (
+                leaf.identity().clone(),
+                super::super::EmittedDependencyCallable::target_member(
+                    crate::fir::ExternalCallableId::from_raw(100 + index as u32),
+                ),
+            )
+        })
+        .collect();
+    let oracle = crate::symbol_resolver::SourceOracle(&libraries);
+    let facts = KlibCalleeFacts::with_declarations([root], leaves).with_type_oracle(&oracle);
+    let mut unit = DependencyBodyUnit::default();
+    unit.lower_function_with_intrinsics_and_externals(
+        root,
+        libraries.declaration_bodies(),
+        &facts,
+        crate::klib_libraries::KlibIntrinsicFacts::empty(),
+        &externals,
+    )
+    .unwrap_or_else(|decline| panic!("{decline}"));
+    validated(unit.ir());
+    // `add` receives the element read as it is, typed `T?`, with no cast placed before it.
+    let ir = unit.ir();
+    let added = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::Call { callee, args, .. }
+                if matches!(
+                    &**callee,
+                    crate::ir::Callee::External { target, .. } if target.raw() == 103
+                ) =>
+            {
+                Some(args.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [element] = added.iter().map(Vec::as_slice).collect::<Vec<_>>()[..] else {
+        panic!("one `add(element)` call, found {added:?}");
+    };
+    let [element] = element else {
+        panic!("`add` takes one argument, found {element:?}");
+    };
+    assert!(
+        matches!(ir.exprs[*element as usize], IrExpr::GetValue(_)),
+        "{:?}",
+        ir.exprs[*element as usize]
+    );
+    assert!(ir.checked_type(*element).is_some_and(|ty| ty.is_nullable()));
+}
+
+/// `MutableCollection<in T>.addAll(elements: Iterable<T>)` passes `elements`, smart cast to a
+/// `Collection<T>`, to the member `addAll(elements: Collection<E>)`. There `E` is captured from
+/// `in T` inside the parameter type, and kotlinc approximates it to `E`'s bound there too: the
+/// member takes a `Collection<Any?>`, so the body lowers as serialized.
+#[test]
+fn an_argument_through_a_contravariant_receiver_is_checked_against_the_bound_inside_its_type() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(type_name("kotlin/collections")),
+        "addAll",
+    );
+    let add_all = symbols
+        .callables
+        .functions()
+        .iter()
+        .find(|function| {
+            function.semantic_receiver().is_some_and(|receiver| {
+                receiver.kotlin_class_internal()
+                    == Some(type_name("kotlin/collections/MutableCollection"))
+            }) && function.semantic_params().first().is_some_and(|parameter| {
+                parameter.kotlin_class_internal() == Some(type_name("kotlin/collections/Iterable"))
+            })
+        })
+        .expect("`MutableCollection<in T>.addAll(elements: Iterable<T>)`");
+    let fact = frozen_function(
+        &libraries,
+        "kotlin/collections",
+        "addAll",
+        add_all.semantic_receiver(),
+        add_all.semantic_params().as_ref(),
+    );
+    let root = fact.klib_body_callable().expect("signed");
+    let providers = [
+        member(&libraries, "kotlin/collections/MutableCollection", "addAll"),
+        member(&libraries, "kotlin/collections/MutableCollection", "add"),
+        member(&libraries, "kotlin/collections/Iterable", "iterator"),
+        member(&libraries, "kotlin/collections/Iterator", "hasNext"),
+        member(&libraries, "kotlin/collections/Iterator", "next"),
+    ];
+    let leaves = providers
+        .each_ref()
+        .map(|provider| provider.klib_body_callable().unwrap());
+    let externals = leaves
+        .iter()
+        .enumerate()
+        .map(|(index, leaf)| {
+            (
+                leaf.identity().clone(),
+                super::super::EmittedDependencyCallable::target_member(
+                    crate::fir::ExternalCallableId::from_raw(100 + index as u32),
+                ),
+            )
+        })
+        .collect();
+    let oracle = crate::symbol_resolver::SourceOracle(&libraries);
+    let facts = KlibCalleeFacts::with_declarations([root], leaves).with_type_oracle(&oracle);
+    let mut unit = DependencyBodyUnit::default();
+    unit.lower_function_with_intrinsics_and_externals(
+        root,
+        libraries.declaration_bodies(),
+        &facts,
+        crate::klib_libraries::KlibIntrinsicFacts::empty(),
+        &externals,
+    )
+    .unwrap_or_else(|decline| panic!("{decline}"));
+    validated(unit.ir());
+    // The member `addAll` receives one argument, the smart-cast `elements`.
+    let ir = unit.ir();
+    let added = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::Call { callee, args, .. }
+                if matches!(
+                    &**callee,
+                    crate::ir::Callee::External { target, .. } if target.raw() == 100
+                ) =>
+            {
+                Some(args.len())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(added, [1]);
 }

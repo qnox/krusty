@@ -5,7 +5,7 @@ mod type_annotations;
 use super::string_table::{resolve_class_name, resolve_string, Rec};
 use super::{
     decode_metadata_type, flags_visibility, parse_type_class_name, type_param_bodies, MetaCtx,
-    MetadataResult, TYPE_ALIAS_TYPE_PARAMETER_FIELD, VIS_PUBLIC,
+    MetadataResult, MetadataTypeSource, TYPE_ALIAS_TYPE_PARAMETER_FIELD, VIS_PUBLIC,
 };
 use crate::fx_hash::HashMap;
 use crate::metadata::decode::{parse_type_node, parse_type_param, ParsedTypeParam, Pb};
@@ -201,11 +201,13 @@ fn parse_type_alias_decoded(
     let expansion = expanded_body.or(underlying_body).and_then(|type_body| {
         decode_metadata_type(
             type_body,
-            None,
-            records,
-            d2,
-            &parameters,
-            &HashMap::default(),
+            &MetadataTypeSource {
+                type_table: None,
+                records,
+                d2,
+                tparams: &parameters,
+                bounds: &HashMap::default(),
+            },
             false,
             0,
         )

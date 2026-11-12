@@ -4,7 +4,9 @@ use super::decline::KlibBodyDeclineReason;
 use super::klib_types::{classifier_name, semantic_type, KlibTypeParameters};
 use crate::fx_hash::HashSet;
 use crate::klib_libraries::KlibDeclarationBodies;
-use crate::libraries::{KlibBodyCallable, KlibBodyClassContract, KlibBodyClassParameters};
+use crate::libraries::{
+    KlibAccessorRole, KlibBodyCallable, KlibBodyClassContract, KlibBodyClassParameters,
+};
 use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrClass, KlibIrFunction, KlibIrVariance};
 use crate::metadata::klib_ir::KlibIrSymbolKind;
 use crate::metadata::klib_ir::{
@@ -65,12 +67,16 @@ pub(super) fn authenticate<'a, 'b>(
     let class = selected
         .class_contract()
         .ok_or_else(|| mismatch("a selected member has no provider-owned class contract"))?;
+    // A singleton edge's class is the singleton it dispatches to. Its declaration owner can
+    // remain the class the member was inherited from.
+    let class_is_member_owner = selected.declaration_owner()
+        == Some(crate::types::SemanticCallableOwner::Classifier(
+            class.classifier,
+        ));
+    let class_is_singleton = selected.singleton_classifier() == Some(class.classifier);
     if class.module != selected.identity().module
         || class.signature.member_id().is_some()
-        || selected.declaration_owner()
-            != Some(crate::types::SemanticCallableOwner::Classifier(
-                class.classifier,
-            ))
+        || !(class_is_member_owner || class_is_singleton)
         || classifier_name(&class.signature)? != class.classifier
     {
         return Err(mismatch(
@@ -78,22 +84,77 @@ pub(super) fn authenticate<'a, 'b>(
         ));
     }
     let member = bodies
-        .class_member_header(selected.identity(), &class.signature)
-        .map_err(mismatch)?
-        .ok_or_else(|| mismatch("a selected member has no exact serialized class header"))?;
-    if member.class.base.symbol.kind != KlibIrSymbolKind::Class {
-        return Err(mismatch(
-            "the serialized class header has a non-class symbol",
-        ));
+        .class_member_header(
+            selected.identity(),
+            &class.signature,
+            selected
+                .accessor()
+                .map_or(KlibAccessorRole::Getter, |accessor| accessor.role),
+        )
+        .map_err(mismatch)?;
+    if let Some(member) = member {
+        if member.class.base.symbol.kind != KlibIrSymbolKind::Class {
+            return Err(mismatch(
+                "the serialized class header has a non-class symbol",
+            ));
+        }
+        let (types, formals) =
+            bind_class_parameters(&class.parameters, member.arena, member.class)?;
+        return Ok(ClassMemberHeader {
+            contract: class,
+            arena: member.arena,
+            function: member.function,
+            class: member.class,
+            types,
+            formals,
+        });
     }
-    let (types, formals) = bind_class_parameters(&class.parameters, member.arena, member.class)?;
-    Ok(ClassMemberHeader {
-        contract: class,
-        arena: member.arena,
-        function: member.function,
-        class: member.class,
-        types,
-        formals,
+    // A singleton member can be serialized as the function itself. Its dispatch receiver names
+    // the class, and a class with no type parameters has nothing further to bind.
+    let bare_function = (class.parameters.formals.is_empty() && class_is_singleton)
+        .then(|| bodies.function(selected.identity()))
+        .flatten();
+    if let Some((arena, function)) = bare_function {
+        authenticate_receiver(class, arena, function)?;
+        return Ok(ClassMemberHeader {
+            contract: class,
+            arena,
+            function,
+            class: receiver_named_class(),
+            types: KlibTypeParameters::default(),
+            formals: Vec::new(),
+        });
+    }
+    Err(mismatch(
+        "a selected member has no exact serialized class header",
+    ))
+}
+
+/// Placeholder class node for a member serialized as its function, whose receiver names the
+/// class. The class has no type parameters, so later phases do not read this node.
+fn receiver_named_class() -> &'static KlibIrClass {
+    use std::sync::OnceLock;
+    static CLASS: OnceLock<KlibIrClass> = OnceLock::new();
+    CLASS.get_or_init(|| KlibIrClass {
+        base: crate::metadata::klib_ir::tree::KlibIrDeclarationBase {
+            symbol: crate::metadata::klib_ir::KlibIrSymbol {
+                kind: KlibIrSymbolKind::Class,
+                signature: crate::metadata::klib_ir::KlibIrSignature::FileLocal {
+                    file: 0,
+                    slot: 0,
+                },
+            },
+            origin: "DEFINED".to_owned(),
+            flags: 0,
+            annotations: Vec::new(),
+        },
+        name: String::new(),
+        this_receiver: None,
+        type_parameters: Vec::new(),
+        supertypes: Vec::new(),
+        members: Vec::new(),
+        value_class_representation: None,
+        sealed_subclasses: Vec::new(),
     })
 }
 
@@ -115,7 +176,7 @@ pub(super) fn authenticate_private_member<'a, 'b>(
         ));
     }
     let member = bodies
-        .class_member_header(identity, &class.signature)
+        .class_member_header(identity, &class.signature, KlibAccessorRole::Getter)
         .map_err(mismatch)?
         .ok_or_else(|| mismatch("a private member is not a direct member of its calling class"))?;
     if member.class.base.symbol.kind != KlibIrSymbolKind::Class {

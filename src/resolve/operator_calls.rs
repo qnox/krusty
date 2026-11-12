@@ -110,6 +110,20 @@ enum OperatorTypeArguments {
     CommittedBySelection,
 }
 
+/// One operator convention selection: the receiver, the operand expressions, and the span the
+/// diagnostic belongs to. Binary expressions, ranges, indexed stores, and `in` all select through
+/// this same shape.
+pub(super) struct OperatorCall<'a, 'scope> {
+    pub(super) scope: &'a CheckerScope<'scope>,
+    pub(super) site: ExprId,
+    pub(super) receiver: Ty,
+    pub(super) name: &'a str,
+    pub(super) arg_tys: &'a [Ty],
+    pub(super) arg_exprs: &'a [ExprId],
+    pub(super) span: Span,
+    pub(super) expected_result: Option<Ty>,
+}
+
 /// The single right-hand operand of a binary operator expression (`b` in `a + b`, `a..b`,
 /// `a < b`): its checked type and its source expression.
 pub(super) struct OperatorOperand {
@@ -120,27 +134,10 @@ pub(super) struct OperatorOperand {
 impl<'a> Checker<'a> {
     pub(super) fn operator_call_ret(
         &mut self,
-        scope: &CheckerScope<'_>,
-        site: ExprId,
-        receiver: Ty,
-        name: &str,
-        arg_tys: &[Ty],
-        arg_exprs: &[ExprId],
-        span: Span,
-        expected_result: Option<Ty>,
+        call: OperatorCall<'_, '_>,
     ) -> Option<(Ty, ResolvedCall)> {
-        self.select_operator(
-            scope,
-            site,
-            receiver,
-            name,
-            arg_tys,
-            arg_exprs,
-            span,
-            expected_result,
-            None,
-        )
-        .map(|selected| (selected.ret, selected.call))
+        self.select_operator(call, None)
+            .map(|selected| (selected.ret, selected.call))
     }
 
     /// Select the convention `name` that the binary expression `expression` denotes (`a + b`,
@@ -218,14 +215,16 @@ impl<'a> Checker<'a> {
         expected_result: Option<Ty>,
     ) -> Option<(Ty, ResolvedCall)> {
         let selected = self.select_operator(
-            scope,
-            expression,
-            receiver,
-            name,
-            &[operand.ty],
-            &[operand.expression],
-            self.span(expression),
-            expected_result,
+            OperatorCall {
+                scope,
+                site: expression,
+                receiver,
+                name,
+                arg_tys: &[operand.ty],
+                arg_exprs: &[operand.expression],
+                span: self.span(expression),
+                expected_result,
+            },
             None,
         )?;
         match selected.type_arguments {
@@ -248,16 +247,19 @@ impl<'a> Checker<'a> {
     /// declared primitive bound; the ordinary call path always derives kinds from source values.
     fn select_operator(
         &mut self,
-        scope: &CheckerScope<'_>,
-        site: ExprId,
-        receiver: Ty,
-        name: &str,
-        arg_tys: &[Ty],
-        arg_exprs: &[ExprId],
-        span: Span,
-        expected_result: Option<Ty>,
+        call: OperatorCall<'_, '_>,
         checked_argument_kinds: Option<Vec<crate::symbol_resolver::CallArgKind>>,
     ) -> Option<SelectedOperator> {
+        let OperatorCall {
+            scope,
+            site,
+            receiver,
+            name,
+            arg_tys,
+            arg_exprs,
+            span,
+            expected_result,
+        } = call;
         // `downTo` and the legacy `until` range spellings are represented by RangeKind in the AST,
         // but their Kotlin declarations are `infix`, not `operator`. They still go through the same
         // semantic callable selection and checked-FIR handoff as the operator range conventions.
@@ -746,16 +748,16 @@ impl<'a> Checker<'a> {
                 kind,
                 value_ty: vt,
             };
-            let Some((range_ty, range_call)) = self.operator_call_ret(
+            let Some((range_ty, range_call)) = self.operator_call_ret(OperatorCall {
                 scope,
-                e,
-                st,
-                convention.name,
-                &[et],
-                &[end],
-                self.span(e),
-                None,
-            ) else {
+                site: e,
+                receiver: st,
+                name: convention.name,
+                arg_tys: &[et],
+                arg_exprs: &[end],
+                span: self.span(e),
+                expected_result: None,
+            }) else {
                 self.diags.error(
                     self.span(e),
                     format!(
@@ -974,16 +976,16 @@ impl<'a> Checker<'a> {
         value_ty: Ty,
         value: ExprId,
     ) -> Option<(Ty, ResolvedCall)> {
-        self.operator_call_ret(
+        self.operator_call_ret(OperatorCall {
             scope,
-            expression,
-            range_ty,
-            "contains",
-            &[value_ty],
-            &[value],
-            self.span(expression),
-            None,
-        )
+            site: expression,
+            receiver: range_ty,
+            name: "contains",
+            arg_tys: &[value_ty],
+            arg_exprs: &[value],
+            span: self.span(expression),
+            expected_result: None,
+        })
     }
 
     /// Select `contains` through a type parameter's checked primitive bound solely to authorize
@@ -999,14 +1001,16 @@ impl<'a> Checker<'a> {
         value: ExprId,
     ) -> Option<(Ty, ResolvedCall)> {
         self.select_operator(
-            scope,
-            expression,
-            range_ty,
-            "contains",
-            &[bound],
-            &[value],
-            self.span(expression),
-            None,
+            OperatorCall {
+                scope,
+                site: expression,
+                receiver: range_ty,
+                name: "contains",
+                arg_tys: &[bound],
+                arg_exprs: &[value],
+                span: self.span(expression),
+                expected_result: None,
+            },
             Some(vec![crate::symbol_resolver::CallArgKind::Typed(bound)]),
         )
         .map(|selected| (selected.ret, selected.call))

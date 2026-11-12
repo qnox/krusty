@@ -116,8 +116,8 @@ pub(super) fn record_renamed_functions(
 
 /// kotlinc's boxed `Any` member delegating to a source override's static `-impl` is that override
 /// on the box: it stands right after the `-impl`, at the override's place among the declared
-/// members, enters on the override's signature line and returns on its last line. The generated
-/// ones follow every declared member and map no line.
+/// members, enters on the override's signature line, where its delegating call is built, and
+/// returns on its last line. The generated ones follow every declared member and map no line.
 fn realize_delegator_of_override(
     ir: &mut IrFile,
     custom: Option<u32>,
@@ -138,12 +138,30 @@ fn realize_delegator_of_override(
         IrExpr::Block { stmts, value: None } => stmts.last().copied(),
         _ => None,
     };
+    // kotlinc builds the delegating call at the override's offsets, so the call marks the entry
+    // line where it starts.
+    let delegated = returned.and_then(|returned| match ir.expr(returned) {
+        IrExpr::Return(value) => *value,
+        _ => None,
+    });
+    if let (Some(call), Some(line)) = (delegated, entry) {
+        ir.position_generated_tree(call, line);
+    }
     // The return's line is an entry of its own only below the entry line; on that same line the
     // method's one entry at its start already covers it.
     let end = ir.function_position(custom).end_line;
     if let (Some(returned), Some(line)) = (returned, end.filter(|&end| Some(end) != entry)) {
         ir.mark_implicit_return_end_line(returned, line);
     }
+}
+
+/// Make the generated structural member `function` the box's instance delegator with `body`,
+/// placed where kotlinc emits it: right after the static `-impl` it delegates to. It has no source
+/// position, so the member schedule keeps it in that place.
+fn adopt_delegator(ir: &mut IrFile, function: u32, body: ExprId) -> u32 {
+    ir.functions[function as usize].body = Some(body);
+    ir.fn_source_order.remove(&function);
+    function
 }
 
 /// Synthesize a value class's unboxed-support members directly in the IR (a JVM concern, so it lives in
@@ -254,6 +272,13 @@ pub(super) fn synth_value_members(
     // reads inside it are lowered to the carrier later in this pass. The ordinary instance override is
     // synthesized below as the ABI delegator back to this implementation.
     let custom_any_roles = ir.any_member_overrides(internal_name);
+    // Common lowering declares the structural trio every final value class generates. On the JVM
+    // that declaration is the box's instance member, which delegates to the static `-impl` over the
+    // carrier synthesized below; it keeps its identity, so every checked call naming it stays bound.
+    let generated = |role| ir.data_class_member(internal_name, role);
+    let generated_equals = generated(krusty::ir::IrDataClassMemberRole::Equals);
+    let generated_hash_code = generated(krusty::ir::IrDataClassMemberRole::HashCode);
+    let generated_to_string = generated(krusty::ir::IrDataClassMemberRole::ToString);
     // Each source override, by the `Any` member it overrides.
     let mut custom_equals = None;
     let mut custom_hash_code = None;
@@ -587,7 +612,10 @@ pub(super) fn synth_value_members(
             args: vec![fv],
         });
         let ibody = ret_block(ir, call);
-        let fid = add_inst(ir, "toString", vec![], str_ir, ibody);
+        let fid = match generated_to_string {
+            Some(function) => adopt_delegator(ir, function, ibody),
+            None => add_inst(ir, "toString", vec![], str_ir, ibody),
+        };
         realized.any_delegators.insert(fid);
         ir.jvm_value_class_any_delegators
             .insert(fid, krusty::ir::IrValueClassAnyMember::ToString);
@@ -626,7 +654,10 @@ pub(super) fn synth_value_members(
             args: vec![fv],
         });
         let ibody = ret_block(ir, call);
-        let fid = add_inst(ir, "hashCode", vec![], int_ir, ibody);
+        let fid = match generated_hash_code {
+            Some(function) => adopt_delegator(ir, function, ibody),
+            None => add_inst(ir, "hashCode", vec![], int_ir, ibody),
+        };
         realized.any_delegators.insert(fid);
         ir.jvm_value_class_any_delegators
             .insert(fid, krusty::ir::IrValueClassAnyMember::HashCode);
@@ -732,7 +763,10 @@ pub(super) fn synth_value_members(
         });
         let ibody = ret_block(ir, call);
         // `Any.equals` declares `other: Any?`, and an override keeps that parameter type.
-        let fid = add_inst(ir, "equals", vec![Ty::nullable(any_ir)], bool_ir, ibody);
+        let fid = match generated_equals {
+            Some(function) => adopt_delegator(ir, function, ibody),
+            None => add_inst(ir, "equals", vec![Ty::nullable(any_ir)], bool_ir, ibody),
+        };
         realized.any_delegators.insert(fid);
         ir.jvm_value_class_any_delegators
             .insert(fid, krusty::ir::IrValueClassAnyMember::Equals);
@@ -897,13 +931,11 @@ pub(super) fn synth_value_members(
             // A `vararg` stays one on the static: Java calls it in element form, and its
             // `Signature` keeps the element's declaration-site wildcards.
             if let Some(index) = sc.vararg_index {
-                ir.fn_varargs.insert(
-                    constructor,
-                    krusty::ir::IrVarargParameter {
+                ir.declared_parameters_mut(constructor).vararg =
+                    Some(krusty::ir::IrVarargParameter {
                         index,
                         is_last: index + 1 == sc.named_params.len(),
-                    },
-                );
+                    });
             }
             crate::method_parameters::record_function(ir, constructor, &names, &[]);
             ir.fn_source_order.insert(constructor, sc.source_order);
@@ -977,7 +1009,7 @@ fn reframe_value_class_secondary(ir: &mut IrFile, root: ExprId, this_value: u32,
 
 fn mark_line(ir: &mut IrFile, statement: ExprId, line: u32) {
     if line != 0 {
-        ir.expr_lines.insert(statement, line);
+        ir.set_statement_line(statement, line);
     }
 }
 
@@ -1202,9 +1234,7 @@ fn property_hash(ir: &mut IrFile, underlying: Ty) -> ExprId {
     });
     let zero = ir.add_expr(IrExpr::Const(krusty::ir::IrConst::Int(0)));
     let non_null = hash(ir);
-    ir.add_expr(IrExpr::When {
-        branches: vec![(Some(is_null), zero), (None, non_null)],
-    })
+    ir.add_when(vec![(Some(is_null), zero), (None, non_null)], Ty::Int)
 }
 
 /// Decrement every value-slot index (`GetValue`/`SetValue`/`Variable`) reachable from `root` by one —

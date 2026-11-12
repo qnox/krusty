@@ -82,3 +82,37 @@ fn only_a_source_when_carries_the_when_origin() {
         [false, false, true]
     );
 }
+
+/// The result every value `when` in `source` yields, innermost first, after proving none is
+/// missing.
+fn when_results(source: &str) -> Vec<Ty> {
+    let ir = lower_single_source(source, "WhenResults");
+    assert_eq!(ir.unrecorded_when_result(), None);
+    (0..ir.exprs.len() as u32)
+        .filter(|expression| matches!(ir.expr(*expression), IrExpr::When { .. }))
+        .filter_map(|expression| ir.when_result_type(expression))
+        .collect()
+}
+
+#[test]
+fn a_value_if_yields_its_checked_type_not_a_join_of_its_branches() {
+    assert_eq!(
+        when_results(
+            "open class Base\nclass A : Base()\nclass B : Base()\n\
+             fun f(c: Boolean): Base = if (c) A() else B()\n"
+        ),
+        [Ty::obj("Base")]
+    );
+}
+
+#[test]
+fn every_value_when_lowering_builds_records_its_result() {
+    assert_eq!(
+        when_results(
+            "fun f(a: String?, b: String) = a ?: b\n\
+             fun g(a: Boolean, b: Boolean) = a && b\n\
+             fun h(a: Any) = a as? String\n"
+        ),
+        [Ty::String, Ty::Boolean, Ty::nullable(Ty::String)]
+    );
+}

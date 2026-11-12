@@ -1,9 +1,14 @@
 //! Realize the checked callable-reference identity without inspecting its invocation adapter.
 
 use crate::callable_references::{Declaration, ReferenceKind};
-use krusty::ir::{IrCallableReference, IrCallableReferenceTarget as Target};
+use krusty::ir::{IrCallableReference, IrCallableReferenceTarget as Target, IrReferencedProperty};
 
 use super::*;
+
+/// The classifier-owned callables a reference may name, by the operation that tells them apart.
+const ENUM_VALUE_OF: u8 = 0;
+const SAM_CONSTRUCTOR: u8 = 1;
+const ENUM_ENTRIES: u8 = 2;
 
 impl Body<'_> {
     pub(super) fn callable_reference_kind(
@@ -40,6 +45,41 @@ impl Body<'_> {
                 result: reference.declaration_result,
                 suspend: reference.declaration_suspend,
             },
+            // A property read as a function value is the property reference, equal to every other
+            // reference to the same property. Its adapter only performs the read.
+            Target::Property(property) => match property.referenced_property() {
+                Some(IrReferencedProperty::Module(property)) => Declaration::Property {
+                    module: self.module_name.to_owned(),
+                    property,
+                },
+                Some(IrReferencedProperty::External(property)) => {
+                    let identity = self
+                        .callables
+                        .property(property)
+                        .and_then(|fact| self.callables.callable(fact.getter))
+                        .and_then(|fact| fact.dependency_callable.as_ref())
+                        .ok_or(
+                            "a property reference without its module-qualified dependency identity",
+                        )?;
+                    Declaration::Dependency(identity.clone())
+                }
+                None => match &property.target {
+                    krusty::fir::FirPropertyReferenceTarget::Classifier {
+                        owner,
+                        property: krusty::fir::FirClassifierProperty::EnumEntries,
+                        ..
+                    } => Declaration::Classifier {
+                        classifier: *owner,
+                        operation: ENUM_ENTRIES,
+                    },
+                    _ => {
+                        return Err(
+                            "a property read as a function value without its property declaration"
+                                .into(),
+                        );
+                    }
+                },
+            },
             Target::FunctionInvoke => Declaration::Invoke {
                 arity: reference.declaration_parameters.len(),
                 suspend: reference.declaration_suspend,
@@ -50,8 +90,8 @@ impl Body<'_> {
             } => Declaration::Classifier {
                 classifier: *classifier,
                 operation: match operation {
-                    krusty::ir::IrClassifierCallable::EnumValueOf => 0,
-                    krusty::ir::IrClassifierCallable::SamConstructor => 1,
+                    krusty::ir::IrClassifierCallable::EnumValueOf => ENUM_VALUE_OF,
+                    krusty::ir::IrClassifierCallable::SamConstructor => SAM_CONSTRUCTOR,
                 },
             },
         };

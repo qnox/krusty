@@ -119,6 +119,10 @@ pub enum IrGeneratedParameterRole {
     ReferenceInvokeValue {
         ordinal: u32,
     },
+    /// The receiver a property-reference class's own `get` takes, by its position.
+    PropertyReferenceGetReceiver {
+        ordinal: u32,
+    },
     /// The explicitly bound receiver stored by a callable-reference adapter, ahead of its own
     /// invocation inputs. It carries no lexical-capture or source-parameter-name provenance.
     ReferenceBoundReceiver,
@@ -491,7 +495,7 @@ impl IrFile {
     /// declared context and value parameters, so the position is the declared parameter at that
     /// ordinal.
     pub fn vararg_parameter_position(&self, function: FunId) -> Option<usize> {
-        let vararg = self.fn_varargs.get(&function)?;
+        let vararg = self.declared_parameters(function).vararg?;
         self.function_parameter_identities(function)?
             .iter()
             .enumerate()

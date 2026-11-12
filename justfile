@@ -46,7 +46,11 @@ ci: lint coverage-gate
 # Lint gate (enforced locally + in CI + by the pre-commit hook): formatting must be clean, and
 # clippy must introduce NO new findings beyond the frozen baseline (clippy-baseline.tsv). Existing
 # findings are tolerated; any new one fails. Identical behaviour everywhere — it's plain cargo + sh.
-lint: versioning-tests release-tests legacy-ratchet-tests fmt-check legacy-baseline-check clippy-baseline-check
+lint: versioning-tests release-tests legacy-ratchet-tests reference-cache-tests fmt-check legacy-baseline-check clippy-baseline-check
+
+# The CI step that drops kotlinc reference inventories no recent run read, before master saves them.
+reference-cache-tests:
+    bash scripts/test-prune-reference-cache.sh
 
 # Cheap release-version contracts, without a compiler build or reference-toolchain download.
 versioning-tests:
@@ -384,11 +388,15 @@ box-corpus VERSION=`just max-version`:
         # Keep cone mode: a fresh sparse clone checks out the repository-root files that cone mode
         # owns. Switching to non-cone while excluding them can leave those paths in place and abort
         # the update before the requested corpus directory is materialized.
-        git -C "$root" sparse-checkout set compiler/testData/codegen/box "$mock_dir" $cli_dirs >&2
+        git -C "$root" sparse-checkout set compiler/testData/codegen/box "$mock_dir" $cli_dirs $bytecode_dirs >&2
     }
     # Kotlin's command-line test corpus (`.args`/`.out` pairs) and the third-party annotation
     # sources some of its cases put on the classpath; kotlin_cli_jvm_conformance runs it.
     cli_dirs="compiler/testData/cli third-party/annotations third-party/java8-annotations third-party/jsr305"
+    # Kotlin's bytecode-shape corpora: instruction-count expectations over textified class files
+    # (bytecodeText) and whole-class declaration listings (bytecodeListing);
+    # kotlin_bytecode_text_conformance and kotlin_bytecode_listing_conformance run them.
+    bytecode_dirs="compiler/testData/codegen/bytecodeText compiler/testData/codegen/bytecodeListing"
     mock_dir=""
     if [ -d "$root/.git" ] && [ -d "$box" ]; then
         mock_dir="$(mock_dir_at_tag)"
@@ -396,7 +404,7 @@ box-corpus VERSION=`just max-version`:
     complete=0
     if [ -n "$mock_dir" ] && [ -f "$root/$mock_dir/rt.jar" ]; then
         complete=1
-        for dir in $cli_dirs; do [ -d "$root/$dir" ] || complete=0; done
+        for dir in $cli_dirs $bytecode_dirs; do [ -d "$root/$dir" ] || complete=0; done
     fi
     if [ "$complete" = 1 ]; then
         echo "$box"
@@ -409,10 +417,10 @@ box-corpus VERSION=`just max-version`:
         exit 1
     fi
     if [ -n "$mock_dir" ]; then
-        # A cache provisioned before the mock JDK or the CLI corpus was needed: extend it rather
+        # A cache provisioned before the mock JDK, the CLI corpus or the bytecode corpora was needed: extend it rather
         # than accept it.
-        echo "adding the mock JDK and the CLI corpus to the Kotlin codegen/box corpus (v${ver})…" >&2
-        git -C "$root" sparse-checkout add "$mock_dir" $cli_dirs >&2 \
+        echo "adding the mock JDK, the CLI corpus and the bytecode corpora to the Kotlin codegen/box corpus (v${ver})…" >&2
+        git -C "$root" sparse-checkout add "$mock_dir" $cli_dirs $bytecode_dirs >&2 \
             || { echo "failed to extend the v${ver} corpus checkout" >&2; exit 1; }
     else
         # No checkout, or a restored one whose tree cannot name its mock JDK: provision afresh.
@@ -524,16 +532,49 @@ test-all *ARGS:
 
 # Build the krusty-build library test binary and print its path. Gradle lanes run this prebuilt
 # binary; they do not compile krusty again.
+#
+# CI builds this right after `just conformance-bin-and-cli`, and must reuse that build's krusty.
+# Selecting krusty-cli's binary here keeps the Native backend in the graph: without it bumpalo
+# (under zopfli) loses Cranelift's `allocator-api2` feature and krusty, which links zopfli,
+# compiled a second time (484 s of a 1157 s build). krusty-build's own dev-dependencies add the
+# libc, object and once_cell features that the root package's dev-dependencies add there.
 krusty-build-tests:
     #!/usr/bin/env bash
     set -euo pipefail
-    scripts/cargo-test-binary.sh krusty_build -p krusty-build --lib
+    scripts/cargo-test-binary.sh krusty_build -p krusty-build --lib -p krusty-cli --bin krusty
+
+# The normal compiler unit suite, which exact-version CI rows run without rebuilding Rust.
+compiler-unit-tests:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scripts/cargo-test-binary.sh krusty -p krusty --lib
+
+# Hold one release's Native, Wasm/JS and Wasm/WASI stdlib KLIBs to their exact-identity
+# implementation backlogs (`tests/klib_uncovered_implementations/`), using the compiler unit binary
+# BIN (`just compiler-unit-tests`). Each target reads that release's own stdlib.
+klib-implementation-coverage BIN VERSION=`just max-version`:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bin="$(realpath "{{BIN}}")"
+    export KRUSTY_LANGUAGE_VERSION="{{VERSION}}"
+    export KRUSTY_KOTLIN_NATIVE="$(just kotlin-native "{{VERSION}}")"
+    export KRUSTY_KOTLINC="$(just kotlinc "{{VERSION}}")"
+    KRUSTY_REQUIRE_KLIB=1 KRUSTY_REQUIRE_KLIB_IMPLEMENTATION_TARGETS=native,wasm-js,wasm-wasi \
+      "$bin" klib_libraries::tests::implementation_coverage:: --nocapture
 
 # Build the conformance test binary and print its path.
 conformance-bin:
     #!/usr/bin/env bash
     set -euo pipefail
     scripts/cargo-test-binary.sh conformance --test conformance
+
+# CI's tool-bins job: the conformance binary and the `krusty` CLI (target/gate/krusty) from one
+# Cargo invocation. The CLI alone resolves libc, object and once_cell without the features the
+# root package's dev-dependencies add, so building the two apart compiled krusty twice.
+conformance-bin-and-cli:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scripts/cargo-test-binary.sh --build conformance -p krusty-cli -p krusty --test conformance --bin krusty
 
 # Run the codegen/box conformance suite and print the case report "<pct> <passed> <applicable>":
 # applicable cases whose box() returns "OK". The same run's JVM byte report "<pct> <matched> <total>",

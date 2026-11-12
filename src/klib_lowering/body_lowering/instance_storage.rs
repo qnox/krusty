@@ -37,29 +37,6 @@ impl<'a> InstanceStorageFrame<'a> {
         matches!(self.access, Access::Initializer).then(|| self.clone())
     }
 
-    pub(super) fn initializer(
-        class: ClassId,
-        plan: &'a super::super::class_initialization::ClassInitialization<'a, 'a>,
-    ) -> Self {
-        Self {
-            class,
-            receiver: Some(super::super::class_headers::declared_receiver(
-                plan.header.contract,
-            )),
-            fields: plan
-                .field_declarations
-                .iter()
-                .enumerate()
-                .map(|(index, field)| Field {
-                    symbol: &field.base.symbol,
-                    index: u32::try_from(index).expect("a field list fits u32"),
-                    ty: plan.storage.fields[index].ty,
-                })
-                .collect(),
-            access: Access::Initializer,
-        }
-    }
-
     pub(super) fn local_initializer(
         class: ClassId,
         receiver: Ty,

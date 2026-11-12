@@ -1,6 +1,7 @@
 //! Transient AST to checked FIR construction.
 //! Owns source traversal; semantic facts come from the checker and migration seams fail explicitly.
 
+mod argument_vararg;
 mod arguments;
 mod arrays;
 #[cfg(test)]
@@ -108,6 +109,7 @@ pub use failure::{BodyCheckFailure, BodyCheckFailureKind, CheckedBodyDriverFailu
 
 use crate::fx_hash::{HashMap, HashSet};
 
+use argument_vararg::ArgumentVararg;
 use receiver_provenance::ReceiverFrame;
 
 use crate::ast::{BinOp, Expr, ExprId, File, RangeKind, Stmt, StmtId, TemplatePart, UnOp};
@@ -588,9 +590,15 @@ impl BodyFirChecker<'_> {
             return value;
         }
         let runtime = inferred.unwrap_or_else(|| {
-            crate::symbol_resolver::reified_runtime_type(value.get(), &|name| {
-                self.index.recorded_direct_supertypes(name)
-            })
+            crate::symbol_resolver::reified_runtime_type(
+                value.get(),
+                &crate::symbol_resolver::ReifiedDeclarations {
+                    direct_supertypes: &|name| self.index.recorded_direct_supertypes(name),
+                    variance_at: &|name, index| {
+                        self.index.recorded_type_argument_variance(name, index)
+                    },
+                },
+            )
         });
         if runtime == value.get() {
             return value;

@@ -152,8 +152,11 @@ pub(super) fn semantic_type_in(
     Ok(match nullability {
         KlibIrNullability::MarkedNullable => Ty::nullable(semantic),
         // A class type the serializer marks definitely non-null is its ordinary non-null type; on
-        // a type parameter the mark is the intersection `T & Any`.
-        KlibIrNullability::DefinitelyNotNull if semantic.is_ty_param() => {
+        // a type parameter whose bound admits null the mark is the intersection `T & Any`. A
+        // parameter bounded by a non-null type is already non-null, and `T & Any` is `T` itself.
+        KlibIrNullability::DefinitelyNotNull
+            if semantic.is_ty_param() && semantic.upper_bound_admits_null() =>
+        {
             Ty::from(TyKind::DefinitelyNotNull(semantic))
         }
         KlibIrNullability::NotSpecified | KlibIrNullability::DefinitelyNotNull => semantic,
@@ -385,4 +388,43 @@ fn declaration_name(
 
 fn mismatch(detail: &str) -> KlibBodyDeclineReason {
     KlibBodyDeclineReason::SignatureMismatch(detail.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata::klib_ir::KlibIrSignature;
+
+    /// `T & Any` as kotlinc serializes it: the type parameter `T` marked definitely non-null.
+    fn definitely_non_null(bound: Ty) -> Ty {
+        let symbol = KlibIrSymbol {
+            kind: KlibIrSymbolKind::TypeParameter,
+            signature: KlibIrSignature::FileLocal { file: 0, slot: 0 },
+        };
+        let mut parameters = KlibTypeParameters::default();
+        assert!(parameters.bind(&symbol, Ty::ty_param("T", bound)));
+        let mut arena = KlibIrArena::default();
+        let id = arena.push_type(KlibIrType::Simple {
+            classifier: symbol,
+            nullability: KlibIrNullability::DefinitelyNotNull,
+            arguments: Vec::new(),
+            annotations: Vec::new(),
+            abbreviation: None,
+        });
+        semantic_type(&arena, &parameters, id).expect("a type parameter type")
+    }
+
+    /// kotlinc serializes `listOf(element)` in `fun <T : Any> listOfNotNull(element: T?)` at the
+    /// type argument `T & Any`, and types the call `List<T>`: for a parameter bounded by `Any`,
+    /// `T & Any` is `T`.
+    #[test]
+    fn a_definitely_non_null_parameter_bounded_by_a_non_null_type_is_the_parameter() {
+        let any = Ty::obj("kotlin/Any");
+        assert_eq!(definitely_non_null(any), Ty::ty_param("T", any));
+        let nullable_any = Ty::nullable(any);
+        assert_eq!(
+            definitely_non_null(nullable_any),
+            Ty::from(TyKind::DefinitelyNotNull(Ty::ty_param("T", nullable_any)))
+        );
+    }
 }

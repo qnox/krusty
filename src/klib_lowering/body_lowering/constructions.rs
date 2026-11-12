@@ -150,7 +150,7 @@ impl BodyLowering<'_> {
             internal: declaration.classifier,
             args,
             ctor_params: Some(params),
-            declared_params: None,
+            declared_params: Some(declaration.declared_parameters().into()),
             ctor_desc: None,
             external_target,
             defaults: defaults.into_boxed_slice(),

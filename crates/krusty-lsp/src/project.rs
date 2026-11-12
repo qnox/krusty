@@ -36,3 +36,4 @@ pub use runner::{Command, CommandOutput, CommandRunner, ProcessRunner};
 pub use source_digest::{DigestedJavaSource, DigestedSource, SupportText};
 pub use sources::{workspace_sources, LoadedProjectSources, ProjectSources};
 pub use sync::{ProjectSync, RefreshOutcome};
+pub use walk::{is_ignored_directory, IGNORED_DIRECTORIES};

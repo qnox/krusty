@@ -284,6 +284,9 @@ fn materialize_delegation(
                     function,
                     crate::ir::FnParamInfo::identities(parameter_identities),
                 );
+                if let Some(spellings) = member.enhanced_parameter_spellings() {
+                    ir.fn_declared_spellings.insert(function, spellings);
+                }
                 if !member.type_parameters.is_empty() {
                     ir.signatures.insert(
                         function,
@@ -297,7 +300,7 @@ fn materialize_delegation(
                 }
                 if let Some(receiver) = member.call.extension_receiver_parameter {
                     ir.extension_receiver_fns.insert(function);
-                    ir.fn_context_counts.insert(function, receiver as usize);
+                    ir.declared_parameters_mut(function).context_count = receiver as usize;
                 }
                 let implementation_owner = ir.classes[class as usize].fq_name;
                 let implementation = member

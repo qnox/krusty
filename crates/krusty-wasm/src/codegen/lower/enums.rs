@@ -12,6 +12,7 @@ use krusty::ir::ClassId;
 use krusty::libraries::RuntimeExceptionKind;
 
 use super::*;
+use crate::objects::ENUM_NAME_FIELD;
 
 impl Body<'_> {
     /// One enum constant: its construction, whose allocation fills `kotlin.Enum`'s fields so a
@@ -70,8 +71,8 @@ impl Body<'_> {
         self.code.struct_get(
             base,
             match member {
-                BaseMember::Name => 1,
-                BaseMember::Ordinal => 2,
+                BaseMember::Name => ENUM_NAME_FIELD,
+                BaseMember::Ordinal => ENUM_NAME_FIELD + 1,
             },
         );
         Ok(())
@@ -84,7 +85,7 @@ impl Body<'_> {
         classifier: krusty::types::TypeName,
         name: u32,
     ) -> Result<(), Unsupported> {
-        let structure = self.runtime.exceptions.ensure_class(
+        let structure = self.runtime.exception_class(
             self.module,
             self.classifiers,
             RuntimeExceptionKind::IllegalArgument.classifier(),
@@ -106,7 +107,7 @@ impl Body<'_> {
             structure,
             Some(message),
             self.runtime.string,
-        );
+        )?;
         self.code.throw(self.runtime.exceptions.tag);
         Ok(())
     }

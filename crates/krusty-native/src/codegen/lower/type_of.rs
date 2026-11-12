@@ -121,6 +121,9 @@ impl FileLowering<'_> {
                     .ok_or_else(|| declined!("`typeOf` of `{ty:?}`"))?,
                 Vec::new(),
             ),
+            // `Nothing` has no instances and no class to look up; the runtime names it with a
+            // descriptor of its own, which is what a `KType` naming it (`In<Nothing>`) points at.
+            TyKind::Nothing => (self.import_data("kt_type_nothing")?, Vec::new()),
             TyKind::TyParam(..) | TyKind::DefinitelyNotNull(_) => {
                 return Err(declined!(
                     "`typeOf` of the type parameter `{ty:?}`, whose classifier is a \
@@ -165,6 +168,12 @@ impl FileLowering<'_> {
         });
         let local = format!("kt_typeof_{}", self.type_of_objects.len());
         let object = self.declare_reflection_object(shared.as_deref(), &local)?;
+        // The program-wide name is the described type's identity, and two spellings can name one
+        // type: `(A) -> B` and `Function1<A, B>` are one object, defined once.
+        if shared.is_some() && self.comdat_objects.contains(&object) {
+            self.type_of_objects.insert(ty, object);
+            return Ok(object);
+        }
         let size = ARGUMENTS + ARGUMENT_SIZE * objects.len() as u32;
         let mut bytes = vec![0u8; size as usize];
         let mut write = |offset: u32, value: i64| {

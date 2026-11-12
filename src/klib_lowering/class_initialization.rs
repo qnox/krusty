@@ -1,23 +1,14 @@
-//! An authenticated, bounded ordinary-class initialization capability.
+//! Ordinary-class initialization steps and the exact edges an admitted class executes.
 //!
-//! Planning and lowering use this same declaration-owned plan. Fields come from actual serialized
-//! members; constructor parameters never imply storage. Other class representations remain target
-//! constructor leaves, while an admitted class with invalid initialization declines transactionally.
+//! Fields come from actual serialized members; constructor parameters never imply storage. Edge
+//! planning and lowering share one prepared class, so an admitted class with invalid
+//! initialization declines transactionally in both.
 
-use super::class_headers::{self, ClassMemberHeader};
 use super::decline::KlibBodyDeclineReason;
-use super::klib_types::semantic_type;
 use crate::klib_libraries::{KlibCalleeOrigin, KlibDeclarationBodies};
-use crate::libraries::{
-    KlibBodyCallable, KlibClassStorage, KlibDeclarationSignature, KlibDependencyCallable, TypeKind,
-};
-use crate::metadata::klib_ir::tree::{
-    KlibIrArguments, KlibIrBody, KlibIrExprId, KlibIrExprKind, KlibIrField, KlibIrMember,
-    KlibIrStatement,
-};
-use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbolKind};
-use crate::metadata::semantic::KotlinModality;
-use crate::types::Ty;
+use crate::libraries::{KlibBodyCallable, KlibDeclarationSignature, KlibDependencyCallable};
+use crate::metadata::klib_ir::tree::{KlibIrExprId, KlibIrField, KlibIrMember, KlibIrStatement};
+use crate::metadata::klib_ir::KlibIrSignature;
 
 pub(super) enum InitializationStep<'a> {
     Field { index: u32, value: KlibIrExprId },
@@ -48,160 +39,49 @@ pub(super) fn record_initializer<'a>(
     Ok(())
 }
 
-pub(super) struct ClassInitialization<'a, 'b> {
-    pub(super) header: ClassMemberHeader<'a, 'b>,
-    pub(super) field_declarations: Vec<&'b KlibIrField>,
-    pub(super) storage: KlibClassStorage,
-    pub(super) steps: Vec<InitializationStep<'b>>,
-}
-
-fn mismatch(detail: &str) -> KlibBodyDeclineReason {
-    KlibBodyDeclineReason::SignatureMismatch(detail.to_owned())
-}
-
-/// A positive common representation, independently of a target's runtime constructor registry.
-pub(super) fn plan<'a, 'b>(
-    selected: KlibBodyCallable<'a>,
-    bodies: &'b KlibDeclarationBodies,
-    callees: &super::KlibCalleeFacts<'_>,
-) -> Result<Option<ClassInitialization<'a, 'b>>, KlibBodyDeclineReason> {
-    let header = class_headers::authenticate(selected, bodies)?;
-    let contract = header.contract;
-    if contract.kind != TypeKind::Class
-        || contract.modality != KotlinModality::Final
-        || contract.is_value
-        || contract.is_inner
-        || contract.is_expect
-        || !contract.parameters.formals.is_empty()
-        || contract.primary_constructor.as_ref()
-            != match &selected.identity().declaration {
-                KlibDeclarationSignature::Public(signature) => Some(signature),
-                _ => None,
-            }
-        || header.class.value_class_representation.is_some()
-    {
-        return Ok(None);
-    }
-    let mut constructors = Vec::new();
-    for member in &header.class.members {
-        match member {
-            KlibIrMember::Function(function) => {
-                let function = header.arena.function(*function);
-                if !function.constructor {
-                    return Ok(None);
-                }
-                constructors.push(&function.base.symbol);
-            }
-            KlibIrMember::Property(_)
-            | KlibIrMember::Field(_)
-            | KlibIrMember::AnonymousInitializer { .. } => {}
-            _ => return Ok(None),
-        }
-    }
-    if constructors.as_slice() != [&header.function.base.symbol]
-        || header.function.regular_parameters.iter().any(|parameter| {
-            parameter.default_value.is_some() || parameter.vararg_element_type.is_some()
-        })
-        || header.class.supertypes.len() != 1
-    {
-        return Ok(None);
-    }
-    let declared_superclass =
-        semantic_type(header.arena, &header.types, header.class.supertypes[0])?;
-    if declared_superclass != Ty::obj_name(crate::types::wk::any()) {
-        return Ok(None);
-    }
-    let Some(KlibIrBody::Block(statements)) = &header.function.body else {
-        // A bodyless or synthetic constructor retains its separately authenticated target boundary.
-        return Ok(None);
-    };
-    let receiver = header
-        .class
-        .this_receiver
-        .as_ref()
-        .ok_or_else(|| mismatch("a materialized class has no serialized instance receiver"))?;
-    if semantic_type(header.arena, &header.types, receiver.ty)? != Ty::obj_name(contract.classifier)
-    {
-        return Err(mismatch(
-            "a class instance receiver has another declared type",
-        ));
-    }
-    let [KlibIrStatement::Expression(delegate), KlibIrStatement::Expression(initialize)] =
-        statements.as_slice()
-    else {
-        return Err(KlibBodyDeclineReason::UnsupportedOperation(
-            "a nontrivial primary constructor body",
-        ));
-    };
-    let KlibIrExprKind::DelegatingConstructorCall(access) = &header.arena.expr(*delegate).kind
-    else {
-        return Err(mismatch(
-            "a primary constructor does not delegate before initialization",
-        ));
-    };
-    let no_operands = match &access.arguments {
-        KlibIrArguments::Flat(values) => values.is_empty(),
-        KlibIrArguments::Split {
-            dispatch_receiver,
-            extension_receiver,
-            values,
-        } => dispatch_receiver.is_none() && extension_receiver.is_none() && values.is_empty(),
-    };
-    let root = match &access.symbol.signature {
-        KlibIrSignature::Public(signature) => {
-            super::ir_builtins::root_constructor(signature, || {
-                callees.validate_root_constructor(&contract.module, signature, bodies)
-            })?
-        }
-        _ => false,
-    };
-    if access.symbol.kind != KlibIrSymbolKind::Constructor
-        || !no_operands
-        || !access.type_arguments.is_empty()
-        || !root
-        || !matches!(&header.arena.expr(*initialize).kind,
-            KlibIrExprKind::InstanceInitializerCall(class) if class == &header.class.base.symbol)
-    {
-        return Err(mismatch(
-            "an ordinary class does not delegate to Any and initialize its own instance",
-        ));
-    }
-    let mut steps = Vec::new();
-    let storage =
-        super::class_storage::authenticate(&header, declared_superclass, |member, field| {
-            record_initializer(member, field, &mut steps)
-        })?;
-    Ok(Some(ClassInitialization {
-        header,
-        field_declarations: storage.field_declarations,
-        storage: storage.storage,
-        steps,
-    }))
-}
-
-/// Exact edges of the same admitted initialization which lowering will execute.
+/// Exact edges of the same admitted class which lowering will execute: its initialization and
+/// every member it installs with the class.
 pub(super) fn constructor_initialization_callees(
     selected: KlibBodyCallable<'_>,
     bodies: &KlibDeclarationBodies,
     callees: &super::KlibCalleeFacts<'_>,
 ) -> Result<Option<Vec<KlibDependencyCallable>>, KlibBodyDeclineReason> {
-    let Some(plan) = plan(selected, bodies, callees)? else {
+    let module = selected.identity().module.clone();
+    let Some((prepared, _)) = super::same_library_class::prepare_public(
+        super::same_library_class::LocalClassSource {
+            bodies,
+            module: &module,
+            validate_root: &|root| callees.validate_root_constructor(&module, root, bodies),
+        },
+        selected,
+    )?
+    else {
         return Ok(None);
     };
     let mut roots = Vec::new();
-    for step in &plan.steps {
+    for step in &prepared.steps {
         match step {
             InitializationStep::Field { value, .. } => roots.push(*value),
             InitializationStep::Block(statements) => {
-                roots.extend(plan.header.arena.statement_expression_roots(statements));
+                roots.extend(prepared.arena.statement_expression_roots(statements));
             }
         }
     }
+    for member in &prepared.members {
+        roots.extend(prepared.arena.statement_expression_roots(member.statements));
+    }
+    // The class's own members are installed with it rather than reached as declarations.
+    let own = prepared
+        .members
+        .iter()
+        .map(|member| &member.signature)
+        .collect::<Vec<_>>();
     Ok(Some(
-        plan.header
+        prepared
             .arena
             .emitted_callable_symbols_from(roots, super::EMITTED_CALL_FORMS)
             .into_iter()
+            .filter(|symbol| !own.contains(&&symbol.signature))
             .filter_map(|symbol| match &symbol.signature {
                 KlibIrSignature::Public(signature) => {
                     Some(KlibDeclarationSignature::Public(signature.clone()))
@@ -211,12 +91,12 @@ pub(super) fn constructor_initialization_callees(
                 }
                 _ => None,
             })
-            .filter_map(|signature| {
-                match bodies.callee_origin(&plan.header.contract.module, &signature) {
+            .filter_map(
+                |signature| match bodies.callee_origin(&module, &signature) {
                     KlibCalleeOrigin::Exact(identity) => Some(identity),
                     KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
-                }
-            })
+                },
+            )
             .collect(),
     ))
 }
