@@ -1250,7 +1250,6 @@ coroutines/withReceiver.kt
 cycles/cycle.kt
 cycles/cycle_do.kt
 cycles/cycle_for.kt
-dataClasses/arrayParams.kt
 dataClasses/components/kt49812.kt
 dataClasses/copy/kt3033.kt
 dataClasses/copy/withGenericParameter.kt
@@ -1273,7 +1272,6 @@ dataClasses/hashCode/short.kt
 dataClasses/kt49715.kt
 dataClasses/multiDeclaration.kt
 dataClasses/propertyOfDnnType.kt
-dataClasses/toString/arrayParams.kt
 dataClasses/toString/genericParam.kt
 dataClasses/toString/primitiveArrays.kt
 dataClasses/unitComponent.kt
