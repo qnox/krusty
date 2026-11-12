@@ -216,18 +216,16 @@ pub fn kotlin_compiler_jar() -> Option<PathBuf> {
 
 /// Compile the pure-JDK `KotlincServer.java` driver once (via `javac`) into a stable cache dir; return it.
 /// The driver uses only reflection + `URLClassLoader`, so it needs no compiler jar to compile OR to run.
-fn setup_kotlinc_server(java_home: &str, compiler_jar: &Path) -> Option<PathBuf> {
+fn setup_kotlinc_server(java_home: &str, _compiler_jar: &Path) -> Option<PathBuf> {
     // The JDK is part of the cache key: a class compiled by a NEWER javac (another session's
     // JAVA_HOME) is unloadable by an older runtime, and the server-spawn failure then reads as
     // "kotlinc unavailable" — silently disabling every reference compile and cross-check.
-    // The compiler jar is part of it too: the settings updater is compiled against that
-    // distribution and loaded by its class loader, so two releases do not share one class file.
     let mut hash: u64 = 0xcbf29ce484222325;
     for b in KOTLINC_SERVER_SRC
         .bytes()
         .chain(TYPED_LANGUAGE_SETTINGS_UPDATER_SRC.bytes())
         .chain(super::producing_jdk::driver_cache_key(java_home))
-        .chain(compiler_jar.to_string_lossy().bytes())
+        .chain(_compiler_jar.to_string_lossy().bytes())
     {
         hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
     }
@@ -263,7 +261,7 @@ fn setup_kotlinc_server(java_home: &str, compiler_jar: &Path) -> Option<PathBuf>
     }
     let out = Command::new(&javac)
         .arg("-cp")
-        .arg(format!("{}/*", compiler_jar.parent()?.to_string_lossy()))
+        .arg(format!("{}/*", _compiler_jar.parent()?.to_string_lossy()))
         .arg("-d")
         .arg(&dir)
         .arg(&src_path)
@@ -402,143 +400,17 @@ type KotlincPools = Mutex<HashMap<String, Arc<server_pool::Pool<KotlincServer>>>
 /// On a cache miss the live compiler applies it as a JVM system property, on a server that no
 /// other compile shares, and does not pass it through to the compiler.
 pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
-    let jar = kotlin_compiler_jar()?;
-    let release = krusty::kotlin_version::target().to_string();
-    // The provisioned distribution of the process release is that compiler. An override
-    // (`KRUSTY_KOTLINC`) names a different jar and keeps this function on that jar.
-    if compiler_jar_for_release(&release).as_deref() == Some(jar.as_ref()) {
-        return kotlinc_compile_for_release(&release, args);
-    }
-    compile_jar(&jar, args)
-}
-
-/// Compile `args` with the kotlinc distribution of `release`, through the same server and
-/// recorded-byte replay as [`kotlinc_compile`].
-///
-/// A release or RC replays under that distribution's identity and `lib/` fingerprint. A beta
-/// compiles live and is not archived. The distribution is
-/// `target/cache/kotlinc/<release>/`, downloaded when it is absent. The process compiler, the one
-/// [`kotlinc_compile`] uses, keeps its own replay key.
-pub fn kotlinc_compile_for_release(release: &str, args: &[String]) -> Option<(i32, String)> {
-    compile_jar(&compiler_jar_for_release(release)?, args)
-}
-
-fn compile_jar(compiler_jar: &Path, args: &[String]) -> Option<(i32, String)> {
-    let lib = compiler_jar.parent()?;
-    // The process compiler keeps its existing replay key. Another release fingerprints that
-    // release's `lib/` and build identity, and a beta compiles live.
-    let process_compiler = kotlin_compiler_jar().as_deref() == Some(compiler_jar);
-    let identity = build_identity(lib);
-    let replayed = if process_compiler {
-        byte_dump::replay_class_dump(args)
-    } else {
-        byte_dump::replay_class_dump_for_compiler(args, identity.as_deref(), Some(lib))
-    };
-    if let Some(replayed) = replayed {
+    if let Some(replayed) = byte_dump::replay_class_dump(args) {
         if replayed.code == 0 {
             byte_dump::write_replayed_classes(args, &replayed.files);
         }
         return Some((replayed.code, replayed.stderr));
     }
-    let result = kotlinc_compile_with_jar(compiler_jar, args, None, None)?;
-    if process_compiler {
-        byte_dump::report_live_kotlinc(args);
-        byte_dump::remember_class_dump(args, result.0, &result.1);
-    } else {
-        byte_dump::report_live_kotlinc_for(args, identity.is_some(), Some(lib));
-        byte_dump::remember_class_dump_for_compiler(
-            args,
-            result.0,
-            &result.1,
-            identity.as_deref(),
-            Some(lib),
-        );
-    }
+    let result = kotlinc_compile_live(args, None, None)?;
+    // A replay returns above and prints nothing. This line names the test that reached the JVM.
+    byte_dump::report_live_kotlinc(args);
+    byte_dump::remember_class_dump(args, result.0, &result.1);
     Some(result)
-}
-
-/// The `lib/` directory of `release`'s kotlinc distribution, provisioning it when needed.
-pub fn kotlinc_lib_for_release(release: &str) -> Option<PathBuf> {
-    let jar = cached_compiler_jar(release);
-    if jar.is_file() {
-        return jar.parent().map(Path::to_path_buf);
-    }
-    if release == krusty::kotlin_version::target().to_string() {
-        if let Some(jar) = kotlin_compiler_jar() {
-            return jar.parent().map(Path::to_path_buf);
-        }
-    }
-    provision_kotlinc(release).and_then(|jar| jar.parent().map(Path::to_path_buf))
-}
-
-fn compiler_jar_for_release(release: &str) -> Option<PathBuf> {
-    let jar = kotlinc_lib_for_release(release)?.join("kotlin-compiler.jar");
-    jar.is_file().then_some(jar)
-}
-
-fn cached_compiler_jar(release: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
-        "target/cache/kotlinc/{release}/kotlinc/lib/kotlin-compiler.jar"
-    ))
-}
-
-fn build_identity(lib: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(lib.parent()?.join("build.txt")).ok()?;
-    let line = text.lines().next()?.trim();
-    byte_dump::cacheable_build_identity(line)
-}
-
-fn provision_kotlinc(release: &str) -> Option<PathBuf> {
-    let dest =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/cache/kotlinc/{release}"));
-    let jar = dest.join("kotlinc/lib/kotlin-compiler.jar");
-    std::fs::create_dir_all(&dest).ok()?;
-    let lock_path = dest.join(".provision.lock");
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-        .ok()?;
-    // SAFETY: `flock` on a descriptor this function owns until it returns.
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return None;
-    }
-    if jar.is_file() {
-        return Some(jar);
-    }
-    let url = format!(
-        "https://github.com/JetBrains/kotlin/releases/download/v{release}/kotlin-compiler-{release}.zip"
-    );
-    let tmp = std::env::temp_dir().join(format!("kotlinc-{release}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).ok()?;
-    let zip = tmp.join("kotlinc.zip");
-    let downloaded = Command::new("curl")
-        .args(["-fsSL", &url, "-o"])
-        .arg(&zip)
-        .status()
-        .ok()
-        .is_some_and(|status| status.success());
-    if !downloaded {
-        let _ = std::fs::remove_dir_all(&tmp);
-        return None;
-    }
-    let unpacked = Command::new("unzip")
-        .args(["-q"])
-        .arg(&zip)
-        .arg("-d")
-        .arg(&dest)
-        .status()
-        .ok()
-        .is_some_and(|status| status.success());
-    let _ = std::fs::remove_dir_all(&tmp);
-    if !unpacked || !jar.is_file() {
-        return None;
-    }
-    let bin = dest.join("kotlinc/bin/kotlinc");
-    let _ = std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755));
-    Some(jar)
 }
 
 /// [`kotlinc_compile`] without the recorded-byte archive: always the live persistent compiler, and
@@ -624,22 +496,6 @@ fn kotlinc_compile_live(
     )
 }
 
-/// The JVM compiler of one named release, in the same pool machinery as the process compiler.
-fn kotlinc_compile_with_jar(
-    compiler_jar: &Path,
-    args: &[String],
-    language_version: Option<&str>,
-    api_version: Option<&str>,
-) -> Option<(i32, String)> {
-    kotlinc_compile_on(
-        krusty::compilation_target::CompilationTarget::Jvm,
-        Some(compiler_jar),
-        args,
-        language_version,
-        api_version,
-    )
-}
-
 struct SelectedCompiler {
     lib_dir: String,
     class: &'static str,
@@ -650,17 +506,6 @@ struct SelectedCompiler {
 /// Compiler classes and typed configuration phases are selected explicitly, never retried as JVM.
 pub fn kotlinc_compile_for_target(
     target: krusty::compilation_target::CompilationTarget,
-    args: &[String],
-    language_version: Option<&str>,
-    api_version: Option<&str>,
-) -> Option<(i32, String)> {
-    kotlinc_compile_on(target, None, args, language_version, api_version)
-}
-
-/// `jvm_jar` names another release's JVM compiler; it applies to the JVM target only.
-fn kotlinc_compile_on(
-    target: krusty::compilation_target::CompilationTarget,
-    jvm_jar: Option<&Path>,
     args: &[String],
     language_version: Option<&str>,
     api_version: Option<&str>,
@@ -677,10 +522,7 @@ fn kotlinc_compile_on(
     let mut properties = Vec::new();
     let (compiler_jar, class, phase) = match target {
         CompilationTarget::Jvm => (
-            match jvm_jar {
-                Some(jar) => jar.to_path_buf(),
-                None => kotlin_compiler_jar()?,
-            },
+            kotlin_compiler_jar()?,
             "org.jetbrains.kotlin.cli.jvm.K2JVMCompiler",
             "org.jetbrains.kotlin.cli.pipeline.jvm.JvmConfigurationPipelinePhase",
         ),

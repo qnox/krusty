@@ -186,28 +186,6 @@ mod tests {
     }
 
     #[test]
-    fn the_default_language_version_is_the_newest_stable_release() {
-        assert_eq!(
-            KotlinVersion::supported().last().copied(),
-            Some(KotlinVersion::V2_5_0_BETA2)
-        );
-        assert_eq!(KotlinVersion::newest(), KotlinVersion::V2_4_21);
-        assert_eq!(LanguageVersion::default(), LanguageVersion::V2_4);
-        assert_eq!(
-            LanguageVersion::default_for(KotlinVersion::V2_4_21),
-            LanguageVersion::V2_4
-        );
-        assert_eq!(
-            LanguageVersion::parse_supported_for("2.5", KotlinVersion::V2_4_21),
-            Some(LanguageVersion::V2_5)
-        );
-        assert_eq!(
-            LanguageVersion::default_for(KotlinVersion::V2_5_0_BETA2),
-            LanguageVersion::V2_5
-        );
-    }
-
-    #[test]
     fn language_level_maps_to_the_kotlin_metadata_version() {
         assert_eq!(LanguageVersion::V2_2.metadata_version(), [2, 2, 0]);
         assert_eq!(LanguageVersion::default(), LanguageVersion::V2_4);

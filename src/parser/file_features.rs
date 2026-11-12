@@ -34,10 +34,6 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.eager_lambda_analysis = features.has("EagerLambdaAnalysis");
     file.allow_eager_supertype_accessibility_checks =
         features.has("AllowEagerSupertypeAccessibilityChecks");
-    file.sam_constructor_missing_dependency = features
-        .table()
-        .get("ForbidSamConstructorCallsWithMissingDependencySupertype")
-        .map(|_| features.has("ForbidSamConstructorCallsWithMissingDependencySupertype"));
     file.lambda_implementation_uses_inferred_result =
         features.language_version() < crate::language_version::LanguageVersion::V2_4;
     file.full_value_classes = features.has("FullValueClasses");
@@ -57,18 +53,9 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.custom_equals_in_value_classes = features.has("CustomEqualsInValueClasses");
     file.forbid_upper_bounds_violation_on_type_operator_and_parameter_bounds =
         features.has("ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds");
-    // 2.5.0-Beta2 renamed the feature and moved its since-version from 2.5 to 2.6. A release
-    // declares one spelling; the bit is that spelling.
-    let useless_type_arguments = [
-        "ForbidUselessTypeArgumentsIn26",
-        "ForbidUselessTypeArgumentsIn25",
-    ]
-    .into_iter()
-    .find(|name| features.table().get(name).is_some())
-    .unwrap_or("ForbidUselessTypeArgumentsIn25");
-    file.forbid_useless_type_arguments = features.has(useless_type_arguments);
+    file.forbid_useless_type_arguments = features.has("ForbidUselessTypeArgumentsIn25");
     file.useless_type_arguments_warning_format =
-        features.deprecation_warning_format(useless_type_arguments);
+        features.deprecation_warning_format("ForbidUselessTypeArgumentsIn25");
     file.forbid_package_qualifier_forms =
         features.has("ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier");
     file.parenthesized_package_qualifier_warning = features.deprecation_warning_message(
@@ -80,11 +67,11 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
         crate::features::deprecation_cycle_messages::PACKAGE_QUALIFIER_TYPE_ARGUMENTS,
     );
     file.type_arguments_not_allowed_warning = features.deprecation_warning_message(
-        useless_type_arguments,
+        "ForbidUselessTypeArgumentsIn25",
         "Type arguments are not allowed when static member is accessed.",
     );
     file.explicit_type_arguments_in_property_access_warning = features.deprecation_warning_message(
-        useless_type_arguments,
+        "ForbidUselessTypeArgumentsIn25",
         "Object access cannot have explicit type arguments.",
     );
     file.error_about_data_class_copy_visibility_change =
@@ -223,74 +210,5 @@ mod tests {
             property_access_warning
         );
         assert_eq!(dynamic_warning(&current), expected_dynamic_warning);
-    }
-
-    #[test]
-    fn beta2_postpones_useless_type_arguments_under_the_renamed_feature() {
-        let mut before = File::default();
-        apply_file_features(
-            &mut before,
-            &LangFeatures::for_release(
-                KotlinVersion::V2_5_0_BETA2,
-                LanguageVersion::V2_4,
-                LanguageVersion::V2_4,
-            ),
-        );
-        assert!(!before.forbid_useless_type_arguments);
-        assert_eq!(
-            before.type_arguments_not_allowed_warning.as_deref(),
-            Some(
-                "Type arguments are not allowed when static member is accessed. This will become \
-                 an error in language version 2.6. See \
-                 https://youtrack.jetbrains.com/issue/KTLC-390."
-            )
-        );
-
-        let mut at_since = File::default();
-        apply_file_features(
-            &mut at_since,
-            &LangFeatures::for_release(
-                KotlinVersion::V2_5_0_BETA2,
-                LanguageVersion::V2_6,
-                LanguageVersion::V2_6,
-            ),
-        );
-        assert!(at_since.forbid_useless_type_arguments);
-    }
-
-    #[test]
-    fn sam_constructor_missing_dependency_follows_the_release_that_introduced_it() {
-        let mut before = File::default();
-        apply_file_features(
-            &mut before,
-            &LangFeatures::for_release(
-                KotlinVersion::V2_4_21,
-                LanguageVersion::V2_4,
-                LanguageVersion::V2_4,
-            ),
-        );
-        assert_eq!(before.sam_constructor_missing_dependency, None);
-
-        let mut beta = File::default();
-        apply_file_features(
-            &mut beta,
-            &LangFeatures::for_release(
-                KotlinVersion::V2_5_0_BETA2,
-                LanguageVersion::V2_5,
-                LanguageVersion::V2_5,
-            ),
-        );
-        assert_eq!(beta.sam_constructor_missing_dependency, Some(false));
-
-        let mut at_since = File::default();
-        apply_file_features(
-            &mut at_since,
-            &LangFeatures::for_release(
-                KotlinVersion::V2_5_0_BETA2,
-                LanguageVersion::V2_6,
-                LanguageVersion::V2_6,
-            ),
-        );
-        assert_eq!(at_since.sam_constructor_missing_dependency, Some(true));
     }
 }

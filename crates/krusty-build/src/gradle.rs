@@ -1863,6 +1863,14 @@ fun main() {
             let kgp =
                 std::env::var("KRUSTY_GRADLE_KGP_VERSION").unwrap_or_else(|_| "2.4.20".into());
             write(&root, &plugin_version, &kgp);
+            // Every fixture's builds share one daemon, which loads each fixture's plugin
+            // classpath (KGP, KSP, AGP) in turn. Gradle's default 384 MiB metaspace ran out in
+            // KSP2's `kspKotlin` after the fixtures before it.
+            std::fs::write(
+                root.join("gradle.properties"),
+                "org.gradle.jvmargs=-Xmx1g -XX:MaxMetaspaceSize=1g\n",
+            )
+            .expect("write gradle.properties");
             // Gradle resolves the project directory through symlinks (macOS /var → /private/var);
             // the recorded invocations carry the resolved path, so the normalization root must too.
             let root = root.canonicalize().expect("canonicalize fixture root");

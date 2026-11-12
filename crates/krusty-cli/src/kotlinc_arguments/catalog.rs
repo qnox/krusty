@@ -29,7 +29,6 @@ macro_rules! releases {
 releases! {
     V2_4_0 => "2.4.0",
     V2_4_20 => "2.4.20",
-    V2_5_0_BETA2 => "2.5.0-Beta2",
 }
 
 /// The Kotlin type of an argument's field, which decides how kotlinc reads its value.
