@@ -35,6 +35,7 @@ use declared_capabilities::{
     declares_its_own_comparable, implemented_collections, implemented_dependencies,
     overrides_a_throwable_accessor,
 };
+mod atomic_fields;
 mod functions;
 mod implementor_dispatch;
 mod imported_functions;
@@ -50,6 +51,7 @@ mod object_entries;
 mod objects;
 mod ranges;
 mod references;
+mod reified_templates;
 mod representation;
 mod scope;
 mod statics;
@@ -749,6 +751,7 @@ impl<'a> FileLowering<'a> {
                     finallys: Vec::new(),
                     dead: Vec::new(),
                     unresolved_reified: Vec::new(),
+                    scope: krusty::ir::IrEnclosure::File,
                     frame_objects: krusty::fx_hash::HashMap::default(),
                     frame_fields: krusty::fx_hash::HashMap::default(),
                     enum_base: None,
@@ -845,6 +848,7 @@ impl<'a> FileLowering<'a> {
             ret,
             &name,
             &mut |lowering, params| {
+                lowering.scope = krusty::ir::IrEnclosure::Function(index as krusty::ir::FunId);
                 lowering.record_semantic_slots(&semantic_slots);
                 for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
                     let variable = lowering.declare_value(slot as u32, *ty)?;
@@ -944,6 +948,10 @@ struct BodyLowering<'a, 'b, 'c> {
     /// being emitted. A runtime type operation naming one executes Kotlin's direct-call failure;
     /// ordinary functions and specialized inline copies leave this empty.
     unresolved_reified: Vec<String>,
+    /// The common-IR scope whose body this frame lowers. A type operation against a reified
+    /// parameter the scope's own declaration introduces is that declaration's template, which
+    /// [`krusty::ir::IrFile::is_reified_template_operation`] identifies for every backend.
+    scope: krusty::ir::IrEnclosure,
     /// The constructions of this body whose object lives in this frame, each with the local it
     /// initializes; see `frame_objects`.
     frame_objects: krusty::fx_hash::HashMap<u32, u32>,
@@ -1765,21 +1773,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         | IrTypeOp::NotInstanceOf
                         | IrTypeOp::Cast
                         | IrTypeOp::CastNonNull
-                ) && self.unresolved_reified.iter().any(|parameter| {
-                    type_operand
-                        .type_parameter_occurrence_bound(parameter)
-                        .is_some()
-                }) {
+                ) && self.is_unresolved_reified_operation(id, type_operand)
+                {
                     // The operand precedes kotlinc's reified-operation marker and therefore keeps
                     // any side effect or exception it produces before the marker's own failure.
                     let _ = self.expression(arg)?;
                     if self.terminated {
                         return Ok(None);
                     }
-                    let message = self.string_literal(
-                        b"This function has a reified type parameter and thus can only be inlined at compilation time, not called directly.",
-                    )?;
-                    self.raise("kt_type_unsupported_operation_exception", message)
+                    self.reified_direct_call_failure()
                 } else {
                     self.type_operation(
                         op,
@@ -2165,6 +2167,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 finally,
                 result,
             } => self.try_catch(body, &catches, finally, result),
+            IrExpr::PluginPlaceholder {
+                plugin: "atomicfu",
+                kind,
+                exprs,
+                data,
+                types,
+            } => self.atomic_field_operation(kind, &exprs, &data, &types),
             IrExpr::Return(_)
             | IrExpr::Variable { .. }
             | IrExpr::SetValue { .. }
@@ -2385,7 +2394,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(Some(joined))
     }
 
-    /// One field's contribution to a data class's `hashCode`, which is the field's own `hashCode`.
+    /// One field's contribution to a data class's `hashCode`, which is the field's own `hashCode`,
+    /// except that an ARRAY field contributes its contents' hash, as kotlinc's does.
     ///
     /// Kotlin's answer for each primitive is fixed, and these are those answers rather than
     /// anything this generator is free to choose: a program can print a hash, and two programs
@@ -2400,7 +2410,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             if self.terminated {
                 return Ok(None);
             }
-            return self.runtime_call("kt_hash_code", &[any()], Ty::Int, &[value]);
+            return self.generated_property_hash(value, ty).map(Some);
         }
         let Some(operand) = self.coerce(value, ty)? else {
             return Err("a `Unit` data-class field".into());
@@ -2409,6 +2419,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(None);
         }
         self.value_hash(operand, ty).map(Some)
+    }
+
+    /// The hash a generated `hashCode` takes of a property value already in hand. An array
+    /// property hashes by its CONTENTS (`Arrays.hashCode`, which is `contentHashCode()`), not by
+    /// the array's own identity `hashCode`; every other property hashes as [`Self::value_hash`]
+    /// says. Equality of the same property stays the array's identity.
+    pub(super) fn generated_property_hash(
+        &mut self,
+        operand: Value,
+        ty: Ty,
+    ) -> Result<Value, Unsupported> {
+        if !ty.non_null().is_array() {
+            return self.value_hash(operand, ty);
+        }
+        Ok(self
+            .runtime_call("kt_array_content_hash_code", &[any()], Ty::Int, &[operand])?
+            .expect("`kt_array_content_hash_code` returns an Int"))
     }
 
     /// The hash of a value already in hand, by the same rules.
@@ -2625,6 +2652,7 @@ fn describe(node: &IrExpr) -> String {
             Target::FunctionInvoke => {
                 "a reference to a function value's `invoke` declaration".to_string()
             }
+            Target::Property(_) => "a property reference read as a function value".to_string(),
         };
     }
     // The first two identifiers, not one: `Checked(Call { … })` and `Checked(PropertyRead { … })`

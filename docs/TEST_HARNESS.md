@@ -173,10 +173,9 @@ invocation separately because each is a separate process with its own wall time.
 unfiltered binary name.
 
 CI builds the conformance test binary and CLI once. Every version in `kotlin-versions` expands into
-independent `jvm`, `native`, and `wasm` matrix rows from those artifacts. GitHub resolves a job's
-producer dependencies before it expands the matrix, so JVM rows use an early scheduler matrix that
-does not wait for the focused KLIB test binaries; Native and Wasm use a second scheduler matrix once
-that target-only artifact is ready. Both matrices execute one YAML-anchored conformance step
+independent `jvm`, `native`, and `wasm` matrix rows from those artifacts. Those rows never wait for the
+ordinary compiler unit test binary: the `klib-implementation-coverage` job builds it and checks every release's exact Native and Wasm stdlib KLIB implementation coverage with
+it (`just klib-implementation-coverage`). One conformance matrix executes one step
 inventory and the same backend-neutral case table. The JVM row runs its box corpus and JVM-owned
 regressions. The Native and Wasm rows run their own box corpora followed by
 their focused non-corpus regressions against the same exact target compiler and KLIB setup, so no
@@ -523,12 +522,12 @@ Do not use `--release` for tests. The release build cycle takes longer than it s
 ## Required Check
 
 The `ci` workflow's `ci-and-conformance` job is the single check for master's ruleset to require.
-It needs the independent `lint` and coverage-owning `ci` jobs, both scheduler halves of the shared
-conformance matrix, `build-gradle-plugin`, and the whole `gradle` compatibility matrix. Every
+It needs the independent `lint` and coverage-owning `ci` jobs, the shared conformance matrix,
+`klib-implementation-coverage`, `build-gradle-plugin`, and the whole `gradle` compatibility matrix. Every
 supported Kotlin version has distinct JVM, Native and Wasm conformance
-rows; the maximum-version Native row also runs the focused KLIB decoder, value-class and
-kotlinc-native oracle coverage formerly owned by a standalone job, while `just klib-semantics`
-remains the focused local recipe. One backend-neutral box inventory includes upstream and owned
+rows. The KLIB decoder, value-class and kotlinc-native oracle tests are ordinary e2e and unit tests
+that the `ci` coverage gate runs against the maximum-version Native distribution, while
+`just klib-semantics` remains the focused local recipe. One backend-neutral box inventory includes upstream and owned
 portable regular/multimodule cases in every JVM, Native and Wasm row; directives may not silently
 skip owned cases. Genuinely platform-specific sources live in named target-owned tests with a
 `PLATFORM-SPECIFIC` marker. The JVM row owns JVM regressions; Native
@@ -687,9 +686,10 @@ is compiled once and the cfg(test) harness overlaps the binaries. Nightly rustc 
 job per core (`-Z threads`). The run ends with `coverage: phases` repeating every
 finished phase and `coverage: phase total <seconds>s`, which is wall time from the first phase rather than
 the sum of the rows. The conformance box runner prints the same shape as
-`conformance-run: phase box-conformance <seconds>s`. The shared binary job prints
-`shared-bins: phase conformance-test-binary`, `shared-bins: phase krusty-cli`, and
-`shared-bins: phase krusty-build-tests`. Conformance lanes and Gradle lanes run those binaries. A
+`conformance-run: phase box-conformance <seconds>s`. The conformance producer prints
+`conformance-bin: phase conformance-test-binary`, the KLIB coverage job prints
+`klib-implementation-coverage: phase compiler-unit-tests`, and the tool producer prints `tool-bins: phase krusty-cli` and
+`tool-bins: phase krusty-build-tests`. Conformance lanes and Gradle lanes run those binaries. A
 Gradle lane does not compile krusty.
 
 Performance-relevant harness state:

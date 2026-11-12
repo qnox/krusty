@@ -62,6 +62,12 @@ impl Body<'_> {
                 self.code.array_get_u(self.runtime.chars);
                 Ok(())
             }
+            IrIntrinsic::UnsignedToString { source } => {
+                let (Some(receiver), []) = (receiver, args) else {
+                    return Err("an unsigned string conversion with malformed operands".into());
+                };
+                self.unsigned_string_of(receiver, source)
+            }
             // `Any?.toString()` is the string a template makes of its operand.
             IrIntrinsic::NullableAnyToString => {
                 let value = match (receiver, args) {

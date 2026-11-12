@@ -2,6 +2,7 @@
 """The top-project list: compile rows stay buildable, and the LSP set adds the two large roots."""
 
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -66,6 +67,50 @@ class Projects(unittest.TestCase):
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertIn("language-server metric set", result.stderr)
                 self.assertFalse((Path(work) / "corpus" / "src").exists())
+
+    def test_compile_lsp_on_an_android_row_exports_only_the_variant(self):
+        # The lane is the last field. Leaving it for `read` stores `demoDebug` and
+        # `compile,lsp` together in CORPUS_ANDROID_VARIANT.
+        for script in ("run.sh", "bench.sh"):
+            with self.subTest(script), tempfile.TemporaryDirectory() as work:
+                repo = Path(work) / "upstream"
+                repo.mkdir()
+                sentinel = Path(work) / "variant"
+                quoted = shlex.quote(str(sentinel))
+                gradlew = repo / "gradlew"
+                gradlew.write_text(
+                    "#!/bin/sh\n"
+                    "if [ \"${CORPUS_ANDROID_VARIANT+set}\" = set ]; then\n"
+                    f"  printf '%s\\n' \"$CORPUS_ANDROID_VARIANT\" >> {quoted}\n"
+                    "else\n"
+                    f"  printf 'unset\\n' >> {quoted}\n"
+                    "fi\n"
+                    "exit 1\n"
+                )
+                gradlew.chmod(0o755)
+                git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
+                subprocess.run(["git", "init", "-q", str(repo)], check=True)
+                subprocess.run(git + ["add", "."], check=True)
+                subprocess.run(git + ["commit", "-qm", "init"], check=True)
+                commit = subprocess.run(
+                    git + ["rev-parse", "HEAD"], check=True, capture_output=True, text=True
+                ).stdout.strip()
+                projects_file = Path(work) / "projects.tsv"
+                projects_file.write_text(
+                    f"android\tfile://{repo}\t{commit}\t.\t21\t-\tdemoDebug\tcompile,lsp\n"
+                )
+                env = dict(os.environ, CORPUS_PROJECTS=str(projects_file))
+                env.pop("CORPUS_ANDROID_VARIANT", None)
+                env.setdefault("JAVA_HOME", "/usr")
+                result = subprocess.run(
+                    ["bash", str(HERE / script), "android", f"{work}/corpus",
+                     "/nonexistent/krusty", "/nonexistent/repository", "0"],
+                    env=env, capture_output=True, text=True,
+                )
+                self.assertNotIn("language-server metric set", result.stderr)
+                recorded = sentinel.read_text().splitlines() if sentinel.exists() else []
+                self.assertTrue(recorded, result.stderr)
+                self.assertEqual(set(recorded), {"demoDebug"}, result.stderr)
 
 
 if __name__ == "__main__":

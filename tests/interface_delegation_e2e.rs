@@ -974,3 +974,71 @@ fn an_explicit_override_of_a_delegated_java_member_replaces_its_forwarder() {
         &["Recording", "Reversed"],
     );
 }
+
+const KOTLIN_AND_JAVA_DECLARATIONS: &str = "import java.util.function.Predicate
+
+interface Check {
+    fun test(t: String): Boolean
+}
+
+interface Both : Check, Predicate<String>
+
+class Short : Both {
+    override fun test(t: String): Boolean = t.length < 3
+}
+
+class Forwarding(both: Both) : Both by both
+
+fun box(): String {
+    val forwarding = Forwarding(Short())
+    val check: Check = forwarding
+    val predicate: Predicate<String> = forwarding
+    return if (check.test(\"a\") && !predicate.test(\"long\")) \"OK\" else \"fail\"
+}
+";
+
+/// A Kotlin `test(t: String)` and a Java `test(p0: T!)` applied to `String` share one override
+/// slot under the shared override rule. The single forwarder therefore overrides both, and its
+/// bridge `test(Object)` implements `Predicate`, as kotlinc writes it.
+#[test]
+fn one_forwarder_overrides_kotlin_and_java_declarations_of_one_slot() {
+    common::expect_box_same_as_kotlinc(
+        KOTLIN_AND_JAVA_DECLARATIONS,
+        "KotlinAndJavaDelegatedDeclarations",
+    );
+}
+
+const JAVA_DECLARATION_FIRST: &str = "import java.util.function.Predicate
+
+interface Check {
+    fun test(t: String): Boolean
+}
+
+interface Both : Predicate<String>, Check
+
+class Short : Both {
+    override fun test(t: String): Boolean = t.length < 3
+}
+
+class Forwarding(both: Both) : Both by both
+
+fun box(): String {
+    val forwarding = Forwarding(Short())
+    val check: Check = forwarding
+    val predicate: Predicate<String> = forwarding
+    return if (check.test(\"a\") && !predicate.test(\"long\")) \"OK\" else \"fail\"
+}
+";
+
+/// With `Predicate` listed first, the forwarder forwards its `test(p0)`, but `Check` declares the
+/// parameter non-null `String` rather than `String!`. kotlinc's forwarder therefore checks it for
+/// null, and so does krusty's.
+#[test]
+fn a_forwarder_checks_a_parameter_its_kotlin_declaration_makes_non_null() {
+    common::expect_box_same_as_kotlinc(JAVA_DECLARATION_FIRST, "JavaDeclarationFirstDelegation");
+    common::assert_classes_identical_to_kotlinc(
+        "JavaDeclarationFirstDelegation",
+        JAVA_DECLARATION_FIRST,
+        &["Forwarding"],
+    );
+}

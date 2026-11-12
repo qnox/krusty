@@ -146,6 +146,15 @@ fn realize_delegator_of_override(
     }
 }
 
+/// Make the generated structural member `function` the box's instance delegator with `body`,
+/// placed where kotlinc emits it: right after the static `-impl` it delegates to. It has no source
+/// position, so the member schedule keeps it in that place.
+fn adopt_delegator(ir: &mut IrFile, function: u32, body: ExprId) -> u32 {
+    ir.functions[function as usize].body = Some(body);
+    ir.fn_source_order.remove(&function);
+    function
+}
+
 /// Synthesize a value class's unboxed-support members directly in the IR (a JVM concern, so it lives in
 /// this pass, not common lowering): `unbox-impl`/`box-impl`/`constructor-impl`/`equals-impl0` plus structural
 /// `equals`/`hashCode`/`toString` (skipped where the user defined one). The plain single-field class
@@ -254,6 +263,13 @@ pub(super) fn synth_value_members(
     // reads inside it are lowered to the carrier later in this pass. The ordinary instance override is
     // synthesized below as the ABI delegator back to this implementation.
     let custom_any_roles = ir.any_member_overrides(internal_name);
+    // Common lowering declares the structural trio every final value class generates. On the JVM
+    // that declaration is the box's instance member, which delegates to the static `-impl` over the
+    // carrier synthesized below; it keeps its identity, so every checked call naming it stays bound.
+    let generated = |role| ir.data_class_member(internal_name, role);
+    let generated_equals = generated(krusty::ir::IrDataClassMemberRole::Equals);
+    let generated_hash_code = generated(krusty::ir::IrDataClassMemberRole::HashCode);
+    let generated_to_string = generated(krusty::ir::IrDataClassMemberRole::ToString);
     // Each source override, by the `Any` member it overrides.
     let mut custom_equals = None;
     let mut custom_hash_code = None;
@@ -587,7 +603,10 @@ pub(super) fn synth_value_members(
             args: vec![fv],
         });
         let ibody = ret_block(ir, call);
-        let fid = add_inst(ir, "toString", vec![], str_ir, ibody);
+        let fid = match generated_to_string {
+            Some(function) => adopt_delegator(ir, function, ibody),
+            None => add_inst(ir, "toString", vec![], str_ir, ibody),
+        };
         realized.any_delegators.insert(fid);
         ir.jvm_value_class_any_delegators
             .insert(fid, krusty::ir::IrValueClassAnyMember::ToString);
@@ -626,7 +645,10 @@ pub(super) fn synth_value_members(
             args: vec![fv],
         });
         let ibody = ret_block(ir, call);
-        let fid = add_inst(ir, "hashCode", vec![], int_ir, ibody);
+        let fid = match generated_hash_code {
+            Some(function) => adopt_delegator(ir, function, ibody),
+            None => add_inst(ir, "hashCode", vec![], int_ir, ibody),
+        };
         realized.any_delegators.insert(fid);
         ir.jvm_value_class_any_delegators
             .insert(fid, krusty::ir::IrValueClassAnyMember::HashCode);
@@ -732,7 +754,10 @@ pub(super) fn synth_value_members(
         });
         let ibody = ret_block(ir, call);
         // `Any.equals` declares `other: Any?`, and an override keeps that parameter type.
-        let fid = add_inst(ir, "equals", vec![Ty::nullable(any_ir)], bool_ir, ibody);
+        let fid = match generated_equals {
+            Some(function) => adopt_delegator(ir, function, ibody),
+            None => add_inst(ir, "equals", vec![Ty::nullable(any_ir)], bool_ir, ibody),
+        };
         realized.any_delegators.insert(fid);
         ir.jvm_value_class_any_delegators
             .insert(fid, krusty::ir::IrValueClassAnyMember::Equals);
@@ -1200,9 +1225,7 @@ fn property_hash(ir: &mut IrFile, underlying: Ty) -> ExprId {
     });
     let zero = ir.add_expr(IrExpr::Const(krusty::ir::IrConst::Int(0)));
     let non_null = hash(ir);
-    ir.add_expr(IrExpr::When {
-        branches: vec![(Some(is_null), zero), (None, non_null)],
-    })
+    ir.add_when(vec![(Some(is_null), zero), (None, non_null)], Ty::Int)
 }
 
 /// Decrement every value-slot index (`GetValue`/`SetValue`/`Variable`) reachable from `root` by one —

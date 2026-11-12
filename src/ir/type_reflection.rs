@@ -246,7 +246,7 @@ impl IrFile {
     }
 
     /// The expression is a synthesized function adapter. Its class omits the source-lambda record.
-    pub(crate) fn note_synthesized_lambda(&mut self, expression: u32) {
+    pub fn note_synthesized_lambda(&mut self, expression: u32) {
         let IrExpr::Lambda { impl_fn, .. } = self.exprs[expression as usize] else {
             panic!("a synthesized adapter is a lambda expression");
         };

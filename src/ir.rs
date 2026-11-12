@@ -118,7 +118,9 @@ mod when_facts;
 pub use crate::enclosing_declarations::EnclosingDeclaration;
 /// A declared type's checked source spelling, which the IR carries per declaration
 /// ([`IrFile::prop_declared_spellings`]) as part of its contract with backends and plugins.
-pub use crate::fir::{CallableId, ExternalCallableId, SourceFileId};
+pub use crate::fir::{
+    CallableId, ExternalCallableId, ExternalPropertyId, PropertyId, SourceFileId,
+};
 pub use crate::spelling::{Spelled, TypeUseAnnotation};
 pub use crate::types::EqualityMode;
 pub(crate) use annotations::PackagePropertyAnnotations;
@@ -179,13 +181,14 @@ pub use package_declarations::{
 pub use progression::{IrProgressionSource, IrRuntimeFunction};
 pub use properties::{
     IrAccessorLines, IrCheckedProperty, IrInlinePropertySplice, IrInlineTypeSubstitution,
-    IrMemberKind, IrModuleProperty, IrProperty, IrPropertyModality, IrPropertyModifiers,
-    IrPropertyOrigin, MemberExtProp, PrivatePropertyAccessorCall,
+    IrMemberKind, IrModuleProperty, IrProperty, IrPropertyDeclarationSource, IrPropertyModality,
+    IrPropertyModifiers, IrPropertyOrigin, MemberExtProp, PrivatePropertyAccessorCall,
 };
 pub use property_layouts::IrLocalPropertyLayout;
 pub use references::{
     FuncRef, IrCallableReference, IrCallableReferenceTarget, IrClassifierCallable,
-    IrConstructorReferenceDeclaration, PropRef, ReflectedCallable,
+    IrConstructorReferenceDeclaration, IrPropertyFunctionReference, IrReferencedProperty, PropRef,
+    ReflectedCallable,
 };
 pub use sam_target::{IrSamMethod, IrSamTarget, IrSamTypeParameter};
 pub use static_properties::{IrStatic, IrStaticAccessor, IrStaticAccessors};
@@ -1297,6 +1300,15 @@ pub struct IrValueClassTypeOperation {
     pub role: IrValueClassTypeRole,
 }
 
+/// The inline function whose body an expansion copied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum IrInlineCallee {
+    /// A same-module inline callable, by its stable checked identity.
+    Module(crate::fir::CallableId),
+    /// An inline dependency function, expanded from its template in this file.
+    Dependency(crate::fir::ExternalCallableId),
+}
+
 /// A call-site copy of a lambda implementation.
 ///
 /// The record keeps the checked declaration identities and lexical containment that caused the
@@ -1317,8 +1329,8 @@ pub struct IrSpecializedFunction {
     /// Source spelling of that declaration, or the deliberately empty spelling of a constructor or
     /// unnamed initializer. This is rendering provenance, never the expansion identity.
     pub caller_source_name: String,
-    /// Stable checked identity of the same-module inline callable that was expanded.
-    pub inline_callee: crate::fir::CallableId,
+    /// The inline callable that was expanded.
+    pub inline_callee: IrInlineCallee,
     /// Source spelling retained for target-specific debug/artifact rendering.
     pub inline_callee_source_name: String,
     /// Specialized implementation lexically containing this one. Nested copies retain containment
@@ -1345,7 +1357,7 @@ pub struct IrSpecializedAnonymousClass {
     pub caller: Option<IrEnclosure>,
     pub caller_is_default: bool,
     pub caller_source_name: String,
-    pub inline_callee: crate::fir::CallableId,
+    pub inline_callee: IrInlineCallee,
     pub inline_callee_source_name: String,
     /// For each of the callee's operands, by its value slot: the caller's `crossinline` parameter
     /// the expansion binds it to, when it is one. A copy remaps its captures' provenance through
@@ -1704,6 +1716,9 @@ pub struct IrFile {
     /// What the Compose plugin recorded from this file's source at the handoff, for its body
     /// transform. `None` unless the plugin is active and the file declares a composable function.
     pub compose: Option<Box<crate::plugins::compose::ComposeFileFacts>>,
+    /// What the atomicfu plugin recorded from this file's source at the handoff, for its body
+    /// transform. `None` unless the plugin is active and the file declares an atomic it lowers.
+    pub atomicfu: Option<Box<crate::plugins::atomicfu::AtomicfuFileFacts>>,
     /// Package functions a compiler plugin gave physical parameters their declaration does not
     /// have (Compose's `$composer` and `$changed`). Metadata records their realized signature.
     pub plugin_extended_signatures: crate::fx_hash::HashSet<FunId>,

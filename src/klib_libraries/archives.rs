@@ -402,6 +402,19 @@ impl<'a> OpenedKlibLibraries<'a> {
             body_provider_snapshots.push((record.module.clone(), body_provider));
         }
         inventory.attach_defaults(&defaults);
+        let (body_libraries, inline_body_libraries) = match &platform_module {
+            Some(platform) => (
+                body_libraries
+                    .into_iter()
+                    .map(|library| library.depending_on_platform(platform))
+                    .collect(),
+                inline_body_libraries
+                    .into_iter()
+                    .map(|library| library.depending_on_platform(platform))
+                    .collect(),
+            ),
+            None => (body_libraries, inline_body_libraries),
+        };
         let bodies = KlibDeclarationBodies::from_body_libraries(body_libraries)
             .map_err(KlibLibrariesOpenError::Bodies)?;
         let inline_bodies = KlibDeclarationBodies::from_body_libraries(inline_body_libraries)
@@ -419,7 +432,7 @@ impl<'a> OpenedKlibLibraries<'a> {
         });
         let libraries = KlibLibraries::over_with_bodies_and_snapshot(
             std::rc::Rc::new(inventory),
-            std::rc::Rc::new(bodies),
+            bodies,
             std::rc::Rc::new(inline_bodies),
             body_snapshot,
         );
