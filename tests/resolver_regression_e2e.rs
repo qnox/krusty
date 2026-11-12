@@ -2530,24 +2530,24 @@ fun box(): String {
     );
 }
 
-#[test]
-fn an_inapplicable_package_function_falls_through_to_the_default_imported_constructor() {
-    // The same-package `Pair(Int, Int)` takes `Pair(1, 2)`; `Pair("x", 2)` does not fit it, so the
-    // default-imported `kotlin.Pair` constructor on the farther rung builds the pair.
-    let sources = [(
-        "main.kt",
-        r#"package demo
-
-fun Pair(a: Int, b: Int): String = "local"
-
-fun box(): String {
-    val local: String = Pair(1, 2)
-    val pair: kotlin.Pair<String, Int> = Pair("x", 2)
-    return if (local == "local" && pair.first == "x" && pair.second == 2) "OK" else "FAIL: $local"
-}
-"#,
-    )];
-    assert_accepted_and_runs_files(&sources, "ResolverPackageFunctionDefaultConstructor");
+/// Run a portable box regression as the module it declares and compare its classes with
+/// kotlinc's.
+fn assert_box_regression_matches_kotlinc(source: &str, stem: &str) {
+    let (blocks, java) = krusty::conformance::split_files(source);
+    assert!(java.is_empty(), "{stem} declares no Java sources");
+    let files = if blocks.is_empty() {
+        vec![(format!("{stem}.kt"), source.to_string())]
+    } else {
+        blocks
+            .into_iter()
+            .map(|(name, body)| (format!("{name}.kt"), body))
+            .collect()
+    };
+    let sources = files
+        .iter()
+        .map(|(name, body)| (name.as_str(), body.as_str()))
+        .collect::<Vec<_>>();
+    assert_accepted_and_runs_files(&sources, stem);
     let differences = common::classes_against_kotlinc_module(&sources).differences();
     assert!(
         differences.is_empty(),
@@ -2557,62 +2557,26 @@ fun box(): String {
 }
 
 #[test]
-fn a_star_imported_function_outranks_the_default_imported_constructor() {
-    // `import other.*` puts `Triple` on a nearer import rung than the builtin `kotlin.Triple`.
-    let sources = [
-        (
-            "other.kt",
-            r#"package other
-
-fun Triple(a: Int, b: Int, c: Int): String = "star"
-"#,
-        ),
-        (
-            "main.kt",
-            r#"package demo
-
-import other.*
-
-fun box(): String {
-    val star: String = Triple(1, 2, 3)
-    return if (star == "star") "OK" else "FAIL: $star"
+fn a_package_or_star_imported_function_outranks_the_default_imported_constructor() {
+    assert_box_regression_matches_kotlinc(
+        include_str!("box_regressions/packageFunctionShadowsDefaultConstructor.kt"),
+        "ResolverPackageFunctionShadowsConstructor",
+    );
 }
-"#,
-        ),
-    ];
-    assert_accepted_and_runs_files(&sources, "ResolverStarImportFunctionConstructor");
-    let differences = common::classes_against_kotlinc_module(&sources).differences();
-    assert!(
-        differences.is_empty(),
-        "classes differ from kotlinc's:\n\n{}",
-        differences.join("\n\n")
+
+#[test]
+fn an_inapplicable_package_function_falls_through_to_a_star_imported_constructor() {
+    assert_box_regression_matches_kotlinc(
+        include_str!("box_regressions/packageFunctionFallsThroughToStarImportedConstructor.kt"),
+        "ResolverPackageFunctionStarImportedConstructor",
     );
 }
 
 #[test]
 fn an_explicitly_imported_classifier_outranks_a_same_package_function() {
-    // `import kotlin.Pair` puts the classifier on the explicit-import rung, nearer than the
-    // same-package function, so `Pair(1, 2)` constructs the pair.
-    let sources = [(
-        "main.kt",
-        r#"package demo
-
-import kotlin.Pair
-
-fun Pair(a: Int, b: Int): String = "local"
-
-fun box(): String {
-    val pair = Pair(1, 2)
-    return if (pair.first == 1 && pair.second == 2) "OK" else "FAIL"
-}
-"#,
-    )];
-    assert_accepted_and_runs_files(&sources, "ResolverExplicitImportConstructor");
-    let differences = common::classes_against_kotlinc_module(&sources).differences();
-    assert!(
-        differences.is_empty(),
-        "classes differ from kotlinc's:\n\n{}",
-        differences.join("\n\n")
+    assert_box_regression_matches_kotlinc(
+        include_str!("box_regressions/explicitImportClassifierOutranksPackageFunction.kt"),
+        "ResolverExplicitImportConstructor",
     );
 }
 
