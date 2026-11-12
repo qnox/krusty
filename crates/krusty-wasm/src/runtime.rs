@@ -16,7 +16,11 @@
 //! `String` is on every target. A string constant is copied out of the module's passive data
 //! segment with `array.new_data`.
 
+mod exception_classes;
 mod object_equality;
+mod object_strings;
+
+pub(super) use object_strings::ObjectStrings;
 
 use krusty::fx_hash::HashMap;
 
@@ -67,6 +71,8 @@ pub(super) struct Runtime {
     /// Kotlin's `hashCode()` rules.
     pub(super) hashing: Hashing,
     pub(super) exceptions: ExceptionTransport,
+    /// `toString()` of a runtime reference, and `kotlin.Any`'s and `kotlin.Throwable`'s defaults.
+    pub(super) object_strings: ObjectStrings,
     /// The box types of the primitives this module carries as references.
     pub(super) boxes: Boxes,
     /// The table types of the function values this module creates.
@@ -111,14 +117,17 @@ impl Runtime {
     pub(super) fn start(module: &mut Module, host: &Host) -> Self {
         let (chars, string) = Self::declare_types(module);
         let mut objects = ObjectRoot::declare(module, ValType::nullable(string));
+        let identity = IdentityObjects::declare(module, &objects);
         let exceptions =
-            ExceptionTransport::declare(module, &mut objects, ValType::nullable(string));
+            ExceptionTransport::declare(module, &objects, &identity, ValType::nullable(string));
         let references = module.ty(CompositeType::Array(FieldType {
             storage: StorageType::Val(super::objects::REFERENCE),
             mutable: true,
         }));
-        let identity = IdentityObjects::declare(module, &objects);
-        let arrays = ArrayObjects::declare(module, &mut objects, &identity, references);
+        let object_strings = ObjectStrings::declare(module, host.target());
+        let array_to_string = module.declare();
+        let arrays =
+            ArrayObjects::declare(module, &mut objects, &identity, references, array_to_string);
         let object_equals = module.declare();
         let callable_references = CallableReferences::declare(module, &objects, object_equals);
         let mut runtime = Self {
@@ -142,6 +151,7 @@ impl Runtime {
             identity,
             hashing: Hashing::declare(module),
             exceptions,
+            object_strings,
             boxes: Boxes::default(),
             functions: FunctionShapes::default(),
             callable_references,
@@ -160,6 +170,8 @@ impl Runtime {
         runtime.define_string_or_null(module);
         runtime.define_write_string(module, host);
         runtime.define_division(module);
+        runtime.define_object_strings(module);
+        runtime.define_reference_array_to_string(module, array_to_string);
         runtime
             .hashing
             .define(module, &runtime.objects, runtime.string, runtime.chars);

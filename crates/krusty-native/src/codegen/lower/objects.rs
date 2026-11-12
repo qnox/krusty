@@ -797,26 +797,8 @@ impl<'a> FileLowering<'a> {
             return (None, Some(simple), CLASS_NAMES_LOCAL);
         }
 
-        let mut nested = Vec::new();
-        let mut outer = declaration.fq_name;
-        while let Some(owner) = outer.nested_owner() {
-            nested.push(
-                outer
-                    .nested_segment_within(owner)
-                    .unwrap_or_else(|| outer.nested_segment_ref())
-                    .to_string(),
-            );
-            outer = owner;
-        }
-        let simple = nested
-            .first()
-            .cloned()
-            .unwrap_or_else(|| outer.segment_ref().to_string());
-        let mut qualified = outer.render().replace('/', ".");
-        for segment in nested.iter().rev() {
-            qualified.push('.');
-            qualified.push_str(segment);
-        }
+        let krusty::backend::class_names::ClassNames { qualified, simple } =
+            krusty::backend::class_names::member_class_names(declaration.fq_name);
         (Some(qualified), Some(simple), CLASS_NAMES_MEMBER)
     }
 

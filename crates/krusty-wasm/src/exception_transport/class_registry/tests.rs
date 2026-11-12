@@ -1,14 +1,18 @@
 use super::*;
-use crate::{exception_transport::ExceptionTransport, objects::ObjectRoot, runtime::Runtime};
+use crate::{
+    exception_transport::ExceptionTransport, identity::IdentityObjects, objects::ObjectRoot,
+    runtime::Runtime,
+};
 use krusty::backend::{BackendModuleFacts, CheckedBackendClassifiers};
 use krusty::libraries::LibraryType;
 
 fn runtime() -> (Module, ExceptionTransport) {
     let mut module = Module::default();
     let (_, string) = Runtime::declare_types(&mut module);
-    let mut objects = ObjectRoot::declare(&mut module, ValType::nullable(string));
+    let objects = ObjectRoot::declare(&mut module, ValType::nullable(string));
+    let identity = IdentityObjects::declare(&mut module, &objects);
     let transport =
-        ExceptionTransport::declare(&mut module, &mut objects, ValType::nullable(string));
+        ExceptionTransport::declare(&mut module, &objects, &identity, ValType::nullable(string));
     (module, transport)
 }
 

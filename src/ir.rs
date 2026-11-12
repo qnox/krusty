@@ -79,6 +79,7 @@ pub(crate) mod lambda_exits;
 mod lifting_sequences;
 mod local_class_names;
 mod local_delegates;
+mod loop_exits;
 pub use local_delegates::IrLocalDelegateAccess;
 pub use local_delegates::{IrInlineDeclaration, IrLocalDelegateAccessorPlan, IrLocalDelegatePlan};
 mod declared_parameters;

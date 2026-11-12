@@ -28,7 +28,7 @@ impl Body<'_> {
                 .array_read_elem()
                 .ok_or_else(|| "a reference array with no readable element type".to_string())?;
             // Each element answers through its own `hashCode` slot, which must have a body.
-            if self.may_reach_any_default(element, AnyMember::HashCode)? {
+            if self.may_reach_unrealized(element, AnyMember::HashCode)? {
                 return Err("`kotlin.Any.hashCode`'s identity hash".to_string());
             }
         } else if !self

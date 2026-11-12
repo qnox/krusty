@@ -55,14 +55,16 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
 
 use krusty::backend::class_tables::module_interfaces::ModuleInterfaces;
 use krusty::backend::class_tables::module_slots::ModuleSlotPlan;
+use krusty::backend::class_tables::AnyMember;
 use krusty::backend::{CheckedBackendCallables, DependencyExportSignatures};
-use krusty::ir::{Callee, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp};
+use krusty::ir::{Callee, ClassId, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp};
 use krusty::types::{EqualityMode, Ty, TyKind};
 
 use super::super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
 use super::super::numeric_conversions;
 use super::super::objects::REFERENCE;
 use super::super::runtime::*;
+use super::any_member_reach::FileReach;
 use super::callable_registry::{CallableRegistry, FileCallTargets};
 use super::classes::{FileClasses, RealizedProperties};
 use super::property_registry::PropertyRegistry;
@@ -77,6 +79,9 @@ pub(super) struct LoweredFile {
     /// The function running this file's top-level property initializers in declaration order,
     /// when it has any.
     pub(super) initializer: Option<u32>,
+    /// The file's calls through `kotlin.Any`'s slots that can reach other files' objects, and its
+    /// own slots with no body.
+    pub(super) reach: FileReach,
 }
 
 /// One file's checked IR and the facts frozen beside it.
@@ -214,6 +219,7 @@ pub(super) fn lower_file(
         )?;
         Some(classes)
     };
+    let reach = std::cell::RefCell::new(FileReach::default());
     let context = FileContext {
         array_range_checks,
         classifiers,
@@ -228,6 +234,7 @@ pub(super) fn lower_file(
         callables,
         inert_singleton_bindings: &inert_singleton_bindings,
         properties: property_registry,
+        reach: &reach,
     };
     for (id, function) in ir.functions.iter().enumerate() {
         let (Some(index), Some(signature)) = (indices[id], signatures[id]) else {
@@ -352,9 +359,23 @@ pub(super) fn lower_file(
         None
     };
     callable_registry.publish(ir, dependency_exports, &indices)?;
+    let mut reach = reach.into_inner();
+    if let Some(classes) = &classes {
+        for class in 0..ir.classes.len() {
+            for member in AnyMember::ALL {
+                if !classes.realizes(class as ClassId, member) {
+                    reach.bodiless_class(member);
+                }
+            }
+        }
+    }
+    if objects::holds_unprinted_values(ir) {
+        reach.bodiless_value(AnyMember::ToString);
+    }
     Ok(LoweredFile {
         functions: indices,
         initializer,
+        reach,
     })
 }
 
@@ -381,6 +402,8 @@ struct FileContext<'a> {
     inert_singleton_bindings: &'a HashSet<krusty::ir::ExprId>,
     /// Top-level property storage reserved or published by files of this source module.
     properties: &'a PropertyRegistry,
+    /// What the file's bodies record for the module about calls through `kotlin.Any`'s slots.
+    reach: &'a std::cell::RefCell<FileReach>,
 }
 
 /// The wasm value a Kotlin type is carried as; `None` for a type with no value (`Unit`,
@@ -607,6 +630,8 @@ struct Body<'a> {
     callables: &'a CheckedBackendCallables,
     inert_singleton_bindings: &'a HashSet<krusty::ir::ExprId>,
     properties: &'a PropertyRegistry,
+    /// What this file's bodies record for the module about calls through `kotlin.Any`'s slots.
+    reach: &'a std::cell::RefCell<FileReach>,
     code: Code,
     /// Locals beyond the parameters, in index order.
     locals: Vec<ValType>,
@@ -671,6 +696,7 @@ impl<'a> Body<'a> {
             callables: context.callables,
             inert_singleton_bindings: context.inert_singleton_bindings,
             properties: context.properties,
+            reach: context.reach,
             code: Code::default(),
             locals: Vec::new(),
             next_local: parameters.len() as u32,
@@ -797,17 +823,14 @@ impl<'a> Body<'a> {
         // A statement-shaped operand may return/throw before its enclosing value use resumes.
         // Its Unit annotation must stay Unit; only the common completion proof removes the
         // impossible conversion. Live Unit operands still fail below rather than invent a value.
-        if source_ty == Some(Ty::Unit)
-            && carrier(target)?.is_some()
-            && self.ir.expr_diverges_by(id, &|_, _| false)
-        {
+        if source_ty == Some(Ty::Unit) && carrier(target)?.is_some() && self.diverges(id) {
             self.code.unreachable();
             return Ok(());
         }
         let Some(source) = source_ty else {
             // Restore stack polymorphism after structured control only when completion proves
             // divergence: an inlined generic result may retain Nothing but complete normally.
-            if self.ir.expr_diverges_by(id, &|_, _| false) {
+            if self.diverges(id) {
                 self.code.unreachable();
             }
             return Ok(());
@@ -820,6 +843,13 @@ impl<'a> Body<'a> {
             );
         }
         self.coerce_emitted_value(source, target)
+    }
+
+    /// Whether evaluating `id` as a value never completes: it ends in a jump or a `throw`, or in an
+    /// inline-return frame that no reachable exit leaves.
+    fn diverges(&self, id: u32) -> bool {
+        self.ir
+            .expr_diverges_by(id, &|leaf, _| self.ir.loop_never_exits(leaf))
     }
 
     /// Convert the value already on the Wasm stack from its emitted declaration type to the type

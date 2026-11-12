@@ -222,7 +222,7 @@ impl Body<'_> {
     /// `IllegalArgumentException("Negative array size")`, as Kotlin/Wasm's array constructors do.
     pub(super) fn new_array(&mut self, array: Ty, size: u32) -> Result<(), Unsupported> {
         let (form, _) = self.array_form(array)?;
-        let exception = self.runtime.exceptions.ensure_class(
+        let exception = self.runtime.exception_class(
             self.module,
             self.classifiers,
             RuntimeExceptionKind::IllegalArgument.classifier(),
@@ -245,7 +245,7 @@ impl Body<'_> {
             exception,
             Some(message),
             self.runtime.string,
-        );
+        )?;
         self.code
             .throw(self.runtime.exceptions.tag)
             .end()
@@ -368,7 +368,7 @@ impl Body<'_> {
         if !self.array_range_checks {
             return Ok(());
         }
-        let exception = self.runtime.exceptions.ensure_class(
+        let exception = self.runtime.exception_class(
             self.module,
             self.classifiers,
             RuntimeExceptionKind::IndexOutOfBounds.classifier(),
@@ -386,7 +386,7 @@ impl Body<'_> {
             exception,
             None,
             self.runtime.string,
-        );
+        )?;
         self.code.throw(self.runtime.exceptions.tag).end();
         Ok(())
     }
