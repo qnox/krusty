@@ -72,9 +72,12 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
     };
 
     // Pass 2: resolve signatures/properties against the now-complete type universe.
-    let mut table = SymbolTable::default();
-    table.source_fragments =
-        crate::source::SourceFragments::new(files.iter().map(|file| file.fragment));
+    let mut table = SymbolTable {
+        source_fragments: crate::source::SourceFragments::new(
+            files.iter().map(|file| file.fragment),
+        ),
+        ..SymbolTable::default()
+    };
     table
         .source_fragments
         .publish_alias_sources(file_type_aliases.iter().enumerate().flat_map(
@@ -3039,6 +3042,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         type_parameters: &class_type_parameters,
                         annotations: &resolved_annotations,
                         annotation_class_arguments: &resolved_annotation_class_arguments,
+                        declared_functions: &frontend_declared_functions(&methods),
                     };
                     let mut contributed_members = Vec::new();
                     frontend_plugins.generate_frontend_declarations(
@@ -3053,45 +3057,8 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     let mut contributed_companion_methods = MethodMap::default();
                     let mut contributed_companion_order = Vec::new();
                     for member in contributed_members {
-                        let required = member.params.len();
-                        assert_eq!(
-                            member.param_names.len(),
-                            required,
-                            "a frontend plugin declaration publishes one identity per parameter"
-                        );
-                        let signature = Signature {
-                            params: member.params,
-                            ret: member.ret,
-                            generic_sig: member.generic_sig,
-                            projected_return_hazard: false,
-                            flags: SigFlags::default().with_is_final(true),
-                            annotations: Vec::new(),
-                            equality_bound: None,
-                            vararg_index: None,
-                            required,
-                            param_defaults: vec![].into(),
-                            exact_params: vec![].into(),
-                            no_infer_params: vec![].into(),
-                            implicit_integer_coercion: vec![].into(),
-                            param_default_values: Vec::new(),
-                            param_names: member.param_names,
-                            parameter_identities: Vec::new(),
-                            lambda_param_types: vec![],
-                            lambda_recv: vec![].into(),
-                            inline_modifiers: Vec::new(),
-                            visibility: Visibility::Public,
-                            context_count: 0,
-                            source_decl: None,
-                            stable_declaration: None,
-                            source_file: None,
-                            source_member: None,
-                            source_receiver: None,
-                            package: TypeName::ROOT,
-                            contract: None,
-                            plugin_expression: member.plugin_expression,
-                        };
-                        let name = member.name;
-                        match member.owner {
+                        let (name, owner, signature) = frontend_plugin_member_signature(member);
+                        match owner {
                             crate::plugins::FrontendCallableOwner::Classifier => {
                                 if !declared_callable_order.contains(&name) {
                                     declared_callable_order.push(name.clone());

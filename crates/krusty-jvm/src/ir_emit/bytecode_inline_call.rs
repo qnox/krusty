@@ -541,15 +541,15 @@ impl Emitter<'_> {
         } else {
             0
         };
-        code.splice_inline(
-            &rewritten.bytes,
-            &rewritten.external_branches,
-            body.max_stack,
-            frame.top_local,
-            argument_words,
-            result_words,
-            rewritten.falls_through,
-        );
+        code.splice_inline(InlineSplice {
+            bytes: &rewritten.bytes,
+            external_branches: &rewritten.external_branches,
+            body_stack: body.max_stack,
+            top_local: frame.top_local,
+            arg_words: argument_words,
+            ret_words: result_words,
+            falls_through: rewritten.falls_through,
+        });
         self.frame.reserve_through(frame.top_local);
         self.record_spliced_lines(
             &rewritten.lines,
@@ -953,11 +953,12 @@ impl Emitter<'_> {
                     let slot = base + temporary;
                     self.frame.reserve_through(slot);
                     let operand_frame = self.frame.mark();
-                    let lines = code.line_entry_count();
+                    // kotlinc reads a captured value through the lambda, with no position.
+                    code.line_mapper().open_no_line_scope();
                     self.emit_value(value, code);
                     let evaluated = self.value_ty(value);
                     self.unbox_captured_value_class(evaluated, ty, code);
-                    code.withdraw_lines_since(lines);
+                    code.line_mapper().close_no_line_scope();
                     self.frame.rewind_to(operand_frame);
                     let entered = self.frame.enter_temp(TempRole::InlineArgument, ty);
                     debug_assert_eq!(entered.slot(), slot);
@@ -1010,24 +1011,26 @@ impl Emitter<'_> {
         }
 
         // Like any call, an inline call states its line once its arguments are evaluated; that line
-        // is the call site the body's lines are mapped against.
-        let since = match code.value_boundary_here() {
-            Some((first, value)) if debug_lines::evaluates_to(self.ir, value, call_expression) => {
-                first
+        // is the call site the body's lines are mapped against. An `@InlineOnly` body whose
+        // ordinary arguments are movable evaluates them where the copied body loads them: kotlinc
+        // generated that code, with its lines, before the call marked its own, and the call's
+        // entry stands ahead of them (see `CodeBuilder::mark_in_place_call_line`).
+        let call_mark = self.expression_start_line(call_expression, code);
+        let marks_in_place = supplies.contains(&Supply::InPlace);
+        let in_place_mark = marks_in_place.then(|| {
+            let pc = code.bytes.len().min(usize::from(u16::MAX)) as u16;
+            (code.line_entry_count(), pc)
+        });
+        if !marks_in_place {
+            if let Some(line) = call_mark {
+                code.mark_line(line);
             }
-            _ => code.line_entry_count(),
+        }
+        let caller_line = match (marks_in_place, call_mark) {
+            (true, Some(line)) => Some(line.min(u32::from(u16::MAX)) as u16),
+            _ => code.current_line(),
         };
-        self.mark_expression_start(call_expression, code);
-        let caller_line = code.current_line();
         let call_line = caller_line.unwrap_or(1);
-        // An `@InlineOnly` body whose ordinary arguments are movable evaluates them where the
-        // copied body loads their temporary. kotlinc generated that code, with its lines, before
-        // the call marked its own line, so the entry is settled once the body has placed them.
-        let deferred_line = if supplies.contains(&Supply::InPlace) {
-            code.defer_line_mark(since)
-        } else {
-            None
-        };
         let claimable = self.claimable_lines();
         let bodies = self.bodies;
         // The body is numbered from the method's scopes so far, its own scope at the call's line
@@ -1080,9 +1083,6 @@ impl Emitter<'_> {
         let inlined = match inlined {
             Ok(inlined) => inlined,
             Err(error) => {
-                if let Some(deferred) = deferred_line {
-                    code.settle_deferred_line(deferred);
-                }
                 for lease in leases {
                     self.release_temporary(lease);
                 }
@@ -1121,8 +1121,8 @@ impl Emitter<'_> {
             code.set_stack_height(0);
         }
         self.write_inlined_node(&inlined, placement, code);
-        if let Some(deferred) = deferred_line {
-            code.settle_deferred_line(deferred);
+        if let (Some((index, pc)), Some(line)) = (in_place_mark, call_mark) {
+            code.mark_in_place_call_line(index, pc, line);
         }
         if spills_operands {
             code.inline_call_marker(false);
@@ -1131,18 +1131,7 @@ impl Emitter<'_> {
         // kotlinc's `markLineNumberAfterInlineIfNeeded`: inside a condition the caller's line is
         // marked again for the jump that follows; elsewhere it is forgotten, so the next mark of
         // any line is written.
-        match caller_line {
-            Some(line)
-                if self.inside_condition
-                    || self
-                        .regeneration_site
-                        .as_ref()
-                        .is_some_and(RegenerationSite::is_class_initializer) =>
-            {
-                code.inlined_line(line)
-            }
-            _ => code.forget_line(),
-        }
+        code.line_after_inline(self.inside_condition);
 
         for lease in leases {
             self.release_temporary(lease);

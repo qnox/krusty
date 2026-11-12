@@ -94,7 +94,6 @@ intrinsicsCompare/intSmartCast.kt
 intrinsicsCompare/longSmartCast.kt
 intrinsicsTrim/trimIndentPositive.kt
 intrinsicsTrim/trimMarginPositive.kt
-invokedynamic/functionRefToJavaInterface.kt
 invokedynamic/streamApi.kt
 isArrayOf.kt
 javaFields.kt

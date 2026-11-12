@@ -21,7 +21,6 @@ mod declaration_bodies;
 mod declaration_modifiers;
 mod declaration_stream;
 mod destructuring;
-mod enum_primary_constructor;
 mod expressions;
 mod file_features;
 mod for_loops;
@@ -33,6 +32,7 @@ mod lambda_literals;
 mod lexical_type_parameters;
 mod line_breaks;
 mod nesting;
+mod primary_constructor_parameters;
 mod properties;
 mod qualified_type_arguments;
 mod return_labels;
@@ -691,6 +691,9 @@ struct Parser<'a> {
     /// The type parameters of the declaration whose `<…>` list was parsed last, with their spans,
     /// so its `where` clause can name the parameter each bound constrains.
     type_parameter_spans: Vec<(String, crate::diag::Span)>,
+    /// The span of each upper bound in the type-parameter list parsed last, from the first token
+    /// of the bound (a type-use annotation included) to the end of its type.
+    type_parameter_bound_spans: Vec<crate::diag::Span>,
     /// The script class name and definition when this file is a Kotlin script.
     script: Option<(String, crate::script_definitions::ScriptDefinition)>,
     /// Current expression-recursion depth (see [`Parser::parse_bp`]). Bounded by
@@ -793,8 +796,10 @@ impl<'a> Parser<'a> {
         features: &LangFeatures,
         script: Option<(&str, &crate::script_definitions::ScriptDefinition)>,
     ) -> Self {
-        let mut file = File::default();
-        file.is_script = script.is_some();
+        let file = File {
+            is_script: script.is_some(),
+            ..File::default()
+        };
         let (t, newline_before) = line_breaks::grammar_tokens(src, tokens);
         Self {
             src,
@@ -827,6 +832,7 @@ impl<'a> Parser<'a> {
             declaration_name_span: Span::new(0, 0),
             declaration_prefix: Default::default(),
             type_parameter_spans: Vec::new(),
+            type_parameter_bound_spans: Vec::new(),
             script: script.map(|(file_stem, definition)| {
                 (scripts::script_class_name(file_stem), definition.clone())
             }),
@@ -1139,7 +1145,7 @@ impl<'a> Parser<'a> {
                     if self
                         .t
                         .get(self.i + 1)
-                        .map_or(false, |t| self.token_keyword_text(*t, "interface")) =>
+                        .is_some_and(|t| self.token_keyword_text(*t, "interface")) =>
                 {
                     self.bump(); // 'fun'
                     let mut d = self.parse_interface();
@@ -1185,7 +1191,7 @@ impl<'a> Parser<'a> {
                 // `data class` / `data object` — `data` is a soft keyword (a plain identifier elsewhere).
                 TokenKind::Ident
                     if self.keyword_text("data")
-                        && self.t.get(self.i + 1).map_or(false, |t| {
+                        && self.t.get(self.i + 1).is_some_and(|t| {
                             t.kind == TokenKind::KwClass || self.token_keyword_text(*t, "object")
                         }) =>
                 {
@@ -1205,7 +1211,7 @@ impl<'a> Parser<'a> {
                         && self
                             .t
                             .get(self.i + 1)
-                            .map_or(false, |t| t.kind == TokenKind::Ident) =>
+                            .is_some_and(|t| t.kind == TokenKind::Ident) =>
                 {
                     let d = self.parse_object();
                     self.register_top_level_classifier(d, &mods, decls_before);
@@ -1218,7 +1224,7 @@ impl<'a> Parser<'a> {
                         && self
                             .t
                             .get(self.i + 1)
-                            .map_or(false, |t| t.kind == TokenKind::KwClass) =>
+                            .is_some_and(|t| t.kind == TokenKind::KwClass) =>
                 {
                     self.bump(); // 'annotation'
                     let mut d = self.parse_class();
@@ -1231,7 +1237,7 @@ impl<'a> Parser<'a> {
                         && self
                             .t
                             .get(self.i + 1)
-                            .map_or(false, |t| t.kind == TokenKind::KwClass) =>
+                            .is_some_and(|t| t.kind == TokenKind::KwClass) =>
                 {
                     let d = self.parse_enum();
                     self.register_top_level_classifier(d, &mods, decls_before);
@@ -1244,7 +1250,7 @@ impl<'a> Parser<'a> {
                         && self
                             .t
                             .get(self.i + 1)
-                            .map_or(false, |t| t.kind == TokenKind::Ident) =>
+                            .is_some_and(|t| t.kind == TokenKind::Ident) =>
                 {
                     let mut d = self.parse_interface();
                     if is_sealed {
@@ -1479,14 +1485,22 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Consume an `init` keyword and its block, recording the KEYWORD's span against the resulting
-    /// block expression. A diagnostic about an initializer block points at `init`, which the block
-    /// expression's own span (starting at `{`) does not cover.
+    /// Consume an `init` keyword and its block, recording the keyword's span and the annotations
+    /// of the member prefix before it against the resulting block expression.
     fn parse_init_block(&mut self) -> ExprId {
+        let annotations = self.take_pending_annotations();
+        let annotation_args = self.take_pending_annotation_args();
         let keyword = self.tok().span;
         self.bump(); // 'init'
         let block = self.parse_block_expr(false);
-        self.file.init_block_keywords.insert(block, keyword);
+        self.file.init_blocks.insert(
+            block,
+            InitBlockHeader {
+                keyword,
+                annotations,
+                annotation_args,
+            },
+        );
         block
     }
 
@@ -1612,10 +1626,11 @@ impl<'a> Parser<'a> {
         self.bump(); // `typealias`
         let name = self.ident_or_error("typealias name");
         let name_span = self.declaration_name_span;
-        let type_params = if self.at(TokenKind::Lt) {
-            self.parse_type_params(start.lo).0
+        let (type_params, type_param_bound_spans) = if self.at(TokenKind::Lt) {
+            let names = self.parse_type_params(start.lo).0;
+            (names, std::mem::take(&mut self.type_parameter_bound_spans))
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         self.expect(TokenKind::Eq, "'='");
         let target = self.parse_type();
@@ -1623,6 +1638,7 @@ impl<'a> Parser<'a> {
         crate::ast::TypeAliasDecl {
             name,
             type_params,
+            type_param_bound_spans,
             target,
             span: Span::new(start.lo, end.hi),
             name_span,
@@ -1983,7 +1999,8 @@ impl<'a> Parser<'a> {
         }
         let has_primary_ctor = self.at(TokenKind::LParen);
         let (props, ctor_close_lo) = if has_primary_ctor {
-            self.parse_enum_primary_constructor_parameters()
+            let parsed = self.parse_primary_constructor_parameters();
+            (parsed.parameters, parsed.close_lo)
         } else {
             (Vec::new(), 0)
         };
@@ -2763,7 +2780,8 @@ impl<'a> Parser<'a> {
             }
         }
         let header_ctor_kw = self.at(TokenKind::Ident) && self.keyword_text("constructor");
-        let mut ctor_decl_offset = header_ctor_kw.then(|| self.tok().span.lo).unwrap_or(0);
+        let header_lo = self.tok().span.lo;
+        let mut ctor_decl_offset = if header_ctor_kw { header_lo } else { 0 };
         if header_ctor_kw {
             self.bump();
         }
@@ -2778,90 +2796,16 @@ impl<'a> Parser<'a> {
         if ctor_decl_offset == 0 && self.at(TokenKind::LParen) {
             ctor_decl_offset = primary_ctor_open;
         }
-        let has_primary_ctor_parens = self.eat(TokenKind::LParen);
+        let has_primary_ctor_parens = self.at(TokenKind::LParen);
         let mut primary_constructor_parameters_span = None;
         let header_has_primary = header_ctor_kw || has_primary_ctor_parens;
         if has_primary_ctor_parens {
-            self.skip_semicolons();
-            while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-                let declaration_start = self.tok().span.lo;
-                let mut pannos = Vec::new();
-                let mut pannos_args = Vec::new();
-                let mut cpmods = Vec::new();
-                self.begin_declaration_prefix();
-                if self.at(TokenKind::At)
-                    || (self.at(TokenKind::Ident) && self.at_modifier() && self.text() != "value")
-                {
-                    cpmods = self.skip_decl_prefix(); // `private val x`, `@Anno val y`, `vararg xs`
-                    pannos = self.take_pending_annotations();
-                    pannos_args = self.take_pending_annotation_args();
-                }
-                self.record_declaration_prefix(declaration_start);
-                let is_vararg = cpmods.iter().any(|m| m == "vararg");
-                let (is_property, is_var) = match self.kind() {
-                    TokenKind::KwVal => {
-                        self.bump();
-                        (true, false)
-                    }
-                    TokenKind::KwVar => {
-                        self.bump();
-                        (true, true)
-                    }
-                    _ => (false, false), // a plain constructor parameter (not a property)
-                };
-                if is_property {
-                    self.record_external_property_parameter(&cpmods);
-                }
-                let pspan = self.tok().span;
-                let pname = self.ident_or_error("parameter name");
-                self.expect(TokenKind::Colon, "':'");
-                self.skip_semicolons(); // a wrapped declaration puts the type on the next line (`val x:\n  T`)
-                let ty = self.parse_vararg_aware_type(is_vararg);
-                let default = if self.eat(TokenKind::Eq) {
-                    self.skip_semicolons();
-                    Some(self.parse_expr())
-                } else {
-                    None
-                };
-                let declaration_end = self.t[self.i.saturating_sub(1)].span.hi;
-                props.push(PropParam {
-                    name: pname,
-                    ty,
-                    span: pspan,
-                    declaration_span: Span::new(declaration_start, declaration_end),
-                    decl_line: 0,
-                    decl_start_line: 0,
-                    is_vararg,
-                    is_var,
-                    is_property,
-                    is_script_parameter: false,
-                    is_actual: cpmods.iter().any(|modifier| modifier == "actual"),
-                    is_override: cpmods.iter().any(|modifier| modifier == "override"),
-                    has_open_modifier: cpmods.iter().any(|modifier| modifier == "open"),
-                    is_final: cpmods.iter().any(|modifier| modifier == "final"),
-                    is_open: !cpmods.iter().any(|modifier| modifier == "final")
-                        && cpmods
-                            .iter()
-                            .any(|modifier| modifier == "open" || modifier == "override"),
-                    visibility: visibility_of(&cpmods),
-                    has_visibility_modifier: has_visibility_modifier(&cpmods),
-                    default,
-                    annotations: pannos,
-                    annotation_args: pannos_args,
-                });
-                self.skip_semicolons();
-                if !self.eat(TokenKind::Comma) {
-                    break;
-                }
-                self.skip_semicolons();
-            }
+            let parsed = self.parse_primary_constructor_parameters();
+            props = parsed.parameters;
             // The byte offset of the primary ctor's `)` — rewritten to a source LINE by the
             // decl-line post-pass; kotlinc maps the ctor `$default`'s `return` to it.
-            ctor_close_lo = self.tok().span.lo;
-            let close = self.tok().span;
-            if self.expect(TokenKind::RParen, "')'") {
-                primary_constructor_parameters_span = Some(Span::new(primary_ctor_open, close.hi));
-            }
+            ctor_close_lo = parsed.close_lo;
+            primary_constructor_parameters_span = parsed.span;
         }
         // Optional supertype list: `: Iface1, Base(args), Iface2`. Supertypes with `()` are the
         // base class (v0: unsupported → flagged); the rest are implemented interfaces.
@@ -2913,7 +2857,7 @@ impl<'a> Parser<'a> {
                             && self
                                 .t
                                 .get(self.i + 1)
-                                .map_or(false, |t| t.kind == TokenKind::LBrace) =>
+                                .is_some_and(|t| t.kind == TokenKind::LBrace) =>
                     {
                         init_order.push(ClassInit::Block(self.parse_init_block()));
                     }
@@ -2926,7 +2870,7 @@ impl<'a> Parser<'a> {
                             && self
                                 .t
                                 .get(self.i + 1)
-                                .map_or(false, |t| t.kind == TokenKind::KwClass) =>
+                                .is_some_and(|t| t.kind == TokenKind::KwClass) =>
                     {
                         let _ = self.parse_nested_type_decl();
                     }
@@ -3527,7 +3471,7 @@ impl<'a> Parser<'a> {
                             && self
                                 .t
                                 .get(self.i + 1)
-                                .map_or(false, |t| t.kind == TokenKind::LBrace) =>
+                                .is_some_and(|t| t.kind == TokenKind::LBrace) =>
                     {
                         init_order.push(ClassInit::Block(self.parse_init_block()));
                     }
@@ -3536,7 +3480,7 @@ impl<'a> Parser<'a> {
                             && self
                                 .t
                                 .get(self.i + 1)
-                                .map_or(false, |t| t.kind == TokenKind::KwClass) =>
+                                .is_some_and(|t| t.kind == TokenKind::KwClass) =>
                     {
                         let _ = self.parse_nested_type_decl();
                     }
@@ -3767,7 +3711,7 @@ impl<'a> Parser<'a> {
                 && self
                     .t
                     .get(self.i + 1)
-                    .map_or(false, |t| t.kind == TokenKind::Ident)
+                    .is_some_and(|t| t.kind == TokenKind::Ident)
             {
                 self.bump(); // '.'
                 name.push('.');
@@ -4233,7 +4177,7 @@ fn parse_int_literal(text: &str) -> i64 {
 }
 
 fn parse_unsigned_literal_bits(text: &str) -> u64 {
-    let text = text.trim_end_matches(|c: char| matches!(c, 'L' | 'l' | 'u' | 'U'));
+    let text = text.trim_end_matches(['L', 'l', 'u', 'U']);
     let t: String = text.chars().filter(|c| *c != '_').collect();
     let (radix, digits) = if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
         (16, h)

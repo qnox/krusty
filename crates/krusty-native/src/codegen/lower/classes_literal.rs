@@ -17,6 +17,7 @@ impl BodyLowering<'_, '_, '_> {
     /// `::class`, over a value or over a type.
     pub(super) fn class_literal(
         &mut self,
+        literal: u32,
         classifier: Option<Ty>,
         value: Option<u32>,
     ) -> Result<Option<Value>, Unsupported> {
@@ -32,6 +33,17 @@ impl BodyLowering<'_, '_, '_> {
         let Some(ty) = classifier else {
             return Err("a class literal naming neither a type nor a value".into());
         };
+        // Only a reified declaration's own template — an anonymous object or lambda its body
+        // keeps — names its unsubstituted parameter; every executed expansion names the call's
+        // type argument. The template fails as kotlinc's direct call of the declaration does.
+        if ty.non_null().is_ty_param()
+            && self
+                .file
+                .ir
+                .is_reified_template_operation(self.scope, literal, ty.non_null())
+        {
+            return self.reified_direct_call_failure();
+        }
         // `kotlin.Any` has no class descriptor of its own to test against, but the runtime's
         // `kt_type_any` is the class: a reified flow intersection reaches here as `Any::class`.
         let descriptor = match self.file.type_descriptor(ty)? {
@@ -47,15 +59,23 @@ impl BodyLowering<'_, '_, '_> {
 
     /// `k.simpleName` and `k.qualifiedName`, or `None` when the read is somebody else's.
     ///
+    /// The provider authenticated the getter as the platform stdlib's own `KClass` declaration.
     /// Both are read off the descriptor's own Kotlin name, which every type carries because
     /// `toString` already needed it — so no reflection metadata has to exist for either.
     pub(super) fn class_name_accessor(
         &self,
         target: krusty::fir::ExternalPropertyId,
     ) -> Option<&'static str> {
+        use krusty::libraries::{ClassNameKind, CompilerIntrinsic};
         let property = self.file.callables.property(target)?;
         let getter = self.file.callables.callable(property.getter)?;
-        super::super::super::intrinsics::class_name_accessor(getter.physical_owner, &property.name)
+        match getter.compiler_operation()? {
+            CompilerIntrinsic::ClassName(ClassNameKind::Simple) => Some("kt_class_simple_name"),
+            CompilerIntrinsic::ClassName(ClassNameKind::Qualified) => {
+                Some("kt_class_qualified_name")
+            }
+            _ => None,
+        }
     }
 
     pub(super) fn class_name(
