@@ -26,10 +26,10 @@
 7	uses	unify_inferred_ty_with_source
 7	uses	unify_ty_common
 4	uses	unify_member_extension_slot
-282	uses	ty_subst_keep_unbound
+281	uses	ty_subst_keep_unbound
 # Common-supertype joins that one join replaces.
 12	uses	semantic_common_supertype
-10	uses	semantic_common_supertype_inner
+8	uses	semantic_common_supertype_inner
 6	uses	applied_common_supertype
 16	uses	common_super_type
 10	uses	common_super_types
@@ -38,6 +38,6 @@
 8	uses	merge_inferred_lower_bounds_from_symbols
 5	uses	try_branch_join
 # Call selection without a shared applicability ranking.
-177	fns	select_
+176	fns	select_
 # The temporary signature bridge, which must disappear.
-31735	lines	src/resolve/streaming_signature_bridge*
+31731	lines	src/resolve/streaming_signature_bridge*

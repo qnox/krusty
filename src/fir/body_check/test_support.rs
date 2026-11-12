@@ -163,12 +163,16 @@ pub(super) fn prepare_fir_source(
     let mut pass_two_symbols = std::mem::take(&mut analysis.symbols).into_pass_two_symbols();
     let cache = crate::fir::StreamedModuleProjectionCache::default();
     let info = crate::resolve::check_selected_declarations_in_pass_two(
-        file,
-        source.raw(),
-        &selected_roots,
-        &selected_body_spans,
+        crate::resolve::SourceFileUnit {
+            file,
+            file_index: source.raw(),
+        },
+        crate::resolve::SpanBodySelection {
+            declarations: &selected_roots,
+            bodies: &selected_body_spans,
+            stable_bodies: &selected_stable_bodies,
+        },
         &active,
-        &selected_stable_bodies,
         &mut pass_two_symbols,
         &index,
         &cache,

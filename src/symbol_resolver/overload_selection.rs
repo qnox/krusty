@@ -485,7 +485,21 @@ pub(super) fn select_overload(
     ext: ExtCtx<'_>,
 ) -> Option<FunctionInfo> {
     let mut ambiguous = false;
-    select_overload_tracking(lib, recv, name, args, type_args, kind, ext, &mut ambiguous)
+    select_overload_tracking_with_functions(
+        lib,
+        OverloadCall {
+            recv,
+            name,
+            args,
+            type_args,
+            indexed: IndexedConvention::Ordinary,
+        },
+        SelectionMode::Kind(kind),
+        ext,
+        None,
+        &mut ambiguous,
+        None,
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -744,33 +758,6 @@ fn select_separately_mapped_among(
         }
     }
     CandidateSelectionWithTies::None
-}
-
-fn select_overload_tracking(
-    lib: &dyn SemanticPlatform,
-    recv: Ty,
-    name: &str,
-    args: &[CallArgKind],
-    type_args: &[Ty],
-    kind: FnKind,
-    ext: ExtCtx<'_>,
-    ambiguous: &mut bool,
-) -> Option<FunctionInfo> {
-    select_overload_tracking_with_functions(
-        lib,
-        OverloadCall {
-            recv,
-            name,
-            args,
-            type_args,
-            indexed: IndexedConvention::Ordinary,
-        },
-        SelectionMode::Kind(kind),
-        ext,
-        None,
-        ambiguous,
-        None,
-    )
 }
 
 pub(super) fn select_overload_tracking_with_functions(
@@ -1173,14 +1160,16 @@ fn generic_function_call_admits(
         inferred,
     );
     apply_only_input_type_bindings(
-        src,
-        &signature,
+        OnlyInputCall {
+            source: src,
+            signature: &signature,
+            receiver: Some(receiver),
+            arguments: &only_input_actuals,
+            vararg_index: overload.call_sig.vararg_index,
+            expected_result: None,
+        },
         &overload.call_sig.only_input_type_formals,
         type_args,
-        Some(receiver),
-        &only_input_actuals,
-        overload.call_sig.vararg_index,
-        None,
         &mut bindings,
     ) && generic_bindings_satisfy_bounds(&signature, &bindings, |actual, bound| {
         resolution_subtype(src, actual, bound)
@@ -1223,14 +1212,16 @@ pub(super) fn generic_bounds_admit_slots(
         })
         .collect::<Vec<_>>();
     apply_only_input_type_bindings(
-        src,
-        gsig,
+        OnlyInputCall {
+            source: src,
+            signature: gsig,
+            receiver: Some(receiver),
+            arguments: &actuals,
+            vararg_index: call_sig.vararg_index,
+            expected_result: None,
+        },
         &call_sig.only_input_type_formals,
         type_args,
-        Some(receiver),
-        &actuals,
-        call_sig.vararg_index,
-        None,
         &mut binds,
     ) && generic_bindings_satisfy_bounds(gsig, &binds, |actual, bound| {
         actual == bound

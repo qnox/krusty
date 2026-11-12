@@ -2875,15 +2875,13 @@ fn common_ir_sink_prepares_inline_bodies_before_ordinary_callers() {
     let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
     let ordinary =
         streamed.ordinary_body_work(&analysis.files[0], crate::fir::SourceFileId::from_raw(0));
-    let (index, mut inline_bodies, mut default_arguments, mut sources) =
-        streamed.module.into_parts();
+    let (index, inline_bodies, mut default_arguments, mut sources) = streamed.module.into_parts();
     assert_eq!(inline_bodies.len(), 1);
     let mut ir = IrFile::default();
     let mut sink =
         super::CommonIrBodySink::new(&index, crate::fir::SourceFileId::from_raw(0), &mut ir)
             .unwrap();
-    sink.accept_inline_bodies(&index, &mut inline_bodies)
-        .unwrap();
+    sink.accept_inline_bodies(&index, &inline_bodies).unwrap();
     sink.accept_default_arguments(&index, &inline_bodies, &mut default_arguments)
         .unwrap();
     assert_eq!(inline_bodies.len(), 1);
