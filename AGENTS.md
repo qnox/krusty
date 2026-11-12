@@ -339,8 +339,8 @@ command here. Do not bury recurring rules only in a review comment or session tr
 - Never add a suppression to land a change. `#[allow(dead_code)]` on new code is already a review
   smell (scan item 8); the same applies to `clippy::too_many_arguments` on a new signature.
 - Prefer deleting a suppression to converting it. `#[expect(...)]` reports an *unfulfilled
-  expectation* when the lint does NOT fire, so under the unpinned toolchains this repository builds
-  with it becomes a new baseline row on the next contributor's machine rather than a self-expiring
+  expectation* when the lint does NOT fire, so under contributors' unpinned local toolchains it
+  becomes a new baseline row on the next contributor's machine rather than a self-expiring
   suppression.
 
 ### `clippy-baseline.tsv`
@@ -350,8 +350,10 @@ NEW file+message row or a HIGHER count. Removing findings is therefore always sa
 not: relocating code creates rows under the new path, so an extraction must leave the new files
 with no findings at all.
 
-It is enforced by the lefthook **pre-commit hook** and CI's **lint job**. It can still drift in both
-directions as toolchains move, findings are fixed without unfreezing, or a stale green branch lands
+It is enforced by the lefthook **pre-commit hook** and CI's **lint job**. CI installs one exact Rust
+release, named in its workflows; moving to a newer one is a change of its own that fixes, or states
+what it knowingly accepts of, the new release's findings in the same pull request. It can still
+drift in both directions as toolchains move, findings are fixed without unfreezing, or a stale green branch lands
 after its baseline snapshot: a stale-low entry blocks every commit, and a stale-high one silently
 licenses a real regression in that file.
 
