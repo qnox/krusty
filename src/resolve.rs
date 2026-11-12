@@ -6023,10 +6023,7 @@ fn declaration_body_is_unpublishable(file: &File, expression: ExprId, expr_types
     // `null ?: throw …` yields the LEFT side, and a bare `null` left becomes `Nothing?` — a
     // publishable type — so the rule above never sees it. Neither side ever produces a value, so
     // the declaration has no type; kotlinc rejects it.
-    if right == Ty::Nothing && matches!(left, Ty::Null | Ty::Nothing) {
-        return true;
-    }
-    false
+    right == Ty::Nothing && matches!(left, Ty::Null | Ty::Nothing)
 }
 
 /// The engine's seams into one checker run.

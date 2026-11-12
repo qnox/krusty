@@ -839,23 +839,19 @@ impl Checker<'_> {
                     let Some(&parameter) = parameter_indices.get(visible_parameter) else {
                         return false;
                     };
-                    if call_sig.vararg_index == Some(visible_parameter)
-                        || call_sig
+                    call_sig.vararg_index != Some(visible_parameter)
+                        && !call_sig
                             .exact_params
                             .get(visible_parameter)
                             .copied()
                             .unwrap_or(false)
-                        || signature
+                        && signature
                             .params
                             .get(parameter)
                             .copied()
                             .map(Ty::non_null)
                             .and_then(Ty::ty_param_name)
-                            != Some(formal.as_str())
-                    {
-                        return false;
-                    }
-                    true
+                            == Some(formal.as_str())
                 })
                 .collect::<Vec<_>>();
             for argument in &direct_arguments {
