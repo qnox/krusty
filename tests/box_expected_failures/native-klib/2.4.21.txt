@@ -1701,8 +1701,6 @@ ranges/contains/inRangeWithCustomContains.kt
 ranges/contains/inRangeWithImplicitReceiver.kt
 ranges/contains/inRangeWithNonmatchingArguments.kt
 ranges/contains/inRangeWithSmartCast.kt
-ranges/contains/smartCastOnBothEnds.kt
-ranges/contains/smartCastOnBothEndsGeneric.kt
 ranges/evaluationOrder/forInDownTo.kt
 ranges/evaluationOrder/forInDownToReversed.kt
 ranges/evaluationOrder/forInDownToReversedReversed.kt
