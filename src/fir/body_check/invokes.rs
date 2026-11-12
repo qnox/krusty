@@ -641,6 +641,11 @@ impl BodyFirChecker<'_> {
                     member.member.stable_declaration,
                     &member.member.params,
                 )?;
+                let vararg = self.declared_argument_vararg(
+                    self.file.expr_span(expression),
+                    member.member.call_sig.vararg_index,
+                    member.context_args.len(),
+                )?;
                 (
                     target.0,
                     target.1,
@@ -650,7 +655,7 @@ impl BodyFirChecker<'_> {
                     }),
                     None,
                     member.context_args,
-                    member.member.call_sig.vararg_index,
+                    vararg,
                     parameters,
                     None,
                 )
@@ -680,14 +685,13 @@ impl BodyFirChecker<'_> {
                         conversion: None,
                     }),
                     extension.context_args,
-                    extension.vararg_index,
+                    ArgumentVararg::of_source_parameters(extension.vararg_index),
                     parameters,
                     None,
                 )
             }
             ref selected @ ResolvedCall::MemberExtension {
                 ref dispatch_receiver,
-                vararg_index,
                 ref context_args,
                 ..
             } => {
@@ -707,7 +711,7 @@ impl BodyFirChecker<'_> {
                         conversion: None,
                     }),
                     context_args.clone(),
-                    vararg_index,
+                    target.argument_vararg,
                     target.parameters,
                     target.extension_parameter,
                 )
