@@ -4,17 +4,16 @@
 
 use std::path::{Path, PathBuf};
 
-mod backend_selection;
 mod box_jdk;
 mod codegen_modes;
 mod compiler_arguments;
 mod coroutine_support;
+mod native_box_configuration;
 mod reference_jvm;
 mod wasm_options;
 
 pub use wasm_options::WasmCompilerOptions;
 
-pub use backend_selection::{native_box_configuration_applicable, native_def_contents_supported};
 pub use box_jdk::{box_jdk_kind, BoxJdk, BoxJdkKind, BoxJdkRoots};
 pub use codegen_modes::{unsupported_codegen_mode_directive, UnitCodegenModes};
 pub use compiler_arguments::{
@@ -23,6 +22,9 @@ pub use compiler_arguments::{
     unit_kotlinc_arguments, UnitCompilerConfiguration,
 };
 pub use coroutine_support::{coroutine_sources, inject_coroutine_support};
+pub use native_box_configuration::{
+    native_box_configuration_applicable, native_def_contents_supported,
+};
 pub use reference_jvm::{
     reference_jvm_acceptance, reference_jvm_properties, ReferenceJvmAcceptance,
 };
