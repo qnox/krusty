@@ -675,7 +675,7 @@ impl BodyLowering<'_> {
         {
             match argument {
                 Some(argument) => {
-                    let accepted = argument_expectation(declared, parameter, substitute);
+                    let accepted = argument_expectation(declared, parameter, &bindings);
                     args.push(self.operand(argument, accepted)?);
                 }
                 // A serialized call leaves out exactly the arguments the callee's defaults supply.
@@ -1036,13 +1036,29 @@ fn binary_operands(access: &KlibIrMemberAccess, ty: Ty) -> Lowered<(KlibIrExprId
 }
 
 /// The type an argument for the parameter `declared` is checked against, where `parameter` is
-/// `declared` at the call's receiver. A parameter whose type is the class's type parameter read
-/// through an `in` projection (`add(element: E)` on a `MutableCollection<in T>`) has a captured
-/// type, which kotlinc approximates to the type parameter's bound when it places the argument's
-/// implicit casts: the serialized argument is a value of that bound, with no cast to `T`.
-fn argument_expectation(declared: Ty, parameter: Ty, substitute: impl Fn(Ty) -> Ty) -> Ty {
-    match (parameter.kind(), declared.ty_param_bound()) {
-        (crate::types::TyKind::InProjection(_), Some(bound)) => substitute(bound),
-        _ => parameter,
+/// `declared` at the call's receiver, which binds the class's type parameters to `bindings`. A
+/// class type parameter the receiver reads through an `in` projection (`E` on a
+/// `MutableCollection<in T>`) has a captured type. kotlinc approximates every occurrence of that
+/// captured type in the parameter to the type parameter's bound when it places the argument's
+/// implicit casts: at the top (`add(element: E)` takes an `Any?`) and inside the parameter type
+/// (`addAll(elements: Collection<E>)` takes a `Collection<Any?>`).
+fn argument_expectation(
+    declared: Ty,
+    parameter: Ty,
+    bindings: &crate::fx_hash::HashMap<String, Ty>,
+) -> Ty {
+    let approximations = bindings
+        .iter()
+        .filter(|(_, binding)| matches!(binding.kind(), crate::types::TyKind::InProjection(_)))
+        .filter_map(|(name, _)| {
+            let bound = declared.type_parameter_occurrence_bound(name)?;
+            Some((name.clone(), bound.substitute_erased(bindings)))
+        })
+        .collect::<Vec<_>>();
+    if approximations.is_empty() {
+        return parameter;
     }
+    let mut approximated = bindings.clone();
+    approximated.extend(approximations);
+    declared.substitute_erased(&approximated)
 }
