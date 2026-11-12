@@ -8,21 +8,21 @@
 //! the validator.
 
 use krusty::backend::class_tables::module_slots::PlanKey;
-use krusty::backend::class_tables::{
-    function_key, local_property_target, AnyMember, Slot, SlotKey,
-};
+use krusty::backend::class_tables::{function_key, local_property_target, AnyMember, SlotKey};
 use krusty::backend::interface_identity::member_identity;
 use krusty::fir::{
     CallableId, ExternalCallableId, PropertyId, ResolvedFunctionOverrideTarget,
     ResolvedPropertyOverrideTarget,
 };
 use krusty::ir::{
-    Callee, ClassId, CtorDelegateTarget, FunId, IrExpr, IrLocalPropertyLayout, IrSuperCallKind,
-    IrTypeOp, IrVirtualTarget,
+    Callee, ClassId, CtorDelegateTarget, FunId, IrLocalPropertyLayout, IrSuperCallKind, IrTypeOp,
+    IrVirtualTarget,
 };
 use krusty::types::{Ty, TyKind, TypeName};
 
-use super::super::super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
+use super::super::super::encode::{
+    BlockType, Code, Function, HeapType, Module, StorageType, ValType,
+};
 use super::super::super::interface_dispatch::MemberRef;
 use super::super::super::objects::{slot_field, REFERENCE};
 use super::super::super::runtime::{Runtime, EQZ32, OR32};
@@ -35,6 +35,9 @@ use super::{carrier, Body, FileContext, Unsupported, STRING};
 const STRING_HEAP: HeapType = HeapType::Concrete(1);
 
 mod override_bridges;
+mod unrealized_members;
+
+pub(super) use unrealized_members::holds_unprinted_values;
 
 #[cfg(test)]
 mod tests;
@@ -77,6 +80,19 @@ impl Body<'_> {
         let field = self.file_classes()?.field(class, index);
         self.code.struct_get(structure, field);
         Ok(())
+    }
+
+    /// Consume one checked enclosing edge through the producer-certified constructor field.
+    /// The existing field reader evaluates the receiver exactly once and projects its GC layout.
+    pub(super) fn enclosing_instance(
+        &mut self,
+        receiver: u32,
+        inner: TypeName,
+        outer: TypeName,
+    ) -> Result<(), Unsupported> {
+        let (class, field) = super::super::classes::enclosing_field(self.ir, inner, outer)
+            .ok_or_else(|| "an enclosing instance without authenticated storage".to_string())?;
+        self.field_read(receiver, class, field)
     }
 
     pub(super) fn field_write(
@@ -157,9 +173,11 @@ impl Body<'_> {
         Ok(())
     }
 
-    /// Push a new instance of `class` with every field at its default value.
+    /// Push a new instance of `class`: its identity hash, and every field at its default value.
     fn allocate(&mut self, class: ClassId) -> Result<(), Unsupported> {
-        let classes = self.file_classes()?;
+        let classes = self
+            .classes
+            .ok_or_else(|| "an object of a class declared in another file".to_string())?;
         let form = &classes.forms[class as usize];
         let table = form
             .table
@@ -174,14 +192,28 @@ impl Body<'_> {
             chain.push(parent);
         }
         let exception_rooted = classes.exception_base(class).is_some();
-        self.code.global_get(table);
-        self.enum_base_fields(class)?;
-        if exception_rooted {
-            // A runtime exception's message and cause, which its constructor's delegation to
-            // the runtime class writes.
-            self.code
-                .ref_null(HeapType::Concrete(self.runtime.string))
-                .ref_null(HeapType::Eq);
+        self.code
+            .global_get(table)
+            .call(self.runtime.identity.allocate);
+        match classes.laid_out_superclass(class) {
+            Some(superclass) => {
+                for field in &superclass.fields {
+                    let StorageType::Val(value) = field.storage else {
+                        return Err("a packed field of a superclass of another file".to_string());
+                    };
+                    default_value(&mut self.code, value);
+                }
+            }
+            None => {
+                self.enum_base_fields(class)?;
+                if exception_rooted {
+                    // A runtime exception's message and cause, which its constructor's delegation
+                    // to the runtime class writes.
+                    self.code
+                        .ref_null(HeapType::Concrete(self.runtime.string))
+                        .ref_null(HeapType::Eq);
+                }
+            }
         }
         for &owner in chain.iter().rev() {
             for field in &self.ir.classes[owner as usize].fields {
@@ -554,7 +586,7 @@ impl Body<'_> {
     }
 
     /// Replace the object on the stack with its dispatch table, as `$AnyTable`.
-    fn table_of_object(&mut self) {
+    pub(super) fn table_of_object(&mut self) {
         let object = self.runtime.objects.object;
         self.code
             .ref_cast(false, HeapType::Concrete(object))
@@ -587,6 +619,43 @@ impl Body<'_> {
             self.function_argument(function, parameter as u32, arg)?;
         }
         let function = self.emitted_function(function)?;
+        self.code.call(function);
+        Ok(())
+    }
+
+    /// `super.f(args)` for a method of a superclass an earlier file laid out, called directly. The
+    /// call's parameter and result types are carried as that file's function takes and answers.
+    fn laid_out_super_call(
+        &mut self,
+        callable: CallableId,
+        (params, ret): (&[Ty], Ty),
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        let (function, ty) = self
+            .file_classes()?
+            .laid_out_method(callable)
+            .ok_or("a `super` call to a member of another file")?;
+        let (carried, results) = self
+            .module
+            .func_signature(ty)
+            .ok_or("a `super` call to a function of no function type")?;
+        let mut expected = vec![REFERENCE];
+        for param in params {
+            expected.push(carrier(*param)?.ok_or("a `Unit` parameter")?);
+        }
+        if params.len() != args.len()
+            || carried != expected
+            || results != carrier(ret)?.into_iter().collect::<Vec<_>>()
+        {
+            return Err(
+                "a `super` call to a member of another file carried differently".to_string(),
+            );
+        }
+        self.value(receiver, any())?;
+        for (&arg, param) in args.iter().zip(params) {
+            self.value(arg, *param)?;
+        }
         self.code.call(function);
         Ok(())
     }
@@ -668,15 +737,13 @@ impl Body<'_> {
             Callee::Super {
                 kind: IrSuperCallKind::Function,
                 declaration: Some(ResolvedFunctionOverrideTarget::Module(callable)),
+                params,
+                ret,
                 ..
-            } => {
-                let function = *self
-                    .ir
-                    .checked_callable_functions
-                    .get(callable)
-                    .ok_or("a `super` call to a member of another file")?;
-                self.direct_member_call(function, receiver, args)
-            }
+            } => match self.ir.checked_callable_functions.get(callable) {
+                Some(&function) => self.direct_member_call(function, receiver, args),
+                None => self.laid_out_super_call(*callable, (params, *ret), receiver, args),
+            },
             Callee::Super { .. } => Err("a `super` call to a library member".to_string()),
             _ => Err("a member call through this calling convention".to_string()),
         }
@@ -753,15 +820,6 @@ impl Body<'_> {
         let property = self.ir.classes[class as usize].properties[index].clone();
         let receiver =
             receiver.ok_or_else(|| format!("a receiver-less read of `{}`", property.name))?;
-        if property
-            .storage_ty
-            .is_some_and(|storage| storage != property.ty)
-        {
-            return Err(format!(
-                "a property whose storage differs from its type (`{}`)",
-                property.name
-            ));
-        }
         let slot = local_property_target(self.ir, class, index).and_then(|target| {
             self.file_classes()
                 .ok()?
@@ -775,7 +833,18 @@ impl Body<'_> {
             return self.direct_member_call(getter, receiver, &[]);
         }
         match property.backing_field {
-            Some(field) => self.field_read(receiver, class, field),
+            Some(field) => {
+                self.field_read(receiver, class, field)?;
+                // The field keeps its storage type. Callers of the read see the public type: the
+                // checker lowers a read of the field itself as a field access, so a property read
+                // that remains is the default getter.
+                match property.storage_ty {
+                    Some(storage) if storage != property.ty => {
+                        self.coerce_emitted_value(storage, property.ty)
+                    }
+                    _ => Ok(()),
+                }
+            }
             None => Err(format!(
                 "a property with neither storage nor a getter (`{}`)",
                 property.name
@@ -825,15 +894,6 @@ impl Body<'_> {
         let property = self.ir.classes[class as usize].properties[index].clone();
         let receiver =
             receiver.ok_or_else(|| format!("a receiver-less write of `{}`", property.name))?;
-        if property
-            .storage_ty
-            .is_some_and(|storage| storage != property.ty)
-        {
-            return Err(format!(
-                "a property whose storage differs from its type (`{}`)",
-                property.name
-            ));
-        }
         let slot = local_property_target(self.ir, class, index).and_then(|target| {
             self.file_classes()
                 .ok()?
@@ -1044,8 +1104,7 @@ impl Body<'_> {
             {
                 let structure =
                     self.runtime
-                        .exceptions
-                        .ensure_class(self.module, self.classifiers, name)?;
+                        .exception_class(self.module, self.classifiers, name)?;
                 self.code.ref_test(nullable, HeapType::Concrete(structure));
             }
             _ => match (self.interface_of_type(tested), self.class_of_type(tested)) {
@@ -1090,95 +1149,12 @@ impl Body<'_> {
         Ok(())
     }
 
-    /// Whether a call through `member`'s slot on a value statically of `class` could reach
-    /// `kotlin.Any`'s own member, which this module has no body for.
-    pub(super) fn reaches_any_default(
-        &self,
-        class: ClassId,
-        member: AnyMember,
-    ) -> Result<bool, Unsupported> {
-        let classes = self.file_classes()?;
-        Ok(self.ir.classes.iter().enumerate().any(|(id, candidate)| {
-            let id = id as ClassId;
-            if candidate.is_interface {
-                return false;
-            }
-            let mut ancestor = Some(id);
-            let mut related = classes.tables.interfaces[id as usize].contains(&class);
-            while let Some(current) = ancestor {
-                related |= current == class;
-                ancestor = classes.tables.table(current).superclass;
-            }
-            related
-                && classes.tables.table(id).vtable[member.slot() as usize]
-                    == Slot::AnyMember(member)
-        }))
-    }
-
-    /// Whether a call through `member`'s slot on a value statically of type `ty` could reach
-    /// `kotlin.Any`'s own member. A type naming a class of this file is answered by that class's
-    /// hierarchy; any other reference type (`Any`, a type parameter, an interface) is erased, so
-    /// its value can be an instance of every class here or a runtime exception object. A scalar's box and `Unit` answer the
-    /// member themselves.
-    pub(super) fn may_reach_any_default(
-        &self,
-        ty: Ty,
-        member: AnyMember,
-    ) -> Result<bool, Unsupported> {
-        if let Some(class) = self.class_of_type(ty) {
-            return self.reaches_any_default(class, member);
-        }
-        if ty.non_null().obj_internal() == Some(super::super::super::type_objects::ktype()) {
-            return self.ktype_may_reach_any_default(member);
-        }
-        if !matches!(carrier(ty.non_null())?, Some(ValType::Ref { .. })) {
-            return Ok(false);
-        }
-        if self.holds_runtime_exception_objects() {
-            return Ok(true);
-        }
-        let Some(classes) = self.classes else {
-            return Ok(false);
-        };
-        Ok(self.ir.classes.iter().enumerate().any(|(id, class)| {
-            !class.is_interface
-                && classes.tables.table(id as ClassId).vtable[member.slot() as usize]
-                    == Slot::AnyMember(member)
-        }))
-    }
-
-    /// Whether an erased reference of this file can hold a runtime exception object. Those objects
-    /// are built by the exception runtime, not declared by this file's classes, and they answer
-    /// none of `kotlin.Any`'s overridable members. One becomes a value only when this file
-    /// constructs a runtime exception class or binds a thrown exception in a catch clause.
-    fn holds_runtime_exception_objects(&self) -> bool {
-        self.ir.exprs.iter().any(|node| match node {
-            IrExpr::Try { catches, .. } => !catches.is_empty(),
-            IrExpr::New { internal, .. } => self
-                .classifiers
-                .classifier(*internal)
-                .is_some_and(|fact| fact.runtime_exception.is_some()),
-            _ => false,
-        })
-    }
-
     /// `lhs == rhs` on objects: `lhs?.equals(rhs) ?: (rhs === null)`.
     pub(super) fn object_equality(&mut self, lhs: u32, rhs: u32) -> Result<(), Unsupported> {
         // The shared runtime dispatch begins only after both operands have run, left first.
         self.value(lhs, any())?;
         self.value(rhs, any())?;
         self.code.call(self.runtime.object_equals);
-        Ok(())
-    }
-
-    /// Replace the object on the stack, statically of type `ty`, with its `toString()`, or
-    /// `"null"`.
-    pub(super) fn object_to_string(&mut self, ty: Ty) -> Result<(), Unsupported> {
-        let class = self.class_of_type(ty).expect("checked by the caller");
-        if self.reaches_any_default(class, AnyMember::ToString)? {
-            return Err("`kotlin.Any.toString`'s own rendering".to_string());
-        }
-        self.dispatch_to_string();
         Ok(())
     }
 
@@ -1320,9 +1296,7 @@ pub(super) fn define_class_functions(
                 .flatten()
                 .map(|owner| owner as ClassId);
             for activated in owner.into_iter().chain([id]) {
-                if let Some(parent) = classes.tables.table(activated).superclass {
-                    body.activate_class(parent, owner)?;
-                }
+                body.activate_superclasses(activated, owner)?;
             }
             body.allocate(id)?;
             body.code
@@ -1399,31 +1373,33 @@ pub(super) fn define_module_property_functions(
         {
             return Err("a module member property entry disagrees with its local layout".into());
         }
-        let declaration = context
+        if context
             .ir
             .classes
             .get(*class as usize)
             .and_then(|class| class.properties.get(*property as usize))
-            .ok_or_else(|| "a module member property with an invalid class index".to_string())?;
-        if declaration
-            .storage_ty
-            .is_some_and(|storage| storage != declaration.ty)
+            .is_none()
         {
-            return Err(format!(
-                "a property whose storage differs from its type (`{}`)",
-                declaration.name
-            ));
+            return Err("a module member property with an invalid class index".to_string());
         }
 
         let value = carrier(definition.entry.ty)?;
         let getter_ty = module.func_type(vec![REFERENCE], value.into_iter().collect());
         let mut getter = Code::default();
-        emit_module_property_getter(context, classes, runtime, *class, *property, &mut getter)?;
+        let locals = emit_module_property_getter(
+            context,
+            classes,
+            module,
+            runtime,
+            *class,
+            *property,
+            &mut getter,
+        )?;
         module.define(
             definition.entry.getter,
             Function {
                 ty: getter_ty,
-                locals: Vec::new(),
+                locals,
                 code: getter,
             },
         );
@@ -1447,21 +1423,24 @@ pub(super) fn define_module_property_functions(
     Ok(())
 }
 
+/// Emit the body of a module member property's getter entry; returns the locals it declares
+/// after the receiver parameter.
 fn emit_module_property_getter(
     context: &FileContext<'_>,
     classes: &FileClasses,
-    runtime: &Runtime,
+    module: &mut Module,
+    runtime: &mut Runtime,
     class: ClassId,
     property: u32,
     code: &mut Code,
-) -> Result<(), Unsupported> {
+) -> Result<Vec<ValType>, Unsupported> {
     let declaration = &context.ir.classes[class as usize].properties[property as usize];
     let slot = local_property_target(context.ir, class, property as usize)
         .and_then(|target| classes.tables.slot(class, &SlotKey::Getter(target)));
     if let Some(slot) = slot {
         code.local_get(0);
         emit_module_property_dispatch(classes, runtime, class, slot, code)?;
-        return Ok(());
+        return Ok(Vec::new());
     }
     if let Some(getter) = declaration.getter {
         let function = context
@@ -1471,7 +1450,7 @@ fn emit_module_property_getter(
             .flatten()
             .ok_or_else(|| "a module property getter with no emitted function".to_string())?;
         code.local_get(0).call(function);
-        return Ok(());
+        return Ok(Vec::new());
     }
     let field = declaration
         .backing_field
@@ -1480,7 +1459,34 @@ fn emit_module_property_getter(
     code.local_get(0)
         .ref_cast(false, HeapType::Concrete(structure))
         .struct_get(structure, classes.field(class, field));
-    Ok(())
+    let Some(storage) = declaration
+        .storage_ty
+        .filter(|storage| *storage != declaration.ty)
+    else {
+        return Ok(Vec::new());
+    };
+    // A scalar stored for a reference-typed property is boxed on the way out.
+    let stored = carrier(storage)?;
+    let boxed = match stored {
+        Some(value @ (ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64))
+            if matches!(carrier(declaration.ty)?, Some(ValType::Ref { .. })) =>
+        {
+            runtime
+                .box_form(module, storage, value)?
+                .map(|form| (form, value))
+        }
+        _ => None,
+    };
+    let Some((form, value)) = boxed else {
+        adapt_property_carrier(code, storage, declaration.ty, &declaration.name)?;
+        return Ok(Vec::new());
+    };
+    let (scratch, locals) = match form.needs_scratch() {
+        true => (Some(1), vec![value]),
+        false => (None, Vec::new()),
+    };
+    form.emit_box(code, scratch);
+    Ok(locals)
 }
 
 fn emit_module_property_setter(
@@ -1515,9 +1521,47 @@ fn emit_module_property_setter(
     let structure = classes.structure(class);
     code.local_get(0)
         .ref_cast(false, HeapType::Concrete(structure))
-        .local_get(1)
-        .struct_set(structure, classes.field(class, field));
+        .local_get(1);
+    if let Some(storage) = declaration
+        .storage_ty
+        .filter(|storage| *storage != declaration.ty)
+    {
+        // The setter argument is the public type. The field stores `storage`.
+        adapt_property_carrier(code, declaration.ty, storage, &declaration.name)?;
+    }
+    code.struct_set(structure, classes.field(class, field));
     Ok(())
+}
+
+/// The value on the stack has type `from`. Leave it as `to` for a property whose backing
+/// field type is not the type its accessors publish.
+///
+/// A `String` is already `(ref null eq)`, which is how `Any` is carried, so reading that
+/// field as `Any` needs no instruction. Storing an `Any` into the string field casts it
+/// back. A scalar and a reference still have no carrier in common here.
+fn adapt_property_carrier(
+    code: &mut Code,
+    from: Ty,
+    to: Ty,
+    name: &str,
+) -> Result<(), Unsupported> {
+    if from == to {
+        return Ok(());
+    }
+    let source = carrier(from)?;
+    let target = carrier(to)?;
+    if source == target {
+        return Ok(());
+    }
+    let declined = || format!("a property whose storage differs from its type (`{name}`)");
+    match (source, target) {
+        (Some(ValType::Ref { .. }), Some(REFERENCE)) => Ok(()),
+        (Some(ValType::Ref { .. }), Some(ValType::Ref { heap, .. })) => {
+            code.ref_cast(true, heap);
+            Ok(())
+        }
+        _ => Err(declined()),
+    }
 }
 
 /// Append the table reference and indirect call after the wrapper's receiver and value operands.
@@ -1590,6 +1634,26 @@ impl Body<'_> {
         let mut params = secondary.prefix_params.clone();
         params.extend(secondary.params.iter().copied());
         Ok((form.secondaries[index], params))
+    }
+
+    /// The constructor `ordinal` of the superclass of `class` an earlier file laid out, and the
+    /// parameters it takes.
+    fn laid_out_constructor(
+        &self,
+        class: ClassId,
+        ordinal: u32,
+    ) -> Result<(u32, Vec<Ty>), Unsupported> {
+        self.file_classes()?
+            .laid_out_superclass(class)
+            .and_then(|superclass| superclass.constructors.get(ordinal as usize))
+            .cloned()
+            .flatten()
+            .ok_or_else(|| {
+                format!(
+                    "a delegation to a constructor the superclass of another file lacks (`{}`)",
+                    self.ir.classes[class as usize].fq_name()
+                )
+            })
     }
 
     /// Call `constructor`, taking `params`, on `this` with the first `forwarded` parameters of
@@ -1666,6 +1730,11 @@ impl Body<'_> {
             Some(parent) => {
                 let (constructor, params) =
                     self.constructor_of(parent, declaration.super_ctor.ordinal)?;
+                self.delegate(constructor, &params, 0, &declaration.super_args)?;
+            }
+            None if self.file_classes()?.laid_out_superclass(class).is_some() => {
+                let (constructor, params) =
+                    self.laid_out_constructor(class, declaration.super_ctor.ordinal)?;
                 self.delegate(constructor, &params, 0, &declaration.super_args)?;
             }
             None if self.file_classes()?.exception_base(class).is_some() => {
@@ -1790,6 +1859,10 @@ impl Body<'_> {
                     let (constructor, params) = self.constructor_of(parent, target.ordinal)?;
                     self.delegate(constructor, &params, 0, &secondary.delegate_args)?;
                 }
+                None if self.file_classes()?.laid_out_superclass(class).is_some() => {
+                    let (constructor, params) = self.laid_out_constructor(class, target.ordinal)?;
+                    self.delegate(constructor, &params, 0, &secondary.delegate_args)?;
+                }
                 None if self.file_classes()?.exception_base(class).is_some() => {
                     self.exception_delegation(&name, target_params, &secondary.delegate_args)?;
                 }
@@ -1831,12 +1904,39 @@ impl Body<'_> {
             };
             chain.push(parent);
         }
+        self.activate_laid_out(*chain.last().expect("non-empty"))?;
         for &owner in chain.iter().rev() {
             if Some(owner) != initializing {
                 self.initialize_companion(owner)?;
             }
         }
         Ok(())
+    }
+
+    /// Initialize what a superclass of `class` an earlier file laid out initializes before its
+    /// construction: its companions, and its superclasses', root first.
+    fn activate_laid_out(&mut self, class: ClassId) -> Result<(), Unsupported> {
+        let activation = self
+            .file_classes()?
+            .laid_out_superclass(class)
+            .map(|superclass| superclass.activation.clone())
+            .unwrap_or_default();
+        for getter in activation {
+            self.code.call(getter).drop_();
+        }
+        Ok(())
+    }
+
+    /// Initialize the superclasses of `class`, as constructing it does first.
+    pub(super) fn activate_superclasses(
+        &mut self,
+        class: ClassId,
+        initializing: Option<ClassId>,
+    ) -> Result<(), Unsupported> {
+        match self.file_classes()?.tables.table(class).superclass {
+            Some(parent) => self.activate_class(parent, initializing),
+            None => self.activate_laid_out(class),
+        }
     }
 
     /// Run the companion's typed initializer when this class has one. The getter's result is

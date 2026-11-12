@@ -23,6 +23,8 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::ListStorageConstruction(_)
         | CompilerIntrinsic::ThrowableConstructor { .. }
         | CompilerIntrinsic::ThrowableMessage
+        | CompilerIntrinsic::ThrowableCause
+        | CompilerIntrinsic::ClassName(_)
         | CompilerIntrinsic::ReinterpretBits
         | CompilerIntrinsic::ScalarInstruction(_)
         | CompilerIntrinsic::FloatingIsNaN { .. }

@@ -231,11 +231,8 @@ impl Checker<'_> {
         {
             return None;
         }
-        let Some((inherited, provider)) =
-            self.inherited_body_local_default_candidate(owner, candidate)
-        else {
-            return None;
-        };
+        let (inherited, provider) =
+            self.inherited_body_local_default_candidate(owner, candidate)?;
         candidate.call_sig.param_defaults = inherited.call_sig.param_defaults;
         candidate.call_sig.required = inherited.call_sig.required;
         candidate.default_values = inherited.default_values;

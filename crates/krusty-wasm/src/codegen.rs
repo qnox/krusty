@@ -5,9 +5,11 @@
 //! generator has not been taught declines the compilation with a diagnostic naming the construct,
 //! and a declined compilation emits nothing.
 
+mod any_member_reach;
 mod callable_registry;
 mod classes;
 mod interface_members;
+mod laid_out_classes;
 mod lower;
 mod property_registry;
 
@@ -71,6 +73,9 @@ pub struct WasmModule {
         String,
         krusty::backend::class_tables::module_slots::ModuleSlotPlan,
     )>,
+    /// What the files lowered so far contribute to whether a call through `kotlin.Any`'s slots
+    /// reaches another file's slot with no body.
+    reach: any_member_reach::ModuleReach,
     /// Each file's top-level property initializer, in file order. They all run before the entry,
     /// as the native target runs them at program start: a program's first touch of a file is
     /// through its entry or a call that follows it, so starting with every initializer is the same
@@ -84,6 +89,7 @@ struct Started {
     runtime: Runtime,
     callables: callable_registry::CallableRegistry,
     properties: property_registry::PropertyRegistry,
+    classes: laid_out_classes::LaidOutClasses,
 }
 
 impl Started {
@@ -100,6 +106,7 @@ impl Started {
             runtime,
             callables: Default::default(),
             properties: Default::default(),
+            classes: Default::default(),
         }
     }
 }
@@ -200,6 +207,7 @@ impl Backend for WasmBackend {
                 return Vec::new();
             }
             started.properties.enter_source_module(file.module_name);
+            started.classes.enter_source_module(file.module_name);
         }
         if state
             .slot_plan
@@ -228,6 +236,7 @@ impl Backend for WasmBackend {
                 runtime: &mut started.runtime,
                 callables: &mut started.callables,
                 properties: &mut started.properties,
+                classes: &mut started.classes,
             },
         ) {
             Ok(lowered) => lowered,
@@ -236,6 +245,10 @@ impl Backend for WasmBackend {
                 return Vec::new();
             }
         };
+        if let Some(construct) = state.reach.add(lowered.reach) {
+            decline(state, construct);
+            return Vec::new();
+        }
         state.initializers.extend(lowered.initializer);
         if let Some((function, _)) = selected {
             let entry = match lowered.functions.get(function as usize).copied() {
@@ -350,6 +363,7 @@ const COUNTED_LOOPS: krusty::backend::counted_loops::CountedLoopPolicy =
 #[cfg(test)]
 mod tests {
     mod companion_declarations;
+    mod laid_out_superclasses;
     mod reference_array_size;
 
     use super::{WasmBackend, WasmTarget};
@@ -408,6 +422,80 @@ mod tests {
 
     fn compile(target: WasmTarget, source: &str) -> (Vec<Artifact>, Vec<String>) {
         compile_program(target, Entry::Box, &[source])
+    }
+
+    /// A file dispatching `toString` on an erased receiver, and another file creating a value
+    /// whose `toString` this target has no body for, decline together, whichever file comes first.
+    #[test]
+    fn an_erased_to_string_declines_on_another_files_unprinted_value() {
+        let show = "fun show(value: Any?): String = value.toString()\n\
+                    fun box(): String = \"OK\"";
+        let expected = vec![format!(
+            "{}a `toString` of `kotlin.Any?` reaching an object another file creates yet",
+            super::DECLINE_PREFIX
+        )];
+        for other in [
+            "fun double(): String = show(1.5)",
+            "fun function(): String = show { 1 }",
+        ] {
+            for target in WasmTarget::ALL {
+                for sources in [[show, other], [other, show]] {
+                    let (outputs, diagnostics) = compile_program(target, Entry::Box, &sources);
+                    assert_eq!(diagnostics, expected, "{sources:?}");
+                    assert!(outputs.is_empty());
+                }
+            }
+        }
+    }
+
+    /// A plain interface is not a function value, so a lambda elsewhere in the file does not make
+    /// its `toString` unprintable. The value class here delegates `toString` to that interface.
+    #[test]
+    fn a_plain_interface_to_string_survives_a_function_value() {
+        let source = krusty::conformance::prepare_test_source(
+            include_str!("../../../tests/box_regressions/discardedIfOverSealedValueClasses.kt"),
+            krusty::conformance::TestTarget::WasmJs,
+        );
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(target, &source);
+            assert_eq!(diagnostics, Vec::<String>::new(), "{target:?}");
+            assert!(!outputs.is_empty(), "{target:?}");
+        }
+    }
+
+    /// A function value converted to a `fun interface` is an instance of it with no `toString`
+    /// body, so rendering a value of that interface declines.
+    #[test]
+    fn a_fun_interface_to_string_declines_on_a_converted_function_value() {
+        let source = "fun interface Supplier { fun get(): Int }\n\
+                      fun box(): String { val supplier = Supplier { 1 }\n\
+                      return if (\"$supplier\" == \"\") \"empty\" else \"OK\" }";
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(target, source);
+            assert_eq!(
+                diagnostics,
+                vec![format!(
+                    "{}a `toString` of `Supplier` reaching a runtime object this target cannot \
+                     print yet",
+                    super::DECLINE_PREFIX
+                )]
+            );
+            assert!(outputs.is_empty());
+        }
+    }
+
+    /// Another file's local classes and anonymous objects print, so an erased `toString` reaching
+    /// them is lowered.
+    #[test]
+    fn an_erased_to_string_reaches_another_files_local_classes() {
+        let show = "fun show(value: Any?): String = value.toString()\n\
+                    fun box(): String = \"OK\"";
+        let other = "fun local(): String { class Local; return show(Local()) + show(object {}) }";
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile_program(target, Entry::Box, &[show, other]);
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(outputs.len(), 2);
+        }
     }
 
     #[test]

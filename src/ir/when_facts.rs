@@ -3,7 +3,7 @@
 
 use super::expression_copy::InheritedFacts;
 use super::{ExprId, IrExpr};
-use crate::fx_hash::HashMap;
+use crate::fx_hash::{HashMap, HashSet};
 use crate::types::Ty;
 
 #[derive(Clone, Debug, Default)]
@@ -22,6 +22,10 @@ pub struct IrWhenFacts {
     /// rebuilds an elvis's branches at the elvis's own position uses this provenance rather than
     /// recognizing the shape.
     pub elvises: HashMap<ExprId, u32>,
+    /// The elvis `when`s that are a later link of a chain `a ?: b ?: c`. kotlinc folds a chain into
+    /// one block (`JvmSafeCallChainFoldingLowering`), so a later link opens no elvis block of its
+    /// own and its code takes the position the chain starts at.
+    pub elvis_chain_links: HashSet<ExprId>,
 }
 
 impl InheritedFacts for IrWhenFacts {
@@ -30,10 +34,12 @@ impl InheritedFacts for IrWhenFacts {
             exhaustive,
             source_lines,
             elvises,
+            elvis_chain_links,
         } = self;
         exhaustive.inherit(source, target);
         source_lines.inherit(source, target);
         elvises.inherit(source, target);
+        elvis_chain_links.inherit(source, target);
     }
 }
 
