@@ -72,8 +72,7 @@ impl PropertyReadSelection {
             Self::Member(member) => member
                 .getter
                 .as_ref()
-                .map(|getter| getter.member.external_identity)
-                .flatten()
+                .and_then(|getter| getter.member.external_identity)
                 .or_else(|| {
                     member
                         .accessor

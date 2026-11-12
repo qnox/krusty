@@ -28,6 +28,7 @@ mod dependency_references;
 mod interface_calls;
 mod interop_libraries;
 mod intrinsics;
+mod laid_out_classes;
 mod linker;
 mod prebuilt;
 mod runtime;

@@ -19,6 +19,50 @@ pub(super) fn ir_sam_method(method: crate::fir::FirSamMethod) -> crate::ir::IrSa
 use super::BodyLowering;
 
 impl BodyLowering<'_> {
+    /// kotlinc builds a function reference converted to a Java functional interface as the
+    /// interface's own implementation (`FunctionReferenceLowering` with a SAM super type): the
+    /// reference's adapter is the method body, its captures and bound receiver are the object's
+    /// state, and no `FunctionN` value exists to wrap. The reference becomes the lambda the
+    /// conversion then targets, realized as every SAM-converted lambda is.
+    ///
+    /// A Kotlin fun interface keeps the reference as a value: its implementation is a
+    /// `FunctionAdapter` whose delegate is that reference.
+    pub(super) fn fold_sam_converted_reference(
+        &mut self,
+        conversion: &FirSamConversion,
+        expression: ExprId,
+    ) {
+        if conversion.kotlin_interface || conversion.suspend {
+            return;
+        }
+        let IrExpr::CallableReference(reference) = self.ir.expr(expression) else {
+            return;
+        };
+        if reference.declaration_suspend
+            || matches!(
+                reference.target,
+                crate::ir::IrCallableReferenceTarget::Property(_)
+            )
+        {
+            return;
+        }
+        let Some((impl_fn, captures, _, arity)) =
+            self.ir.callable_reference_inline_template(expression)
+        else {
+            return;
+        };
+        let Ok(arity) = u8::try_from(arity) else {
+            return;
+        };
+        self.ir.exprs[expression as usize] = IrExpr::Lambda {
+            impl_fn,
+            arity,
+            captures,
+            sam: None,
+            inline_body: None,
+        };
+    }
+
     /// Adapt an already-materialized function value to the selected SAM declaration. The generated
     /// implementation captures that value and forwards the interface method's checked arguments to
     /// `FunctionN.invoke`; target representation remains a backend decision.

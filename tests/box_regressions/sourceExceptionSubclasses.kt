@@ -1,3 +1,6 @@
+// A class extending a runtime exception is laid out on the runtime exception's struct: caught by
+// its runtime parents and by itself, with the message and cause its delegation stores, the
+// class's own name in `Throwable.toString`, and an identity hash.
 class ParseFailure(message: String) : Exception(message)
 
 open class LookupFailure(val key: Int) : IllegalStateException("missing key $key")
@@ -19,6 +22,12 @@ class CodedFailure : IllegalArgumentException {
 }
 
 class RootFailure(message: String?) : Throwable(message)
+
+fun show(value: Any?): String = value.toString()
+
+class Report(val failure: Throwable) {
+    override fun hashCode(): Int = failure.hashCode()
+}
 
 fun parse(text: String): Int {
     if (text == "") throw ParseFailure("empty input")
@@ -81,5 +90,20 @@ fun box(): String {
         if (failure is IllegalArgumentException && failure !is CodedFailure) return "wrong sibling"
     }
     if (exceptions != 3) return "lost exception parents"
+
+    // Throwable.toString: the class's name, then the message when there is one.
+    if (show(ParseFailure("bad")) != "ParseFailure: bad") return "lost Throwable.toString"
+    if ("$uncoded" != "CodedFailure") return "lost Throwable.toString without a message"
+    if (show(NestedLookupFailure(5, 1)) != "NestedLookupFailure: missing key 5") {
+        return "lost an inherited Throwable.toString"
+    }
+    if (show(thrown) != "RootFailure: root") return "lost Throwable.toString of a Throwable root"
+
+    // Any.hashCode: an exception object's identity hash, stable across calls.
+    val silent = SilentFailure()
+    if (Report(silent).hashCode() != silent.hashCode()) return "lost an exception's hash"
+    if (silent.hashCode() != silent.hashCode()) return "unstable exception hash"
+    val runtime: Throwable = IllegalStateException("runtime")
+    if (Report(runtime).hashCode() != runtime.hashCode()) return "lost a runtime exception's hash"
     return "OK"
 }

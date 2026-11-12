@@ -759,11 +759,12 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             arguments: CallArgumentRange,
             qualified: Option<QualifiedCallCoordinateId>,
             forced_result_constraint: Option<SignatureCallResultConstraint>,
-            graph: &SignatureGraph,
-            demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
-            memo: &mut HashMap<SigExprId, ResolvedTy>,
-            computing: &mut crate::fx_hash::HashSet<SigExprId>,
+            evaluation: &mut ExpressionEvaluation<'_, '_>,
         ) -> Result<ResolvedTy, DiagnosticId> {
+            let graph = evaluation.graph;
+            let demand = &mut *evaluation.demand;
+            let memo = &mut *evaluation.memo;
+            let computing = &mut *evaluation.computing;
             let selection = graph
                 .callable_selection(target)
                 .expect("a deferred callable selection must belong to its graph");
@@ -976,10 +977,12 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     arguments,
                     qualified,
                     Some(result_constraint),
-                    graph,
-                    demand,
-                    memo,
-                    computing,
+                    &mut ExpressionEvaluation {
+                        graph,
+                        demand,
+                        memo,
+                        computing,
+                    },
                 )),
                 SigExpr::MemberCall {
                     receiver,
@@ -1419,8 +1422,17 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         arguments,
                         qualified,
                     } => evaluate_call(
-                        semantics, target, arguments, qualified, None, graph, demand, memo,
-                        computing,
+                        semantics,
+                        target,
+                        arguments,
+                        qualified,
+                        None,
+                        &mut ExpressionEvaluation {
+                            graph,
+                            demand,
+                            memo,
+                            computing,
+                        },
                     ),
                     SigExpr::CallableReference(target) => {
                         let selection = graph.callable_selection(target).expect(
