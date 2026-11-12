@@ -47,6 +47,7 @@ impl ProductionSignatureSemantics<'_> {
         let rules = SignatureReferenceRules {
             oracle: crate::symbol_resolver::SourceOracle(&source),
             context: crate::assignable::TyCtx::new(),
+            binds_reference_contexts: self.headers.scopes.binds_reference_contexts(scope.source),
         };
         let ExtensionReferenceChoice::Selected(selected) = select_extension_reference(
             &source,
@@ -140,13 +141,16 @@ impl ProductionSignatureSemantics<'_> {
         ]);
         let oracle = crate::symbol_resolver::SourceOracle(&source);
         let context = crate::assignable::TyCtx::new();
+        let binds_contexts = self.headers.scopes.binds_reference_contexts(scope.source);
         let selected = candidates_with_finalized_signatures
             .into_iter()
             .filter(|candidate| !candidate.callable.suspend || expected.suspend)
             .filter_map(|mut candidate| {
+                let bound_contexts = candidate.context_count * usize::from(binds_contexts);
                 let specialized = super::super::callable_reference_selection::specialize_candidate(
                     &source,
                     &mut candidate,
+                    bound_contexts,
                     None,
                     Some(&expected.params),
                     Some(expected.ret),
@@ -162,6 +166,7 @@ impl ProductionSignatureSemantics<'_> {
                 super::super::callable_reference_selection::parameter_plan(
                     &candidate.callable.params,
                     &candidate.call_sig,
+                    bound_contexts,
                     &expected.params,
                     |actual, target| {
                         crate::assignable::is_subtype(&context, &oracle, actual, target)
@@ -453,6 +458,7 @@ impl ProductionSignatureSemantics<'_> {
         let plan = super::super::callable_reference_selection::parameter_plan(
             &parameters,
             &call_sig,
+            0,
             &expected_function.params,
             assignable,
         )?;
@@ -483,7 +489,8 @@ impl ProductionSignatureSemantics<'_> {
                         );
                     }
                 }
-                super::super::callable_reference_selection::AdaptedRefArgument::Default => {}
+                super::super::callable_reference_selection::AdaptedRefArgument::Context
+                | super::super::callable_reference_selection::AdaptedRefArgument::Default => {}
             }
         }
         if !expected_function.ret.is_ty_param() {
@@ -769,6 +776,7 @@ impl ProductionSignatureSemantics<'_> {
 struct SignatureReferenceRules<'s> {
     oracle: crate::symbol_resolver::SourceOracle<'s>,
     context: crate::assignable::TyCtx,
+    binds_reference_contexts: bool,
 }
 
 impl ExtensionReferenceRules for SignatureReferenceRules<'_> {
@@ -782,6 +790,10 @@ impl ExtensionReferenceRules for SignatureReferenceRules<'_> {
 
     fn accessible(&self, _function: &crate::libraries::FunctionInfo) -> bool {
         true
+    }
+
+    fn binds_reference_contexts(&self) -> bool {
+        self.binds_reference_contexts
     }
 
     fn at_least_as_specific(&self, left: &[Ty], right: &[Ty]) -> bool {

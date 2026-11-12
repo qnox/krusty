@@ -386,6 +386,7 @@ impl Checker<'_> {
                         let mut plan = self.callable_ref_parameter_plan(
                             &value_parameters,
                             &call_sig,
+                            0,
                             expected_values.as_deref()?,
                         )?;
                         if leading_receiver_in_expected {

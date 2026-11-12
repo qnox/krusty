@@ -102,6 +102,7 @@ mod class_literal_type_arguments;
 mod class_names_aliases;
 mod expression_finalization;
 mod reference_array_spread;
+mod reference_context_arguments;
 mod star_projected_classifier;
 use candidate_display::{
     ambiguous_classifier_message, classifier_access_display_from_shape,
@@ -33999,9 +34000,11 @@ impl<'a> Checker<'a> {
         expected_ret: Option<Ty>,
     ) -> Result<Vec<Ty>, CallableRefSpecialization> {
         let source = self.fed_source();
+        let bound_contexts = self.reference_bound_context_count(function);
         callable_reference_selection::specialize_candidate_with_type_arguments(
             &source,
             function,
+            bound_contexts,
             extension_receiver,
             expected_params,
             expected_ret,
@@ -34675,19 +34678,36 @@ impl<'a> Checker<'a> {
         self.callable_ref_parameter_plan(
             &function.callable.params,
             &function.call_sig,
+            self.reference_bound_context_count(function),
             &expected.params,
         )
+    }
+
+    /// How many leading context parameters a reference to `function` fills from its own site.
+    /// Without `CallableReferencesToContextual` they stay ordinary leading inputs of the
+    /// reference's function type.
+    pub(super) fn reference_bound_context_count(
+        &self,
+        function: &crate::libraries::FunctionInfo,
+    ) -> usize {
+        if self.file.callable_references_to_contextual {
+            function.context_count
+        } else {
+            0
+        }
     }
 
     fn callable_ref_parameter_plan(
         &self,
         params: &[Ty],
         call_sig: &crate::libraries::CallSig,
+        context_count: usize,
         expected_params: &[Ty],
     ) -> Option<Vec<AdaptedRefArgument>> {
         extension_reference_selection::checked_parameter_plan(
             params,
             call_sig,
+            context_count,
             expected_params,
             self,
         )
@@ -34738,7 +34758,7 @@ impl<'a> Checker<'a> {
                     vararg_index: signature.vararg_index,
                     ..CallSig::default()
                 };
-                self.callable_ref_parameter_plan(&params, &call_sig, &expected.params)
+                self.callable_ref_parameter_plan(&params, &call_sig, 0, &expected.params)
                     .is_some()
                     && self.callable_ref_is_compatible(
                         &expected.params,
@@ -34808,6 +34828,7 @@ impl<'a> Checker<'a> {
             if callable_reference_selection::select_adapted_instance_candidate(
                 &source,
                 &candidates,
+                self.file.callable_references_to_contextual,
                 None,
                 expected,
                 |actual, target| self.receiver_is_assignable(actual, target),
@@ -35074,7 +35095,8 @@ impl<'a> Checker<'a> {
                         values,
                         whole_array: true,
                     } => values.as_slice() == [target],
-                    AdaptedRefArgument::Default
+                    AdaptedRefArgument::Context
+                    | AdaptedRefArgument::Default
                     | AdaptedRefArgument::Vararg {
                         whole_array: false,
                         ..
@@ -37111,6 +37133,7 @@ impl<'a> Checker<'a> {
             callable_reference_selection::select_adapted_instance_candidate(
                 &source,
                 overloads,
+                self.file.callable_references_to_contextual,
                 None,
                 expected,
                 |actual, target| self.receiver_is_assignable(actual, target),
@@ -38228,8 +38251,11 @@ impl<'a> Checker<'a> {
             generic,
             &call_sig,
             receiver,
-            Some(expected_params),
-            Some(expected_ret),
+            callable_reference_selection::ReferenceExpectation {
+                params: Some(expected_params),
+                ret: Some(expected_ret),
+                bound_contexts: 0,
+            },
             |actual, bound| self.generic_bound_admits(actual, bound),
         )
         .ok()?;
@@ -54647,6 +54673,7 @@ impl<'a> Checker<'a> {
                         callable_reference_selection::select_adapted_instance_candidate(
                             &source,
                             &candidates,
+                            self.file.callable_references_to_contextual,
                             None,
                             expected,
                             |actual, target| self.receiver_is_assignable(actual, target),
@@ -54940,6 +54967,7 @@ impl<'a> Checker<'a> {
                     callable_reference_selection::select_adapted_instance_candidate(
                         &source,
                         &receiver_candidates.overloads,
+                        self.file.callable_references_to_contextual,
                         Some(receiver_ty),
                         expected,
                         |actual, target| self.receiver_is_assignable(actual, target),
@@ -55092,6 +55120,82 @@ impl<'a> Checker<'a> {
         receiver: Option<ExprId>,
         name: String,
     ) -> Ty {
+        let ty = self.callable_ref_selected_type(scope, e, expected, receiver, name.clone());
+        // Without an expected function type the reference is first selected as the declaration
+        // reads, contexts included. Its context parameters are not part of the reference's type,
+        // so the declaration's remaining parameters are the expectation it is selected against.
+        let ty = match expected
+            .is_none()
+            .then(|| self.context_free_reference_expectation(e))
+            .flatten()
+        {
+            Some(context_free) => {
+                self.callable_ref_selected_type(scope, e, Some(context_free), receiver, name)
+            }
+            None => ty,
+        };
+        self.bind_reference_context_arguments(scope, e, ty)
+    }
+
+    /// The function type of the function reference `e` selected without an expectation, with the
+    /// declaration's leading context parameters removed, when the declaration has some and the
+    /// reference binds them.
+    fn context_free_reference_expectation(&self, e: ExprId) -> Option<Ty> {
+        if !self.file.callable_references_to_contextual {
+            return None;
+        }
+        let (context_count, offset, parameters, ret, suspend) = match self.expr_lowers.get(&e)? {
+            ExprLowering::TopLevelFunctionRef(reference) => {
+                let target = &reference.target;
+                (
+                    target.context_count,
+                    0,
+                    target.params.clone(),
+                    target.ret,
+                    target.suspend,
+                )
+            }
+            ExprLowering::CallableReference {
+                binding,
+                target: CallableReferenceTarget::Member { receiver, member },
+            } => {
+                let mut parameters = Vec::new();
+                let unbound = matches!(binding, CallableReferenceBinding::Unbound);
+                if unbound {
+                    parameters.push(*receiver);
+                }
+                parameters.extend(member.params.iter().copied());
+                (
+                    member.context_count,
+                    usize::from(unbound),
+                    parameters,
+                    member.ret,
+                    member.suspend(),
+                )
+            }
+            _ => return None,
+        };
+        let context_count = Some(context_count).filter(|&count| count > 0)?;
+        let mut parameters = parameters;
+        if parameters.len() < offset + context_count {
+            return None;
+        }
+        parameters.drain(offset..offset + context_count);
+        Some(if suspend {
+            Ty::fun_suspend(parameters, ret)
+        } else {
+            Ty::fun(parameters, ret)
+        })
+    }
+
+    fn callable_ref_selected_type(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        e: ExprId,
+        expected: Option<Ty>,
+        receiver: Option<ExprId>,
+        name: String,
+    ) -> Ty {
         // Callable references are contextually revisited while surrounding overload candidates are
         // compared. Start each pass transactionally: only the winner selected below may publish a
         // generic commitment, and a non-generic winner must leave no provisional evidence behind.
@@ -55184,6 +55288,13 @@ impl<'a> Checker<'a> {
                         }
                         implicit_rungs::ImplicitRung::Receiver(receiver) => receiver,
                     };
+                    // A context parameter is not a receiver a bare reference binds to.
+                    if implicit_receiver
+                        .receiver_role
+                        .is_some_and(ReceiverDeclarationRole::is_context_parameter)
+                    {
+                        continue;
+                    }
                     let receiver = implicit_receiver.ty;
                     let candidates = self.callable_ref_candidates(receiver, &name);
                     if let Some(selection) = self.select_bound_callable_ref(&candidates, expected) {
