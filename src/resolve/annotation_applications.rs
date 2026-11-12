@@ -759,9 +759,11 @@ impl Checker<'_> {
         owner: Option<TypeName>,
     ) {
         let container = self.enter_annotation_class_rung(owner.and_then(TypeName::nested_owner));
+        let annotated = std::mem::replace(&mut self.annotated_classifier, owner);
         for (annotation, arguments) in class.annotations.iter().zip(&class.annotation_args) {
             self.check_non_property_annotation_application(scope, annotation, arguments, "class");
         }
+        self.annotated_classifier = annotated;
         self.exit_annotation_class_rung(container);
     }
 
