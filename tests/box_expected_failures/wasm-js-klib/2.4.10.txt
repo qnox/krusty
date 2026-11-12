@@ -480,7 +480,6 @@ classes/kt3114.kt
 classes/kt343.kt
 classes/kt500.kt
 classes/kt508.kt
-classes/kt5347.kt
 classes/kt6136.kt
 classes/kt725.kt
 classes/kt8011.kt
@@ -1395,7 +1394,6 @@ delegatedProperty/valInInnerClass.kt
 delegatedProperty/varInInnerClass.kt
 delegation/delegationDifferentModule.kt
 delegation/delegationDifferentModule2.kt
-delegation/delegationToVar.kt
 delegation/genericProperty.kt
 delegation/ifWithCallableReferenceInLazy.kt
 delegation/kt30102_comparable.kt
@@ -1594,7 +1592,6 @@ function/eqeq.kt
 function/extension.kt
 function/intrinsic.kt
 function/localFunction.kt
-function/localFunction2.kt
 function/manglingImportedFromObjectWithNI.kt
 function/minus_eq.kt
 function/named.kt
@@ -1625,7 +1622,6 @@ functions/kt395.kt
 functions/kt47449.kt
 functions/kt58825_arrayOverloads.kt
 functions/localFunction.kt
-functions/localFunctions/callBetweenLocalFunctions.kt
 functions/localFunctions/callInlineLocalInLambda.kt
 functions/localFunctions/definedWithinLambda.kt
 functions/localFunctions/definedWithinLambdaInnerUsage1.kt
@@ -2525,23 +2521,17 @@ lazyCodegen/optimizations/negateObjectComp2.kt
 literals/listof1.kt
 literals/strdedup1.kt
 localClass/innerTakesCapturedFromOuter.kt
-localClass/localFunctionCallFromLocalClass.kt
 localClass/localFunctionInLocalClass.kt
 localClass/tryCatch.kt
-localClass/virtualCallFromConstructor.kt
 localClasses/closureWithSelfInstantiation.kt
 localClasses/inExtensionFunction.kt
 localClasses/inExtensionProperty.kt
 localClasses/inLocalExtensionFunction.kt
 localClasses/inLocalExtensionProperty.kt
 localClasses/innerOfLocalCaptureExtensionReceiver.kt
-localClasses/kt3210.kt
 localClasses/kt4174.kt
 localClasses/kt45383.kt
 localClasses/localClassCaptureExtensionReceiver.kt
-localClasses/recaptureVarCapturedInLocalClass1.kt
-localClasses/recaptureVarCapturedInLocalClass2.kt
-localClasses/recaptureVarCapturedInLocalClass3.kt
 localClasses/subclassingExtensionReceiverClass.kt
 localEscapeAnalysis/arraysFieldWrite.kt
 lower/forLoopsLowering/arrays.kt
@@ -2562,7 +2552,6 @@ mangling/multipleConstructors.kt
 mangling/parentheses.kt
 mangling/publicOverrideSuperCall.kt
 mixedNamedPosition/varargsEvaluationOrder.kt
-multiDecl/VarCapturedInObjectLiteral.kt
 multiDecl/component.kt
 multiDecl/forIterator/MultiDeclFor.kt
 multiDecl/forIterator/MultiDeclForComponentExtensions.kt
@@ -2723,8 +2712,6 @@ objects/flist.kt
 objects/initializationOrderConsts.kt
 objects/interfaceCompanionObjectReference.kt
 objects/kt11117.kt
-objects/kt2663.kt
-objects/kt2663_3.kt
 objects/kt32351.kt
 objects/kt32749.kt
 objects/kt52540.kt
@@ -3929,7 +3916,6 @@ super/interfaceHashCode.kt
 super/kt14243_prop.kt
 super/kt3492ClassProperty.kt
 super/kt3492TraitProperty.kt
-super/kt4982.kt
 super/traitproperty.kt
 super/unqualifiedSuper.kt
 super/unqualifiedSuperWithDeeperHierarchies.kt
