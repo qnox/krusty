@@ -7,7 +7,9 @@ public class DumpLanguageFeatures {
         Class<?> feature = Class.forName("org.jetbrains.kotlin.config.LanguageFeature");
         // The argument `LanguageFeatureMessageRenderer` names for enabling a feature, from the
         // compiler's own `@Enables` map; a feature without one is named `-XXLanguage:+Feature`.
-        Map<?, ?> flags = featureFlags(feature.getClassLoader());
+        Map<?, ?> flags = (Map<?, ?>) Class.forName("org.jetbrains.kotlin.diagnostics.rendering.RuntimeFeatureToFlagMapKt")
+            .getMethod("buildRuntimeFeatureToFlagMap", ClassLoader.class)
+            .invoke(null, feature.getClassLoader());
         System.out.println("# name\tsinceVersion\tsinceApiVersion\tprogressive\tforcesPreReleaseBinaries\tforcesPreReleaseBinariesBefore\ttestOnly\tbehaviorAfterSinceVersion\thintUrl\tflag\tissue\tpresentableName");
         for (Object entry : feature.getEnumConstants()) {
             System.out.println(String.join("\t",
@@ -25,23 +27,6 @@ public class DumpLanguageFeatures {
                 issue(get(feature, entry, "getIssue")),
                 // Last: every feature has one, so no row ends in an empty cell's tab.
                 text(get(feature, entry, "getPresentableName"))));
-        }
-    }
-
-    /**
-     * The compiler's map from a feature to the argument that enables it. 2.4 reads
-     * `RuntimeFeatureToFlagMapKt.buildRuntimeFeatureToFlagMap`; 2.5.0-Beta2 publishes
-     * `FeatureToFlagMapGeneratedKt.getFeatureToEnablingFlagMap` instead.
-     */
-    private static Map<?, ?> featureFlags(ClassLoader loader) throws Exception {
-        try {
-            return (Map<?, ?>) Class.forName("org.jetbrains.kotlin.diagnostics.rendering.RuntimeFeatureToFlagMapKt")
-                .getMethod("buildRuntimeFeatureToFlagMap", ClassLoader.class)
-                .invoke(null, loader);
-        } catch (ClassNotFoundException moved) {
-            return (Map<?, ?>) Class.forName("org.jetbrains.kotlin.diagnostics.rendering.FeatureToFlagMapGeneratedKt")
-                .getMethod("getFeatureToEnablingFlagMap")
-                .invoke(null);
         }
     }
 

@@ -135,24 +135,7 @@ impl Evaluator<'_> {
             .map(ResolvedCall::compiler_intrinsic)
     }
 
-    /// The value of `expression`, as kotlinc's FIR evaluator turns each evaluated node into a
-    /// literal (`toConstExpression`): under `NormalizeNaNValuesInConstContext` a NaN is the
-    /// canonical NaN of its type.
     fn evaluate(
-        &self,
-        expression: ExprId,
-        requested: Option<Ty>,
-        depth: u32,
-    ) -> Option<LibraryConst> {
-        let constant = self.evaluate_node(expression, requested, depth)?;
-        Some(if self.context.file.normalize_nan_in_const_context {
-            canonical_nan(constant)
-        } else {
-            constant
-        })
-    }
-
-    fn evaluate_node(
         &self,
         expression: ExprId,
         requested: Option<Ty>,
@@ -288,16 +271,6 @@ impl Evaluator<'_> {
         .then_some(())?;
         arithmetic_numeric(expected, left, right, result_ty)
     }
-}
-
-/// `constant` with a NaN replaced by its type's canonical NaN (`Float.NaN`, `Double.NaN`).
-fn canonical_nan(constant: LibraryConst) -> LibraryConst {
-    let value = match constant.value {
-        LibConst::Float(value) if value.is_nan() => LibConst::Float(f32::NAN),
-        LibConst::Double(value) if value.is_nan() => LibConst::Double(f64::NAN),
-        value => value,
-    };
-    LibraryConst { value, ..constant }
 }
 
 fn evaluate_primitive_intrinsic(

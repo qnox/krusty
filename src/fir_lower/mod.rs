@@ -406,13 +406,6 @@ struct BodyLowering<'a> {
     /// that parameter's slot in the function declaring it. Recorded where each read is produced,
     /// so an argument keeps its provenance however an inline expansion stages it.
     crossinline_reads: HashMap<ExprId, u32>,
-    /// The lowered operands of the context arguments checking selected from the scope (see
-    /// [`FirBody::is_implicit_context_argument`]). They are no source arguments, so they never
-    /// reorder a call's written operands.
-    implicit_context_operands: crate::fx_hash::HashSet<ExprId>,
-    /// The lowered operands of the explicit context arguments evaluated after the extension
-    /// receiver (see [`FirBody::is_receiver_ordered_context_argument`]).
-    receiver_ordered_context_operands: crate::fx_hash::HashSet<ExprId>,
     implicit_receiver_capture_slots: Vec<(crate::fir::FirImplicitReceiverCapture, u32)>,
     shared_locals: HashMap<crate::fir::LocalValueId, crate::fir::ResolvedTy>,
     /// Checked source-binding reassignment facts, inventoried before expression lowering so every
@@ -738,8 +731,6 @@ impl<'a> BodyLowering<'a> {
             class_constructor_context_count,
             capture_slots,
             crossinline_reads: HashMap::default(),
-            implicit_context_operands: crate::fx_hash::HashSet::default(),
-            receiver_ordered_context_operands: crate::fx_hash::HashSet::default(),
             implicit_receiver_capture_slots,
             shared_locals: directly_shared_locals(body),
             binding_stability: binding_stability::inventory(body),
