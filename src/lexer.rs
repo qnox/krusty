@@ -776,7 +776,7 @@ impl<'a> Lexer<'a> {
             self.i += utf8_char_len(self.b[self.i]);
         }
         let span = Span::new(lo, self.i as u32);
-        let text = &self.s[lo as usize..self.i as usize];
+        let text = &self.s[lo as usize..self.i];
         let kind = keyword(text).unwrap_or(TokenKind::Ident);
         Token { kind, span }
     }

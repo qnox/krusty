@@ -40,7 +40,7 @@ pub(super) fn memoize(
     class.is_compiler_generated = true;
     let class_id = ir.add_class(class);
     ir.ctor_visibilities.insert(singletons, Visibility::Public);
-    ir.mark_declarationless_class(singletons);
+    ir.mark_declarationless_class(singletons, crate::ir::IrDeclarationlessVisibility::Internal);
     let owner: Box<str> = format!("class:{}", singletons.nested_segment_ref()).into();
     let mut stores = Vec::with_capacity(lambdas.len());
     for (index, lambda) in (0u32..).zip(lambdas) {

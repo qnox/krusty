@@ -76,6 +76,7 @@ impl Parser<'_> {
         let mut bounds = Vec::new();
         let mut variances = Vec::new();
         self.type_parameter_spans.clear();
+        self.type_parameter_bound_spans.clear();
         if !self.eat(TokenKind::Lt) {
             return (names, non_null, reified, bounds, variances);
         }
@@ -134,7 +135,10 @@ impl Parser<'_> {
             }
             let mut inline_bound = None;
             if self.eat(TokenKind::Colon) {
+                let bound_start = self.tok().span.lo;
                 let bound = self.parse_type();
+                self.type_parameter_bound_spans
+                    .push(crate::diag::Span::new(bound_start, bound.span.hi));
                 if bound.name == "Any" && !bound.nullable() && !name.is_empty() {
                     non_null.insert(name.clone());
                 }

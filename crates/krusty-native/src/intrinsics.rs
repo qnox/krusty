@@ -1894,24 +1894,6 @@ pub(super) fn throwable_field(owner: krusty::types::TypeName, name: &str) -> Opt
     }
 }
 
-/// The runtime function answering a `KClass` name accessor, or `None` for anything else.
-///
-/// Both spellings of each are taken for the reason `is_text_length` takes both: which one
-/// a provider presents a property's accessor under is the provider's business, not this table's.
-pub(super) fn class_name_accessor(
-    owner: krusty::types::TypeName,
-    name: &str,
-) -> Option<&'static str> {
-    if !owner.matches("kotlin/reflect/KClass") {
-        return None;
-    }
-    match name {
-        "simpleName" => Some("kt_class_simple_name"),
-        "qualifiedName" => Some("kt_class_qualified_name"),
-        _ => None,
-    }
-}
-
 /// Whether this is an object the runtime realizes ENTIRELY, so it has no instance of its own.
 ///
 /// `kotlin.properties.Delegates` is one: it holds no state, and every member of it is answered

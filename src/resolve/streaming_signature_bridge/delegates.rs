@@ -365,12 +365,12 @@ impl ProductionSignatureSemantics<'_> {
             Some(
                 crate::resolve::delegated_properties::delegate_convention_message(
                     resolver,
-                    convention_site,
-                    delegate,
-                    name,
-                    this_ref,
-                    None,
-                    None,
+                    &crate::resolve::delegated_properties::DelegateConventionQuery::for_delegate(
+                        convention_site,
+                        delegate,
+                        name,
+                        this_ref,
+                    ),
                     &mut |candidate| self.determined_candidate_result(candidate, demand),
                 ),
             )
@@ -410,12 +410,12 @@ impl ProductionSignatureSemantics<'_> {
         );
         let convention_site = self.delegate_convention_site(&site, by_span);
         let message = match crate::resolve::delegated_properties::delegate_convention_ambiguity_message_with_functions(
-            convention_site,
-            delegate,
-            name,
-            this_ref,
-            None,
-            None,
+            &crate::resolve::delegated_properties::DelegateConventionQuery::for_delegate(
+                convention_site,
+                delegate,
+                name,
+                this_ref,
+            ),
             candidates,
             &mut |candidate| self.determined_candidate_result(candidate, demand),
         ) {
