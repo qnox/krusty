@@ -15,6 +15,9 @@ use crate::diagnostic_wording::{
 };
 
 pub(super) fn validate(file: &File, diagnostics: &mut DiagSink) {
+    for alias in &file.type_alias_decls {
+        validate_type_alias(alias, diagnostics);
+    }
     for declaration in &file.decl_arena {
         match declaration {
             Decl::Fun(function) => validate_function(function, false, diagnostics),
@@ -35,6 +38,9 @@ pub(super) fn validate(file: &File, diagnostics: &mut DiagSink) {
                 for function in &class.methods {
                     validate_function(function, true, diagnostics);
                 }
+                for alias in &class.type_aliases {
+                    validate_type_alias(alias, diagnostics);
+                }
                 if class.is_interface() {
                     for property in &class.body_props {
                         for diagnostic in
@@ -52,6 +58,12 @@ pub(super) fn validate(file: &File, diagnostics: &mut DiagSink) {
                 }
             }
         }
+    }
+}
+
+fn validate_type_alias(alias: &crate::ast::TypeAliasDecl, diagnostics: &mut DiagSink) {
+    for diagnostic in crate::declaration_validation::type_alias_diagnostics(alias) {
+        diagnostics.error(diagnostic.span, diagnostic.message.to_string());
     }
 }
 

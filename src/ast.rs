@@ -471,6 +471,8 @@ pub struct DestructureEntry {
 pub struct TypeAliasDecl {
     pub name: String,
     pub type_params: Vec<String>,
+    /// The span of each upper bound written on a type parameter, which a type alias may not have.
+    pub type_param_bound_spans: Vec<Span>,
     pub target: TypeRef,
     pub span: Span,
     /// Exact span of the alias's NAME, like [`FunDecl::name_span`].

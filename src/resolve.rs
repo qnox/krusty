@@ -19572,6 +19572,10 @@ impl<'a> Checker<'a> {
                 self.check_local_fun(scope, &f.clone(), s);
             }
             Stmt::LocalTypeAlias(alias) => {
+                for diagnostic in crate::declaration_validation::type_alias_diagnostics(&alias) {
+                    self.diags
+                        .error(diagnostic.span, diagnostic.message.to_string());
+                }
                 self.declare_lexical_type_alias(scope, &alias);
             }
             Stmt::CompoundAssign {
