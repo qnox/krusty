@@ -573,6 +573,14 @@ fn expression_type(
             ir.functions[function as usize].ret
         }
         IrExpr::PropertyRead { ty, .. } if ir.checked_type(id).is_none() => *ty,
+        // A `when` without an `else` branch, such as a guard a counted loop's lowering adds, is a
+        // statement: no branch's value can be its own.
+        IrExpr::When { branches }
+            if ir.checked_type(id).is_none()
+                && branches.iter().all(|(condition, _)| condition.is_some()) =>
+        {
+            Ty::Unit
+        }
         // A top-level property read has its storage's declared type.
         IrExpr::GetStatic(index) if ir.checked_type(id).is_none() => ir.statics[*index as usize].ty,
         // A shared cell's element is read, and a write evaluates to what it stored, at the
@@ -1733,12 +1741,24 @@ impl<'a> Body<'a> {
         }
         self.code.block(BlockType::Empty);
         let next = self.open();
-        self.loops.push(Loop { label, exit, next });
+        self.loops.push(Loop {
+            label: label.clone(),
+            exit,
+            next,
+        });
         self.statement(body)?;
         self.loops.pop();
         self.close();
         if let Some(update) = update {
+            // The update is still the loop's own code: a counted loop over an inclusive bound
+            // leaves from it before stepping past the last value.
+            self.loops.push(Loop {
+                label,
+                exit,
+                next: top,
+            });
             self.statement(update)?;
+            self.loops.pop();
         }
         if post_test {
             self.value(cond, Ty::Boolean)?;
