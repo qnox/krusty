@@ -341,6 +341,13 @@ impl SymbolSource for DependencyPlatform {
         self.platform.external_callable(identity)
     }
 
+    fn klib_body_class_contract(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::libraries::KlibBodyClassContract> {
+        self.platform.klib_body_class_contract(classifier)
+    }
+
     fn external_callable_by_dependency(
         &self,
         identity: &crate::libraries::KlibDependencyCallable,

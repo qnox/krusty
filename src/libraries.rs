@@ -10,6 +10,7 @@ mod call_arg_mapping_failure;
 mod call_realization;
 mod call_sig;
 mod callable_scope_rung;
+mod class_name_property;
 mod classifier_callables;
 mod classifier_declaration;
 mod classifier_kind;
@@ -54,6 +55,7 @@ pub use annotation_argument_provenance::AnnotationArgumentProvenance;
 pub use call_arg_mapping_failure::{CallArgMappingError, CallArgMappingFailure};
 pub(crate) use call_realization::KlibBodyCallableShape;
 pub use call_realization::KlibBodyCompanionReceiver;
+pub(crate) use call_realization::KlibSerializedMember;
 pub use call_realization::{
     DefaultCallRealization, DirectCFunction, ExternalCallableKind, ExternalCallableRealization,
     ExternalPropertyRealization, KlibBodyCallable, KlibDeclarationSignature,
@@ -108,8 +110,10 @@ use crate::types::InlineParameterModifier;
 pub use crate::types::Visibility;
 use crate::types::{SemanticCallRole, SemanticCallableOwner, Ty, TyKind, TypeName, TypeNameList};
 pub(crate) use array_factories::kotlin_array_factory_kind;
+pub(crate) use class_name_property::realize_class_name_property;
 pub use compiler_intrinsic::{
-    CompilerIntrinsic, IndicesReceiver, ListStorageConstruction, ResultFailureIntrinsic,
+    ClassNameKind, CompilerIntrinsic, IndicesReceiver, ListStorageConstruction,
+    ResultFailureIntrinsic,
 };
 pub(crate) use core_builtins::add_core_builtin_declarations;
 pub use generic_signature::{GenericReturnPolicy, GenericSig};

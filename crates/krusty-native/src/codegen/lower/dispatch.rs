@@ -384,6 +384,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             }
             return self.runtime_call(symbol, &params, ret, &arguments);
         }
+        if self.file.ir.class_id_by_name(owner).is_none() {
+            return self.laid_out_direct_call(owner, kind, declaration, name, receiver, args);
+        }
         let class = self.file.class_of(owner, "a `super` call to a method of")?;
         match kind {
             krusty::ir::IrSuperCallKind::PropertyGetter(property) => {
@@ -407,6 +410,55 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Err(declined!("a `super` call to the abstract method `{name}`"));
         };
         let params = super::super::super::captures::carried_parameters(ir, fid);
+        let Some(object) = self.receiver(receiver)? else {
+            return Ok(None);
+        };
+        let mut arguments = vec![object];
+        arguments.extend(self.arguments(args, &params)?);
+        if self.terminated {
+            return Ok(None);
+        }
+        let func_ref = self.func_ref(id);
+        let call = self.emit_call(func_ref, &arguments)?;
+        Ok(self.builder.inst_results(call).first().copied())
+    }
+
+    /// `super.f()` to a method of a superclass an earlier file laid out, through the symbol its
+    /// record names.
+    fn laid_out_direct_call(
+        &mut self,
+        owner: TypeName,
+        kind: krusty::ir::IrSuperCallKind,
+        declaration: Option<krusty::fir::ResolvedFunctionOverrideTarget>,
+        name: &str,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<Option<Value>, Unsupported> {
+        let outside = || {
+            declined!(
+                "a `super` call to a method of `{}`, which is not declared in this file",
+                owner.render()
+            )
+        };
+        let (
+            krusty::ir::IrSuperCallKind::Function,
+            Some(krusty::fir::ResolvedFunctionOverrideTarget::Module(callable)),
+        ) = (kind, declaration)
+        else {
+            return Err(outside());
+        };
+        let Some((function, params, _)) = self
+            .file
+            .laid_out
+            .get(owner)
+            .and_then(|record| record.methods.get(&callable))
+            .cloned()
+        else {
+            return Err(declined!(
+                "a `super` call to `{name}`, which the file declaring it does not export"
+            ));
+        };
+        let id = self.file.import_object_function(&function)?;
         let Some(object) = self.receiver(receiver)? else {
             return Ok(None);
         };

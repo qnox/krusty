@@ -566,6 +566,7 @@ impl Record {
             None,
             None,
             Some(&self.identity),
+            crate::libraries::KlibSerializedMember::Class,
         )
         .expect("signed")
     }
