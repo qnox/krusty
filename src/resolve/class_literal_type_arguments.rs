@@ -114,10 +114,11 @@ impl Checker<'_> {
             let Some((internal, [])) = ty.obj_parts() else {
                 return ty;
             };
-            let classifier = self
-                .fed_source()
-                .classifier(internal)
-                .expect("a resolved class-literal classifier must retain its declaration");
+            // A class whose own signature never finalized (an unresolved supertype, already
+            // reported) publishes no declaration, so there are no type parameters to project.
+            let Some(classifier) = self.fed_source().classifier(internal) else {
+                return ty;
+            };
             super::class_literal_receiver::star_projected_class_literal_receiver(ty, &classifier)
         })
     }
