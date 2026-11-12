@@ -1708,8 +1708,8 @@ fn kotlin_codegen_box_conformance() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(usize::MAX);
 
-    let mut files =
-        super::box_inventory::discover(&box_dir).unwrap_or_else(|error| panic!("{error}"));
+    let mut files = super::box_inventory::discover(&box_dir, krusty::conformance::TestTarget::Jvm)
+        .unwrap_or_else(|error| panic!("{error}"));
     let corpus: BTreeSet<String> = files
         .iter()
         .map(|file| box_ratchet::corpus_key(&box_dir, file))

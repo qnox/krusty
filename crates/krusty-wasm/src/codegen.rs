@@ -278,6 +278,18 @@ impl Backend for WasmBackend {
     }
 
     fn check_module(&self, state: &Self::State, diags: &mut DiagSink) {
+        if let Some(construct) = state
+            .started
+            .as_ref()
+            .filter(|_| !state.declined)
+            .and_then(|started| started.runtime.objects.interfaces.declined())
+        {
+            diags.error(
+                krusty::diag::Span::new(0, 0),
+                format!("{DECLINE_PREFIX}{construct} yet"),
+            );
+            return;
+        }
         if let Some(started) = state.started.as_ref().filter(|_| !state.declined) {
             if let Err(error) = started.callables.check_source_singletons() {
                 diags.error(
