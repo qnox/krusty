@@ -54,13 +54,7 @@ impl BodyLowering<'_> {
     fn default_value(mut self, default: KlibIrExprId, declared: Ty) -> Lowered<ExprId> {
         let lowered = self.expression(default)?;
         let actual = self.lowered_type(lowered);
-        if actual != declared
-            && actual != Ty::Nothing
-            && (self.local_class_subtype(actual, declared)
-                || self
-                    .linker
-                    .is_subtype(self.header.type_parameters(), actual, declared))
-        {
+        if actual != declared && actual != Ty::Nothing && self.is_supertype_of(declared, actual) {
             let coerced = self.coercion(lowered, declared);
             return Ok(self.typed(coerced, declared));
         }
