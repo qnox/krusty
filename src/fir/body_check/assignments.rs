@@ -135,7 +135,7 @@ impl BodyFirChecker<'_> {
         // call. Routing through the shared operator-target mapping is what keeps a dependency
         // operator from being reported as a missing STABLE target — it never had one.
         let selected = self.selected_call_target(span, Some(target.call.as_ref()))?;
-        if selected.vararg_index.is_some() || selected.value_parameters.len() != 1 {
+        if selected.vararg.is_some() || selected.value_parameters.len() != 1 {
             return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
         }
         let parameter_types = selected.parameter_types();

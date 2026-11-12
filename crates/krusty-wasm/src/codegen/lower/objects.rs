@@ -20,7 +20,9 @@ use krusty::ir::{
 };
 use krusty::types::{Ty, TyKind, TypeName};
 
-use super::super::super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
+use super::super::super::encode::{
+    BlockType, Code, Function, HeapType, Module, StorageType, ValType,
+};
 use super::super::super::interface_dispatch::MemberRef;
 use super::super::super::objects::{slot_field, REFERENCE};
 use super::super::super::runtime::{Runtime, EQZ32, OR32};
@@ -173,7 +175,9 @@ impl Body<'_> {
 
     /// Push a new instance of `class`: its identity hash, and every field at its default value.
     fn allocate(&mut self, class: ClassId) -> Result<(), Unsupported> {
-        let classes = self.file_classes()?;
+        let classes = self
+            .classes
+            .ok_or_else(|| "an object of a class declared in another file".to_string())?;
         let form = &classes.forms[class as usize];
         let table = form
             .table
@@ -191,13 +195,25 @@ impl Body<'_> {
         self.code
             .global_get(table)
             .call(self.runtime.identity.allocate);
-        self.enum_base_fields(class)?;
-        if exception_rooted {
-            // A runtime exception's message and cause, which its constructor's delegation to
-            // the runtime class writes.
-            self.code
-                .ref_null(HeapType::Concrete(self.runtime.string))
-                .ref_null(HeapType::Eq);
+        match classes.laid_out_superclass(class) {
+            Some(superclass) => {
+                for field in &superclass.fields {
+                    let StorageType::Val(value) = field.storage else {
+                        return Err("a packed field of a superclass of another file".to_string());
+                    };
+                    default_value(&mut self.code, value);
+                }
+            }
+            None => {
+                self.enum_base_fields(class)?;
+                if exception_rooted {
+                    // A runtime exception's message and cause, which its constructor's delegation
+                    // to the runtime class writes.
+                    self.code
+                        .ref_null(HeapType::Concrete(self.runtime.string))
+                        .ref_null(HeapType::Eq);
+                }
+            }
         }
         for &owner in chain.iter().rev() {
             for field in &self.ir.classes[owner as usize].fields {
@@ -570,7 +586,7 @@ impl Body<'_> {
     }
 
     /// Replace the object on the stack with its dispatch table, as `$AnyTable`.
-    fn table_of_object(&mut self) {
+    pub(super) fn table_of_object(&mut self) {
         let object = self.runtime.objects.object;
         self.code
             .ref_cast(false, HeapType::Concrete(object))
@@ -603,6 +619,43 @@ impl Body<'_> {
             self.function_argument(function, parameter as u32, arg)?;
         }
         let function = self.emitted_function(function)?;
+        self.code.call(function);
+        Ok(())
+    }
+
+    /// `super.f(args)` for a method of a superclass an earlier file laid out, called directly. The
+    /// call's parameter and result types are carried as that file's function takes and answers.
+    fn laid_out_super_call(
+        &mut self,
+        callable: CallableId,
+        (params, ret): (&[Ty], Ty),
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        let (function, ty) = self
+            .file_classes()?
+            .laid_out_method(callable)
+            .ok_or("a `super` call to a member of another file")?;
+        let (carried, results) = self
+            .module
+            .func_signature(ty)
+            .ok_or("a `super` call to a function of no function type")?;
+        let mut expected = vec![REFERENCE];
+        for param in params {
+            expected.push(carrier(*param)?.ok_or("a `Unit` parameter")?);
+        }
+        if params.len() != args.len()
+            || carried != expected
+            || results != carrier(ret)?.into_iter().collect::<Vec<_>>()
+        {
+            return Err(
+                "a `super` call to a member of another file carried differently".to_string(),
+            );
+        }
+        self.value(receiver, any())?;
+        for (&arg, param) in args.iter().zip(params) {
+            self.value(arg, *param)?;
+        }
         self.code.call(function);
         Ok(())
     }
@@ -684,15 +737,13 @@ impl Body<'_> {
             Callee::Super {
                 kind: IrSuperCallKind::Function,
                 declaration: Some(ResolvedFunctionOverrideTarget::Module(callable)),
+                params,
+                ret,
                 ..
-            } => {
-                let function = *self
-                    .ir
-                    .checked_callable_functions
-                    .get(callable)
-                    .ok_or("a `super` call to a member of another file")?;
-                self.direct_member_call(function, receiver, args)
-            }
+            } => match self.ir.checked_callable_functions.get(callable) {
+                Some(&function) => self.direct_member_call(function, receiver, args),
+                None => self.laid_out_super_call(*callable, (params, *ret), receiver, args),
+            },
             Callee::Super { .. } => Err("a `super` call to a library member".to_string()),
             _ => Err("a member call through this calling convention".to_string()),
         }
@@ -1245,9 +1296,7 @@ pub(super) fn define_class_functions(
                 .flatten()
                 .map(|owner| owner as ClassId);
             for activated in owner.into_iter().chain([id]) {
-                if let Some(parent) = classes.tables.table(activated).superclass {
-                    body.activate_class(parent, owner)?;
-                }
+                body.activate_superclasses(activated, owner)?;
             }
             body.allocate(id)?;
             body.code
@@ -1587,6 +1636,26 @@ impl Body<'_> {
         Ok((form.secondaries[index], params))
     }
 
+    /// The constructor `ordinal` of the superclass of `class` an earlier file laid out, and the
+    /// parameters it takes.
+    fn laid_out_constructor(
+        &self,
+        class: ClassId,
+        ordinal: u32,
+    ) -> Result<(u32, Vec<Ty>), Unsupported> {
+        self.file_classes()?
+            .laid_out_superclass(class)
+            .and_then(|superclass| superclass.constructors.get(ordinal as usize))
+            .cloned()
+            .flatten()
+            .ok_or_else(|| {
+                format!(
+                    "a delegation to a constructor the superclass of another file lacks (`{}`)",
+                    self.ir.classes[class as usize].fq_name()
+                )
+            })
+    }
+
     /// Call `constructor`, taking `params`, on `this` with the first `forwarded` parameters of
     /// this constructor and then `args`.
     fn delegate(
@@ -1661,6 +1730,11 @@ impl Body<'_> {
             Some(parent) => {
                 let (constructor, params) =
                     self.constructor_of(parent, declaration.super_ctor.ordinal)?;
+                self.delegate(constructor, &params, 0, &declaration.super_args)?;
+            }
+            None if self.file_classes()?.laid_out_superclass(class).is_some() => {
+                let (constructor, params) =
+                    self.laid_out_constructor(class, declaration.super_ctor.ordinal)?;
                 self.delegate(constructor, &params, 0, &declaration.super_args)?;
             }
             None if self.file_classes()?.exception_base(class).is_some() => {
@@ -1785,6 +1859,10 @@ impl Body<'_> {
                     let (constructor, params) = self.constructor_of(parent, target.ordinal)?;
                     self.delegate(constructor, &params, 0, &secondary.delegate_args)?;
                 }
+                None if self.file_classes()?.laid_out_superclass(class).is_some() => {
+                    let (constructor, params) = self.laid_out_constructor(class, target.ordinal)?;
+                    self.delegate(constructor, &params, 0, &secondary.delegate_args)?;
+                }
                 None if self.file_classes()?.exception_base(class).is_some() => {
                     self.exception_delegation(&name, target_params, &secondary.delegate_args)?;
                 }
@@ -1826,12 +1904,39 @@ impl Body<'_> {
             };
             chain.push(parent);
         }
+        self.activate_laid_out(*chain.last().expect("non-empty"))?;
         for &owner in chain.iter().rev() {
             if Some(owner) != initializing {
                 self.initialize_companion(owner)?;
             }
         }
         Ok(())
+    }
+
+    /// Initialize what a superclass of `class` an earlier file laid out initializes before its
+    /// construction: its companions, and its superclasses', root first.
+    fn activate_laid_out(&mut self, class: ClassId) -> Result<(), Unsupported> {
+        let activation = self
+            .file_classes()?
+            .laid_out_superclass(class)
+            .map(|superclass| superclass.activation.clone())
+            .unwrap_or_default();
+        for getter in activation {
+            self.code.call(getter).drop_();
+        }
+        Ok(())
+    }
+
+    /// Initialize the superclasses of `class`, as constructing it does first.
+    pub(super) fn activate_superclasses(
+        &mut self,
+        class: ClassId,
+        initializing: Option<ClassId>,
+    ) -> Result<(), Unsupported> {
+        match self.file_classes()?.tables.table(class).superclass {
+            Some(parent) => self.activate_class(parent, initializing),
+            None => self.activate_laid_out(class),
+        }
     }
 
     /// Run the companion's typed initializer when this class has one. The getter's result is

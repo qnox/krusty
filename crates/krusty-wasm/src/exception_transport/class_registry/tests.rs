@@ -8,8 +8,8 @@ use krusty::libraries::LibraryType;
 
 fn runtime() -> (Module, ExceptionTransport) {
     let mut module = Module::default();
-    let (_, string) = Runtime::declare_types(&mut module);
-    let objects = ObjectRoot::declare(&mut module, ValType::nullable(string));
+    let (chars, string) = Runtime::declare_types(&mut module);
+    let objects = ObjectRoot::declare(&mut module, chars, string);
     let identity = IdentityObjects::declare(&mut module, &objects);
     let transport =
         ExceptionTransport::declare(&mut module, &objects, &identity, ValType::nullable(string));

@@ -1,4 +1,5 @@
-// Unsigned numbers read as nullable values and as `Any`: each is a box of its own classifier.
+// Unsigned numbers read as nullable values, as `Any`, and as reference array elements: each is a
+// box of its own classifier.
 
 fun nullableUInt(value: UInt?): UInt? = value
 
@@ -32,5 +33,18 @@ fun box(): String {
     if (keep(0x1_0000_0001uL).hashCode() != 0x1_0000_0001uL.hashCode()) return "fail: ULong hashCode"
     if (keep(200u.toUByte()).hashCode() != 200u.toUByte().hashCode()) return "fail: UByte hashCode"
     if (keep(60000u.toUShort()).hashCode() != 60000u.toUShort().hashCode()) return "fail: UShort hashCode"
+    val filled = Array(2) { 7u }
+    filled[1] = 9u
+    if (filled[0] != 7u) return "fail: filled[0]"
+    if (filled[1] != 9u) return "fail: filled[1]"
+    if (filled[0] + filled[1] != 16u) return "fail: filled sum"
+    val empty: Array<UInt?> = Array(2) { null }
+    empty[0] = 5u
+    if (empty[0] != 5u) return "fail: empty[0]"
+    if (empty[1] != null) return "fail: empty[1]"
+    val literal = arrayOf<UInt?>(1u, null)
+    var sum = 0u
+    for (x in literal) sum += x ?: 0u
+    if (sum != 1u) return "fail: literal sum"
     return "OK"
 }

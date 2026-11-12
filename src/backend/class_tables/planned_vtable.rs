@@ -10,6 +10,7 @@ use crate::fx_hash::HashMap;
 
 use crate::fir::{CallableId, PropertyId, ResolvedPropertyOverrideTarget};
 use crate::ir::{ClassId, FunId, IrClass, IrFile, IrLocalPropertyLayout};
+use crate::types::TypeName;
 
 use super::class_vtable::{
     interface_keys, register_inherited_interface_members, register_interface_keys,
@@ -18,24 +19,51 @@ use super::class_vtable::{
 use super::members::{function_key, overridden_functions};
 use super::module_interfaces::ModuleInterfaces;
 use super::module_slots::{PlanKey, PlannedSlot, PlannedTable};
-use super::{AnyMember, ClassTable, Representation, Slot, SlotKey, Unsupported};
+use super::{AnyMember, ClassTable, LaidOutSuperclass, Representation, Slot, SlotKey, Unsupported};
 
-/// The table of class `id` as `planned` numbers it, extending `parent` (already tabled).
+/// The class a planned table is filled for, and what it extends.
+pub(super) struct PlannedClass<'t> {
+    pub(super) id: ClassId,
+    /// Its superclass in this file, already tabled as `parent`.
+    pub(super) superclass: Option<ClassId>,
+    pub(super) parent: Option<&'t ClassTable>,
+    /// The nearest superclass another file laid out, which `superclass` (if any) extends in turn.
+    pub(super) laid_out: Option<(TypeName, &'t LaidOutSuperclass)>,
+}
+
+/// The table of `planned_class` as `planned` numbers it.
+///
+/// A number below the slots of the superclass another file laid out, holding a member this file
+/// does not lower, is that superclass's: [`Slot::Inherited`].
 pub(super) fn planned_class_table(
     representation: &dyn Representation,
     ir: &IrFile,
-    id: ClassId,
-    superclass: Option<ClassId>,
-    parent: Option<&ClassTable>,
+    planned_class: PlannedClass<'_>,
     planned: &PlannedTable,
     numbered: &ModuleInterfaces,
 ) -> Result<ClassTable, Unsupported> {
+    let PlannedClass {
+        id,
+        superclass,
+        parent,
+        laid_out,
+    } = planned_class;
     let class = &ir.classes[id as usize];
     let qualified = class.fq_name();
+    if let (None, Some((name, table))) = (parent, laid_out) {
+        if table.slots != planned.inherited {
+            return Err(format!(
+                "a superclass of another file whose table the module plan does not number \
+                 (`{qualified}` extends `{}`)",
+                name.render().replace('/', ".")
+            ));
+        }
+    }
+    // Whether `slot` may hold what the superclass another file laid out holds there.
+    let elsewhere = |slot: usize| laid_out.is_some_and(|(_, table)| (slot as u32) < table.slots);
+    let lowered = |callable: CallableId| ir.checked_callable_functions.get(&callable).copied();
     let function = |callable: CallableId| {
-        ir.checked_callable_functions
-            .get(&callable)
-            .copied()
+        lowered(callable)
             .ok_or_else(|| format!("a planned member this file did not lower (`{qualified}`)"))
     };
     let method = |fid: FunId| {
@@ -90,30 +118,51 @@ pub(super) fn planned_class_table(
         }
     };
     let mut vtable = Vec::with_capacity(planned.entries.len());
-    for entry in &planned.entries {
+    for (slot, entry) in planned.entries.iter().enumerate() {
         vtable.push(match *entry {
             PlannedSlot::Any(member) => Slot::AnyMember(member),
             PlannedSlot::Reserved => Slot::Abstract,
-            PlannedSlot::Member(PlanKey::Callable(callable)) => method(function(callable)?),
+            PlannedSlot::Member(PlanKey::Callable(callable)) => match lowered(callable) {
+                Some(fid) => method(fid),
+                None if elsewhere(slot) => Slot::Inherited { slot: slot as u32 },
+                None => method(function(callable)?),
+            },
+            PlannedSlot::Member(PlanKey::Getter(property) | PlanKey::Setter(property))
+                if elsewhere(slot) && !ir.local_property_layouts.contains_key(&property) =>
+            {
+                Slot::Inherited { slot: slot as u32 }
+            }
             PlannedSlot::Member(PlanKey::Getter(property)) => accessor(property, false)?,
             PlannedSlot::Member(PlanKey::Setter(property)) => accessor(property, true)?,
             PlannedSlot::Bridge {
                 declared,
                 target_slot,
                 target,
-            } => Slot::Bridge {
-                declared: function(declared)?,
-                target_slot: Some(target_slot),
-                target: function(target)?,
+            } => match (lowered(declared), lowered(target)) {
+                (None, None) if elsewhere(slot) => Slot::Inherited { slot: slot as u32 },
+                (None, Some(_)) if elsewhere(slot) => {
+                    return Err(format!(
+                        "an override carried differently from the member of another file it \
+                         overrides (`{qualified}`)"
+                    ))
+                }
+                _ => Slot::Bridge {
+                    declared: function(declared)?,
+                    target_slot: Some(target_slot),
+                    target: function(target)?,
+                },
             },
             PlannedSlot::FunctionBridge {
                 arity,
                 target_slot,
                 target,
-            } => Slot::FunctionBridge {
-                arity,
-                target_slot,
-                target: function(target)?,
+            } => match lowered(target) {
+                None if elsewhere(slot) => Slot::Inherited { slot: slot as u32 },
+                _ => Slot::FunctionBridge {
+                    arity,
+                    target_slot,
+                    target: function(target)?,
+                },
             },
             PlannedSlot::AccessorBridge {
                 declared,
@@ -166,6 +215,11 @@ pub(super) fn planned_class_table(
     slots.extend(AnyMember::ALL.map(|member| (SlotKey::Any(member.slot()), member.slot())));
     for (key, &slot) in &planned.slots {
         let key = match *key {
+            // A member of the superclass another file laid out keeps its number in the plan,
+            // which is where a caller reads it; this file has no function to key it by.
+            PlanKey::Callable(callable) if laid_out.is_some() && lowered(callable).is_none() => {
+                continue
+            }
             PlanKey::Callable(callable) => SlotKey::Function(function(callable)?),
             PlanKey::Getter(property) => {
                 SlotKey::Getter(ResolvedPropertyOverrideTarget::Module(property))
@@ -176,7 +230,7 @@ pub(super) fn planned_class_table(
         };
         slots.insert(key, slot);
     }
-    let overridden = overridden_functions(ir, class, numbered)?;
+    let overridden = overridden_functions(ir, class, numbered, laid_out.is_some())?;
     for &fid in &class.methods {
         let function = &ir.functions[fid as usize];
         if function.dispatch_receiver.is_none() || function.is_static {
@@ -234,6 +288,7 @@ pub(super) fn planned_class_table(
 
     Ok(ClassTable {
         superclass,
+        laid_out_superclass: laid_out.map(|(name, _)| name),
         first_field: parent.map_or(0, |parent| {
             let parent_class = superclass.expect("a parent table is a superclass's");
             parent.first_field + ir.classes[parent_class as usize].fields.len() as u32
