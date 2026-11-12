@@ -93,6 +93,8 @@ pub(super) struct LoweredFile {
 
 /// One file's checked IR and the facts frozen beside it.
 pub(super) struct FileInput<'a> {
+    /// The module's Pass-1 facts, which certify a declaration another file of it realizes.
+    pub(super) module_facts: &'a krusty::backend::BackendModuleFacts,
     pub(super) array_range_checks: bool,
     pub(super) classifiers: &'a dyn krusty::backend::BackendClassifierSource,
     pub(super) ir: &'a IrFile,
@@ -120,6 +122,7 @@ pub(super) fn lower_file(
     state: ModuleState<'_>,
 ) -> Result<LoweredFile, Unsupported> {
     let FileInput {
+        module_facts,
         array_range_checks,
         classifiers,
         ir,
@@ -179,12 +182,14 @@ pub(super) fn lower_file(
         let results = carrier(function.ret)?.into_iter().collect::<Vec<_>>();
         signatures.push(Some(module.func_type(params, results)));
     }
-    let indices = callable_registry.declare_file(ir, module)?;
+    let enum_constant_entries =
+        callable_registry.link_enum_constants(dependency_exports, module)?;
+    let indices = callable_registry.declare_file(ir, module, &enum_constant_entries)?;
     let reference_file =
         runtime
             .callable_references
             .begin_file(module_name, ir, dependency_exports)?;
-    let call_targets = callable_registry.file_calls(ir, callables, module)?;
+    let call_targets = callable_registry.file_calls(ir, callables, module_facts, module)?;
     let inert_singleton_bindings = krusty::backend::inert_staged_singleton_bindings(
         ir,
         |expression| {
@@ -2114,6 +2119,7 @@ mod tests {
         );
         lower_file(
             FileInput {
+                module_facts: &module_facts,
                 array_range_checks: super::super::super::array_access::default_range_checks(),
                 classifiers: &classifiers,
                 ir,
