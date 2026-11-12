@@ -142,8 +142,8 @@ fn validate_expect_class(file: &File, class: &crate::ast::ClassDecl, diagnostics
             // The parser records that keyword for every `init` block it parses, so an absent one is
             // a broken parse product rather than a block to skip: reporting nothing here would drop
             // the diagnostic for an implementation the header really carries.
-            match file.init_block_keywords.get(body) {
-                Some(span) => diagnostics.error(*span, body_message()),
+            match file.init_blocks.get(body) {
+                Some(header) => diagnostics.error(header.keyword, body_message()),
                 None => diagnostics.error(
                     class.span,
                     "internal error: an init block in an expect classifier has no `init` keyword",

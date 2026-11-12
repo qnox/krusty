@@ -1241,6 +1241,17 @@ pub enum ClassInit {
     Block(ExprId),   // an `init { … }` block expression
 }
 
+/// The syntax an `init { … }` block carries besides its body.
+#[derive(Clone, Debug)]
+pub struct InitBlockHeader {
+    /// The `init` keyword. A diagnostic about an initializer block points at it, which the block
+    /// expression's own span (the `{`) does not cover.
+    pub keyword: Span,
+    /// Annotations written before `init`, with their argument expressions in parallel.
+    pub annotations: Vec<AnnotationRef>,
+    pub annotation_args: Vec<Vec<ExprId>>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ExplicitBackingField {
     pub ty: Option<TypeRef>,
@@ -1624,10 +1635,9 @@ pub struct File {
     pub assignment_overload_calls: crate::fx_hash::HashMap<u32, ExprId>,
     /// Source-name spans keyed by the synthetic read expression made for `target op= value`.
     pub compound_assignment_read_spans: crate::fx_hash::HashMap<u32, Span>,
-    /// Source span of the `init` KEYWORD introducing each initializer block, keyed by the block
-    /// expression [`ClassInit::Block`] records. A diagnostic about an `init` block points at the
-    /// keyword, which the block expression's own span (the `{`) does not cover.
-    pub init_block_keywords: crate::fx_hash::HashMap<ExprId, Span>,
+    /// The `init` keyword and declaration annotations of each initializer block, keyed by the
+    /// block expression [`ClassInit::Block`] records.
+    pub init_blocks: crate::fx_hash::HashMap<ExprId, InitBlockHeader>,
     /// Labels written on declaration statements (`label@ val …`, `label@ fun …`), keyed by the
     /// declaration statement. The value retains both spelling and exact label-token span.
     pub statement_labels: crate::fx_hash::HashMap<StmtId, (String, Span)>,
@@ -2046,7 +2056,7 @@ impl File {
         self.assignment_target_spans = Default::default();
         self.assignment_overload_calls = Default::default();
         self.compound_assignment_read_spans = Default::default();
-        self.init_block_keywords = Default::default();
+        self.init_blocks = Default::default();
         self.incdec_accesses = Default::default();
         self.call_arg_names = Default::default();
         self.collection_literal_calls = Default::default();
