@@ -1255,10 +1255,8 @@ impl WorkerHost {
                     &classpath,
                     jdk_home.as_deref(),
                 );
-                // Missing repository jars stay missing on this refresh. The parity command is
-                // what downloads them; this call runs on the analysis thread.
-                let _ = krusty_lsp::project::maven_repository::RepositoryFetch::Editor
-                    .fetch_named_jars(&classpath);
+                // Missing repository jars stay missing. `ensure_maven_repository_jars` runs only
+                // from the parity command; this refresh is on the analysis thread.
                 let missing_classpath =
                     krusty_lsp::project::classpath_presence::missing_classpath_warning(
                         &classpath,
