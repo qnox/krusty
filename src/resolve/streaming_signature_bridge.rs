@@ -4539,10 +4539,11 @@ pub(crate) fn finalized_streamed_signature_index(
             classifier.internal,
             interface_delegations,
         ));
-        let sealed_subclasses = classifier
-            .is_sealed()
-            .then(|| table.subclass_names_of(classifier.internal))
-            .unwrap_or_default();
+        let sealed_subclasses = if classifier.is_sealed() {
+            table.subclass_names_of(classifier.internal)
+        } else {
+            Default::default()
+        };
         let signature_scope = crate::fir::SignatureScope {
             owner: stub.id,
             source: stub.source,
@@ -4559,7 +4560,7 @@ pub(crate) fn finalized_streamed_signature_index(
                         .filter(|_| {
                             parameter.context_kind == crate::types::ContextParameterKind::Named
                         })
-                        .map(|name| Box::<str>::from(name)),
+                        .map(Box::<str>::from),
                     parameter.context_kind,
                     semantics.resolve_compact_header_type(signature_scope, parameter.ty)?,
                 ))

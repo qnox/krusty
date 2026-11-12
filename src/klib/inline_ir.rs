@@ -691,8 +691,8 @@ impl FileWriter {
     ) -> u32 {
         let boolean = self.ty(Ty::Boolean, parameters);
         let value_slot = usize::try_from(function.body.value_slot).expect("value slot fits usize");
-        let argument_ty = if function.dispatch_receiver.is_some() && value_slot == 0 {
-            function.dispatch_receiver.expect("slot zero is dispatch")
+        let argument_ty = if let (0, Some(dispatch)) = (value_slot, function.dispatch_receiver) {
+            dispatch
         } else {
             let index = value_slot - usize::from(function.dispatch_receiver.is_some());
             function.parameters[index].ty

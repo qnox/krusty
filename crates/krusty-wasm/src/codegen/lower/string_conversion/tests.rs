@@ -108,7 +108,7 @@ fn unsigned_decimal_support_does_not_admit_nullable_or_erased_unsigned_boxes() {
             assert_eq!(
                 lower(ir, value, target),
                 Err(format!(
-                    "a string template part of type `{}`",
+                    "a `toString` of `{}` reaching a runtime object this target cannot print",
                     super::super::describe(Ty::nullable(ty))
                 )),
             );
@@ -126,7 +126,7 @@ fn unsigned_decimal_support_does_not_admit_nullable_or_erased_unsigned_boxes() {
             assert_eq!(
                 lower(ir, value, target),
                 Err(format!(
-                    "a string template part of type `{}`",
+                    "a `toString` of `{}` reaching a runtime object this target cannot print",
                     super::super::describe(Ty::obj_name(krusty::types::wk::any()))
                 )),
             );

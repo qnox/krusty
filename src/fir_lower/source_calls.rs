@@ -74,6 +74,36 @@ pub(super) struct DispatchOperand {
     pub(super) class: Option<TypeName>,
 }
 
+/// One intrinsic call: the selected operation and the operands already lowered for it.
+pub(super) struct IntrinsicCall<'a> {
+    pub(super) operation: crate::ir::IrIntrinsic,
+    pub(super) receiver_ty: Option<ResolvedTy>,
+    pub(super) parameters: &'a [ResolvedTy],
+    pub(super) result: ResolvedTy,
+    pub(super) dispatch_receiver: Option<ExprId>,
+    pub(super) extension_receiver: Option<ExprId>,
+    pub(super) arguments: &'a [IrCheckedArgument],
+}
+
+/// One same-file call after its receivers and arguments have been lowered.
+pub(super) struct SameFileCall<'a> {
+    pub(super) target: CallableId,
+    pub(super) dispatch: DispatchOperand,
+    pub(super) extension_receiver: Option<ExprId>,
+    pub(super) arguments: &'a [IrCheckedArgument],
+    pub(super) specialized_parameters: &'a [Ty],
+    pub(super) substitutions: &'a [crate::fir::FirTypeSubstitution],
+    pub(super) source_line: Option<u32>,
+}
+
+/// The statements, dispatch receiver, positional arguments, and default ordinals of one call.
+pub(super) struct SelectedSemanticOperands {
+    pub(super) statements: Vec<ExprId>,
+    pub(super) receiver: Option<ExprId>,
+    pub(super) args: Vec<ExprId>,
+    pub(super) defaults: Vec<u32>,
+}
+
 impl DispatchOperand {
     /// A receiver whose static class does not name the call's owner.
     pub(super) fn plain(receiver: Option<ExprId>) -> Self {
@@ -215,6 +245,7 @@ impl BodyLowering<'_> {
         extension_receiver: Option<ExprId>,
         arguments: &[crate::fir::FirCallArgument],
         result: ResolvedTy,
+        call_line: u32,
     ) -> Option<ExprId> {
         if dispatch_receiver.is_some() || extension_receiver.is_some() {
             return None;
@@ -266,6 +297,29 @@ impl BodyLowering<'_> {
                 callee: Some(callee),
             },
         )?;
+        // The primitive is `@InlineOnly`: where the block's body starts on the call's line,
+        // kotlinc's inliner separates the two with the synthetic inline line at the block's frame
+        // marker, as it does for every `@InlineOnly` call.
+        if call_line != 0 {
+            if let IrExpr::Block {
+                stmts,
+                value: Some(body),
+            } = self.ir.expr(invocation).clone()
+            {
+                let marker = stmts.iter().copied().find(|&statement| {
+                    matches!(
+                        self.ir.debug_local_provenance(statement),
+                        Some(crate::ir::IrDebugLocalProvenance::LambdaFrameMarker { .. })
+                    )
+                });
+                if let Some(marker) = marker {
+                    self.ir.set_statement_line(marker, call_line);
+                    if block_start_line(self.ir, body) == Some(call_line) {
+                        self.ir.inline_synthetic_lines.insert(marker);
+                    }
+                }
+            }
+        }
         self.ir.intrinsic_suspension_points.insert(
             invocation,
             crate::ir::IrIntrinsicSuspensionPoint {
@@ -304,18 +358,22 @@ impl BodyLowering<'_> {
             .iter()
             .map(|parameter| parameter.get())
             .collect::<Vec<_>>();
-        let (statements, receiver, arguments, defaults) =
-            self.selected_semantic_operands(SelectedOperandRequest {
-                receiver_ty,
-                parameter_types: &parameter_types,
-                dispatch_receiver,
-                extension_receiver,
-                arguments,
-                defaults: SelectedDefaultMode::Reject,
-                preserve_inline_lambdas: false,
-                extension_receiver_parameter,
-                mode: SelectedOperandMode::DirectWhenOrdered,
-            })?;
+        let SelectedSemanticOperands {
+            statements,
+            receiver,
+            args: arguments,
+            defaults,
+        } = self.selected_semantic_operands(SelectedOperandRequest {
+            receiver_ty,
+            parameter_types: &parameter_types,
+            dispatch_receiver,
+            extension_receiver,
+            arguments,
+            defaults: SelectedDefaultMode::Reject,
+            preserve_inline_lambdas: false,
+            extension_receiver_parameter,
+            mode: SelectedOperandMode::DirectWhenOrdered,
+        })?;
         debug_assert!(defaults.is_empty());
         let operation = if write {
             crate::ir::IrCheckedOperation::ExternalPropertyWrite {
@@ -400,6 +458,7 @@ impl BodyLowering<'_> {
             // A checked plan is an obligation, not an optimization hint. If its already-validated
             // operands cannot be materialized, propagate failure to `checked_call` as an unsupported
             // external call; never retry the same source as an ordinary dependency invocation.
+            let first_expanded = self.ir.exprs.len();
             let expanded = self.external_inline_call(ExternalInlineCallRequest {
                 target,
                 plan,
@@ -413,6 +472,7 @@ impl BodyLowering<'_> {
                 extension_receiver_parameter,
                 source_line,
             })?;
+            self.settle_inline_expansion_positions(first_expanded);
             self.ir.inline_regions.insert(expanded);
             return Some(expanded);
         }
@@ -450,18 +510,22 @@ impl BodyLowering<'_> {
                 None => {}
             }
         }
-        let (statements, receiver, args, mut defaults) =
-            self.selected_semantic_operands(SelectedOperandRequest {
-                receiver_ty,
-                parameter_types: &parameter_types,
-                dispatch_receiver,
-                extension_receiver,
-                arguments,
-                defaults: SelectedDefaultMode::Omit,
-                preserve_inline_lambdas: inline.can_inline(),
-                extension_receiver_parameter,
-                mode: SelectedOperandMode::DirectWhenOrdered,
-            })?;
+        let SelectedSemanticOperands {
+            statements,
+            receiver,
+            args,
+            mut defaults,
+        } = self.selected_semantic_operands(SelectedOperandRequest {
+            receiver_ty,
+            parameter_types: &parameter_types,
+            dispatch_receiver,
+            extension_receiver,
+            arguments,
+            defaults: SelectedDefaultMode::Omit,
+            preserve_inline_lambdas: inline.can_inline(),
+            extension_receiver_parameter,
+            mode: SelectedOperandMode::DirectWhenOrdered,
+        })?;
         let boundary_defaults = defaults.clone();
         let boundary_parameters = parameter_types.clone();
         // The external FIR target temporarily inserts a MEMBER EXTENSION receiver into its parameter
@@ -569,18 +633,22 @@ impl BodyLowering<'_> {
             append,
             accumulator_ty,
         } = plan;
-        let (mut statements, receiver, args, defaults) =
-            self.selected_semantic_operands(SelectedOperandRequest {
-                receiver_ty,
-                parameter_types,
-                dispatch_receiver,
-                extension_receiver,
-                arguments,
-                defaults: SelectedDefaultMode::Reject,
-                preserve_inline_lambdas: false,
-                extension_receiver_parameter: None,
-                mode: SelectedOperandMode::Materialized,
-            })?;
+        let SelectedSemanticOperands {
+            mut statements,
+            receiver,
+            args,
+            defaults,
+        } = self.selected_semantic_operands(SelectedOperandRequest {
+            receiver_ty,
+            parameter_types,
+            dispatch_receiver,
+            extension_receiver,
+            arguments,
+            defaults: SelectedDefaultMode::Reject,
+            preserve_inline_lambdas: false,
+            extension_receiver_parameter: None,
+            mode: SelectedOperandMode::Materialized,
+        })?;
         debug_assert!(defaults.is_empty());
         let iterable = receiver?;
         let lambda_slot = match self.ir.expr(*args.get(lambda_parameter as usize)?) {
@@ -919,16 +987,16 @@ impl BodyLowering<'_> {
         }))
     }
 
-    pub(super) fn intrinsic_call(
-        &mut self,
-        operation: crate::ir::IrIntrinsic,
-        receiver_ty: Option<ResolvedTy>,
-        parameters: &[ResolvedTy],
-        result: ResolvedTy,
-        dispatch_receiver: Option<ExprId>,
-        extension_receiver: Option<ExprId>,
-        arguments: &[IrCheckedArgument],
-    ) -> Option<ExprId> {
+    pub(super) fn intrinsic_call(&mut self, call: IntrinsicCall<'_>) -> Option<ExprId> {
+        let IntrinsicCall {
+            operation,
+            receiver_ty,
+            parameters,
+            result,
+            dispatch_receiver,
+            extension_receiver,
+            arguments,
+        } = call;
         let parameter_types = parameters
             .iter()
             .map(|parameter| parameter.get())
@@ -955,18 +1023,22 @@ impl BodyLowering<'_> {
         extension_receiver: Option<ExprId>,
         arguments: &[IrCheckedArgument],
     ) -> Option<ExprId> {
-        let (statements, receiver, args, defaults) =
-            self.selected_semantic_operands(SelectedOperandRequest {
-                receiver_ty,
-                parameter_types: &parameter_types,
-                dispatch_receiver,
-                extension_receiver,
-                arguments,
-                defaults: SelectedDefaultMode::Reject,
-                preserve_inline_lambdas: false,
-                extension_receiver_parameter: None,
-                mode: SelectedOperandMode::DirectWhenOrdered,
-            })?;
+        let SelectedSemanticOperands {
+            statements,
+            receiver,
+            args,
+            defaults,
+        } = self.selected_semantic_operands(SelectedOperandRequest {
+            receiver_ty,
+            parameter_types: &parameter_types,
+            dispatch_receiver,
+            extension_receiver,
+            arguments,
+            defaults: SelectedDefaultMode::Reject,
+            preserve_inline_lambdas: false,
+            extension_receiver_parameter: None,
+            mode: SelectedOperandMode::DirectWhenOrdered,
+        })?;
         debug_assert!(defaults.is_empty());
         let call = self.ir.add_expr(IrExpr::Call {
             callee: Box::new(callee),
@@ -980,7 +1052,7 @@ impl BodyLowering<'_> {
     pub(super) fn selected_semantic_operands(
         &mut self,
         request: SelectedOperandRequest<'_>,
-    ) -> Option<(Vec<ExprId>, Option<ExprId>, Vec<ExprId>, Vec<u32>)> {
+    ) -> Option<SelectedSemanticOperands> {
         let SelectedOperandRequest {
             receiver_ty,
             parameter_types,
@@ -1075,7 +1147,12 @@ impl BodyLowering<'_> {
         } else {
             (statements, receiver, args)
         };
-        Some((statements, receiver, args, normalized.defaults))
+        Some(SelectedSemanticOperands {
+            statements,
+            receiver,
+            args,
+            defaults: normalized.defaults,
+        })
     }
 
     /// Call `visit` for every caller local this expression reads, including nested operands and a
@@ -1308,18 +1385,22 @@ impl BodyLowering<'_> {
             .iter()
             .map(|parameter| parameter.get())
             .collect::<Vec<_>>();
-        let (statements, receiver, mut args, mut defaults) =
-            self.selected_semantic_operands(SelectedOperandRequest {
-                receiver_ty: None,
-                parameter_types: &parameter_types,
-                dispatch_receiver: None,
-                extension_receiver: None,
-                arguments,
-                defaults: SelectedDefaultMode::Omit,
-                preserve_inline_lambdas: false,
-                extension_receiver_parameter: None,
-                mode: SelectedOperandMode::DirectWhenOrdered,
-            })?;
+        let SelectedSemanticOperands {
+            statements,
+            receiver,
+            mut args,
+            mut defaults,
+        } = self.selected_semantic_operands(SelectedOperandRequest {
+            receiver_ty: None,
+            parameter_types: &parameter_types,
+            dispatch_receiver: None,
+            extension_receiver: None,
+            arguments,
+            defaults: SelectedDefaultMode::Omit,
+            preserve_inline_lambdas: false,
+            extension_receiver_parameter: None,
+            mode: SelectedOperandMode::DirectWhenOrdered,
+        })?;
         debug_assert!(receiver.is_none());
         if context_parameter_count as usize > parameter_types.len() {
             return None;
@@ -1379,6 +1460,7 @@ impl BodyLowering<'_> {
             .iter()
             .map(|(name, ty)| (name.to_string(), ty.get()))
             .collect::<Vec<_>>();
+        let first_default = self.ir.exprs.len();
         let defaults = annotation
             .defaults
             .iter()
@@ -1387,6 +1469,13 @@ impl BodyLowering<'_> {
                 None => Some(None),
             })
             .collect::<Option<Vec<_>>>()?;
+        // The element defaults are the annotation declaration's values, which kotlinc builds
+        // without offsets in the implementation class it generates: no node of the construction
+        // site's call gives them a position.
+        self.ir.settle_positions(
+            first_default..self.ir.exprs.len(),
+            crate::ir::IrNodePosition::default(),
+        );
         let enclosing_class = self
             .body
             .lexical_class_owner()
@@ -1527,7 +1616,12 @@ impl BodyLowering<'_> {
             "module constructor classifier={classifier} parameters={argument_parameter_types:?} arguments={arguments:?} selected={}",
             selected.is_some(),
         );
-        let (statements, receiver, mut args, mut defaults) = selected?;
+        let SelectedSemanticOperands {
+            statements,
+            receiver,
+            mut args,
+            mut defaults,
+        } = selected?;
         debug_assert!(receiver.is_none());
         if context_parameter_count as usize > argument_parameter_types.len() {
             return None;
@@ -1625,14 +1719,17 @@ impl BodyLowering<'_> {
     /// rather than reconstructed by the backend.
     pub(super) fn same_file_call(
         &mut self,
-        target: CallableId,
-        dispatch: DispatchOperand,
-        extension_receiver: Option<ExprId>,
-        arguments: &[IrCheckedArgument],
-        specialized_parameters: &[Ty],
-        substitutions: &[crate::fir::FirTypeSubstitution],
-        source_line: Option<u32>,
+        call: SameFileCall<'_>,
     ) -> Option<Result<ExprId, FirLoweringFailure>> {
+        let SameFileCall {
+            target,
+            dispatch,
+            extension_receiver,
+            arguments,
+            specialized_parameters,
+            substitutions,
+            source_line,
+        } = call;
         let DispatchOperand {
             receiver: dispatch_receiver,
             class: dispatch_class,
@@ -1830,6 +1927,10 @@ impl BodyLowering<'_> {
                         .record_inline_copy_call_line(expression as u32, source_line);
                 }
             }
+            // The expansion is the callee's code, which kotlinc's inliner copies with the callee's
+            // own lines: what it copied keeps the template's positions, and what it built to bind
+            // operands and splice lambdas has none of the call's.
+            self.settle_inline_expansion_positions(first_generated);
             let expanded = if statements.is_empty() {
                 inlined
             } else {
@@ -2159,13 +2260,7 @@ impl BodyLowering<'_> {
         ty: Ty,
         statements: &mut Vec<ExprId>,
     ) -> ExprId {
-        let temporary = self.allocate_temporary();
-        let declaration = self.ir.add_expr(IrExpr::Variable {
-            index: temporary,
-            ty,
-            init: Some(value),
-            named: false,
-        });
+        let (declaration, temporary) = self.value_temporary(value, ty);
         self.ir.call_operand_bindings.insert(declaration);
         statements.push(declaration);
         let read = self.ir.add_expr(IrExpr::GetValue(temporary));
@@ -2322,4 +2417,23 @@ pub(super) fn rehome_inline_body_values(
         &mut crate::fx_hash::HashSet::default(),
     )?;
     Some(local_count)
+}
+
+/// The line a spliced block body starts on: the first statement's line, or the start of the first
+/// expression it reaches.
+fn block_start_line(ir: &crate::ir::IrFile, body: ExprId) -> Option<u32> {
+    let mut expression = body;
+    loop {
+        if let Some(line) = ir.statement_line(expression).filter(|&line| line != 0) {
+            return Some(line);
+        }
+        match ir.expr(expression) {
+            IrExpr::Block { stmts, value } => expression = *stmts.first().or(value.as_ref())?,
+            _ => {
+                return ir
+                    .start_line(expression)
+                    .or_else(|| ir.source_line(expression))
+            }
+        }
+    }
 }
