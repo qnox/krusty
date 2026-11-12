@@ -20,7 +20,7 @@ use crate::ir::{
     for_each_child, shift_value_indices, Callee, ExprId, IrConst, IrExpr, IrFile,
     IrGeneratedParameterRole, IrParameterIdentity, IrTypeOp,
 };
-use crate::types::{wk, Ty};
+use crate::types::{continuation_passing, wk, Ty};
 
 use super::control_flow::stmt_diverges;
 
@@ -290,15 +290,6 @@ fn pass_continuations(ir: &mut IrFile, suspend_set: &HashSet<u32>) {
             type_operand: logical,
         };
     }
-}
-
-/// What a suspend function answering `result` takes last and answers once it passes its
-/// continuation: `Continuation<result>`, and `Any?`.
-pub fn continuation_passing(result: Ty) -> (Ty, Ty) {
-    (
-        Ty::obj_args_name(wk::continuation(), &[result]),
-        Ty::nullable(Ty::obj_name(wk::any())),
-    )
 }
 
 fn add_continuation_parameter(ir: &mut IrFile, function: u32) {

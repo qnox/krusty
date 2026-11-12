@@ -149,7 +149,7 @@ impl ModuleSlotPlan {
                             // The slot holds the function in the form every target that lowers
                             // coroutines on common IR gives it.
                             let (continuation, completed) =
-                                super::super::coroutines::continuation_passing(*result);
+                                crate::types::continuation_passing(*result);
                             (
                                 parameters.iter().copied().chain([continuation]).collect(),
                                 completed,
