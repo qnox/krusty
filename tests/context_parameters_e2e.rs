@@ -1886,42 +1886,6 @@ fn an_inferred_property_getter_reads_its_context_parameters() {
     common::expect_box_same_as_kotlinc(INFERRED_CONTEXT_PROPERTIES, "InferredContextPropertiesRun");
 }
 
-/// kotlinc 2.5 evaluates an extension receiver before an explicit context argument written after
-/// it, although the context parameter is passed first; earlier releases evaluate the context
-/// argument first. The fixture reports the order, which krusty must reproduce under the reference
-/// release the run is configured for.
-#[test]
-fn explicit_context_argument_is_evaluated_in_the_reference_releases_order() {
-    let source = r#"
-// LANGUAGE: +ContextParameters +ExplicitContextArguments
-var log = ""
-
-fun logged(label: String): Int {
-    log += label
-    return label.length
-}
-
-fun receiver(): Double {
-    log += "r"
-    return 1.0
-}
-
-context(c: Int)
-fun Double.contextual(value: Int): Int = c + value + toInt()
-
-fun box(): String {
-    receiver().contextual(c = logged("c"), value = logged("v"))
-    return log
-}
-"#;
-    let reference = common::kotlinc_box_result(source);
-    assert!(
-        reference == "rcv" || reference == "crv",
-        "unexpected kotlinc evaluation order {reference:?}"
-    );
-    assert_eq!(run(source).as_deref(), Some(reference.as_str()));
-}
-
 /// A context parameter is a declared parameter before the vararg, but no source argument fills
 /// it: the call's arguments start at the first value parameter, so the vararg packs exactly the
 /// positional arguments that reach it, whatever the call form.
@@ -1974,4 +1938,40 @@ fn varargs_after_context_parameters_reach_operator_invokes_and_local_functions()
     };
     assert_eq!(stem, "Main");
     common::expect_box_ok_with_stdlib(src, "Main");
+}
+
+/// kotlinc 2.5 evaluates an extension receiver before an explicit context argument written after
+/// it, although the context parameter is passed first; earlier releases evaluate the context
+/// argument first. The fixture reports the order, which krusty must reproduce under the reference
+/// release the run is configured for.
+#[test]
+fn explicit_context_argument_is_evaluated_in_the_reference_releases_order() {
+    let source = r#"
+// LANGUAGE: +ContextParameters +ExplicitContextArguments
+var log = ""
+
+fun logged(label: String): Int {
+    log += label
+    return label.length
+}
+
+fun receiver(): Double {
+    log += "r"
+    return 1.0
+}
+
+context(c: Int)
+fun Double.contextual(value: Int): Int = c + value + toInt()
+
+fun box(): String {
+    receiver().contextual(c = logged("c"), value = logged("v"))
+    return log
+}
+"#;
+    let reference = common::kotlinc_box_result(source);
+    assert!(
+        reference == "rcv" || reference == "crv",
+        "unexpected kotlinc evaluation order {reference:?}"
+    );
+    assert_eq!(run(source).as_deref(), Some(reference.as_str()));
 }

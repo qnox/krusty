@@ -314,7 +314,6 @@ callableReference/adaptedReferences/suspendUnitConversion.kt
 callableReference/adaptedReferences/unboundReferences.kt
 callableReference/adaptedReferences/unitCoercionOverloads.kt
 callableReference/adaptedReferences/varargFromBaseClass.kt
-callableReference/adaptedReferences/varargWithDefaultValue.kt
 callableReference/arrayOfNulls.kt
 callableReference/bound/array.kt
 callableReference/bound/boundReferenceToOverloadedFunction.kt
@@ -570,7 +569,6 @@ controlStructures/breakContinueInExpressions/inlinedBreakContinue/initializerBlo
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/inlineFunctionWithMultipleParameters.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/lambdaPassedToInlineFunction.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/loopWithinInlineFunction.kt
-controlStructures/breakContinueInExpressions/inlinedBreakContinue/stdlibFunctions.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/withReturnValueNested.kt
 controlStructures/breakInWhen.kt
 controlStructures/continueInExpr.kt
@@ -2994,8 +2992,6 @@ ranges/forInDownTo/forLongInDownTo.kt
 ranges/forInDownTo/forNullableIntInDownTo.kt
 ranges/forInFloatRangeWithCustomIterator.kt
 ranges/forInIndices/forInArrayListIndices.kt
-ranges/forInIndices/forInCharSequenceIndices.kt
-ranges/forInIndices/forInCharSequenceTypeParameterIndices.kt
 ranges/forInIndices/forInCollectionImplicitReceiverIndices.kt
 ranges/forInIndices/forInCollectionIndices.kt
 ranges/forInIndices/forInCollectionTypeParameterIndices.kt
