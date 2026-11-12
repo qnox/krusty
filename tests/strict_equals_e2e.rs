@@ -2,7 +2,7 @@
 //! or inherited from the overridden `equals`, reads that parameter as the bound inside its body.
 //! The call only reaches the body with such a value because the body opens with
 //! `if (this === other) return true` (outside a value class) and `if (other !is Bound) return
-//! false`. Each program must answer `OK` from kotlinc and from krusty.
+//! false`. Each program must answer `OK` from krusty.
 //!
 //! The contract is the test-only `StrictEquals` language feature, which each program enables with a
 //! `LANGUAGE` directive, so it runs on every supported release.
@@ -80,21 +80,23 @@ fun box(): String {
 }
 ";
 
-fn assert_ok_like_kotlinc(stem: &str, source: &str) {
-    common::expect_box_same_as_kotlinc(source, stem);
+/// Every program answers `OK`. kotlinc 2.4 rejects `@EqualityBound` ("only available in Kotlin 2.5
+/// and newer"), so the comparison with kotlinc runs on the 2.5 release.
+fn assert_ok(stem: &str, source: &str) {
+    assert_eq!(common::expect_box_run_with_stdlib(source, stem), "OK");
 }
 
 #[test]
 fn an_equality_bound_equals_returns_before_its_body_for_itself_and_other_types() {
-    assert_ok_like_kotlinc("IdentityAndTypeGuards", IDENTITY_AND_TYPE_GUARDS);
+    assert_ok("IdentityAndTypeGuards", IDENTITY_AND_TYPE_GUARDS);
 }
 
 #[test]
 fn an_inherited_equality_bound_guards_the_overriding_body() {
-    assert_ok_like_kotlinc("InheritedBound", INHERITED_BOUND);
+    assert_ok("InheritedBound", INHERITED_BOUND);
 }
 
 #[test]
 fn a_value_class_equality_bound_guards_only_the_type() {
-    assert_ok_like_kotlinc("ValueClassBound", VALUE_CLASS);
+    assert_ok("ValueClassBound", VALUE_CLASS);
 }
