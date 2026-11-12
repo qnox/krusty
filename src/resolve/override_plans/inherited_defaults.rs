@@ -42,6 +42,7 @@ pub(super) fn inherited_defaults(
         .interfaces
         .iter()
         .filter_map(|interface| interface.get().non_null().obj_internal())
+        .map(|interface| actualized(source, interface))
         .collect::<Vec<_>>();
     let closure = sorted_closure(source, &direct);
     if closure.is_empty() {
@@ -50,7 +51,7 @@ pub(super) fn inherited_defaults(
     let applied = |classifier: TypeName| {
         plan.hierarchy
             .iter()
-            .find(|entry| entry.classifier == classifier)
+            .find(|entry| actualized(source, entry.classifier) == classifier)
             .map_or_else(|| Ty::obj_name(classifier), |entry| entry.applied.get())
     };
     // The classifier's own declarations occupy their slots first.
@@ -90,13 +91,11 @@ pub(super) fn inherited_defaults(
     // redeclares with a body (`object : Base2, Base by delegate` where `Base2` overrides
     // `Base.test`): the delegate answers it.
     for &interface in &delegated {
-        if let Some(shape) = source.classifier(interface) {
-            selected.extend(
-                interface_surface(index, source, &shape, interface, applied(interface))
-                    .into_iter()
-                    .map(|member| member.slot),
-            );
-        }
+        selected.extend(
+            interface_surface(index, source, interface, applied(interface))
+                .into_iter()
+                .map(|member| member.slot),
+        );
     }
     let ancestors = direct
         .iter()
@@ -111,11 +110,8 @@ pub(super) fn inherited_defaults(
         .collect::<Vec<_>>();
     let mut defaults = Vec::new();
     for interface in closure {
-        let Some(shape) = source.classifier(interface) else {
-            continue;
-        };
         let receiver = applied(interface);
-        for member in interface_surface(index, source, &shape, interface, receiver) {
+        for member in interface_surface(index, source, interface, receiver) {
             if selected
                 .iter()
                 .any(|slot| slot.same_slot(source, &member.slot))
@@ -152,7 +148,10 @@ pub(super) fn inherited_defaults(
             selected.push(slot);
             // The direct superclass already realizes every member of an interface it reaches, and a
             // delegation every member of the interface it delegates.
-            if plan.superclass_interfaces.contains(&interface)
+            if plan
+                .superclass_interfaces
+                .iter()
+                .any(|&inherited| actualized(source, inherited) == interface)
                 || delegated.contains(&interface)
                 || implemented
             {
@@ -276,6 +275,13 @@ fn member_property(property: &PropertyInfo) -> bool {
     matches!(property.kind, PropKind::Member | PropKind::MemberExtension)
 }
 
+/// The classifier `classifier` stands for in `source`: a platform source realizes an `expect`
+/// classifier as the target of its `actual typealias`, whose members, defaults and dispatch are the
+/// ones a realization inherits.
+fn actualized(source: &dyn SymbolSource, classifier: TypeName) -> TypeName {
+    source.actualized_expect(classifier).unwrap_or(classifier)
+}
+
 /// The transitive interface closure of `direct` in topological order: every interface precedes
 /// all of its ancestors, while incomparable interfaces keep declaration order.
 fn sorted_closure(source: &dyn SymbolSource, direct: &[TypeName]) -> Vec<TypeName> {
@@ -285,6 +291,7 @@ fn sorted_closure(source: &dyn SymbolSource, direct: &[TypeName]) -> Vec<TypeNam
         seen: &mut HashSet<TypeName>,
         out: &mut Vec<TypeName>,
     ) {
+        let interface = actualized(source, interface);
         if !seen.insert(interface) {
             return;
         }
@@ -466,17 +473,21 @@ impl SurfaceAccessor {
 }
 
 /// The members `interface` declares, in its semantic declaration order, each paired with its slot
-/// as seen through `receiver` (the classifier's applied view of the interface).
+/// as seen through `receiver` (the classifier's applied view of the interface). An actualized
+/// `expect` interface's surface is its [`actualized`] target's, never the `expect` declaration's.
 fn interface_surface(
     index: &ResolvedModuleIndex,
     source: &dyn SymbolSource,
-    shape: &crate::libraries::LibraryType,
     interface: TypeName,
     receiver: Ty,
 ) -> Vec<SurfaceMember> {
+    let interface = actualized(source, interface);
+    let Some(shape) = source.classifier(interface) else {
+        return Vec::new();
+    };
     match index.classifier_declaration(interface) {
         Some(declaration) => module_surface(index, source, declaration, receiver),
-        None => dependency_surface(source, shape, receiver),
+        None => dependency_surface(source, &shape, receiver),
     }
 }
 

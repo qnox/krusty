@@ -119,6 +119,10 @@ pub enum IrGeneratedParameterRole {
     ReferenceInvokeValue {
         ordinal: u32,
     },
+    /// The receiver a property-reference class's own `get` takes, by its position.
+    PropertyReferenceGetReceiver {
+        ordinal: u32,
+    },
     /// The explicitly bound receiver stored by a callable-reference adapter, ahead of its own
     /// invocation inputs. It carries no lexical-capture or source-parameter-name provenance.
     ReferenceBoundReceiver,

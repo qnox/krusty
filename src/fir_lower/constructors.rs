@@ -103,9 +103,7 @@ pub(super) fn classifier_type_parameter_ordinal(
 ) -> Option<u32> {
     let semantic_name = parameter.non_null().ty_param_name()?;
     for ordinal in 0.. {
-        let Some(identity) = index.type_parameter(classifier, ordinal) else {
-            return None;
-        };
+        let identity = index.type_parameter(classifier, ordinal)?;
         if index.type_parameter_semantic_name(identity) == Some(semantic_name) {
             return Some(ordinal);
         }
@@ -1305,7 +1303,7 @@ pub(super) fn finalize_constructor_field_indices(
     pre_super.sort();
     for (class, parameter, field) in pre_super {
         let slots = &mut ir.classes[class as usize].pre_super_param_fields;
-        if !slots.iter().any(|pair| *pair == (parameter, field)) {
+        if !slots.contains(&(parameter, field)) {
             slots.push((parameter, field));
         }
     }
@@ -1490,9 +1488,8 @@ pub(super) fn accept_constructor_body(
             ),
             _ => false,
         })
-        .map(|delegation| {
+        .inspect(|_| {
             roots.remove(0);
-            delegation
         });
     let body = if roots.is_empty() {
         None

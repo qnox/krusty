@@ -1,5 +1,9 @@
 //! The string a template makes of each operand, which is also `Any?.toString()`.
 
+use krusty::backend::class_tables::AnyMember;
+
+use super::super::super::encode::ValType;
+use super::super::super::runtime::AND32;
 use super::*;
 
 impl Body<'_> {
@@ -14,6 +18,16 @@ impl Body<'_> {
             self.string_constant("kotlin.Unit");
             return Ok(());
         }
+        if ty.is_unsigned() {
+            return self.unsigned_string_of(id, ty);
+        }
+        self.expression(id)?;
+        self.stacked_string_of(ty)
+    }
+
+    /// Replace the `ty` value on the stack with its non-null `String`, as a string template
+    /// renders it. `Unit` is not one of these values: it may have no carrier to replace.
+    pub(super) fn stacked_string_of(&mut self, ty: Ty) -> Result<(), Unsupported> {
         let nullable_scalar = match ty.kind() {
             TyKind::Nullable(inner) => self
                 .scalar_string_function(inner)
@@ -23,7 +37,6 @@ impl Body<'_> {
         if let Some((inner, function)) = nullable_scalar {
             // A nullable scalar is its box or `null`.
             let value = self.local(REFERENCE);
-            self.expression(id)?;
             self.code
                 .local_tee(value)
                 .ref_is_null()
@@ -36,14 +49,22 @@ impl Body<'_> {
             self.code.call(function).end().ref_as_non_null();
             return Ok(());
         }
-        self.expression(id)?;
         let function = match ty {
             Ty::String | Ty::Null => self.runtime.string_or_null,
             ty if ty == Ty::nullable(Ty::String) => self.runtime.string_or_null,
             ty if self.scalar_string_function(ty).is_some() => {
                 self.scalar_string_function(ty).expect("checked above")
             }
-            ty if self.class_of_type(ty).is_some() => return self.object_to_string(ty),
+            // A `KType` object prints through its own slot. Every other reference, including a
+            // class and an erased `Any`, prints through the shared runtime `toString`.
+            ty if ty.non_null().obj_internal()
+                == Some(super::super::super::type_objects::ktype()) =>
+            {
+                return self.type_object_to_string(ty);
+            }
+            ty if matches!(carrier(ty)?, Some(ValType::Ref { .. })) => {
+                return self.reference_string(ty);
+            }
             other => {
                 return Err(format!(
                     "a string template part of type `{}`",
@@ -52,6 +73,38 @@ impl Body<'_> {
             }
         };
         self.code.call(function);
+        Ok(())
+    }
+
+    /// Decimal conversion of an exact non-null unsigned scalar, retaining its semantic width.
+    pub(super) fn unsigned_string_of(&mut self, id: u32, source: Ty) -> Result<(), Unsupported> {
+        if !source.is_unsigned() || self.type_of(id)? != Some(source) {
+            return Err(
+                "an unsigned string conversion without its exact non-null scalar source".into(),
+            );
+        }
+        self.expression(id)?;
+        if let Some(mask) = source.unsigned_widen_mask() {
+            self.code.i32_const(mask).op(AND32);
+        }
+        self.code.call(if source == Ty::ULong {
+            self.runtime.string_of_u64
+        } else {
+            self.runtime.string_of_u32
+        });
+        Ok(())
+    }
+
+    /// Replace the reference on the stack, statically of type `ty`, with `toString()` of whatever
+    /// it holds at run time, or `"null"`.
+    fn reference_string(&mut self, ty: Ty) -> Result<(), Unsupported> {
+        if self.may_reach_unrealized(ty, AnyMember::ToString)? {
+            return Err(format!(
+                "a `toString` of `{}` reaching a runtime object this target cannot print",
+                describe(ty)
+            ));
+        }
+        self.code.call(self.runtime.object_strings.any_to_string);
         Ok(())
     }
 
@@ -66,7 +119,7 @@ impl Body<'_> {
         })
     }
 
-    fn string_constant(&mut self, text: &str) {
+    pub(super) fn string_constant(&mut self, text: &str) {
         let units = text.encode_utf16().collect::<Vec<_>>();
         self.runtime
             .string_constant(self.module, &mut self.code, &units);
@@ -77,3 +130,6 @@ impl Body<'_> {
 fn is_unit(ty: Ty) -> bool {
     ty == Ty::Unit || matches!(ty.kind(), TyKind::Obj(name, _) if name == krusty::types::wk::unit())
 }
+
+#[cfg(test)]
+mod tests;

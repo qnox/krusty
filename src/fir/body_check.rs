@@ -607,9 +607,15 @@ impl BodyFirChecker<'_> {
             return value;
         }
         let runtime = inferred.unwrap_or_else(|| {
-            crate::symbol_resolver::reified_runtime_type(value.get(), &|name| {
-                self.index.recorded_direct_supertypes(name)
-            })
+            crate::symbol_resolver::reified_runtime_type(
+                value.get(),
+                &crate::symbol_resolver::ReifiedDeclarations {
+                    direct_supertypes: &|name| self.index.recorded_direct_supertypes(name),
+                    variance_at: &|name, index| {
+                        self.index.recorded_type_argument_variance(name, index)
+                    },
+                },
+            )
         });
         if runtime == value.get() {
             return value;

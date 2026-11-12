@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { collectMetrics, compareKotlinVersions, corpusSources, parseBoxReport } from "../scripts/metrics.mjs";
+import { builtByCorpus, collectMetrics, compareKotlinVersions, corpusSources, parseBoxReport } from "../scripts/metrics.mjs";
 
 function inputs(files) {
   const dir = mkdtempSync(join(tmpdir(), "metrics-"));
@@ -204,6 +204,23 @@ test("a corpus run must carry its identity and a valid project list", () => {
     }
   }
   assert.throws(() => corpusSources("p\thttps://x\tnot-a-sha\t.\t21\t-\n", new Set(), "projects.tsv"), /projects.tsv: not a project line/);
+});
+
+test("a language-server-only project is not a missing compile result", () => {
+  const sha = "a".repeat(40);
+  const idea = "c".repeat(40);
+  const tsv = `p\thttps://example.test/p.git\t${sha}\t.\t21\t-\nintellij-community\thttps://github.com/JetBrains/intellij-community\t${idea}\t.\t21\t-\t-\tlsp\n`;
+  assert.equal(builtByCorpus(tsv.trim().split("\n")[1].split("\t")), false);
+  const sources = corpusSources(tsv, new Set(), "projects.tsv");
+  assert.deepEqual([...sources.keys()], ["p"]);
+  const dir = inputs(corpusRun(CORPUS_RUN, [project("p")], { "projects.tsv": tsv }));
+  try {
+    const { corpus } = collectMetrics(dir);
+    assert.deepEqual(corpus.noResult, []);
+    assert.equal(corpus.listed, 1);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
 });
 
 test("the coverage baseline must name every measure", () => {

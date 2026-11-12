@@ -18,11 +18,6 @@
 #   scripts/check-outcome-lists.sh <base-rev> <head-rev>
 set -euo pipefail
 
-script_dir=$(cd "$(dirname "$0")" && pwd)
-order_versions() {
-  "$script_dir/order-kotlin-versions.sh"
-}
-
 if [ "$#" -ne 2 ]; then
   sed -n '2,14p' "$0" >&2
   exit 2
@@ -69,12 +64,12 @@ releases() {
     git show "$rev:kotlin-versions" | sed 's/#.*//' | awk 'NF { print $1 }'
   else
     recorded "$rev" "$lane"
-  fi | order_versions
+  fi | sort -uV
 }
 
 recorded() {
   git ls-tree --name-only "$1" -- "$2/" 2>/dev/null |
-    sed -nE 's#.*/([0-9]+\.[0-9]+\.[0-9]+(-Beta[1-9][0-9]*|-RC[1-9][0-9]*|-RC)?)\.txt$#\1#p' | order_versions
+    sed -n 's|.*/\([0-9]*\.[0-9]*\.[0-9]*\)\.txt$|\1|p' | sort -uV
 }
 
 # The manifest `release` reads at a revision: its own, else the newest recorded supported release
@@ -83,7 +78,7 @@ reads() {
   local rev=$1 lane=$2 release=$3 candidates
   candidates=$(recorded "$rev" "$lane" | grep -Fx -f <(releases "$rev" "$lane") || true)
   [ -n "$candidates" ] || return 0
-  { echo "$candidates"; echo "$release"; } | order_versions | sed "/^${release//./\\.}\$/q" |
+  { echo "$candidates"; echo "$release"; } | sort -V | sed "/^${release//./\\.}\$/q" |
     grep -Fx -f <(echo "$candidates") | tail -n 1 || true
 }
 
@@ -110,7 +105,7 @@ approved_migration() {
 added_total=0
 while read -r lane; do
   base_releases=$(releases "$base" "$lane")
-  for release in $( { echo "$base_releases"; releases "$head" "$lane"; recorded "$head" "$lane"; } | sed '/^$/d' | order_versions); do
+  for release in $( { echo "$base_releases"; releases "$head" "$lane"; recorded "$head" "$lane"; } | sed '/^$/d' | sort -uV); do
     grep -qx -- "$release" <<<"$base_releases" || continue
     from=$(reads "$base" "$lane" "$release")
     [ -n "$from" ] || continue

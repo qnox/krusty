@@ -2208,7 +2208,7 @@ fn pass_one_inline_fir_publishes_owned_anonymous_object_members() {
                 index.callable_for_declaration(declaration).map(|callable| {
                     (
                         declaration,
-                        callable.clone(),
+                        callable,
                         index
                             .signature(declaration)
                             .map(|signature| signature.result.get()),

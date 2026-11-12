@@ -21,8 +21,10 @@ use krusty::fx_hash::{HashMap, HashSet};
 mod absent_arguments;
 pub(super) mod any_members;
 mod arrays;
+pub(super) mod box_members;
 mod boxing;
 mod callable_reference_identity;
+mod class_literals;
 mod dependency_exports;
 mod enums;
 mod exceptions;
@@ -31,8 +33,10 @@ mod generated_members;
 mod intrinsic_operations;
 mod objects;
 mod scalar_instructions;
+mod scalar_value_classes;
 mod shared_cells;
 mod string_conversion;
+mod type_of;
 
 #[cfg(test)]
 use tests::lower_alone;
@@ -44,23 +48,32 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
     is_scalar_operation(operation)
         || IrBinOp::of_primitive_operator(operation).is_some()
         || operation == krusty::backend::BackendCompilerIntrinsic::ThrowableMessage
+        || operation == krusty::backend::BackendCompilerIntrinsic::ThrowableCause
         || operation == krusty::backend::BackendCompilerIntrinsic::ArrayGet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySize
         || operation == krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
+        || matches!(
+            operation,
+            krusty::backend::BackendCompilerIntrinsic::ClassName(_)
+        )
 }
 
 use krusty::backend::class_tables::module_interfaces::ModuleInterfaces;
 use krusty::backend::class_tables::module_slots::ModuleSlotPlan;
+use krusty::backend::class_tables::AnyMember;
 use krusty::backend::{CheckedBackendCallables, DependencyExportSignatures};
-use krusty::ir::{Callee, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp};
+use krusty::ir::{Callee, ClassId, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp};
 use krusty::types::{EqualityMode, Ty, TyKind};
 
 use super::super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
+use super::super::numeric_conversions;
 use super::super::objects::REFERENCE;
 use super::super::runtime::*;
+use super::any_member_reach::FileReach;
 use super::callable_registry::{CallableRegistry, FileCallTargets};
 use super::classes::{FileClasses, RealizedProperties};
+use super::laid_out_classes::LaidOutClasses;
 use super::property_registry::PropertyRegistry;
 
 pub(super) type Unsupported = String;
@@ -73,6 +86,9 @@ pub(super) struct LoweredFile {
     /// The function running this file's top-level property initializers in declaration order,
     /// when it has any.
     pub(super) initializer: Option<u32>,
+    /// The file's calls through `kotlin.Any`'s slots that can reach other files' objects, and its
+    /// own slots with no body.
+    pub(super) reach: FileReach,
 }
 
 /// One file's checked IR and the facts frozen beside it.
@@ -94,6 +110,8 @@ pub(super) struct ModuleState<'a> {
     pub(super) runtime: &'a mut Runtime,
     pub(super) callables: &'a mut CallableRegistry,
     pub(super) properties: &'a mut PropertyRegistry,
+    /// The classes earlier files of the source module laid out; this file's join them.
+    pub(super) classes: &'a mut LaidOutClasses,
 }
 
 /// Lower every function and class of `file` into the program.
@@ -116,6 +134,7 @@ pub(super) fn lower_file(
         runtime,
         callables: callable_registry,
         properties: property_registry,
+        classes: laid_out_classes,
     } = state;
     for property in &ir.statics {
         if property.owner.is_some() {
@@ -190,8 +209,18 @@ pub(super) fn lower_file(
     let classes = if ir.classes.is_empty() {
         None
     } else {
-        let mut classes =
-            super::classes::declare(ir, module, runtime, classifiers, &indices, properties, plan)?;
+        let mut classes = super::classes::declare(
+            ir,
+            module,
+            runtime,
+            &indices,
+            properties,
+            super::classes::BeyondFile {
+                classifiers,
+                plan,
+                laid_out: laid_out_classes,
+            },
+        )?;
         super::interface_members::record(
             &super::interface_members::Recording {
                 ir,
@@ -210,6 +239,7 @@ pub(super) fn lower_file(
         )?;
         Some(classes)
     };
+    let reach = std::cell::RefCell::new(FileReach::default());
     let context = FileContext {
         array_range_checks,
         classifiers,
@@ -224,6 +254,7 @@ pub(super) fn lower_file(
         callables,
         inert_singleton_bindings: &inert_singleton_bindings,
         properties: property_registry,
+        reach: &reach,
     };
     for (id, function) in ir.functions.iter().enumerate() {
         let (Some(index), Some(signature)) = (indices[id], signatures[id]) else {
@@ -317,6 +348,9 @@ pub(super) fn lower_file(
             module,
             runtime,
         )?;
+        for (name, record) in classes.records(ir, &indices, &signatures) {
+            laid_out_classes.insert(name, record);
+        }
     } else if !member_property_definitions.is_empty() {
         return Err("a member property definition without its class layout".to_string());
     }
@@ -348,9 +382,24 @@ pub(super) fn lower_file(
         None
     };
     callable_registry.publish(ir, dependency_exports, &indices)?;
+    let mut reach = reach.into_inner();
+    if let Some(classes) = &classes {
+        for class in 0..ir.classes.len() {
+            for member in AnyMember::ALL {
+                if !classes.realizes(class as ClassId, member) {
+                    reach.bodiless_class(member);
+                }
+            }
+        }
+    }
+    if objects::holds_unprinted_values(ir) {
+        reach.bodiless_value(AnyMember::ToString);
+    }
+    class_literals::name_type_infos(module, runtime, classifiers);
     Ok(LoweredFile {
         functions: indices,
         initializer,
+        reach,
     })
 }
 
@@ -377,6 +426,8 @@ struct FileContext<'a> {
     inert_singleton_bindings: &'a HashSet<krusty::ir::ExprId>,
     /// Top-level property storage reserved or published by files of this source module.
     properties: &'a PropertyRegistry,
+    /// What the file's bodies record for the module about calls through `kotlin.Any`'s slots.
+    reach: &'a std::cell::RefCell<FileReach>,
 }
 
 /// The wasm value a Kotlin type is carried as; `None` for a type with no value (`Unit`,
@@ -399,18 +450,17 @@ pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
         TyKind::Nullable(Ty::String) => STRING,
         // Nullable scalars keep their semantic type until this representation boundary. They
         // use the same boxes as erased values; nullable Unit can hold its singleton or null.
-        TyKind::Nullable(
-            Ty::Boolean
-            | Ty::Byte
-            | Ty::Short
-            | Ty::Char
-            | Ty::Int
-            | Ty::Long
-            | Ty::Float
-            | Ty::Double
-            | Ty::Unit
-            | Ty::Nothing,
-        ) => REFERENCE,
+        TyKind::Nullable(Ty::Unit | Ty::Nothing) => REFERENCE,
+        TyKind::Nullable(inner)
+            if matches!(
+                carrier(inner),
+                Ok(Some(
+                    ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64
+                ))
+            ) =>
+        {
+            REFERENCE
+        }
         // Every object, interface and `Any` value, and a type parameter's: a reference the
         // frontend checked, cast to its class where one is read (see `super::super::objects`).
         TyKind::Obj(..) | TyKind::TyParam(..) => REFERENCE,
@@ -510,6 +560,11 @@ fn expression_type(
         },
         // A member access common lowering produced after checking has its declaration's type,
         // which is what the instruction leaves on the stack; a use at a narrower type casts.
+        IrExpr::EnclosingInstance { inner, outer, .. } if ir.checked_type(id).is_none() => {
+            let (class, field) = super::classes::enclosing_field(ir, *inner, *outer)
+                .ok_or_else(|| "an enclosing instance without authenticated storage".to_string())?;
+            ir.classes[class as usize].fields[field as usize].ty
+        }
         IrExpr::GetField { class, index, .. } if ir.checked_type(id).is_none() => {
             ir.classes[*class as usize].fields[*index as usize].ty
         }
@@ -573,20 +628,6 @@ fn widened(value: ValType) -> Ty {
     }
 }
 
-/// Convert the numeric value on top of the stack from `from` to the wider `to`.
-fn widen(code: &mut Code, from: ValType, to: ValType) {
-    let opcode = match (from, to) {
-        (ValType::I32, ValType::I64) => EXTEND_I32_S,
-        (ValType::I32, ValType::F32) => 0xb2,
-        (ValType::I64, ValType::F32) => 0xb4,
-        (ValType::I32, ValType::F64) => 0xb7,
-        (ValType::I64, ValType::F64) => 0xb9,
-        (ValType::F32, ValType::F64) => 0xbb,
-        _ => return,
-    };
-    code.op(opcode);
-}
-
 /// A loop the body is inside: the absolute depths `break` and `continue` branch to.
 struct Loop {
     label: Option<String>,
@@ -613,6 +654,8 @@ struct Body<'a> {
     callables: &'a CheckedBackendCallables,
     inert_singleton_bindings: &'a HashSet<krusty::ir::ExprId>,
     properties: &'a PropertyRegistry,
+    /// What this file's bodies record for the module about calls through `kotlin.Any`'s slots.
+    reach: &'a std::cell::RefCell<FileReach>,
     code: Code,
     /// Locals beyond the parameters, in index order.
     locals: Vec<ValType>,
@@ -677,6 +720,7 @@ impl<'a> Body<'a> {
             callables: context.callables,
             inert_singleton_bindings: context.inert_singleton_bindings,
             properties: context.properties,
+            reach: context.reach,
             code: Code::default(),
             locals: Vec::new(),
             next_local: parameters.len() as u32,
@@ -768,39 +812,8 @@ impl<'a> Body<'a> {
         if !signed(target_ty) {
             return Err(unsupported());
         }
-        let (Some(source), Some(target)) = (carrier(source_ty)?, carrier(target_ty)?) else {
-            return Err(unsupported());
-        };
         self.expression(arg)?;
-        let carried = match (source, target) {
-            (ValType::I64, ValType::I32) => {
-                self.code.op(0xa7);
-                Ty::Int
-            }
-            (ValType::F32, ValType::I32) => {
-                self.code.trunc_sat(0);
-                Ty::Int
-            }
-            (ValType::F64, ValType::I32) => {
-                self.code.trunc_sat(2);
-                Ty::Int
-            }
-            (ValType::F32, ValType::I64) => {
-                self.code.trunc_sat(4);
-                Ty::Long
-            }
-            (ValType::F64, ValType::I64) => {
-                self.code.trunc_sat(6);
-                Ty::Long
-            }
-            (ValType::F64, ValType::F32) => {
-                self.code.op(0xb6);
-                Ty::Float
-            }
-            _ => return Err(unsupported()),
-        };
-        // A `Byte`, `Short` or `Char` result narrows the `Int` it came through.
-        self.coerce_emitted_value(carried, target_ty)
+        numeric_conversions::convert(&mut self.code, source_ty, target_ty)
     }
 
     /// Whether a cast of `arg` to `target` reads a scalar out of a reference: the operand is
@@ -834,17 +847,14 @@ impl<'a> Body<'a> {
         // A statement-shaped operand may return/throw before its enclosing value use resumes.
         // Its Unit annotation must stay Unit; only the common completion proof removes the
         // impossible conversion. Live Unit operands still fail below rather than invent a value.
-        if source_ty == Some(Ty::Unit)
-            && carrier(target)?.is_some()
-            && self.ir.expr_diverges_by(id, &|_, _| false)
-        {
+        if source_ty == Some(Ty::Unit) && carrier(target)?.is_some() && self.diverges(id) {
             self.code.unreachable();
             return Ok(());
         }
         let Some(source) = source_ty else {
             // Restore stack polymorphism after structured control only when completion proves
             // divergence: an inlined generic result may retain Nothing but complete normally.
-            if self.ir.expr_diverges_by(id, &|_, _| false) {
+            if self.diverges(id) {
                 self.code.unreachable();
             }
             return Ok(());
@@ -857,6 +867,13 @@ impl<'a> Body<'a> {
             );
         }
         self.coerce_emitted_value(source, target)
+    }
+
+    /// Whether evaluating `id` as a value never completes: it ends in a jump or a `throw`, or in an
+    /// inline-return frame that no reachable exit leaves.
+    fn diverges(&self, id: u32) -> bool {
+        self.ir
+            .expr_diverges_by(id, &|leaf, _| self.ir.loop_never_exits(leaf))
     }
 
     /// Convert the value already on the Wasm stack from its emitted declaration type to the type
@@ -881,23 +898,8 @@ impl<'a> Body<'a> {
         };
         if source == target {
             // An `Int` stored where a `Byte`, `Short` or `Char` is declared (`b++` on a `Byte`)
-            // wraps to that width: the 32-bit carrier must hold the narrow value's own bits.
-            let narrowing = match (source_ty, target_ty) {
-                (from, to) if from == to => None,
-                (_, Ty::Byte) => Some(0xc0),
-                (_, Ty::Short) => Some(0xc1),
-                (_, Ty::Char) => Some(0),
-                _ => None,
-            };
-            match narrowing {
-                Some(0) => {
-                    self.code.i32_const(0xffff).op(AND32);
-                }
-                Some(extend) => {
-                    self.code.op(extend);
-                }
-                None => {}
-            }
+            // wraps to that width.
+            numeric_conversions::fit(&mut self.code, source_ty, target_ty);
             return Ok(());
         }
         if let (ValType::Ref { .. }, ValType::Ref { heap, .. }) = (source, target) {
@@ -916,7 +918,7 @@ impl<'a> Body<'a> {
         }
         match (rank(source), rank(target)) {
             (Some(from), Some(to)) if from < to => {
-                widen(&mut self.code, source, target);
+                numeric_conversions::widen(&mut self.code, source, target);
                 Ok(())
             }
             _ => Err(format!(
@@ -928,6 +930,9 @@ impl<'a> Body<'a> {
     /// Emit `id`, leaving its value on the stack when it has one.
     fn expression(&mut self, id: u32) -> Result<(), Unsupported> {
         let node = self.ir.expr(id).clone();
+        if let Some(result) = self.box_member_expression(id, &node) {
+            return result;
+        }
         if let Some(result) = self.emitted_dependency_expression(id, &node) {
             return result;
         }
@@ -1127,6 +1132,24 @@ impl<'a> Body<'a> {
                 ));
                 self.direct_call(function, &frame, &args)?;
             }
+            // The target stdlib's own `typeOf` body only says it is a compiler intrinsic.
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver: None,
+                args,
+            } if let Callee::External {
+                target,
+                substitutions,
+                ..
+            } = &**call_callee
+                && args.is_empty()
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    fact.compiler_operation()
+                        == Some(krusty::backend::BackendCompilerIntrinsic::TypeOf)
+                }) =>
+            {
+                self.type_of_call(*target, substitutions)?;
+            }
             IrExpr::Call {
                 callee: ref call_callee,
                 dispatch_receiver,
@@ -1182,9 +1205,9 @@ impl<'a> Body<'a> {
                 ..
             } = &**call_callee
                 && defaults.is_empty()
-                && self.is_throwable_message(*target) =>
+                && let Some(field) = self.throwable_field(*target) =>
             {
-                self.throwable_message(dispatch_receiver, &args, *ret)?;
+                self.throwable_field_read(field, dispatch_receiver, &args, *ret)?;
             }
             IrExpr::Call {
                 dispatch_receiver: Some(receiver),
@@ -1344,19 +1367,9 @@ impl<'a> Body<'a> {
                 spreads,
                 elements,
             } => {
-                if arrays::is_int_array(array_type) {
-                    self.int_array_literal(&spreads, &elements)?;
-                } else {
-                    self.reference_array_literal(array_type, &spreads, &elements)?;
-                }
+                self.array_literal(array_type, &spreads, &elements)?;
             }
-            IrExpr::NewArray { array_type, size } => {
-                if arrays::is_int_array(array_type) {
-                    self.new_int_array(size)?;
-                } else {
-                    return Err("the expression `NewArray`".into());
-                }
-            }
+            IrExpr::NewArray { array_type, size } => self.new_array(array_type, size)?,
             IrExpr::Try {
                 body,
                 catches,
@@ -1364,6 +1377,13 @@ impl<'a> Body<'a> {
                 result,
             } => {
                 self.try_catch(body, &catches, finally, result)?;
+            }
+            IrExpr::EnclosingInstance {
+                receiver,
+                inner,
+                outer,
+            } => {
+                self.enclosing_instance(receiver, inner, outer)?;
             }
             IrExpr::GetField {
                 receiver,
@@ -1437,6 +1457,21 @@ impl<'a> Body<'a> {
             {
                 self.checked_array_size(checked_op)?;
             }
+            IrExpr::Checked(ref checked_op)
+                if let krusty::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch: krusty::ir::IrPropertyDispatch::Ordinary,
+                    receiver: Some(receiver),
+                    arguments,
+                    parameters,
+                    ..
+                } = &**checked_op
+                    && parameters.is_empty()
+                    && arguments.is_empty()
+                    && self.is_scalar_value_storage(*target) =>
+            {
+                self.scalar_value_storage_read(*target, *receiver)?;
+            }
             // `name` and `ordinal` are `kotlin.Enum`'s, and an enum constant answers both from
             // the `$Enum` fields its struct leads with.
             IrExpr::Checked(ref checked_op)
@@ -1461,9 +1496,24 @@ impl<'a> Body<'a> {
                     source_receiver: Some(_),
                 } = &**checked_op
                     && parameters.is_empty()
-                    && self.is_throwable_message_property(*target) =>
+                    && let Some(field) = self.throwable_field_property(*target) =>
             {
-                self.throwable_message(*receiver, arguments, *result)?;
+                self.throwable_field_read(field, *receiver, arguments, *result)?;
+            }
+            IrExpr::Checked(ref checked_op)
+                if let krusty::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch: krusty::ir::IrPropertyDispatch::Ordinary,
+                    receiver: Some(receiver),
+                    arguments,
+                    parameters,
+                    ..
+                } = &**checked_op
+                    && parameters.is_empty()
+                    && arguments.is_empty()
+                    && let Some(kind) = self.class_name_property(*target) =>
+            {
+                self.class_name(kind, *receiver)?;
             }
             IrExpr::Checked(ref checked_op)
                 if let krusty::ir::IrCheckedOperation::ExternalPropertyRead {
@@ -1540,6 +1590,9 @@ impl<'a> Body<'a> {
                 params,
                 ret,
             } => self.invoke_function(func, &args, &params, ret)?,
+            IrExpr::KClassLiteral {
+                classifier, value, ..
+            } => self.class_literal(id, classifier, value)?,
             IrExpr::Call { callee, .. } => {
                 return Err(format!("a call to {}", callee_kind(&callee)));
             }
@@ -2054,6 +2107,7 @@ mod tests {
                 runtime: &mut started.runtime,
                 callables: &mut started.callables,
                 properties: &mut started.properties,
+                classes: &mut started.classes,
             },
         )
     }

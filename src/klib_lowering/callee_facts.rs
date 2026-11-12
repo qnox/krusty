@@ -171,14 +171,19 @@ impl<'a> KlibCalleeFacts<'a> {
         identity: &KlibDependencyCallable,
         bodies: &crate::klib_libraries::KlibDeclarationBodies,
     ) -> Result<Option<Vec<KlibDependencyCallable>>, super::decline::KlibBodyDeclineReason> {
+        super::class_initialization::constructor_initialization_callees(
+            self.initialized_class_member(identity)?,
+            bodies,
+            self,
+        )
+    }
+
+    fn initialized_class_member(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Result<KlibBodyCallable<'a>, super::decline::KlibBodyDeclineReason> {
         match self.get(identity) {
-            Some(KlibCalleeFact::Selected(callables)) => {
-                super::class_initialization::constructor_initialization_callees(
-                    callables[0],
-                    bodies,
-                    self,
-                )
-            }
+            Some(KlibCalleeFact::Selected(callables)) => Ok(callables[0]),
             _ => Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
                 "an initializer has no unique selected constructor declaration".to_owned(),
             )),
@@ -247,7 +252,7 @@ impl<'a> KlibCalleeFacts<'a> {
     ) -> Result<Option<crate::libraries::CompilerIntrinsic>, super::decline::KlibBodyDeclineReason>
     {
         use super::decline::KlibBodyDeclineReason;
-        use super::function_lowering::{raw_function_header, HeaderPurpose};
+        use super::function_lowering::{selected_function_header, HeaderPurpose};
         let selected = match self.get(identity) {
             Some(KlibCalleeFact::Ambiguous) => {
                 return Err(KlibBodyDeclineReason::SignatureMismatch(
@@ -268,7 +273,13 @@ impl<'a> KlibCalleeFacts<'a> {
             .ok_or(KlibBodyDeclineReason::Unjoined)?;
         // A body-bearing target leaf still authenticates its complete declared header, not the
         // narrower set of declarations whose executable bodies common lowering supports.
-        raw_function_header(Some(selected), HeaderPurpose::External, arena, declaration)?;
+        selected_function_header(
+            selected,
+            HeaderPurpose::External,
+            arena,
+            declaration,
+            Some(bodies),
+        )?;
         Ok(Some(operation))
     }
 
@@ -399,5 +410,42 @@ impl<'a> KlibCalleeFacts<'a> {
             }
             IndexedKlibCallee::Ambiguous => Some(KlibCalleeFact::Ambiguous),
         }
+    }
+}
+
+/// The initialization edges of each class admitted with its members, by its declaring class, so
+/// a class reached through many of its constructors and members is prepared once. Each reached
+/// declaration is still authenticated as a member of the class it names before the class's edges
+/// answer for it.
+#[derive(Default)]
+pub(crate) struct ClassInitializations {
+    classes: HashMap<
+        (String, crate::metadata::id_signature::KlibPublicIdSignature),
+        Option<Vec<KlibDependencyCallable>>,
+    >,
+}
+
+impl ClassInitializations {
+    /// [`KlibCalleeFacts::constructor_initialization_callees`] of the class declaring `identity`.
+    pub(crate) fn callees(
+        &mut self,
+        facts: &KlibCalleeFacts<'_>,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<Option<Vec<KlibDependencyCallable>>, super::decline::KlibBodyDeclineReason> {
+        let selected = facts.initialized_class_member(identity)?;
+        let header = super::class_headers::authenticate(selected, bodies, None)?;
+        let key = (
+            header.contract.module.clone(),
+            header.contract.signature.clone(),
+        );
+        if let Some(edges) = self.classes.get(&key) {
+            return Ok(edges.clone());
+        }
+        let edges = super::class_initialization::constructor_initialization_callees(
+            selected, bodies, facts,
+        )?;
+        self.classes.insert(key, edges.clone());
+        Ok(edges)
     }
 }

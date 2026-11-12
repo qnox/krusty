@@ -117,11 +117,21 @@ const PATCHES = "scripts/oss-corpus/patches";
  * repository and pinned commit, the Kotlin version pin, and the krusty-side patch applied after
  * checkout (a path in this repository at the measured commit), or null without one.
  */
+const LANE = /^(?:lsp|compile|compile,lsp)$/;
+
+/** A row is built by the corpus unless its last field is a lane token that omits `compile`. */
+export function builtByCorpus(fields) {
+  const lane = LANE.test(fields.at(-1)) ? fields.at(-1) : "compile,lsp";
+  return lane.split(",").includes("compile");
+}
+
 export function corpusSources(tsv, patches, path) {
   const out = new Map();
   for (const line of tsv.split("\n")) {
     if (line.trim() === "" || line.startsWith("#")) continue;
-    const [name, url, commit, , , pin] = line.split("\t");
+    const fields = line.split("\t");
+    if (!builtByCorpus(fields)) continue;
+    const [name, url, commit, , , pin] = fields;
     if (!name || !url || !/^[0-9a-f]{40}$/.test(commit ?? "") || !pin) throw new Error(`${path}: not a project line: ${JSON.stringify(line)}`);
     out.set(name, {
       url: url.replace(/\.git$/, ""),

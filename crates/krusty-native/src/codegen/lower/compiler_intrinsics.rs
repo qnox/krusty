@@ -75,6 +75,33 @@ impl BodyLowering<'_, '_, '_> {
         }))
     }
 
+    /// A builtin scalar's own `hashCode()`, by the rule Kotlin fixes for the receiver's type.
+    fn primitive_hash_code(&mut self, operand: u32) -> Result<Option<Value>, Unsupported> {
+        let Some(ty) = self.checked_type(operand) else {
+            return Err("a primitive `hashCode` without a checked receiver type".into());
+        };
+        if !matches!(
+            ty,
+            Ty::Boolean
+                | Ty::Char
+                | Ty::Byte
+                | Ty::Short
+                | Ty::Int
+                | Ty::Long
+                | Ty::Float
+                | Ty::Double
+        ) {
+            return Err(declined!("a primitive `hashCode` on `{ty:?}`"));
+        }
+        let Some(value) = self.coerce(operand, ty)? else {
+            return Err("a primitive `hashCode` on `Unit`".into());
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        self.value_hash(value, ty).map(Some)
+    }
+
     /// Realize an exact provider intrinsic reached through an ordinary member call.
     ///
     /// Returns `None` only when the selected declaration has no operation handled here, allowing
@@ -85,9 +112,10 @@ impl BodyLowering<'_, '_, '_> {
         intrinsic: Option<krusty::backend::BackendCompilerIntrinsic>,
         receiver: Option<u32>,
         args: &[u32],
-        extension_receiver_parameter: Option<u32>,
+        declared: DeclaredOperands<'_>,
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
+        let extension_receiver_parameter = declared.extension_receiver_parameter;
         if let Some(plan) = intrinsic.and_then(super::super::dependency_intrinsics::operation_plan)
         {
             use super::super::dependency_intrinsics::DependencyOperation;
@@ -114,6 +142,19 @@ impl BodyLowering<'_, '_, '_> {
                     }
                     self.string_plus(left, right, ret)
                 }
+                DependencyOperation::PrimitiveHashCode => {
+                    let (Some(operand), [], None) = (receiver, args, extension_receiver_parameter)
+                    else {
+                        return Some(Err("a malformed primitive `hashCode`".into()));
+                    };
+                    if ret != Ty::Int {
+                        return Some(Err("a primitive `hashCode` with a non-Int result".into()));
+                    }
+                    self.primitive_hash_code(operand)
+                }
+                // The iteration protocol's own member: the member path realizes it through the
+                // receiver's runtime descriptor, exactly as it realizes a source call of it.
+                DependencyOperation::PrimitiveIteratorNext => return None,
             });
         }
         if intrinsic == Some(krusty::backend::BackendCompilerIntrinsic::ReinterpretBits) {
@@ -328,6 +369,25 @@ impl BodyLowering<'_, '_, '_> {
                 };
                 Some(self.unsigned_compare_intrinsic(carrier, *left, *right, ret))
             }
+            // `a.compareTo(b)` on a builtin scalar, compared at the carrier the declaration's own
+            // receiver and parameter promote to, as the source operator form is.
+            Some(krusty::backend::BackendCompilerIntrinsic::PrimitiveCompare) => {
+                let (Some(receiver), [argument], Some(owner), [parameter]) =
+                    (receiver, args, declared.receiver, declared.params)
+                else {
+                    return Some(Err("a malformed primitive `compareTo`".into()));
+                };
+                let Some(operand) =
+                    krusty::libraries::builtin_member_realization::primitive_compare_operand(
+                        owner, *parameter,
+                    )
+                else {
+                    return Some(Err(declined!(
+                        "a primitive `compareTo` of `{owner:?}` with `{parameter:?}`"
+                    )));
+                };
+                Some(self.primitive_compare(operand, receiver, *argument, ret))
+            }
             _ => None,
         }
     }
@@ -355,6 +415,15 @@ impl BodyLowering<'_, '_, '_> {
             &[value, fallback],
         )
     }
+}
+
+/// The selected declaration's own operands: the classifier owning a member, the declared value
+/// parameters, and the argument coordinate a serialized body keeps an extension receiver at.
+#[derive(Clone, Copy)]
+pub(super) struct DeclaredOperands<'a> {
+    pub(super) receiver: Option<Ty>,
+    pub(super) params: &'a [Ty],
+    pub(super) extension_receiver_parameter: Option<u32>,
 }
 
 /// The two common-IR representations of one exact top-level extension receiver. A checked source

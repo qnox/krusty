@@ -11,6 +11,7 @@ import org.jetbrains.kotlin.ir.declarations.IrFile
 import org.jetbrains.kotlin.ir.declarations.IrSimpleFunction
 import org.jetbrains.kotlin.ir.declarations.IrValueDeclaration
 import org.jetbrains.kotlin.ir.expressions.IrBody
+import org.jetbrains.kotlin.ir.expressions.IrConstKind
 import org.jetbrains.kotlin.ir.expressions.IrExpression
 import org.jetbrains.kotlin.ir.expressions.IrStatementOrigin
 import org.jetbrains.kotlin.ir.expressions.impl.IrCallImpl
@@ -195,23 +196,23 @@ internal class ModuleBuilder(private val ir: Fir2IrActualizedResult) {
     private fun DataInputStream.readConstant(start: Int, end: Int): Node = when (val tag = readByte().toInt()) {
         0 -> {
             val value = readBoolean()
-            Node { _, _ -> IrConstImpl.boolean(start, end, builtIns.booleanType, value) }
+            Node { _, _ -> IrConstImpl(start, end, builtIns.booleanType, IrConstKind.Boolean, value) }
         }
         1 -> {
             val value = readInt()
-            Node { _, _ -> IrConstImpl.int(start, end, builtIns.intType, value) }
+            Node { _, _ -> IrConstImpl(start, end, builtIns.intType, IrConstKind.Int, value) }
         }
         2 -> {
             val value = readLong()
-            Node { _, _ -> IrConstImpl.long(start, end, builtIns.longType, value) }
+            Node { _, _ -> IrConstImpl(start, end, builtIns.longType, IrConstKind.Long, value) }
         }
         3 -> {
             val value = readString()
-            Node { _, _ -> IrConstImpl.string(start, end, builtIns.stringType, value) }
+            Node { _, _ -> IrConstImpl(start, end, builtIns.stringType, IrConstKind.String, value) }
         }
         4 -> {
             val type = readTypeNode()
-            Node { function, _ -> IrConstImpl.constNull(start, end, type(function)) }
+            Node { function, _ -> IrConstImpl(start, end, type(function), IrConstKind.Null, null) }
         }
         else -> throw Refused("unknown constant kind $tag")
     }

@@ -17,7 +17,7 @@
 //! Only the compiler-provided freestanding headers are used (`stdint.h`, `stddef.h`, `stdbool.h`),
 //! which C11 §4 guarantees exist without a hosted implementation.
 //!
-//! The runtime is fourteen translation units over four headers:
+//! The runtime is fifteen translation units over four headers:
 //!
 //! * `SYS_HEADER` (`krusty_sys.h`) is the kernel interface — the syscall shim per architecture
 //!   and the page-mapping primitives over it. It is the whole of the target-specific surface, a
@@ -35,6 +35,8 @@
 //! * `krusty_lang.c` is `kotlin.*`'s arithmetic and unsigned integers, `Throwable` and the
 //!   exception in flight, `kotlin.test`'s assertions, callable references, string literals and
 //!   the console.
+//! * `krusty_appendable.c` is `Appendable`'s range `append` on the runtime's string builder, which
+//!   reads the value it cuts through the builder's and the strings' own entry points.
 //! * `krusty_fp.c` renders a floating-point value as Kotlin does — the shortest decimal that reads
 //!   back as the same value — and computes the floating remainder.
 //! * `krusty_gc.c` is the heap: allocator and a mark-sweep collector with conservative roots and a

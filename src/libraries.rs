@@ -10,6 +10,7 @@ mod call_arg_mapping_failure;
 mod call_realization;
 mod call_sig;
 mod callable_scope_rung;
+mod class_name_property;
 mod classifier_callables;
 mod classifier_declaration;
 mod classifier_kind;
@@ -54,6 +55,7 @@ pub use annotation_argument_provenance::AnnotationArgumentProvenance;
 pub use call_arg_mapping_failure::{CallArgMappingError, CallArgMappingFailure};
 pub(crate) use call_realization::KlibBodyCallableShape;
 pub use call_realization::KlibBodyCompanionReceiver;
+pub(crate) use call_realization::KlibSerializedMember;
 pub use call_realization::{
     DefaultCallRealization, DirectCFunction, ExternalCallableKind, ExternalCallableRealization,
     ExternalPropertyRealization, KlibBodyCallable, KlibDeclarationSignature,
@@ -108,8 +110,10 @@ use crate::types::InlineParameterModifier;
 pub use crate::types::Visibility;
 use crate::types::{SemanticCallRole, SemanticCallableOwner, Ty, TyKind, TypeName, TypeNameList};
 pub(crate) use array_factories::kotlin_array_factory_kind;
+pub(crate) use class_name_property::realize_class_name_property;
 pub use compiler_intrinsic::{
-    CompilerIntrinsic, IndicesReceiver, ListStorageConstruction, ResultFailureIntrinsic,
+    ClassNameKind, CompilerIntrinsic, IndicesReceiver, ListStorageConstruction,
+    ResultFailureIntrinsic,
 };
 pub(crate) use core_builtins::add_core_builtin_declarations;
 pub use generic_signature::{GenericReturnPolicy, GenericSig};
@@ -121,9 +125,7 @@ pub use inline_body::{
 };
 #[cfg(test)]
 pub(crate) use klib_body_class::test_fixture as klib_body_class_fixture;
-pub(crate) use klib_body_class::{
-    KlibBodyClassContract, KlibBodyClassParameters, KlibClassStorage, KlibStoredField,
-};
+pub(crate) use klib_body_class::{KlibBodyClassContract, KlibBodyClassParameters, KlibStoredField};
 pub use member_flags::LmFlags;
 pub(crate) use metadata_normalization::{
     associated_function_parameter_identities, associated_property_parameter_identities,
@@ -1580,9 +1582,11 @@ impl FunctionInfo {
                             merge_method_arguments(declared, selected, formals)
                         })
                         .collect::<Vec<_>>();
-                    (merged.as_slice() != arguments)
-                        .then(|| Ty::obj_args_name(name, &merged))
-                        .unwrap_or(declared)
+                    if merged.as_slice() != arguments {
+                        Ty::obj_args_name(name, &merged)
+                    } else {
+                        declared
+                    }
                 }
                 (TyKind::Fun(function), TyKind::Fun(selected_function))
                     if function.params.len() == selected_function.params.len()
@@ -1600,17 +1604,17 @@ impl FunctionInfo {
                         })
                         .collect::<Vec<_>>();
                     let ret = merge_method_arguments(function.ret, selected_function.ret, formals);
-                    (params.as_slice() != function.params || ret != function.ret)
-                        .then(|| {
-                            Ty::fun_with_shape(
-                                params,
-                                ret,
-                                function.context_count,
-                                function.has_receiver,
-                                function.suspend,
-                            )
-                        })
-                        .unwrap_or(declared)
+                    if params.as_slice() != function.params || ret != function.ret {
+                        Ty::fun_with_shape(
+                            params,
+                            ret,
+                            function.context_count,
+                            function.has_receiver,
+                            function.suspend,
+                        )
+                    } else {
+                        declared
+                    }
                 }
                 (TyKind::Nullable(inner), TyKind::Nullable(selected_inner)) => {
                     Ty::nullable(merge_method_arguments(inner, selected_inner, formals))

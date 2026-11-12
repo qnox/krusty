@@ -206,9 +206,10 @@ fn secondary_constructor_default_flags_round_trip() {
     assert_eq!(constructors[0].params.defaults, defaults);
 }
 
+/// A data class's synthesized `equals` carries no equality bound in its metadata, and the decoder
+/// does not invent one: kotlinc does not narrow the other operand of `a == Data(...)` to `Data`.
 #[test]
-fn synthesized_data_equals_recovers_its_implicit_equality_bound() {
-    let owner = Ty::obj("sample/Data");
+fn synthesized_data_equals_has_no_implicit_equality_bound() {
     let mut equals = FnMeta::plain(
         "equals".to_string(),
         vec![("other".to_string(), Ty::nullable(Ty::obj("kotlin/Any")))],
@@ -247,7 +248,7 @@ fn synthesized_data_equals_recovers_its_implicit_equality_bound() {
         .find(|function| function.jvm_name == "equals")
         .expect("synthesized equals metadata");
 
-    assert_eq!(equals.equality_bound(), Some(owner));
+    assert_eq!(equals.equality_bound(), None);
 }
 
 #[test]

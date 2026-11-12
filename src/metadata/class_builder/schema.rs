@@ -1078,17 +1078,17 @@ pub(crate) fn class_message(
     }
     // Unscheduled records are compiler/plugin synthetics or callers using the legacy/default shape.
     // Preserve their established property-then-function order after all explicitly ordered members.
-    for index in 0..props.len() {
-        if prop_msgs[index].is_none() {
-            prop_msgs[index] = Some((
+    for (index, message) in prop_msgs.iter_mut().enumerate() {
+        if message.is_none() {
+            *message = Some((
                 built.next().expect("unbounded"),
                 build_prop(st, &mut requirements, index),
             ));
         }
     }
-    for index in 0..methods.len() {
-        if func_msgs[index].is_none() {
-            func_msgs[index] = Some((
+    for (index, message) in func_msgs.iter_mut().enumerate() {
+        if message.is_none() {
+            *message = Some((
                 built.next().expect("unbounded"),
                 build_func(st, &mut requirements, &mut contract_types, index),
             ));
@@ -1255,10 +1255,6 @@ pub(crate) fn class_message(
 
     Ok(class.canonical())
 }
-
-/// Build the `(d1, d2)` payload for an ANONYMOUS class (`object : P2 {}` inside a function):
-/// kotlinc's record is `Class { flags = LOCAL visibility (10), fq_name = <raw internal, marked
-/// localName in the string table>, supertype* }` — no members, no constructor record.
 
 /// A member list in the order its records were built, which is the order kotlinc serializes it.
 fn in_build_order(slots: Vec<Option<(usize, Pb)>>, kind: &str) -> Vec<Pb> {

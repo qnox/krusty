@@ -263,9 +263,11 @@ impl Checker<'_> {
         if let Some(alias) = scope.type_alias(&reference.name) {
             return Some(self.alias_application_ty_with_spelling(
                 scope,
-                alias.formals,
-                alias.expansion,
-                alias.expansion_spelling,
+                SelectedAliasApplication {
+                    formals: alias.formals,
+                    expansion: alias.expansion,
+                    expansion_spelling: alias.expansion_spelling,
+                },
                 &reference.name,
                 AliasArguments::of(reference),
                 reference.span,
@@ -300,9 +302,11 @@ impl Checker<'_> {
         };
         self.alias_application_ty_with_spelling(
             scope,
-            binding.formals,
-            binding.expansion,
-            binding.expansion_spelling,
+            SelectedAliasApplication {
+                formals: binding.formals,
+                expansion: binding.expansion,
+                expansion_spelling: binding.expansion_spelling,
+            },
             display_name,
             arguments,
             span,
@@ -320,9 +324,11 @@ impl Checker<'_> {
     ) -> AppliedAlias {
         self.alias_application_ty_with_spelling(
             scope,
-            formals,
-            expansion,
-            Default::default(),
+            SelectedAliasApplication {
+                formals,
+                expansion,
+                expansion_spelling: Default::default(),
+            },
             display_name,
             arguments,
             span,
@@ -332,18 +338,13 @@ impl Checker<'_> {
     pub(super) fn alias_application_ty_with_spelling(
         &mut self,
         scope: &CheckerScope<'_>,
-        formals: Vec<String>,
-        expansion: Ty,
-        expansion_spelling: crate::spelling::Spelled,
+        selected: SelectedAliasApplication,
         display_name: &str,
         arguments: AliasArguments<'_>,
         span: Span,
     ) -> AppliedAlias {
-        let selected = SelectedAliasApplication {
-            formals: formals.clone(),
-            expansion,
-            expansion_spelling,
-        };
+        let formals = selected.formals.clone();
+        let expansion = selected.expansion;
         let arguments = match arguments {
             AliasArguments::Written(arguments) => arguments,
             AliasArguments::StarProjected => {

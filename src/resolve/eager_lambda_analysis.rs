@@ -339,7 +339,12 @@ impl Checker<'_> {
         if function.kind != FnKind::TopLevel || !self.source_callable_visible(function) {
             return None;
         }
-        let shape = self.top_level_overload_lambda_shape(scope, function, call.shape)?;
+        let shape = self.top_level_overload_lambda_shape(
+            scope,
+            function,
+            call.shape,
+            super::lambda_call_shapes::ExplicitTypeArgumentBounds::Enforced,
+        )?;
         let lambdas = (0..call.shape.args.len())
             .map(|argument| {
                 let expected = shape

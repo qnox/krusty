@@ -1,6 +1,8 @@
 //! Declaration-owned class evidence for authenticating serialized member headers.
 
-use crate::metadata::id_signature::KlibPublicIdSignature;
+use crate::metadata::id_signature::{
+    metadata_class_signature, KlibPublicIdSignature, MetadataClass, MetadataContainer,
+};
 use crate::metadata::semantic::KotlinModality;
 use crate::types::{Ty, TypeName, TypeVariance};
 
@@ -37,19 +39,60 @@ impl KlibBodyClassContract {
         crate::types::builtin_semantic(self.classifier).is_some()
     }
 
-    /// This class applied to its declared formals. A non-generic class is the bare classifier.
-    pub(crate) fn self_type(&self) -> Ty {
-        Ty::obj_args_name(self.classifier, &self.parameters.formals)
+    /// A final object named by `classifier` in `module`. A singleton edge carries this when the
+    /// provider did not publish the class, so the contract is the class the classifier names.
+    pub(crate) fn singleton_object(module: &str, classifier: TypeName) -> Option<Self> {
+        let mut segments = Vec::new();
+        let mut current = classifier;
+        loop {
+            if current == TypeName::ROOT {
+                break;
+            }
+            segments.push(current.segment_ref());
+            match current.parent() {
+                Some(parent) if parent != TypeName::ROOT => current = parent,
+                _ => break,
+            }
+        }
+        segments.reverse();
+        let (name, package) = segments.split_last()?;
+        if name.contains('$') || name.contains('.') {
+            return None;
+        }
+        let package = package
+            .iter()
+            .map(|&segment| segment.to_owned())
+            .collect::<Vec<_>>();
+        let signature = metadata_class_signature(
+            MetadataContainer {
+                package: &package,
+                classes: &[],
+                native_interop_library: false,
+            },
+            MetadataClass {
+                name,
+                type_params: &[],
+                expect: false,
+            },
+        );
+        Some(Self {
+            module: module.to_owned(),
+            signature,
+            classifier,
+            parameters: KlibBodyClassParameters {
+                formals: Box::new([]),
+                bounds: Box::new([]),
+                variances: Box::new([]),
+                own_count: 0,
+            },
+            kind: super::TypeKind::Object,
+            modality: KotlinModality::Final,
+            is_value: false,
+            is_inner: false,
+            is_expect: false,
+            primary_constructor: None,
+        })
     }
-}
-
-/// A complete declared instance layout. Its field ordinals belong to this exact producer class;
-/// retaining the layout grants no constructor, initializer, singleton or descriptor definition.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct KlibClassStorage {
-    pub(crate) declaration: KlibBodyClassContract,
-    pub(crate) superclass: Ty,
-    pub(crate) fields: Vec<KlibStoredField>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

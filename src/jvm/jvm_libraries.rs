@@ -51,7 +51,7 @@ mod return_types;
 use return_types::{java_collection_return_lower_bound, metadata_declared_nonnull_return};
 mod static_properties;
 mod synthetic_properties;
-mod unsigned_intrinsics;
+pub mod unsigned_intrinsics;
 use static_properties::StaticAccessor;
 use synthetic_properties::{accessor_property_name, setter_name_for_getter, AccessorInventory};
 
@@ -1988,9 +1988,9 @@ impl JvmLibraries {
             }
             // Kotlin metadata is authoritative for Kotlin companion identity. The structural field
             // pattern is only a Java/classfile fallback when no Kotlin companion fact exists.
-            let metadata_companion = super::metadata::class_companion_name(&ci).and_then(|field| {
+            let metadata_companion = super::metadata::class_companion_name(&ci).map(|field| {
                 let companion = crate::types::type_name_nested_child(internal_name, &field);
-                Some((field, companion))
+                (field, companion)
             });
             let classfile_companion = (!ci.meta.is_present())
                 .then(|| {
@@ -3098,7 +3098,7 @@ impl JvmLibraries {
                     );
                     Some(setter)
                 });
-                overloads.push(PropertyInfo {
+                let mut property = PropertyInfo {
                     return_value_status: Some(mp.return_value_status),
                     name: name.to_string(),
                     kind: PropKind::Member,
@@ -3144,7 +3144,13 @@ impl JvmLibraries {
                     source_member: None,
                     producer: PropertyProducer::KotlinAccessor,
                     read_stability: self.module_read_stability(mp, cn),
-                });
+                };
+                crate::libraries::realize_class_name_property(
+                    cn,
+                    self.cp.common_metadata_owns(cn),
+                    &mut property,
+                );
+                overloads.push(property);
                 self.publish_kotlin_property_deprecation(overloads.last_mut(), mp);
             }
 

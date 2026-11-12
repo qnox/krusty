@@ -566,6 +566,7 @@ impl Record {
             None,
             None,
             Some(&self.identity),
+            crate::libraries::KlibSerializedMember::Class,
         )
         .expect("signed")
     }
@@ -1533,8 +1534,10 @@ fn stdlib_calls_reach_header_declared_callees() {
     // they are not expected-failure allowances for executable conformance tests. Elvis and safe-call
     // blocks, then generic calls and `when` subject blocks, now reach further declared callees;
     // so do callees that declare parameter defaults, which their headers now carry, and callees
-    // reached past a call that leaves a parameter to its default. The same complete inputs were
-    // measured on every release.
+    // reached past a call that leaves a parameter to its default, and past a `for` loop over an
+    // array, which loops by index. The same complete inputs were measured on every release. A
+    // call of an inherited member no library serializes now links to the declaration it inherits
+    // and declines there as a member function call.
     let expected =
         if crate::kotlin_version::target() >= crate::kotlin_version::KotlinVersion::V2_4_20 {
             vec![
@@ -1542,14 +1545,10 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it calls `kotlin.NumberFormatException.<init>`)", 4),
                 ("it calls `kotlin.UInt.<init>`)", 4),
                 ("it converts a value implicitly)", 4),
-                ("it declares type parameters)", 205),
+                ("it declares type parameters)", 207),
                 ("it uses a call of a file-private declaration)", 6),
-                ("it uses a call of a member function)", 74),
-                (
-                    "it uses a call of a member no library serializes, such as a fake override)",
-                    10,
-                ),
-                ("it uses a call through a property accessor signature)", 35),
+                ("it uses a call of a member function)", 88),
+                ("it uses a call through a property accessor signature)", 39),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),
                 (
@@ -1564,14 +1563,10 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it calls `kotlin.NumberFormatException.<init>`)", 4),
                 ("it calls `kotlin.UInt.<init>`)", 4),
                 ("it converts a value implicitly)", 4),
-                ("it declares type parameters)", 187),
+                ("it declares type parameters)", 189),
                 ("it uses a call of a file-private declaration)", 4),
-                ("it uses a call of a member function)", 71),
-                (
-                    "it uses a call of a member no library serializes, such as a fake override)",
-                    10,
-                ),
-                ("it uses a call through a property accessor signature)", 35),
+                ("it uses a call of a member function)", 85),
+                ("it uses a call through a property accessor signature)", 39),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),
                 (
@@ -1623,7 +1618,7 @@ fn stdlib_bodies_decline_inside_header_declared_callees() {
                 &[int],
             ),
             "the KLIB body of `kotlin.collections.contains` (it reaches the KLIB body of \
-             `kotlin.collections.indexOf` (it uses a call of a member no library serializes, such as a fake override))",
+             `kotlin.collections.indexOf` (it uses a call of a member function))",
         ),
     ];
     let declines = cases
@@ -1650,4 +1645,79 @@ fn stdlib_bodies_decline_inside_header_declared_callees() {
             .map(|(_, expected)| expected.to_owned())
             .collect::<Vec<_>>()
     );
+}
+
+/// A stdlib body iterating a primitive array calls `IntIterator.hasNext`, which `IntIterator`
+/// inherits from `Iterator` without declaring it, so no library serializes it. The call links to
+/// the declaration it inherits, by the declared hierarchy, under that declaration's own identity.
+#[test]
+fn an_unserialized_inherited_member_call_links_to_its_declaration() {
+    use crate::klib_libraries::KlibCalleeOrigin;
+    use crate::metadata::klib_ir::KlibIrSignature;
+    let Some(root) = super::distribution_root() else {
+        return;
+    };
+    let libraries = super::stdlib(&root);
+    let bodies = libraries.declaration_bodies();
+    let int_array = kotlin("IntArray");
+    let member = |owner: &str, name: &str, signature: &KlibPublicIdSignature| {
+        signature.package().segments() == ["kotlin", "collections"]
+            && signature.declaration().segments() == [owner, name]
+    };
+    for (name, receiver, params) in [
+        ("contentHashCode", Ty::nullable(int_array), vec![]),
+        ("indexOf", int_array, vec![kotlin("Int")]),
+    ] {
+        let record = super::frozen_function(
+            &libraries,
+            "kotlin/collections",
+            name,
+            Some(receiver),
+            &params,
+        );
+        let callable = record.klib_body_callable().expect("signed");
+        let (arena, function) = bodies
+            .function(callable.identity())
+            .expect("a serialized body");
+        let references = arena
+            .call_symbols_in_body(function)
+            .filter_map(|symbol| match &symbol.signature {
+                KlibIrSignature::Public(signature)
+                    if member("IntIterator", "hasNext", signature) =>
+                {
+                    Some(KlibDeclarationSignature::Public(signature.clone()))
+                }
+                _ => None,
+            })
+            .fold(Vec::new(), |mut unique, reference| {
+                if !unique.contains(&reference) {
+                    unique.push(reference);
+                }
+                unique
+            });
+        assert_eq!(references.len(), 1, "{name} calls IntIterator.hasNext once");
+        let reference = references.into_iter().next().unwrap();
+        let module = &callable.identity().module;
+        assert!(matches!(
+            bodies.callee_origin(module, &reference),
+            KlibCalleeOrigin::Missing
+        ));
+        let KlibCalleeOrigin::Exact(linked) = bodies.linked_origin(module, &reference) else {
+            panic!("{name}: IntIterator.hasNext links to no declaration");
+        };
+        let (
+            KlibDeclarationSignature::Public(linked_signature),
+            KlibDeclarationSignature::Public(reference),
+        ) = (&linked.declaration, &reference)
+        else {
+            unreachable!()
+        };
+        assert_eq!(linked.module, "stdlib");
+        assert!(member("Iterator", "hasNext", linked_signature));
+        assert_eq!(linked_signature.member_id(), reference.member_id());
+        assert!(matches!(
+            bodies.callee_origin(module, &linked.declaration),
+            KlibCalleeOrigin::Exact(serialized) if serialized == linked
+        ));
+    }
 }

@@ -329,7 +329,7 @@ impl Checker<'_> {
         if convertible {
             let nominal = self.expr_types[argument.0 as usize];
             if let Some(conversion) = self.sam_conversion_record(scope, argument, nominal, sam) {
-                self.note_sam_conversion(argument, conversion);
+                self.resolved_sam_conversions.insert(argument, conversion);
             }
         }
     }
@@ -403,50 +403,34 @@ impl Checker<'_> {
                 if let Some(conversion) =
                     self.sam_conversion_record(scope, argument, nominal, signature.clone())
                 {
-                    self.note_sam_conversion(argument, conversion);
+                    self.resolved_sam_conversions.insert(argument, conversion);
                 }
             }
         }
     }
 
-    pub(super) fn record_selected_sam_vararg_arguments(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        args: &[ExprId],
-        params: &[Ty],
-        vararg_index: Option<usize>,
-    ) {
-        for (index, &argument) in args.iter().enumerate() {
-            let Some(mut parameter) = params
-                .get(index)
-                .copied()
-                .or_else(|| vararg_index.and_then(|vararg| params.get(vararg).copied()))
-            else {
-                continue;
-            };
-            if vararg_index.is_some_and(|vararg| index >= vararg)
-                && !self.file.is_spread_arg(argument)
-            {
-                parameter = parameter.array_read_elem().unwrap_or(parameter);
-            }
-            self.record_selected_sam_conversion(scope, parameter, argument);
-        }
-    }
-
-    pub(super) fn record_resolved_extension_sam_arguments(
+    /// Record each argument's SAM conversion at the parameter the call's argument mapping selected:
+    /// a named argument, an argument after an omitted default, and a trailing lambda each convert
+    /// to their own parameter's interface, never to the one at the same source position.
+    pub(super) fn record_selected_sam_mapped_arguments(
         &mut self,
         scope: &CheckerScope<'_>,
         call: ExprId,
         args: &[ExprId],
+        argument_names: Option<&[Option<String>]>,
+        shape: &ContextualCallShape,
     ) {
-        let selected_parameters = match self.resolved_calls.get(&call) {
-            Some(ResolvedCall::Extension(extension)) => {
-                Some((extension.params.clone(), extension.vararg_index))
+        let expected_types = self.sam_argument_expected_types(
+            call,
+            args,
+            argument_names,
+            &shape.params,
+            &shape.call_sig,
+        );
+        for (&argument, expected) in args.iter().zip(expected_types) {
+            if expected != Ty::Error {
+                self.record_selected_sam_conversion(scope, expected, argument);
             }
-            _ => None,
-        };
-        if let Some((parameters, vararg_index)) = selected_parameters {
-            self.record_selected_sam_vararg_arguments(scope, args, &parameters, vararg_index);
         }
     }
 }
