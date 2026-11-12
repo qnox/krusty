@@ -308,8 +308,9 @@ kotlinc-arguments VERSION=`just max-version`:
         java -cp "$lib/kotlin-compiler.jar:$lib/kotlin-stdlib.jar" \
             "scripts/kotlinc-arguments/$main.java" > "$own"
         previous=$(find "$releases" -maxdepth 1 -name "*$suffix" -printf '%f\n' |
-            sed -n "s/^\([0-9]*\.[0-9]*\.[0-9]*\)${suffix//./\\.}\$/\1/p" |
-            { cat; echo "{{VERSION}}"; } | sort -uV | sed -n '/^{{VERSION}}$/{x;p;q};h')
+            sed -nE "s/^([0-9]+\\.[0-9]+\\.[0-9]+(-RC[1-9][0-9]*|-RC|-Beta[1-9][0-9]*)?)${suffix//./\\.}\$/\\1/p" |
+            { cat; echo "{{VERSION}}"; } | scripts/order-kotlin-versions.sh |
+            awk -v version="{{VERSION}}" '$0 == version { exit } { previous = $0 } END { print previous }')
         if [ -n "$previous" ] && cmp -s "$own" "$releases/$previous$suffix"; then
             rm "$own"
         fi
@@ -388,7 +389,7 @@ box-corpus VERSION=`just max-version`:
         # Keep cone mode: a fresh sparse clone checks out the repository-root files that cone mode
         # owns. Switching to non-cone while excluding them can leave those paths in place and abort
         # the update before the requested corpus directory is materialized.
-        git -C "$root" sparse-checkout set compiler/testData/codegen/box "$mock_dir" $cli_dirs $bytecode_dirs >&2
+        git -C "$root" sparse-checkout set compiler/testData/codegen/box "$mock_dir" $cli_dirs $bytecode_dirs "${selection_dirs[@]}" >&2
     }
     # Kotlin's command-line test corpus (`.args`/`.out` pairs) and the third-party annotation
     # sources some of its cases put on the classpath; kotlin_cli_jvm_conformance runs it.
@@ -397,6 +398,25 @@ box-corpus VERSION=`just max-version`:
     # (bytecodeText) and whole-class declaration listings (bytecodeListing);
     # kotlin_bytecode_text_conformance and kotlin_bytecode_listing_conformance run them.
     bytecode_dirs="compiler/testData/codegen/bytecodeText compiler/testData/codegen/bytecodeListing"
+    # The matching generators and backend matcher are the selection oracle, not another
+    # compiler build. Keep their original sources beside each exact-version corpus.
+    selection_files=()
+    selection_dirs=()
+    while IFS= read -r selection_file; do
+        [ -n "$selection_file" ] || continue
+        selection_files+=("$selection_file")
+        selection_dirs+=("${selection_file%/*}")
+    done < tests/box_selection_sources.txt
+    box_roots=()
+    load_box_roots() {
+        local roots_text
+        roots_text=$(python3 scripts/box_selection.py --checkout "$root" --required-roots) || return 1
+        box_roots=()
+        while IFS= read -r box_root; do
+            [ -n "$box_root" ] && box_roots+=("$box_root")
+        done <<< "$roots_text"
+        [ "${#box_roots[@]}" -gt 0 ]
+    }
     mock_dir=""
     if [ -d "$root/.git" ] && [ -d "$box" ]; then
         mock_dir="$(mock_dir_at_tag)"
@@ -405,6 +425,15 @@ box-corpus VERSION=`just max-version`:
     if [ -n "$mock_dir" ] && [ -f "$root/$mock_dir/rt.jar" ]; then
         complete=1
         for dir in $cli_dirs $bytecode_dirs; do [ -d "$root/$dir" ] || complete=0; done
+        for selection_file in "${selection_files[@]}"; do
+            [ -f "$root/$selection_file" ] || complete=0
+        done
+        if [ "$complete" = 1 ]; then
+            load_box_roots || exit 1
+            for box_root in "${box_roots[@]}"; do
+                [ -d "$root/$box_root" ] || complete=0
+            done
+        fi
     fi
     if [ "$complete" = 1 ]; then
         echo "$box"
@@ -417,20 +446,31 @@ box-corpus VERSION=`just max-version`:
         exit 1
     fi
     if [ -n "$mock_dir" ]; then
-        # A cache provisioned before the mock JDK, the CLI corpus or the bytecode corpora was needed: extend it rather
-        # than accept it.
-        echo "adding the mock JDK, the CLI corpus and the bytecode corpora to the Kotlin codegen/box corpus (v${ver})…" >&2
-        git -C "$root" sparse-checkout add "$mock_dir" $cli_dirs $bytecode_dirs >&2 \
+        # A cache provisioned before the mock JDK, the CLI corpus, the bytecode corpora or the
+        # generator sources were needed: extend it rather than accept it.
+        echo "adding the mock JDK, CLI corpus, bytecode corpora and generator sources to Kotlin v${ver}…" >&2
+        git -C "$root" sparse-checkout add "$mock_dir" $cli_dirs $bytecode_dirs "${selection_dirs[@]}" >&2 \
             || { echo "failed to extend the v${ver} corpus checkout" >&2; exit 1; }
     else
         # No checkout, or a restored one whose tree cannot name its mock JDK: provision afresh.
         clone_corpus
     fi
+    load_box_roots || exit 1
+    git -C "$root" sparse-checkout add "${box_roots[@]}" >&2 \
+        || { echo "failed to provision the upstream box roots for v${ver}" >&2; exit 1; }
     [ -d "$box" ] || { echo "box dir missing after sparse checkout: $box" >&2; exit 1; }
     [ -f "$root/$mock_dir/rt.jar" ] \
         || { echo "mock JDK missing after sparse checkout: $root/$mock_dir/rt.jar" >&2; exit 1; }
     [ -d "$root/compiler/testData/cli/jvm" ] \
         || { echo "CLI corpus missing after sparse checkout: $root/compiler/testData/cli/jvm" >&2; exit 1; }
+    for selection_file in "${selection_files[@]}"; do
+        [ -f "$root/$selection_file" ] \
+            || { echo "selection source missing after sparse checkout: $root/$selection_file" >&2; exit 1; }
+    done
+    for box_root in "${box_roots[@]}"; do
+        [ -d "$root/$box_root" ] \
+            || { echo "upstream box root missing after sparse checkout: $root/$box_root" >&2; exit 1; }
+    done
     echo "$box"
 
 # Provision the kotlinx.serialization compiler-plugin box corpus (plugins/kotlinx-serialization/
@@ -533,10 +573,11 @@ test-all *ARGS:
 # Build the krusty-build library test binary and print its path. Gradle lanes run this prebuilt
 # binary; they do not compile krusty again.
 #
-# CI builds this right after `cargo build --profile gate -p krusty-cli`. Selecting krusty-cli's
-# binary here as well resolves the same features as that build: on its own, krusty-build's graph
-# lacks the Native backend, so bumpalo (under zopfli) loses Cranelift's `allocator-api2` feature
-# and krusty, which links zopfli, compiled a second time (484 s of the 1157 s tool-bins build).
+# CI builds this right after `just conformance-bin-and-cli`, and must reuse that build's krusty.
+# Selecting krusty-cli's binary here keeps the Native backend in the graph: without it bumpalo
+# (under zopfli) loses Cranelift's `allocator-api2` feature and krusty, which links zopfli,
+# compiled a second time (484 s of a 1157 s build). krusty-build's own dev-dependencies add the
+# libc, object and once_cell features that the root package's dev-dependencies add there.
 krusty-build-tests:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -566,6 +607,14 @@ conformance-bin:
     #!/usr/bin/env bash
     set -euo pipefail
     scripts/cargo-test-binary.sh conformance --test conformance
+
+# CI's tool-bins job: the conformance binary and the `krusty` CLI (target/gate/krusty) from one
+# Cargo invocation. The CLI alone resolves libc, object and once_cell without the features the
+# root package's dev-dependencies add, so building the two apart compiled krusty twice.
+conformance-bin-and-cli:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scripts/cargo-test-binary.sh --build conformance -p krusty-cli -p krusty --test conformance --bin krusty
 
 # Run the codegen/box conformance suite and print the case report "<pct> <passed> <applicable>":
 # applicable cases whose box() returns "OK". The same run's JVM byte report "<pct> <matched> <total>",
@@ -706,26 +755,29 @@ install-hooks:
 
 # --- versioning: krusty's release version = supported Kotlin reference version + build number ---
 #
-# The kotlin-versions manifest lists the Kotlin reference versions (full major.minor.patch, e.g.
-# 2.4.20) krusty is validated against. The MAX is krusty's headline release version; every entry is
-# also tested in parallel by CI against that kotlinc. The build number resets per reference version
-# (commits since its baseline), so 2.4.20-build.3 is the 3rd krusty build supporting Kotlin 2.4.20.
+# The kotlin-versions manifest lists the Kotlin reference versions (major.minor.patch, or the same
+# with -BetaN, -RC, or -RCN) krusty is validated against. The MAX is krusty's headline release
+# version: the newest stable entry. A pre-release precedes the stable release of the same numbers
+# and stays supported, but it is not the headline. Every entry is also tested in parallel by CI
+# against that kotlinc. The build number resets per reference version (commits since its baseline),
+# so 2.4.20-build.3 is the 3rd krusty build supporting Kotlin 2.4.20.
 
-# Supported Kotlin reference versions, one per line.
+# Supported Kotlin reference versions, oldest first.
 kotlin-versions:
-    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}'
+    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | scripts/order-kotlin-versions.sh
 
 # Comma-separated list of supported Kotlin reference versions (advertised by `krusty -version`).
 supported-kotlin:
-    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | sort -V | paste -sd, -
+    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | scripts/order-kotlin-versions.sh | paste -sd, -
 
-# Highest supported Kotlin reference version — krusty's release version (without the build suffix).
+# Newest stable Kotlin reference version — krusty's release version (without the build suffix).
+# A pre-release can sort last and still not be this version.
 max-version:
-    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | sort -V | tail -1
+    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | scripts/order-kotlin-versions.sh | awk '!/-/ { stable = $0 } END { print stable }'
 
 # JSON array of supported Kotlin reference versions, for the GitHub Actions test matrix.
 matrix-json:
-    @grep -vE '^\s*(#|$)' {{manifest}} | awk 'BEGIN{printf "["} {printf "%s\"%s\"",(NR>1?",":""),$1} END{print "]"}'
+    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | scripts/order-kotlin-versions.sh | awk 'BEGIN{printf "["} {printf "%s\"%s\"",(NR>1?",":""),$0} END{print "]"}'
 
 # Build number for a Kotlin reference version: commits since its baseline + 1 (resets per version,
 # reproducible from any clone, no CI state).

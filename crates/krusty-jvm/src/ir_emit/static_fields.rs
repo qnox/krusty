@@ -798,7 +798,9 @@ fn static_field_annotations<'a>(
 
 /// An enum class's own statics, after its property fields and before its entry constants: a
 /// `@Serializable enum`'s `$cachedSerializer$delegate` (`Companion, value,
-/// $cachedSerializer$delegate, <entries>`), and its companion's hoisted properties.
+/// $cachedSerializer$delegate, <entries>`), its companion's hoisted properties, and its
+/// `companion { … }` block properties' storage. Each is declared in declaration order exactly as
+/// an ordinary class declares it (see [`declare_static`]).
 pub(super) fn emit_enum_static_fields(
     ir: &IrFile,
     c: &IrClass,
@@ -806,7 +808,6 @@ pub(super) fn emit_enum_static_fields(
     signature_formatter: &JvmSignatureFormatter<'_>,
     cw: &mut ClassWriter,
 ) {
-    // Declaration order, as in the class path: a companion `const val` among hoisted properties.
     let mut owner_statics: Vec<_> = (ir.statics.iter().enumerate())
         .filter(|(_, s)| s.owner_matches(fq))
         .map(|(index, s)| (index as u32, s))
@@ -814,41 +815,7 @@ pub(super) fn emit_enum_static_fields(
     owner_statics
         .sort_by_key(|(index, declaration)| (declaration.line, declaration.source_order, *index));
     for (index, s) in owner_statics {
-        // A `var` is reassignable, so it must not carry ACC_FINAL (see the class path). A hoisted
-        // companion property's field is private unless `@JvmField` makes it the property's surface,
-        // at the declaration's visibility.
-        let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
-        let jvm_field = ir.is_jvm_field_static(index);
-        let private = s.visibility.is_private() || ir.is_jvm_companion_hoisted_static(index);
-        let acc = if let Some(visibility) = hoisted_lateinit_field_visibility(ir, index) {
-            0x0008 | static_visibility_access(visibility) | final_flag
-        } else if jvm_field {
-            0x0008 | static_visibility_access(s.visibility) | final_flag
-        } else if private {
-            0x000A | final_flag // PRIVATE | STATIC [| FINAL]
-        } else {
-            0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
-        } | annotated_field_modifiers(ir.static_declaration_annotations(index));
-        // A PARAMETERIZED static keeps its generic `Signature` (the delegate is a
-        // `Lazy<KSerializer<Object>>`), and a reference-typed one carries kotlinc's nullability
-        // annotation — the same treatment the class and facade field tables give their statics.
-        let signature = signature_formatter.field_signature(&s.ty, None, s.is_var);
-        let ann = super::declared_static_annotation(s).filter(|_| !s.is_lateinit);
-        // A folded `const val` is its `ConstantValue`; `<clinit>` does not store it.
-        let constant = (s.init)
-            .filter(|_| s.is_const && !s.is_var && !ir.is_jvm_companion_hoisted_static(index))
-            .and_then(|init| constant_value(ir, init));
-        cw.add_field_late_sig(
-            acc,
-            ir.static_field_jvm_name(index),
-            &ir_type_desc(&s.ty),
-            signature.as_deref().filter(|_| !s.property_delegate),
-            constant,
-            ann,
-        );
-        if let Some(annotations) = static_field_annotations(ir, c, index) {
-            cw.set_last_late_field_annotations(annotations);
-        }
+        declare_static(ir, c, signature_formatter, cw, index, s);
     }
 }
 
