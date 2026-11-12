@@ -45,8 +45,8 @@ impl Body<'_> {
             }
             // An object or a nullable primitive's box, through its table. `Nothing` has no value.
             Some(ValType::Ref { .. }) | None => {
-                if self.may_reach_any_default(ty, AnyMember::HashCode)? {
-                    return Err("`kotlin.Any.hashCode`'s identity hash".to_string());
+                if self.may_reach_unrealized(ty, AnyMember::HashCode)? {
+                    return Err("a `hashCode` reaching a runtime object with no hash".to_string());
                 }
                 self.value(value, any())?;
                 self.code.call(self.runtime.hashing.hash_code);

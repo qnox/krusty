@@ -707,6 +707,36 @@ struct ExtractedFileStubs {
     /// can say which positions are free; this carries its answer past the AST.
     continuation_ordinals: Vec<(DeclarationId, u32)>,
     local_class_name_provenance: Vec<(DeclarationId, super::LocalClassNameProvenance)>,
+    /// The classifier each `companion { … }` block member was written in. The member is hoisted
+    /// to file level, so its anchor has no owner, but its source position is among that
+    /// classifier's members.
+    lexical_owners: LexicalOwners,
+}
+
+/// Declarations whose source position is inside a classifier they are not anchored under: each
+/// `companion { … }` block member, keyed to the classifier whose block declared it.
+pub(super) type LexicalOwners = crate::fx_hash::HashMap<DeclarationId, DeclarationId>;
+
+/// [`LexicalOwners`] of one parsed file, in the identity space `identities` binds it to.
+fn companion_block_lexical_owners(
+    file: &File,
+    identities: &ParserDeclarationIdentities,
+) -> LexicalOwners {
+    let mut owners = LexicalOwners::default();
+    for &declaration in &file.decls {
+        let Decl::Class(class) = file.decl(declaration) else {
+            continue;
+        };
+        let Some(&classifier) = identities.get(&declaration) else {
+            continue;
+        };
+        for member in &class.companion_block_members {
+            if let Some(&member) = identities.get(&member.declaration) {
+                owners.insert(member, classifier);
+            }
+        }
+    }
+    owners
 }
 
 #[derive(Clone, Copy)]
@@ -1615,8 +1645,10 @@ fn extract_file_stub_inventory(
             &stubs,
         );
     }
+    let lexical_owners = companion_block_lexical_owners(file, &stable_by_transient);
     ExtractedFileStubs {
         stubs,
+        lexical_owners,
         stable_by_transient,
         source_declarations: source_declarations
             .into_iter()
@@ -1654,15 +1686,15 @@ pub(crate) fn extract_file_stubs_for_stable_binding(
     source: SourceFileId,
     ids: &mut DeclarationIds,
     names: &mut LookupNames,
-) -> Vec<DeclarationStub> {
-    extract_file_stub_inventory(
+) -> (Vec<DeclarationStub>, LexicalOwners) {
+    let extracted = extract_file_stub_inventory(
         file,
         source,
         ids,
         names,
         LocalClassProvenanceOwnership::AlreadyPublished,
-    )
-    .stubs
+    );
+    (extracted.stubs, extracted.lexical_owners)
 }
 
 /// Put one file's declarations into the stable stream shared by Pass 1 and a fresh Pass-2 parse.
@@ -1672,7 +1704,13 @@ pub(crate) fn extract_file_stubs_for_stable_binding(
 /// 2 reparses one such bounded unit at a time. Within an owner, compiler-generated data-class members
 /// have no source position and follow every written sibling in stable synthesis order. Only the
 /// resulting declaration-id stream survives the parse; the ranges and temporary hierarchy do not.
-pub(super) fn order_file_stubs(stubs: &mut [DeclarationStub], ids: &DeclarationIds) {
+/// A declaration with a [`LexicalOwners`] entry is ordered among that classifier's members, where
+/// source wrote it; it is still part of the same top-level subtree.
+pub(super) fn order_file_stubs(
+    stubs: &mut [DeclarationStub],
+    ids: &DeclarationIds,
+    lexical_owners: &LexicalOwners,
+) {
     let ordering = stubs
         .iter()
         .enumerate()
@@ -1705,10 +1743,11 @@ pub(super) fn order_file_stubs(stubs: &mut [DeclarationStub], ids: &DeclarationI
             if let Some(order) = ordering.get(&declaration).copied() {
                 path.push(order);
             }
-            current = ids
-                .anchor(declaration)
-                .unwrap_or_else(|| panic!("declaration {declaration:?} has no stable anchor"))
-                .owner;
+            current = lexical_owners.get(&declaration).copied().or_else(|| {
+                ids.anchor(declaration)
+                    .unwrap_or_else(|| panic!("declaration {declaration:?} has no stable anchor"))
+                    .owner
+            });
         }
         path.reverse();
         path
@@ -2885,7 +2924,7 @@ impl HeaderInventoryBuilder {
         );
         let mut stubs = extracted.stubs;
         let stable_by_transient = extracted.stable_by_transient;
-        order_file_stubs(&mut stubs, &self.declarations);
+        order_file_stubs(&mut stubs, &self.declarations, &extracted.lexical_owners);
         self.source_declarations[source.raw() as usize] = extracted.source_declarations;
         self.expect_keywords.extend(extracted.expect_keywords);
         self.continuation_ordinals

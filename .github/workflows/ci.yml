@@ -24,6 +24,10 @@ on:
         description: Build and publish a release of this master commit after the test suite passes
         type: boolean
         default: false
+  # A daily release of master's tip, as if dispatched with `release` on. Cron is UTC: 11:00 UTC is
+  # 12:00 CET, and 13:00 during CEST. A tip that already has its release republishes nothing.
+  schedule:
+    - cron: '0 11 * * *'
 
 permissions:
   contents: read
@@ -262,9 +266,9 @@ jobs:
         with:
           path: target/cache/box-corpus
           # The checkout carries the box corpus, the mock JDK its tests compile against, the CLI
-          # corpus and the bytecode corpora. A key hit is never re-saved, so the salt changes
-          # whenever those inputs do.
-          key: box-and-cli-corpus-v2-${{ hashFiles('kotlin-versions') }}
+          # corpus, the bytecode corpora, and the test-generator sources that select each target's
+          # cases. A key hit is never re-saved, so the key changes whenever those inputs do.
+          key: box-cli-and-generator-corpus-v3-${{ hashFiles('kotlin-versions', 'scripts/box_selection.py', 'tests/box_selection_sources.txt') }}
       # A hit must already hold every corpus input: provisioning then refuses to fetch.
       - name: forbid corpus fetches after a cache hit
         if: steps.box-corpus.outputs.cache-hit == 'true'
@@ -483,46 +487,6 @@ jobs:
           run_with_deadline "$KRUSTY_E2E_TIMEOUT_SECONDS" "$E2E_BINARY" plugin_host_compiler_e2e:: --include-ignored --test-threads=1
       - *save-plugin-host-runtime
 
-  # Each artifact family has one producer. They run on separate hosted runners so the conformance
-  # matrix waits for the slowest required build instead of serializing every unrelated target graph
-  # on one runner. Consumers never compile krusty again.
-  build-conformance-bin:
-    runs-on: [self-hosted, rust-4c-8gb]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
-        with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          # Queue branches restore master's entries but never save their own: per-branch copies
-          # overflowed the repository cache and evicted the master entries every branch restores.
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-      # Self-hosted runners have no JDK on PATH (ubuntu-latest defaults to 17); the justfile runs
-      # `java -version`.
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
-        with:
-          distribution: zulu
-          java-version: '17'
-      - *just-on-path
-      - *install-just
-      - name: build conformance binary
-        run: |
-          set -euo pipefail
-          source scripts/phase-timing.sh
-          phase_log_prefix=conformance-bin
-          PHASE_TIMING_LOG="$(mktemp)"
-          trap 'phase_report || true' EXIT
-          phase_begin conformance-test-binary
-          bin=$(just conformance-bin)
-          phase_end conformance-test-binary
-          cp "$bin" conformance-bin
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: conformance-bin
-          path: conformance-bin
-          if-no-files-found: error
-
   # The KLIB implementation-coverage ratchet needs the compiler unit binary, whose build takes about
   # three times as long as the conformance binary. Its own job keeps that build off the conformance
   # rows' critical path; no row waits for it, and it checks every release's exact Native and Wasm
@@ -601,21 +565,30 @@ jobs:
         run: |
           echo "matrix=$(just matrix-json)" >> "$GITHUB_OUTPUT"
           echo "max=$(just max-version)" >> "$GITHUB_OUTPUT"
-      - name: build compiler and Gradle test binaries
+      # One job builds every prebuilt Rust binary the later jobs run: the conformance binary, the
+      # krusty CLI and the krusty-build test binary all link one krusty library. In separate jobs
+      # the conformance build compiled krusty a second time, with its test dependencies' features.
+      - name: build conformance, compiler and Gradle test binaries
         run: |
           set -euo pipefail
           source scripts/phase-timing.sh
           phase_log_prefix=tool-bins
           PHASE_TIMING_LOG="$(mktemp)"
           trap 'phase_report || true' EXIT
-          phase_begin krusty-cli
-          cargo build --profile gate -p krusty-cli
-          phase_end krusty-cli
+          phase_begin conformance-and-cli
+          bin=$(just conformance-bin-and-cli)
+          phase_end conformance-and-cli
+          cp "$bin" conformance-bin
           cp target/gate/krusty krusty
           phase_begin krusty-build-tests
           bin=$(just krusty-build-tests)
           phase_end krusty-build-tests
           cp "$bin" krusty-build-tests
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: conformance-bin
+          path: conformance-bin
+          if-no-files-found: error
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tool-bins
@@ -626,7 +599,7 @@ jobs:
 
   conformance:
     name: conformance (${{ matrix.version }}, ${{ matrix.target }})
-    needs: [build-conformance-bin, build-tool-bins]
+    needs: build-tool-bins
     strategy:
       fail-fast: false
       matrix:
@@ -723,15 +696,32 @@ jobs:
             write=1
           fi
           echo "write=$write" >> "$GITHUB_OUTPUT"
+      # kotlinc's KLIB bytes for each box case, keyed like the JVM recordings: restored from the
+      # base, completed live for a missing entry, and saved only by a master push.
+      - name: restore KLIB box reference bytes
+        if: matrix.target != 'jvm'
+        id: klib-recordings
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/klib-references
+          key: box-klib-references-${{ hashFiles('tests/box_klib_bytes/reference-format') }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}-${{ steps.base.outputs.sha }}
+          restore-keys: |
+            box-klib-references-${{ hashFiles('tests/box_klib_bytes/reference-format') }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}-
+      # A restore through `restore-keys` never reports a hit, so whether a master push saves is
+      # decided by the entries it added: one archive per exact-input fingerprint, never rewritten.
+      - name: list restored KLIB box reference bytes
+        if: matrix.target != 'jvm'
+        id: klib-recordings-restored
+        run: echo "entries=$(scripts/cache-entries.sh target/cache/klib-references)" >> "$GITHUB_OUTPUT"
       - name: restore box corpus (${{ matrix.version }})
         id: box-corpus
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/box-corpus/${{ matrix.version }}
           # The checkout carries the box corpus, the mock JDK its tests compile against, the CLI
-          # corpus and the bytecode corpora. A key hit is never re-saved, so the salt changes
-          # whenever those inputs do.
-          key: box-and-cli-corpus-v2-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+          # corpus, the bytecode corpora, and the test-generator sources that select each target's
+          # cases. A key hit is never re-saved, so the key changes whenever those inputs do.
+          key: box-cli-and-generator-corpus-v3-${{ matrix.version }}-${{ hashFiles('kotlin-versions', 'scripts/box_selection.py', 'tests/box_selection_sources.txt') }}
       # A hit must already hold every corpus input: provisioning then refuses to fetch.
       - name: forbid corpus fetches after a cache hit (${{ matrix.version }})
         if: steps.box-corpus.outputs.cache-hit == 'true'
@@ -828,6 +818,8 @@ jobs:
         # and focused deadlines unchanged; a corpus timeout still fails this row.
         env:
           KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS: "1800"
+          KRUSTY_NATIVE_BYTE_REPORT: ${{ github.workspace }}/native-byte-equality.txt
+          KRUSTY_KLIB_REFERENCE_CACHE: ${{ github.workspace }}/target/cache/klib-references
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/native-recordings
           KRUSTY_CLASS_DUMP_COMPILE_MISSING: "1"
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.native-recording-mode.outputs.write }}
@@ -875,8 +867,17 @@ jobs:
           node-version: '22'
       - name: run wasm box conformance ${{ matrix.version }}
         if: startsWith(matrix.target, 'wasm-')
+        # Each case now also compiles kotlinc's KLIB reference, so the corpus step gets the same
+        # budget the Native corpus step has.
         env:
+          KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS: "1800"
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
+          KRUSTY_WASM_JS_BYTE_REPORT: ${{ github.workspace }}/wasm-js-byte-equality.txt
+          KRUSTY_WASM_WASI_BYTE_REPORT: ${{ github.workspace }}/wasm-wasi-byte-equality.txt
+          KRUSTY_KLIB_REFERENCE_CACHE: ${{ github.workspace }}/target/cache/klib-references
+          KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/klib-references
+          KRUSTY_CLASS_DUMP_COMPILE_MISSING: "1"
+          KRUSTY_CLASS_DUMP_WRITE: ${{ github.ref == 'refs/heads/master' && steps.klib-recordings.outputs.cache-hit != 'true' && '1' || '0' }}
         run: |
           set -euo pipefail
           chmod +x conformance-bin
@@ -887,12 +888,38 @@ jobs:
         env:
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
         run: just wasm-conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
+      - name: list new KLIB box reference bytes
+        if: always() && matrix.target != 'jvm' && github.ref == 'refs/heads/master'
+        id: klib-recordings-added
+        env:
+          RESTORED: ${{ steps.klib-recordings-restored.outputs.entries }}
+        run: |
+          set -euo pipefail
+          entries=$(scripts/cache-entries.sh target/cache/klib-references)
+          echo "added=$([ "$entries" != "$RESTORED" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - name: save KLIB box reference bytes
+        if: always() && steps.klib-recordings-added.outputs.added == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/klib-references
+          key: box-klib-references-${{ hashFiles('tests/box_klib_bytes/reference-format') }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}-${{ github.sha }}
+      - name: upload KLIB byte equality
+        if: always() && matrix.target != 'jvm'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: klib-byte-equality-${{ matrix.version }}-${{ matrix.target }}
+          path: '*-byte-equality.txt'
+          if-no-files-found: error
       - name: run non-box conformance ${{ matrix.version }}
         if: matrix.target == 'jvm'
         env:
           # Required serialization/reference CLI toolchains can be cold. Keep the local
           # 120-second default; this complete CI pass includes their provisioning and compilation.
           KRUSTY_CONFORMANCE_TIMEOUT_SECONDS: "600"
+          # box_selection_reference runs the upstream test generators' selection over the whole
+          # Kotlin test-data tree as one BoxRunner call: about 1s locally, past the 10s default on a
+          # busy 8 GB runner while the step's other tests share its cores.
+          KRUSTY_BOX_TIMEOUT_MS: "60000"
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
           KRUSTY_RECORD_CLASS_DUMPS: "0"
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
@@ -1111,19 +1138,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Every release in the kotlin-versions manifest runs on the newest validated Gradle; the
-        # rows below add the older Gradle boundaries.
+        # Every release in the kotlin-versions manifest runs the full suite on the newest validated
+        # Gradle. The rows below add the older Gradle boundaries, which run the boundary suite: the
+        # builds whose Gradle API surface differs by Gradle release (task wiring, the configuration
+        # and build caches, kotlin-dsl's embedded compiler, kapt, KSP, multiplatform and the verify
+        # report). Every other test exercises the plugin and KGP, which the full lanes cover.
         kotlin: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
         gradle: [9.7.0]
         ksp: [true]
+        suite: [full]
         include:
           # KSP's Gradle plugin does not load on Gradle 7.6 (its build-script metadata is newer than
           # Gradle 7.6's embedded Kotlin compiler reads), so the KSP2 test runs on the other lanes.
-          - { kotlin: 2.4.0,  gradle: 7.6.3,  ksp: false }
-          - { kotlin: 2.4.0,  gradle: 9.5.0,  ksp: true }
-          - { kotlin: 2.4.10, gradle: 8.14.3, ksp: true }
-          - { kotlin: 2.4.20, gradle: 7.6.3,  ksp: false }
+          - { kotlin: 2.4.0,  gradle: 7.6.3,  ksp: false, suite: boundary }
+          - { kotlin: 2.4.0,  gradle: 9.5.0,  ksp: true,  suite: boundary }
+          - { kotlin: 2.4.10, gradle: 8.14.3, ksp: true,  suite: boundary }
+          - { kotlin: 2.4.20, gradle: 7.6.3,  ksp: false, suite: boundary }
     runs-on: [self-hosted, rust-4c-8gb]
+    # A lane takes under 10 minutes; one stuck on its runner (a download that never finished) ran for
+    # hours, holding the batch that waits on it.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1206,13 +1240,15 @@ jobs:
         run: |
           chmod +x krusty krusty-build-tests
           tests="kotlin_compiler_slice_compiles_through_krusty kotlin_dsl_build_src_compiles_through_krusty"
-          tests="$tests serialization_plugin_compiles_through_krusty kapt_project_compiles_through_krusty"
-          tests="$tests verify_task_reports_krusty_against_kotlinc verify_task_reports_only_the_current_invocation"
-          tests="$tests verify_task_reports_an_unsupported_kotlin_gradle_plugin verify_task_reports_projects_that_each_load_the_plugin"
-          tests="$tests verify_task_reports_kotlin_dsl_compiles_after_kotlinc_compiles_them"
-          tests="$tests verify_task_reports_a_kotlin_gradle_plugin_older_than_the_plugin_api"
-          tests="$tests multiplatform_jvm_compiles_through_krusty body_only_dependency_edit_keeps_dependent_compile_up_to_date"
-          tests="$tests oss_corpus_init_script_applies_the_packaged_plugin"
+          tests="$tests kapt_project_compiles_through_krusty multiplatform_jvm_compiles_through_krusty"
+          tests="$tests verify_task_reports_krusty_against_kotlinc verify_task_reports_kotlin_dsl_compiles_after_kotlinc_compiles_them"
+          if [ "${{ matrix.suite }}" = full ]; then
+            tests="$tests serialization_plugin_compiles_through_krusty verify_task_reports_only_the_current_invocation"
+            tests="$tests verify_task_reports_an_unsupported_kotlin_gradle_plugin verify_task_reports_projects_that_each_load_the_plugin"
+            tests="$tests verify_task_reports_a_kotlin_gradle_plugin_older_than_the_plugin_api"
+            tests="$tests body_only_dependency_edit_keeps_dependent_compile_up_to_date"
+            tests="$tests oss_corpus_init_script_applies_the_packaged_plugin"
+          fi
           if [ "${{ matrix.ksp }}" = true ]; then
             tests="$tests ksp2_generated_sources_compile_through_krusty"
           fi
@@ -1353,12 +1389,12 @@ jobs:
             "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/$kotlin/kotlin-stdlib-$kotlin.jar"
           scripts/bazel-smoke.sh "$PWD/krusty" "$RUNNER_TEMP/kotlin-stdlib.jar"
 
-  # A release is started by hand (`release` input) on a master commit and builds its own immutable
-  # artifacts there, even after master advances. All six platforms build concurrently on their
-  # hosted runners; the queue's own master runs leave them out.
+  # A release is started by hand (`release` input) or by the daily schedule on a master commit and
+  # builds its own immutable artifacts there, even after master advances. All six platforms build
+  # concurrently on their hosted runners; the queue's own master runs leave them out.
   build-release:
     needs: [ci-and-conformance]
-    if: github.ref == 'refs/heads/master' && inputs.release
+    if: github.ref == 'refs/heads/master' && (inputs.release || github.event_name == 'schedule')
     strategy:
       fail-fast: false
       matrix:

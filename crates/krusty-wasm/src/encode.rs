@@ -264,6 +264,14 @@ impl Module {
         self.ty(CompositeType::Func { params, results })
     }
 
+    /// The parameters and results of function type `ty`; `None` when `ty` is no function type.
+    pub(super) fn func_signature(&self, ty: u32) -> Option<(Vec<ValType>, Vec<ValType>)> {
+        match &self.types.get(ty as usize)?.composite {
+            CompositeType::Func { params, results } => Some((params.clone(), results.clone())),
+            _ => None,
+        }
+    }
+
     pub(super) fn exception_tag(&mut self, payload: Vec<ValType>) -> u32 {
         let ty = self.func_type(payload, Vec::new());
         let index = self.tags.len() as u32;

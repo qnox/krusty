@@ -166,6 +166,9 @@ pub struct AnnotationTargets {
     /// properties, so kotlinc places a bare Java annotation on the parameter or backing field
     /// instead, even where its default targets list `property`.
     property_site: bool,
+    /// Whether these are kotlinc's `DEFAULT_TARGET_SET`, which also holds the `backing field`
+    /// target no `AnnotationTarget` entry names. It shows only in diagnostics.
+    default_set: bool,
 }
 
 /// Where an annotation written on a property declaration with no use-site prefix belongs.
@@ -263,12 +266,14 @@ impl AnnotationTargets {
         ],
         len: 10,
         property_site: true,
+        default_set: true,
     };
 
     /// A Kotlin `@Target(…)`: its entries in declared order, each listed once.
     pub fn kotlin(declared: impl IntoIterator<Item = KotlinTarget>) -> Self {
         let mut targets = Self {
             len: 0,
+            default_set: false,
             ..Self::DEFAULT
         };
         for target in declared {
@@ -310,6 +315,19 @@ impl AnnotationTargets {
     /// The applicable targets, in kotlinc's order.
     pub fn applicable(&self) -> &[KotlinTarget] {
         &self.targets[..usize::from(self.len)]
+    }
+
+    /// The applicable targets as kotlinc's WRONG_ANNOTATION_TARGET lists them, comma-separated.
+    /// The default set lists `backing field` after `setter`.
+    pub fn diagnostic_list(&self) -> String {
+        let mut list = Vec::new();
+        for target in self.applicable() {
+            list.push(target.description());
+            if self.default_set && *target == KotlinTarget::PropertySetter {
+                list.push("backing field");
+            }
+        }
+        list.join(", ")
     }
 
     pub fn allows(self, target: KotlinTarget) -> bool {
@@ -535,6 +553,28 @@ mod tests {
             .iter()
             .map(|target| target.description())
             .collect()
+    }
+
+    /// kotlinc's default target set lists `backing field` after `setter` in diagnostics, also
+    /// for a Java annotation without `@Target`, whose list ends with `expression`. A declared
+    /// `@Target` lists only its own entries.
+    #[test]
+    fn the_default_set_lists_the_backing_field_target_in_diagnostics() {
+        assert_eq!(
+            AnnotationTargets::DEFAULT.diagnostic_list(),
+            "class, annotation class, property, field, local variable, value parameter, \
+             constructor, function, getter, setter, backing field"
+        );
+        assert_eq!(
+            AnnotationTargets::java(&[]).diagnostic_list(),
+            "class, annotation class, property, field, local variable, value parameter, \
+             constructor, function, getter, setter, backing field, expression"
+        );
+        assert_eq!(
+            AnnotationTargets::kotlin([KotlinTarget::PropertySetter, KotlinTarget::Field])
+                .diagnostic_list(),
+            "setter, field"
+        );
     }
 
     /// kotlinc lists a Kotlin `@Target` in declared order, once per target.

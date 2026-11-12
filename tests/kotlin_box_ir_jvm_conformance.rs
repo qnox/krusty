@@ -1018,27 +1018,10 @@ impl BoxRunner {
     }
 }
 
-/// Milliseconds `BoxRunner` waits for one `box()` call.
-///
-/// Unset or blank keeps the hosted-runner deadline of 2s. An explicit positive integer selects
-/// up to `u32::MAX` milliseconds, keeping the Java long literal and the client's additional
-/// duration representable. The value is compiled into that run's runner.
+/// Milliseconds `BoxRunner` waits for one `box()` call: unset or blank keeps the hosted-runner
+/// deadline of 2s. The value is compiled into that run's runner.
 fn box_case_timeout_ms_from(raw: Option<&str>) -> u64 {
-    const DEFAULT_MS: u64 = 2_000;
-    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
-        return DEFAULT_MS;
-    };
-    let Ok(value) = raw.parse::<u32>() else {
-        panic!(
-            "KRUSTY_BOX_CASE_TIMEOUT_MS must be an integer from 1 through 4294967295, got {raw}"
-        );
-    };
-    if value == 0 {
-        panic!(
-            "KRUSTY_BOX_CASE_TIMEOUT_MS must be an integer from 1 through 4294967295, got {raw}"
-        );
-    }
-    u64::from(value)
+    common::timeout_ms_from("KRUSTY_BOX_CASE_TIMEOUT_MS", raw, 2_000)
 }
 
 fn box_case_timeout_ms() -> u64 {
@@ -1708,8 +1691,8 @@ fn kotlin_codegen_box_conformance() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(usize::MAX);
 
-    let mut files =
-        super::box_inventory::discover(&box_dir).unwrap_or_else(|error| panic!("{error}"));
+    let mut files = super::box_inventory::discover(&box_dir, krusty::conformance::TestTarget::Jvm)
+        .unwrap_or_else(|error| panic!("{error}"));
     let corpus: BTreeSet<String> = files
         .iter()
         .map(|file| box_ratchet::corpus_key(&box_dir, file))

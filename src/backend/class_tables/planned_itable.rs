@@ -18,7 +18,7 @@ use super::class_vtable::same_representation;
 use super::members::function_key;
 use super::module_interfaces::{MemberDeclaration, ModuleInterfaces};
 use super::module_slots::PlanKey;
-use super::{ClassTable, Representation, Slot, SlotKey, Unsupported};
+use super::{ClassTable, LaidOutSuperclass, Representation, Slot, SlotKey, Unsupported};
 
 /// What one interface table entry holds.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -28,6 +28,9 @@ pub enum InterfaceEntry {
     /// The body an interface another file of the module declares, which that file defines under
     /// the member's module symbol.
     ModuleFunction(CallableId),
+    /// What the interface table of the class's superclass laid out by another file holds at this
+    /// number, where that is no class slot's member: an interface default, or a bridge.
+    Inherited,
 }
 
 /// The interface tables of every class of a file, indexed by `ClassId`.
@@ -39,6 +42,10 @@ pub struct InterfaceTables {
     /// The module interfaces each class implements (an interface: extends, itself first), in a
     /// deterministic order.
     pub implemented: Vec<Vec<TypeName>>,
+    /// Each number a class's table fills with a member of the class rather than an interface's
+    /// default, with the class slot the member stands at, or `None` for a bridge: what a class of
+    /// another file extending it reads ([`super::LaidOutSuperclass::interface_entries`]).
+    pub members: Vec<HashMap<u32, Option<u32>>>,
 }
 
 /// How a class implements one numbered spelling.
@@ -51,19 +58,24 @@ enum Implementation {
 }
 
 /// Fill the interface table of every class of `ir`, whose class tables `tables` already holds.
+/// `laid_out` holds every superclass another file laid out that a class of `ir` extends.
 pub(super) fn interface_tables(
     representation: &dyn Representation,
     ir: &IrFile,
     numbers: &ModuleInterfaces,
     order: &[ClassId],
     tables: &[ClassTable],
+    laid_out: &HashMap<TypeName, LaidOutSuperclass>,
 ) -> Result<InterfaceTables, Unsupported> {
     let mut implemented: Vec<Vec<TypeName>> = vec![Vec::new(); ir.classes.len()];
     for &id in order {
         let class = &ir.classes[id as usize];
         let mut set = match tables[id as usize].superclass {
             Some(parent) => implemented[parent as usize].clone(),
-            None => Vec::new(),
+            None => laid_out
+                .get(&class.superclass)
+                .map(|superclass| superclass.interfaces.clone())
+                .unwrap_or_default(),
         };
         let direct = class
             .is_interface
@@ -106,19 +118,22 @@ pub(super) fn interface_tables(
         implemented[id as usize] = set;
     }
     let mut filled = vec![Vec::new(); ir.classes.len()];
+    let mut members = vec![HashMap::default(); ir.classes.len()];
     for &id in order {
-        filled[id as usize] = Filler {
+        (filled[id as usize], members[id as usize]) = Filler {
             representation,
             ir,
             numbers,
             tables,
             implemented: &implemented,
+            laid_out,
         }
         .table(id)?;
     }
     Ok(InterfaceTables {
         tables: filled,
         implemented,
+        members,
     })
 }
 
@@ -128,23 +143,31 @@ struct Filler<'a> {
     numbers: &'a ModuleInterfaces,
     tables: &'a [ClassTable],
     implemented: &'a [Vec<TypeName>],
+    laid_out: &'a HashMap<TypeName, LaidOutSuperclass>,
 }
 
+/// A class's interface table, and the numbers in it that members of the class fill
+/// ([`InterfaceTables::members`]).
+type FilledTable = (Vec<InterfaceEntry>, HashMap<u32, Option<u32>>);
+
 impl Filler<'_> {
-    fn table(&self, id: ClassId) -> Result<Vec<InterfaceEntry>, Unsupported> {
+    fn table(&self, id: ClassId) -> Result<FilledTable, Unsupported> {
         let class = &self.ir.classes[id as usize];
         let implemented = &self.implemented[id as usize];
         let numbered = self
             .numbers
             .numbers_of(&implemented.iter().copied().collect::<HashSet<_>>());
         let Some(&last) = numbered.last() else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), HashMap::default()));
         };
-        let implementations = if class.is_interface {
-            HashMap::default()
+        let (implementations, elsewhere) = if class.is_interface {
+            (HashMap::default(), HashSet::default())
         } else {
             self.implementations(id)?
         };
+        let laid_out = self.tables[id as usize]
+            .laid_out_superclass
+            .map(|name| &self.laid_out[&name]);
         // An object of this class can be made, so every number it implements has to reach a body.
         // A class whose every enum entry has a body is not instantiable as itself: each entry is a
         // subclass with a table of its own.
@@ -157,19 +180,39 @@ impl Filler<'_> {
         let instantiable = !class.is_interface && !class.is_abstract && !entries_carry_it;
         let vtable = &self.tables[id as usize].vtable;
         let mut table = vec![InterfaceEntry::Slot(Slot::Abstract); last as usize + 1];
+        let mut members = HashMap::default();
         for number in numbered {
             let member = self.numbers.member(number);
-            let spellings = std::iter::once(&member.key).chain(&member.aliases);
+            let mut spellings = std::iter::once(&member.key).chain(&member.aliases);
             let own = spellings
                 .clone()
                 .find_map(|key| implementations.get(key))
                 .cloned();
-            let entry = match own {
-                Some(Implementation::Slot(slot)) => {
+            // What the superclass another file laid out put at this number: the member at one of
+            // its slots, which this class's table holds at the same number, or a body no slot holds.
+            let inherited =
+                laid_out.and_then(|superclass| superclass.interface_entries.get(&number).copied());
+            let entry = match (own, inherited) {
+                (Some(Implementation::Slot(slot)), _) | (None, Some(Some(slot))) => {
+                    members.insert(number, Some(slot));
                     InterfaceEntry::Slot(vtable[slot as usize].clone())
                 }
-                Some(Implementation::Bridged(bridge)) => InterfaceEntry::Slot(bridge),
-                None => self.supplied(id, number, instantiable, class.is_interface)?,
+                (Some(Implementation::Bridged(bridge)), _) => {
+                    members.insert(number, None);
+                    InterfaceEntry::Slot(bridge)
+                }
+                (None, Some(None)) => {
+                    members.insert(number, None);
+                    InterfaceEntry::Inherited
+                }
+                (None, None) if spellings.any(|key| elsewhere.contains(key)) => {
+                    return Err(format!(
+                        "an interface member implemented by a member of a superclass of another \
+                         file (number {number} in `{}`)",
+                        class.fq_name()
+                    ))
+                }
+                (None, None) => self.supplied(id, number, instantiable, class.is_interface)?,
             };
             if instantiable && entry == InterfaceEntry::Slot(Slot::Abstract) {
                 return Err(format!(
@@ -179,7 +222,7 @@ impl Filler<'_> {
             }
             table[number as usize] = entry;
         }
-        Ok(table)
+        Ok((table, members))
     }
 
     /// The body the most derived interface of `id`'s hierarchy declaring `number` supplies, or the
@@ -326,13 +369,15 @@ impl Filler<'_> {
 
     /// How class `id` implements each numbered spelling: through its own override edges and
     /// those of its superclasses in this file, nearest last so an override replaces what a base
-    /// recorded.
+    /// recorded. Beside them, the spellings an edge implements with a member of the superclass
+    /// another file laid out, which has no slot this file can name.
     fn implementations(
         &self,
         id: ClassId,
-    ) -> Result<HashMap<PlanKey, Implementation>, Unsupported> {
+    ) -> Result<(HashMap<PlanKey, Implementation>, HashSet<PlanKey>), Unsupported> {
         let ir = self.ir;
         let table = &self.tables[id as usize];
+        let mut elsewhere = HashSet::default();
         let mut chain = vec![id];
         while let Some(parent) = self.tables[*chain.last().expect("non-empty") as usize].superclass
         {
@@ -384,6 +429,10 @@ impl Filler<'_> {
                             let key = function_key(ir, owner, implementation);
                             table.slots.get(&key).map(|&slot| (implementation, slot))
                         });
+                    if implementation_owner.is_none() && table.laid_out_superclass.is_some() {
+                        elsewhere.insert(key);
+                        continue;
+                    }
                     let Some((implementation, slot)) = slot else {
                         return Err(format!(
                             "an interface member implemented by a declaration with no slot in \
@@ -493,6 +542,6 @@ impl Filler<'_> {
                 }
             }
         }
-        Ok(found)
+        Ok((found, elsewhere))
     }
 }

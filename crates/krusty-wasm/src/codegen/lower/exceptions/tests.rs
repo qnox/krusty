@@ -20,7 +20,7 @@ fn declaration() -> BackendCallableFact {
         compiler_intrinsic: None,
         semantic_role: None,
         overridden_declarations: Box::new([]),
-        primitive_implementations: Box::new([]),
+        builtin_implementations: Box::new([]),
         member_realization: MemberRealization::Intrinsic(CompilerIntrinsic::ThrowableConstructor {
             kind: RuntimeExceptionKind::IllegalState,
             message: true,
