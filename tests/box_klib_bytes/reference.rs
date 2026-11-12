@@ -649,7 +649,10 @@ mod tests {
         let reference = reference_units(source, &actual, TestTarget::WasmJs).unwrap();
         assert_eq!(
             reference[0].files,
-            [("real.mjs".into(), "fun box() = \"OK\"\n".into())]
+            [(
+                "real.mjs".into(),
+                "// FILE: real.mjs.kt\nfun box() = \"OK\"\n".into()
+            )]
         );
         assert_eq!(actual[0].files.len(), 2, "execution inventory is retained");
         let source = "// MODULE: common\n// FILE: real.mjs.kt\nexpect fun answer(): String\n// MODULE: main()()(common)\n// FILE: Main.kt\nactual fun answer() = <!DEBUG_INFO_EXPRESSION_TYPE(\"String\")!>\"OK\"<!>\nfun box() = answer()\n";
@@ -659,10 +662,14 @@ mod tests {
         assert_eq!(
             reference[0].files,
             [
-                ("real.mjs".into(), "expect fun answer(): String\n".into()),
+                (
+                    "real.mjs".into(),
+                    "\n// FILE: real.mjs.kt\nexpect fun answer(): String\n".into()
+                ),
                 (
                     "Main".into(),
-                    "actual fun answer() = \"OK\"\nfun box() = answer()\n".into()
+                    "\n\n\n\n// FILE: Main.kt\nactual fun answer() = \"OK\"\nfun box() = answer()\n"
+                        .into()
                 ),
             ]
         );
