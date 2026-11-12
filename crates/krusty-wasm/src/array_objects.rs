@@ -49,7 +49,14 @@ impl ArrayObjects {
         storage: u32,
         to_string: u32,
     ) -> Self {
-        let (object, table) = declare_object(module, objects, identity, storage, to_string);
+        let (object, table) = declare_object(
+            module,
+            objects,
+            identity,
+            storage,
+            krusty::types::wk::array(),
+            to_string,
+        );
         Self {
             reference: ArrayForm {
                 object,
@@ -94,6 +101,7 @@ impl Runtime {
             &mut self.objects,
             &self.identity,
             storage,
+            class,
             to_string,
         );
         let form = ArrayForm {
@@ -130,6 +138,7 @@ fn declare_object(
     objects: &mut ObjectRoot,
     identity: &IdentityObjects,
     storage: u32,
+    class: krusty::types::TypeName,
     to_string: u32,
 ) -> (u32, u32) {
     let object = module.subtype(SubType {
@@ -144,12 +153,15 @@ fn declare_object(
     let (_, itable) = objects
         .interfaces
         .class(module, objects.itable, vec![object]);
+    let info = objects.type_infos.global(module, class);
     let mut init = Code::default();
     for function in [objects.identity_equals, identity.hash_code, to_string] {
         module.reference_function(function);
         init.ref_func(function);
     }
-    init.global_get(itable).struct_new(objects.any_table);
+    init.global_get(itable);
+    objects.push_type_info(&mut init, Some(info));
+    init.struct_new(objects.any_table);
     let table = module.constant_global(ValType::reference(objects.any_table), init);
     (object, table)
 }

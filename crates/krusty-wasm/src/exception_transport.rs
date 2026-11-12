@@ -130,6 +130,12 @@ impl ExceptionTransport {
         code.ref_cast(false, HeapType::Concrete(self.structure))
             .struct_get(self.structure, MESSAGE_FIELD);
     }
+
+    /// Replace the throwable on the stack with its `cause`.
+    pub(super) fn cause(&self, code: &mut Code) {
+        code.ref_cast(false, HeapType::Concrete(self.structure))
+            .struct_get(self.structure, CAUSE_FIELD);
+    }
 }
 
 /// The exception struct fields holding the message and the cause.

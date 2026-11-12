@@ -171,6 +171,14 @@ impl ModuleClasses {
         self.classes.iter().map(|(name, class)| (*name, class))
     }
 
+    /// The named classes of the module whose declared superclass is `superclass`.
+    pub fn subclasses_of(&self, superclass: TypeName) -> impl Iterator<Item = TypeName> + '_ {
+        self.classes
+            .iter()
+            .filter(move |(_, class)| class.superclass == Some(superclass))
+            .map(|(name, _)| *name)
+    }
+
     /// The named interfaces, in declaration order.
     pub(crate) fn interfaces(&self) -> impl Iterator<Item = (TypeName, &ModuleInterface)> {
         self.interfaces

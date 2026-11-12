@@ -10,6 +10,7 @@ mod call_arg_mapping_failure;
 mod call_realization;
 mod call_sig;
 mod callable_scope_rung;
+mod class_name_property;
 mod classifier_callables;
 mod classifier_declaration;
 mod classifier_kind;
@@ -108,8 +109,10 @@ use crate::types::InlineParameterModifier;
 pub use crate::types::Visibility;
 use crate::types::{SemanticCallRole, SemanticCallableOwner, Ty, TyKind, TypeName, TypeNameList};
 pub(crate) use array_factories::kotlin_array_factory_kind;
+pub(crate) use class_name_property::realize_class_name_property;
 pub use compiler_intrinsic::{
-    CompilerIntrinsic, IndicesReceiver, ListStorageConstruction, ResultFailureIntrinsic,
+    ClassNameKind, CompilerIntrinsic, IndicesReceiver, ListStorageConstruction,
+    ResultFailureIntrinsic,
 };
 pub(crate) use core_builtins::add_core_builtin_declarations;
 pub use generic_signature::{GenericReturnPolicy, GenericSig};
@@ -561,6 +564,12 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// means this provider takes no part in source-set diagnostics, and a check that needs the
     /// name reports an internal error rather than inventing one.
     fn diagnostic_target_name(&self) -> Option<&str> {
+        None
+    }
+
+    /// The error this platform reports for a value of type `Array<Nothing?>`, which it cannot
+    /// represent. `None` where such an array is an ordinary value.
+    fn array_of_nullable_nothing_error(&self) -> Option<&'static str> {
         None
     }
 

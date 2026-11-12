@@ -9,6 +9,7 @@ mod any_member_reach;
 mod callable_registry;
 mod classes;
 mod interface_members;
+mod laid_out_classes;
 mod lower;
 mod property_registry;
 
@@ -88,6 +89,7 @@ struct Started {
     runtime: Runtime,
     callables: callable_registry::CallableRegistry,
     properties: property_registry::PropertyRegistry,
+    classes: laid_out_classes::LaidOutClasses,
 }
 
 impl Started {
@@ -104,6 +106,7 @@ impl Started {
             runtime,
             callables: Default::default(),
             properties: Default::default(),
+            classes: Default::default(),
         }
     }
 }
@@ -201,6 +204,7 @@ impl Backend for WasmBackend {
             // cross-file reservations from the current source module.
             started.callables.enter_source_module(file.module_name);
             started.properties.enter_source_module(file.module_name);
+            started.classes.enter_source_module(file.module_name);
         }
         if state
             .slot_plan
@@ -227,6 +231,7 @@ impl Backend for WasmBackend {
                 runtime: &mut started.runtime,
                 callables: &mut started.callables,
                 properties: &mut started.properties,
+                classes: &mut started.classes,
             },
         ) {
             Ok(lowered) => lowered,
@@ -342,6 +347,7 @@ const COUNTED_LOOPS: krusty::backend::counted_loops::CountedLoopPolicy =
 #[cfg(test)]
 mod tests {
     mod companion_declarations;
+    mod laid_out_superclasses;
     mod reference_array_size;
 
     use super::{WasmBackend, WasmTarget};

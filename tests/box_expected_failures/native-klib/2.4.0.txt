@@ -151,7 +151,6 @@ bridges/test22.kt
 bridges/test23.kt
 bridges/test24.kt
 bridges/test25.kt
-bridges/varargBridge1.kt
 builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
 callableReference/adaptedReferences/boundReferences.kt
 callableReference/adaptedReferences/inlineDefault.kt
@@ -246,7 +245,6 @@ collectionLiterals/stdlibSequence.kt
 collectionLiterals/unsignedArrays.kt
 collections/clashWithInternalMapMethod.kt
 collections/inheritFromAbstractMutableListInt.kt
-companion/protectedConstValFromSuperCompanion.kt
 companionBlocksAndExtensions/callableReferences.kt
 companionBlocksAndExtensions/companionBlock.kt
 companionBlocksAndExtensions/lateinit.kt
@@ -877,7 +875,6 @@ delegatedProperty/delegatedByExtensionProperty.kt
 delegatedProperty/delegatedOverride.kt
 delegatedProperty/functionRefDelefate.kt
 delegatedProperty/genericDelegateUncheckedCast1.kt
-delegatedProperty/genericSetValueViaSyntheticAccessor.kt
 delegatedProperty/kt37204.kt
 delegatedProperty/kt45431.kt
 delegatedProperty/kt6722.kt
@@ -961,12 +958,6 @@ evaluate/intrinsicConst/constTrim.kt
 evaluate/intrinsicConst/equals_after.kt
 evaluate/intrinsicConst/kCallableName.kt
 evaluate/intrinsicConst/lowerAndUpperCase.kt
-evaluate/serialization/annotationOnFakeOverride.kt
-evaluate/serialization/annotationOnFakeOverrideProperty.kt
-evaluate/serialization/annotationOnParameterOnFakeOverride.kt
-evaluate/serialization/annotationOnSecondParameterOnFakeOverride.kt
-evaluate/serialization/annotationOnTypeOnFakeOverride.kt
-evaluate/serialization/annotationWithDefaultValueOnFakeOverride.kt
 evaluate/serialization/typeAnnotation.kt
 evaluate/thisPlusString.kt
 exceptions/catch1.kt
@@ -1383,7 +1374,6 @@ innerClass/noPrimaryConstructor.kt
 innerClass/secondaryConstructor.kt
 innerNested/innerWithDefaultArgumentGenericExtensionProperty.kt
 innerNested/passingOuterRef.kt
-innerNested/protectedNestedClass.kt
 interfaceCallsNCasts/conservativeItable.kt
 interfaceCallsNCasts/diamond.kt
 interfaceCallsNCasts/finalMethod.kt
@@ -1471,10 +1461,8 @@ multiplatform/k2/basic/localIntersectionOverrideWithDefaultParameterInCommonModu
 multiplatform/k2/basic/localSubstitutionOverrideInCommonModule.kt
 multiplatform/k2/basic/nameBasedDestructuringFullForm.kt
 multiplatform/k2/basic/nameBasedDestructuringShortForm.kt
-multiplatform/k2/basic/nonExternalEquals.kt
 multiplatform/k2/basic/overridesOfExpectMembers.kt
 multiplatform/k2/basic/substitutionOverrideInCommonModule.kt
-multiplatform/k2/basic/transitiveSuperclassActualization.kt
 multiplatform/k2/basic/widerVisibilityInActualClassifier.kt
 multiplatform/k2/defaultArguments/constructor.kt
 multiplatform/k2/defaultArguments/defaultArgumentInDelegatedFunction.kt
@@ -1496,7 +1484,6 @@ multiplatform/k2/extensionPropertiesOverloads.kt
 multiplatform/k2/hmpp/abstractExpectedActual2-2.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritance.kt
-multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflict.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflictDefaults.kt
 multiplatform/k2/hmpp/expectActualGeneric2-2.kt
 multiplatform/k2/hmpp/expectActualGeneric3-3.kt
@@ -1526,11 +1513,8 @@ multiplatform/k2/hmpp/overloadAliasTwoLibs.kt
 multiplatform/k2/hmpp/propertyAlias3-3.kt
 multiplatform/k2/hmpp/propertyAliasTwoLibs.kt
 multiplatform/k2/hmpp/typealiasNameClash.kt
-multiplatform/k2/internalOverride.kt
 multiplatform/k2/internalOverride2.kt
-multiplatform/k2/internalSetterInCommon.kt
 multiplatform/k2/kt66970.kt
-multiplatform/k2/mergedOverrides.kt
 nameBasedDestructuring/fullFormExtraPropType.kt
 nameBasedDestructuring/fullFormFromSmartCast.kt
 nameBasedDestructuring/fullFormLoopsAndLambdas.kt
@@ -1550,18 +1534,10 @@ object/method_call.kt
 objectExpression/expr1.kt
 objectExpression/expr3.kt
 objectIntrinsics/objects.kt
-objects/companionObjectAccess/multipleCompanionsWithAccessors/accessFromInlineLambda.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/anonymousObjectInPropertyInitializer.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromAnonymousObjectInNestedClass.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlock.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlockOfNestedClass.kt
-objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInlineLambdaInNestedClass.kt
-objects/companionObjectAccess/multipleCompanionsWithAccessors/inheritedProtectedCompanionAndOwnPrivateCompanion.kt
-objects/companionObjectAccess/multipleCompanionsWithAccessors/inheritedProtectedCompanionsReferencedByName.kt
-objects/companionObjectAccess/multipleCompanionsWithAccessors/lambdaInPropertyInitializer.kt
-objects/companionObjectAccess/multipleCompanionsWithAccessors/twoInheritedProtectedCompanions.kt
-objects/companionObjectAccess/multipleCompanionsWithAccessors/withCompanionObjectBase.kt
-objects/companionObjectAccess/multipleCompanionsWithAccessors/withMultipleNestedCompanionObjectBases.kt
 objects/interfaceCompanionObjectReference.kt
 objects/kt52540.kt
 operatorConventions/compareTo/comparable.kt
@@ -2331,7 +2307,6 @@ reflection/types/typeArguments.kt
 reflection/types/useSiteVariance.kt
 regressions/floatingRangeContainsMixedWidths.kt
 regressions/generic.kt
-regressions/kt10143.kt
 regressions/kt15196.kt
 regressions/kt1779.kt
 regressions/kt2017.kt
@@ -2367,7 +2342,6 @@ reified/isClass.kt
 reified/isNumber.kt
 reified/isString.kt
 reified/isTNullable.kt
-reified/kt39256_privateInlineWithAnonymousObject.kt
 reified/lambda.kt
 reified/lambdaNameClash.kt
 reified/method.kt
@@ -2390,7 +2364,6 @@ sam/kt59858.kt
 sam/kt64116.kt
 sealed/kt54028.kt
 sealed/kt54028_cursed.kt
-sealed/multipleFiles_enabled.kt
 secondaryConstructors/enums.kt
 secondaryConstructors/innerClassesInheritance.kt
 secondaryConstructors/localClasses.kt
@@ -2452,9 +2425,7 @@ suspendConversion/suspendConversionOfAliasedType.kt
 suspendConversion/suspendConversionOnVarargElements.kt
 suspendConversion/suspendConversionWithFunInterfaces.kt
 syntheticAccessors/accessorForAbstractProtected.kt
-syntheticAccessors/accessorForGenericMethod.kt
 syntheticAccessors/accessorForGenericMethodWithDefaults.kt
-syntheticAccessors/accessorForProtected.kt
 syntheticAccessors/accessorForProtectedInvokeVirtual.kt
 syntheticAccessors/accessorForProtectedPropertyReference.kt
 syntheticAccessors/functionsWithDefaultValues/memberFunction.kt
@@ -2462,9 +2433,6 @@ syntheticAccessors/functionsWithDefaultValues/memberFunctionTransitiveCase.kt
 syntheticAccessors/kt10047.kt
 syntheticAccessors/kt9958.kt
 syntheticAccessors/kt9958Interface.kt
-syntheticAccessors/protectedMemberReferenceAccessor/kt46597_crossinline_method.kt
-syntheticAccessors/protectedMemberReferenceAccessor/kt46597_crossinline_property.kt
-syntheticAccessors/protectedMemberReferenceAccessor/kt46597_method.kt
 syntheticAccessors/protectedMemberReferenceAccessor/kt46597_property.kt
 toArray/kt3177-toTypedArray.kt
 toArray/returnToTypedArray.kt
@@ -2473,7 +2441,6 @@ topLevelInitializtion/failInInitializer1.kt
 topLevelInitializtion/failInInitializer2.kt
 topLevelInitializtion/failInInitializer3.kt
 topLevelInitializtion/failInInitializer4.kt
-traits/doubleGenericDiamond.kt
 traits/kt5393_property.kt
 traits/multiple.kt
 try/catch3.kt
@@ -2509,7 +2476,6 @@ typeErasure/twoFunWithTypeParametersWithUpperBoundsInlineFunWithReifiedTypeParam
 typealias/abbreviationWithCapturedType.kt
 typealias/deserializedAbbreviationWithRedundantArgument.kt
 typealias/localTypeAliases.kt
-typealias/privateInKlib.kt
 typealias/typeAliasAsBareType.kt
 unsignedTypes/forInUnsignedProgression.kt
 unsignedTypes/forInUnsignedRangeWithCoercion.kt

@@ -413,3 +413,28 @@ fn nullable_nothing_is_reified_only_with_its_feature() {
         &[],
     );
 }
+
+/// `arrayOfNulls<T>` returns `Array<T?>`, so its written argument, not the result's element, is
+/// the type argument it reifies. The JVM also rejects the resulting `Array<Nothing?>` value.
+#[test]
+fn array_of_nulls_reifies_its_written_type_argument() {
+    assert_matches_kotlinc(
+        "fun f() = arrayOfNulls<Nothing>(1)\n",
+        &[],
+        &[
+            "1:11: 'Array<Nothing?>' is not supported on the JVM.",
+            "1:24: cannot use 'Nothing' as reified type parameter.",
+        ],
+        &[],
+    );
+}
+
+#[test]
+fn an_array_of_nullable_nothing_value_is_not_supported_on_the_jvm() {
+    assert_matches_kotlinc(
+        "fun f() = arrayOfNulls<Nothing?>(1)\n",
+        &[],
+        &["1:11: 'Array<Nothing?>' is not supported on the JVM."],
+        &[],
+    );
+}

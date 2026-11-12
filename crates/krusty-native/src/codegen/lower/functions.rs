@@ -655,7 +655,7 @@ impl<'a> FileLowering<'a> {
         // `kotlin.Any` member it overrides — so a SAM object answers `result()` or `toString()`
         // the way an ordinary implementor would, and only then fill in the member the lambda is.
         let layout = self.model.layout(interface).clone();
-        let mut vtable = self.table_functions(&layout.vtable)?;
+        let mut vtable = self.table_functions(&layout.vtable, None)?;
         let itable_template = layout.itable;
         let sam_number = match entry {
             model::Dispatch::Class(slot) => {
@@ -694,7 +694,7 @@ impl<'a> FileLowering<'a> {
                 "a functional interface inheriting a body of another file it cannot name".into(),
             );
         }
-        let mut itable = self.table_functions(&itable_template)?;
+        let mut itable = self.table_functions(&itable_template, None)?;
         if let Some(number) = sam_number {
             itable[number as usize] = thunk;
         }

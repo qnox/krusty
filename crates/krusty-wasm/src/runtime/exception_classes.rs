@@ -3,10 +3,11 @@
 //! `kotlin.Throwable` and the runtime exception classes this module constructs declare `toString`
 //! (`Throwable.toString`: the class's qualified name, then its message) and inherit `kotlin.Any`'s
 //! identity `equals` and `hashCode`, whose hash every exception object carries after its table
-//! (`crate::identity`).
+//! (`crate::identity`). Each table also carries its class's type information record
+//! (`crate::class_tokens`), named from the class's published declaration name.
 
 use super::*;
-use krusty::backend::class_names::member_class_names;
+use krusty::backend::class_names::{member_class_names, published_classifier};
 use krusty::backend::BackendClassifierSource;
 use krusty::types::TypeName;
 
@@ -31,7 +32,12 @@ impl Runtime {
                 module.reference_function(function);
                 init.ref_func(function);
             }
+            let info = self.objects.type_infos.global(module, class);
+            if let Some(names) = published_classifier(source, class) {
+                self.objects.type_infos.name(module, class, &names);
+            }
             init.ref_null(HeapType::Concrete(self.objects.itable))
+                .global_get(info)
                 .struct_new(self.objects.any_table);
             let table = module.constant_global(ValType::reference(self.objects.any_table), init);
             self.exceptions.publish_table(structure, table);
