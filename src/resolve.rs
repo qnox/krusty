@@ -139,6 +139,7 @@ mod control_flow_join;
 pub(crate) mod declaration_index;
 pub(crate) mod delegated_properties;
 mod provider_constructor_selection;
+mod scope_constructor_candidates;
 use constructor_arguments::{
     ConstructionExpectations, ConstructorCandidateRejection, SourceConstructorSelection,
 };
@@ -214,7 +215,9 @@ mod lexical_value_invoke;
 use lexical_value_invoke::{DeferredInvokePeers, DeferredLexicalInvoke, LexicalInvokeSite};
 mod lambda_call_shapes;
 mod property_read_selection;
-use lambda_call_shapes::UntypedLambdaCall;
+use lambda_call_shapes::{
+    ExplicitTypeArgumentBounds, ExplicitTypeArgumentProbe, UntypedLambdaCall,
+};
 use lexical_policies::LexicalPolicy;
 use library_constructor_failure::LibraryConstructorFailure;
 mod lambda_expectation;
@@ -16572,17 +16575,55 @@ impl<'a> Checker<'a> {
                     type_args: &explicit_type_args,
                     expected,
                 };
-                let top_level_family = match toplevel_partial.as_deref() {
-                    Some(partial) if has_lambda_argument && known_sig.is_none() => self
+                // An inner classifier's constructors belong to the member level of the receiver
+                // supplying its outer instance. When that receiver also declares same-named
+                // member functions, its implicit-receiver rung below selects over both families
+                // at once, and that rung's member shaping types their lambdas; selecting or
+                // shaping from the constructors alone here would hide an ambiguity.
+                let bare_constructor_classifier = bare_classifier.filter(|&internal| {
+                    implicit_constructor_outer.as_ref().is_none_or(|receiver| {
+                        !self.receiver_member_level_owns_constructors(receiver.ty, &fname, internal)
+                    })
+                });
+                // With no same-named receiver-less function, the classifier's constructors are the
+                // bare call's candidate family, and they shape its lambdas through the same
+                // operation a function family uses. Only a call with a lambda argument has a
+                // shape to take from them.
+                let receiverless_family = {
+                    let functions = self.resolver().top_level_candidates(&fname);
+                    match bare_constructor_classifier {
+                        Some(internal)
+                            if has_lambda_argument
+                                && functions.is_empty()
+                                && !self.lexical_value_declares(scope, &fname) =>
+                        {
+                            (
+                                functions,
+                                self.scope_constructor_candidates(scope, internal, call),
+                            )
+                        }
+                        _ => (functions, Vec::new()),
+                    }
+                };
+                let (receiverless_functions, scope_constructors) = receiverless_family;
+                let eager_family = |checker: &mut Self, family| match toplevel_partial.as_deref() {
+                    Some(partial) if has_lambda_argument && known_sig.is_none() => checker
                         .eager_lambda_family(
                             scope,
                             eager_lambda_analysis::EagerLambdaCall {
                                 shape: untyped_lambda_call(partial),
                                 label: call_fn_name.as_deref(),
                             },
-                            self.resolver().top_level_candidates(&fname),
+                            family,
                         ),
-                    _ => self.resolver().top_level_candidates(&fname),
+                    _ => family,
+                };
+                let top_level_family = eager_family(self, receiverless_functions);
+                let scope_constructors = eager_family(self, scope_constructors);
+                let lambda_shape_family = if scope_constructors.is_empty() {
+                    &top_level_family
+                } else {
+                    &scope_constructors
                 };
                 let toplevel_lambda_shape = match toplevel_partial
                     .as_ref()
@@ -16592,7 +16633,7 @@ impl<'a> Checker<'a> {
                     .map(|partial| {
                         self.receiverless_lambda_shape(
                             scope,
-                            &top_level_family,
+                            lambda_shape_family,
                             &fname,
                             untyped_lambda_call(partial),
                         )
@@ -16926,16 +16967,6 @@ impl<'a> Checker<'a> {
                 // The shape's own callable may be a companion's `operator fun invoke` rather than
                 // a top-level function; its inline flag decides where a lambda's `return` may go.
                 let selected_shape_inline = selected_lambda_shape.is_some_and(|shape| shape.inline);
-                // An inner classifier's constructors belong to the member level of the receiver
-                // supplying its outer instance. When that receiver also declares same-named
-                // member functions, its implicit-receiver rung below selects over both families
-                // at once, and that rung's member shaping types their lambdas; selecting or
-                // shaping from the constructors alone here would hide an ambiguity.
-                let bare_constructor_classifier = bare_classifier.filter(|&internal| {
-                    implicit_constructor_outer.as_ref().is_none_or(|receiver| {
-                        !self.receiver_member_level_owns_constructors(receiver.ty, &fname, internal)
-                    })
-                });
                 let constructor_expectations: Option<ConstructionExpectations> = if !self
                     .lexical_value_declares(scope, &fname)
                     && self.resolver().top_level_candidates(&fname).is_empty()
@@ -17031,104 +17062,6 @@ impl<'a> Checker<'a> {
                         .filter(|expected| Self::type_is_lexically_fixed(scope, *expected))
                     {
                         return self.expr_expected(scope, a, expected);
-                    }
-                    if let Some((declared, has_receiver)) = constructor_expectations
-                        .as_ref()
-                        .and_then(|plan| plan.params.get(i))
-                        .copied()
-                        .flatten()
-                    {
-                        if matches!(self.file.expr(a), Expr::Lambda { .. }) {
-                            // Substitute what the call already fixes — explicit type arguments,
-                            // the expected result, the arguments typed above — into the
-                            // parameter's own template. An unbound `ROOT` erases to its bound,
-                            // which types the lambda's parameter as `Any` and fails every member
-                            // read in the body.
-                            let (shaped, postponed_formals) = constructor_expectations
-                                .as_ref()
-                                .zip(bare_classifier)
-                                .and_then(|(plan, internal)| {
-                                    let shape = (*plan.symbolic.get(i)?)?;
-                                    if !shape.mentions_ty_param() {
-                                        return None;
-                                    }
-                                    let actuals = typed_args.borrow().clone();
-                                    let binds = self.construction_type_param_binds(
-                                        scope, call, internal, expected, plan, &actuals,
-                                    );
-                                    // Substituting NOTHING is still the right shape. A parameter
-                                    // whose result variable no other argument binds — `N<T>(build:
-                                    // (String) -> T)` — keeps that variable UNBOUND here, and an
-                                    // unbound result variable is an inference output rather than an
-                                    // expected type: the lambda's body types freely and the call
-                                    // binds `T` from it afterwards. Falling back to the declared
-                                    // parameter instead handed the lambda `(String) -> Any`, the
-                                    // variable's erased bound, which the typed-lambda path then
-                                    // imposed on the body — so `val n = N { it + "K" }` inferred
-                                    // `N<Any>` and every later use of the real type was rejected.
-                                    let postponed = plan
-                                        .type_params
-                                        .iter()
-                                        .filter(|formal| !binds.contains_key((*formal).as_str()))
-                                        .cloned()
-                                        .collect();
-                                    Some((
-                                        crate::types::ty_subst_keep_unbound(shape, &binds),
-                                        postponed,
-                                    ))
-                                })
-                                .unwrap_or_else(|| {
-                                    (
-                                        declared,
-                                        constructor_expectations
-                                            .as_ref()
-                                            .map(|plan| plan.type_params.clone())
-                                            .unwrap_or_default(),
-                                    )
-                                });
-                            let (shaped, collect_postponed) =
-                                PostponedCallConstraints::enter_for_type(
-                                    self.postponed_call_site(call, a),
-                                    &mut self.postponed_call_constraints,
-                                    &postponed_formals,
-                                    shaped,
-                                );
-                            if let TyKind::Fun(signature) = shaped.non_null().kind() {
-                                // Route through the common seam after call-site instantiation: it
-                                // distinguishes the constructor's open variable from an enclosing
-                                // declaration's fixed parameter in nested lambda results.
-                                let checked = self.check_argument_expected(
-                                    scope,
-                                    a,
-                                    Ty::from(TyKind::Fun(signature)),
-                                    has_receiver,
-                                    call_implicit_lambda_label(self.file, call)
-                                        .map(str::to_string)
-                                        .as_deref(),
-                                );
-                                let checked = if collect_postponed {
-                                    let inferred = self
-                                        .postponed_call_constraints
-                                        .pop()
-                                        .expect("postponed constructor lambda binding frame");
-                                    crate::trace_compiler!(
-                                        "lambda_apply",
-                                        "constructor={fname} postponed argument={i} lower={:?} upper={:?}",
-                                        inferred.lower,
-                                        inferred.upper,
-                                    );
-                                    self.merge_postponed_function_argument(
-                                        a,
-                                        checked,
-                                        &mut postponed_constraints,
-                                        inferred,
-                                    )
-                                } else {
-                                    checked
-                                };
-                                return checked;
-                            }
-                        }
                     }
                     if let Some((declared, _)) = constructor_expectations
                         .as_ref()
@@ -18006,6 +17939,26 @@ impl<'a> Checker<'a> {
                         return self.lambda_probe_ty(scope, a).unwrap_or(Ty::Error);
                     }
                     if let Expr::Lambda { params, body } = self.file.expr(a).clone() {
+                        // Several overloads and no applicable shape: the lambda has no expected
+                        // function type. kotlinc leaves its parameters uninferred instead of
+                        // checking them as `Any`.
+                        let competing = selected_lambda_shape.is_none()
+                            && this_member_ext_lambda_plan.is_none()
+                            && top_level_family.len() > 1;
+                        if competing {
+                            self.report_unshaped_lambda_diagnostics(scope, &[a]);
+                            self.omit_unshaped_any_receiver_type += 1;
+                            let checked = self.expr_inner_lambda(
+                                scope,
+                                a,
+                                None,
+                                params,
+                                body,
+                                call_fn_name.as_deref(),
+                            );
+                            self.omit_unshaped_any_receiver_type -= 1;
+                            return checked;
+                        }
                         return self.expr_inner_lambda(
                             scope,
                             a,
@@ -49329,7 +49282,10 @@ impl<'a> Checker<'a> {
                     None,
                     (args, partial),
                     (argument_parameters, &whole_array),
-                    type_args,
+                    ExplicitTypeArgumentProbe {
+                        arguments: type_args,
+                        bounds: ExplicitTypeArgumentBounds::Enforced,
+                    },
                 )
             })
             .cloned()
