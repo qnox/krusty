@@ -801,30 +801,17 @@ impl<'a> FileLowering<'a> {
         )
     }
 
-    /// The names Kotlin reflection publishes for one declared classifier.
-    ///
-    /// Common IR records declaration kind and exact nested identities before this backend assigns
-    /// physical local names. Use those facts directly: splitting `kotlin_name` would confuse a
-    /// source segment containing `$` or `.` with a nesting/package boundary.
+    /// The names Kotlin reflection publishes for one declared classifier, from the declaration
+    /// facts common IR recorded (`krusty::backend::class_names`).
     fn reflection_names(&self, class: ClassId) -> (Option<String>, Option<String>, u32) {
-        let declaration = &self.ir.classes[class as usize];
-        if declaration.is_anonymous_object || !declaration.is_source_declared {
-            return (None, None, CLASS_NAMES_ANONYMOUS);
-        }
-        if declaration.is_local_class {
-            let simple = self
-                .ir
-                .local_class_name_provenance
-                .get(&class)
-                .and_then(|provenance| provenance.segments.last())
-                .cloned()
-                .unwrap_or_else(|| declaration.fq_name.nested_segment_ref().to_string());
-            return (None, Some(simple), CLASS_NAMES_LOCAL);
-        }
-
-        let krusty::backend::class_names::ClassNames { qualified, simple } =
-            krusty::backend::class_names::member_class_names(declaration.fq_name);
-        (Some(qualified), Some(simple), CLASS_NAMES_MEMBER)
+        use krusty::backend::class_names::{declared_class, ReflectionNameKind};
+        let names = declared_class(self.ir, class);
+        let kind = match names.kind() {
+            ReflectionNameKind::Member => CLASS_NAMES_MEMBER,
+            ReflectionNameKind::Local => CLASS_NAMES_LOCAL,
+            ReflectionNameKind::Anonymous => CLASS_NAMES_ANONYMOUS,
+        };
+        (names.qualified, names.simple, kind)
     }
 
     /// The slot a class's own `name` of this ARITY takes, with the parameter types it declares and

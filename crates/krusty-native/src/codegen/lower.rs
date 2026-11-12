@@ -2196,7 +2196,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             IrExpr::LocalPropertyReference(_) => self.local_property_reference(id),
             IrExpr::KClassLiteral {
                 classifier, value, ..
-            } => self.class_literal(classifier, value),
+            } => self.class_literal(id, classifier, value),
             IrExpr::Checked(ref checked_op)
                 if let IrCheckedOperation::RangeConstruction {
                     operation,

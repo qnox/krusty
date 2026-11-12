@@ -2390,7 +2390,6 @@ reified/isClass.kt
 reified/isNumber.kt
 reified/isString.kt
 reified/isTNullable.kt
-reified/kt39256_privateInlineWithAnonymousObject.kt
 reified/lambda.kt
 reified/lambdaNameClash.kt
 reified/method.kt

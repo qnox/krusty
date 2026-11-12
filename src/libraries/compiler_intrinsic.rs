@@ -10,6 +10,15 @@ pub enum ResultFailureIntrinsic {
     CheckOfClass,
 }
 
+/// Which name of a class token an authenticated `kotlin.reflect.KClass` getter reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClassNameKind {
+    /// `simpleName`.
+    Simple,
+    /// `qualifiedName`.
+    Qualified,
+}
+
 /// Storage supplied by a target for an authenticated stdlib collection factory. The selected
 /// declaration distinguishes one array element from a packed array of elements before substitution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +45,9 @@ pub enum CompilerIntrinsic {
     ThrowableMessage,
     /// The authenticated `Throwable.cause: Throwable?` getter, not a same-named user property.
     ThrowableCause,
+    /// The authenticated platform-stdlib `KClass.simpleName` or `qualifiedName` getter. A
+    /// target that builds its own class tokens answers it from the token's reflection names.
+    ClassName(ClassNameKind),
     /// Reinterpret one scalar's bits as the equal-width floating or integral scalar selected by
     /// the authenticated declaration. Checked FIR/IR records both semantic endpoint types.
     ReinterpretBits,

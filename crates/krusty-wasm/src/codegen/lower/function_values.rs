@@ -137,9 +137,10 @@ impl Body<'_> {
             init.ref_func(function);
         }
         self.module.reference_function(invoke);
-        init.global_get(itable)
-            .ref_func(invoke)
-            .struct_new(shape.table);
+        init.global_get(itable);
+        // A function value is no class a literal names: reading its class traps.
+        self.runtime.objects.push_type_info(&mut init, None);
+        init.ref_func(invoke).struct_new(shape.table);
         let table = self
             .module
             .constant_global(ValType::reference(shape.table), init);

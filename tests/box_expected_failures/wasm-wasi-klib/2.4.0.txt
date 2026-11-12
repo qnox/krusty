@@ -459,11 +459,7 @@ classDelegation/multipleModules.kt
 classDelegation/withBridge.kt
 classLiteral/bareArray.kt
 classLiteral/bound/primitives.kt
-classLiteral/bound/sideEffect.kt
-classLiteral/bound/simple.kt
-classLiteral/bound/smartCast.kt
 classLiteral/classEquality.kt
-classLiteral/primitiveClassEquality.kt
 classes/comanionObjectFieldVsClassField.kt
 classes/delegationGenericArg.kt
 classes/delegationGenericArgUpperBound.kt
@@ -1535,7 +1531,6 @@ extensionProperties/extensionPropertyDifferentReceiver.kt
 extensionProperties/extensionPropertyWithAnonymoesExtensionWithALabel.kt
 extensionProperties/extensionPropertyWithAnonymousExtensionFunWithTypeParam.kt
 extensionProperties/extensionPropertyWithExtensionAsReceiver.kt
-extensionProperties/extensionPropertyWithInline.kt
 extensionProperties/extensionProperyWithExtensionType.kt
 extensionProperties/genericContextOverride.kt
 extensionProperties/genericValForPrimitiveType.kt
@@ -1695,14 +1690,12 @@ increment/genericClassWithGetSet.kt
 increment/mutableListElement.kt
 increment/nullable.kt
 inference/builderInferenceLeakingVariable.kt
-inference/capturedSelfInsideIntersection.kt
 inference/capturedTypesSubstitutionIntoAbbreviation.kt
 inference/integerLiteralTypeInLamdaReturnType.kt
 inference/kt35684.kt
 inference/kt36446.kt
 inference/kt38664.kt
 inference/kt39824.kt
-inference/kt49838.kt
 inference/lambdasWithExtensionFunctionType.kt
 inference/lastExpressionOfLambdaWithNothingConstraint.kt
 inference/mapCollectChainWithNullResult.kt
@@ -2452,7 +2445,6 @@ inlineSizeReduction/this.kt
 inlineSizeReduction/valAssignment.kt
 inlineSizeReduction/valDeclaration.kt
 inlineStdlib/callableRefToFunInCurrentModule.kt
-innerClass/inCallableReferenceLHSclassReference.kt
 innerClass/inheritanceMultipleModules1.kt
 innerClass/inheritanceMultipleModules2.kt
 innerClass/inheritanceMultipleModules3.kt
@@ -2579,7 +2571,6 @@ localClasses/kt3210.kt
 localClasses/kt4174.kt
 localClasses/kt45383.kt
 localClasses/localClassCaptureExtensionReceiver.kt
-localClasses/localGenericWithTypeParameters.kt
 localClasses/recaptureVarCapturedInLocalClass1.kt
 localClasses/recaptureVarCapturedInLocalClass2.kt
 localClasses/recaptureVarCapturedInLocalClass3.kt
@@ -3731,15 +3722,12 @@ ranges/unsigned/outOfBoundsInMixedContains.kt
 reflection/classLiterals/annotationClassLiteral.kt
 reflection/classLiterals/genericClass.kt
 reflection/classLiterals/lambdaClass.kt
-reflection/classLiterals/simpleClassLiteral.kt
 reflection/classes/localClassSimpleName.kt
 reflection/classes/multiplatformKClassCreation.kt
 reflection/classes/qualifiedName.kt
 reflection/classes/qualifiedNameOfStandardClasses.kt
 reflection/classes/qualifiedNameOfStandardClassesOther.kt
-reflection/classes/qualifiedNameWasm.kt
 reflection/classes/qualifiedNameWithDollars.kt
-reflection/classes/toStringWasm.kt
 reflection/constructors/constructorName.kt
 reflection/functions/simpleNames.kt
 reflection/kClassCompanion.kt
@@ -3851,7 +3839,6 @@ reified/isNumber.kt
 reified/isString.kt
 reified/isTNullable.kt
 reified/kt16445.kt
-reified/kt39256_privateInlineWithAnonymousObject.kt
 reified/lambda.kt
 reified/lambdaNameClash.kt
 reified/method.kt
@@ -3863,8 +3850,6 @@ reified/reifiedIntersectionTypeArgument.kt
 reified/reifiedIntersectionTypeArgumentCrossModule.kt
 reified/reifiedNullableNothing1.kt
 reified/reifiedNullableNothing2.kt
-reified/reifiedTypeArgumentWithIntersectionTypeAsTypeArgument.kt
-reified/reifiedTypeArgumentWithRecursion.kt
 reified/safecast.kt
 reified/sameIndexRecursive.kt
 reified/spreads.kt

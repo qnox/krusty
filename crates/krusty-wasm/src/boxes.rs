@@ -149,12 +149,15 @@ impl Runtime {
         let (class, itable) = objects
             .interfaces
             .class(module, objects.itable, vec![structure]);
+        let info = objects.type_infos.global(module, identity);
         let mut init = Code::default();
         for function in [equals, hash_code, to_string] {
             module.reference_function(function);
             init.ref_func(function);
         }
-        init.global_get(itable).struct_new(objects.any_table);
+        init.global_get(itable);
+        objects.push_type_info(&mut init, Some(info));
+        init.struct_new(objects.any_table);
         let table = module.constant_global(ValType::reference(objects.any_table), init);
         let booleans = (ty == Ty::Boolean).then(|| {
             [0, 1].map(|value| {
@@ -203,12 +206,15 @@ impl Runtime {
         let (_, itable) = objects
             .interfaces
             .class(module, objects.itable, vec![structure]);
+        let info = objects.type_infos.global(module, krusty::types::wk::unit());
         let mut init = Code::default();
         for function in [objects.identity_equals, hash_code, to_string] {
             module.reference_function(function);
             init.ref_func(function);
         }
-        init.global_get(itable).struct_new(objects.any_table);
+        init.global_get(itable);
+        objects.push_type_info(&mut init, Some(info));
+        init.struct_new(objects.any_table);
         let table = module.constant_global(ValType::reference(objects.any_table), init);
         let mut init = Code::default();
         init.global_get(table).struct_new(structure);
