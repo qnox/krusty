@@ -313,6 +313,17 @@ fn retarget_caller_property_use(
     Ok(())
 }
 
+/// Concrete arguments may replace a copied member's declared type parameters. An argument that is
+/// still a type parameter is the enclosing inline function's, and the copy's metadata cannot name
+/// a type parameter its declaration table does not contain.
+fn signature_bindings(bindings: &HashMap<String, Ty>) -> HashMap<String, Ty> {
+    bindings
+        .iter()
+        .filter(|(_, replacement)| !replacement.mentions_ty_param())
+        .map(|(name, replacement)| (name.clone(), *replacement))
+        .collect()
+}
+
 fn specialized_class(
     ir: &mut crate::ir::IrFile,
     internal: TypeName,
@@ -376,13 +387,14 @@ fn specialized_class(
         // specialized above; substituting the signature would emit a concrete descriptor plus a
         // bridge where kotlinc keeps the erased member.
         shape.dispatch_receiver = Some(placeholder);
-        // Substitute the generic signature only. The erased descriptor stays the declaration's,
-        // so the copy does not grow a bridge for the instantiated return type.
+        // A concrete instantiation updates the generic signature so it matches that erased member.
+        // A replacement that is still a type parameter belongs to the enclosing inline function.
+        // It is not in this class's declaration table, so the copy keeps the declared parameter.
         cloned_methods.push(crate::ir::clone_class_method(
             ir,
             method,
             shape,
-            expansion.bindings,
+            &signature_bindings(expansion.bindings),
         ));
     }
     let cloned = source_methods

@@ -368,9 +368,17 @@ impl BodyLowering<'_> {
             frame,
             source_line,
             !cleanup.is_empty(),
+            // `apply` returns the callee receiver, so that local stays distinct from the
+            // extension lambda's `$this$`. Every other expansion uses one local: a copy
+            // would take a slot the next source local reuses, and the lambda receiver
+            // would land one slot above kotlinc.
+            matches!(returned_value, Some(crate::fir::FirInlineValue::Receiver))
+                || !cleanup.is_empty(),
         )?;
-        // An extension lambda's receiver is a separate local; the callee's own receiver
-        // parameter is the frame local that holds the declaration's type-parameter value.
+        // The distinct callee receiver holds the declaration's type-parameter value.
+        // The lambda `$this$` keeps the call-site type: an unconstrained `T` erases to
+        // `Object`, and recording that on the lambda receiver publishes a local kotlinc
+        // types as the argument.
         if let (Some(slot), Some(declared)) = (
             callee_receiver,
             declared_receiver
@@ -1380,6 +1388,7 @@ impl BodyLowering<'_> {
         frame: &crate::fir::FirInlineBodyFrame,
         call_line: Option<u32>,
         preamble_in_body: bool,
+        distinct_callee_receiver: bool,
     ) -> Option<(ExprId, Option<u32>)> {
         let ExternalInlineLambdaArgument {
             arguments: args,
@@ -1502,22 +1511,28 @@ impl BodyLowering<'_> {
         for (operand, &(value, ty)) in invocation_operands.iter().enumerate() {
             let parameter = capture_count + u32::try_from(operand).ok()?;
             if receiver_parameter == Some(parameter) {
-                // The inlined callee's receiver and the invoked extension lambda's receiver are
-                // distinct semantic parameters, even though both receive the same value.
-                let callee_slot = self.allocate_temporary();
-                statements.push(self.ir.add_expr(IrExpr::Variable {
-                    index: callee_slot,
-                    ty,
-                    init: Some(value),
-                    named: false,
-                }));
-                callee_receiver = Some(callee_slot);
+                // `apply` returns the callee's receiver, and a `finally` keeps that local
+                // outside the protected region, so those expansions store it separately and
+                // copy it into the extension lambda's `$this$`. Otherwise kotlinc has only
+                // the lambda receiver: the value is stored there directly.
+                let init = if distinct_callee_receiver {
+                    let callee_slot = self.allocate_temporary();
+                    statements.push(self.ir.add_expr(IrExpr::Variable {
+                        index: callee_slot,
+                        ty,
+                        init: Some(value),
+                        named: false,
+                    }));
+                    callee_receiver = Some(callee_slot);
+                    self.ir.add_expr(IrExpr::GetValue(callee_slot))
+                } else {
+                    value
+                };
                 let slot = self.allocate_temporary();
-                let read = self.ir.add_expr(IrExpr::GetValue(callee_slot));
                 let declaration = self.ir.add_expr(IrExpr::Variable {
                     index: slot,
                     ty,
-                    init: Some(read),
+                    init: Some(init),
                     named: true,
                 });
                 self.ir.call_operand_bindings.insert(declaration);
