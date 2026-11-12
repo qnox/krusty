@@ -685,19 +685,26 @@ fn local_variables_lower_as_the_source_declarations_do() {
 
 #[test]
 fn unmodelled_local_variables_decline_by_form() {
-    let cases: [(u64, &str, &str); 3] = [
-        (0b1000 | 0b10, "DEFINED", "it uses a `lateinit` variable"),
-        (0b100, "DEFINED", "it uses a `const` variable"),
+    let cases: [(u64, &str, bool, &str); 3] = [
+        (
+            0b1000 | 0b10,
+            "DEFINED",
+            true,
+            "it uses a `lateinit` variable",
+        ),
+        (0b100, "DEFINED", true, "it uses a `const` variable"),
         (
             0,
             "IR_TEMPORARY_VARIABLE",
+            true,
             "it uses a compiler-introduced variable",
         ),
     ];
-    for (flags, origin, reason) in cases {
+    for (flags, origin, initialized, reason) in cases {
         let demo = demo(&[("f", &[T::Int], T::Int)], |_, body| {
             let a = body.param(0);
-            let (declaration, x) = body.variable_with(T::Int, Some(a), flags, origin);
+            let (declaration, x) =
+                body.variable_with(T::Int, initialized.then_some(a), flags, origin);
             let read = body.get(&x, T::Int);
             Some(vec![declaration, body.ret(read)])
         });
@@ -708,25 +715,42 @@ fn unmodelled_local_variables_decline_by_form() {
     }
 }
 
-/// `val x: Int` followed by `x = a`: the producer's frontend proved the assignment initializes the
-/// `val`, so the declaration has no initializer and the assignment stores it.
+/// A local declared without an initializer and assigned later lowers as the source declaration
+/// does: a reassignable binding holding the deferred type's zero until its definite assignment.
 #[test]
-fn a_val_without_an_initializer_is_initialized_by_its_assignment() {
-    let demo = demo(&[("f", &[T::Int], T::Int)], |_, body| {
-        let (declaration, x) = body.variable_with(T::Int, None, 0, "DEFINED");
-        let a = body.param(0);
-        let assignment = body.set(&x, a);
-        let read = body.get(&x, T::Int);
-        Some(vec![declaration, assignment, body.ret(read)])
-    });
-    assert_eq!(
-        lowered_f(&demo),
-        source_body(
-            "fun f(a: Int): Int {\n val x: Int\n x = a\n return x\n}\n",
-            "f",
-            1
-        )
-    );
+fn a_deferred_local_lowers_as_the_source_declaration() {
+    for (flags, keyword) in [(0, "val"), (0b10, "var")] {
+        let demo = demo(&[("f", &[T::Int], T::Int)], |_, body| {
+            let (declaration, x) = body.variable_with(T::Int, None, flags, "DEFINED");
+            let a = body.param(0);
+            let assignment = body.set(&x, a);
+            let read = body.get(&x, T::Int);
+            Some(vec![declaration, assignment, body.ret(read)])
+        });
+        let mut unit = DependencyBodyUnit::default();
+        let f = demo
+            .lower(&mut unit, "f", &[])
+            .unwrap_or_else(|decline| panic!("{decline}"));
+        validated(unit.ir());
+        assert_eq!(
+            unit.ir()
+                .deferred_local_types
+                .values()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![Ty::Int],
+            "{keyword}"
+        );
+        assert_eq!(
+            lowered_body(&unit, f),
+            source_body(
+                &format!("fun f(a: Int): Int {{\n {keyword} x: Int\n x = a\n return x\n}}\n"),
+                "f",
+                1
+            ),
+            "{keyword}"
+        );
+    }
 }
 
 #[test]

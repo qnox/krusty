@@ -954,45 +954,48 @@ impl<'a> BodyLowering<'a> {
         Ok(self.declared_value(lowered, declared))
     }
 
-    /// A local `val` or `var`, lowered as checked FIR lowers the source declaration: a named
-    /// variable in the next value slot, with no type of its own. One declared without an
-    /// initializer (`val start: Int`) is initialized by the assignments that follow it.
+    /// A local `val` or `var` with its initializer, lowered as checked FIR lowers the source
+    /// declaration: a named variable in the next value slot, with no type of its own.
     fn variable(&mut self, id: KlibIrVariableId) -> Lowered<ExprId> {
         let variable = self.arena.variable(id);
         let ty = self.semantic(variable.ty)?;
-        let init = variable
-            .initializer
-            .map(|initializer| self.operand(initializer, ty))
-            .transpose()?;
-        // A local declared without an initializer, which the producer's frontend proved is
-        // assigned before each read, lowers as checked FIR lowers the deferred declaration: a
-        // binding its assignments write, seeded with its type's zero and recorded as deferred.
-        let deferred = init.is_none();
-        let init = init.or_else(|| {
-            let zero = self
-                .ir
-                .add_expr(IrExpr::Const(IrConst::zero_for_value_type(ty)));
-            self.ir.set_logical_type(zero, ty);
-            Some(zero)
-        });
+        let Some(initializer) = variable.initializer else {
+            return self.deferred_variable(id, ty);
+        };
+        let init = self.operand(initializer, ty)?;
         // Initializers can declare locals of their own. Allocate the enclosing declaration only
         // after those locals, as checked FIR does, and keep its symbol invisible until then.
-        let mut local = self.locals.slot(variable, ty)?;
-        if deferred {
-            local.mutable = true;
-        }
+        let local = self.locals.slot(variable, ty)?;
         self.locals.declare(&variable.base.symbol, local)?;
         self.locals
             .record_name(&variable.base.symbol, &variable.name);
+        Ok(self.ir.add_expr(IrExpr::Variable {
+            index: local.index,
+            ty,
+            init: Some(init),
+            named: true,
+        }))
+    }
+
+    /// A local declared without an initializer and assigned later (`val x: Int` followed by
+    /// `x = …` on every path kotlinc's definite-assignment analysis proved). Checked FIR lowers the
+    /// source declaration as a reassignable binding holding a target-neutral zero and records the
+    /// declared type as deferred, so each backend chooses that type's physical zero.
+    fn deferred_variable(&mut self, id: KlibIrVariableId, ty: Ty) -> Lowered<ExprId> {
+        let variable = self.arena.variable(id);
+        let local = self.locals.deferred(variable, ty)?;
+        self.locals.declare(&variable.base.symbol, local)?;
+        self.locals
+            .record_name(&variable.base.symbol, &variable.name);
+        let zero = self.ir.add_expr(IrExpr::Const(deferred_zero(ty)));
+        self.ir.set_logical_type(zero, ty);
         let declaration = self.ir.add_expr(IrExpr::Variable {
             index: local.index,
             ty,
-            init,
+            init: Some(zero),
             named: true,
         });
-        if deferred {
-            self.ir.deferred_local_types.insert(declaration, ty);
-        }
+        self.ir.deferred_local_types.insert(declaration, ty);
         Ok(declaration)
     }
 
@@ -1066,4 +1069,21 @@ fn unsupported<T>(form: &'static str) -> Lowered<T> {
 /// literal where a nullable type is expected, which checked FIR lowering converts nothing for.
 fn is_value_of(actual: Ty, expected: Ty) -> bool {
     actual == expected || (actual == Ty::Null && expected.is_nullable())
+}
+
+/// The target-neutral zero a deferred local of type `ty` holds before its first assignment, as the
+/// source parser supplies it: the primitive's zero, and `null` for every other type (a backend
+/// reads the deferred type to choose the physical zero it stores).
+fn deferred_zero(ty: Ty) -> IrConst {
+    match ty {
+        Ty::Boolean => IrConst::Boolean(false),
+        Ty::Byte => IrConst::Byte(0),
+        Ty::Short => IrConst::Short(0),
+        Ty::Int => IrConst::Int(0),
+        Ty::Long => IrConst::Long(0),
+        Ty::Float => IrConst::Float(0.0),
+        Ty::Double => IrConst::Double(0.0),
+        Ty::Char => IrConst::Char(0),
+        _ => IrConst::Null,
+    }
 }

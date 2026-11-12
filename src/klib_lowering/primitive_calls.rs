@@ -206,7 +206,7 @@ fn authenticated_header(
         types,
         formals,
         ..
-    } = super::class_headers::authenticate(selected, bodies, None)?;
+    } = super::class_headers::authenticate(selected, bodies)?;
     super::class_headers::authenticate_receiver(class, arena, function)?;
     let header = raw_function_header_with_class(
         Some(selected),

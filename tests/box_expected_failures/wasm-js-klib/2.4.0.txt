@@ -437,7 +437,6 @@ casts/kt54802.kt
 casts/kt65197.kt
 casts/kt68509.kt
 casts/kt73931.kt
-casts/kt81257.kt
 casts/kt82732.kt
 casts/mutableCollections/asWithMutable.kt
 casts/mutableCollections/isWithMutable.kt
@@ -467,7 +466,6 @@ classes/delegationGenericLongArg.kt
 classes/implementComparableInSubclass.kt
 classes/initializerBlockDImpl.kt
 classes/innerClass.kt
-classes/kt1018.kt
 classes/kt1535.kt
 classes/kt1538.kt
 classes/kt1980.kt
@@ -481,7 +479,6 @@ classes/kt500.kt
 classes/kt508.kt
 classes/kt5347.kt
 classes/kt6136.kt
-classes/kt725.kt
 classes/kt8011.kt
 classes/kt8011a.kt
 classes/nestedInitBlocksWithLambda.kt
@@ -707,7 +704,6 @@ controlStructures/forInSmartCastToArray.kt
 controlStructures/forNullableCharInString.kt
 controlStructures/forUserType.kt
 controlStructures/kt1742.kt
-controlStructures/kt2147.kt
 controlStructures/kt2291.kt
 controlStructures/kt2416.kt
 controlStructures/kt3203_1.kt
@@ -1660,7 +1656,6 @@ ieee754/equalsNaN_properIeeeComparisons.kt
 ieee754/equalsNullableDouble_properIeeeComparisons.kt
 ieee754/equalsNullableFloat_properIeeeComparisons.kt
 ieee754/explicitCompareCall.kt
-ieee754/explicitEqualsCall.kt
 ieee754/greaterDouble_properIeeeComparisons.kt
 ieee754/greaterFloat_properIeeeComparisons.kt
 ieee754/inline.kt
@@ -2059,7 +2054,6 @@ inlineClasses/castInsideWhenExpression.kt
 inlineClasses/castInsideWhenExpressionGeneric.kt
 inlineClasses/checkLambdaWithInlineClassesInFunctionalType.kt
 inlineClasses/checkLambdaWithInlineClassesInFunctionalTypeGeneric.kt
-inlineClasses/checkUnboxingResultFromTypeVariableGeneric2.kt
 inlineClasses/conformToComparableAndCallInterfaceMethod.kt
 inlineClasses/conformToComparableAndCallInterfaceMethodGeneric.kt
 inlineClasses/constructorCallableReference.kt
@@ -2546,8 +2540,6 @@ lateinit/localCapturedNotInitialized.kt
 lateinit/localInitialized.kt
 lateinit/localNotInitialized.kt
 lateinit/notInitialized.kt
-lazyCodegen/optimizations/negateObjectComp.kt
-lazyCodegen/optimizations/negateObjectComp2.kt
 literals/listof1.kt
 literals/strdedup1.kt
 localClass/innerTakesCapturedFromOuter.kt
@@ -2819,22 +2811,14 @@ primitiveTypes/kt2269NotOptimizable.kt
 primitiveTypes/kt2275.kt
 primitiveTypes/kt248.kt
 primitiveTypes/kt2768.kt
-primitiveTypes/kt3613.kt
 primitiveTypes/kt36952_identityEqualsWithBooleanInLocalFunction.kt
-primitiveTypes/kt4098.kt
-primitiveTypes/kt4210.kt
-primitiveTypes/kt4251.kt
 primitiveTypes/kt46864_double.kt
 primitiveTypes/kt6590_identityEquals.kt
 primitiveTypes/kt711.kt
-primitiveTypes/kt753.kt
 primitiveTypes/kt756.kt
-primitiveTypes/kt757.kt
 primitiveTypes/kt79977.kt
 primitiveTypes/kt79977_withIncrementalCompilation.kt
 primitiveTypes/kt887.kt
-primitiveTypes/nullAsNullableIntIsNull.kt
-primitiveTypes/nullableCharBoolean.kt
 primitiveTypes/numberEqualsHashCodeToString.kt
 primitiveTypes/numberToChar/abstractMethodInSuperinterface.kt
 primitiveTypes/numberToChar/fakeOverride.kt
@@ -3178,7 +3162,6 @@ ranges/literal/simpleSteppedRange.kt
 ranges/multiAssignmentIterationOverIntRange.kt
 ranges/nullableLoopParameter/progressionExpression.kt
 ranges/nullableLoopParameter/rangeExpression.kt
-ranges/nullableLoopParameter/rangeLiteral.kt
 ranges/safeCallRangeTo.kt
 ranges/stepped/expression/downTo/emptyProgression.kt
 ranges/stepped/expression/downTo/illegalStepNegative.kt
@@ -4049,7 +4032,6 @@ typealias/nestedTypeAliasesAndStaticScope.kt
 typealias/nestedTypeAliasesAndTypeArguments.kt
 typealias/typeAliasAsBareType.kt
 unaryOp/callWithCommonType.kt
-unaryOp/intrinsicNullable.kt
 underscoredTypeArguments/backTicked.kt
 underscoredTypeArguments/lambdaInputType.kt
 underscoredTypeArguments/simple.kt
@@ -4103,7 +4085,6 @@ vararg/inlineClassArraysAsNamedArgumentInVararg.kt
 vararg/kt10926.kt
 vararg/kt37715.kt
 vararg/kt581.kt
-vararg/kt796_797.kt
 vararg/referenceToContainsFromVarargParameter.kt
 vararg/spreadCopiesArray.kt
 vararg/useSuspendFunResultAsVararg.kt

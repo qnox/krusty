@@ -691,10 +691,11 @@ is compiled once and the cfg(test) harness overlaps the binaries. Nightly rustc 
 job per core (`-Z threads`). The run ends with `coverage: phases` repeating every
 finished phase and `coverage: phase total <seconds>s`, which is wall time from the first phase rather than
 the sum of the rows. The conformance box runner prints the same shape as
-`conformance-run: phase box-conformance <seconds>s`. The conformance producer prints
-`conformance-bin: phase conformance-test-binary`, the KLIB coverage job prints
-`klib-implementation-coverage: phase compiler-unit-tests`, and the tool producer prints `tool-bins: phase krusty-cli` and
-`tool-bins: phase krusty-build-tests`. Conformance lanes and Gradle lanes run those binaries. A
+`conformance-run: phase box-conformance <seconds>s`. The KLIB coverage job prints
+`klib-implementation-coverage: phase compiler-unit-tests`, and the tool producer, which builds the
+conformance binary, the CLI and the krusty-build tests over one krusty library, prints
+`tool-bins: phase conformance-and-cli` and `tool-bins: phase krusty-build-tests`. Conformance lanes
+and Gradle lanes run those binaries. A
 Gradle lane does not compile krusty.
 
 Performance-relevant harness state:

@@ -257,8 +257,7 @@ impl BackendCallableFact {
         singleton_dispatch: Option<SingletonDispatch>,
         class_contract: Option<&'a crate::libraries::KlibBodyClassContract>,
     ) -> Option<crate::libraries::KlibBodyCallable<'a>> {
-        let (class_contract, serialized_member) =
-            self.edge_class_contract(singleton_dispatch, class_contract);
+        let class_contract = self.edge_class_contract(class_contract);
         crate::libraries::KlibBodyCallable::new(
             crate::libraries::KlibBodyCallableShape {
                 name: &self.name,
@@ -284,78 +283,17 @@ impl BackendCallableFact {
             self.klib_body_companion_receiver.as_ref(),
             self.declaration_owner,
             self.dependency_callable.as_ref(),
-            serialized_member,
         )
     }
 
-    /// The class a singleton edge authenticates through, and how that member is serialized.
-    /// `provided` is the class the provider recorded for that singleton. A member fact that
-    /// carries no class of its own takes the class of the singleton it dispatches to, and the
-    /// provider records that member as the serialized function.
+    /// The class a singleton edge authenticates through: the class the provider recorded for
+    /// that singleton when it has one, otherwise the class of the member itself.
     fn edge_class_contract<'a>(
         &'a self,
-        singleton_dispatch: Option<SingletonDispatch>,
         provided: Option<&'a crate::libraries::KlibBodyClassContract>,
-    ) -> (
-        Option<&'a crate::libraries::KlibBodyClassContract>,
-        crate::libraries::KlibSerializedMember,
-    ) {
-        if let Some(contract) = provided {
-            return (
-                Some(contract),
-                crate::libraries::KlibSerializedMember::Class,
-            );
-        }
-        if let Some(singleton) = singleton_dispatch.filter(|_| {
-            self.kind == ExternalCallableKind::Member && self.klib_body_class_contract.is_none()
-        }) {
-            if let Some(contract) = self.singleton_class_contract(singleton) {
-                return (
-                    Some(contract),
-                    crate::libraries::KlibSerializedMember::Function,
-                );
-            }
-        }
-        (
-            self.klib_body_class_contract.as_ref(),
-            crate::libraries::KlibSerializedMember::Class,
-        )
+    ) -> Option<&'a crate::libraries::KlibBodyClassContract> {
+        provided.or(self.klib_body_class_contract.as_ref())
     }
-
-    fn singleton_class_contract(
-        &self,
-        singleton: SingletonDispatch,
-    ) -> Option<&crate::libraries::KlibBodyClassContract> {
-        let module = &self.dependency_callable.as_ref()?.module;
-        synthesized_singleton_class(module, singleton, || {
-            crate::libraries::KlibBodyClassContract::singleton_object(module, singleton.classifier)
-        })
-    }
-}
-
-/// The class of a singleton edge whose fact did not already carry one. It is determined by the
-/// module and the singleton, so it lives with those identities rather than on the fact other
-/// crates construct.
-fn synthesized_singleton_class(
-    module: &str,
-    singleton: SingletonDispatch,
-    synthesize: impl FnOnce() -> Option<crate::libraries::KlibBodyClassContract>,
-) -> Option<&'static crate::libraries::KlibBodyClassContract> {
-    use std::sync::{Mutex, OnceLock};
-    static CLASSES: OnceLock<
-        Mutex<HashMap<(String, TypeName), &'static crate::libraries::KlibBodyClassContract>>,
-    > = OnceLock::new();
-    let classes = CLASSES.get_or_init(|| Mutex::new(HashMap::default()));
-    let mut classes = classes
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let key = (module.to_owned(), singleton.classifier);
-    if let Some(contract) = classes.get(&key) {
-        return Some(*contract);
-    }
-    let contract = Box::leak(Box::new(synthesize()?));
-    classes.insert(key, contract);
-    Some(contract)
 }
 
 #[cfg(test)]
