@@ -50,9 +50,10 @@ pub(in super::super) enum ExpansionReason {
     NoTemplate,
     /// The callee's body creates an object of a local or anonymous class.
     LocalClassInBody,
-    /// The callee's body holds a subject `when` that switches on an enum's keys. The keys are
-    /// read from a table of the callee's own class (the JVM's `$WhenMappings`), numbered as that
-    /// class's emission claims them, which a body compiled for the call site cannot reproduce.
+    /// The callee is another file's and its body holds a subject `when` that switches on an enum's
+    /// keys. The keys are read from a table of the callee's own class (the JVM's `$WhenMappings`),
+    /// numbered by every `when` of that class in source order; this file's emission sees only the
+    /// callee's.
     EnumSwitchInBody,
 }
 
@@ -154,18 +155,19 @@ impl BodyLowering<'_> {
         else {
             return Some(ExpansionReason::NoTemplate);
         };
-        self.template_exclusion(body)
+        self.template_exclusion(function, body)
     }
 
-    /// What in the callee's IR template keeps a call to it expanded in IR.
-    fn template_exclusion(&self, body: ExprId) -> Option<ExpansionReason> {
+    /// What in the IR template `body` of the callee `function` keeps a call to it expanded in IR.
+    fn template_exclusion(&self, function: FunId, body: ExprId) -> Option<ExpansionReason> {
+        let foreign = self.ir.foreign_inline_templates.contains(&function);
         let mut pending = vec![body];
         let mut seen = std::collections::HashSet::new();
         while let Some(expression) = pending.pop() {
             if !seen.insert(expression) {
                 continue;
             }
-            if self.ir.enum_switch_when(expression).is_some() {
+            if foreign && self.ir.enum_switch_when(expression).is_some() {
                 return Some(ExpansionReason::EnumSwitchInBody);
             }
             match self.ir.expr(expression) {

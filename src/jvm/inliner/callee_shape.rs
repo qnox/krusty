@@ -16,15 +16,17 @@ const NEW: u8 = 0xbb;
 /// A body shape the ported stages do not inline yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnsupportedShape {
-    /// It reads a `$WhenMappings` table, which kotlinc regenerates for the call site.
+    /// It reads a `$WhenMappings` table of another module, which kotlinc regenerates for the call
+    /// site (`WhenMappingTransformationInfo.shouldRegenerate`).
     WhenMappings,
     /// It reads `$assertionsDisabled`, a field kotlinc moves to the calling class.
     AssertionsStatus,
 }
 
 /// The first shape in `callee` that needs a later stage of the port, if any. Anonymous objects and
-/// SAM wrappers are regenerated for the call site by the method inliner.
-pub fn unsupported_shape(callee: &MethodNode) -> Option<UnsupportedShape> {
+/// SAM wrappers are regenerated for the call site by the method inliner. A `same_module` body keeps
+/// reading its own class's `$WhenMappings` tables, as kotlinc's inlined code does.
+pub fn unsupported_shape(callee: &MethodNode, same_module: bool) -> Option<UnsupportedShape> {
     callee.instructions().find_map(|insn| match insn {
         Insn::Field {
             op: GETSTATIC,
@@ -35,7 +37,10 @@ pub fn unsupported_shape(callee: &MethodNode) -> Option<UnsupportedShape> {
             // `getstatic INSTANCE` of an anonymous object is regenerated with the object, and
             // `needClassReification` is removed once that copy exists. Neither is a shape this
             // gate refuses.
-            if name.starts_with("$EnumSwitchMapping$") && owner.ends_with("$WhenMappings") {
+            if !same_module
+                && name.starts_with("$EnumSwitchMapping$")
+                && owner.ends_with("$WhenMappings")
+            {
                 Some(UnsupportedShape::WhenMappings)
             } else if name == "$assertionsDisabled" && desc == "Z" {
                 Some(UnsupportedShape::AssertionsStatus)
