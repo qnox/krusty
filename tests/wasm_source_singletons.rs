@@ -12,13 +12,28 @@ fn a_forward_source_singleton_has_one_instance_and_initializer() {
     let stem = "sourceSingletonAcrossFiles";
     crate::box_reference_classes::checked_box(source, stem)
         .expect("the complete source-singleton program returns OK on the official compiler");
-    let modules = krusty::conformance::split_modules(source).expect("complete source topology");
-    let units = krusty::conformance::module_units(&modules);
+    let (files, java) = krusty::conformance::split_files(source);
+    assert!(
+        java.is_empty(),
+        "the source-singleton program has no Java files"
+    );
+    let files = files
+        .into_iter()
+        .map(|(file_stem, text)| (format!("{file_stem}.kt"), text))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        files
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["SourceSingletonUse.kt", "SourceSingletonDeclarations.kt"],
+        "the using file stays first",
+    );
     for target in WasmTarget::ALL {
         let lane = WasmLane { target };
         assert!(focused_wasm_lane_available(&lane, stem));
         assert_eq!(
-            lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            lane.compile_and_run(&std::env::temp_dir(), stem, &files, source),
             Outcome::Pass,
             "{stem} on {}",
             target.name(),
