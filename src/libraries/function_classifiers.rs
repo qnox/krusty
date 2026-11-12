@@ -327,6 +327,47 @@ fn ensure_invoke(
     }
 }
 
+/// The `invoke` that `owner`'s classifier `record` declares itself, as [`normalize`] places it:
+/// every declaration carrying the function-invoke role is given to `identify`, and the member of
+/// that role then carries the identity it receives. A reflective classifier declares none.
+pub(crate) fn identify_declared_invoke(
+    record: &mut LibraryType,
+    owner: TypeName,
+    mut identify: impl FnMut(&mut FunctionInfo),
+) {
+    let role = Some(crate::types::SemanticCallRole::KotlinFunctionInvoke);
+    let mut identity = None;
+    for callables in record.declared_callables.values_mut() {
+        if !callables
+            .functions()
+            .iter()
+            .any(|function| function.callable.semantic_role == role)
+        {
+            continue;
+        }
+        let (mut functions, properties) = std::mem::take(callables).into_parts();
+        for invoke in functions
+            .overloads
+            .iter_mut()
+            .filter(|function| function.callable.semantic_role == role)
+        {
+            identify(invoke);
+            identity = Some(invoke.callable.external_identity);
+        }
+        *callables = Callables::from_parts(functions, properties);
+    }
+    let Some(identity) = identity else {
+        return;
+    };
+    for member in record
+        .members
+        .iter_mut()
+        .filter(|member| member.semantic_role == role && member.owner == Some(owner))
+    {
+        member.external_identity = identity;
+    }
+}
+
 /// Normalize a provider-selected seed into the common semantic declaration for this function
 /// classifier. The seed may retain opaque physical callable handles; every source-visible fact is
 /// overwritten here from the compiler-owned family definition.

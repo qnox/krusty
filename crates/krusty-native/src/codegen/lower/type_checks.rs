@@ -79,7 +79,7 @@ impl<'a> FileLowering<'a> {
         base: &str,
     ) -> Result<DataId, Unsupported> {
         let named = self.unit_kind == krusty::backend::CheckedIrUnitKind::Source
-            && !self.ir.local_class_name_provenance.contains_key(&class);
+            && !self.ir.is_local_class(class);
         if !named {
             return self.declare_local_data(&format!("kt_type_{base}"), false);
         }

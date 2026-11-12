@@ -687,6 +687,9 @@ impl<'a> FileLowering<'a> {
                 {
                     Linkage::Hidden
                 }
+                krusty::backend::CheckedIrUnitKind::Source if self.symbols.file_local[index] => {
+                    Linkage::Local
+                }
                 krusty::backend::CheckedIrUnitKind::Source => Linkage::Export,
             };
             let id = self
@@ -1406,6 +1409,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 update,
                 post_test,
                 label,
+                inline_return_frame: _,
             } => self.loop_statement(cond, body, update, post_test, label)?,
             IrExpr::BottomValue {
                 producer,

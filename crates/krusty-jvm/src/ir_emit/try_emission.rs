@@ -718,6 +718,7 @@ mod tests {
             update: None,
             post_test: false,
             label: Some("here".into()),
+            inline_return_frame: false,
         });
         ir.add_fun(IrFunction {
             name: "box".into(),

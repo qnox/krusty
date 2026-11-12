@@ -604,9 +604,9 @@ mod tests {
     }
 
     #[test]
-    fn a_local_class_cloned_from_another_files_inline_template_declines_by_name() {
-        // Backend contract: the clone realizes the template's callables a second time, which no
-        // Wasm function can carry twice.
+    fn a_local_class_of_another_files_inline_function_is_realized_again_by_its_caller() {
+        // The caller's expansion realizes the template's anonymous class as its own: its members
+        // bind no module identity, so the declaring file's realization stays the only one.
         for target in WasmTarget::ALL {
             let (outputs, diagnostics) = compile_program(
                 target,
@@ -617,11 +617,8 @@ mod tests {
                      inline fun make(): String = object : I { override fun run() = \"O\" }.run()",
                 ],
             );
-            assert_eq!(outputs, Vec::<Artifact>::new());
-            assert_eq!(
-                diagnostics,
-                ["krusty: the wasm backend does not support a callable realized by two functions yet"]
-            );
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(outputs.len(), 2);
         }
     }
 
