@@ -1,6 +1,5 @@
 //! Projection of solver-local types into denotable declaration results.
 
-use super::super::super::declaration_publication::inferred_declaration_ty;
 use crate::types::{Ty, TyKind};
 
 mod anonymous_results;
@@ -45,7 +44,7 @@ pub(super) fn declaration_result(
     // context. Retain a separate body view only for anonymous exposure, using the same lexical
     // normalization without applying anonymous exposure to that body.
     Ok(crate::fir::DeclarationResultTypes {
-        published: resolve(inferred_declaration_ty(exposed))?,
+        published: resolve(exposed)?,
         inferred_body_result: if exposed != result.get() {
             Some(resolve(evaluated_body.get())?)
         } else {
