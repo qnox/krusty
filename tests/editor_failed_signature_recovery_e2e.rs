@@ -110,10 +110,10 @@ fun useText(): Int = text.value.length
     );
 }
 
-/// A class literal of the class being declared, written inside the arguments of its own
+/// A class literal of the class being declared (generic or not), written inside the arguments of its own
 /// unresolved superclass constructor call, names a class whose signature never finalized. The
-/// literal has no type parameters to project, and the one unresolved reference is the whole
-/// report; the analysis worker used to die with a panic (exit 101) on this shape.
+/// literal cannot be star-projected without the class's signature, and the unresolved reference is
+/// the whole report; the analysis worker used to die with a panic (exit 101) on this shape.
 #[test]
 fn a_class_literal_of_a_class_with_an_unresolved_supertype_is_reported_once() {
     let source = r#"
@@ -128,10 +128,19 @@ class Foo : Missing(
         use(Foo::class, "x")
     }
 )
+
+class Generic<T> : AlsoMissing(
+    {
+        use(Generic::class, "y")
+    }
+)
 "#;
     assert_eq!(
         editor_diagnostics(source),
-        vec!["unresolved reference 'Missing'.".to_string()],
+        vec![
+            "unresolved reference 'Missing'.".to_string(),
+            "unresolved reference 'AlsoMissing'.".to_string(),
+        ],
     );
 }
 

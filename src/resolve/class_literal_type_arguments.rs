@@ -115,9 +115,11 @@ impl Checker<'_> {
                 return ty;
             };
             // A class whose own signature never finalized (an unresolved supertype, already
-            // reported) publishes no declaration, so there are no type parameters to project.
+            // reported) publishes no declaration, so its type parameters cannot be read to
+            // star-project the literal. The literal is unknown rather than a raw `KClass<Foo>`,
+            // which `class Foo<T>` would make wrong; the reported error is the one diagnostic.
             let Some(classifier) = self.fed_source().classifier(internal) else {
-                return ty;
+                return Ty::Error;
             };
             super::class_literal_receiver::star_projected_class_literal_receiver(ty, &classifier)
         })
