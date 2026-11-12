@@ -94,6 +94,17 @@ pub enum ExternalCallableKind {
     StaticFieldWrite,
 }
 
+/// How the provider serialized one member edge. It is recorded when the edge is built.
+/// Authentication reads it and does not search for a second declaration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum KlibSerializedMember {
+    /// A direct member of the serialized class header.
+    Class,
+    /// The member is the serialized function. Its dispatch receiver names the class, and the
+    /// class has no serialized class node.
+    Function,
+}
+
 /// The semantic declaration facts needed to lower one selected KLIB body.
 ///
 /// This deliberately excludes every target-realization field carried by
@@ -133,6 +144,9 @@ pub struct KlibBodyCallable<'a> {
     /// The provider-normalized namespace that declares the callable. Metadata is authoritative
     /// for it: a serialized body must name the same owner.
     declaration_owner: Option<crate::types::SemanticCallableOwner>,
+    /// Whether this member edge is the serialized function or a member of the serialized class.
+    /// A declaration may have both forms across edges; it is not a declaration-contract fact.
+    serialized_member: KlibSerializedMember,
     identity: &'a KlibDependencyCallable,
 }
 
@@ -165,6 +179,7 @@ impl<'a> KlibBodyCallable<'a> {
         companion_receiver: Option<&'a KlibBodyCompanionReceiver>,
         declaration_owner: Option<SemanticCallableOwner>,
         identity: Option<&'a KlibDependencyCallable>,
+        serialized_member: KlibSerializedMember,
     ) -> Option<Self> {
         let KlibBodyCallableShape {
             name,
@@ -209,6 +224,7 @@ impl<'a> KlibBodyCallable<'a> {
             singleton_classifier: singleton.map(|dispatch| dispatch.classifier),
             companion_receiver,
             declaration_owner,
+            serialized_member,
             identity: identity?,
         })
     }
@@ -304,6 +320,22 @@ impl<'a> KlibBodyCallable<'a> {
         self.singleton_classifier
     }
 
+    /// How the provider serialized this member. A class member reads its class header;
+    /// [`KlibSerializedMember::Function`] is the function authentication already holds.
+    pub(crate) fn serialized_member(self) -> KlibSerializedMember {
+        self.serialized_member
+    }
+
+    /// The class contract that belongs to the declaration, with a singleton edge's own class
+    /// removed. That class is the singleton the edge dispatches to, so two edges of one
+    /// declaration may name different singleton classes and still be the same declaration.
+    fn declaration_class_contract(self) -> Option<&'a super::KlibBodyClassContract> {
+        match (self.singleton_classifier, self.class_contract) {
+            (Some(singleton), Some(class)) if class.classifier == singleton => None,
+            _ => self.class_contract,
+        }
+    }
+
     /// Whether two selected edges describe the same dependency declaration before their
     /// call-site singleton dispatch is applied. A KLIB identity names one declaration, while
     /// inherited object selections may legitimately contribute several receiver variants.
@@ -325,7 +357,7 @@ impl<'a> KlibBodyCallable<'a> {
             && self.compiler_intrinsic == other.compiler_intrinsic
             && self.range_construction == other.range_construction
             && self.declaration_modifiers == other.declaration_modifiers
-            && self.class_contract == other.class_contract
+            && self.declaration_class_contract() == other.declaration_class_contract()
             && self.companion_receiver == other.companion_receiver
             && self.declaration_owner == other.declaration_owner
             && self.identity == other.identity
@@ -421,6 +453,7 @@ impl ExternalCallableRealization {
             self.klib_body_companion_receiver.as_ref(),
             self.declaration_owner,
             self.dependency_callable.as_ref(),
+            KlibSerializedMember::Class,
         )
     }
 }

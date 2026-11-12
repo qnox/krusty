@@ -651,6 +651,26 @@ impl PackageInventory {
             })
     }
 
+    /// The class contract of `classifier`, the class a singleton edge dispatches to.
+    pub(super) fn class_body_contract(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::libraries::KlibBodyClassContract> {
+        let class = self.classifiers.get(&classifier)?;
+        Some(crate::libraries::KlibBodyClassContract {
+            module: class.module.clone()?,
+            signature: class.signature.clone(),
+            classifier,
+            parameters: class.type_parameters.klib_body_parameters(),
+            kind: class.shape.kind,
+            modality: class.modality,
+            is_value: class.is_value,
+            is_inner: class.shape.outer_instance.is_some(),
+            is_expect: class.expect,
+            primary_constructor: class.primary_constructor.clone(),
+        })
+    }
+
     /// The actual declaration container, joined by exact callable identity, not a classifier
     /// spelling recovered from its receiver. Associated declarations are not instance members.
     pub(super) fn dependency_declaring_class(
