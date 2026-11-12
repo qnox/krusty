@@ -46214,14 +46214,19 @@ impl<'a> Checker<'a> {
                         unreachable!("an enum entry selects a constructor of its enum class")
                     }
                 };
+                // An enum whose supertype never resolved publishes no classifier header; the
+                // unresolved reference is already reported and its entries select nothing.
+                let Some(owner) = streamed_enum_owner
+                    .and_then(|owner| self.resolved_index?.classifier_header(owner))
+                    .map(|header| header.classifier)
+                    .or_else(|| enum_signature.as_ref().map(ClassSig::internal_name))
+                else {
+                    continue;
+                };
                 self.resolved_enum_entry_constructors.insert(
                     (entry.span.lo, entry.span.hi),
                     ResolvedConstructor::Source {
-                        owner: streamed_enum_owner
-                            .and_then(|owner| self.resolved_index?.classifier_header(owner))
-                            .map(|header| header.classifier)
-                            .or_else(|| enum_signature.as_ref().map(ClassSig::internal_name))
-                            .expect("checked enum must have a semantic owner"),
+                        owner,
                         stable_declaration,
                         outer: None,
                         primary,
