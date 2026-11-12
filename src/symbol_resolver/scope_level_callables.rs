@@ -132,15 +132,46 @@ fn symbols_at_scope_level(
             // An explicit star import (`import a.b.C.*`) names a package or a classifier. A
             // classifier brings its static-scope callables into scope, as the explicit
             // `import a.b.C.name` already does through the same namespace.
-            let namespace = if owners_may_be_classifiers && src.classifier(*pkg).is_some() {
-                SymbolNamespace::Classifier(*pkg)
-            } else {
-                SymbolNamespace::Package(*pkg)
+            let classifier = owners_may_be_classifiers
+                .then(|| src.classifier(*pkg))
+                .flatten();
+            let Some(classifier) = classifier else {
+                let record = src.symbols(SymbolNamespace::Package(*pkg), name);
+                return (!record.is_empty()).then_some(record);
             };
-            let record = src.symbols(namespace, name);
+            // An object's own members are what a star import of it names (kotlinc reports the
+            // import itself and still resolves them). A class contributes only its static scope,
+            // never the members of its companion object, which `C.member` reaches through the
+            // companion instance.
+            let record = if classifier.is_object() {
+                imported_object_member_symbols(src, *pkg, name)
+                    .unwrap_or_else(|| src.symbols(SymbolNamespace::Classifier(*pkg), name))
+            } else {
+                without_companion_object_members(
+                    &src.symbols(SymbolNamespace::Classifier(*pkg), name),
+                )
+            };
             (!record.is_empty()).then_some(record)
         })
         .collect()
+}
+
+/// `record` without the callables that dispatch on a companion object's instance.
+fn without_companion_object_members(record: &Rc<ResolvedSymbols>) -> Rc<ResolvedSymbols> {
+    let (mut functions, mut properties) = record.callables.clone().into_parts();
+    let declared = functions.overloads.len() + properties.overloads.len();
+    functions
+        .overloads
+        .retain(|function| function.callable.singleton_dispatch.is_none());
+    properties
+        .overloads
+        .retain(|property| property.getter.singleton_dispatch.is_none());
+    if functions.overloads.len() + properties.overloads.len() == declared {
+        return Rc::clone(record);
+    }
+    let mut filtered = (**record).clone();
+    filtered.callables = Callables::from_parts(functions, properties);
+    Rc::new(filtered)
 }
 
 fn has_callables(record: &ResolvedSymbols) -> bool {
