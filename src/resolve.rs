@@ -18155,7 +18155,7 @@ impl<'a> Checker<'a> {
                 // selection chooses among them, and the provider path materializes only the
                 // declaration it chose. A low-priority winner keeps its place after the implicit
                 // receiver rungs.
-                let selected_scope_constructor = self.select_scope_constructor(
+                let selected_scope_constructor = self.scope_constructor_choice(
                     scope,
                     CallArgs {
                         call,

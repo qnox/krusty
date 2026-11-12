@@ -81,10 +81,10 @@ impl Checker<'_> {
         ))
     }
 
-    /// Select one of a bare call's scope constructors through the shared callable selection. Only
+    /// The scope constructor that the shared callable selection chooses for a bare call. Only
     /// a declared constructor is returned: the functional-interface constructor has no
     /// declaration to materialize, and its own conversion path commits it.
-    pub(super) fn select_scope_constructor(
+    pub(super) fn scope_constructor_choice(
         &self,
         scope: &CheckerScope<'_>,
         call_args: CallArgs<'_>,
