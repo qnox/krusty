@@ -118,9 +118,14 @@ pub fn directive(src: &str, name: &str) -> bool {
     })
 }
 
-/// Payload after a runner directive. Kotlin accepts optional space (`//FILE:` and `// FILE:`).
+/// Payload after a `// FILE:`/`// MODULE:` structure directive.
+///
+/// Kotlin's runner also reads the spaceless `//FILE:` spelling, but it keeps every directive line
+/// in its file's text, so a file's line numbers match the test data. The partitions here drop the
+/// marker line, so a spaceless marker on the first line (`lineNumbers/inlineCondition.kt`) stays
+/// part of one whole-file case, where kotlinc's line numbers still hold.
 pub fn directive_payload<'a>(line: &'a str, name: &str) -> Option<&'a str> {
-    let rest = line.trim_start().strip_prefix("//")?.trim_start();
+    let rest = line.trim_start().strip_prefix("// ")?;
     let rest = rest.strip_prefix(name)?;
     rest.strip_prefix(':')
 }
