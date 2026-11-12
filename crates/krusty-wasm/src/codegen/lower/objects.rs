@@ -231,7 +231,7 @@ impl Body<'_> {
         classifier: krusty::types::TypeName,
     ) -> Result<(), Unsupported> {
         if self.ir.class_id_by_name(classifier).is_none() {
-            if let Some(entry) = self.calls.singleton(classifier) {
+            if let Some(entry) = self.calls.dependency_singleton(classifier) {
                 self.code.call(entry);
                 return Ok(());
             }

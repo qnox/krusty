@@ -597,11 +597,6 @@ fn constructs(ir: &IrFile, name: TypeName) -> bool {
         })
 }
 
-pub(super) struct ClassEntryPoints<'a> {
-    pub(super) functions: &'a [Option<u32>],
-    pub(super) singletons: &'a super::callable_registry::FileCallTargets,
-}
-
 /// Lay out every class of `ir` in `module`: types, constructors' and accessors' indices, and the
 /// dispatch tables, whose entries name `functions` (the file's function indices, by `FunId`). A
 /// superclass no class of `ir` declares is read from `laid_out`, the classes earlier files of the
@@ -620,11 +615,10 @@ pub(super) fn declare(
     ir: &IrFile,
     module: &mut Module,
     runtime: &mut Runtime,
-    entries: ClassEntryPoints<'_>,
+    functions: &[Option<u32>],
     properties: &RealizedProperties,
     beyond: BeyondFile<'_>,
 ) -> Result<FileClasses, Unsupported> {
-    let functions = entries.functions;
     let BeyondFile {
         classifiers,
         plan,
@@ -747,10 +741,7 @@ pub(super) fn declare(
         if class.is_object || class.is_companion {
             form.singleton = Some(Singleton {
                 global: module.global(REFERENCE),
-                getter: entries
-                    .singletons
-                    .singleton_definition(id)
-                    .unwrap_or_else(|| module.declare()),
+                getter: module.declare(),
             });
         }
     }

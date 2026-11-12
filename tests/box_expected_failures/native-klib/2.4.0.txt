@@ -1183,7 +1183,6 @@ inline/requireNotNull.kt
 inline/rootConstructor.kt
 inline/safeCall.kt
 inline/sharedVar.kt
-inline/simpleEnum.kt
 inline/simpleReturnFunctionWithResultUnused.kt
 inline/statementsAfterReturn.kt
 inline/thisImplicitlyCaptured.kt

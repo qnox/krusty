@@ -1832,7 +1832,6 @@ inline/safeCall.kt
 inline/severalClosures.kt
 inline/sharedVar.kt
 inline/simpleDouble.kt
-inline/simpleEnum.kt
 inline/simpleInt.kt
 inline/simpleLambda.kt
 inline/simpleObject.kt

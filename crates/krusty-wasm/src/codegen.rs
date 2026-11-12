@@ -202,10 +202,7 @@ impl Backend for WasmBackend {
             // A support unit has no source `CallableId`s. It is emitted immediately before the
             // source file that selected it, so rotating the source registry here would discard
             // cross-file reservations from the current source module.
-            if let Err(error) = started.callables.enter_source_module(file.module_name) {
-                decline(state, error);
-                return Vec::new();
-            }
+            started.callables.enter_source_module(file.module_name);
             started.properties.enter_source_module(file.module_name);
             started.classes.enter_source_module(file.module_name);
         }
@@ -220,9 +217,8 @@ impl Backend for WasmBackend {
         let plan = &state.slot_plan.as_ref().expect("planned just above").1;
         let lowered = match lower::lower_file(
             lower::FileInput {
+                module_facts: file.classifiers.module(),
                 ir: &file.ir,
-                source_singletons: (file.kind == krusty::backend::CheckedIrUnitKind::Source)
-                    .then_some(file.classifiers.module()),
                 properties: &properties,
                 callables: &file.callables,
                 classifiers: &file.classifiers,
@@ -278,20 +274,15 @@ impl Backend for WasmBackend {
     }
 
     fn check_module(&self, state: &Self::State, diags: &mut DiagSink) {
-        if let Some(construct) = state
-            .started
-            .as_ref()
-            .filter(|_| !state.declined)
-            .and_then(|started| started.runtime.objects.interfaces.declined())
-        {
-            diags.error(
-                krusty::diag::Span::new(0, 0),
-                format!("{DECLINE_PREFIX}{construct} yet"),
-            );
-            return;
-        }
         if let Some(started) = state.started.as_ref().filter(|_| !state.declined) {
-            if let Err(error) = started.callables.check_source_singletons() {
+            if let Some(construct) = started.runtime.objects.interfaces.declined() {
+                diags.error(
+                    krusty::diag::Span::new(0, 0),
+                    format!("{DECLINE_PREFIX}{construct} yet"),
+                );
+                return;
+            }
+            if let Err(error) = started.callables.check_links() {
                 diags.error(
                     krusty::diag::Span::new(0, 0),
                     format!("{DECLINE_PREFIX}{error} yet"),
@@ -315,9 +306,6 @@ impl Backend for WasmBackend {
         else {
             return Vec::new();
         };
-        if started.callables.check_source_singletons().is_err() {
-            return Vec::new();
-        }
         started
             .runtime
             .objects

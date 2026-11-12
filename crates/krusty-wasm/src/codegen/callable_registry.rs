@@ -7,6 +7,7 @@
 
 use krusty::fx_hash::{HashMap, HashSet};
 
+use krusty::backend::module_links::ModuleLinks;
 use krusty::backend::{
     CheckedBackendCallables, DependencyExportSignatures, DependencyFunctionSignature,
     DependencyMemberReceiver, KlibDependencyCallable, SingletonExtensionUnreadReceiver,
@@ -31,19 +32,11 @@ pub(super) fn authenticated_singleton_member_call(
     member && dispatch_receiver.is_some() && has_dispatch_fact
 }
 
-struct SourceSingleton {
-    function: u32,
-    claimed: bool,
-    defined: bool,
-}
-
 #[derive(Default)]
 pub(super) struct CallableRegistry {
     source_module: Option<String>,
     module: HashMap<CallableId, u32>,
     module_defaults: HashMap<CallableId, u32>,
-    /// Defining-file getters of checked objects in the active source module.
-    source_singletons: HashMap<krusty::backend::DependencyClassifier, SourceSingleton>,
     dependencies: HashMap<KlibDependencyCallable, u32>,
     /// The default entry of each published declaration that declares a default.
     dependency_defaults: HashMap<KlibDependencyCallable, u32>,
@@ -56,11 +49,11 @@ pub(super) struct CallableRegistry {
         HashMap<KlibDependencyCallable, SingletonExtensionUnreadReceiver>,
     /// The entry answering each published object declaration's instance, by its classifier.
     dependency_singletons: HashMap<krusty::backend::DependencyClassifier, u32>,
-    /// The entry answering each constant of a published enum.
-    dependency_enum_constants: HashMap<krusty::backend::EnumConstant, u32>,
+    /// The entry answering each enum constant, linked by the constant (see
+    /// `krusty::backend::module_links`).
+    enum_constants: ModuleLinks<krusty::backend::EnumConstant, u32>,
 }
 
-#[derive(Default)]
 pub(super) struct FileCallTargets {
     module: HashMap<CallableId, u32>,
     module_defaults: HashMap<CallableId, u32>,
@@ -74,10 +67,8 @@ pub(super) struct FileCallTargets {
     singleton_member_receivers: HashMap<ExternalCallableId, SingletonMemberReceiver>,
     singleton_extension_unread_receivers:
         HashMap<ExternalCallableId, SingletonExtensionUnreadReceiver>,
-    /// The selected instance getter for each object outside this file.
+    /// The instance entry of each other module's object this file reads as a value.
     singletons: HashMap<krusty::backend::DependencyClassifier, u32>,
-    singleton_definitions:
-        HashMap<krusty::ir::ClassId, (krusty::backend::DependencyClassifier, u32)>,
     /// The entry of each constant of another file's enum this file reads.
     enum_constants: HashMap<krusty::backend::EnumConstant, u32>,
 }
@@ -85,59 +76,42 @@ pub(super) struct FileCallTargets {
 impl CallableRegistry {
     /// Begin (or continue) one source module. `CallableId` belongs to one analysis and therefore
     /// cannot cross this boundary; exact module-qualified KLIB identities remain program-wide.
-    pub(super) fn enter_source_module(&mut self, module_name: &str) -> Result<(), Unsupported> {
+    pub(super) fn enter_source_module(&mut self, module_name: &str) {
         if self.source_module.as_deref() != Some(module_name) {
-            self.check_source_singletons()?;
-            self.source_singletons.clear();
             self.source_module = Some(module_name.to_owned());
             self.module.clear();
             self.module_defaults.clear();
         }
-        Ok(())
     }
 
-    /// A reserved source getter must be defined before leaving its analysis or encoding output.
-    pub(super) fn check_source_singletons(&self) -> Result<(), Unsupported> {
-        if self.source_singletons.values().any(|entry| !entry.defined) {
-            return Err("a source-module object without its defining singleton getter".to_owned());
-        }
-        Ok(())
-    }
-
-    fn reserve_source_singleton(
+    /// Link the entry answering each constant of every enum this file publishes, reusing the index
+    /// a read in an earlier file reserved. [`Self::declare_file`] declares each entry there.
+    pub(super) fn link_enum_constants(
         &mut self,
-        classifier: krusty::backend::DependencyClassifier,
+        exports: &DependencyExportSignatures,
         wasm: &mut Module,
-    ) -> &mut SourceSingleton {
-        self.source_singletons
-            .entry(classifier)
-            .or_insert_with(|| SourceSingleton {
-                function: wasm.declare(),
-                claimed: false,
-                defined: false,
-            })
+    ) -> Result<Vec<(krusty::ir::FunId, u32)>, Unsupported> {
+        krusty::backend::enums::link_constant_entries(exports, &mut self.enum_constants, || {
+            wasm.declare()
+        })
+        .map_err(str::to_owned)
     }
 
-    /// Called only after this file's existing singleton getter bodies were emitted successfully.
-    pub(super) fn define_source_singletons(
-        &mut self,
-        targets: &FileCallTargets,
-    ) -> Result<(), Unsupported> {
-        for &(classifier, function) in targets.singleton_definitions.values() {
-            let entry = self
-                .source_singletons
-                .get_mut(&classifier)
-                .ok_or_else(|| "a source singleton getter without its reservation".to_owned())?;
-            if entry.function != function || !entry.claimed || entry.defined {
-                return Err("a source singleton getter has a conflicting definition".to_owned());
-            }
-            entry.defined = true;
+    /// The enum constants a read reserved an entry for and no file of the module defined.
+    pub(super) fn check_links(&self) -> Result<(), Unsupported> {
+        match self.enum_constants.undefined().next() {
+            // Boundary conversion for a diagnostic.
+            Some(constant) => Err(format!(
+                "an enum constant (`{}.{}`) without its declaring file's entry",
+                constant.classifier.render().replace('/', "."),
+                constant.name
+            )),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     /// Declare every emitted function defined by `ir`, reusing an index reserved by an earlier
-    /// cross-file call. Every checked callable identity that realizes the same `FunId` binds to
+    /// cross-file call, or `linked` to an enum constant ([`Self::link_enum_constants`]). Every checked callable identity that realizes the same `FunId` binds to
     /// that index, and so does every identity a default-argument entry is published under. An
     /// inline-only function is a cloning template, not a declaration, and therefore receives no
     /// Wasm index and binds no callable identity.
@@ -145,6 +119,7 @@ impl CallableRegistry {
         &mut self,
         ir: &IrFile,
         wasm: &mut Module,
+        linked: &[(krusty::ir::FunId, u32)],
     ) -> Result<Vec<Option<u32>>, Unsupported> {
         let mut identities = vec![Vec::new(); ir.functions.len()];
         for (&callable, &function) in &ir.checked_callable_functions {
@@ -186,6 +161,12 @@ impl CallableRegistry {
                     .iter()
                     .filter_map(|target| self.module.get(target).copied())
                     .chain(
+                        linked
+                            .iter()
+                            .filter(|(entry, _)| *entry as usize == function)
+                            .map(|&(_, index)| index),
+                    )
+                    .chain(
                         default_targets
                             .iter()
                             .filter_map(|target| self.module_defaults.get(target).copied()),
@@ -220,8 +201,8 @@ impl CallableRegistry {
         &mut self,
         ir: &IrFile,
         callables: &CheckedBackendCallables,
+        module_facts: &krusty::backend::BackendModuleFacts,
         wasm: &mut Module,
-        source: Option<(&str, &krusty::backend::BackendModuleFacts)>,
     ) -> Result<FileCallTargets, Unsupported> {
         let mut targets = FileCallTargets {
             module: HashMap::default(),
@@ -235,38 +216,13 @@ impl CallableRegistry {
             singleton_member_receivers: HashMap::default(),
             singleton_extension_unread_receivers: HashMap::default(),
             singletons: HashMap::default(),
-            singleton_definitions: HashMap::default(),
-            enum_constants: HashMap::default(),
+            enum_constants: krusty::backend::enums::link_constant_reads(
+                ir,
+                module_facts,
+                &mut self.enum_constants,
+                || wasm.declare(),
+            ),
         };
-        if let Some((module_name, facts)) = source {
-            if self.source_module.as_deref() != Some(module_name) {
-                return Err("a source singleton belongs to another source module".to_owned());
-            }
-            for (class, declaration) in ir.classes.iter().enumerate() {
-                if !declaration.is_source_declared
-                    || !(declaration.is_object || declaration.is_companion)
-                {
-                    continue;
-                }
-                if !facts
-                    .classifier(declaration.fq_name)
-                    .is_some_and(|fact| fact.is_object())
-                {
-                    return Err(
-                        "a source object without its frozen singleton declaration".to_owned()
-                    );
-                }
-                let entry = self.reserve_source_singleton(declaration.fq_name, wasm);
-                if entry.claimed {
-                    return Err("a source singleton getter has two defining classes".to_owned());
-                }
-                entry.claimed = true;
-                targets.singleton_definitions.insert(
-                    u32::try_from(class).expect("a class index fits u32"),
-                    (declaration.fq_name, entry.function),
-                );
-            }
-        }
         for expression in krusty::ir::emitted_body_roots(ir)
             .into_iter()
             .flat_map(|root| krusty::ir::value_namespace_expressions(ir, root))
@@ -302,35 +258,11 @@ impl CallableRegistry {
                     targets.signatures.insert(*target, signature.clone());
                     continue;
                 }
-                // Another file's enum constant is read through the entry its file publishes.
-                IrExpr::EnumEntry { classifier, name }
-                    if ir.class_id_by_name(*classifier).is_none() =>
-                {
-                    let constant = krusty::backend::EnumConstant {
-                        classifier: *classifier,
-                        name: name.clone(),
-                    };
-                    if let Some(&entry) = self.dependency_enum_constants.get(&constant) {
-                        targets.enum_constants.insert(constant, entry);
-                    }
-                    continue;
-                }
-                // A source object uses its defining file's getter; a dependency uses its export.
+                // Another module's object is read through the entry its module publishes.
                 IrExpr::SingletonValue { classifier }
                     if ir.class_id_by_name(*classifier).is_none() =>
                 {
-                    let entry = match source.and_then(|(_, facts)| facts.classifier(*classifier)) {
-                        Some(fact) if fact.is_object() => {
-                            Some(self.reserve_source_singleton(*classifier, wasm).function)
-                        }
-                        Some(_) => {
-                            return Err(
-                                "a singleton value of a non-object source classifier".to_owned()
-                            );
-                        }
-                        None => self.dependency_singletons.get(classifier).copied(),
-                    };
-                    if let Some(entry) = entry {
+                    if let Some(&entry) = self.dependency_singletons.get(classifier) {
                         targets.singletons.insert(*classifier, entry);
                     }
                     continue;
@@ -543,15 +475,6 @@ impl CallableRegistry {
         exports: &DependencyExportSignatures,
         functions: &[Option<u32>],
     ) -> Result<(), Unsupported> {
-        for (constant, entry) in exports.enum_constant_entries() {
-            let entry = functions
-                .get(*entry as usize)
-                .copied()
-                .flatten()
-                .ok_or_else(|| "an enum constant entry without its function".to_string())?;
-            self.dependency_enum_constants
-                .insert(constant.clone(), entry);
-        }
         for &(classifier, entry) in exports.singleton_entries() {
             let entry = functions
                 .get(entry as usize)
@@ -663,12 +586,6 @@ impl CallableRegistry {
 }
 
 impl FileCallTargets {
-    pub(super) fn singleton_definition(&self, class: krusty::ir::ClassId) -> Option<u32> {
-        self.singleton_definitions
-            .get(&class)
-            .map(|(_, function)| *function)
-    }
-
     pub(super) fn module(&self, target: CallableId) -> Option<u32> {
         self.module.get(&target).copied()
     }
@@ -687,8 +604,8 @@ impl FileCallTargets {
             .copied()
     }
 
-    /// The selected instance getter, certified by a source declaration or dependency export.
-    pub(super) fn singleton(
+    /// The entry answering the instance of another module's object `classifier`.
+    pub(super) fn dependency_singleton(
         &self,
         classifier: krusty::backend::DependencyClassifier,
     ) -> Option<u32> {
@@ -755,6 +672,11 @@ impl FileCallTargets {
 
 #[cfg(test)]
 mod tests {
+    fn no_facts() -> krusty::backend::BackendModuleFacts {
+        krusty::backend::BackendModuleFacts::from_classifiers([], [])
+            .expect("an empty module has valid facts")
+    }
+
     use super::*;
     use crate::encode::{Code, Function};
     use krusty::backend::BackendCallableFact;
@@ -935,7 +857,7 @@ mod tests {
         let mut wasm = Module::default();
         let local = CallableId::from_raw(0);
 
-        registry.enter_source_module("lib").unwrap();
+        registry.enter_source_module("lib");
         let library_index = registry.module_index(local, &mut wasm);
         let signature = signature("answer");
         let identity = KlibDependencyCallable {
@@ -966,7 +888,7 @@ mod tests {
         );
         assert!(!registry.singleton_member_receivers[&identity].evaluate_source());
 
-        registry.enter_source_module("app").unwrap();
+        registry.enter_source_module("app");
         let application_index = registry.module_index(local, &mut wasm);
         assert_ne!(application_index, library_index);
         assert_eq!(registry.dependencies[&identity], library_index);
@@ -1027,9 +949,9 @@ mod tests {
         ir.checked_callable_functions.insert(callable, function);
         ir.inline_only_fns.insert(function);
 
-        registry.enter_source_module("app").unwrap();
+        registry.enter_source_module("app");
         let functions = registry
-            .declare_file(&ir, &mut wasm)
+            .declare_file(&ir, &mut wasm, &[])
             .expect("the inline template is a valid non-emitted function");
 
         assert_eq!(functions, [None]);
@@ -1058,12 +980,17 @@ mod tests {
         let entry_body = ir.add_expr(IrExpr::UnitInstance);
         ir.add_fun(function("entry", Some(entry_body)));
 
-        registry.enter_source_module("app").unwrap();
+        registry.enter_source_module("app");
         let functions = registry
-            .declare_file(&ir, &mut wasm)
+            .declare_file(&ir, &mut wasm, &[])
             .expect("the emitted entry has one declaration");
         let calls = registry
-            .file_calls(&ir, &CheckedBackendCallables::default(), &mut wasm, None)
+            .file_calls(
+                &ir,
+                &CheckedBackendCallables::default(),
+                &no_facts(),
+                &mut wasm,
+            )
             .expect("a dead inline template cannot affect emitted calls");
 
         assert_eq!(functions.len(), 2);
@@ -1093,9 +1020,14 @@ mod tests {
         class.init_body = Some(call);
         ir.classes.push(class);
 
-        registry.enter_source_module("app").unwrap();
+        registry.enter_source_module("app");
         let calls = registry
-            .file_calls(&ir, &CheckedBackendCallables::default(), &mut wasm, None)
+            .file_calls(
+                &ir,
+                &CheckedBackendCallables::default(),
+                &no_facts(),
+                &mut wasm,
+            )
             .expect("a supported constructor initializer has registered calls");
 
         assert_eq!(calls.module(target), registry.module.get(&target).copied());
@@ -1115,7 +1047,7 @@ mod tests {
         let callable = CallableId::from_raw(0);
         let mut registry = CallableRegistry::default();
         let mut wasm = Module::default();
-        registry.enter_source_module("app").unwrap();
+        registry.enter_source_module("app");
         let physical = registry.module_index(callable, &mut wasm);
         let ty = wasm.func_type(Vec::new(), Vec::new());
         wasm.define(
@@ -1128,17 +1060,17 @@ mod tests {
         );
         assert_eq!(
             registry
-                .declare_file(&inline_file(callable), &mut wasm)
+                .declare_file(&inline_file(callable), &mut wasm, &[])
                 .expect("an existing physical definition remains authoritative"),
             [None]
         );
 
         let mut registry = CallableRegistry::default();
         let mut wasm = Module::default();
-        registry.enter_source_module("app").unwrap();
+        registry.enter_source_module("app");
         registry.module_index(callable, &mut wasm);
         assert_eq!(
-            registry.declare_file(&inline_file(callable), &mut wasm),
+            registry.declare_file(&inline_file(callable), &mut wasm, &[]),
             Err("a source call reserved an inline-only Wasm function".to_string())
         );
     }
@@ -1149,7 +1081,7 @@ mod tests {
         let provider = CallableId::from_raw(2);
         let mut registry = CallableRegistry::default();
         let mut wasm = Module::default();
-        registry.enter_source_module("app").unwrap();
+        registry.enter_source_module("app");
 
         let mut caller = IrFile::default();
         let call = caller.add_expr(IrExpr::Call {
@@ -1176,8 +1108,8 @@ mod tests {
             .file_calls(
                 &caller,
                 &CheckedBackendCallables::default(),
+                &no_facts(),
                 &mut wasm,
-                None,
             )
             .expect("the inherited provider reserves its exact entry");
         let reserved = calls
@@ -1218,7 +1150,7 @@ mod tests {
         );
         let entry = declaration.default_entries[&function];
         let functions = registry
-            .declare_file(&declaration, &mut wasm)
+            .declare_file(&declaration, &mut wasm, &[])
             .expect("the actual declaration realizes the provider-owned entry");
         assert_eq!(functions[entry as usize], Some(reserved));
         assert_ne!(functions[function as usize], Some(reserved));
@@ -1241,6 +1173,3 @@ mod tests {
         ));
     }
 }
-
-#[cfg(test)]
-mod singleton_tests;
