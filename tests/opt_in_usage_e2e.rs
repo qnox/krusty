@@ -481,3 +481,51 @@ fn an_unresolved_compiler_opt_in_marker_warns_once_per_compilation() {
         Vec::<String>::new()
     );
 }
+
+const COLLECTION_LITERALS_MARKER: &str = "package kotlin
+
+@RequiresOptIn
+annotation class ExperimentalCollectionLiteralsApi
+
+@ExperimentalCollectionLiteralsApi
+fun factory() = 1
+
+@RequiresOptIn
+annotation class OtherMarker
+
+@OtherMarker
+fun other() = 2
+";
+
+/// `+CollectionLiterals` accepts `kotlin.ExperimentalCollectionLiteralsApi` and no other marker.
+#[test]
+fn collection_literals_feature_accepts_only_its_own_marker() {
+    let allow_kotlin_package = vec![
+        "-Xallow-kotlin-package".to_string(),
+        "-Xcollection-literals".to_string(),
+    ];
+    let enabled = "// LANGUAGE: +CollectionLiterals
+fun use() {
+    kotlin.factory()
+    kotlin.other()
+}
+";
+    common::assert_errors_match_kotlinc(
+        &[("marker.kt", COLLECTION_LITERALS_MARKER), ("main.kt", enabled)],
+        &allow_kotlin_package,
+    );
+}
+
+/// Without the feature the marker is an ordinary `@RequiresOptIn` one.
+#[test]
+fn the_marker_needs_opt_in_without_collection_literals() {
+    let allow_kotlin_package = vec!["-Xallow-kotlin-package".to_string()];
+    let disabled = "fun use() {
+    kotlin.factory()
+}
+";
+    common::assert_errors_match_kotlinc(
+        &[("marker.kt", COLLECTION_LITERALS_MARKER), ("main.kt", disabled)],
+        &allow_kotlin_package,
+    );
+}

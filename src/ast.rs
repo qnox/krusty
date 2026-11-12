@@ -1920,6 +1920,9 @@ pub struct File {
     pub forbid_array_of_nothing_in_lhs_of_class_literal: bool,
     /// `+EnumEntries`: expose the synthetic classifier property `E.entries` on enum classes.
     pub enum_entries_enabled: bool,
+    /// `+CollectionLiterals`: uses of `kotlin.ExperimentalCollectionLiteralsApi` declarations are
+    /// accepted without an opt-in, as kotlinc's opt-in usage check does.
+    pub collection_literals_enabled: bool,
     /// `+PrioritizedEnumEntries`: the synthetic enum property wins over a same-named companion
     /// declaration. With the legacy feature disabled, the companion rung is considered first.
     pub prioritized_enum_entries: bool,
