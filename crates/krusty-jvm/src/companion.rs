@@ -612,6 +612,17 @@ pub(super) fn lower_companion_properties(
             let getter = candidate.declared_getter.is_none().then(|| {
                 let read = ir.add_expr(IrExpr::GetStatic(static_index));
                 let returned = ir.add_expr(IrExpr::Return(Some(read)));
+                // fir2ir builds a default getter's `return field` at the getter's offsets: the
+                // field read marks that line where the body starts, and the `return` marks the
+                // same line, which writes nothing.
+                let getter_line = if candidate.accessor_lines.getter != 0 {
+                    candidate.accessor_lines.getter
+                } else {
+                    candidate.decl_line
+                };
+                if getter_line != 0 {
+                    ir.set_source_line(read, getter_line);
+                }
                 let getter_body = ir.add_expr(IrExpr::Block {
                     stmts: vec![returned],
                     value: None,
@@ -652,7 +663,7 @@ pub(super) fn lower_companion_properties(
                     candidate.decl_line
                 };
                 if setter_line != 0 {
-                    ir.expr_lines.insert(write, setter_line);
+                    ir.set_statement_line(write, setter_line);
                 }
                 // This default setter is backend-synthesized, but its source declaration is not:
                 // a visibility-only `lateinit` accessor owns the prefix line at its store and the
@@ -662,8 +673,7 @@ pub(super) fn lower_companion_properties(
                     && candidate.accessor_lines.setter != 0
                     && candidate.accessor_lines.declaration_end > setter_line
                 {
-                    ir.expr_lines
-                        .insert(returned, candidate.accessor_lines.declaration_end);
+                    ir.set_statement_line(returned, candidate.accessor_lines.declaration_end);
                 }
                 let body = ir.add_expr(IrExpr::Block {
                     stmts: vec![write, returned],

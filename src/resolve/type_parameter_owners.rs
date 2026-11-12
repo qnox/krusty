@@ -261,10 +261,7 @@ impl Checker<'_> {
             return Vec::new();
         };
         let mut owners = Vec::new();
-        loop {
-            let Some(header) = index.declaration_header(current) else {
-                break;
-            };
+        while let Some(header) = index.declaration_header(current) {
             if !header.flags.has(crate::fir::DeclarationFlags::INNER) {
                 break;
             }

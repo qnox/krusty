@@ -32,7 +32,7 @@ use super::bytecode_analysis::{
     TypedHandler, VerificationType,
 };
 use super::method_rewrite::var_slot;
-use super::{u2, ClassWriter, CodeBuilder, ConstPool, LvtEntry, VerifType};
+use super::{u2, ClassWriter, CodeBuilder, ConstPool, LvtEntry, VerifSlots, VerifType};
 use crate::jvm::inline::{disassemble, insn_offsets_at};
 
 const NOP: u8 = 0x00;
@@ -200,7 +200,7 @@ impl ClassWriter {
         bytes: &[u8],
         code: &CodeBuilder,
         entry: &[VerifType],
-    ) -> Option<Vec<(usize, Vec<VerifType>, Vec<VerifType>)>> {
+    ) -> Option<Vec<(usize, VerifSlots, VerifSlots)>> {
         let body = Body {
             access: 0,
             name: "",
@@ -397,9 +397,7 @@ pub(super) fn table_labels(lnt: &[(u16, u16)], lvt: &[LvtEntry], code_len: usize
 /// The labels of an emitted body that the class file will record: its line marks and the bounds of
 /// its local ranges.
 /// `frames` by instruction index in the emitter's form, their locals one per slot.
-pub(super) fn verif_frames(
-    frames: &[ComputedFrame],
-) -> Vec<(usize, Vec<VerifType>, Vec<VerifType>)> {
+pub(super) fn verif_frames(frames: &[ComputedFrame]) -> Vec<(usize, VerifSlots, VerifSlots)> {
     frames
         .iter()
         .map(|frame| {

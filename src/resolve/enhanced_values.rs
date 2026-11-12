@@ -138,9 +138,11 @@ impl Checker<'_> {
         coerced_to_unit: bool,
     ) {
         let result = super::conditional_branch::branch_value_expression(self.file, body);
-        let marks = (!coerced_to_unit)
-            .then(|| self.value_enhancement(result))
-            .unwrap_or_default();
+        let marks = if !coerced_to_unit {
+            self.value_enhancement(result)
+        } else {
+            Default::default()
+        };
         if marks.is_none() {
             self.enhanced_locals.lambda_results.remove(&lambda);
         } else {

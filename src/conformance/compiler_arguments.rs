@@ -94,6 +94,7 @@ fn case_compiler_configuration_for_release(
 /// | `// ASSERTIONS_MODE: X` | `-Xassertions=X` |
 /// | `// WHEN_EXPRESSIONS: X` | `-Xwhen-expressions=x` |
 /// | `// WITH_COMPOSE` | `-Xplugin=<the distribution's Compose plugin>`, with source information |
+/// | `// WITH_ATOMICFU` | `-Xplugin=<the atomicfu plugin of the distribution's Kotlin version>` |
 ///
 /// The per-unit `// LAMBDAS:`, `// SAM_CONVERSIONS:` and `// JVM_DEFAULT_MODE:` directives belong
 /// to [`unit_kotlinc_arguments`]; a value of one that names no mode fails closed here, so no unit
@@ -181,6 +182,14 @@ fn case_cli_arguments(src: &str, compiler: KotlinVersion) -> Result<Vec<String>,
                 crate::plugins::cli::COMPOSE_PLUGIN_ID
             ),
         ]);
+    }
+    if directive(src, "WITH_ATOMICFU") {
+        let plugin = crate::toolchain::atomicfu_compiler_plugin_jar().ok_or_else(|| {
+            "box directive `// WITH_ATOMICFU` needs the atomicfu compiler plugin of the reference \
+             Kotlin version"
+                .to_string()
+        })?;
+        arguments.push(format!("-Xplugin={}", plugin.display()));
     }
     Ok(arguments)
 }

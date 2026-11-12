@@ -281,6 +281,10 @@ fn realize_adapter_reference(
         | krusty::ir::IrCallableReferenceTarget::FunctionInvoke => {
             krusty::ir::ReflectedCallable::Physical
         }
+        // A property reference value is the property reference's carrier, never this one.
+        krusty::ir::IrCallableReferenceTarget::Property(_) => {
+            return Err(FunctionReferenceRealizationTarget::Invalid);
+        }
     };
     // A local function is reflected by the physical signature it was lifted to, in which a
     // shared mutable capture is its JVM holder.
@@ -386,6 +390,9 @@ fn realize_adapter_reference(
                 false,
                 Some(format!("invoke({erased})Ljava/lang/Object;")),
             )
+        }
+        krusty::ir::IrCallableReferenceTarget::Property(_) => {
+            return Err(FunctionReferenceRealizationTarget::Invalid);
         }
     };
     let adapted = reference.adaptation.is_some() || suspend_conversion;
@@ -793,7 +800,7 @@ pub(super) fn realize(
     ir: &mut IrFile,
     callables: &krusty::backend::CheckedBackendCallables,
     facades: Facades<'_>,
-) -> Result<(), FunctionReferenceRealizationTarget> {
+) -> Result<super::property_references::SplicedGetters, FunctionReferenceRealizationTarget> {
     // Join each dependency inline call with the exact selected declaration while its argument
     // vector is still semantic. This publishes consumption once; carrier planning below does not
     // scan expression parents or infer inline-parameter roles from syntax.
@@ -876,6 +883,17 @@ pub(super) fn realize(
     let mut carrier_adapters = krusty::fx_hash::HashSet::default();
     for raw in 0..expression_count {
         let adapter = match &ir.exprs[raw] {
+            // A property reference value is realized as the property reference, which calls the
+            // getter rather than the adapter, unless the getter is spliced at each read.
+            IrExpr::CallableReference(reference)
+                if matches!(
+                    &reference.target,
+                    krusty::ir::IrCallableReferenceTarget::Property(property)
+                        if !property.getter_is_spliced()
+                ) =>
+            {
+                continue;
+            }
             IrExpr::CallableReference(reference) => reference.adapter,
             _ => continue,
         };
@@ -886,6 +904,7 @@ pub(super) fn realize(
             carrier_adapters.insert(adapter);
         }
     }
+    let mut spliced_getters = super::property_references::SplicedGetters::default();
     for raw in 0..expression_count {
         let IrExpr::CallableReference(reference) = ir.exprs[raw].clone() else {
             continue;
@@ -909,6 +928,26 @@ pub(super) fn realize(
             }
             continue;
         }
+        // A property reference is the property reference value itself, which the
+        // property-reference realization gives kotlinc's carrier.
+        if let krusty::ir::IrCallableReferenceTarget::Property(property) = &reference.target {
+            let operation =
+                property.checked_operation(reference.bound_receiver, reference.adaptation.clone());
+            ir.exprs[raw] = IrExpr::Checked(Box::new(operation));
+            // An inline getter has no accessor method the carrier could call: kotlinc splices it
+            // into the carrier's own `get`, which takes the body of the adapter performing it.
+            if property.getter_is_spliced() {
+                if !sole {
+                    return Err(FunctionReferenceRealizationTarget::Adapter(
+                        reference.adapter,
+                    ));
+                }
+                spliced_getters.record(raw as u32, reference.adapter);
+            } else {
+                ir.inline_only_fns.insert(reference.adapter);
+            }
+            continue;
+        }
         let adapter_owner = adapter_owners.get(&reference.adapter).copied();
         let own_invoke = sole && own_invoke_realizable(ir, &reference);
         realize_adapter_reference(
@@ -921,7 +960,7 @@ pub(super) fn realize(
             *reference,
         )?;
     }
-    Ok(())
+    Ok(spliced_getters)
 }
 
 #[cfg(test)]

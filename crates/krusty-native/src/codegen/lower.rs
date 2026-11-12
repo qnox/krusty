@@ -35,6 +35,7 @@ use declared_capabilities::{
     declares_its_own_comparable, implemented_collections, implemented_dependencies,
     overrides_a_throwable_accessor,
 };
+mod atomic_fields;
 mod functions;
 mod implementor_dispatch;
 mod imported_functions;
@@ -50,6 +51,7 @@ mod object_entries;
 mod objects;
 mod ranges;
 mod references;
+mod reified_templates;
 mod representation;
 mod scope;
 mod statics;
@@ -77,6 +79,7 @@ use krusty::ir::{
 use krusty::types::{Ty, TypeName};
 
 use super::super::classes::{self as model, AnyMember, ClassModel, Slot};
+use super::super::laid_out_classes::{LaidOutClass, LaidOutClasses};
 use super::super::symbols::Symbols;
 use super::{Entry, BOX_RESULT_FRAME, PROGRAM_ENTRY};
 use crate::NativeTarget;
@@ -149,6 +152,8 @@ pub struct Lowered {
     pub defines_entry: bool,
     /// This file's contribution to the module's C header, in source order.
     pub abi: Vec<super::super::c_abi::Record>,
+    /// What a later file of the module extending a class of this one reads of it.
+    pub laid_out: Vec<(TypeName, LaidOutClass)>,
 }
 
 /// Build the ISA for `target`. Non-PIC, because the output is a static executable at a fixed
@@ -233,6 +238,9 @@ pub struct FileInput<'a> {
     pub slot_plan: &'a krusty::backend::class_tables::module_slots::ModuleSlotPlan,
     /// The module's classifier facts, which every file reads alike.
     pub module_facts: &'a krusty::backend::BackendModuleFacts,
+    /// The classes earlier files of the source module laid out, which a class of this file may
+    /// extend.
+    pub laid_out: &'a LaidOutClasses,
 }
 
 pub fn lower_file(
@@ -261,8 +269,11 @@ pub fn lower_file(
         value_classes,
         slot_plan,
         module_facts,
+        laid_out,
     } = input;
-    let class_model = model::build(ir, value_classes, slot_plan)?;
+    let class_model = model::build(ir, value_classes, slot_plan, laid_out)?;
+    let extended = extended_elsewhere(ir, unit_kind, module_facts);
+    let exported = module_abi::exported_classes(&class_model, &extended);
     // Another file calls a default-argument entry by the one symbol its identity names.
     if let Some(declaration) = ir.default_entries.keys().find(|&&declaration| {
         krusty::backend::default_arguments::published_identities(ir, declaration).len() > 1
@@ -314,6 +325,11 @@ pub fn lower_file(
         values: value_classes,
         slot_plan,
         module_facts,
+        laid_out,
+        extended,
+        exported,
+        extension_entries: HashMap::default(),
+        extension_tables: HashMap::default(),
         module: &mut module,
         symbols: super::super::symbols::symbols(ir, module_name, runtime_symbols.clone()),
         model: class_model,
@@ -395,6 +411,7 @@ pub fn lower_file(
     lowering.define_constructor_entry_points(file_init)?;
     lowering.define_singleton_entry_points(file_init)?;
     lowering.define_value_box_entry_points()?;
+    lowering.define_extension_entries(file_init)?;
     let defines_entry = selected.is_some();
     let abi = match unit_kind {
         krusty::backend::CheckedIrUnitKind::Source => {
@@ -406,6 +423,7 @@ pub fn lower_file(
     lowering.define_dependency_exports(file_init, dependency_exports)?;
     lowering.define_interface_identities()?;
 
+    let records = lowering.laid_out_records()?;
     let comdat_objects = std::mem::take(&mut lowering.comdat_objects);
     let mut product = module.finish();
     for data in comdat_objects {
@@ -427,7 +445,35 @@ pub fn lower_file(
         object,
         defines_entry,
         abi,
+        laid_out: records,
     })
+}
+
+/// The classes of `ir` another file of the module extends, with their superclasses in this file:
+/// what a later file's subclass names by symbol, so their objects define those symbols for the
+/// link to find. A support unit's classes are no source file's to extend.
+fn extended_elsewhere(
+    ir: &IrFile,
+    unit_kind: krusty::backend::CheckedIrUnitKind,
+    module_facts: &krusty::backend::BackendModuleFacts,
+) -> krusty::fx_hash::HashSet<krusty::ir::ClassId> {
+    let mut extended = krusty::fx_hash::HashSet::default();
+    if unit_kind != krusty::backend::CheckedIrUnitKind::Source {
+        return extended;
+    }
+    let classes = module_facts.classes();
+    for (id, class) in ir.classes.iter().enumerate() {
+        if class.is_interface || ir.local_class_name_provenance.contains_key(&(id as u32)) {
+            continue;
+        }
+        if classes
+            .subclasses_of(class.fq_name)
+            .any(|subclass| ir.class_id_by_name(subclass).is_none())
+        {
+            extended.insert(id as krusty::ir::ClassId);
+        }
+    }
+    extended
 }
 
 struct FileLowering<'a> {
@@ -445,6 +491,17 @@ struct FileLowering<'a> {
     slot_plan: &'a krusty::backend::class_tables::module_slots::ModuleSlotPlan,
     /// The module's classifier facts, which say what every file, not only this one, declares.
     module_facts: &'a krusty::backend::BackendModuleFacts,
+    /// The classes earlier files of the source module laid out.
+    laid_out: &'a LaidOutClasses,
+    /// The classes of this file another file of the module extends.
+    extended: krusty::fx_hash::HashSet<krusty::ir::ClassId>,
+    /// The classes of `extended` and their superclasses here, whose table entries another file
+    /// links by symbol.
+    exported: krusty::fx_hash::HashSet<krusty::ir::ClassId>,
+    /// The entry points a later file's subclass of each class in `extended` calls.
+    extension_entries: HashMap<krusty::ir::ClassId, module_abi::ExtensionEntries>,
+    /// What the vtable and interface table of each class in `extended` hold.
+    extension_tables: HashMap<krusty::ir::ClassId, (Vec<FuncId>, Vec<FuncId>)>,
     module: &'a mut ObjectModule,
     /// Symbols of this file's classes and functions.
     symbols: Symbols,
@@ -749,6 +806,7 @@ impl<'a> FileLowering<'a> {
                     finallys: Vec::new(),
                     dead: Vec::new(),
                     unresolved_reified: Vec::new(),
+                    scope: krusty::ir::IrEnclosure::File,
                     frame_objects: krusty::fx_hash::HashMap::default(),
                     frame_fields: krusty::fx_hash::HashMap::default(),
                     enum_base: None,
@@ -845,6 +903,7 @@ impl<'a> FileLowering<'a> {
             ret,
             &name,
             &mut |lowering, params| {
+                lowering.scope = krusty::ir::IrEnclosure::Function(index as krusty::ir::FunId);
                 lowering.record_semantic_slots(&semantic_slots);
                 for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
                     let variable = lowering.declare_value(slot as u32, *ty)?;
@@ -944,6 +1003,10 @@ struct BodyLowering<'a, 'b, 'c> {
     /// being emitted. A runtime type operation naming one executes Kotlin's direct-call failure;
     /// ordinary functions and specialized inline copies leave this empty.
     unresolved_reified: Vec<String>,
+    /// The common-IR scope whose body this frame lowers. A type operation against a reified
+    /// parameter the scope's own declaration introduces is that declaration's template, which
+    /// [`krusty::ir::IrFile::is_reified_template_operation`] identifies for every backend.
+    scope: krusty::ir::IrEnclosure,
     /// The constructions of this body whose object lives in this frame, each with the local it
     /// initializes; see `frame_objects`.
     frame_objects: krusty::fx_hash::HashMap<u32, u32>,
@@ -1765,21 +1828,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         | IrTypeOp::NotInstanceOf
                         | IrTypeOp::Cast
                         | IrTypeOp::CastNonNull
-                ) && self.unresolved_reified.iter().any(|parameter| {
-                    type_operand
-                        .type_parameter_occurrence_bound(parameter)
-                        .is_some()
-                }) {
+                ) && self.is_unresolved_reified_operation(id, type_operand)
+                {
                     // The operand precedes kotlinc's reified-operation marker and therefore keeps
                     // any side effect or exception it produces before the marker's own failure.
                     let _ = self.expression(arg)?;
                     if self.terminated {
                         return Ok(None);
                     }
-                    let message = self.string_literal(
-                        b"This function has a reified type parameter and thus can only be inlined at compilation time, not called directly.",
-                    )?;
-                    self.raise("kt_type_unsupported_operation_exception", message)
+                    self.reified_direct_call_failure()
                 } else {
                     self.type_operation(
                         op,
@@ -2139,7 +2196,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             IrExpr::LocalPropertyReference(_) => self.local_property_reference(id),
             IrExpr::KClassLiteral {
                 classifier, value, ..
-            } => self.class_literal(classifier, value),
+            } => self.class_literal(id, classifier, value),
             IrExpr::Checked(ref checked_op)
                 if let IrCheckedOperation::RangeConstruction {
                     operation,
@@ -2165,6 +2222,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 finally,
                 result,
             } => self.try_catch(body, &catches, finally, result),
+            IrExpr::PluginPlaceholder {
+                plugin: "atomicfu",
+                kind,
+                exprs,
+                data,
+                types,
+            } => self.atomic_field_operation(kind, &exprs, &data, &types),
             IrExpr::Return(_)
             | IrExpr::Variable { .. }
             | IrExpr::SetValue { .. }
@@ -2385,7 +2449,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(Some(joined))
     }
 
-    /// One field's contribution to a data class's `hashCode`, which is the field's own `hashCode`.
+    /// One field's contribution to a data class's `hashCode`, which is the field's own `hashCode`,
+    /// except that an ARRAY field contributes its contents' hash, as kotlinc's does.
     ///
     /// Kotlin's answer for each primitive is fixed, and these are those answers rather than
     /// anything this generator is free to choose: a program can print a hash, and two programs
@@ -2400,7 +2465,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             if self.terminated {
                 return Ok(None);
             }
-            return self.runtime_call("kt_hash_code", &[any()], Ty::Int, &[value]);
+            return self.generated_property_hash(value, ty).map(Some);
         }
         let Some(operand) = self.coerce(value, ty)? else {
             return Err("a `Unit` data-class field".into());
@@ -2409,6 +2474,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(None);
         }
         self.value_hash(operand, ty).map(Some)
+    }
+
+    /// The hash a generated `hashCode` takes of a property value already in hand. An array
+    /// property hashes by its CONTENTS (`Arrays.hashCode`, which is `contentHashCode()`), not by
+    /// the array's own identity `hashCode`; every other property hashes as [`Self::value_hash`]
+    /// says. Equality of the same property stays the array's identity.
+    pub(super) fn generated_property_hash(
+        &mut self,
+        operand: Value,
+        ty: Ty,
+    ) -> Result<Value, Unsupported> {
+        if !ty.non_null().is_array() {
+            return self.value_hash(operand, ty);
+        }
+        Ok(self
+            .runtime_call("kt_array_content_hash_code", &[any()], Ty::Int, &[operand])?
+            .expect("`kt_array_content_hash_code` returns an Int"))
     }
 
     /// The hash of a value already in hand, by the same rules.
@@ -2625,6 +2707,7 @@ fn describe(node: &IrExpr) -> String {
             Target::FunctionInvoke => {
                 "a reference to a function value's `invoke` declaration".to_string()
             }
+            Target::Property(_) => "a property reference read as a function value".to_string(),
         };
     }
     // The first two identifiers, not one: `Checked(Call { … })` and `Checked(PropertyRead { … })`

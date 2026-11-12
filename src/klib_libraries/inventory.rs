@@ -75,6 +75,12 @@ impl<T> CompanionExtension<T> {
     }
 }
 
+/// One package fragment before target-stdlib facts are attached.
+///
+/// In order: package segments, the decoded package, stdlib authority, friend visibility, and the
+/// declaring module when the fragment came from an archive.
+type PackageInput = (Vec<String>, KotlinPackage, bool, bool, Option<String>);
+
 /// Signed declarations by namespace, plus every package namespace a qualifier walk may pass
 /// through.
 pub(super) struct PackageInventory {
@@ -138,7 +144,7 @@ impl PackageInventory {
 
     /// Build an inventory while retaining which archive supplied friend-visible internals.
     pub(super) fn from_package_inputs(
-        packages: Vec<(Vec<String>, KotlinPackage, bool, bool, Option<String>)>,
+        packages: Vec<PackageInput>,
     ) -> Result<Self, KlibLibraryError> {
         Self::from_target_package_inputs(
             packages
@@ -643,6 +649,26 @@ impl PackageInventory {
                         })
                 })
             })
+    }
+
+    /// The class contract of `classifier`, the class a singleton edge dispatches to.
+    pub(super) fn class_body_contract(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::libraries::KlibBodyClassContract> {
+        let class = self.classifiers.get(&classifier)?;
+        Some(crate::libraries::KlibBodyClassContract {
+            module: class.module.clone()?,
+            signature: class.signature.clone(),
+            classifier,
+            parameters: class.type_parameters.klib_body_parameters(),
+            kind: class.shape.kind,
+            modality: class.modality,
+            is_value: class.is_value,
+            is_inner: class.shape.outer_instance.is_some(),
+            is_expect: class.expect,
+            primary_constructor: class.primary_constructor.clone(),
+        })
     }
 
     /// The actual declaration container, joined by exact callable identity, not a classifier

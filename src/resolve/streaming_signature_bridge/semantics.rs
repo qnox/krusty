@@ -2123,10 +2123,9 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 return Ok(vec![crate::fir::ResolvedTy::new(shape).ok()].into_boxed_slice());
             }
         }
-        let parameters_and_slots: Result<
-            (Vec<Ty>, Vec<Option<usize>>, crate::libraries::CallSig),
-            _,
-        > = self.with_resolver(scope, |resolver| {
+        type TopLevelCallExpectation = (Vec<Ty>, Vec<Option<usize>>, crate::libraries::CallSig);
+        let parameters_and_slots: Result<TopLevelCallExpectation, _> =
+            self.with_resolver(scope, |resolver| {
             let candidates = resolver.accessible_top_level_candidates(spelling);
             let argument_names = arguments
                 .iter()

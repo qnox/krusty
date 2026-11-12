@@ -62,6 +62,12 @@ impl Body<'_> {
                 self.code.array_get_u(self.runtime.chars);
                 Ok(())
             }
+            IrIntrinsic::UnsignedToString { source } => {
+                let (Some(receiver), []) = (receiver, args) else {
+                    return Err("an unsigned string conversion with malformed operands".into());
+                };
+                self.unsigned_string_of(receiver, source)
+            }
             // `Any?.toString()` is the string a template makes of its operand.
             IrIntrinsic::NullableAnyToString => {
                 let value = match (receiver, args) {
@@ -82,6 +88,12 @@ impl Body<'_> {
                     return Err("a malformed generated property comparison".to_string());
                 };
                 self.generated_property_equals(*left, *right, ty)
+            }
+            IrIntrinsic::DataClassArrayToString { ty } => {
+                let (None, [value]) = (receiver, args) else {
+                    return Err("a malformed generated array rendering".to_string());
+                };
+                self.generated_array_to_string(*value, ty)
             }
             other => Err(format!("a call to the intrinsic {other:?}")),
         }

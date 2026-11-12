@@ -16,12 +16,18 @@
 //! `String` is on every target. A string constant is copied out of the module's passive data
 //! segment with `array.new_data`.
 
+mod exception_classes;
 mod object_equality;
+mod object_strings;
+
+pub(super) use object_strings::ObjectStrings;
 
 use krusty::fx_hash::HashMap;
 
+use super::array_objects::ArrayObjects;
 use super::boxes::Boxes;
 use super::callable_references::CallableReferences;
+use super::class_tokens::{ClassTokens, TokenRuntime};
 use super::encode::{
     BlockType, Code, CompositeType, FieldType, Function, HeapType, Module, StorageType, ValType,
 };
@@ -31,7 +37,6 @@ use super::hashing::Hashing;
 use super::host::Host;
 use super::identity::IdentityObjects;
 use super::objects::ObjectRoot;
-use super::reference_arrays::ReferenceArrays;
 use super::type_objects::{TypeDescription, TypeObject, TypeObjects};
 
 /// Where a host write's bytes are staged in linear memory. The first 16 bytes are left for the
@@ -46,18 +51,15 @@ pub(super) struct Runtime {
     pub(super) chars: u32,
     /// `(struct (field (ref $chars)))`.
     pub(super) string: u32,
-    /// Reference-element array storage shared by every applied Kotlin `Array<T>`.
-    pub(super) references: u32,
-    pub(super) arrays: ReferenceArrays,
-    /// `(array (mut i32))`, the storage of a Kotlin `IntArray`.
-    pub(super) ints: u32,
-    /// `IntArray`'s identity object. Same shape as a reference array, with `ints` as storage.
-    pub(super) int_arrays: ReferenceArrays,
+    /// Every Kotlin array classifier's object type; `Array<T>` shares one reference storage.
+    pub(super) arrays: ArrayObjects,
     pub(super) string_equals: u32,
     pub(super) object_equals: u32,
     pub(super) string_concat: u32,
     pub(super) string_of_i32: u32,
     pub(super) string_of_i64: u32,
+    pub(super) string_of_u32: u32,
+    pub(super) string_of_u64: u32,
     pub(super) string_of_char: u32,
     pub(super) string_of_boolean: u32,
     pub(super) string_or_null: u32,
@@ -70,6 +72,8 @@ pub(super) struct Runtime {
     /// Kotlin's `hashCode()` rules.
     pub(super) hashing: Hashing,
     pub(super) exceptions: ExceptionTransport,
+    /// `toString()` of a runtime reference, and `kotlin.Any`'s and `kotlin.Throwable`'s defaults.
+    pub(super) object_strings: ObjectStrings,
     /// The box types of the primitives this module carries as references.
     pub(super) boxes: Boxes,
     /// The table types of the function values this module creates.
@@ -77,6 +81,8 @@ pub(super) struct Runtime {
     pub(super) callable_references: CallableReferences,
     /// The `KType` objects `typeOf` sites make.
     type_objects: TypeObjects,
+    /// What a class literal evaluates to.
+    pub(super) class_tokens: ClassTokens,
     /// Offsets of string constants already in the data segment.
     constants: HashMap<Vec<u16>, u32>,
 }
@@ -113,34 +119,43 @@ impl Runtime {
     /// run after every import is declared and before any program function.
     pub(super) fn start(module: &mut Module, host: &Host) -> Self {
         let (chars, string) = Self::declare_types(module);
-        let mut objects = ObjectRoot::declare(module, ValType::nullable(string));
+        let mut objects = ObjectRoot::declare(module, chars, string);
+        let identity = IdentityObjects::declare(module, &objects);
         let exceptions =
-            ExceptionTransport::declare(module, &mut objects, ValType::nullable(string));
+            ExceptionTransport::declare(module, &objects, &identity, ValType::nullable(string));
         let references = module.ty(CompositeType::Array(FieldType {
             storage: StorageType::Val(super::objects::REFERENCE),
             mutable: true,
         }));
-        let ints = module.ty(CompositeType::Array(FieldType {
-            storage: StorageType::Val(ValType::I32),
-            mutable: true,
-        }));
-        let identity = IdentityObjects::declare(module, &objects);
-        let arrays = ReferenceArrays::declare(module, &mut objects, &identity, references);
-        let int_arrays = ReferenceArrays::declare(module, &mut objects, &identity, ints);
+        let object_strings = ObjectStrings::declare(module, host.target());
+        let array_to_string = module.declare();
+        let arrays =
+            ArrayObjects::declare(module, &mut objects, &identity, references, array_to_string);
         let object_equals = module.declare();
         let callable_references = CallableReferences::declare(module, &objects, object_equals);
+        let string_concat = module.declare();
+        let hashing = Hashing::declare(module);
+        let class_tokens = ClassTokens::declare(
+            module,
+            &mut objects,
+            TokenRuntime {
+                string,
+                string_concat,
+                string_hash: hashing.string_hash,
+            },
+            &"class ".encode_utf16().collect::<Vec<_>>(),
+        );
         let mut runtime = Self {
             chars,
             string,
-            references,
             arrays,
-            ints,
-            int_arrays,
             string_equals: module.declare(),
             object_equals,
-            string_concat: module.declare(),
+            string_concat,
             string_of_i32: module.declare(),
             string_of_i64: module.declare(),
+            string_of_u32: module.declare(),
+            string_of_u64: module.declare(),
             string_of_char: module.declare(),
             string_of_boolean: module.declare(),
             string_or_null: module.declare(),
@@ -149,8 +164,10 @@ impl Runtime {
             i64_div: module.declare(),
             objects,
             identity,
-            hashing: Hashing::declare(module),
+            hashing,
+            class_tokens,
             exceptions,
+            object_strings,
             boxes: Boxes::default(),
             functions: FunctionShapes::default(),
             callable_references,
@@ -160,13 +177,17 @@ impl Runtime {
         runtime.define_string_equals(module);
         runtime.define_object_equals(module);
         runtime.define_string_concat(module);
-        runtime.define_string_of_i64(module);
+        runtime.define_decimal(module, runtime.string_of_i64, true);
+        runtime.define_decimal(module, runtime.string_of_u64, false);
         runtime.define_string_of_i32(module);
+        runtime.define_string_of_u32(module);
         runtime.define_string_of_char(module);
         runtime.define_string_of_boolean(module);
         runtime.define_string_or_null(module);
         runtime.define_write_string(module, host);
         runtime.define_division(module);
+        runtime.define_object_strings(module);
+        runtime.define_reference_array_to_string(module, array_to_string);
         runtime
             .hashing
             .define(module, &runtime.objects, runtime.string, runtime.chars);
@@ -303,10 +324,10 @@ impl Runtime {
         module.define(self.string_concat, Function { ty, locals, code });
     }
 
-    /// `(value: Long) -> String`: the decimal form, `-` first for a negative value. The magnitude
-    /// is taken as UNSIGNED so that `Long.MIN_VALUE`, which has no positive counterpart, still has
-    /// one: `0 - MIN_VALUE` wraps to itself, which read unsigned is exactly its magnitude.
-    fn define_string_of_i64(&self, module: &mut Module) {
+    /// Decimal digits of a 64-bit carrier, with signed or unsigned framing. The digit loop always
+    /// divides an unsigned magnitude: `0 - Long.MIN_VALUE` wraps to its unsigned magnitude, and
+    /// `ULong.MAX_VALUE` uses all 20 code units without a sign.
+    fn define_decimal(&self, module: &mut Module, index: u32, signed: bool) {
         let ty = module.func_type(vec![ValType::I64], vec![self.string_type()]);
         let (value, magnitude, digits, position, result) = (0, 1, 2, 3, 4);
         let mut code = Code::default();
@@ -314,17 +335,21 @@ impl Runtime {
             .array_new_default(self.chars)
             .local_set(digits);
         code.i32_const(20).local_set(position);
-        code.local_get(value)
-            .i64_const(0)
-            .op(LT_S64)
-            .if_(BlockType::Value(ValType::I64))
-            .i64_const(0)
-            .local_get(value)
-            .op(SUB64)
-            .else_()
-            .local_get(value)
-            .end()
-            .local_set(magnitude);
+        if signed {
+            code.local_get(value)
+                .i64_const(0)
+                .op(LT_S64)
+                .if_(BlockType::Value(ValType::I64))
+                .i64_const(0)
+                .local_get(value)
+                .op(SUB64)
+                .else_()
+                .local_get(value)
+                .end();
+        } else {
+            code.local_get(value);
+        }
+        code.local_set(magnitude);
         code.loop_(BlockType::Empty);
         code.local_get(position)
             .i32_const(1)
@@ -347,17 +372,19 @@ impl Runtime {
             .op(NE64)
             .br_if(0);
         code.end();
-        code.local_get(value).i64_const(0).op(LT_S64);
-        code.if_(BlockType::Empty)
-            .local_get(position)
-            .i32_const(1)
-            .op(SUB32)
-            .local_set(position)
-            .local_get(digits)
-            .local_get(position)
-            .i32_const(i32::from(b'-'))
-            .array_set(self.chars)
-            .end();
+        if signed {
+            code.local_get(value).i64_const(0).op(LT_S64);
+            code.if_(BlockType::Empty)
+                .local_get(position)
+                .i32_const(1)
+                .op(SUB32)
+                .local_set(position)
+                .local_get(digits)
+                .local_get(position)
+                .i32_const(i32::from(b'-'))
+                .array_set(self.chars)
+                .end();
+        }
         code.i32_const(20)
             .local_get(position)
             .op(SUB32)
@@ -374,7 +401,7 @@ impl Runtime {
         code.local_get(result).struct_new(self.string);
         let chars = ValType::reference(self.chars);
         let locals = vec![ValType::I64, chars, ValType::I32, chars];
-        module.define(self.string_of_i64, Function { ty, locals, code });
+        module.define(index, Function { ty, locals, code });
     }
 
     /// `(value: Int) -> String`.
@@ -384,6 +411,21 @@ impl Runtime {
         code.local_get(0).op(EXTEND_I32_S).call(self.string_of_i64);
         module.define(
             self.string_of_i32,
+            Function {
+                ty,
+                locals: Vec::new(),
+                code,
+            },
+        );
+    }
+
+    /// `(value: UInt) -> String`: preserve all 32 bits before the unsigned digit loop.
+    fn define_string_of_u32(&self, module: &mut Module) {
+        let ty = module.func_type(vec![ValType::I32], vec![self.string_type()]);
+        let mut code = Code::default();
+        code.local_get(0).op(EXTEND_I32_U).call(self.string_of_u64);
+        module.define(
+            self.string_of_u32,
             Function {
                 ty,
                 locals: Vec::new(),
@@ -703,6 +745,7 @@ pub(super) const SHR_S64: u8 = 0x87;
 pub(super) const SHR_U64: u8 = 0x88;
 pub(super) const WRAP_I64: u8 = 0xa7;
 pub(super) const EXTEND_I32_S: u8 = 0xac;
+pub(super) const EXTEND_I32_U: u8 = 0xad;
 
 /// The null of every struct and array type.
 pub(super) const NULL: HeapType = HeapType::None;

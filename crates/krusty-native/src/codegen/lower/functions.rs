@@ -172,6 +172,52 @@ fn reference_identity(
             format!("e{}", declaration.raw())
         }
         Target::FunctionValueConversion { ordinal } => format!("conversion_{ordinal}"),
+        // A property read as a function value is the property reference, equal to every other
+        // reference to the same property. A property another module may name is identified by
+        // its getter's published identity, in its own module as in every other.
+        Target::Property(property) => match property.referenced_property() {
+            Some(krusty::ir::IrReferencedProperty::Module(property)) => {
+                // A property this module exports is named by its published identity, which its
+                // importers' references share; any other module property by its declaration.
+                let declaration = match file.dependency_signatures.property_declaration(property) {
+                    Some(identity) => ReferenceDeclaration::dependency(identity),
+                    None => ReferenceDeclaration::property(file.module_name, property),
+                };
+                return Ok(ReferenceIdentity::Program(
+                    declaration.marker(reference.bound_receiver.is_some()),
+                ));
+            }
+            // A dependency property is named by its getter's own provider identity, which every
+            // file's reference to it shares, under the same rule as a dependency function's
+            // reference: a getter its provider gives no such identity is identified per file.
+            Some(krusty::ir::IrReferencedProperty::External(property)) => {
+                let getter = file
+                    .callables
+                    .property(property)
+                    .ok_or("a property reference without frozen declaration facts")?
+                    .getter;
+                // An exported property's module names it by its getter's published identity, so an
+                // importer names it by that same identity rather than a source export's marker.
+                let identity = file
+                    .callables
+                    .callable(getter)
+                    .ok_or("a property reference without frozen getter facts")?
+                    .dependency_callable
+                    .as_ref();
+                if let Some(identity) = identity {
+                    return Ok(ReferenceIdentity::Program(
+                        ReferenceDeclaration::dependency(identity)
+                            .marker(reference.bound_receiver.is_some()),
+                    ));
+                }
+                format!("property_e{}", property.raw())
+            }
+            None => {
+                return Err(
+                    "a property read as a function value without its property declaration".into(),
+                );
+            }
+        },
         Target::FunctionInvoke => format!(
             "function_invoke_{}_{}",
             reference.declaration_parameters.len(),
@@ -609,7 +655,7 @@ impl<'a> FileLowering<'a> {
         // `kotlin.Any` member it overrides — so a SAM object answers `result()` or `toString()`
         // the way an ordinary implementor would, and only then fill in the member the lambda is.
         let layout = self.model.layout(interface).clone();
-        let mut vtable = self.table_functions(&layout.vtable)?;
+        let mut vtable = self.table_functions(&layout.vtable, None)?;
         let itable_template = layout.itable;
         let sam_number = match entry {
             model::Dispatch::Class(slot) => {
@@ -648,7 +694,7 @@ impl<'a> FileLowering<'a> {
                 "a functional interface inheriting a body of another file it cannot name".into(),
             );
         }
-        let mut itable = self.table_functions(&itable_template)?;
+        let mut itable = self.table_functions(&itable_template, None)?;
         if let Some(number) = sam_number {
             itable[number as usize] = thunk;
         }

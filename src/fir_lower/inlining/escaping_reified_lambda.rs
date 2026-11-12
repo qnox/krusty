@@ -135,7 +135,10 @@ fn an_inlined_reified_check_specializes_only_the_call_site_lambda() {
     assert_eq!(specialization.caller_source_name, "box");
     assert_eq!(
         specialization.inline_callee,
-        callable_for_function(&ir, function_named(&ir, "defineFunc"))
+        crate::ir::IrInlineCallee::Module(callable_for_function(
+            &ir,
+            function_named(&ir, "defineFunc"),
+        ))
     );
     assert_eq!(specialization.inline_callee_source_name, "defineFunc");
     assert_eq!(specialization.parent, None);
@@ -607,7 +610,10 @@ fn repeated_expansions_keep_distinct_semantic_copies_without_physical_ordinals()
         assert_eq!(specialization.caller_source_name, "box");
         assert_eq!(
             specialization.inline_callee,
-            callable_for_function(&ir, function_named(&ir, "defineFunc"))
+            crate::ir::IrInlineCallee::Module(callable_for_function(
+                &ir,
+                function_named(&ir, "defineFunc"),
+            ))
         );
         assert_eq!(specialization.inline_callee_source_name, "defineFunc");
         assert_eq!(specialization.source, declaration[0]);
