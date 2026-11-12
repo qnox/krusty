@@ -1126,6 +1126,7 @@ impl ClassFlags {
     const HAS_ABSTRACT_MEMBERS: u16 = 1 << 6;
     const ANNOTATION: u16 = 1 << 7;
     const DATA: u16 = 1 << 8;
+    const ENUM: u16 = 1 << 9;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -1177,6 +1178,10 @@ impl ClassFlags {
     pub const fn with_data(self, on: bool) -> Self {
         self.with(Self::DATA, on)
     }
+    #[inline]
+    pub const fn with_enum(self, on: bool) -> Self {
+        self.with(Self::ENUM, on)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1202,6 +1207,7 @@ fn source_class_flags(class: &ClassDecl) -> ClassFlags {
         )
         .with_annotation(class.is_annotation())
         .with_data(class.is_data)
+        .with_enum(class.is_enum())
 }
 
 /// Classifier flags read from the compact Pass-1 declaration inventory.
@@ -1237,6 +1243,7 @@ fn streamed_source_class_flags(
         .with_has_abstract_members(has_abstract_members)
         .with_annotation(flags.has(crate::fir::DeclarationFlags::ANNOTATION_CLASS))
         .with_data(flags.has(crate::fir::DeclarationFlags::DATA))
+        .with_enum(flags.has(crate::fir::DeclarationFlags::ENUM))
 }
 
 /// Capture the source-level callable inventory before functions and properties are normalized into
@@ -1457,6 +1464,10 @@ pub struct ClassSig {
     /// `final`, `has_abstract_members`, `annotation`). Read via the `is_*`/`has_*` accessors; the
     /// `annotation` bit lives here too (its doc stays at the former field position below).
     pub flags: ClassFlags,
+    /// Declared enum entry names in source order. Non-empty only for an `enum class` (the
+    /// [`ClassFlags::ENUM`] kind); an enum is an ordinary classifier of that kind, not a separate
+    /// table.
+    pub enum_entries: Vec<String>,
     /// `Some(outer_internal)` for an `inner class` — it captures the enclosing instance (a `this$0`
     /// field of the outer type); constructed as `outerInstance.Inner(...)`.
     pub inner_of: Option<TypeName>,
@@ -1636,6 +1647,7 @@ impl ClassSig {
             declared_callable_order,
             source_methods: Vec::new(),
             flags,
+            enum_entries: Vec::new(),
             inner_of: None,
             companion_internal,
             lateinit_props: Default::default(),
@@ -1799,6 +1811,11 @@ impl ClassSig {
     #[inline]
     pub fn is_interface(&self) -> bool {
         self.flags.has(ClassFlags::INTERFACE)
+    }
+    /// True for an `enum class`.
+    #[inline]
+    pub fn is_enum(&self) -> bool {
+        self.flags.has(ClassFlags::ENUM)
     }
     /// True if declared `object` (a singleton).
     #[inline]
@@ -2703,10 +2720,6 @@ pub struct SymbolTable {
     /// name but must emit the annotated one, and the callee's AST is out of its reach — so the name
     /// is recorded here, where the collect pass can see every file. Absent = the two agree.
     pub toplevel_jvm_names: HashMap<(u32, u32), String>,
-    /// Declared enum entries by classifier identity, accessed via `Name.ENTRY`. Object identity is
-    /// already carried by `ClassSig::is_object`; duplicating it in a simple-name set made the two
-    /// sources disagree for cross-package homonyms.
-    pub enums: HashMap<TypeName, Vec<String>>,
     /// The target's compiled library set — a JVM classpath or a klib (empty unless the driver
     /// supplies one). The front end resolves external references only through this abstraction.
     pub libraries: Box<dyn SemanticPlatform>,
@@ -2845,7 +2858,6 @@ impl Default for SymbolTable {
             context_prop_names: crate::fx_hash::HashSet::default(),
             property_inference_failures: HashMap::default(),
             toplevel_jvm_names: HashMap::default(),
-            enums: HashMap::default(),
             libraries: Box::new(EmptySymbolSource),
             native_plugins: Default::default(),
             annotation_conventions: Default::default(),
@@ -3494,7 +3506,10 @@ impl SymbolTable {
 
     /// The source enum entry names for this classifier identity.
     pub fn enum_entries_of(&self, internal: TypeName) -> Option<&Vec<String>> {
-        self.enums.get(&internal)
+        self.classes
+            .get(&internal)
+            .filter(|class| class.is_enum())
+            .map(|class| &class.enum_entries)
     }
 
     /// The source spelling (`Wrapper`, `Outer.Inner` for a nested class) of a MODULE class's internal
@@ -21560,7 +21575,7 @@ mod tests {
         assert!(class.value_field.is_none());
         assert!(!class.methods.contains_key("component1"));
         assert!(!class.methods.contains_key("copy"));
-        assert!(!symbols.enums.contains_key(&type_name("Box")));
+        assert!(symbols.enum_entries_of(type_name("Box")).is_none());
         assert_eq!(class.ctor_params, [Ty::Int]);
         let value = &class.declared_props["value"];
         assert_eq!(value.visibility, Visibility::Public);
