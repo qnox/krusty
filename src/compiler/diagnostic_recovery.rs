@@ -106,12 +106,16 @@ fn check_active_diagnostic_unit(
         .map(|(declaration, _)| *declaration)
         .collect::<crate::fx_hash::HashSet<_>>();
     drop(crate::resolve::check_selected_declarations_in_pass_two(
-        active_file,
-        raw_source as u32,
-        &selected_roots,
-        &selected_bodies,
+        crate::resolve::SourceFileUnit {
+            file: active_file,
+            file_index: raw_source as u32,
+        },
+        crate::resolve::SpanBodySelection {
+            declarations: &selected_roots,
+            bodies: &selected_bodies,
+            stable_bodies: &selected_stable_bodies,
+        },
         active,
-        &selected_stable_bodies,
         symbols,
         index,
         streamed_cache,

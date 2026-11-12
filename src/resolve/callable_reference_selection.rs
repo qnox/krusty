@@ -105,7 +105,7 @@ fn adaptation_specificity_shape(params: &[Ty], plan: &[AdaptedRefArgument]) -> V
             }
             AdaptedRefArgument::Vararg { values, .. } => {
                 let element = declared.array_read_elem().unwrap_or(declared);
-                shape.extend(std::iter::repeat(element).take(values.len()));
+                shape.extend(std::iter::repeat_n(element, values.len()));
             }
         }
     }
@@ -314,14 +314,14 @@ pub(super) fn specialize_generic_signature(
             source,
             generic,
             expected,
-            |actual, target| is_assignable(actual, target),
+            &mut is_assignable,
         ) {
             crate::symbol_resolver::merge_generic_upper_bindings(
                 generic,
                 0,
                 &mut bindings,
                 inferred,
-                |actual, target| is_assignable(actual, target),
+                &mut is_assignable,
             );
         }
     }
@@ -338,7 +338,7 @@ pub(super) fn specialize_generic_signature(
     if !crate::symbol_resolver::generic_bindings_satisfy_bounds(
         generic,
         &validation_bindings,
-        |actual, bound| is_assignable(actual, bound),
+        is_assignable,
     ) {
         return Err(CallableRefSpecialization::Inapplicable);
     }
@@ -389,7 +389,7 @@ pub(super) fn specialize_candidate_with_type_arguments(
     let Some(generic) = function.generic_sig.clone() else {
         return Ok(Vec::new());
     };
-    let specialized = match specialize_generic_signature(
+    let specialized = specialize_generic_signature(
         source,
         &generic,
         &function.call_sig,
@@ -397,10 +397,7 @@ pub(super) fn specialize_candidate_with_type_arguments(
         expected_params,
         expected_ret,
         is_assignable,
-    ) {
-        Ok(specialized) => specialized,
-        Err(failure) => return Err(failure),
-    };
+    )?;
     let type_arguments = specialized.type_arguments;
     function.receiver = specialized.receiver;
     function.callable.params = if function.is_extension() {
@@ -792,14 +789,14 @@ fn select_adapted_bound_instance_candidate(
                 None,
                 Some(&expected.params),
                 Some(expected.ret),
-                |actual, bound| is_assignable(actual, bound),
+                &mut is_assignable,
             )
             .ok()?;
             let plan = parameter_plan(
                 &candidate.semantic_params(),
                 &candidate.call_sig,
                 &expected.params,
-                |actual, target| is_assignable(actual, target),
+                &mut is_assignable,
             )?;
             if !is_compatible(
                 &expected.params,
@@ -807,7 +804,7 @@ fn select_adapted_bound_instance_candidate(
                 candidate.callable.suspend,
                 expected,
                 true,
-                |actual, target| is_assignable(actual, target),
+                &mut is_assignable,
             ) {
                 return None;
             }

@@ -373,9 +373,11 @@ Recording each of those compiles into the archive as well rewrote the whole arch
 pushed a cold scored run past its deadline. In CI each JVM conformance row restores that directory
 from its base commit's GHA cache (`box-reference-classes-<version>-…`), and master saves it under
 its own commit, so a pull request pays kotlinc only for cases whose inputs it changed. The outer key
-hashes the inventory owner, shared case planning, kotlinc server/Javac driver, and the content-
-identity implementation, so a producer change starts a fresh cache even though a hit does not run
-that producer. Each entry additionally uses the recorded-byte archive's process-memoized content
+names only the Kotlin version: a change to how references are planned, invoked, or laid out bumps
+`REF_CACHE_SALT` in `tests/box_reference_classes.rs`, which re-keys every entry, while any other
+harness edit keeps the cache. A read refreshes an entry's `OK`/`FAILED` marker time, and before
+master saves, `scripts/prune-reference-cache.sh` drops entries unread for a week, so the cache
+tracks the current suite instead of growing with every input it ever compiled. Each entry additionally uses the recorded-byte archive's process-memoized content
 identity for the complete selected kotlinc installation, the exact JDK selected to run kotlinc and
 javac (`KRUSTY_REF_JAVA_HOME` before `JAVA_HOME`), the mock JDK when selected, and every explicit
 classpath dependency. Those immutable inputs are hashed once per process. Replacing a distribution

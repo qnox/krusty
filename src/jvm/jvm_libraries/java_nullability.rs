@@ -102,6 +102,25 @@ pub(super) fn java_type_argument_nullability(ty: Ty) -> Ty {
     }
 }
 
+/// The enhancement a Java method's result starts from, before any overridden declaration is known.
+///
+/// `@NotNull` enhances it outright. A method of a JDK class that realizes a mapped Kotlin builtin
+/// (`java.lang.Throwable` for `kotlin.Throwable`) is not a Java declaration in Kotlin's scope:
+/// kotlinc's `JvmMappedScope` shows the builtin declaration it overrides instead, so an override
+/// gives it that declaration's result without marking it enhanced.
+pub(super) fn java_result_enhancement(
+    owner: TypeName,
+    nullability: Option<JavaNullability>,
+) -> ResultEnhancement {
+    if nullability == Some(JavaNullability::NotNull) {
+        ResultEnhancement::NotNull
+    } else if super::super::jvm_class_map::maps_to_distinct_jvm_internal(owner) {
+        ResultEnhancement::MappedRealization
+    } else {
+        ResultEnhancement::None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,24 +157,5 @@ mod tests {
             java_type_argument_nullability(variable),
             Ty::ty_param("T", Ty::platform_nullable(Ty::obj("java/lang/Object")),)
         );
-    }
-}
-
-/// The enhancement a Java method's result starts from, before any overridden declaration is known.
-///
-/// `@NotNull` enhances it outright. A method of a JDK class that realizes a mapped Kotlin builtin
-/// (`java.lang.Throwable` for `kotlin.Throwable`) is not a Java declaration in Kotlin's scope:
-/// kotlinc's `JvmMappedScope` shows the builtin declaration it overrides instead, so an override
-/// gives it that declaration's result without marking it enhanced.
-pub(super) fn java_result_enhancement(
-    owner: TypeName,
-    nullability: Option<JavaNullability>,
-) -> ResultEnhancement {
-    if nullability == Some(JavaNullability::NotNull) {
-        ResultEnhancement::NotNull
-    } else if super::super::jvm_class_map::maps_to_distinct_jvm_internal(owner) {
-        ResultEnhancement::MappedRealization
-    } else {
-        ResultEnhancement::None
     }
 }

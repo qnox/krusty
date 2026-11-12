@@ -51,6 +51,7 @@ use super::super::runtime::Runtime;
 use super::lower::{carrier, parameter_carrier, Unsupported, STRING};
 
 mod constructor_prefix;
+pub(super) use constructor_prefix::enclosing_field;
 
 #[cfg(test)]
 mod annotation_class_tests;

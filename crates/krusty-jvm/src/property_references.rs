@@ -1,8 +1,11 @@
 //! JVM realization of checked property-reference declarations.
 
 pub(crate) mod delegated_arrays;
+mod inline_getters;
 pub(crate) mod local_delegated_properties;
 mod realization;
+
+pub(crate) use inline_getters::SplicedGetters;
 
 pub(crate) use delegated_arrays::DelegatedPropertyArrays;
 
@@ -106,6 +109,7 @@ pub(super) fn realize(
     callables: &krusty::backend::CheckedBackendCallables,
     current_facade: &str,
     delegate_helpers: &super::local_delegate_accessors::HelperAccess,
+    mut spliced_getters: SplicedGetters,
 ) -> Result<PropertyReferenceRealizations, PropertyReferenceRealizationTarget> {
     let facades = &file_classes.containers[..];
     let mut realizations = PropertyReferenceRealizations::default();
@@ -328,7 +332,8 @@ pub(super) fn realize(
             });
             continue;
         }
-        ir.exprs[raw] = synthesize(
+        let get_receiver = inline_getters::GetReceiver::of(receiver.is_some(), &property);
+        let (class, carrier) = synthesize(
             ir,
             current_facade,
             raw,
@@ -337,6 +342,14 @@ pub(super) fn realize(
             receiver,
             &mut realizations,
         );
+        if let Some(adapter) = spliced_getters.take(raw as u32) {
+            inline_getters::realize_own_get(ir, raw, class, adapter, get_receiver);
+        }
+        ir.exprs[raw] = carrier;
+    }
+    // Every spliced getter belongs to a carrier synthesized above.
+    if !spliced_getters.is_empty() {
+        return Err(PropertyReferenceRealizationTarget::Invalid);
     }
     realizations.pending_delegated = delegated_operands;
     Ok(realizations)
@@ -506,6 +519,7 @@ fn classifier_property(
             static_dispatch: true,
             mutable: false,
             ext_facade: None,
+            get: None,
         },
         PropertyReferenceRealization {
             declared_getter_name: getter.to_string(),
@@ -694,6 +708,7 @@ fn external_property(
             static_dispatch,
             mutable: setter.is_some(),
             ext_facade,
+            get: None,
         },
         PropertyReferenceRealization {
             declared_getter_name: getter_name,
@@ -1027,6 +1042,7 @@ fn module_property(
             static_dispatch,
             mutable: reference_mutable,
             ext_facade,
+            get: None,
         },
         PropertyReferenceRealization {
             declared_getter_name,
@@ -1093,7 +1109,7 @@ fn synthesize(
     realization: PropertyReferenceRealization,
     receiver: Option<krusty::ir::ExprId>,
     realizations: &mut PropertyReferenceRealizations,
-) -> IrExpr {
+) -> (krusty::ir::ClassId, IrExpr) {
     let bound = receiver.is_some();
     property.bound = bound;
     let arity = usize::from(!bound && !property.static_dispatch);
@@ -1118,7 +1134,7 @@ fn synthesize(
     class.prop_ref = Some(property);
     realizations.record(internal, realization);
     let class = ir.add_class(class);
-    match receiver {
+    let carrier = match receiver {
         Some(receiver) => IrExpr::New {
             internal,
             args: vec![receiver],
@@ -1134,7 +1150,8 @@ fn synthesize(
             ty: class,
             field: "INSTANCE",
         },
-    }
+    };
+    (class, carrier)
 }
 
 /// A private companion property is realized before its field moves to the outer class. Once that

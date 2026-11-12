@@ -20,7 +20,6 @@ annotations/instances/instanceEquality.kt
 annotations/instances/multifileEqHc.kt
 annotations/instances/multimoduleTypeParams.kt
 annotations/instances/nested.kt
-annotations/instances/nestedDefaults.kt
 annotations/instances/typeAliasesAndGenericsInterop.kt
 annotations/selfReferentialAnnotation.kt
 annotations/typeAnnotations/checkingNotincorporatedInputTypes.kt
@@ -123,7 +122,6 @@ boxingOptimization/safeCallWithElvisMultipleFiles.kt
 boxingOptimization/simple.kt
 boxingOptimization/simpleUninitializedMerge.kt
 boxingOptimization/taintedValues.kt
-boxingOptimization/taintedValuesBox.kt
 boxingOptimization/unsafeRemoving.kt
 boxingOptimization/unsignedArrayForEach.kt
 boxingOptimization/variables.kt
@@ -158,7 +156,6 @@ builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
 callableReference/adaptedReferences/boundReferences.kt
 callableReference/adaptedReferences/inlineDefault.kt
 callableReference/adaptedReferences/inlineVararg.kt
-callableReference/adaptedReferences/inlineVarargInts.kt
 callableReference/adaptedReferences/manyDefaultsAndVararg.kt
 callableReference/adaptedReferences/suspendConversion/adaptedWithCoercionToUnit.kt
 callableReference/adaptedReferences/suspendConversion/adaptedWithDefaultArguments.kt
