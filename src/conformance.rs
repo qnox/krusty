@@ -863,9 +863,6 @@ pub fn kotlin_source_blocks(
             } else if file_name.is_some() {
                 body.push_str(line);
                 body.push('\n');
-            } else if !saw_file {
-                preamble.push_str(line);
-                preamble.push('\n');
             } else if module.is_some()
                 && !ignore_non_kotlin_file
                 && !trimmed.is_empty()
@@ -874,11 +871,17 @@ pub fn kotlin_source_blocks(
                 // The testdata convention permits one implicit Kotlin file immediately under a
                 // module header. Name it after the module, just like `split_modules`.
                 file_name = module.clone();
-                if preamble_contains_code(&preamble) && blocks.is_empty() && body.is_empty() {
-                    body.push_str(&preamble);
+                if !saw_file {
+                    saw_file = true;
+                    if preamble_contains_code(&preamble) {
+                        body.push_str(&preamble);
+                    }
                 }
                 body.push_str(line);
                 body.push('\n');
+            } else if !saw_file {
+                preamble.push_str(line);
+                preamble.push('\n');
             }
         }
         flush(&mut blocks, &module, &mut file_name, &mut body);
@@ -2045,6 +2048,26 @@ fun box(): String = \"OK\"
         let src = "// MODULE: only\n// FILE: only.kt\nfun box(): String = \"OK\"\n";
         assert!(split_modules(src).is_none());
         assert_eq!(source_modules(src).expect("one module").len(), 1);
+    }
+
+    #[test]
+    fn kotlin_source_blocks_name_implicit_module_files_without_file_markers() {
+        let src = "// LANGUAGE: +MultiPlatformProjects\nval leading = 1\n// MODULE: common\nexpect fun f(): String\n// MODULE: main()()(common)\n// a comment\nactual fun f() = \"OK\"\n";
+        let blocks = kotlin_source_blocks(src, "Case").unwrap();
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| (block.module.as_deref(), block.name.as_str(), block.source.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    Some("common"),
+                    "common",
+                    "// LANGUAGE: +MultiPlatformProjects\nval leading = 1\nexpect fun f(): String\n"
+                ),
+                (Some("main"), "main", "actual fun f() = \"OK\"\n"),
+            ]
+        );
     }
 
     #[test]
