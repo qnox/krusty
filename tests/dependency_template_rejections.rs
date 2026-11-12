@@ -313,10 +313,8 @@ fn produce_lib_archive(target: DependencyTarget) -> ProducedArchive {
     let mut diagnostics = DiagSink::new();
     let (analysis, stems, _) = super::box_lane::analyze_module(
         lib,
-        &[],
-        &[],
+        super::box_lane::ModuleDependencies::NONE,
         source,
-        super::box_lane::Libraries::StdlibKlib,
         target.test_target,
         target.test_target.compilation_target(),
         &mut diagnostics,

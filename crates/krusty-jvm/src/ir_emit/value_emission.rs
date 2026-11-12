@@ -1949,7 +1949,7 @@ impl super::Emitter<'_> {
                 if self.value_ty(*operand).is_jvm_scalar() {
                     return;
                 }
-                self.emit_null_assertion_check(check, code);
+                self.emit_null_assertion_check(e, check, code);
                 if let Some(elem) = shared_cell {
                     self.narrow_shared_cell_element(elem, code);
                 }

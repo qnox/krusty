@@ -377,7 +377,7 @@ fn blocked_slots(
                 init: Some(init),
                 named: false,
                 ..
-            } if *init == read && converted.contains_key(&index)
+            } if *init == read && converted.contains_key(index)
         )
     };
     let mut blocked = HashSet::default();
@@ -408,7 +408,7 @@ fn blocked_slots(
             let IrExpr::GetValue(source) = ir.expr(copy) else {
                 continue;
             };
-            if !converted.contains_key(&source) || blocked.contains(&source) {
+            if !converted.contains_key(source) || blocked.contains(source) {
                 continue;
             }
             let Some(uses) = parents.get(&copy) else {
@@ -418,7 +418,7 @@ fn blocked_slots(
                 matches!(
                     ir.expr(*parent),
                     IrExpr::Variable { index, init: Some(init), named: false, .. }
-                        if *init == copy && blocked.contains(&index)
+                        if *init == copy && blocked.contains(index)
                 )
             });
             if feeds_blocked && blocked.insert(*source) {

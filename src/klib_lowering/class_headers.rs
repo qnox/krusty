@@ -6,6 +6,7 @@ use crate::fx_hash::HashSet;
 use crate::klib_libraries::KlibDeclarationBodies;
 use crate::libraries::{
     KlibAccessorRole, KlibBodyCallable, KlibBodyClassContract, KlibBodyClassParameters,
+    KlibDeclarationSignature, KlibSerializedMember,
 };
 use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrClass, KlibIrFunction, KlibIrVariance};
 use crate::metadata::klib_ir::KlibIrSymbolKind;
@@ -19,7 +20,9 @@ pub(super) struct ClassMemberHeader<'a, 'b> {
     pub(super) contract: &'a KlibBodyClassContract,
     pub(super) arena: &'b KlibIrArena,
     pub(super) function: &'b KlibIrFunction,
-    pub(super) class: &'b KlibIrClass,
+    /// The serialized class, when the member is a direct member of it. `None` means the provider
+    /// serialized the member as its function; there is no class node to read.
+    pub(super) class: Option<&'b KlibIrClass>,
     pub(super) types: KlibTypeParameters,
     pub(super) formals: Vec<String>,
 }
@@ -60,19 +63,27 @@ pub(super) fn declared_receiver(class: &KlibBodyClassContract) -> Ty {
     }
 }
 
+/// Authenticate `selected` as a member. `held_function` is the function this authentication
+/// already holds. A member the provider serialized as its function uses that function;
+/// authentication does not look up another one.
 pub(super) fn authenticate<'a, 'b>(
     selected: KlibBodyCallable<'a>,
     bodies: &'b KlibDeclarationBodies,
+    held_function: Option<(&'b KlibIrArena, &'b KlibIrFunction)>,
 ) -> Result<ClassMemberHeader<'a, 'b>, KlibBodyDeclineReason> {
     let class = selected
         .class_contract()
         .ok_or_else(|| mismatch("a selected member has no provider-owned class contract"))?;
+    // A singleton edge's class is the singleton it dispatches to. Its declaration owner can
+    // remain the class the member was inherited from.
+    let class_is_member_owner = selected.declaration_owner()
+        == Some(crate::types::SemanticCallableOwner::Classifier(
+            class.classifier,
+        ));
+    let class_is_singleton = selected.singleton_classifier() == Some(class.classifier);
     if class.module != selected.identity().module
         || class.signature.member_id().is_some()
-        || selected.declaration_owner()
-            != Some(crate::types::SemanticCallableOwner::Classifier(
-                class.classifier,
-            ))
+        || !(class_is_member_owner || class_is_singleton)
         || classifier_name(&class.signature)? != class.classifier
     {
         return Err(mismatch(
@@ -87,22 +98,61 @@ pub(super) fn authenticate<'a, 'b>(
                 .accessor()
                 .map_or(KlibAccessorRole::Getter, |accessor| accessor.role),
         )
-        .map_err(mismatch)?
-        .ok_or_else(|| mismatch("a selected member has no exact serialized class header"))?;
-    if member.class.base.symbol.kind != KlibIrSymbolKind::Class {
-        return Err(mismatch(
-            "the serialized class header has a non-class symbol",
-        ));
+        .map_err(mismatch)?;
+    if let Some(member) = member {
+        if member.class.base.symbol.kind != KlibIrSymbolKind::Class {
+            return Err(mismatch(
+                "the serialized class header has a non-class symbol",
+            ));
+        }
+        let (types, formals) =
+            bind_class_parameters(&class.parameters, member.arena, member.class)?;
+        return Ok(ClassMemberHeader {
+            contract: class,
+            arena: member.arena,
+            function: member.function,
+            class: Some(member.class),
+            types,
+            formals,
+        });
     }
-    let (types, formals) = bind_class_parameters(&class.parameters, member.arena, member.class)?;
-    Ok(ClassMemberHeader {
-        contract: class,
-        arena: member.arena,
-        function: member.function,
-        class: member.class,
-        types,
-        formals,
-    })
+    // The class has no serialized header for this member. A singleton the provider serialized
+    // as its function carries that fact on the edge. The function is the one this
+    // authentication already holds, and a class with no type parameters has nothing to bind.
+    let held_member = (selected.serialized_member() == KlibSerializedMember::Function
+        && class_is_singleton
+        && class.parameters.formals.is_empty())
+    .then_some(held_function)
+    .flatten()
+    .filter(|(_, function)| {
+        function.base.symbol.kind == KlibIrSymbolKind::Function
+            && signature_is(selected.signature(), &function.base.symbol.signature)
+    });
+    if let Some((arena, function)) = held_member {
+        return Ok(ClassMemberHeader {
+            contract: class,
+            arena,
+            function,
+            class: None,
+            types: KlibTypeParameters::default(),
+            formals: Vec::new(),
+        });
+    }
+    Err(mismatch(
+        "a selected member has no exact serialized class header",
+    ))
+}
+
+fn signature_is(declared: &KlibDeclarationSignature, serialized: &KlibIrSignature) -> bool {
+    match (declared, serialized) {
+        (KlibDeclarationSignature::Public(declared), KlibIrSignature::Public(serialized)) => {
+            declared == serialized
+        }
+        (KlibDeclarationSignature::Accessor(declared), KlibIrSignature::Accessor(serialized)) => {
+            declared == serialized
+        }
+        _ => false,
+    }
 }
 
 /// The raw header of `identity`, a private member of `class` that no provider records. Only
@@ -144,7 +194,7 @@ pub(super) fn authenticate_private_member<'a, 'b>(
         contract: class,
         arena: member.arena,
         function: member.function,
-        class: member.class,
+        class: Some(member.class),
         types,
         formals,
     })

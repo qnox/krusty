@@ -566,6 +566,7 @@ impl Record {
             None,
             None,
             Some(&self.identity),
+            crate::libraries::KlibSerializedMember::Class,
         )
         .expect("signed")
     }
@@ -1533,9 +1534,10 @@ fn stdlib_calls_reach_header_declared_callees() {
     // they are not expected-failure allowances for executable conformance tests. Elvis and safe-call
     // blocks, then generic calls and `when` subject blocks, now reach further declared callees;
     // so do callees that declare parameter defaults, which their headers now carry, and callees
-    // reached past a call that leaves a parameter to its default. The same complete inputs were
-    // measured on every release. A call of an inherited member no library serializes now links to
-    // the declaration it inherits and declines there as a member function call.
+    // reached past a call that leaves a parameter to its default, and past a `for` loop over an
+    // array, which loops by index. The same complete inputs were measured on every release. A
+    // call of an inherited member no library serializes now links to the declaration it inherits
+    // and declines there as a member function call.
     let expected =
         if crate::kotlin_version::target() >= crate::kotlin_version::KotlinVersion::V2_4_20 {
             vec![
@@ -1543,10 +1545,10 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it calls `kotlin.NumberFormatException.<init>`)", 4),
                 ("it calls `kotlin.UInt.<init>`)", 4),
                 ("it converts a value implicitly)", 4),
-                ("it declares type parameters)", 205),
+                ("it declares type parameters)", 207),
                 ("it uses a call of a file-private declaration)", 6),
-                ("it uses a call of a member function)", 84),
-                ("it uses a call through a property accessor signature)", 35),
+                ("it uses a call of a member function)", 88),
+                ("it uses a call through a property accessor signature)", 39),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),
                 (
@@ -1561,10 +1563,10 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it calls `kotlin.NumberFormatException.<init>`)", 4),
                 ("it calls `kotlin.UInt.<init>`)", 4),
                 ("it converts a value implicitly)", 4),
-                ("it declares type parameters)", 187),
+                ("it declares type parameters)", 189),
                 ("it uses a call of a file-private declaration)", 4),
-                ("it uses a call of a member function)", 81),
-                ("it uses a call through a property accessor signature)", 35),
+                ("it uses a call of a member function)", 85),
+                ("it uses a call through a property accessor signature)", 39),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),
                 (

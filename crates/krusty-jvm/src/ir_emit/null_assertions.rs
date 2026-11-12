@@ -1,19 +1,22 @@
 //! The `Intrinsics` call a `!!` or a platform-value assertion writes over the value on the stack.
 
 use super::Emitter;
-use krusty::ir::NullCheck;
+use krusty::ir::{ExprId, NullCheck};
 use krusty::jvm::classfile::CodeBuilder;
 
 impl Emitter<'_> {
     /// Check the reference on top of the stack against null, leaving it in place.
-    pub(super) fn emit_null_assertion_check(&mut self, check: &NullCheck, code: &mut CodeBuilder) {
-        // An inlined operand leaves the caller's line forgotten. kotlinc marks the checked
-        // expression's line again at the implicit check, so the check owns an entry even
-        // though the restored caller line is already in effect.
-        if matches!(check, NullCheck::Named { .. }) && code.line_forgotten() {
-            if let Some(line) = code.current_line() {
-                code.mark_line(line.into());
-            }
+    pub(super) fn emit_null_assertion_check(
+        &mut self,
+        assertion: ExprId,
+        check: &NullCheck,
+        code: &mut CodeBuilder,
+    ) {
+        // kotlinc lowers the implicit check to a temporary of the checked value
+        // (`TypeOperatorLowering`), whose declaration marks the check's line once the
+        // value is on the stack: after an inlined operand the mapper wrote nothing yet.
+        if matches!(check, NullCheck::Named { .. }) {
+            self.mark_expression_start(assertion, code);
         }
         code.dup();
         // A platform value narrowed to a declared non-null type names the checked expression

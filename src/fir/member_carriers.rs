@@ -12,17 +12,20 @@ impl ResolvedModuleIndex {
     /// The parameters (context parameters, then the extension receiver, then the declared value
     /// parameters) and result of `callable` as common IR declares its function.
     ///
-    /// A compiler-generated member stores its values, so `Unit` crosses as the `kotlin.Unit`
-    /// singleton. A `companion { … }` member's extension receiver is a name-resolution coordinate,
-    /// never a value, and is left out. `None` when the callable has no published header or its
+    /// A member the language generates stores its values, so `Unit` crosses as the `kotlin.Unit`
+    /// singleton. A compiler plugin's declaration keeps its semantic signature, as a written one
+    /// does: Parcelize's `writeToParcel` returns `Unit` like `Parcelable.writeToParcel`. A
+    /// `companion { … }` member's extension receiver is a name-resolution coordinate, never a
+    /// value, and is left out. `None` when the callable has no published header or its
     /// receiver position is out of range.
     pub(crate) fn callable_carriers(&self, callable: CallableId) -> Option<(Vec<Ty>, Ty)> {
         let header = self.callable(callable)?;
         let flags = self.declaration_header(header.declaration)?.flags;
         let signature = self.signature(header.declaration)?;
-        let compiler_generated = flags.has(DeclarationFlags::COMPILER_GENERATED);
+        let stores_values = flags.has(DeclarationFlags::COMPILER_GENERATED)
+            && self.callable_behavior(callable).plugin_expression.is_none();
         let carried = |ty: Ty| {
-            if compiler_generated {
+            if stores_values {
                 crate::types::stored_value_ty(ty)
             } else {
                 ty

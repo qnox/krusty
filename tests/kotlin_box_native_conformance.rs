@@ -672,3 +672,29 @@ fun box(): String {
         "a range `append` on the runtime builder must check its bounds as Kotlin/Native's does"
     );
 }
+
+#[test]
+fn native_virtual_field_getter_exports_run_the_override() {
+    let source = include_str!("box_regressions/multimodule/virtualFieldGetterExport.kt");
+    let stem = "virtualFieldGetterExport";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must establish the virtual field getter result");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "an open stored property must run the override"
+    );
+}
+
+#[test]
+fn native_virtual_explicit_getter_exports_run_the_override() {
+    let source = include_str!("box_regressions/multimodule/virtualExplicitGetterExport.kt");
+    let stem = "virtualExplicitGetterExport";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must establish the virtual explicit getter result");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "an open explicit getter must run the override"
+    );
+}

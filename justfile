@@ -46,7 +46,11 @@ ci: lint coverage-gate
 # Lint gate (enforced locally + in CI + by the pre-commit hook): formatting must be clean, and
 # clippy must introduce NO new findings beyond the frozen baseline (clippy-baseline.tsv). Existing
 # findings are tolerated; any new one fails. Identical behaviour everywhere — it's plain cargo + sh.
-lint: versioning-tests release-tests legacy-ratchet-tests fmt-check legacy-baseline-check clippy-baseline-check
+lint: versioning-tests release-tests legacy-ratchet-tests reference-cache-tests fmt-check legacy-baseline-check clippy-baseline-check
+
+# The CI step that drops kotlinc reference inventories no recent run read, before master saves them.
+reference-cache-tests:
+    bash scripts/test-prune-reference-cache.sh
 
 # Cheap release-version contracts, without a compiler build or reference-toolchain download.
 versioning-tests:
@@ -528,10 +532,15 @@ test-all *ARGS:
 
 # Build the krusty-build library test binary and print its path. Gradle lanes run this prebuilt
 # binary; they do not compile krusty again.
+#
+# CI builds this right after `cargo build --profile gate -p krusty-cli`. Selecting krusty-cli's
+# binary here as well resolves the same features as that build: on its own, krusty-build's graph
+# lacks the Native backend, so bumpalo (under zopfli) loses Cranelift's `allocator-api2` feature
+# and krusty, which links zopfli, compiled a second time (484 s of the 1157 s tool-bins build).
 krusty-build-tests:
     #!/usr/bin/env bash
     set -euo pipefail
-    scripts/cargo-test-binary.sh krusty_build -p krusty-build --lib
+    scripts/cargo-test-binary.sh krusty_build -p krusty-build --lib -p krusty-cli --bin krusty
 
 # The normal compiler unit suite, which exact-version CI rows run without rebuilding Rust.
 compiler-unit-tests:
