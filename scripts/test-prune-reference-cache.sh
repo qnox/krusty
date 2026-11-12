@@ -51,12 +51,12 @@ entry read-ok OK 0
 touch -d '-1 days' "$work/restored"
 touch "$cache/read-ok/OK"
 out=$("$prune" "$cache" 7 "$work/restored")
-[ "$out" = "reference cache: kept 2 entries, dropped 3 unread for 7+ days, unread since $work/restored, or unpublished" ] \
+[ "$out" = "reference cache: kept 2 entries, dropped 4 unread for 7+ days, unread since $work/restored, or unpublished" ] \
   || fail "read-since summary: $out"
 for kept in fresh-ok read-ok; do
   [ -f "$cache/$kept/main/pkg/A.class" ] || fail "$kept was dropped with a read-since file"
 done
-for dropped in recent-ok fresh-failed seeded-ok; do
+for dropped in recent-ok fresh-failed fresh-rejected seeded-ok; do
   [ ! -e "$cache/$dropped" ] || fail "$dropped was kept with a read-since file"
 done
 if "$prune" "$cache" 7 "$work/absent" 2>/dev/null; then fail "accepted a missing read-since file"; fi

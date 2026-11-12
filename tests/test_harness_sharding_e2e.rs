@@ -347,6 +347,32 @@ fn native_runner_rejects_a_missing_report_and_truncates_the_callers_copy() {
 
 #[cfg(unix)]
 #[test]
+fn native_runner_requires_a_fresh_byte_report_when_scoring_is_enabled() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let (temp, binary) = regression_fixture(
+        "native-missing-byte-report",
+        "#!/bin/sh\nprintf '100.0 1 1\\n' > \"$KRUSTY_NATIVE_CONFORMANCE_REPORT\"\n",
+    );
+    let report = temp.join("native-bytes.txt");
+    fs::write(&report, "100.0 9 9\n").expect("write stale byte report");
+    let output = Command::new("bash")
+        .arg(root.join("scripts/native-conformance-run.sh"))
+        .arg(binary)
+        .env("KRUSTY_NATIVE_BYTE_REPORT", &report)
+        .env("KRUSTY_TEST_THREADS", "1")
+        .output()
+        .expect("run Native byte-report fixture");
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(fs::read(report).expect("read byte report"), b"");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "native-conformance-run: test did not write a valid KLIB byte report\n"
+    );
+    fs::remove_dir_all(temp).expect("remove fixture");
+}
+
+#[cfg(unix)]
+#[test]
 fn prebuilt_jvm_regressions_skip_the_runnable_target_modules() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let (temp, binary) = regression_fixture(
@@ -970,7 +996,14 @@ fn phase_timing_coverage_run_prints_every_phase() {
             .arg(root.join("scripts").join("coverage.sh"))
             .arg(&summary)
             .env("HOME", &temp)
-            .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin_dir.display(),
+                    std::env::var("PATH").expect("test process PATH")
+                ),
+            )
             .env("CARGO_TARGET_DIR", &target)
             .env("KRUSTY_COVERAGE_TARGET_DIR", &target)
             .env("KRUSTY_COVERAGE_COMPILER_JSON", &compiler_json)
