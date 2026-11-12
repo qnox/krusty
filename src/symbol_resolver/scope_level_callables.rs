@@ -124,11 +124,20 @@ fn symbols_at_scope_level(
     src: &dyn SymbolSource,
     name: &str,
     packages: &[TypeName],
+    owners_may_be_classifiers: bool,
 ) -> Vec<Rc<ResolvedSymbols>> {
     packages
         .iter()
         .filter_map(|pkg| {
-            let record = src.symbols(SymbolNamespace::Package(*pkg), name);
+            // An explicit star import (`import a.b.C.*`) names a package or a classifier. A
+            // classifier brings its static-scope callables into scope, as the explicit
+            // `import a.b.C.name` already does through the same namespace.
+            let namespace = if owners_may_be_classifiers && src.classifier(*pkg).is_some() {
+                SymbolNamespace::Classifier(*pkg)
+            } else {
+                SymbolNamespace::Package(*pkg)
+            };
+            let record = src.symbols(namespace, name);
             (!record.is_empty()).then_some(record)
         })
         .collect()
@@ -232,7 +241,7 @@ pub(super) fn declaration_levels_in_function_scope(
 ) -> Vec<FunctionScopeLevel> {
     match scope {
         FunctionScopeRef::Flat(packages) => {
-            let records = symbols_at_scope_level(src, name, packages);
+            let records = symbols_at_scope_level(src, name, packages, false);
             (!records.is_empty())
                 .then_some(FunctionScopeLevel {
                     kind: FunctionScopeLevelKind::Flat,
@@ -272,7 +281,12 @@ pub(super) fn declaration_levels_in_function_scope(
                 });
             }
             for (index, level) in imports.levels().iter().enumerate() {
-                let records = symbols_at_scope_level(src, name, level);
+                let records = symbols_at_scope_level(
+                    src,
+                    name,
+                    level,
+                    u32::try_from(index).is_ok_and(|rank| rank == EXPLICIT_STAR_IMPORT_RANK),
+                );
                 if !records.is_empty() {
                     crate::trace_compiler!(
                         "resolve",
