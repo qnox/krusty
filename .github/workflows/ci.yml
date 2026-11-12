@@ -912,6 +912,10 @@ jobs:
           # Required serialization/reference CLI toolchains can be cold. Keep the local
           # 120-second default; this complete CI pass includes their provisioning and compilation.
           KRUSTY_CONFORMANCE_TIMEOUT_SECONDS: "600"
+          # box_selection_reference runs the upstream test generators' selection over the whole
+          # Kotlin test-data tree as one BoxRunner call: about 1s locally, past the 10s default on a
+          # busy 8 GB runner while the step's other tests share its cores.
+          KRUSTY_BOX_TIMEOUT_MS: "60000"
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
           KRUSTY_RECORD_CLASS_DUMPS: "0"
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
