@@ -2306,8 +2306,7 @@ fn bare_super_property_falls_through_to_a_direct_interface_default() {
         .index();
     let host_value = (0..index.declaration_count())
         .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
-        .filter(|declaration| index.declaration_name(*declaration) == Some("value"))
-        .last()
+        .rfind(|declaration| index.declaration_name(*declaration) == Some("value"))
         .and_then(|declaration| index.signature(declaration))
         .expect("resolved Host.value signature");
     assert_eq!(host_value.result.get(), Ty::Int);

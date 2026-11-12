@@ -21,7 +21,7 @@ fn record_serialize_lines(
         (class.decl_start_line, class.decl_line)
     };
     if start_line != 0 {
-        ir.expr_lines.insert(opening_expression, start_line);
+        ir.set_statement_line(opening_expression, start_line);
     }
     if header_line != 0 {
         ir.function_position_mut(function).close_line = Some(header_line);
@@ -579,7 +579,7 @@ impl SerializeBody<'_> {
             let start_line = ir.classes[foo_id as usize].decl_start_line;
             if start_line != 0 {
                 for &statement in &stmts {
-                    ir.expr_lines.insert(statement, start_line);
+                    ir.set_statement_line(statement, start_line);
                 }
             }
             let ws_ret = ir.add_expr(IrExpr::Return(None));

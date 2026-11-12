@@ -47,8 +47,16 @@ impl ArrayObjects {
         objects: &mut ObjectRoot,
         identity: &IdentityObjects,
         storage: u32,
+        to_string: u32,
     ) -> Self {
-        let (object, table) = declare_object(module, objects, identity, storage);
+        let (object, table) = declare_object(
+            module,
+            objects,
+            identity,
+            storage,
+            krusty::types::wk::array(),
+            to_string,
+        );
         Self {
             reference: ArrayForm {
                 object,
@@ -82,7 +90,20 @@ impl Runtime {
             storage: packed,
             mutable: true,
         }));
-        let (object, table) = declare_object(module, &mut self.objects, &self.identity, storage);
+        let class = krusty::types::type_name(
+            krusty::types::prim_array_name(element)
+                .expect("a primitive array element names its class"),
+        );
+        let names = krusty::backend::class_names::member_class_names(class);
+        let to_string = self.identity_to_string(module, class, &names);
+        let (object, table) = declare_object(
+            module,
+            &mut self.objects,
+            &self.identity,
+            storage,
+            class,
+            to_string,
+        );
         let form = ArrayForm {
             object,
             storage,
@@ -111,12 +132,14 @@ fn primitive_storage(element: Ty) -> Option<(StorageType, ElementRead)> {
 }
 
 /// Declare an array object type over `storage` and the global holding its dispatch table: identity
-/// equality and hash, as every Kotlin array has.
+/// equality and hash, and `to_string` (`kotlin.Any`'s default for that array class).
 fn declare_object(
     module: &mut Module,
     objects: &mut ObjectRoot,
     identity: &IdentityObjects,
     storage: u32,
+    class: krusty::types::TypeName,
+    to_string: u32,
 ) -> (u32, u32) {
     let object = module.subtype(SubType {
         composite: CompositeType::Struct(vec![
@@ -127,16 +150,18 @@ fn declare_object(
         supertype: Some(identity.object),
         open: false,
     });
-    let to_string = objects.trap(module, objects.any_slot_types[2]);
     let (_, itable) = objects
         .interfaces
         .class(module, objects.itable, vec![object]);
+    let info = objects.type_infos.global(module, class);
     let mut init = Code::default();
     for function in [objects.identity_equals, identity.hash_code, to_string] {
         module.reference_function(function);
         init.ref_func(function);
     }
-    init.global_get(itable).struct_new(objects.any_table);
+    init.global_get(itable);
+    objects.push_type_info(&mut init, Some(info));
+    init.struct_new(objects.any_table);
     let table = module.constant_global(ValType::reference(objects.any_table), init);
     (object, table)
 }

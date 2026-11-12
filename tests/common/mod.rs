@@ -7,6 +7,8 @@ pub(crate) mod kotlin_metadata;
 pub(crate) mod kotlinc_lib;
 pub(crate) mod kotlinc_server;
 pub mod language_directives;
+pub(crate) mod reference_diagnostics;
+pub use reference_diagnostics::*;
 mod metadata_diff;
 pub mod native_backend;
 pub(crate) mod producing_jdk;
@@ -27,8 +29,7 @@ pub mod source_set_compile;
 #[allow(unused_imports)]
 pub use native_backend::{
     expect_native_box, expect_native_decline, expect_native_exit, expect_native_sources,
-    expect_native_sources_decline, native_analysis, native_analysis_with_plugins, native_decline,
-    native_sys_header, write_native_runtime_headers,
+    expect_native_sources_decline, native_analysis, native_decline,
 };
 pub use source_set_compile::compile_in_process_files;
 
@@ -377,19 +378,9 @@ pub fn compile_in_process(
     (!report.has_errors && !report.classes.is_empty()).then_some(report.classes)
 }
 
-/// The complete diagnostics of an in-process compile of `src`, in emission order.
-pub fn compile_in_process_diagnostics(
-    src: &str,
-    stem: &str,
-    cp_jars: &[PathBuf],
-    jdk_modules: Option<&std::path::Path>,
-) -> Vec<String> {
-    compile_in_process_report(src, stem, cp_jars, jdk_modules).diagnostics
-}
-
-struct InProcessEmissionReport {
+pub(crate) struct InProcessEmissionReport {
     artifacts: Vec<krusty::compiler::Artifact>,
-    diagnostics: Vec<String>,
+    pub(crate) diagnostics: Vec<String>,
     has_errors: bool,
 }
 
@@ -409,7 +400,7 @@ pub fn with_native_plugins(
 /// The target-independent in-process compiler path used by backend tests. Frontend analysis always
 /// produces the same checked streaming module; the caller supplies only the semantic platform and
 /// the backend that realizes common IR as target artifacts.
-fn emit_in_process<B: krusty::compiler::Backend>(
+pub(crate) fn emit_in_process<B: krusty::compiler::Backend>(
     src: &str,
     stem: &str,
     platform: Box<dyn krusty::libraries::SemanticPlatform>,
@@ -447,49 +438,6 @@ fn emit_in_process<B: krusty::compiler::Backend>(
     }
 }
 
-/// Capture common IR at the real backend boundary. Tests that inspect or deliberately mutate IR
-/// use this backend instead of reconstructing semantics from the retained inspection AST.
-pub fn capture_common_ir(
-    src: &str,
-    stem: &str,
-    platform: Box<dyn krusty::libraries::SemanticPlatform>,
-) -> (Vec<krusty::ir::IrFile>, Vec<String>) {
-    #[derive(Clone)]
-    struct CaptureBackend(std::rc::Rc<std::cell::RefCell<Vec<krusty::ir::IrFile>>>);
-
-    impl krusty::compiler::Backend for CaptureBackend {
-        type State = ();
-
-        fn compilation_target(&self) -> krusty::compilation_target::CompilationTarget {
-            CompilationTarget::Jvm
-        }
-
-        fn lower_ir_file(
-            &self,
-            file: krusty::compiler::CheckedIrFile<'_>,
-            _state: &mut Self::State,
-            _diags: &mut krusty::diag::DiagSink,
-        ) -> Vec<krusty::compiler::Artifact> {
-            self.0.borrow_mut().push(file.ir);
-            Vec::new()
-        }
-
-        fn finalize(
-            &self,
-            _state: Self::State,
-            _module_name: &str,
-        ) -> Vec<krusty::compiler::Artifact> {
-            Vec::new()
-        }
-    }
-
-    let captured = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-    let backend = CaptureBackend(captured.clone());
-    let report = emit_in_process(src, stem, platform, &backend);
-    let files = std::mem::take(&mut *captured.borrow_mut());
-    (files, report.diagnostics)
-}
-
 pub(crate) struct InProcessCompileReport {
     pub(crate) classes: Vec<(String, Vec<u8>)>,
     pub(crate) diagnostics: Vec<String>,
@@ -500,7 +448,7 @@ pub(crate) struct InProcessCompileReport {
 /// need to explain a rejection must share this primitive with [`compile_in_process`]; rebuilding
 /// the retired AST-to-IR pipeline here made the gate report outcomes the shipping compiler could
 /// never produce.
-fn compile_in_process_report(
+pub(crate) fn compile_in_process_report(
     src: &str,
     stem: &str,
     cp_jars: &[PathBuf],
@@ -1192,47 +1140,6 @@ pub fn java_home() -> String {
     })
 }
 
-/// Start `main_class` in its own `java` process with `arguments` as raw bytes and `input` on its
-/// standard input, and wait for it. The persistent runners cannot do this: a program's arguments and
-/// standard input belong to its process, and theirs carry the runner protocol. The locale is UTF-8
-/// so the launcher decodes the arguments as UTF-8, and the environment is otherwise empty, so
-/// nothing the host exports (a `JAVA_TOOL_OPTIONS` banner) reaches the program's output. `None` when
-/// no JDK is there.
-pub fn run_jvm_main(
-    classpath: &[PathBuf],
-    main_class: &str,
-    arguments: &[&std::ffi::OsStr],
-    input: &[u8],
-) -> Option<std::process::Output> {
-    let java = Path::new(&java_home()).join("bin/java");
-    if !java.is_file() {
-        return None;
-    }
-    let classpath = std::env::join_paths(classpath).expect("build the class path");
-    let mut child = Command::new(java)
-        .env_clear()
-        .env("LANG", "C.UTF-8")
-        .env("LC_ALL", "C.UTF-8")
-        .arg("-cp")
-        .arg(classpath)
-        .arg(main_class)
-        .args(arguments)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()?;
-    let mut stdin = child.stdin.take().expect("stdin is piped");
-    // Written on its own thread: a program may print before it has read all of its input.
-    let input = input.to_vec();
-    let writer = std::thread::spawn(move || {
-        let _ = stdin.write_all(&input);
-    });
-    let output = child.wait_with_output().ok()?;
-    writer.join().expect("the input writer");
-    Some(output)
-}
-
 /// Compile `BoxRunner.java` once into a stable cache dir keyed by the source hash; return its dir.
 fn setup_runner(java_home: &str) -> Option<PathBuf> {
     static SETUP: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -1282,29 +1189,38 @@ impl Drop for BoxRunner {
     }
 }
 
-/// Opt-in JVM diagnostics for a runner: set `KRUSTY_JVM_GCLOG=<dir>` to make every runner JVM log GC,
-/// metaspace, and class-unload events to `<dir>/<role>-<pid>.gclog` (unified `-Xlog`). Empty ⇒ no args,
-/// zero overhead. Lets a profiling run see GC frequency/pauses and whether metaspace/class-unloading is
-/// a bottleneck, instead of guessing. Pair with `KRUSTY_PROF=1` for the per-phase (compile/box) timings.
-#[allow(dead_code)]
-fn jvm_gclog_args(role: &str) -> Vec<String> {
+/// Unified-logging arguments for a JVM that answers a binary protocol on its stdout. HotSpot
+/// prints its unified-logging warnings (a thread it could not start, a container limit it could not
+/// read) to stdout by default, where a `[0.012s][warning]...` line would be read as a reply frame, so
+/// these send them to stderr instead.
+///
+/// Opt-in diagnostics on top: set `KRUSTY_JVM_GCLOG=<dir>` to make the JVM log GC, metaspace, and
+/// class-unload events to `<dir>/<role>-<pid>.gclog`. Lets a profiling run see GC frequency/pauses
+/// and whether metaspace/class-unloading is a bottleneck, instead of guessing. Pair with
+/// `KRUSTY_PROF=1` for the per-phase (compile/box) timings.
+pub fn protocol_jvm_log_args(role: &str) -> Vec<String> {
+    let mut args = vec![
+        "-Xlog:disable".to_owned(),
+        "-Xlog:all=warning:stderr".to_owned(),
+    ];
     let Some(dir) = std::env::var("KRUSTY_JVM_GCLOG")
         .ok()
         .filter(|v| !v.is_empty())
     else {
-        return Vec::new();
+        return args;
     };
     let _ = std::fs::create_dir_all(&dir);
     let pid = std::process::id();
-    vec![format!(
+    args.push(format!(
         "-Xlog:gc*=info,gc+metaspace=info,class+unload=info:file={dir}/{role}-{pid}.gclog:time,uptime,level,tags"
-    )]
+    ));
+    args
 }
 
 impl BoxRunner {
     fn new(java: &str, cp: &str) -> Option<Self> {
         let mut cmd = Command::new(java);
-        cmd.args(jvm_gclog_args("boxrunner"));
+        cmd.args(protocol_jvm_log_args("boxrunner"));
         // Cap the runner heap (-Xmx512m) to keep each persistent runner small — they used to grow to
         // ~1 GB and several run at once, so this eases gate memory pressure. Deliberately keep the
         // DEFAULT collector + full tiered JIT: BoxRunner dispatches box() bodies on a cached thread pool
@@ -2851,6 +2767,7 @@ struct JavaRunner {
 impl JavaRunner {
     fn new(java: &str, runner_dir: &Path) -> Option<Self> {
         let mut cmd = Command::new(java);
+        cmd.args(protocol_jvm_log_args("javarunner"));
         // Cap heap for footprint, but keep the default collector + full tiered JIT: JavaRunner executes
         // the reference javac output on a thread pool, so serial GC / C1-only throttles it (see BoxRunner).
         cmd.args([

@@ -2,13 +2,16 @@
 //!
 //! A reference array and a primitive array differ only in their [`ArrayForm`]: the storage type,
 //! the element type that storage holds, and how a packed element is read back. Allocation,
-//! spreads, reads, stores and bounds checks are shared.
+//! spreads, reads, stores and bounds checks are shared. A generated `hashCode` hashes an array
+//! property by its contents, and a generated `toString` renders one by its contents.
 
 use crate::array_objects::{ArrayForm, ElementRead, STORAGE_FIELD};
 use krusty::backend::BackendCompilerIntrinsic;
 use krusty::ir::{IrCheckedOperation, IrPropertyDispatch};
 use krusty::libraries::RuntimeExceptionKind;
 
+mod content_hash;
+mod content_rendering;
 #[cfg(test)]
 mod tests;
 
@@ -219,7 +222,7 @@ impl Body<'_> {
     /// `IllegalArgumentException("Negative array size")`, as Kotlin/Wasm's array constructors do.
     pub(super) fn new_array(&mut self, array: Ty, size: u32) -> Result<(), Unsupported> {
         let (form, _) = self.array_form(array)?;
-        let exception = self.runtime.exceptions.ensure_class(
+        let exception = self.runtime.exception_class(
             self.module,
             self.classifiers,
             RuntimeExceptionKind::IllegalArgument.classifier(),
@@ -242,7 +245,7 @@ impl Body<'_> {
             exception,
             Some(message),
             self.runtime.string,
-        );
+        )?;
         self.code
             .throw(self.runtime.exceptions.tag)
             .end()
@@ -365,7 +368,7 @@ impl Body<'_> {
         if !self.array_range_checks {
             return Ok(());
         }
-        let exception = self.runtime.exceptions.ensure_class(
+        let exception = self.runtime.exception_class(
             self.module,
             self.classifiers,
             RuntimeExceptionKind::IndexOutOfBounds.classifier(),
@@ -383,7 +386,7 @@ impl Body<'_> {
             exception,
             None,
             self.runtime.string,
-        );
+        )?;
         self.code.throw(self.runtime.exceptions.tag).end();
         Ok(())
     }

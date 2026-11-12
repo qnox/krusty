@@ -81,7 +81,7 @@ fn main() {
         }
     }
     let mut sorted: Vec<_> = buckets.into_iter().collect();
-    sorted.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+    sorted.sort_by_key(|bucket| std::cmp::Reverse(bucket.1 .0));
     for (k, (n, samples)) in sorted.iter().take(40) {
         println!("{:4}  {:50}", n, k);
         for s in samples {

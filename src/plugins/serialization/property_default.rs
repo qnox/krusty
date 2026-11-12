@@ -250,10 +250,5 @@ fn copy_in_frame(
             }
         }
     }
-    // kotlinc marks the default's own line where it starts and keeps it there when the read it
-    // starts with marks the class's line at the same offset.
-    if frame.read_line.is_some() || frame.receiver_read_line.is_some() {
-        ir.kept_start_lines.insert(copy);
-    }
     Some(copy)
 }
