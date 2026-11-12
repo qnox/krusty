@@ -532,10 +532,16 @@ test-all *ARGS:
 
 # Build the krusty-build library test binary and print its path. Gradle lanes run this prebuilt
 # binary; they do not compile krusty again.
+#
+# CI builds this right after `just conformance-bin-and-cli`, and must reuse that build's krusty.
+# Selecting krusty-cli's binary here keeps the Native backend in the graph: without it bumpalo
+# (under zopfli) loses Cranelift's `allocator-api2` feature and krusty, which links zopfli,
+# compiled a second time (484 s of a 1157 s build). krusty-build's own dev-dependencies add the
+# libc, object and once_cell features that the root package's dev-dependencies add there.
 krusty-build-tests:
     #!/usr/bin/env bash
     set -euo pipefail
-    scripts/cargo-test-binary.sh krusty_build -p krusty-build --lib
+    scripts/cargo-test-binary.sh krusty_build -p krusty-build --lib -p krusty-cli --bin krusty
 
 # The normal compiler unit suite, which exact-version CI rows run without rebuilding Rust.
 compiler-unit-tests:
@@ -561,6 +567,14 @@ conformance-bin:
     #!/usr/bin/env bash
     set -euo pipefail
     scripts/cargo-test-binary.sh conformance --test conformance
+
+# CI's tool-bins job: the conformance binary and the `krusty` CLI (target/gate/krusty) from one
+# Cargo invocation. The CLI alone resolves libc, object and once_cell without the features the
+# root package's dev-dependencies add, so building the two apart compiled krusty twice.
+conformance-bin-and-cli:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scripts/cargo-test-binary.sh --build conformance -p krusty-cli -p krusty --test conformance --bin krusty
 
 # Run the codegen/box conformance suite and print the case report "<pct> <passed> <applicable>":
 # applicable cases whose box() returns "OK". The same run's JVM byte report "<pct> <matched> <total>",

@@ -540,11 +540,16 @@ impl DependencyBodyUnit {
             );
         }
         if root.kind() == crate::libraries::ExternalCallableKind::Member
+            && callables
+                .iter()
+                .all(|callable| callable.singleton_dispatch().is_none())
             && root
                 .class_contract()
                 .is_some_and(|class| !class.is_value && !class.is_builtin_type())
         {
             // A member of an ordinary class is authenticated with the class that installs it.
+            // Singleton edges of one declaration differ in the class they dispatch to; the
+            // receiver proof selects among them.
             let [callable] = callables else {
                 return Err(KlibBodyDecline::new(
                     root.signature().clone(),
@@ -2115,22 +2120,14 @@ fn selected_callable_for_header_purpose<'callable>(
     };
     let mut selected = None;
     let mut first_mismatch = None;
-    // A member of a generic class binds its class's type parameters from the class header.
-    let header = |candidate: KlibBodyCallable<'callable>| match class_bodies.filter(|_| {
-        candidate
-            .class_contract()
-            .is_some_and(|class| !class.parameters.formals.is_empty())
-    }) {
-        Some(bodies) => super::class_headers::authenticate(candidate, bodies).and_then(|class| {
-            super::function_lowering::raw_function_header_with_class(
-                Some(candidate),
-                purpose,
-                class.arena,
-                class.function,
-                class.types,
-            )
-        }),
-        None => raw_function_header(Some(candidate), purpose, arena, function),
+    let header = |candidate: KlibBodyCallable<'callable>| {
+        super::function_lowering::selected_function_header(
+            candidate,
+            purpose,
+            arena,
+            function,
+            class_bodies,
+        )
     };
     let mut consider = |candidate| {
         match header(candidate) {

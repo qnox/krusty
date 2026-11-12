@@ -165,7 +165,7 @@ fn copy_type(source: &KlibIrArena, target: &mut KlibIrArena, ty: KlibIrTypeId) -
 
 /// [`target_tree`] of the member `selected`, inside the header of the class declaring it: a
 /// member's header is authenticated through its class.
-fn member_target_tree(
+pub(super) fn member_target_tree(
     libraries: &crate::klib_libraries::KlibLibraries,
     selected: crate::libraries::KlibBodyCallable<'_>,
     source: &KlibIrArena,
@@ -783,39 +783,48 @@ fn klib_target_primitive_iterator_nexts_are_target_dependency_leaves() {
     }
 }
 
-/// `Array<T>.size` and `Array<T>.get` are target leaves whose serialized headers name the class's
-/// own type parameter, which only the authenticated declaring class binds.
+/// A target that realizes `Array`'s members as its own leaves, as Wasm does, authenticates each
+/// member's header with `Array`'s type parameter bound from the class header, as a serialized
+/// caller's call of the member does.
 #[test]
-fn klib_target_members_of_a_generic_class_authenticate_through_their_class() {
+fn klib_target_members_of_a_generic_class_bind_the_class_type_parameters() {
     let Some(root) = distribution_root() else {
         return;
     };
     let libraries = stdlib(&root);
     let array = libraries.classifier(type_name("kotlin/Array")).unwrap();
-    let size = &array.declared_callables["size"].properties()[0].getter;
-    let get = &array.declared_callables["get"].functions()[0].callable;
-    let providers = [size.external_identity, get.external_identity]
-        .map(|identity| libraries.external_callable(identity.unwrap()).unwrap());
-    let leaves =
-        [&providers[0], &providers[1]].map(|provider| provider.klib_body_callable().unwrap());
-    let operations = leaves.map(|selected| selected.compiler_intrinsic().unwrap());
-    assert_eq!(
-        operations,
-        [CompilerIntrinsic::ArraySize, CompilerIntrinsic::ArrayGet]
-    );
-    for (selected, operation) in leaves.into_iter().zip(operations) {
+    let size = array.declared_callables["size"].properties()[0]
+        .getter
+        .external_identity;
+    let get = array.declared_callables["get"].functions()[0]
+        .callable
+        .external_identity;
+    let set = array.declared_callables["set"].functions()[0]
+        .callable
+        .external_identity;
+    for (identity, operation) in [
+        (size, CompilerIntrinsic::ArraySize),
+        (get, CompilerIntrinsic::ArrayGet),
+        (set, CompilerIntrinsic::ArraySet),
+    ] {
+        let provider = libraries
+            .external_callable(identity.expect("provider identity"))
+            .unwrap();
+        let selected = provider.klib_body_callable().unwrap();
+        assert_eq!(selected.compiler_intrinsic(), Some(operation));
         for facts in [
             KlibCalleeFacts::new([selected]),
             KlibCalleeFacts::with_declarations([], [selected]),
         ] {
             assert_eq!(
                 facts
-                    .target_intrinsic(selected.identity(), libraries.declaration_bodies(), &|_| {
-                        true
-                    })
-                    .unwrap(),
-                Some(operation),
-                "a target realizing {operation:?} owns the leaf of its generic class member",
+                    .target_intrinsic(
+                        selected.identity(),
+                        libraries.declaration_bodies(),
+                        &|found| { found == operation }
+                    )
+                    .unwrap_or_else(|reason| panic!("{operation:?}: {reason:?}")),
+                Some(operation)
             );
         }
     }

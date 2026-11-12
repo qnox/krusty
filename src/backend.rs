@@ -2,6 +2,7 @@
 //!
 //! A backend consumes checked frontend output and emits target artifacts.
 
+pub mod class_names;
 pub mod class_tables;
 pub mod construction_entries;
 mod constructor_selection;

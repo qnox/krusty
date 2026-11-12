@@ -24,6 +24,7 @@ mod arrays;
 pub(super) mod box_members;
 mod boxing;
 mod callable_reference_identity;
+mod class_literals;
 mod dependency_exports;
 mod enums;
 mod exceptions;
@@ -48,24 +49,32 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
     is_scalar_operation(operation)
         || IrBinOp::of_primitive_operator(operation).is_some()
         || operation == krusty::backend::BackendCompilerIntrinsic::ThrowableMessage
+        || operation == krusty::backend::BackendCompilerIntrinsic::ThrowableCause
         || operation == krusty::backend::BackendCompilerIntrinsic::ArrayGet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySize
         || operation == krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
+        || matches!(
+            operation,
+            krusty::backend::BackendCompilerIntrinsic::ClassName(_)
+        )
 }
 
 use krusty::backend::class_tables::module_interfaces::ModuleInterfaces;
 use krusty::backend::class_tables::module_slots::ModuleSlotPlan;
+use krusty::backend::class_tables::AnyMember;
 use krusty::backend::{CheckedBackendCallables, DependencyExportSignatures};
-use krusty::ir::{Callee, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp};
+use krusty::ir::{Callee, ClassId, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp};
 use krusty::types::{EqualityMode, Ty, TyKind};
 
 use super::super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
 use super::super::numeric_conversions;
 use super::super::objects::REFERENCE;
 use super::super::runtime::*;
+use super::any_member_reach::FileReach;
 use super::callable_registry::{CallableRegistry, FileCallTargets};
 use super::classes::{FileClasses, RealizedProperties};
+use super::laid_out_classes::LaidOutClasses;
 use super::property_registry::PropertyRegistry;
 
 pub(super) type Unsupported = String;
@@ -78,6 +87,9 @@ pub(super) struct LoweredFile {
     /// The function running this file's top-level property initializers in declaration order,
     /// when it has any.
     pub(super) initializer: Option<u32>,
+    /// The file's calls through `kotlin.Any`'s slots that can reach other files' objects, and its
+    /// own slots with no body.
+    pub(super) reach: FileReach,
 }
 
 /// One file's checked IR and the facts frozen beside it.
@@ -99,7 +111,8 @@ pub(super) struct ModuleState<'a> {
     pub(super) runtime: &'a mut Runtime,
     pub(super) callables: &'a mut CallableRegistry,
     pub(super) properties: &'a mut PropertyRegistry,
-    pub(super) final_classes: &'a mut super::final_classes::FinalClassAnswers,
+    /// The classes earlier files of the source module laid out; this file's join them.
+    pub(super) classes: &'a mut LaidOutClasses,
 }
 
 /// Lower every function and class of `file` into the program.
@@ -122,7 +135,7 @@ pub(super) fn lower_file(
         runtime,
         callables: callable_registry,
         properties: property_registry,
-        final_classes,
+        classes: laid_out_classes,
     } = state;
     for property in &ir.statics {
         if property.owner.is_some() {
@@ -197,8 +210,18 @@ pub(super) fn lower_file(
     let classes = if ir.classes.is_empty() {
         None
     } else {
-        let mut classes =
-            super::classes::declare(ir, module, runtime, classifiers, &indices, properties, plan)?;
+        let mut classes = super::classes::declare(
+            ir,
+            module,
+            runtime,
+            &indices,
+            properties,
+            super::classes::BeyondFile {
+                classifiers,
+                plan,
+                laid_out: laid_out_classes,
+            },
+        )?;
         super::interface_members::record(
             &super::interface_members::Recording {
                 ir,
@@ -215,9 +238,9 @@ pub(super) fn lower_file(
                 callables: &mut *callable_registry,
             },
         )?;
-        final_classes.record_file(ir, &classes.tables);
         Some(classes)
     };
+    let reach = std::cell::RefCell::new(FileReach::default());
     let context = FileContext {
         array_range_checks,
         classifiers,
@@ -232,7 +255,7 @@ pub(super) fn lower_file(
         callables,
         inert_singleton_bindings: &inert_singleton_bindings,
         properties: property_registry,
-        final_classes,
+        reach: &reach,
     };
     for (id, function) in ir.functions.iter().enumerate() {
         let (Some(index), Some(signature)) = (indices[id], signatures[id]) else {
@@ -326,6 +349,9 @@ pub(super) fn lower_file(
             module,
             runtime,
         )?;
+        for (name, record) in classes.records(ir, &indices, &signatures) {
+            laid_out_classes.insert(name, record);
+        }
     } else if !member_property_definitions.is_empty() {
         return Err("a member property definition without its class layout".to_string());
     }
@@ -357,9 +383,24 @@ pub(super) fn lower_file(
         None
     };
     callable_registry.publish(ir, dependency_exports, &indices)?;
+    let mut reach = reach.into_inner();
+    if let Some(classes) = &classes {
+        for class in 0..ir.classes.len() {
+            for member in AnyMember::ALL {
+                if !classes.realizes(class as ClassId, member) {
+                    reach.bodiless_class(member);
+                }
+            }
+        }
+    }
+    if objects::holds_unprinted_values(ir) {
+        reach.bodiless_value(AnyMember::ToString);
+    }
+    class_literals::name_type_infos(module, runtime, classifiers);
     Ok(LoweredFile {
         functions: indices,
         initializer,
+        reach,
     })
 }
 
@@ -386,8 +427,8 @@ struct FileContext<'a> {
     inert_singleton_bindings: &'a HashSet<krusty::ir::ExprId>,
     /// Top-level property storage reserved or published by files of this source module.
     properties: &'a PropertyRegistry,
-    /// What each final class of the files lowered so far answers of `kotlin.Any` itself.
-    final_classes: &'a super::final_classes::FinalClassAnswers,
+    /// What the file's bodies record for the module about calls through `kotlin.Any`'s slots.
+    reach: &'a std::cell::RefCell<FileReach>,
 }
 
 /// The wasm value a Kotlin type is carried as; `None` for a type with no value (`Unit`,
@@ -614,7 +655,8 @@ struct Body<'a> {
     callables: &'a CheckedBackendCallables,
     inert_singleton_bindings: &'a HashSet<krusty::ir::ExprId>,
     properties: &'a PropertyRegistry,
-    final_classes: &'a super::final_classes::FinalClassAnswers,
+    /// What this file's bodies record for the module about calls through `kotlin.Any`'s slots.
+    reach: &'a std::cell::RefCell<FileReach>,
     code: Code,
     /// Locals beyond the parameters, in index order.
     locals: Vec<ValType>,
@@ -679,7 +721,7 @@ impl<'a> Body<'a> {
             callables: context.callables,
             inert_singleton_bindings: context.inert_singleton_bindings,
             properties: context.properties,
-            final_classes: context.final_classes,
+            reach: context.reach,
             code: Code::default(),
             locals: Vec::new(),
             next_local: parameters.len() as u32,
@@ -806,17 +848,14 @@ impl<'a> Body<'a> {
         // A statement-shaped operand may return/throw before its enclosing value use resumes.
         // Its Unit annotation must stay Unit; only the common completion proof removes the
         // impossible conversion. Live Unit operands still fail below rather than invent a value.
-        if source_ty == Some(Ty::Unit)
-            && carrier(target)?.is_some()
-            && self.ir.expr_diverges_by(id, &|_, _| false)
-        {
+        if source_ty == Some(Ty::Unit) && carrier(target)?.is_some() && self.diverges(id) {
             self.code.unreachable();
             return Ok(());
         }
         let Some(source) = source_ty else {
             // Restore stack polymorphism after structured control only when completion proves
             // divergence: an inlined generic result may retain Nothing but complete normally.
-            if self.ir.expr_diverges_by(id, &|_, _| false) {
+            if self.diverges(id) {
                 self.code.unreachable();
             }
             return Ok(());
@@ -829,6 +868,13 @@ impl<'a> Body<'a> {
             );
         }
         self.coerce_emitted_value(source, target)
+    }
+
+    /// Whether evaluating `id` as a value never completes: it ends in a jump or a `throw`, or in an
+    /// inline-return frame that no reachable exit leaves.
+    fn diverges(&self, id: u32) -> bool {
+        self.ir
+            .expr_diverges_by(id, &|leaf, _| self.ir.loop_never_exits(leaf))
     }
 
     /// Convert the value already on the Wasm stack from its emitted declaration type to the type
@@ -1160,9 +1206,9 @@ impl<'a> Body<'a> {
                 ..
             } = &**call_callee
                 && defaults.is_empty()
-                && self.is_throwable_message(*target) =>
+                && let Some(field) = self.throwable_field(*target) =>
             {
-                self.throwable_message(dispatch_receiver, &args, *ret)?;
+                self.throwable_field_read(field, dispatch_receiver, &args, *ret)?;
             }
             IrExpr::Call {
                 dispatch_receiver: Some(receiver),
@@ -1451,9 +1497,24 @@ impl<'a> Body<'a> {
                     source_receiver: Some(_),
                 } = &**checked_op
                     && parameters.is_empty()
-                    && self.is_throwable_message_property(*target) =>
+                    && let Some(field) = self.throwable_field_property(*target) =>
             {
-                self.throwable_message(*receiver, arguments, *result)?;
+                self.throwable_field_read(field, *receiver, arguments, *result)?;
+            }
+            IrExpr::Checked(ref checked_op)
+                if let krusty::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch: krusty::ir::IrPropertyDispatch::Ordinary,
+                    receiver: Some(receiver),
+                    arguments,
+                    parameters,
+                    ..
+                } = &**checked_op
+                    && parameters.is_empty()
+                    && arguments.is_empty()
+                    && let Some(kind) = self.class_name_property(*target) =>
+            {
+                self.class_name(kind, *receiver)?;
             }
             IrExpr::Checked(ref checked_op)
                 if let krusty::ir::IrCheckedOperation::ExternalPropertyRead {
@@ -1530,6 +1591,9 @@ impl<'a> Body<'a> {
                 params,
                 ret,
             } => self.invoke_function(func, &args, &params, ret)?,
+            IrExpr::KClassLiteral {
+                classifier, value, ..
+            } => self.class_literal(id, classifier, value)?,
             IrExpr::Call { callee, .. } => {
                 return Err(format!("a call to {}", callee_kind(&callee)));
             }
@@ -2044,7 +2108,7 @@ mod tests {
                 runtime: &mut started.runtime,
                 callables: &mut started.callables,
                 properties: &mut started.properties,
-                final_classes: &mut started.final_classes,
+                classes: &mut started.classes,
             },
         )
     }

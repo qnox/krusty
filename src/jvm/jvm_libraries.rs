@@ -3098,7 +3098,7 @@ impl JvmLibraries {
                     );
                     Some(setter)
                 });
-                overloads.push(PropertyInfo {
+                let mut property = PropertyInfo {
                     return_value_status: Some(mp.return_value_status),
                     name: name.to_string(),
                     kind: PropKind::Member,
@@ -3144,7 +3144,13 @@ impl JvmLibraries {
                     source_member: None,
                     producer: PropertyProducer::KotlinAccessor,
                     read_stability: self.module_read_stability(mp, cn),
-                });
+                };
+                crate::libraries::realize_class_name_property(
+                    cn,
+                    self.cp.common_metadata_owns(cn),
+                    &mut property,
+                );
+                overloads.push(property);
                 self.publish_kotlin_property_deprecation(overloads.last_mut(), mp);
             }
 

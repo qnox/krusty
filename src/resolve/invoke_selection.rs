@@ -1046,7 +1046,10 @@ impl Checker<'_> {
                     &argument_map,
                     &named_whole_array_varargs(&argument_map, arg_names, &overload.call_sig),
                 ),
-                type_args,
+                ExplicitTypeArgumentProbe {
+                    arguments: type_args,
+                    bounds: ExplicitTypeArgumentBounds::Enforced,
+                },
             ) {
                 continue;
             }
@@ -1512,8 +1515,10 @@ impl Checker<'_> {
                     args[i],
                     *a,
                     *p,
-                    &positional_signature,
-                    i,
+                    SelectedFormal {
+                        signature: &positional_signature,
+                        index: i,
+                    },
                     implicit_lambda_label.as_deref(),
                 );
                 self.expect_call_arg(scope, *p, args[i], actual);

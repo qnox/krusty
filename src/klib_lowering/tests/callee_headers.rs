@@ -1084,17 +1084,10 @@ fn demo_signature(
 
 /// A serialized function with a dispatch receiver when `dispatch`, these context and value
 /// parameters, all `Int`, whose body returns its first context or value parameter.
-fn function_tree(
-    signature: KlibPublicIdSignature,
-    name: &str,
-    dispatch: bool,
-    contexts: usize,
-    values: usize,
-) -> KlibIrDeclarationTree {
-    let mut arena = KlibIrArena::default();
-    let int = arena.push_type(T::Int.klib());
+/// The public signature of the fixture class `demo.Box`.
+fn box_classifier() -> KlibPublicIdSignature {
     let demo_package = ["demo".to_owned()];
-    let box_classifier = metadata_class_signature(
+    metadata_class_signature(
         MetadataContainer {
             package: &demo_package,
             classes: &[],
@@ -1105,7 +1098,104 @@ fn function_tree(
             type_params: &[],
             expect: false,
         },
-    );
+    )
+}
+
+/// [`function_tree`] of the member `get` inside the header of `demo.Box`: a member's header is
+/// authenticated through its class.
+fn box_member_tree(member: KlibPublicIdSignature) -> KlibIrDeclarationTree {
+    let KlibIrDeclarationTree {
+        mut arena,
+        declaration: KlibIrMember::Function(function),
+    } = function_tree(member, "get", true, 0, 1)
+    else {
+        unreachable!("a function tree declares its function")
+    };
+    let class = arena.push_class(crate::metadata::klib_ir::tree::KlibIrClass {
+        base: base(public_symbol(KlibIrSymbolKind::Class, box_classifier())),
+        name: "Box".to_owned(),
+        this_receiver: None,
+        type_parameters: Vec::new(),
+        supertypes: Vec::new(),
+        members: vec![KlibIrMember::Function(function)],
+        value_class_representation: None,
+        sealed_subclasses: Vec::new(),
+    });
+    KlibIrDeclarationTree {
+        arena,
+        declaration: KlibIrMember::Class(class),
+    }
+}
+
+/// Make `record` a member of `demo.Box` as its provider records one: owned by the class, with
+/// the class's contract.
+fn as_box_member(record: &mut crate::backend::BackendCallableFact) {
+    let classifier = crate::types::type_name("demo/Box");
+    record.kind = ExternalCallableKind::Member;
+    record.declaration_owner = Some(crate::types::SemanticCallableOwner::Classifier(classifier));
+    record.klib_body_class_contract = Some(crate::libraries::KlibBodyClassContract {
+        module: "demo".into(),
+        signature: box_classifier(),
+        classifier,
+        parameters: crate::libraries::KlibBodyClassParameters {
+            formals: Box::default(),
+            bounds: Box::default(),
+            variances: Box::default(),
+            own_count: 0,
+        },
+        kind: crate::libraries::TypeKind::Class,
+        modality: crate::metadata::semantic::KotlinModality::Final,
+        is_value: false,
+        is_inner: false,
+        is_expect: false,
+        primary_constructor: None,
+    });
+}
+
+/// The contract a provider records for the singleton `demo.OtherBox`, which inherits `get` from
+/// `demo.Box` and serializes no member of its own.
+fn other_box_contract() -> crate::libraries::KlibBodyClassContract {
+    let demo_package = ["demo".to_owned()];
+    crate::libraries::KlibBodyClassContract {
+        module: "demo".into(),
+        signature: metadata_class_signature(
+            MetadataContainer {
+                package: &demo_package,
+                classes: &[],
+                native_interop_library: false,
+            },
+            MetadataClass {
+                name: "OtherBox",
+                type_params: &[],
+                expect: false,
+            },
+        ),
+        classifier: crate::types::type_name("demo/OtherBox"),
+        parameters: crate::libraries::KlibBodyClassParameters {
+            formals: Box::default(),
+            bounds: Box::default(),
+            variances: Box::default(),
+            own_count: 0,
+        },
+        kind: crate::libraries::TypeKind::Object,
+        modality: crate::metadata::semantic::KotlinModality::Final,
+        is_value: false,
+        is_inner: false,
+        is_expect: false,
+        primary_constructor: None,
+    }
+}
+
+fn function_tree(
+    signature: KlibPublicIdSignature,
+    name: &str,
+    dispatch: bool,
+    contexts: usize,
+    values: usize,
+) -> KlibIrDeclarationTree {
+    let mut arena = KlibIrArena::default();
+    let int = arena.push_type(T::Int.klib());
+    let box_classifier = box_classifier();
     let box_type = arena.push_type(KlibIrType::Simple {
         classifier: public_symbol(KlibIrSymbolKind::Class, box_classifier),
         nullability: KlibIrNullability::NotSpecified,
@@ -1233,7 +1323,7 @@ fn a_later_support_unit_selects_the_matching_singleton_edge_variant() {
     let member = demo_signature(Some("Box"), "get", &[], &[T::Int]);
     let demo = demo_with(
         &MEMBER_CALLER,
-        vec![function_tree(member.clone(), "get", true, 0, 1)],
+        vec![box_member_tree(member.clone())],
         |_, body| {
             let receiver = body.param(0);
             let value = body.param(1);
@@ -1243,7 +1333,7 @@ fn a_later_support_unit_selects_the_matching_singleton_edge_variant() {
     );
     let mut selected_record = demo.facts["a"].clone();
     selected_record.name = "get".to_owned();
-    selected_record.kind = ExternalCallableKind::Member;
+    as_box_member(&mut selected_record);
     selected_record.params = vec![T::Int.semantic()];
     selected_record
         .generic_sig
@@ -1264,6 +1354,7 @@ fn a_later_support_unit_selects_the_matching_singleton_edge_variant() {
     inherited_record.singleton_dispatch = Some(SingletonDispatch {
         classifier: crate::types::type_name("demo/OtherBox"),
     });
+    inherited_record.klib_body_class_contract = Some(other_box_contract());
     let selected = selected_record
         .klib_body_callable()
         .expect("the selected member is signed");
@@ -1337,17 +1428,13 @@ fn a_later_support_unit_selects_the_matching_singleton_edge_variant() {
 #[test]
 fn a_root_group_publishes_the_singleton_variant_which_matches_its_header() {
     let member = demo_signature(Some("Box"), "get", &[], &[T::Int]);
-    let demo = demo_with(
-        &CALLER,
-        vec![function_tree(member.clone(), "get", true, 0, 1)],
-        |_, body| {
-            let value = body.param(0);
-            Some(vec![body.ret(value)])
-        },
-    );
+    let demo = demo_with(&CALLER, vec![box_member_tree(member.clone())], |_, body| {
+        let value = body.param(0);
+        Some(vec![body.ret(value)])
+    });
     let mut selected_record = demo.facts["a"].clone();
     selected_record.name = "get".to_owned();
-    selected_record.kind = ExternalCallableKind::Member;
+    as_box_member(&mut selected_record);
     selected_record.singleton_dispatch = Some(SingletonDispatch {
         classifier: crate::types::type_name("demo/Box"),
     });
@@ -1360,6 +1447,7 @@ fn a_root_group_publishes_the_singleton_variant_which_matches_its_header() {
     inherited_record.singleton_dispatch = Some(SingletonDispatch {
         classifier: crate::types::type_name("demo/OtherBox"),
     });
+    inherited_record.klib_body_class_contract = Some(other_box_contract());
     let selected = selected_record
         .klib_body_callable()
         .expect("the selected member is signed");

@@ -326,9 +326,7 @@ impl<'a> KlibCalleeFacts<'a> {
     ) -> Result<Option<crate::libraries::CompilerIntrinsic>, super::decline::KlibBodyDeclineReason>
     {
         use super::decline::KlibBodyDeclineReason;
-        use super::function_lowering::{
-            raw_function_header, raw_function_header_with_class, HeaderPurpose,
-        };
+        use super::function_lowering::{selected_function_header, HeaderPurpose};
         let selected = match self.get(identity) {
             Some(KlibCalleeFact::Ambiguous) => {
                 return Err(KlibBodyDeclineReason::SignatureMismatch(
@@ -348,26 +346,14 @@ impl<'a> KlibCalleeFacts<'a> {
             .function(identity)
             .ok_or(KlibBodyDeclineReason::Unjoined)?;
         // A body-bearing target leaf still authenticates its complete declared header, not the
-        // narrower set of declarations whose executable bodies common lowering supports. A
-        // member's header names its class's type parameters (`Array<T>.size`), which only its
-        // authenticated class binds.
-        if selected.is_member() {
-            let class = super::class_headers::authenticate(selected, bodies)?;
-            super::class_headers::authenticate_receiver(
-                class.contract,
-                class.arena,
-                class.function,
-            )?;
-            raw_function_header_with_class(
-                Some(selected),
-                HeaderPurpose::External,
-                class.arena,
-                class.function,
-                class.types,
-            )?;
-        } else {
-            raw_function_header(Some(selected), HeaderPurpose::External, arena, declaration)?;
-        }
+        // narrower set of declarations whose executable bodies common lowering supports.
+        selected_function_header(
+            selected,
+            HeaderPurpose::External,
+            arena,
+            declaration,
+            Some(bodies),
+        )?;
         Ok(Some(operation))
     }
 

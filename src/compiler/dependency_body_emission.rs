@@ -319,8 +319,10 @@ pub(super) fn emit_dependencies<B: Backend>(
             }
             if let Some(&receiver) = unit.ir().singleton_extension_unread_receivers.get(function) {
                 let inert_platform_singleton = match receiver.kind() {
-                    TyKind::Obj(classifier, arguments) if arguments.is_empty() => {
-                        bodies.singleton_initialization_is_inert(&identity.module, classifier)
+                    TyKind::Obj(classifier, arguments) => {
+                        arguments.is_empty()
+                            && bodies
+                                .singleton_initialization_is_inert(&identity.module, classifier)
                     }
                     _ => false,
                 };
