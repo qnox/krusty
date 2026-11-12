@@ -650,7 +650,6 @@ contextParameters/useFromAnotherModuleSuspending.kt
 contextParameters/withExtensionReceiverInSupertype.kt
 contracts/contractForCast.kt
 contracts/destructuredVariable.kt
-contracts/exception.kt
 contracts/fieldInConstructorParens.kt
 contracts/forLoop.kt
 contracts/isNullString.kt
@@ -1782,8 +1781,6 @@ inference/pcla/issues/kt52838c.kt
 inference/pcla/issues/kt54400b.kt
 inference/pcla/issues/kt54767a.kt
 inference/pcla/issues/kt54767b.kt
-inference/pcla/issues/kt60291a.kt
-inference/pcla/issues/kt63840a.kt
 inference/pcla/issues/kt64066.kt
 inference/pcla/issues/kt64069.kt
 inference/pcla/issues/kt65300h.kt

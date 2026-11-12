@@ -102,7 +102,7 @@ impl<'s> Linker<'_, 's> {
                     match self
                         .sources
                         .bodies
-                        .callee_origin(&prepared.key.module, &declaration)
+                        .linked_origin(&prepared.key.module, &declaration)
                     {
                         KlibCalleeOrigin::Exact(identity) => Some(identity),
                         KlibCalleeOrigin::Missing => None,

@@ -879,7 +879,7 @@ impl CallLinker for Linker<'_, '_> {
         let identity = match self
             .sources
             .bodies
-            .callee_origin(&self.active_module, &signature)
+            .linked_origin(&self.active_module, &signature)
         {
             KlibCalleeOrigin::Exact(identity) => identity,
             // Dependency preparation omitted this declaration's edge, so a membership this unit
@@ -963,7 +963,7 @@ impl CallLinker for Linker<'_, '_> {
         match self
             .sources
             .bodies
-            .callee_origin(&self.active_module, &signature)
+            .linked_origin(&self.active_module, &signature)
         {
             KlibCalleeOrigin::Exact(identity) => self.link_file_private(ir, signature, identity),
             KlibCalleeOrigin::Missing => self.link_local_member(ir, callee),
@@ -1123,7 +1123,7 @@ impl CallLinker for Linker<'_, '_> {
         let identity = match self
             .sources
             .bodies
-            .callee_origin(&self.active_module, &signature)
+            .linked_origin(&self.active_module, &signature)
         {
             KlibCalleeOrigin::Exact(identity) => identity,
             KlibCalleeOrigin::Missing => return Ok(None),
@@ -1177,7 +1177,7 @@ impl CallLinker for Linker<'_, '_> {
         let identity = match self
             .sources
             .bodies
-            .callee_origin(&self.active_module, &signature)
+            .linked_origin(&self.active_module, &signature)
         {
             KlibCalleeOrigin::Exact(identity) => identity,
             KlibCalleeOrigin::Missing => return Err(unsupported()),
@@ -1202,8 +1202,9 @@ impl CallLinker for Linker<'_, '_> {
                 class_type_parameters: linked.class_type_parameters,
             });
         }
-        // A value class's getter with a body is emitted here, as its other members are.
-        if let Some(linked) = self.value_member_getter(ir, &identity)? {
+        // An accessor with a body of a class the unit materializes is emitted here, as the class's
+        // other members are.
+        if let Some(linked) = self.materialized_member_accessor(ir, &identity)? {
             return Ok(linked);
         }
         if let Some(linked) = self.private_class_member(ir, &identity)? {
@@ -1254,7 +1255,7 @@ impl CallLinker for Linker<'_, '_> {
         let identity = match self
             .sources
             .bodies
-            .callee_origin(&self.active_module, &signature)
+            .linked_origin(&self.active_module, &signature)
         {
             KlibCalleeOrigin::Exact(identity) => identity,
             // Compiler builtins such as `ieee754equals` deliberately have no KLIB declaration.
@@ -1560,8 +1561,8 @@ impl CallLinker for Linker<'_, '_> {
 impl<'s> Linker<'_, 's> {
     /// The type parameters of the generic class declaring `selected`, which a call of the member
     /// binds from its dispatch receiver; none for a top-level function or a non-generic class.
-    /// The getter of a value class's property, when this unit emits its body.
-    fn value_member_getter(
+    /// The accessor of a property of a class whose members the unit emits, when it has a body.
+    fn materialized_member_accessor(
         &mut self,
         ir: &mut IrFile,
         identity: &KlibDependencyCallable,
@@ -1576,10 +1577,10 @@ impl<'s> Linker<'_, 's> {
         let Some(accessor) = selected.accessor() else {
             return Ok(None);
         };
-        if accessor.role != crate::libraries::KlibAccessorRole::Getter
-            || !selected
-                .class_contract()
-                .is_some_and(crate::libraries::KlibBodyClassContract::emits_members)
+        let write = accessor.role == crate::libraries::KlibAccessorRole::Setter;
+        if !selected
+            .class_contract()
+            .is_some_and(crate::libraries::KlibBodyClassContract::emits_members)
         {
             return Ok(None);
         }
@@ -1603,7 +1604,7 @@ impl<'s> Linker<'_, 's> {
         };
         Ok(Some(LinkedAccessor {
             target: LinkedAccessorTarget::Local(function),
-            write: false,
+            write,
             receiver: linked.receiver,
             params: linked.params,
             ret: linked.ret,
@@ -1930,6 +1931,9 @@ impl<'s> Linker<'_, 's> {
             {
                 None
             }
+            // A singleton edge reads the object it dispatches to, which its receiver proof
+            // selects; no class is materialized for it.
+            (Some(_), Some(selected)) if selected.singleton_dispatch().is_some() => None,
             (Some(_), Some(selected)) => Some(self.materialize_member_class(ir, selected)?),
             (Some(_), None) => {
                 return Err(KlibBodyDeclineReason::SignatureMismatch(
@@ -2236,7 +2240,7 @@ impl Linker<'_, '_> {
         let identity = match self
             .sources
             .bodies
-            .callee_origin(&self.active_module, signature)
+            .linked_origin(&self.active_module, signature)
         {
             KlibCalleeOrigin::Exact(identity) => identity,
             KlibCalleeOrigin::Missing => return Ok(None),

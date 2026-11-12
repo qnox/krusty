@@ -59,29 +59,6 @@ impl KlibReferenceBindings {
     }
 }
 
-/// The real declarations that member references of ordinary bodies inherit, by the same
-/// normalization as template references. A reference that names no declaration stays unbound.
-pub(super) fn inherited_members(
-    libraries: &KlibLibraries,
-) -> Vec<(
-    (String, KlibDeclarationSignature),
-    Option<KlibDependencyCallable>,
-)> {
-    libraries
-        .bodies
-        .unserialized_member_references()
-        .into_iter()
-        .filter_map(|(module, reference)| {
-            let binding = match normalize_reference(libraries, &module, &reference) {
-                KlibReferenceOrigin::Exact(binding) => Some(binding.declaration),
-                KlibReferenceOrigin::Ambiguous => None,
-                KlibReferenceOrigin::Missing => return None,
-            };
-            Some(((module, reference), binding))
-        })
-        .collect()
-}
-
 pub(super) fn normalize_reference(
     libraries: &KlibLibraries,
     module: &str,
@@ -89,7 +66,7 @@ pub(super) fn normalize_reference(
 ) -> KlibReferenceOrigin {
     // A real declaration remains itself. Only an explicitly serialized fake override uses its
     // overridden-symbol edges; missing synthesized declarations use the shared core hierarchy.
-    let edges = match libraries.bodies.serialized_origin(module, reference) {
+    let edges = match libraries.bodies.callee_origin(module, reference) {
         KlibCalleeOrigin::Exact(identity) => {
             let Some((_, function)) = libraries.bodies.function(&identity) else {
                 return KlibReferenceOrigin::Missing;
@@ -122,7 +99,7 @@ pub(super) fn normalize_reference(
             // binding carries that dispatch; otherwise it binds the inherited declaration alone.
             return match hierarchy_binding(libraries, module, reference, None) {
                 KlibReferenceOrigin::Missing => {
-                    match libraries.bodies.callee_origin(module, reference) {
+                    match libraries.bodies.linked_origin(module, reference) {
                         KlibCalleeOrigin::Exact(declaration) => {
                             KlibReferenceOrigin::Exact(KlibReferenceBinding {
                                 declaration,

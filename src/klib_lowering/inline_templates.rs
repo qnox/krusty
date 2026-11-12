@@ -543,7 +543,7 @@ impl CallLinker for TemplateCalls<'_> {
                 match self
                     .callees
                     .declarations
-                    .callee_origin(self.module, &signature)
+                    .linked_origin(self.module, &signature)
                 {
                     crate::klib_libraries::KlibCalleeOrigin::Exact(declaration) => {
                         KlibReferenceBinding {

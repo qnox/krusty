@@ -812,7 +812,7 @@ fn header(
             )?;
         }
         params.push(packed);
-        identities.push(serialized_identity(*role, parameter));
+        identities.push(serialized_identity(*role, function, parameter));
     }
     varargs.authenticate(selected, function.companion_extension_class.is_some())?;
     let ret = semantic_type(arena, types, function.return_type)?;
@@ -904,21 +904,29 @@ fn header(
 }
 
 /// The identity a serialized parameter has by its role alone: an extension receiver is the
-/// receiver, a value parameter its source name. A context parameter's role among the context
-/// kinds (named, anonymous, legacy receiver) is recorded only by a provider, so the header alone
-/// gives it none.
+/// receiver, a value parameter its source name. The value of a compiler-generated property
+/// setter declares no name, whatever placeholder the producer spells it with. A context
+/// parameter's role among the context kinds (named, anonymous, legacy receiver) is recorded only
+/// by a provider, so the header alone gives it none.
 fn serialized_identity(
     role: SerializedRole,
+    function: &KlibIrFunction,
     parameter: &KlibIrParameter,
 ) -> Option<ResolvedParameterIdentity> {
     match role {
         SerializedRole::Context => None,
         SerializedRole::ExtensionReceiver => Some(ResolvedParameterIdentity::ExtensionReceiver),
+        SerializedRole::Value if function.base.origin == DEFAULT_PROPERTY_ACCESSOR => {
+            Some(ResolvedParameterIdentity::setter_value(None))
+        }
         SerializedRole::Value => Some(ResolvedParameterIdentity::Source(
             parameter.name.as_str().into(),
         )),
     }
 }
+
+/// The origin a producer records for a property accessor it generates.
+const DEFAULT_PROPERTY_ACCESSOR: &str = "DEFAULT_PROPERTY_ACCESSOR";
 
 /// The parameter identities of `selected`, after checking that it describes the serialized
 /// declaration: the same name, parameter list, parameter types and identities, and result.
@@ -1072,7 +1080,9 @@ fn parameter_role(role: SerializedRole, identity: &ResolvedParameterIdentity) ->
         | (SerializedRole::ExtensionReceiver, ResolvedParameterIdentity::ExtensionReceiver)
         | (
             SerializedRole::Value,
-            ResolvedParameterIdentity::Source(_) | ResolvedParameterIdentity::Unnamed { .. },
+            ResolvedParameterIdentity::Source(_)
+            | ResolvedParameterIdentity::Unnamed { .. }
+            | ResolvedParameterIdentity::PropertySetterValue,
         ) => Some(true),
         _ => None,
     }

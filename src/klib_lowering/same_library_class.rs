@@ -918,7 +918,7 @@ fn member_overrides(
             return Err(unsupported("an override of a non-public declaration"));
         };
         let declaration = KlibDeclarationSignature::Public(signature.clone());
-        let identity = match scope.bodies.callee_origin(scope.module, &declaration) {
+        let identity = match scope.bodies.linked_origin(scope.module, &declaration) {
             KlibCalleeOrigin::Exact(identity) => identity,
             KlibCalleeOrigin::Missing => {
                 return Err(KlibBodyDeclineReason::UnsupportedDeclaration(

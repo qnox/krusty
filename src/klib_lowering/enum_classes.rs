@@ -242,7 +242,7 @@ fn authenticate_constructor(
             "an enum constructor delegates to a file-private constructor",
         ));
     };
-    let enum_constructor = match bodies.callee_origin(
+    let enum_constructor = match bodies.linked_origin(
         module,
         &KlibDeclarationSignature::Public(enum_constructor.clone()),
     ) {

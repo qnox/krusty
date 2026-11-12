@@ -276,7 +276,7 @@ impl<'a> KlibCalleeFacts<'a> {
         use crate::libraries::KlibDeclarationSignature;
         let mismatch = |detail: &str| KlibBodyDeclineReason::SignatureMismatch(detail.to_owned());
         let declaration = KlibDeclarationSignature::Public(signature.clone());
-        let exact = match bodies.callee_origin(module, &declaration) {
+        let exact = match bodies.linked_origin(module, &declaration) {
             KlibCalleeOrigin::Ambiguous => {
                 return Err(mismatch("ambiguous root constructor producer"))
             }

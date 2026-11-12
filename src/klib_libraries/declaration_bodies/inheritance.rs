@@ -51,10 +51,9 @@ impl KlibDeclarationBodies {
     pub(crate) fn overridden_declarations(
         &self,
         body_module: &str,
-        signature: &KlibPublicIdSignature,
+        declaration: &KlibDeclarationSignature,
     ) -> Result<Vec<KlibDependencyCallable>, &'static str> {
-        let declaration = KlibDeclarationSignature::Public(signature.clone());
-        match self.serialized_origin(body_module, &declaration) {
+        match self.callee_origin(body_module, declaration) {
             KlibCalleeOrigin::Exact(identity) => return Ok(vec![identity]),
             KlibCalleeOrigin::Ambiguous => {
                 return Err("an overridden declaration has more than one producer")
@@ -62,7 +61,7 @@ impl KlibDeclarationBodies {
             KlibCalleeOrigin::Missing => {}
         }
         let found = self
-            .inherited(body_module, &declaration)
+            .inherited(body_module, declaration)
             .map_err(|()| "an overridden declaration's class is not unique")?;
         if found.is_empty() {
             return Err("an overridden declaration reaches no serialized declaration");
@@ -85,7 +84,7 @@ impl KlibDeclarationBodies {
                 continue;
             }
             // The root is the fake override itself, which no module serializes.
-            match self.serialized_origin(body_module, &declaration) {
+            match self.callee_origin(body_module, &declaration) {
                 KlibCalleeOrigin::Exact(identity) => {
                     if !found.contains(&identity) {
                         found.push(identity);
@@ -145,6 +144,20 @@ impl KlibDeclarationBodies {
             }
         }
         Ok(found)
+    }
+}
+
+/// The declaration a member function or property accessor symbol names. Only these take part
+/// in dispatch: a file-private declaration is never a member.
+pub(crate) fn member_signature(signature: &KlibIrSignature) -> Option<KlibDeclarationSignature> {
+    match signature {
+        KlibIrSignature::Public(signature) => {
+            Some(KlibDeclarationSignature::Public(signature.clone()))
+        }
+        KlibIrSignature::Accessor(signature) => {
+            Some(KlibDeclarationSignature::Accessor(signature.clone()))
+        }
+        KlibIrSignature::FileLocal { .. } => None,
     }
 }
 

@@ -114,43 +114,37 @@ pub(super) fn plan<'a, 'b>(
     let open = contract.modality != KotlinModality::Final;
     let mut constructors = Vec::new();
     let mut dispatched = Vec::new();
+    // A member function or property accessor dispatch reaches: an override with a body, an open
+    // class's open member, or an abstract member. A fake override is the inherited declaration;
+    // any other bodyless member is the target's, and the class keeps that target boundary.
+    let mut dispatch = |function: &'b KlibIrFunction| -> bool {
+        let modality = crate::metadata::semantic::declaration_modality(function.base.flags);
+        if function.body.is_none() {
+            match modality {
+                _ if function.base.origin == "FAKE_OVERRIDE" => {}
+                KotlinModality::Abstract => dispatched.push(function),
+                _ => return false,
+            }
+        } else if !function.overridden.is_empty() || (open && modality != KotlinModality::Final) {
+            dispatched.push(function);
+        }
+        true
+    };
     for member in &header.class.members {
         match member {
             KlibIrMember::Function(function) => {
                 let function = header.arena.function(*function);
-                let modality = crate::metadata::semantic::declaration_modality(function.base.flags);
                 if function.constructor {
                     constructors.push(&function.base.symbol);
-                } else if function.body.is_none() {
-                    // A fake override is the inherited declaration; an abstract member has no
-                    // implementation to dispatch to. Any other bodyless member is the target's.
-                    match modality {
-                        _ if function.base.origin == "FAKE_OVERRIDE" => {}
-                        KotlinModality::Abstract => dispatched.push(function),
-                        _ => return Ok(None),
-                    }
-                } else if !function.overridden.is_empty()
-                    || (open && modality != KotlinModality::Final)
-                {
-                    dispatched.push(function);
+                } else if !dispatch(function) {
+                    return Ok(None);
                 }
             }
-            // An override of an interface property accessor is the target's. The class keeps
-            // that target boundary rather than dropping the accessor from the materialized class.
             KlibIrMember::Property(property) => {
-                let overrides_accessor = [property.getter, property.setter]
-                    .into_iter()
-                    .flatten()
-                    .any(|accessor| {
-                        header
-                            .arena
-                            .function(accessor)
-                            .overridden
-                            .iter()
-                            .any(|symbol| matches!(symbol.signature, KlibIrSignature::Accessor(_)))
-                    });
-                if overrides_accessor {
-                    return Ok(None);
+                for accessor in [property.getter, property.setter].into_iter().flatten() {
+                    if !dispatch(header.arena.function(accessor)) {
+                        return Ok(None);
+                    }
                 }
             }
             // A nested class, a companion object included, is a class of its own.
@@ -247,7 +241,7 @@ pub(super) fn plan<'a, 'b>(
         (None, Ty::obj_name(crate::types::wk::any()))
     } else {
         // The superclass constructor the delegation names, by its exact declaration.
-        let constructor = match bodies.callee_origin(
+        let constructor = match bodies.linked_origin(
             &contract.module,
             &KlibDeclarationSignature::Public(signature.clone()),
         ) {
@@ -379,7 +373,7 @@ pub(super) fn constructor_initialization_callees(
                 _ => None,
             })
             .filter_map(|signature| {
-                match bodies.callee_origin(&plan.header.contract.module, &signature) {
+                match bodies.linked_origin(&plan.header.contract.module, &signature) {
                     KlibCalleeOrigin::Exact(identity) => Some(identity),
                     KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
                 }
@@ -413,7 +407,7 @@ pub(crate) fn delegated_superclass_constructor(
     let KlibIrSignature::Public(signature) = &access.symbol.signature else {
         return None;
     };
-    match bodies.callee_origin(
+    match bodies.linked_origin(
         &identity.module,
         &KlibDeclarationSignature::Public(signature.clone()),
     ) {
@@ -436,13 +430,10 @@ pub(super) fn constructor_dispatched_members(
         .iter()
         .filter(|function| function.body.is_some())
         .map(|function| {
-            let signature = match &function.base.symbol.signature {
-                KlibIrSignature::Public(signature) => {
-                    KlibDeclarationSignature::Public(signature.clone())
-                }
-                _ => return Err(mismatch("a dispatched member has no public signature")),
-            };
-            match bodies.callee_origin(&plan.header.contract.module, &signature) {
+            let signature =
+                crate::klib_libraries::member_signature(&function.base.symbol.signature)
+                    .ok_or_else(|| mismatch("a dispatched member is not a member"))?;
+            match bodies.linked_origin(&plan.header.contract.module, &signature) {
                 KlibCalleeOrigin::Exact(identity) => Ok(identity),
                 KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => {
                     Err(mismatch("a dispatched member has no exact producer"))
@@ -474,14 +465,11 @@ pub(super) fn constructor_declaration_evidence(
         .iter()
         .flat_map(|function| &function.overridden)
     {
-        let KlibIrSignature::Public(signature) = &symbol.signature else {
-            return Err(mismatch(
-                "an override names a declaration without a public signature",
-            ));
-        };
+        let signature = crate::klib_libraries::member_signature(&symbol.signature)
+            .ok_or_else(|| mismatch("an override names a declaration that is not a member"))?;
         declarations.extend(
             bodies
-                .overridden_declarations(&plan.header.contract.module, signature)
+                .overridden_declarations(&plan.header.contract.module, &signature)
                 .map_err(mismatch)?,
         );
     }

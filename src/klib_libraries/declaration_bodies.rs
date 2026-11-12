@@ -24,6 +24,7 @@ use crate::metadata::klib_ir::{
 use crate::types::{type_name_child, TypeName};
 
 mod inheritance;
+pub(crate) use inheritance::member_signature;
 
 /// The decoded function declarations of a set of KLIB libraries, joined by exact signature.
 #[derive(Default)]
@@ -36,9 +37,6 @@ pub struct KlibDeclarationBodies {
     /// The producer-declared module graph. These are manifest `depends` edges, not the roles the
     /// current compilation assigned its inputs.
     dependencies: HashMap<String, Vec<String>>,
-    /// Member references no library serializes, keyed by the referencing body module, bound to
-    /// the real declaration they inherit; `None` when the declared hierarchy offers several.
-    inherited: HashMap<(String, KlibIrSignature), Option<KlibDependencyCallable>>,
 }
 
 /// A public classifier search over one producer dependency closure.
@@ -395,7 +393,6 @@ impl KlibDeclarationBodies {
                 .into_iter()
                 .map(|(module, dependencies)| (module, dependencies.into_iter().collect()))
                 .collect(),
-            inherited: HashMap::default(),
         })
     }
 
@@ -466,38 +463,6 @@ impl KlibDeclarationBodies {
         references.into_iter().collect()
     }
 
-    /// Member references of ordinary bodies that no reachable library serializes, as a fake
-    /// override is not. Only these may later bind to an inherited declaration.
-    pub(super) fn unserialized_member_references(&self) -> Vec<(String, KlibDeclarationSignature)> {
-        self.callable_references()
-            .into_iter()
-            .filter(|(module, reference)| {
-                matches!(reference, KlibDeclarationSignature::Public(public)
-                    if public.declaration().segments().len() > 1)
-                    && matches!(
-                        self.callee_origin(module, reference),
-                        KlibCalleeOrigin::Missing
-                    )
-            })
-            .collect()
-    }
-
-    /// Publish the frozen inherited bindings of [`Self::unserialized_member_references`].
-    pub(super) fn bind_inherited_members(
-        &mut self,
-        bindings: impl IntoIterator<
-            Item = (
-                (String, KlibDeclarationSignature),
-                Option<KlibDependencyCallable>,
-            ),
-        >,
-    ) {
-        self.inherited = bindings
-            .into_iter()
-            .map(|((module, reference), binding)| ((module, ir_signature(&reference)), binding))
-            .collect();
-    }
-
     /// The declaration a call in an ordinary body links to: the serialized origin, or for a
     /// member no library serializes, the real declaration it inherits through its declared
     /// supertypes. A call never links to a declaration that is neither.
@@ -507,14 +472,7 @@ impl KlibDeclarationBodies {
         declaration: &KlibDeclarationSignature,
     ) -> KlibCalleeOrigin {
         match self.callee_origin(body_module, declaration) {
-            KlibCalleeOrigin::Missing => match self
-                .inherited
-                .get(&(body_module.to_owned(), ir_signature(declaration)))
-            {
-                Some(Some(identity)) => KlibCalleeOrigin::Exact(identity.clone()),
-                Some(None) => KlibCalleeOrigin::Ambiguous,
-                None => KlibCalleeOrigin::Missing,
-            },
+            KlibCalleeOrigin::Missing => self.inherited_origin(body_module, declaration),
             origin => origin,
         }
     }
@@ -523,23 +481,9 @@ impl KlibDeclarationBodies {
     ///
     /// A definition in the body module wins. Otherwise exactly one reachable producer module
     /// must define the signature. Input order and equal declarations outside that graph have no
-    /// bearing on the answer. A member no module serializes is a fake override, which resolves
-    /// to the declaration it inherits ([`Self::inherited_origin`]).
+    /// bearing on the answer. A member no module serializes, a fake override, stays missing here;
+    /// [`Self::linked_origin`] follows it to the declaration it inherits.
     pub(crate) fn callee_origin(
-        &self,
-        body_module: &str,
-        declaration: &KlibDeclarationSignature,
-    ) -> KlibCalleeOrigin {
-        match self.serialized_origin(body_module, declaration) {
-            KlibCalleeOrigin::Missing => self.inherited_origin(body_module, declaration),
-            origin => origin,
-        }
-    }
-
-    /// The module that serializes exactly `declaration`, as [`Self::callee_origin`] resolves it
-    /// before following inheritance. Normalizing a callable reference asks this first: a reference
-    /// to a fake override keeps the shared hierarchy's applied receiver where it has one.
-    pub(crate) fn serialized_origin(
         &self,
         body_module: &str,
         declaration: &KlibDeclarationSignature,
@@ -765,7 +709,7 @@ impl KlibDeclarationBodies {
             .call_symbols_in_body(function)
             .filter_map(|symbol| declaration_signature(&symbol.signature))
             .filter_map(
-                |declaration| match self.callee_origin(&identity.module, &declaration) {
+                |declaration| match self.linked_origin(&identity.module, &declaration) {
                     KlibCalleeOrigin::Exact(callee) => Some(callee),
                     KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
                 },
@@ -870,7 +814,7 @@ impl KlibDeclarationBodies {
                 return false;
             };
             let KlibCalleeOrigin::Exact(callee) =
-                self.callee_origin(&identity.module, &declaration)
+                self.linked_origin(&identity.module, &declaration)
             else {
                 return false;
             };

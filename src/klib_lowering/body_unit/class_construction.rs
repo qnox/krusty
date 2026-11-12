@@ -152,6 +152,7 @@ impl<'u, 's> Linker<'u, 's> {
     ) -> Result<crate::ir::ClassId, KlibBodyDeclineReason> {
         let classifier = plan.storage.declaration.classifier;
         let mut class = IrClass::synthetic(classifier);
+        class.is_source_declared = true;
         class.supertypes.clone_from(&plan.supertypes);
         class.is_open =
             plan.header.contract.modality != crate::metadata::semantic::KotlinModality::Final;
@@ -359,24 +360,23 @@ impl<'u, 's> Linker<'u, 's> {
         function: &'s KlibIrFunction,
     ) -> Result<(), KlibBodyDeclineReason> {
         let module = &member.contract.module;
-        let exact = |symbol: &crate::metadata::klib_ir::KlibIrSymbol| {
-            let crate::metadata::klib_ir::KlibIrSignature::Public(signature) = &symbol.signature
-            else {
-                return Err(KlibBodyDeclineReason::SignatureMismatch(
-                    "an override names a declaration without a public signature".to_owned(),
-                ));
-            };
-            match self
-                .sources
-                .bodies
-                .callee_origin(module, &KlibDeclarationSignature::Public(signature.clone()))
-            {
-                KlibCalleeOrigin::Exact(identity) => Ok(identity),
-                KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => {
-                    Err(KlibBodyDeclineReason::SignatureMismatch(
-                        "an override names a declaration without one exact producer".to_owned(),
-                    ))
-                }
+        let member_signature = |symbol: &crate::metadata::klib_ir::KlibIrSymbol| {
+            crate::klib_libraries::member_signature(&symbol.signature).ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch(
+                    "an override names a declaration that is not a member".to_owned(),
+                )
+            })
+        };
+        let exact = |symbol: &crate::metadata::klib_ir::KlibIrSymbol| match self
+            .sources
+            .bodies
+            .linked_origin(module, &member_signature(symbol)?)
+        {
+            KlibCalleeOrigin::Exact(identity) => Ok(identity),
+            KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => {
+                Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "an override names a declaration without one exact producer".to_owned(),
+                ))
             }
         };
         let provided = |identity: &KlibDependencyCallable| {
@@ -402,16 +402,9 @@ impl<'u, 's> Linker<'u, 's> {
             .overridden
             .iter()
             .map(|symbol| {
-                let crate::metadata::klib_ir::KlibIrSignature::Public(signature) =
-                    &symbol.signature
-                else {
-                    return Err(KlibBodyDeclineReason::SignatureMismatch(
-                        "an override names a declaration without a public signature".to_owned(),
-                    ));
-                };
                 self.sources
                     .bodies
-                    .overridden_declarations(module, signature)
+                    .overridden_declarations(module, &member_signature(symbol)?)
                     .map_err(|reason| KlibBodyDeclineReason::SignatureMismatch(reason.to_owned()))
             })
             .collect::<Result<Vec<_>, _>>()?;
