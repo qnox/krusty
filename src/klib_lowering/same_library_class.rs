@@ -915,6 +915,7 @@ fn member_overrides(
             ));
         }
         // A property's accessor overrides the interface property's accessor of the same kind.
+        // A file-local signature stays private to one serialized file.
         let declaration = match &symbol.signature {
             KlibIrSignature::Public(signature) => {
                 KlibDeclarationSignature::Public(signature.clone())
@@ -922,7 +923,9 @@ fn member_overrides(
             KlibIrSignature::Accessor(signature) => {
                 KlibDeclarationSignature::Accessor(signature.clone())
             }
-            _ => return Err(unsupported("an override of a non-public declaration")),
+            KlibIrSignature::FileLocal { .. } => {
+                return Err(unsupported("an override of a non-public declaration"));
+            }
         };
         let identity = match scope.bodies.callee_origin(scope.module, &declaration) {
             KlibCalleeOrigin::Exact(identity) => identity,
