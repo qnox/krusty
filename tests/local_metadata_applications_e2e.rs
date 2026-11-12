@@ -250,3 +250,18 @@ fun box(): String { val value = make(); return value.own }
 "#,
     )]));
 }
+
+#[test]
+fn a_generic_local_data_class_copies_with_its_captured_formals() {
+    assert_complete_abi_and_metadata(&common::classes_against_kotlinc_module(&[(
+        "LocalDataClassCopyMetadata.kt",
+        r#"
+fun <A, B> pair(a: A, b: B): String {
+    data class Local<C>(val c: C, val a: A, val b: B)
+    val copied = Local("K", a, b).copy(c = "O")
+    return copied.c + copied.component1() + Local(1, a, b).copy().a
+}
+fun box(): String = if (pair("x", 2) == "OOx") "OK" else pair("x", 2)
+"#,
+    )]));
+}

@@ -7,22 +7,22 @@ pub mod annotations;
 pub use annotations::{AccessorMetadataAnnotations, MetadataAnnotations, NO_ANNOTATIONS};
 pub mod builder;
 pub mod class_builder;
-pub(crate) mod class_declarations;
+pub mod class_declarations;
 pub mod class_id;
-pub(crate) mod classifier_applications;
+pub mod classifier_applications;
 pub(crate) mod classifier_inventory;
 pub(crate) mod contract_decoder;
 pub(crate) mod declaration_flags;
-pub(crate) mod declaration_records;
-pub(crate) mod decode;
+pub mod declaration_records;
+pub mod decode;
 pub mod encoding;
-#[cfg(test)]
-pub(crate) mod fragment_text;
+#[cfg(any(test, feature = "test-support"))]
+pub mod fragment_text;
 pub mod id_signature;
 pub mod klib_fragment;
 pub mod klib_ir;
-pub(crate) mod lambda_function;
-pub(crate) mod local_classifiers;
+pub mod lambda_function;
+pub mod local_classifiers;
 pub mod local_properties;
 pub(crate) mod member_order;
 pub mod module;
@@ -30,8 +30,8 @@ pub mod protobuf;
 pub mod semantic;
 mod value_parameter_flags;
 pub use value_parameter_flags::DeclaredValueParameter;
-pub(crate) mod type_encoder;
-pub(crate) use type_encoder::MetadataTypeLookups;
+pub mod type_encoder;
+pub use type_encoder::MetadataTypeLookups;
 pub use type_encoder::{ClassifierApplication, ClassifierApplications, InnerClassifier};
 pub mod version_requirements;
 
@@ -98,7 +98,7 @@ pub(crate) mod property_flags {
 /// recorded array's `Argument.projection`. A primitive specialized array (`vararg xs: Int` →
 /// `IntArray`) has no type argument at all and is recorded unchanged. The element's own record stays
 /// unprojected — it travels separately as `ValueParameter.vararg_element_type`.
-pub(crate) fn vararg_recorded_type(ty: crate::types::Ty) -> crate::types::Ty {
+pub fn vararg_recorded_type(ty: crate::types::Ty) -> crate::types::Ty {
     use crate::types::Ty;
     let TyKind::Obj(name, args) = ty.kind() else {
         return ty;
@@ -141,7 +141,7 @@ pub(crate) fn vararg_recorded_declaration(
 /// holding one anywhere — parameter, extension receiver, or return — a `vararg` of a reference
 /// element included, since that is recorded as an `Array`. Only the OUTERMOST classifier counts: an
 /// array nested inside another type (`List<Array<String>>`) is erased away before the descriptor.
-pub(crate) fn descriptor_needs_recording(ty: crate::types::Ty) -> bool {
+pub fn descriptor_needs_recording(ty: crate::types::Ty) -> bool {
     ty.non_null().is_reference_array()
 }
 

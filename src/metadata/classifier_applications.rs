@@ -11,7 +11,7 @@ use crate::types::TypeName;
 
 /// The split authenticated by the IR declaration or frozen classifier facts. A missing nested
 /// declaration is an error; an ordinary top-level classifier needs no captured-layout fact.
-pub(crate) fn classifier_application(
+pub fn classifier_application(
     ir: &IrFile,
     symbols: &dyn BackendClassifierSource,
     classifier: TypeName,
@@ -127,6 +127,85 @@ mod tests {
                 captured_arguments: 1,
             })
         );
+    }
+
+    struct DependencyFacts(
+        TypeName,
+        std::sync::Arc<crate::backend::BackendClassifierFact>,
+    );
+
+    impl BackendClassifierSource for DependencyFacts {
+        fn classifier(
+            &self,
+            classifier: TypeName,
+        ) -> Option<std::sync::Arc<crate::backend::BackendClassifierFact>> {
+            (classifier == self.0).then(|| self.1.clone())
+        }
+    }
+
+    fn dependency_fact(
+        outer_instance: Option<TypeName>,
+        own_type_parameter_count: usize,
+        semantic_type_parameter_count: usize,
+    ) -> std::sync::Arc<crate::backend::BackendClassifierFact> {
+        std::sync::Arc::new(crate::backend::BackendClassifierFact {
+            runtime_exception: None,
+            declaration_name: None,
+            access: crate::libraries::ClassifierAccess::Public,
+            is_kotlin: true,
+            mapped_builtin: false,
+            source: false,
+            outer_instance,
+            kind: crate::libraries::TypeKind::Class,
+            is_abstract: false,
+            is_extensible: false,
+            supertypes: Box::default(),
+            annotations: Box::default(),
+            own_type_parameter_count,
+            type_param_variances: vec![
+                crate::types::TypeVariance::Invariant;
+                semantic_type_parameter_count
+            ]
+            .into_boxed_slice(),
+            value_underlying: None,
+            value_declaration: None,
+            role: None,
+            companion: None,
+            enum_entries_accessor: None,
+        })
+    }
+
+    #[test]
+    fn a_dependency_classifier_splits_its_application_by_its_published_layout() {
+        let ir = IrFile::default();
+        let nested = crate::types::type_name("sample/Outer").nested_child("Nested");
+        let outer = crate::types::type_name("sample/Outer");
+        for (fact, expected) in [
+            (
+                dependency_fact(None, 1, 3),
+                Ok(ClassifierApplication::LexicalCapture {
+                    own_arguments: 1,
+                    captured_arguments: 2,
+                }),
+            ),
+            (
+                dependency_fact(Some(outer), 1, 2),
+                Ok(ClassifierApplication::Inner(InnerClassifier {
+                    outer,
+                    own_arguments: 1,
+                })),
+            ),
+            (
+                dependency_fact(None, 2, 2),
+                Ok(ClassifierApplication::Direct),
+            ),
+            (dependency_fact(None, 2, 1), Err(nested)),
+        ] {
+            assert_eq!(
+                classifier_application(&ir, &DependencyFacts(nested, fact), nested),
+                expected
+            );
+        }
     }
 
     #[test]

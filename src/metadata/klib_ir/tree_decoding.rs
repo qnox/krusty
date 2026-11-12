@@ -15,7 +15,7 @@ use std::ops::RangeInclusive;
 
 use crate::klib::KlibArchive;
 
-use super::symbols::{string, KlibIrSignature, KlibIrSymbol, SignatureTable};
+use super::symbols::{string, KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind, SignatureTable};
 use super::tree::{
     KlibIrAnnotation, KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrBranch, KlibIrCatch,
     KlibIrClass, KlibIrClassId, KlibIrDeclarationBase, KlibIrEnumEntry, KlibIrExpr, KlibIrExprId,
@@ -54,6 +54,10 @@ pub struct KlibIrDeclarationTree {
 pub struct KlibIrModuleTrees {
     trees: Vec<KlibIrDeclarationTree>,
     functions: HashMap<KlibIrSignature, (usize, KlibIrFunctionId)>,
+    /// File-local functions, meaningful only inside this library.
+    local_functions: HashMap<KlibIrSignature, (usize, KlibIrFunctionId)>,
+    /// File-local classes, meaningful only inside this library.
+    local_classes: HashMap<KlibIrSignature, (usize, KlibIrClassId)>,
 }
 
 impl KlibIrModuleTrees {
@@ -69,11 +73,31 @@ impl KlibIrModuleTrees {
 
     /// The function another module links to under `signature`, with the arena that owns it.
     /// Only public and public-accessor identities are indexed: a file-local identity has no
-    /// meaning outside the tree that holds it.
+    /// meaning in another library, and is answered by [`Self::local_function`] for its own.
     pub fn function(&self, signature: &KlibIrSignature) -> Option<(&KlibIrArena, &KlibIrFunction)> {
         let (tree, function) = *self.functions.get(signature)?;
         let arena = &self.trees[tree].arena;
         Some((arena, arena.function(function)))
+    }
+
+    /// The file-local function this library serializes under `signature`.
+    pub(crate) fn local_function(
+        &self,
+        signature: &KlibIrSignature,
+    ) -> Option<(&KlibIrArena, &KlibIrFunction)> {
+        let (tree, function) = *self.local_functions.get(signature)?;
+        let arena = &self.trees[tree].arena;
+        Some((arena, arena.function(function)))
+    }
+
+    /// The file-local class this library serializes under `signature`.
+    pub(crate) fn local_class(
+        &self,
+        signature: &KlibIrSignature,
+    ) -> Option<(&KlibIrArena, &super::tree::KlibIrClass)> {
+        let (tree, class) = *self.local_classes.get(signature)?;
+        let arena = &self.trees[tree].arena;
+        Some((arena, arena.class(class)))
     }
 
     pub fn function_count(&self) -> usize {
@@ -103,7 +127,7 @@ impl KlibIrModuleTrees {
     pub(crate) fn from_trees(trees: Vec<KlibIrDeclarationTree>) -> Result<Self, KlibIrDecodeError> {
         let mut module = Self {
             trees,
-            functions: HashMap::default(),
+            ..Self::default()
         };
         module.index()?;
         Ok(module)
@@ -112,16 +136,17 @@ impl KlibIrModuleTrees {
     fn index(&mut self) -> Result<(), KlibIrDecodeError> {
         for (tree_index, tree) in self.trees.iter().enumerate() {
             for (function_index, function) in tree.arena.functions.iter().enumerate() {
-                if matches!(
+                let id = KlibIrFunctionId(u32::try_from(function_index).expect("arena fits u32"));
+                let functions = if matches!(
                     function.base.symbol.signature,
                     KlibIrSignature::FileLocal { .. }
                 ) {
-                    continue;
-                }
-                let id = KlibIrFunctionId(u32::try_from(function_index).expect("arena fits u32"));
-                if let Some((previous, _)) = self
-                    .functions
-                    .insert(function.base.symbol.signature.clone(), (tree_index, id))
+                    &mut self.local_functions
+                } else {
+                    &mut self.functions
+                };
+                if let Some((previous, _)) =
+                    functions.insert(function.base.symbol.signature.clone(), (tree_index, id))
                 {
                     return Err(KlibIrDecodeError::malformed(
                         DECLARATIONS,
@@ -129,6 +154,30 @@ impl KlibIrModuleTrees {
                         format!(
                             "declaration trees {previous} and {tree_index} both define {:?}",
                             function.base.symbol.signature
+                        ),
+                    ));
+                }
+            }
+            for (class_index, class) in tree.arena.classes.iter().enumerate() {
+                if class.base.symbol.kind != KlibIrSymbolKind::Class
+                    || !matches!(
+                        class.base.symbol.signature,
+                        KlibIrSignature::FileLocal { .. }
+                    )
+                {
+                    continue;
+                }
+                let id = KlibIrClassId(u32::try_from(class_index).expect("arena fits u32"));
+                if let Some((previous, _)) = self
+                    .local_classes
+                    .insert(class.base.symbol.signature.clone(), (tree_index, id))
+                {
+                    return Err(KlibIrDecodeError::malformed(
+                        DECLARATIONS,
+                        0,
+                        format!(
+                            "declaration trees {previous} and {tree_index} both define {:?}",
+                            class.base.symbol.signature
                         ),
                     ));
                 }

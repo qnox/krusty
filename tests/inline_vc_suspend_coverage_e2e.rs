@@ -1,5 +1,5 @@
 //! Targeted end-to-end "box" coverage for the three worst-covered JVM backend passes:
-//! `src/jvm/inline.rs`, `src/jvm/value_classes.rs`, and `src/jvm/suspend.rs`. Prior suites
+//! `src/jvm/inline.rs`, `crates/krusty-jvm/src/value_classes.rs`, and `crates/krusty-jvm/src/suspend.rs`. Prior suites
 //! (`inline_deep_coverage`, `feature_coverage_u/w`, `value_class_e2e`, `value_class_map_key`,
 //! `suspend_e2e`, `suspend_try_finally`, `coroutine_intrinsics`) already cover the common shapes;
 //! this file deliberately targets DIFFERENT / rarer branches:
