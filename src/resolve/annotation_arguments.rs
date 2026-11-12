@@ -322,8 +322,7 @@ impl Checker<'_> {
             .check_array_builtin(
                 scope,
                 expression,
-                kind,
-                None,
+                super::ArrayBuiltin::of(kind),
                 elements,
                 self.span(expression),
                 primitive_element,

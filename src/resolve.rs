@@ -1178,6 +1178,30 @@ impl ClassFlags {
     }
 }
 
+/// The compiler-built array operation a call checks as, and the label of its initializer lambda
+/// in diagnostics when it is a size constructor.
+#[derive(Clone, Copy)]
+struct ArrayBuiltin {
+    kind: crate::synthetics::SyntheticKind,
+    initializer_label: Option<&'static str>,
+}
+
+impl ArrayBuiltin {
+    fn of(kind: crate::synthetics::SyntheticKind) -> Self {
+        Self {
+            kind,
+            initializer_label: None,
+        }
+    }
+
+    fn constructor(synthetic: &crate::synthetics::Synthetic) -> Self {
+        Self {
+            kind: synthetic.kind,
+            initializer_label: Some(synthetic.name),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct SourceClassHeader {
     flags: ClassFlags,
@@ -13071,9 +13095,14 @@ impl<'a> Checker<'a> {
             } else {
                 crate::synthetics::SyntheticKind::PrimitiveVararg(element)
             };
-            let Some(result) =
-                self.check_array_builtin(scope, call, kind, None, args, span, Some(element))
-            else {
+            let Some(result) = self.check_array_builtin(
+                scope,
+                call,
+                ArrayBuiltin::of(kind),
+                args,
+                span,
+                Some(element),
+            ) else {
                 return Ty::Error;
             };
             self.expr_lowers
@@ -16309,8 +16338,7 @@ impl<'a> Checker<'a> {
                         if let Some(result) = self.check_array_builtin(
                             scope,
                             call,
-                            synthetic.kind,
-                            Some(synthetic.name),
+                            ArrayBuiltin::constructor(synthetic),
                             args,
                             span,
                             Some(element),
@@ -16332,8 +16360,7 @@ impl<'a> Checker<'a> {
                         if let Some(result) = self.check_array_builtin(
                             scope,
                             call,
-                            synthetic.kind,
-                            Some(synthetic.name),
+                            ArrayBuiltin::constructor(synthetic),
                             args,
                             span,
                             element_hint,
@@ -56629,8 +56656,14 @@ impl<'a> Checker<'a> {
             .filter(|element| element.projection_inner().is_none());
         let element_hint = explicit_element.or(expected_element);
         let candidate = candidates.into_iter().next()?;
-        let result =
-            self.check_array_builtin(scope, call, kind, None, args, self.span(call), element_hint)?;
+        let result = self.check_array_builtin(
+            scope,
+            call,
+            ArrayBuiltin::of(kind),
+            args,
+            self.span(call),
+            element_hint,
+        )?;
         self.expr_lowers
             .insert(call, ExprLowering::CompilerSynthetic(kind));
         self.mark_top_level_call(call, &candidate, result, Vec::new());
@@ -56661,13 +56694,16 @@ impl<'a> Checker<'a> {
         &mut self,
         scope: &CheckerScope<'_>,
         call: ExprId,
-        kind: crate::synthetics::SyntheticKind,
-        initializer_label: Option<&'static str>,
+        builtin: ArrayBuiltin,
         args: &[ExprId],
         span: Span,
         element_hint: Option<Ty>,
     ) -> Option<Ty> {
         use crate::synthetics::SyntheticKind;
+        let ArrayBuiltin {
+            kind,
+            initializer_label,
+        } = builtin;
         let argument_names = self.file.call_arg_names.get(&call.0);
         let whole_array_arguments = args
             .iter()
