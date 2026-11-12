@@ -275,6 +275,13 @@ impl Backend for WasmBackend {
 
     fn check_module(&self, state: &Self::State, diags: &mut DiagSink) {
         if let Some(started) = state.started.as_ref().filter(|_| !state.declined) {
+            if let Some(construct) = started.runtime.objects.interfaces.declined() {
+                diags.error(
+                    krusty::diag::Span::new(0, 0),
+                    format!("{DECLINE_PREFIX}{construct} yet"),
+                );
+                return;
+            }
             if let Err(error) = started.callables.check_links() {
                 diags.error(
                     krusty::diag::Span::new(0, 0),
