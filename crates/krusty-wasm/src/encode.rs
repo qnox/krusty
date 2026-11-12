@@ -107,6 +107,7 @@ impl ValType {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum StorageType {
     Val(ValType),
+    I8,
     I16,
 }
 
@@ -120,6 +121,7 @@ impl FieldType {
     fn encode(self, out: &mut Vec<u8>) {
         match self.storage {
             StorageType::Val(value) => value.encode(out),
+            StorageType::I8 => out.push(0x78),
             StorageType::I16 => out.push(0x77),
         }
         out.push(u8::from(self.mutable));
@@ -260,6 +262,14 @@ impl Module {
 
     pub(super) fn func_type(&mut self, params: Vec<ValType>, results: Vec<ValType>) -> u32 {
         self.ty(CompositeType::Func { params, results })
+    }
+
+    /// The parameters and results of function type `ty`; `None` when `ty` is no function type.
+    pub(super) fn func_signature(&self, ty: u32) -> Option<(Vec<ValType>, Vec<ValType>)> {
+        match &self.types.get(ty as usize)?.composite {
+            CompositeType::Func { params, results } => Some((params.clone(), results.clone())),
+            _ => None,
+        }
     }
 
     pub(super) fn exception_tag(&mut self, payload: Vec<ValType>) -> u32 {
@@ -723,6 +733,10 @@ impl Code {
 
     pub(super) fn array_get(&mut self, ty: u32) -> &mut Self {
         self.gc(0x0b).index(ty)
+    }
+
+    pub(super) fn array_get_s(&mut self, ty: u32) -> &mut Self {
+        self.gc(0x0c).index(ty)
     }
 
     pub(super) fn array_get_u(&mut self, ty: u32) -> &mut Self {

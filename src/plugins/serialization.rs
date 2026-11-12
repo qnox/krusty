@@ -686,6 +686,7 @@ fn specialize_expression_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
                 continue;
             };
             let (class_internal, selected_owner) = (*class_internal, *selected_owner);
+            let first_built = ir.exprs.len();
             let realized = if let Some(accessor) =
                 generated_serializer_accessor(ir, class_internal, exprs.len())
             {
@@ -715,6 +716,9 @@ fn specialize_expression_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
                 };
                 call
             };
+            // kotlinc builds the call and its companion or object receiver at the call's offsets.
+            let position = ir.position(mid as ExprId);
+            ir.settle_positions(first_built..ir.exprs.len(), position);
             ir.exprs[mid] = ir.exprs[realized as usize].clone();
             continue;
         }

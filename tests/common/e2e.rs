@@ -8,9 +8,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use super::common_core as common;
-use super::reference_box_support::{
-    kotlinc_box_files_result_with_classpath, kotlinc_box_result, kotlinc_box_result_with_classpath,
-};
+use super::reference_box_support::{kotlinc_box_files_result_with_classpath, kotlinc_box_result};
 use super::reference_compiler_support::{
     compiler_errors, error_blocks, kotlinc_paths_result, render_errors, write_fixture_sources,
 };
@@ -91,6 +89,126 @@ pub fn compile_in_process_files_common(
         None,
         &krusty::language_settings::LanguageSettings::default(),
     )
+}
+
+/// The complete diagnostics of an in-process compile of `src`, in emission order.
+pub fn compile_in_process_diagnostics(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Vec<String> {
+    common::compile_in_process_report(src, stem, cp_jars, jdk_modules).diagnostics
+}
+
+/// Capture common IR at the real backend boundary. Tests that inspect or deliberately mutate IR
+/// use this backend instead of reconstructing semantics from the retained inspection AST.
+pub fn capture_common_ir(
+    src: &str,
+    stem: &str,
+    platform: Box<dyn krusty::libraries::SemanticPlatform>,
+) -> (Vec<krusty::ir::IrFile>, Vec<String>) {
+    #[derive(Clone)]
+    struct CaptureBackend(std::rc::Rc<std::cell::RefCell<Vec<krusty::ir::IrFile>>>);
+
+    impl krusty::compiler::Backend for CaptureBackend {
+        type State = ();
+
+        fn compilation_target(&self) -> krusty::compilation_target::CompilationTarget {
+            CompilationTarget::Jvm
+        }
+
+        fn lower_ir_file(
+            &self,
+            file: krusty::compiler::CheckedIrFile<'_>,
+            _state: &mut Self::State,
+            _diags: &mut krusty::diag::DiagSink,
+        ) -> Vec<krusty::compiler::Artifact> {
+            self.0.borrow_mut().push(file.ir);
+            Vec::new()
+        }
+
+        fn finalize(
+            &self,
+            _state: Self::State,
+            _module_name: &str,
+        ) -> Vec<krusty::compiler::Artifact> {
+            Vec::new()
+        }
+    }
+
+    let captured = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let backend = CaptureBackend(captured.clone());
+    let report = common::emit_in_process(src, stem, platform, &backend);
+    let files = std::mem::take(&mut *captured.borrow_mut());
+    (files, report.diagnostics)
+}
+
+/// Start `main_class` in its own `java` process with `arguments` as raw bytes and `input` on its
+/// standard input, and wait for it. The persistent runners cannot do this: a program's arguments and
+/// standard input belong to its process, and theirs carry the runner protocol. The locale is UTF-8
+/// so the launcher decodes the arguments as UTF-8, and the environment is otherwise empty, so
+/// nothing the host exports (a `JAVA_TOOL_OPTIONS` banner) reaches the program's output. `None` when
+/// no JDK is there.
+pub fn run_jvm_main(
+    classpath: &[PathBuf],
+    main_class: &str,
+    arguments: &[&std::ffi::OsStr],
+    input: &[u8],
+) -> Option<std::process::Output> {
+    use std::io::Write as _;
+
+    let java = std::path::Path::new(&common::java_home()).join("bin/java");
+    if !java.is_file() {
+        return None;
+    }
+    let classpath = std::env::join_paths(classpath).expect("build the class path");
+    let mut child = Command::new(java)
+        .env_clear()
+        .env("LANG", "C.UTF-8")
+        .env("LC_ALL", "C.UTF-8")
+        .arg("-cp")
+        .arg(classpath)
+        .arg(main_class)
+        .args(arguments)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    // Written on its own thread: a program may print before it has read all of its input.
+    let input = input.to_vec();
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(&input);
+    });
+    let output = child.wait_with_output().ok()?;
+    writer.join().expect("the input writer");
+    Some(output)
+}
+
+const NATIVE_SYS_HEADER: &str = include_str!("../../crates/krusty-native/runtime/krusty_sys.h");
+const NATIVE_RUNTIME_HEADER: &str = include_str!("../../crates/krusty-native/runtime/krusty_rt.h");
+
+/// The runtime's syscall surface, for tests that pin the native concurrency contract.
+pub fn native_sys_header() -> &'static str {
+    NATIVE_SYS_HEADER
+}
+
+/// Materialize the two public runtime headers beside a C integration-test driver.
+pub fn write_native_runtime_headers(directory: &std::path::Path) -> std::io::Result<()> {
+    std::fs::write(directory.join("krusty_sys.h"), NATIVE_SYS_HEADER)?;
+    std::fs::write(directory.join("krusty_rt.h"), NATIVE_RUNTIME_HEADER)
+}
+
+/// `native_analysis` of a build applying every compiler plugin krusty ships, with their
+/// `libraries` (the plugins' runtimes) on the classpath after the stdlib and `kotlin-test`.
+pub fn native_analysis_with_plugins(
+    sources: &[(&str, &str)],
+    libraries: &[std::path::PathBuf],
+    diags: &mut krusty::diag::DiagSink,
+) -> Option<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>)> {
+    common::native_backend::analyze_natively(sources, libraries, true, diags)
 }
 
 /// A positive front-end coverage test upgraded to true e2e: the source must be checker-clean, the
@@ -360,7 +478,7 @@ fn krusty_cli_diagnostics_in_process(
         .collect::<Vec<_>>();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_module(
         &inputs,
-        PlatformProvider::from(krusty::frontend::PlatformProvider::jvm(libraries)),
+        PlatformProvider::jvm(libraries),
         &settings.features,
         "main",
         &mut diags,

@@ -797,7 +797,9 @@ mod tests {
                 caller,
                 caller_is_default: caller.is_none(),
                 caller_source_name: String::new(),
-                inline_callee: krusty::fir::CallableId::from_raw(0),
+                inline_callee: krusty::ir::IrInlineCallee::Module(
+                    krusty::fir::CallableId::from_raw(0),
+                ),
                 inline_callee_source_name: "update".to_string(),
                 parent: None,
                 consumed_inline_capture: false,

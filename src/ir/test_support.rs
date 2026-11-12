@@ -118,3 +118,9 @@ pub fn clone_class_method(
 pub fn stored_property(name: String, ty: crate::types::Ty, field: u32) -> super::IrProperty {
     super::IrProperty::stored_value(name, ty, field)
 }
+
+/// Forget every class's declared self type, as a lowering checkpoint restored to before any
+/// class was declared would.
+pub fn forget_declared_class_self_types(ir: &mut super::IrFile) {
+    ir.restore_declared_class_self_type_owners(&Default::default());
+}

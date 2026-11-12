@@ -252,7 +252,7 @@ impl<'a> KlibCalleeFacts<'a> {
     ) -> Result<Option<crate::libraries::CompilerIntrinsic>, super::decline::KlibBodyDeclineReason>
     {
         use super::decline::KlibBodyDeclineReason;
-        use super::function_lowering::{raw_function_header, HeaderPurpose};
+        use super::function_lowering::{selected_function_header, HeaderPurpose};
         let selected = match self.get(identity) {
             Some(KlibCalleeFact::Ambiguous) => {
                 return Err(KlibBodyDeclineReason::SignatureMismatch(
@@ -273,7 +273,13 @@ impl<'a> KlibCalleeFacts<'a> {
             .ok_or(KlibBodyDeclineReason::Unjoined)?;
         // A body-bearing target leaf still authenticates its complete declared header, not the
         // narrower set of declarations whose executable bodies common lowering supports.
-        raw_function_header(Some(selected), HeaderPurpose::External, arena, declaration)?;
+        selected_function_header(
+            selected,
+            HeaderPurpose::External,
+            arena,
+            declaration,
+            Some(bodies),
+        )?;
         Ok(Some(operation))
     }
 

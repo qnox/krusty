@@ -438,7 +438,16 @@ impl BodyLowering<'_, '_, '_> {
                         .or_else(|| self.unsigned_array_carrier_access(realization)),
                     dispatch_receiver,
                     args,
-                    *extension_receiver_parameter,
+                    super::compiler_intrinsics::DeclaredOperands {
+                        receiver: match realization.declaration_owner {
+                            Some(krusty::types::SemanticCallableOwner::Classifier(owner)) => {
+                                Some(Ty::obj_name(owner))
+                            }
+                            _ => None,
+                        },
+                        params: &realization.params,
+                        extension_receiver_parameter: *extension_receiver_parameter,
+                    },
                     *ret,
                 ) {
                     return realized;
