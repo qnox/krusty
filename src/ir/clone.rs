@@ -670,14 +670,10 @@ fn copy_function_implementation_facts(
     ir.set_method_visibility(target, ir.method_visibility(source));
     copy_map!(fn_source_names);
     copy_map!(fn_params);
-    copy_map!(fn_param_declared_nullable);
     copy_map!(fn_declared_spellings);
-    copy_map!(fn_context_counts);
-    copy_map!(fn_param_annotations);
-    copy_map!(fn_param_no_infer);
     copy_map!(fn_return_value_statuses);
-    copy_map!(fn_varargs);
     ir.copy_function_position(source, target);
+    ir.copy_declared_parameters(source, target);
     copy_map!(fn_source_order);
     copy_map!(fn_continuation_ordinal);
     copy_map!(fn_contracts);
@@ -985,7 +981,9 @@ mod tests {
                 caller: Some(IrEnclosure::Function(caller)),
                 caller_is_default: false,
                 caller_source_name: "box".to_string(),
-                inline_callee: crate::fir::CallableId::from_raw(11),
+                inline_callee: crate::ir::IrInlineCallee::Module(crate::fir::CallableId::from_raw(
+                    11,
+                )),
                 inline_callee_source_name: "defineFunc".to_string(),
                 parent: None,
                 consumed_inline_capture: false,
@@ -1002,7 +1000,9 @@ mod tests {
                 caller: Some(IrEnclosure::Function(caller)),
                 caller_is_default: false,
                 caller_source_name: "box".to_string(),
-                inline_callee: crate::fir::CallableId::from_raw(11),
+                inline_callee: crate::ir::IrInlineCallee::Module(crate::fir::CallableId::from_raw(
+                    11,
+                )),
                 inline_callee_source_name: "defineFunc".to_string(),
                 parent: None,
                 consumed_inline_capture: false,
@@ -1047,7 +1047,10 @@ mod tests {
         let recorded = &ir.specialized_functions[&first];
         assert_eq!(recorded.source, source);
         assert_eq!(recorded.caller, Some(IrEnclosure::Function(caller)));
-        assert_eq!(recorded.inline_callee, crate::fir::CallableId::from_raw(11));
+        assert_eq!(
+            recorded.inline_callee,
+            crate::ir::IrInlineCallee::Module(crate::fir::CallableId::from_raw(11))
+        );
         assert_eq!(recorded.inline_callee_source_name, "defineFunc");
         assert_eq!(recorded.parent, None);
         assert_eq!(ir.specialized_functions[&second].parent, None);

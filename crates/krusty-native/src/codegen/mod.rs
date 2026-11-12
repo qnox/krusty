@@ -137,6 +137,9 @@ pub struct CodegenModule {
         String,
         krusty::backend::class_tables::module_slots::ModuleSlotPlan,
     )>,
+    /// The classes the files of the module being emitted laid out so far, which a later file's
+    /// subclass extends.
+    laid_out: super::laid_out_classes::LaidOutClasses,
 }
 
 impl CodegenModule {
@@ -244,6 +247,20 @@ impl Backend for CraneliftBackend {
             &mut file.callables,
             |function| file.dependency_exports.callable(function).is_some(),
         );
+        // After default arguments, so a `$default` entry's call of the declaration is the one
+        // that gains the continuation, and before dispatch entries, which copy the signature.
+        if let Err(declined) =
+            krusty::backend::coroutines::add_continuation_parameters(&mut file.ir)
+        {
+            diags.error(
+                krusty::diag::Span::new(0, 0),
+                format!(
+                    "krusty: the native backend does not support {} yet",
+                    declined.construct()
+                ),
+            );
+            return Vec::new();
+        }
         krusty::backend::construction_entries::realize(&mut file.ir, &mut file.dependency_exports);
         if let Err(error) =
             krusty::backend::property_entries::realize(&mut file.ir, &mut file.dependency_exports)
@@ -327,6 +344,7 @@ impl Backend for CraneliftBackend {
             state.slot_plan = Some((file.module_name.to_owned(), plan));
         }
         let slot_plan = &state.slot_plan.as_ref().expect("planned just above").1;
+        state.laid_out.enter_source_module(file.module_name);
         let mut dependency_exports = krusty::fx_hash::HashMap::default();
         let mut exports = file.dependency_exports.callables().collect::<Vec<_>>();
         // `DependencyExportSignatures` is a lookup map; target symbol allocation must not inherit
@@ -506,6 +524,7 @@ impl Backend for CraneliftBackend {
                 dependency_symbols: &state.dependency_symbols,
                 dependency_singletons: &state.dependency_singletons,
                 dependency_enum_constants: &state.dependency_enum_constants,
+                laid_out: &state.laid_out,
             },
             self.target,
             &object_stem,
@@ -531,6 +550,9 @@ impl Backend for CraneliftBackend {
             state.entry_file = Some(source_stem);
         }
         state.abi.extend(lowered.abi);
+        for (class, record) in lowered.laid_out {
+            state.laid_out.insert(class, record);
+        }
         vec![(format!("{object_stem}.o"), lowered.object)]
     }
 

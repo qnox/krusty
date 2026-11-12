@@ -40,6 +40,7 @@ mod dependency_templates;
 mod entry_point_tests;
 mod erased_parameters;
 mod error;
+mod expect_realization;
 mod expression;
 mod external_references;
 #[cfg(test)]
@@ -65,6 +66,7 @@ mod loops;
 mod member_dispatch;
 mod metadata_constants;
 mod module_declarations;
+mod node_positions;
 mod package_declarations;
 mod properties;
 mod property_references;
@@ -144,8 +146,9 @@ pub(super) fn resolved_parameter_identity(
 }
 
 /// Whether `declaration` is, or belongs to, an `expect` classifier an `actual typealias`
-/// actualized. Common code types one as its own classifier and every target realizes the alias's
-/// target, so nothing of the `expect` is lowered. An `@OptionalExpectation` annotation without an
+/// actualized, or is an `expect` function or property an `actual` replaces. Common code types each
+/// by its own declaration and every target realizes the actual, so nothing of the `expect` is
+/// lowered. An `@OptionalExpectation` annotation without an
 /// actual is no such classifier: it is lowered as declared.
 pub(super) fn within_actualized_expect(
     index: &ResolvedModuleIndex,
@@ -155,14 +158,15 @@ pub(super) fn within_actualized_expect(
         index.declaration_anchor(current)?.owner
     })
     .any(|current| {
-        index
-            .declaration_header(current)
-            .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::EXPECT))
-            && index.classifier_header(current).is_some_and(|classifier| {
-                index
-                    .type_alias_by_identity(classifier.classifier)
-                    .is_some()
-            })
+        index.source_fragments().replacing_actual(current).is_some()
+            || index
+                .declaration_header(current)
+                .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::EXPECT))
+                && index.classifier_header(current).is_some_and(|classifier| {
+                    index
+                        .type_alias_by_identity(classifier.classifier)
+                        .is_some()
+                })
     })
 }
 
@@ -343,16 +347,16 @@ pub(crate) fn lower_body_with_context(
                 });
             };
             let stmts = stmts.clone();
-            if let (Some(&first), Some(&line)) =
-                (stmts.first(), lowering.ir.expr_lines.get(&lowered))
+            if let (Some(&first), Some(line)) = (stmts.first(), lowering.ir.statement_line(lowered))
             {
-                lowering.ir.expr_lines.insert(first, line);
+                lowering.ir.set_statement_line(first, line);
             }
             roots.extend(stmts.iter().copied());
         } else {
             roots.push(lowered);
         }
     }
+    lowering.settle_body_positions();
     let lowered = LoweredFirBody {
         owner,
         roots: roots.into_boxed_slice(),
@@ -444,6 +448,8 @@ struct BodyLowering<'a> {
     /// The call each `{ val t = operand…; call(t…) }` block this body built evaluates once its
     /// stored operands are bound, recorded when the block is created.
     operand_bound_calls: HashMap<ExprId, ExprId>,
+    /// The first node this body built. Every node from here on is this body's.
+    first_expression: usize,
     /// The lambda literal about to be lowered for a functional interface whose method returns
     /// `Unit`: its implementation returns nothing, as the interface method does, rather than the
     /// `Unit` value a function type's `invoke` returns.
@@ -671,6 +677,7 @@ impl<'a> BodyLowering<'a> {
             local_callable_scopes,
             published_local_callables,
         } = scopes;
+        let first_expression = ir.exprs.len();
         let context_parameter_count = u32::try_from(body.context_receiver_types().len())
             .expect("too many FIR context parameters");
         let context_value_count = body.context_value_count();
@@ -744,6 +751,7 @@ impl<'a> BodyLowering<'a> {
             root_block: root_scope_block(body),
             lowered_root_block: None,
             operand_bound_calls: HashMap::default(),
+            first_expression,
             unit_method_lambda: None,
         }
     }
@@ -806,6 +814,21 @@ impl<'a> BodyLowering<'a> {
             .checked_add(1)
             .expect("too many FIR lowering temporaries");
         temporary
+    }
+
+    /// Declare a temporary holding `value`, as fir2ir's `createTemporaryVariable` does: the
+    /// variable is built at its initializer's offsets, so it states the line `value` starts on.
+    fn value_temporary(&mut self, value: ExprId, ty: crate::types::Ty) -> (ExprId, u32) {
+        let temporary = self.allocate_temporary();
+        let declaration = self.ir.add_expr(IrExpr::Variable {
+            index: temporary,
+            ty,
+            init: Some(value),
+            named: false,
+        });
+        self.ir
+            .settle_positions_of(declaration as usize..declaration as usize + 1, value);
+        (declaration, temporary)
     }
 
     /// Attach a generated static helper to the class that lexically owns this checked FIR body.

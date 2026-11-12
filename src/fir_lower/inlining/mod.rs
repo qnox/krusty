@@ -877,28 +877,15 @@ impl BodyLowering<'_> {
             &reified_bindings,
         )?;
         // A lambda or anonymous class the copied body declares is specialized per call site under
-        // the module declaration that declares it. A dependency template declares neither: one
-        // that would need either specialization is not a template this expansion understands.
-        // A template constructs a dependency class by the provider's constructor identity; only a
-        // construction without one names a class the copied body would declare.
-        let module_callee = match frame.module {
-            Some(module) => Some(module),
-            None if escaping_lambda_plan.is_empty()
-                && !escaping_copies.iter().any(|(source, copy)| {
-                    !protected.contains(source)
-                        && matches!(
-                            self.ir.expr(*copy),
-                            IrExpr::New {
-                                external_target: None,
-                                ..
-                            }
-                        )
-                }) =>
-            {
-                None
-            }
-            None => return None,
-        };
+        // the declaration that declares it. A dependency template declares no lambda: one whose
+        // plan would specialize a lambda is not a template this expansion understands. The
+        // anonymous objects a template builds were lowered into this file with it, and are
+        // specialized below as a same-module callee's are.
+        if matches!(frame.callee, crate::ir::IrInlineCallee::Dependency(_))
+            && !escaping_lambda_plan.is_empty()
+        {
+            return None;
+        }
         // A function-value conversion between an inline parameter and its lambda is a
         // callable reference stored in a local. The invocation reads that local, so the
         // splice below never sees the lambda. Retarget the invocation when that local is
@@ -941,21 +928,25 @@ impl BodyLowering<'_> {
         // declaration implementations onto clones the plan never specializes, and the call-site
         // lambda would keep the reified marker. The plan commits without declining; a malformed
         // anonymous object below is a lowering failure, not a decline that leaves the call executable.
-        let inlined_escaping_implementations = match (module_callee, frame.source()) {
-            (Some(module_callee), Some((source_owner, callee_source))) => escaping_lambda::apply(
+        let inlined_escaping_implementations = match frame.source() {
+            Some((source_owner, callee_source)) => escaping_lambda::apply(
                 self.ir,
                 escaping_lambda_plan,
                 &bindings,
                 &reified_bindings,
-                caller_declaration,
-                self.expansion_enclosure,
-                self.in_default_argument,
-                &caller_source_name,
-                function,
-                source_owner,
-                callee_source,
-                module_callee,
-                &callee,
+                escaping_lambda::EscapingLambdaCaller {
+                    declaration: caller_declaration,
+                    enclosure: self.expansion_enclosure,
+                    is_default: self.in_default_argument,
+                    source_name: &caller_source_name,
+                },
+                escaping_lambda::EscapingInlineTemplate {
+                    function,
+                    owner: source_owner,
+                    source: callee_source,
+                    callee: frame.callee,
+                    callee_source_name: &callee,
+                },
             ),
             // The plan is empty: a dependency template declares no lambda.
             _ => Default::default(),
@@ -964,34 +955,32 @@ impl BodyLowering<'_> {
         // `new` reuses the declaration class, whose reified parameter is erased. This is the final
         // fallible specialization: both lambda transformations above have already been preflighted,
         // and every operation after it commits without declining the containing expansion.
-        if let Some(module_callee) = module_callee {
-            // Provenance belongs to the selected argument, not to the slot staging gave it: a
-            // copied operand's temporary is a fresh slot that reads nothing.
-            let crossinline_operands = operands
+        // Provenance belongs to the selected argument, not to the slot staging gave it: a
+        // copied operand's temporary is a fresh slot that reads nothing.
+        let crossinline_operands = operands
+            .iter()
+            .map(|operand| operand.and_then(|operand| self.crossinline_read(operand)))
+            .collect::<Vec<_>>();
+        if let Err(failure) = escaping_anonymous::specialize(
+            self.ir,
+            escaping_copies
                 .iter()
-                .map(|operand| operand.and_then(|operand| self.crossinline_read(operand)))
-                .collect::<Vec<_>>();
-            if let Err(failure) = escaping_anonymous::specialize(
-                self.ir,
-                escaping_copies
-                    .iter()
-                    .filter(|(source, _)| !protected.contains(source))
-                    .map(|(_, copy)| *copy),
-                &bindings,
-                &reified_bindings,
-                &escaping_anonymous::CallSite {
-                    caller_declaration,
-                    caller: self.expansion_enclosure,
-                    caller_is_default: self.in_default_argument,
-                    caller_source_name: &caller_source_name,
-                    inline_callee: module_callee,
-                    inline_callee_source_name: &callee,
-                    crossinline_operands: &crossinline_operands,
-                },
-            ) {
-                *malformed_anonymous = Some(failure);
-                return None;
-            }
+                .filter(|(source, _)| !protected.contains(source))
+                .map(|(_, copy)| *copy),
+            &bindings,
+            &reified_bindings,
+            &escaping_anonymous::CallSite {
+                caller_declaration,
+                caller: self.expansion_enclosure,
+                caller_is_default: self.in_default_argument,
+                caller_source_name: &caller_source_name,
+                inline_callee: frame.callee,
+                inline_callee_source_name: &callee,
+                crossinline_operands: &crossinline_operands,
+            },
+        ) {
+            *malformed_anonymous = Some(failure);
+            return None;
         }
         let mut directly_spliced_implementations = HashSet::default();
         for invocation in inline_invocations {
@@ -1407,6 +1396,10 @@ impl BodyLowering<'_> {
             && self.ir.suspend_funs.contains(&impl_fn)
         {
             let continuation = self.ir.add_expr(IrExpr::CurrentContinuation);
+            // The invocation is a suspend call, which kotlinc marks where it starts: the operand
+            // it passes is read at the invocation's position, not the inlined call's.
+            self.ir.copy_position(invocation, continuation);
+            self.ir.copy_inline_copy_mark(invocation, continuation);
             let ty = Ty::obj("kotlin/coroutines/Continuation");
             self.ir.set_logical_type(continuation, ty);
             let slot = self.allocate_temporary();
@@ -1453,7 +1446,7 @@ impl BodyLowering<'_> {
                 // physical instruction. Put that source point on the generated bindings; an
                 // enclosing inline copy maps it through the caller frame retained below.
                 for &declaration in &declarations {
-                    self.ir.expr_lines.insert(declaration, line);
+                    self.ir.set_statement_line(declaration, line);
                     self.ir.copy_inline_copy_mark(invocation, declaration);
                 }
                 self.ir.copy_inline_copy_mark(invocation, unit);

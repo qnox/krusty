@@ -301,9 +301,21 @@ impl CallableRegistry {
                     if !defaults.is_empty() && default_entry.is_none() {
                         continue;
                     }
+                    if callable.compiler_operation()
+                        == Some(krusty::backend::BackendCompilerIntrinsic::TypeOf)
+                    {
+                        // `typeOf` keeps its checked call, and emission makes the `KType` it names.
+                        continue;
+                    }
                     if super::lower::any_members::call_member(ir, callables, expression).is_some() {
                         // `kotlin.Any`'s members, and the declarations overriding them, are
                         // realized through the receiver's own representation.
+                        continue;
+                    }
+                    if super::lower::box_members::dispatches_to_boxes(
+                        ir, callables, expression, callable,
+                    ) {
+                        // The boxes below a library class implement its member through a stub.
                         continue;
                     }
                     if callable
@@ -733,6 +745,7 @@ mod tests {
             compiler_intrinsic: None,
             semantic_role: None,
             overridden_declarations: Box::new([]),
+            primitive_implementations: Box::new([]),
             member_realization: MemberRealization::Dispatch,
             params: vec![Ty::String, Ty::Int],
             physical_params: Vec::new(),

@@ -759,11 +759,12 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             arguments: CallArgumentRange,
             qualified: Option<QualifiedCallCoordinateId>,
             forced_result_constraint: Option<SignatureCallResultConstraint>,
-            graph: &SignatureGraph,
-            demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
-            memo: &mut HashMap<SigExprId, ResolvedTy>,
-            computing: &mut crate::fx_hash::HashSet<SigExprId>,
+            evaluation: &mut ExpressionEvaluation<'_, '_>,
         ) -> Result<ResolvedTy, DiagnosticId> {
+            let graph = evaluation.graph;
+            let demand = &mut *evaluation.demand;
+            let memo = &mut *evaluation.memo;
+            let computing = &mut *evaluation.computing;
             let selection = graph
                 .callable_selection(target)
                 .expect("a deferred callable selection must belong to its graph");
@@ -976,10 +977,12 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     arguments,
                     qualified,
                     Some(result_constraint),
-                    graph,
-                    demand,
-                    memo,
-                    computing,
+                    &mut ExpressionEvaluation {
+                        graph,
+                        demand,
+                        memo,
+                        computing,
+                    },
                 )),
                 SigExpr::MemberCall {
                     receiver,
@@ -1419,8 +1422,17 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         arguments,
                         qualified,
                     } => evaluate_call(
-                        semantics, target, arguments, qualified, None, graph, demand, memo,
-                        computing,
+                        semantics,
+                        target,
+                        arguments,
+                        qualified,
+                        None,
+                        &mut ExpressionEvaluation {
+                            graph,
+                            demand,
+                            memo,
+                            computing,
+                        },
                     ),
                     SigExpr::CallableReference(target) => {
                         let selection = graph.callable_selection(target).expect(
@@ -1658,6 +1670,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         arguments,
                         scope,
                         origin,
+                        later,
                     } => {
                         let callee =
                             evaluate_expression(semantics, callee, graph, demand, memo, computing)?;
@@ -1671,8 +1684,19 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         let scope = graph.scope(scope).expect(
                             "an invoke signature expression must retain its declaration scope",
                         );
-                        let expectations =
-                            semantics.invoke_argument_expectations(scope, callee, &probes)?;
+                        // Arguments the callee cannot shape mean it has no applicable `invoke`.
+                        let expectations = match (
+                            semantics.invoke_argument_expectations(scope, callee, &probes),
+                            later,
+                        ) {
+                            (Ok(expectations), _) => expectations,
+                            (Err(_), Some(later)) => {
+                                return evaluate_expression(
+                                    semantics, later, graph, demand, memo, computing,
+                                );
+                            }
+                            (Err(diagnostic), None) => return Err(diagnostic),
+                        };
                         let mut resolved_arguments = Vec::new();
                         for (index, argument) in graph.call_arguments(arguments).iter().enumerate()
                         {
@@ -1686,7 +1710,21 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                                 computing,
                             )?);
                         }
-                        semantics.select_invoke(scope, origin, callee, &resolved_arguments, demand)
+                        match semantics.select_invoke(
+                            scope,
+                            origin,
+                            callee,
+                            &resolved_arguments,
+                            demand,
+                        )? {
+                            InvokeSelection::Selected(result) => Ok(result),
+                            InvokeSelection::Inapplicable(diagnostic) => match later {
+                                Some(later) => evaluate_expression(
+                                    semantics, later, graph, demand, memo, computing,
+                                ),
+                                None => Err(diagnostic),
+                            },
+                        }
                     }
                     SigExpr::Function {
                         parameters,

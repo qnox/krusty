@@ -34,16 +34,29 @@ class Changing(private var next: Item?) {\n\
     }\n\
 }\n";
 
-fn assert_both_reject_unsafe_receiver(
-    source: &str,
+/// One unsafe receiver use, and the diagnostics kotlinc and krusty emit for it.
+struct RejectedUnsafeReceiver<'a> {
+    source: &'a str,
     line: usize,
     reference_column: usize,
     krusty_column: usize,
-    source_line: &str,
+    source_line: &'a str,
     reference_marker_width: usize,
-    reference_message: &str,
-    krusty_message: &str,
-) {
+    reference_message: &'a str,
+    krusty_message: &'a str,
+}
+
+fn assert_both_reject_unsafe_receiver(rejected: RejectedUnsafeReceiver<'_>) {
+    let RejectedUnsafeReceiver {
+        source,
+        line,
+        reference_column,
+        krusty_column,
+        source_line,
+        reference_marker_width,
+        reference_message,
+        krusty_message,
+    } = rejected;
     let result = common::compiler_diagnostics(&[("Use.kt", source)], &[common::stdlib_jar()]);
     let reference_path = result
         .reference_stderr
@@ -81,8 +94,8 @@ fn assert_both_reject_unsafe_receiver(
 
 #[test]
 fn a_branch_local_result_cannot_narrow_an_outer_same_named_binding() {
-    assert_both_reject_unsafe_receiver(
-        "class Item(val name: String)\n\
+    assert_both_reject_unsafe_receiver(RejectedUnsafeReceiver {
+        source: "class Item(val name: String)\n\
          fun use(a: Item?, n: String?, flag: Boolean): String? {\n\
          \x20 if (flag) {\n\
          \x20\x20 val n = a?.name\n\
@@ -90,20 +103,20 @@ fn a_branch_local_result_cannot_narrow_an_outer_same_named_binding() {
          \x20 }\n\
          \x20 return n?.let { a.name }\n\
          }\n",
-        7,
-        20,
-        20,
-        "  return n?.let { a.name }",
-        1,
-        "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Item?'.",
-        "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Item?'.",
-    );
+        line: 7,
+        reference_column: 20,
+        krusty_column: 20,
+        source_line: "  return n?.let { a.name }",
+        reference_marker_width: 1,
+        reference_message: "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Item?'.",
+        krusty_message: "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Item?'.",
+    });
 }
 
 #[test]
 fn a_loop_local_result_cannot_escape_the_loop_body() {
-    assert_both_reject_unsafe_receiver(
-        "class Item(val name: String)\n\
+    assert_both_reject_unsafe_receiver(RejectedUnsafeReceiver {
+        source: "class Item(val name: String)\n\
          fun use(a: Item?, n: String?, flag: Boolean): String? {\n\
          \x20 while (flag) {\n\
          \x20\x20 val n = a?.name\n\
@@ -111,20 +124,20 @@ fn a_loop_local_result_cannot_escape_the_loop_body() {
          \x20 }\n\
          \x20 return n?.let { a.name }\n\
          }\n",
-        7,
-        20,
-        20,
-        "  return n?.let { a.name }",
-        1,
-        "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Item?'.",
-        "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Item?'.",
-    );
+        line: 7,
+        reference_column: 20,
+        krusty_column: 20,
+        source_line: "  return n?.let { a.name }",
+        reference_marker_width: 1,
+        reference_message: "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Item?'.",
+        krusty_message: "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Item?'.",
+    });
 }
 
 #[test]
 fn an_origin_shadow_is_not_the_binding_the_result_proves() {
-    assert_both_reject_unsafe_receiver(
-        "class Item(val name: String)\n\
+    assert_both_reject_unsafe_receiver(RejectedUnsafeReceiver {
+        source: "class Item(val name: String)\n\
          fun use(a: Item?, flag: Boolean): String? {\n\
          \x20 val n = a?.name\n\
          \x20 if (flag) {\n\
@@ -133,73 +146,73 @@ fn an_origin_shadow_is_not_the_binding_the_result_proves() {
          \x20 }\n\
          \x20 return null\n\
          }\n",
-        6,
-        21,
-        21,
-        "   return n?.let { a.name }",
-        1,
-        "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Item?'.",
-        "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Item?'.",
-    );
+        line: 6,
+        reference_column: 21,
+        krusty_column: 21,
+        source_line: "   return n?.let { a.name }",
+        reference_marker_width: 1,
+        reference_message: "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Item?'.",
+        krusty_message: "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Item?'.",
+    });
 }
 
 #[test]
 fn a_mutable_origin_is_not_recorded() {
-    assert_both_reject_unsafe_receiver(
-        "class Item(val name: String)\n\
+    assert_both_reject_unsafe_receiver(RejectedUnsafeReceiver {
+        source: "class Item(val name: String)\n\
          fun use(seed: Item?): String? {\n\
          \x20 var a = seed\n\
          \x20 val n = a?.name\n\
          \x20 a = null\n\
          \x20 return n?.let { a.name }\n\
          }\n",
-        6,
-        20,
-        20,
-        "  return n?.let { a.name }",
-        1,
-        "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Nothing?'.",
-        "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Nothing?'.",
-    );
+        line: 6,
+        reference_column: 20,
+        krusty_column: 20,
+        source_line: "  return n?.let { a.name }",
+        reference_marker_width: 1,
+        reference_message: "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Nothing?'.",
+        krusty_message: "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Nothing?'.",
+    });
 }
 
 #[test]
 fn a_delegated_origin_is_not_recorded() {
-    assert_both_reject_unsafe_receiver(
-        &format!(
+    assert_both_reject_unsafe_receiver(RejectedUnsafeReceiver {
+        source: &format!(
             "{CHANGING_DELEGATE_PRELUDE}fun use(seed: Item?): String? {{\n\
              \x20   val origin: Item? by Changing(seed)\n\
              \x20   val result = origin?.name\n\
              \x20   return result?.let {{ origin.name }}\n\
              }}\n"
         ),
-        13,
-        26,
-        32,
-        "    return result?.let { origin.name }",
-        6,
-        "smart cast to 'Item' is impossible, because 'origin' is a delegated property.",
-        "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Item?'.",
-    );
+        line: 13,
+        reference_column: 26,
+        krusty_column: 32,
+        source_line: "    return result?.let { origin.name }",
+        reference_marker_width: 6,
+        reference_message: "smart cast to 'Item' is impossible, because 'origin' is a delegated property.",
+        krusty_message: "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Item?'.",
+    });
 }
 
 #[test]
 fn a_delegated_result_is_not_stable_inside_its_own_safe_call() {
-    assert_both_reject_unsafe_receiver(
-        &format!(
+    assert_both_reject_unsafe_receiver(RejectedUnsafeReceiver {
+        source: &format!(
             "{CHANGING_DELEGATE_PRELUDE}fun use(seed: Item?): String? {{\n\
              \x20   val result: Item? by Changing(seed)\n\
              \x20   return result?.let {{ result.name }}\n\
              }}\n"
         ),
-        12,
-        26,
-        32,
-        "    return result?.let { result.name }",
-        6,
-        "smart cast to 'Item' is impossible, because 'result' is a delegated property.",
-        "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Item?'.",
-    );
+        line: 12,
+        reference_column: 26,
+        krusty_column: 32,
+        source_line: "    return result?.let { result.name }",
+        reference_marker_width: 6,
+        reference_message: "smart cast to 'Item' is impossible, because 'result' is a delegated property.",
+        krusty_message: "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Item?'.",
+    });
 }
 
 #[test]
@@ -310,8 +323,8 @@ fn the_direct_spelling_still_narrows() {
 /// reject; kotlinc pins the verdict and krusty pins its complete output.
 #[test]
 fn a_mutable_receiver_still_proves_nothing() {
-    assert_both_reject_unsafe_receiver(
-        &format!(
+    assert_both_reject_unsafe_receiver(RejectedUnsafeReceiver {
+        source: &format!(
             "{PRELUDE}class Holder(var a: Item?) {{\n\
          \x20 fun use(): String? {{\n\
          \x20\x20 val n = a?.name\n\
@@ -319,36 +332,36 @@ fn a_mutable_receiver_still_proves_nothing() {
          \x20 }}\n\
          }}\n"
         ),
-        5,
-        20,
-        21,
-        "   return n?.let { a.name }",
-        1,
-        "smart cast to 'Item' is impossible, because 'a' is a mutable property that could be mutated concurrently.",
-        "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Item?'.",
-    );
+        line: 5,
+        reference_column: 20,
+        krusty_column: 21,
+        source_line: "   return n?.let { a.name }",
+        reference_marker_width: 1,
+        reference_message: "smart cast to 'Item' is impossible, because 'a' is a mutable property that could be mutated concurrently.",
+        krusty_message: "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Item?'.",
+    });
 }
 
 /// Control: a local REASSIGNED after the safe call is no longer the same value, so the recorded
 /// implication must not survive it.
 #[test]
 fn a_reassigned_local_drops_the_implication() {
-    assert_both_reject_unsafe_receiver(
-        &format!(
+    assert_both_reject_unsafe_receiver(RejectedUnsafeReceiver {
+        source: &format!(
             "{PRELUDE}fun use(a: Item?, b: Item?): String? {{\n\
          \x20 var n = a?.name\n\
          \x20 n = b?.name\n\
          \x20 return n?.let {{ a.name }}\n\
          }}\n"
         ),
-        5,
-        20,
-        20,
-        "  return n?.let { a.name }",
-        1,
-        "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Item?'.",
-        "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Item?'.",
-    );
+        line: 5,
+        reference_column: 20,
+        krusty_column: 20,
+        source_line: "  return n?.let { a.name }",
+        reference_marker_width: 1,
+        reference_message: "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Item?'.",
+        krusty_message: "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Item?'.",
+    });
 }
 
 /// The runtime contract: the narrowed receiver really holds the value the chain proved present.

@@ -2,7 +2,7 @@
 
 use krusty::fir::{ClassCaptureIdentity, EnclosingInstanceKind};
 use krusty::ir::{ClassId, IrCapturedReceiver, IrCtorArg, IrCtorParameterProvenance, IrFile};
-use krusty::types::TyKind;
+use krusty::types::{Ty, TyKind, TypeName};
 
 pub(super) fn supported(ir: &IrFile, id: ClassId) -> bool {
     let class = &ir.classes[id as usize];
@@ -199,6 +199,38 @@ fn capture_parameter(ir: &IrFile, id: ClassId, parameter: u32, argument: &IrCtor
     }
 }
 
+/// The physical field for one checked language-level inner-to-outer edge. Its coordinate
+/// comes from the selected constructor role and store, never a field name or prefix position.
+pub(in crate::codegen) fn enclosing_field(
+    ir: &IrFile,
+    inner: TypeName,
+    outer: TypeName,
+) -> Option<(ClassId, u32)> {
+    let id = ir.class_id_by_name(inner)?;
+    let class = ir.classes.get(id as usize)?;
+    ir.class_id_by_name(outer)?;
+    if !class.is_inner_class || !supported(ir, id) {
+        return None;
+    }
+    let mut enclosing = class.ctor_args.iter().enumerate().filter(|(_, argument)| {
+        argument.provenance == IrCtorParameterProvenance::EnclosingInstance
+    });
+    let (parameter, argument) = enclosing.next()?;
+    if enclosing.next().is_some()
+        || parameter >= class.constructor_prefix_count as usize
+        || argument.ty != Ty::obj_name(outer)
+        || argument.capture.is_some()
+        || argument.capture_identity.is_some()
+        || ir
+            .class_capture_identities
+            .contains_key(&(id, parameter as u32))
+        || !stored_parameter(ir, id, parameter as u32, argument)
+    {
+        return None;
+    }
+    Some((id, argument.field_index?))
+}
+
 fn stored_parameter(ir: &IrFile, id: ClassId, parameter: u32, argument: &IrCtorArg) -> bool {
     let class = &ir.classes[id as usize];
     let Some(field) = argument.field_index else {
@@ -207,10 +239,26 @@ fn stored_parameter(ir: &IrFile, id: ClassId, parameter: u32, argument: &IrCtorA
     let Some(storage) = class.fields.get(field as usize) else {
         return false;
     };
+    // Common lowering records an enclosing parameter at its raw constructor carrier, while
+    // its field retains the declaration's complete self application, including captured formals.
+    let storage_type = if argument.provenance == IrCtorParameterProvenance::EnclosingInstance {
+        let TyKind::Obj(outer, arguments) = argument.ty.kind() else {
+            return false;
+        };
+        if !arguments.is_empty() {
+            return false;
+        }
+        let Some(declared) = ir.declared_class_self_type(outer) else {
+            return false;
+        };
+        declared
+    } else {
+        argument.ty
+    };
     if argument.anonymous_super_forward.is_some()
         || !argument.is_field
         || !storage.is_final()
-        || storage.ty != argument.ty
+        || storage.ty != storage_type
         || class
             .ctor_args
             .iter()
@@ -228,3 +276,6 @@ fn stored_parameter(ir: &IrFile, id: ClassId, parameter: u32, argument: &IrCtorA
         .filter(|(source, target)| *source == parameter || *target == field);
     stores.next() == Some(&(parameter, field)) && stores.next().is_none()
 }
+
+#[cfg(test)]
+mod enclosing_instance_tests;

@@ -4,9 +4,10 @@
 //! `D(xs=[1, 2])` — not the identity an array's own `toString` answers. It is the same rendering
 //! `xs.contentToString()` asks for, so it reaches the same runtime entry point.
 //!
-//! Only `toString` is special this way. `equals` and `hashCode` on a data class with an array
-//! property stay the array's own, which is identity — that is Kotlin's rule, not an omission, and
-//! two of the tests below pin it so the rendering change cannot quietly take them with it.
+//! `hashCode` is special the same way: an array property contributes its contents' hash
+//! (`contentHashCode()`), so the data class's hash follows the array's elements. `equals` on the
+//! same property stays the array's own, which is identity — that is Kotlin's rule, not an
+//! omission, and one of the tests below pins it so the content rules cannot quietly take it.
 //!
 //! Every expectation is kotlinc's, taken by running the same program under it.
 
@@ -80,6 +81,24 @@ fn equality_on_an_array_property_stays_identity() {
          \x20   return \"OK\"\n\
          }\n";
     every_backend_agrees_with_kotlinc("DataClassArrayEquality", source);
+}
+
+/// `hashCode` takes an array property's CONTENTS: the hash changes when an element does, and an
+/// equal-content array hashes the same even though the two data classes are unequal.
+#[test]
+fn a_data_class_hashes_an_array_property_by_its_contents() {
+    let source = "data class D(val xs: IntArray)\n\
+         data class R(val label: String, val xs: Array<String?>?, val count: Int)\n\
+         fun box(): String {\n\
+         \x20   val shared = intArrayOf(1, -2)\n\
+         \x20   val d = D(shared)\n\
+         \x20   val before = d.hashCode()\n\
+         \x20   shared[0] = 7\n\
+         \x20   val text = \"$before;${d.hashCode()};${D(intArrayOf(7, -2)).hashCode()};\" +\n\
+         \x20       \"${R(\"m\", arrayOf(\"a\", null), 9).hashCode()};${R(\"m\", null, 9).hashCode()}\"\n\
+         \x20   return if (text == \"990;1176;1176;227766;104758\") \"OK\" else \"fail \" + text\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("DataClassArrayContentHash", source);
 }
 
 /// A data class in a LIST renders through the same path, since the list asks each element.

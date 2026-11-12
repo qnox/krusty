@@ -549,16 +549,3 @@ fn emit_packed_array_through_temps(
     emitter.release_temporary(array_lease);
     emitter.release_operand_spills(&temps);
 }
-
-/// Box a reference-array element that is still a JVM scalar. An element that is already the boxed
-/// value, including `null`, stays as it is: a second unsigned `box-impl` does not accept a reference.
-fn box_reference_scalar(
-    emitter: &mut Emitter<'_>,
-    primitive: Option<Ty>,
-    produced: Ty,
-    code: &mut CodeBuilder,
-) {
-    if let Some(primitive) = primitive.filter(|_| produced.is_jvm_scalar()) {
-        box_prim_free(emitter.cw, code, primitive);
-    }
-}

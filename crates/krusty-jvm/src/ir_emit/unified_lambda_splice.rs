@@ -389,15 +389,15 @@ impl Emitter<'_> {
             // upper bound on the real peak).
             let ret_words = if probe.falls_through { ret_words } else { 0 };
             let splice_start = code.bytes.len();
-            code.splice_inline(
-                &probe.bytes,
-                &probe.external_branches,
-                body.max_stack + lam_max_stack,
-                plan.top_local,
+            code.splice_inline(InlineSplice {
+                bytes: &probe.bytes,
+                external_branches: &probe.external_branches,
+                body_stack: body.max_stack + lam_max_stack,
+                top_local: plan.top_local,
                 arg_words,
                 ret_words,
-                probe.falls_through,
-            );
+                falls_through: probe.falls_through,
+            });
             self.record_spliced_lines(&probe.lines, body, inline_only, splice_start, code);
             self.record_spliced_locals(&probe.locals, inline_only, splice_start, code);
             return Ok(());
@@ -417,15 +417,15 @@ impl Emitter<'_> {
         // `synchronized`/`runCatching`). Final-body analysis derives their handler-entry frames.
         bind_inline_handlers(code, &bs.handlers);
         let ret_words = if bs.falls_through { ret_words } else { 0 };
-        code.splice_inline(
-            &bs.bytes,
-            &bs.external_branches,
-            body.max_stack + lam_max_stack,
-            plan.top_local,
+        code.splice_inline(InlineSplice {
+            bytes: &bs.bytes,
+            external_branches: &bs.external_branches,
+            body_stack: body.max_stack + lam_max_stack,
+            top_local: plan.top_local,
             arg_words,
             ret_words,
-            bs.falls_through,
-        );
+            falls_through: bs.falls_through,
+        });
         self.record_spliced_lines(&bs.lines, body, inline_only, 0, code);
         self.record_spliced_locals(&bs.locals, inline_only, 0, code);
         Ok(())

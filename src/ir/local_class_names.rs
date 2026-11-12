@@ -22,7 +22,7 @@ pub(crate) struct DetachedLambdaImplementation {
 
 use super::{
     Callee, ClassId, EnclosingDeclaration, ExprId, FunId, IrCallableReferenceTarget,
-    IrCheckedArgument, IrCheckedOperation, IrExpr,
+    IrCheckedArgument, IrCheckedOperation, IrCheckedSubstitution, IrExpr,
 };
 
 /// The classifier that lexically owns a local classifier's executable context.
@@ -439,6 +439,10 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
         | IrCheckedOperation::BackingFieldRead { .. }
         | IrCheckedOperation::BackingFieldWrite { .. } => return,
     };
+    checked_substitutions(substitutions, names);
+}
+
+fn checked_substitutions(substitutions: &mut [IrCheckedSubstitution], names: &IdentityRemap<'_>) {
     for substitution in substitutions {
         substitution.value = ty(substitution.value, names);
         substitution.reified_runtime = ty(substitution.reified_runtime, names);
@@ -583,6 +587,10 @@ fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
                     receiver: Some(receiver),
                     ..
                 } => *receiver = ty(*receiver, names),
+                IrCallableReferenceTarget::Property(property) => {
+                    property_reference_target(&mut property.target, names);
+                    checked_substitutions(&mut property.substitutions, names);
+                }
                 IrCallableReferenceTarget::Module(_)
                 | IrCallableReferenceTarget::Local { owner: None, .. }
                 | IrCallableReferenceTarget::External { receiver: None, .. }
@@ -1250,8 +1258,8 @@ impl super::IrFile {
         for annotations_by_function in self.function_annotations.values_mut() {
             annotations(annotations_by_function, names);
         }
-        for annotations_by_parameter in self.fn_param_annotations.values_mut() {
-            for parameter_annotations in annotations_by_parameter {
+        for parameters in self.all_declared_parameters_mut() {
+            for parameter_annotations in &mut parameters.annotations {
                 annotations(parameter_annotations, names);
             }
         }
