@@ -1885,3 +1885,57 @@ fn an_inferred_property_getter_reads_its_context_parameters() {
     );
     common::expect_box_same_as_kotlinc(INFERRED_CONTEXT_PROPERTIES, "InferredContextPropertiesRun");
 }
+
+/// A context parameter is a declared parameter before the vararg, but no source argument fills
+/// it: the call's arguments start at the first value parameter, so the vararg packs exactly the
+/// positional arguments that reach it, whatever the call form.
+#[test]
+fn varargs_after_context_parameters_take_only_the_arguments_that_reach_them() {
+    let (sources, java) = krusty::conformance::split_files(include_str!(
+        "box_regressions/contextParameters/contextVararg.kt"
+    ));
+    assert!(java.is_empty());
+    let [(stem, src)] = sources.as_slice() else {
+        panic!("the complete same-file context-vararg program")
+    };
+    assert_eq!(stem, "Main");
+    common::expect_box_ok_with_stdlib(src, "Main");
+}
+
+#[test]
+fn dependency_varargs_after_context_parameters_take_only_the_arguments_that_reach_them() {
+    let modules = krusty::conformance::split_modules(include_str!(
+        "box_regressions/multimodule/contextVarargDependency.kt"
+    ))
+    .expect("the complete dependency context-vararg program");
+    let [producer, consumer] = modules.as_slice() else {
+        panic!("producer and consumer modules")
+    };
+    assert_eq!(consumer.deps, std::slice::from_ref(&producer.name));
+    let [(lib_stem, lib)] = producer.files.as_slice() else {
+        panic!("one complete producer file")
+    };
+    let [(main_stem, main)] = consumer.files.as_slice() else {
+        panic!("one complete consumer file")
+    };
+    assert_eq!(lib_stem, "Lib");
+    assert_eq!(main_stem, "Main");
+    if let Some(result) = common::expect_box_run_against("context_vararg_dependency", lib, main) {
+        assert_eq!(result, "OK");
+    }
+}
+
+/// Two more callables with a `vararg` after a context parameter: a member-extension `invoke`
+/// operator applied to a value, and a local function.
+#[test]
+fn varargs_after_context_parameters_reach_operator_invokes_and_local_functions() {
+    let (sources, java) = krusty::conformance::split_files(include_str!(
+        "box_regressions/contextParameters/contextVarargInvokes.kt"
+    ));
+    assert!(java.is_empty());
+    let [(stem, src)] = sources.as_slice() else {
+        panic!("the complete member-invoke and local-function program")
+    };
+    assert_eq!(stem, "Main");
+    common::expect_box_ok_with_stdlib(src, "Main");
+}

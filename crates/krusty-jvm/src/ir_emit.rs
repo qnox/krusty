@@ -171,7 +171,7 @@ mod transformed_suspensions;
 use lambda_implementation_placement::standalone_method_is_elided;
 mod try_emission;
 use annotation_impl::emit_annotation_impl_class;
-use array_elements::reference_array_scalar_adapter;
+use array_elements::{box_reference_scalar, reference_array_scalar_adapter};
 mod value_class_descriptors;
 mod value_class_override_metadata;
 mod value_class_signatures;
@@ -1636,76 +1636,6 @@ pub(super) enum PropertyAccessorSide {
 pub(crate) use declared_property_accessor::declared_signature as declared_property_accessor_signature;
 pub(crate) use static_fields::declared_default_static_accessor_signature;
 
-/// What emitting one class's property accessors (and the `$annotations` markers beside them) needs
-/// besides the IR: the class's JVM name, its file facade, the signature formatter, and the emit
-/// environment. Grouped so the accessor walk stays within the argument-count limit, like
-/// [`krusty::metadata::class_builder::ClassTail`] does for the metadata writer.
-struct PropertyAccessorEmit<'a> {
-    fq_name: &'a str,
-    facade: &'a str,
-    formatter: &'a JvmSignatureFormatter<'a>,
-    param_assertions: bool,
-    env: &'a EmitEnv<'a>,
-}
-
-fn emit_declared_property_accessors(
-    ir: &IrFile,
-    c: &krusty::ir::IrClass,
-    cw: &mut ClassWriter,
-    emit: &PropertyAccessorEmit<'_>,
-) {
-    let (fq_name, facade, formatter, param_assertions, env) = (
-        emit.fq_name,
-        emit.facade,
-        emit.formatter,
-        emit.param_assertions,
-        emit.env,
-    );
-    let accessor_owner = declared_property_accessor::AccessorOwner {
-        ir,
-        class: c,
-        fq_name,
-        formatter,
-        param_assertions,
-        override_results: env.override_results,
-        run: env.run,
-    };
-    for property in &c.properties {
-        declared_property_accessor::emit(
-            &accessor_owner,
-            property,
-            PropertyAccessorSide::Getter,
-            cw,
-        );
-        declared_property_accessor::emit(
-            &accessor_owner,
-            property,
-            PropertyAccessorSide::Setter,
-            cw,
-        );
-        // The property's own annotations ride a synthetic marker method, emitted right here so the
-        // method table (and the constant pool behind it) matches kotlinc's.
-        if let Some(&marker) = ir
-            .property_annotation_markers
-            .get(&(c.fq_name_id(), property.source_order))
-        {
-            // The marker is STATIC (kotlinc's shape): no `this` slot.
-            emit_method(
-                ir,
-                marker,
-                MethodSlot {
-                    static_owner: StaticOwner::Class(c.fq_name),
-                    instance: false,
-                },
-                fq_name,
-                facade,
-                cw,
-                env,
-            );
-        }
-    }
-}
-
 /// What emitting one member of a class's source schedule needs besides the writer.
 struct ScheduledMemberEmission<'a> {
     ir: &'a IrFile,
@@ -1717,6 +1647,8 @@ struct ScheduledMemberEmission<'a> {
     env: &'a EmitEnv<'a>,
     markers: &'a krusty::fx_hash::HashSet<u32>,
     byte_parity: bool,
+    /// The leading synthetic parameters every constructor of the class threads through.
+    owner_prefix: &'a OwnerConstructorPrefix,
 }
 
 /// Emit one member of the class's source schedule: a property's accessors (and its annotation
@@ -1736,6 +1668,7 @@ fn emit_scheduled_member(
         env,
         markers,
         byte_parity,
+        owner_prefix,
     } = *emission;
     let fid = match member {
         SourceOrderedMember::Property(property) => {
@@ -1816,7 +1749,7 @@ fn emit_scheduled_member(
                 facade,
                 env,
                 writer: cw,
-                owner_prefix: &OwnerConstructorPrefix::none(),
+                owner_prefix,
             }
             .emit(ordinal, constructor);
             return;
@@ -2339,6 +2272,7 @@ fn emit_class(
         env,
         markers: &markers,
         byte_parity,
+        owner_prefix: &OwnerConstructorPrefix::none(),
     };
     // A value class's members precede its `<init>`, which the representation members follow.
     let (before_primary, after_primary) = split_around_primary_constructor(
@@ -3305,6 +3239,9 @@ fn emit_enum_class(
         &krusty::ir::DeclarationAnnotations::default(),
         &ctor_parameters,
     );
+    // The source parameters' annotations follow the constructor header, before its body. A private
+    // enum constructor carries no nullability annotations.
+    cw.reserve_method_parameter_annotation_pool(None, &c.ctor_param_annotations, &[], false);
     // The ctor BODY's `super(name, ordinal)` call resolves before its LocalVariableTable strings.
     cw.methodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
     // The property backing fields are visited after the methods: each name interns where the
@@ -3463,6 +3400,9 @@ fn emit_enum_class(
             Some(&ctor_sig),
         );
         cw.set_method_parameters("<init>", &ctor_desc, &ctor_parameters);
+        // The synthetic `(String, int)` prefix is not annotable: the attributes count only the
+        // source parameters.
+        cw.set_annotable_method_param_annotations("<init>", &ctor_desc, &c.ctor_param_annotations);
     }
     if emits_primary_ctor {
         let header = c.decl_line;
@@ -3522,40 +3462,33 @@ fn emit_enum_class(
         }
     }
 
-    emit_declared_property_accessors(
-        ir,
-        c,
-        &mut cw,
-        &PropertyAccessorEmit {
-            fq_name: &fq,
-            facade,
-            formatter: &signature_formatter,
-            param_assertions: opts.param_assertions,
-            env,
-        },
-    );
-    // An enum's SECONDARY constructors, after the declared accessors — the order kotlinc emits for
-    // `enum class My(val s: String) { ENTRY; constructor(): this("OK") }`: `My(String)`, `getS()`,
-    // `My()`. The enum writer is a separate path from `emit_class`, so they were not emitted at
-    // all, and an entry declared with no arguments called an `<init>` that does not exist: the
-    // class failed to load with a `NoSuchMethodError`.
-    for (ordinal, constructor) in c.secondary_ctors.iter().enumerate() {
-        SecondaryConstructorEmitter {
-            ir,
-            class: c,
-            owner: &fq,
-            facade,
-            env,
-            writer: &mut cw,
-            owner_prefix: &OwnerConstructorPrefix::enum_class(),
-        }
-        .emit(ordinal, constructor);
-    }
     let markers = member_schedule::property_annotation_marker_fids(ir, c);
     // kotlinc's enum member order is `<init>`, the DECLARED members, `values`/`valueOf`/
     // `getEntries`, the lifted local functions, `$values`, the lambdas, anything a PLUGIN
     // synthesized onto the class (`_init_$_anonymous_`, `access$…`), then `<clinit>`.
     let schedule = member_schedule::enum_member_schedule(ir, c);
+    // The declared members are an ordinary class's source schedule: property accessors (a
+    // `companion { … }` block property's among them), secondary constructors and methods, each at
+    // its declaration's place. The lowered members follow the synthesized ones below.
+    let declared_members = ScheduledMemberEmission {
+        ir,
+        class: c,
+        fq_name: &fq,
+        facade,
+        signature_formatter: &signature_formatter,
+        param_assertions: opts.param_assertions,
+        env,
+        markers: &markers,
+        byte_parity: false,
+        owner_prefix: &OwnerConstructorPrefix::enum_class(),
+    };
+    for member in source_ordered_members(ir, c, None) {
+        if matches!(member, SourceOrderedMember::Function(function) if !schedule.declared.contains(&function))
+        {
+            continue;
+        }
+        emit_scheduled_member(&declared_members, member, &mut cw);
+    }
     let emit_members = |cw: &mut ClassWriter, members: &[u32]| {
         for &fid in members {
             if markers.contains(&fid) || standalone_method_is_elided(ir, fid, env) {
@@ -3611,7 +3544,6 @@ fn emit_enum_class(
             }
         }
     };
-    emit_members(&mut cw, &schedule.declared);
     // The synthesized members follow the declared ones, in kotlinc's visit order, each with the entries its body
     // references: `values()` reads `$VALUES` and calls `Object.clone()`; `valueOf` delegates to
     // `Enum.valueOf` and names its parameter `value`; `getEntries` returns the `@NotNull`
