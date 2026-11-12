@@ -4,10 +4,8 @@
 //! `if (this === other) return true` (outside a value class) and `if (other !is Bound) return
 //! false`. Each program must answer `OK` from kotlinc and from krusty.
 //!
-//! `EqualityBound` is a Kotlin 2.5 declaration: an older reference release rejects every program
-//! here because its API version does not have it.
-
-use krusty::kotlin_version::KotlinVersion;
+//! The contract is the test-only `StrictEquals` language feature, which each program enables with a
+//! `LANGUAGE` directive, so it runs on every supported release.
 
 use super::common;
 
@@ -83,9 +81,6 @@ fun box(): String {
 ";
 
 fn assert_ok_like_kotlinc(stem: &str, source: &str) {
-    if krusty::kotlin_version::target() < KotlinVersion::V2_5_0_BETA2 {
-        return;
-    }
     common::expect_box_same_as_kotlinc(source, stem);
 }
 
