@@ -132,17 +132,17 @@ fn score(
 
 fn units(source: &str, stem: &str, target: TestTarget) -> Result<Vec<ModuleUnit>, String> {
     if krusty::conformance::contains_directive(source, "MODULE") {
-        let mut modules = reference::module_blocks(&source, target)?;
-        if krusty::conformance::directive(&source, "WITH_COROUTINES") {
+        let mut modules = reference::module_blocks(source, target)?;
+        if krusty::conformance::directive(source, "WITH_COROUTINES") {
             krusty::conformance::inject_coroutine_support(
                 &mut modules,
-                &source,
+                source,
                 krusty::conformance::COROUTINE_HELPERS,
             )?;
         }
         Ok(krusty::conformance::module_units(&modules))
     } else {
-        let files = box_lane::prepare_sources(&source, stem, target)
+        let files = box_lane::prepare_sources(source, stem, target)
             .map_err(|error| format!("{error:?}"))?;
         Ok(vec![ModuleUnit {
             name: "box".into(),
