@@ -685,7 +685,7 @@ fn local_variables_lower_as_the_source_declarations_do() {
 
 #[test]
 fn unmodelled_local_variables_decline_by_form() {
-    let cases: [(u64, &str, bool, &str); 5] = [
+    let cases: [(u64, &str, bool, &str); 4] = [
         (
             0b1000 | 0b10,
             "DEFINED",
@@ -704,12 +704,6 @@ fn unmodelled_local_variables_decline_by_form() {
             "IR_TEMPORARY_VARIABLE",
             true,
             "it uses a mutable or annotated compiler temporary",
-        ),
-        (
-            0,
-            "DEFINED",
-            false,
-            "it uses a variable without an initializer",
         ),
     ];
     for (flags, origin, initialized, reason) in cases {
@@ -746,6 +740,44 @@ fn a_compiler_temporary_lowers_as_an_unnamed_local() {
         lowered_body(&unit, function),
         "scope {scope {temp v1: Int = v0!: Int; return@Some(0) v1!: Int: Nothing}: Nothing}"
     );
+}
+
+/// A local declared without an initializer and assigned later lowers as the source declaration
+/// does: a reassignable binding holding the deferred type's zero until its definite assignment.
+#[test]
+fn a_deferred_local_lowers_as_the_source_declaration() {
+    for (flags, keyword) in [(0, "val"), (0b10, "var")] {
+        let demo = demo(&[("f", &[T::Int], T::Int)], |_, body| {
+            let (declaration, x) = body.variable_with(T::Int, None, flags, "DEFINED");
+            let a = body.param(0);
+            let assignment = body.set(&x, a);
+            let read = body.get(&x, T::Int);
+            Some(vec![declaration, assignment, body.ret(read)])
+        });
+        let mut unit = DependencyBodyUnit::default();
+        let f = demo
+            .lower(&mut unit, "f", &[])
+            .unwrap_or_else(|decline| panic!("{decline}"));
+        validated(unit.ir());
+        assert_eq!(
+            unit.ir()
+                .deferred_local_types
+                .values()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![Ty::Int],
+            "{keyword}"
+        );
+        assert_eq!(
+            lowered_body(&unit, f),
+            source_body(
+                &format!("fun f(a: Int): Int {{\n {keyword} x: Int\n x = a\n return x\n}}\n"),
+                "f",
+                1
+            ),
+            "{keyword}"
+        );
+    }
 }
 
 #[test]

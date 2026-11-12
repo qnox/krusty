@@ -59,13 +59,14 @@ use krusty::ir::{ClassId, FunId, IrClass, IrExpr, IrFile, IrLocalPropertyLayout}
 use krusty::types::{Ty, TypeName};
 
 use super::super::encode::{
-    Code, CompositeType, FieldType, HeapType, Module, StorageType, SubType, ValType,
+    BlockType, Code, CompositeType, FieldType, Function, HeapType, Module, StorageType, SubType,
+    ValType,
 };
 use super::super::exception_transport::ExceptionTransport;
 use super::super::identity::PREFIX_FIELDS;
 use super::super::interface_dispatch::{ClassRef, MemberRef};
 use super::super::objects::{immutable, ObjectRoot, ITABLE_FIELD, REFERENCE};
-use super::super::runtime::Runtime;
+use super::super::runtime::{Runtime, AND32, EQ32, EQ64, OR32};
 use super::laid_out_classes::{DependencyImplementation, LaidOutClass, LaidOutClasses, Placed};
 use super::lower::{carrier, parameter_carrier, Unsupported, STRING};
 
@@ -126,6 +127,17 @@ pub(super) enum OwnedBase {
     Enum,
     /// A runtime exception class, by its runtime struct: its message and cause.
     Exception(u32),
+}
+
+impl OwnedBase {
+    /// How many struct fields after the dispatch table this base contributes.
+    fn fields(self) -> u32 {
+        match self {
+            OwnedBase::None => 0,
+            OwnedBase::Enum => ENUM_BASE_FIELDS,
+            OwnedBase::Exception(_) => EXCEPTION_BASE_FIELDS,
+        }
+    }
 }
 
 /// A synthesized property accessor a table slot holds: the field it reads or writes.
@@ -538,6 +550,9 @@ fn check_supported(ir: &IrFile, id: ClassId) -> Result<(), Unsupported> {
         "a callable reference"
     } else if class.lambda.is_some() || class.sam_wrapper.is_some() {
         "a function value's class"
+    // A value class is its box: an ordinary object whose stored field is the underlying value.
+    // A non-null unsigned number stays the scalar carrier; a nullable one, and any reference
+    // array of unsigned elements, uses that value class's own runtime box.
     // An inner class's enclosing instance is already an ordinary constructor-prefix argument and
     // field in checked IR, which this object form can carry like every other reference field.
     // Anonymous superclass operands are also ordinary parameters, without capture storage.
@@ -777,6 +792,7 @@ pub(super) fn declare(
             slot_types: &slot_types,
             laid_out: laid_out_superclass(id),
             base: bases[id as usize],
+            value_field: single_value_field(&forms, &tables, &bases, id, class)?,
         }
         .resolve(
             id,
@@ -880,6 +896,9 @@ struct TableEntries<'a> {
     laid_out: Option<&'a LaidOutClass>,
     /// The base no file declares that the class extends.
     base: OwnedBase,
+    /// The one stored field of a single-field value class, which answers `equals` and
+    /// `hashCode` from it.
+    value_field: Option<ValueStorage>,
 }
 
 impl TableEntries<'_> {
@@ -900,6 +919,7 @@ impl TableEntries<'_> {
             slot_types,
             laid_out,
             base,
+            value_field,
         } = *self;
         let Synthesized { accessors, bridges } = synthesized;
         let class = &ir.classes[id as usize];
@@ -911,6 +931,22 @@ impl TableEntries<'_> {
                 continue;
             };
             let function = match entry {
+                Slot::AnyMember(AnyMember::Equals) if let Some(storage) = value_field => {
+                    value_class_equals(
+                        module,
+                        storage,
+                        ty,
+                        runtime.objects.object,
+                        runtime.object_equals,
+                    )
+                }
+                Slot::AnyMember(AnyMember::HashCode)
+                    if let Some(function) = value_field.and_then(|storage| {
+                        value_class_hash(module, &runtime.hashing, storage, class.fields[0].ty, ty)
+                    }) =>
+                {
+                    function
+                }
                 Slot::AnyMember(member) => {
                     match inherited_any_member(ir, runtime, module, id, *member, base) {
                         Some(function) => function,
@@ -1052,6 +1088,151 @@ fn table_struct(slots: &[Option<u32>], itable: u32, type_info: u32) -> Composite
         fields.push(immutable(ValType::nullable(type_info)));
     }
     CompositeType::Struct(fields)
+}
+
+/// Where a single-field value class keeps its underlying value.
+#[derive(Clone, Copy)]
+struct ValueStorage {
+    structure: u32,
+    field: u32,
+    value: ValType,
+}
+
+/// The one stored field of a value class, or nothing when `class` is not that shape.
+fn single_value_field(
+    forms: &[ClassForm],
+    tables: &NumberedClassTables,
+    bases: &[OwnedBase],
+    id: ClassId,
+    class: &IrClass,
+) -> Result<Option<ValueStorage>, Unsupported> {
+    if !class.is_value || class.fields.len() != 1 {
+        return Ok(None);
+    }
+    let value = carrier(class.fields[0].ty)?
+        .ok_or_else(|| format!("a `Unit`-typed value class field (`{}`)", class.fq_name()))?;
+    let field = 1 + bases[id as usize].fields() + tables.table(id).first_field;
+    Ok(Some(ValueStorage {
+        structure: forms[id as usize]
+            .structure
+            .expect("a value class has a struct"),
+        field,
+        value,
+    }))
+}
+
+/// `equals` for a single-field value class.
+///
+/// The other operand is this class only when it carries the same dispatch table. A recursion
+/// group canonicalizes two structs of one layout into one GC type, so `ref.test` of the struct
+/// cannot separate `First` from `Second`. The table stored in every instance is that class's
+/// identity.
+///
+/// The field then compares as that value does: scalar bits, with every NaN equal to every other
+/// NaN, or ordinary Kotlin equality for a reference. A payload's own `equals` answers, including
+/// a custom override.
+fn value_class_equals(
+    module: &mut Module,
+    storage: ValueStorage,
+    equals: u32,
+    object: u32,
+    object_equals: u32,
+) -> u32 {
+    let function = module.declare();
+    let mut code = Code::default();
+    let object_heap = HeapType::Concrete(object);
+    let heap = HeapType::Concrete(storage.structure);
+    code.local_get(1)
+        .ref_test(false, object_heap)
+        .if_(BlockType::Value(ValType::I32))
+        .local_get(0)
+        .ref_cast(false, object_heap)
+        .struct_get(object, 0)
+        .local_get(1)
+        .ref_cast(false, object_heap)
+        .struct_get(object, 0)
+        .ref_eq()
+        .if_(BlockType::Value(ValType::I32))
+        .local_get(0)
+        .ref_cast(false, heap)
+        .struct_get(storage.structure, storage.field)
+        .local_get(1)
+        .ref_cast(false, heap)
+        .struct_get(storage.structure, storage.field);
+    let locals = match storage.value {
+        ValType::F32 | ValType::F64 => {
+            // Locals follow the two reference parameters.
+            code.local_set(3).local_set(2);
+            let (ne, bits, bits_eq) = match storage.value {
+                ValType::F32 => (0x5c, 0xbc, EQ32),
+                _ => (0x62, 0xbd, EQ64),
+            };
+            code.local_get(2).local_get(2).op(ne);
+            code.local_get(3).local_get(3).op(ne);
+            code.op(AND32);
+            code.local_get(2).op(bits).local_get(3).op(bits).op(bits_eq);
+            code.op(OR32);
+            vec![storage.value, storage.value]
+        }
+        ValType::I32 => {
+            code.op(EQ32);
+            Vec::new()
+        }
+        ValType::I64 => {
+            code.op(EQ64);
+            Vec::new()
+        }
+        ValType::Ref { .. } => {
+            code.call(object_equals);
+            Vec::new()
+        }
+    };
+    code.else_().i32_const(0).end();
+    code.else_().i32_const(0).end();
+    module.define(
+        function,
+        Function {
+            ty: equals,
+            locals,
+            code,
+        },
+    );
+    function
+}
+
+/// `hashCode` for a single-field value class: the hash of the value it holds. A reference field
+/// is hashed through the object model; a scalar uses the same hash as its primitive box.
+fn value_class_hash(
+    module: &mut Module,
+    hashing: &super::super::hashing::Hashing,
+    storage: ValueStorage,
+    field_ty: Ty,
+    hash_ty: u32,
+) -> Option<u32> {
+    let reference = matches!(storage.value, ValType::Ref { .. });
+    if !reference && !hashing.emit_scalar_hash(&mut Code::default(), field_ty) {
+        return None;
+    }
+    let function = module.declare();
+    let mut code = Code::default();
+    code.local_get(0)
+        .ref_cast(false, HeapType::Concrete(storage.structure))
+        .struct_get(storage.structure, storage.field);
+    if reference {
+        code.call(hashing.hash_code);
+    } else {
+        let hashed = hashing.emit_scalar_hash(&mut code, field_ty);
+        debug_assert!(hashed, "the probe above accepted this scalar");
+    }
+    module.define(
+        function,
+        Function {
+            ty: hash_ty,
+            locals: Vec::new(),
+            code,
+        },
+    );
+    Some(function)
 }
 
 /// The struct fields `class` declares, each mutable: a field is written by the constructor after
