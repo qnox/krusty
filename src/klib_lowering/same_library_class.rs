@@ -636,85 +636,6 @@ struct ClassDeclaration<'a> {
     class_name: TypeName,
 }
 
-/// Whether every override `function` declares stays with the target.
-///
-/// That is a member of `kotlin.Any`, a fake override of one recorded on an interface, or an
-/// interface member this unit cannot locate and therefore cannot lower.
-fn overrides_only_any(
-    bodies: &KlibDeclarationBodies,
-    module: &str,
-    function: &KlibIrFunction,
-) -> bool {
-    !function.overridden.is_empty()
-        && function
-            .overridden
-            .iter()
-            .all(|symbol| any_member_signature(symbol) || left_with_target(bodies, module, symbol))
-}
-
-/// An override the target keeps: `kotlin.Any`, or an interface member that only overrides `Any`
-/// or that has no serialized function of its own.
-fn left_with_target(bodies: &KlibDeclarationBodies, module: &str, symbol: &KlibIrSymbol) -> bool {
-    if symbol.kind != KlibIrSymbolKind::Function {
-        return false;
-    }
-    let KlibIrSignature::Public(signature) = &symbol.signature else {
-        return false;
-    };
-    match bodies.function_owner(module, &symbol.signature) {
-        LocatedMember::One {
-            class, function, ..
-        } => {
-            class_kind(class.base.flags) == TypeKind::Interface
-                && !function.overridden.is_empty()
-                && function.overridden.iter().all(any_member_signature)
-        }
-        LocatedMember::Missing => interface_classifier(bodies, module, signature),
-        LocatedMember::Several => false,
-    }
-}
-
-/// `kotlin.Any`'s own member, by the public signature the override names.
-fn any_member_signature(symbol: &KlibIrSymbol) -> bool {
-    let KlibIrSignature::Public(signature) = &symbol.signature else {
-        return false;
-    };
-    let declaration = signature.declaration().segments();
-    signature.package().segments() == ["kotlin"]
-        && declaration.len() == 2
-        && declaration[0] == "Any"
-}
-
-/// Whether `signature` names a member of an interface serialized for `module`.
-fn interface_classifier(
-    bodies: &KlibDeclarationBodies,
-    module: &str,
-    signature: &KlibPublicIdSignature,
-) -> bool {
-    let Some(classifier) = member_classifier(signature) else {
-        return false;
-    };
-    matches!(
-        bodies.public_class(module, &classifier),
-        LocatedClass::One(class) if class_kind(class.base.flags) == TypeKind::Interface
-    )
-}
-
-/// The classifier that declares `signature`'s member, without the member segment.
-fn member_classifier(signature: &KlibPublicIdSignature) -> Option<KlibPublicIdSignature> {
-    let declaration = signature.declaration().segments();
-    if declaration.len() < 2 {
-        return None;
-    }
-    let mut name = TypeName::ROOT;
-    for segment in signature.package().segments() {
-        name = crate::types::type_name_child(name, segment);
-    }
-    name = crate::types::type_name_child(name, &declaration[0]);
-    for segment in &declaration[1..declaration.len() - 1] {
-        name = crate::types::type_name_nested_child(name, segment);
-    }
-    Some(KlibPublicIdSignature::classifier(name))
 }
 
 fn prepare_class<'a>(
@@ -946,12 +867,7 @@ fn members_and_storage<'a>(
         match declaration {
             KlibIrMember::Function(id) => {
                 let function = arena.function(*id);
-                // `equals`, `hashCode` and `toString` override `kotlin.Any`, sometimes recorded as
-                // the interface's fake override of those members. The target realizes them. This
-                // class still materializes the members of its own, such as a field projection.
-                if !function.constructor
-                    && !overrides_only_any(scope.bodies, scope.module, function)
-                {
+                if !function.constructor {
                     members.push(prepare_member(arena, function, scope, None)?);
                 }
             }

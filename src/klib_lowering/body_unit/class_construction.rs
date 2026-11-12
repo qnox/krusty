@@ -174,7 +174,9 @@ impl<'u, 's> Linker<'u, 's> {
     /// Install the final class that declares `identity` when this path materializes it.
     ///
     /// The provider record is the declaration a checked call would use. A class the path does not
-    /// materialize, including a value class and a builtin, leaves the call on its existing path.
+    /// materialize, including a value class, a builtin and a class whose representation the target
+    /// owns, leaves the call on its existing path: a second layout of a class the target already
+    /// lays out would read the target's instances through fields they do not have.
     pub(super) fn materialize_reached_member(
         &mut self,
         ir: &mut IrFile,
@@ -193,10 +195,11 @@ impl<'u, 's> Linker<'u, 's> {
         if callable.kind() != crate::libraries::ExternalCallableKind::Member {
             return Ok(());
         }
-        if !callable
-            .class_contract()
-            .is_some_and(|class| !class.is_value && !class.is_builtin_type())
-        {
+        if !callable.class_contract().is_some_and(|class| {
+            !class.is_value
+                && !class.is_builtin_type()
+                && !self.sources.callees.target_represents(class.classifier)
+        }) {
             return Ok(());
         }
         self.materialize_declaring_class(ir, callable)?;
