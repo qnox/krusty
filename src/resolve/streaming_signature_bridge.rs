@@ -4509,12 +4509,9 @@ pub(crate) fn finalized_streamed_signature_index(
             .syntax
             .interface_delegations(delegations)
             .iter()
+            .filter(|d| source_supertypes.get(d.supertype as usize) != Some(&Ty::Error))
             .map(|delegation| {
                 let interface = *source_supertypes.get(delegation.supertype as usize)?;
-                // A delegated supertype that did not resolve (already reported) forwards nothing.
-                if interface == Ty::Error {
-                    return Some(None);
-                }
                 let source = match delegation.source {
                     crate::fir::HeaderInterfaceDelegateSource::ConstructorParameter(parameter) => {
                         crate::fir::ResolvedInterfaceDelegateSource::ConstructorParameter(parameter)
@@ -4526,10 +4523,9 @@ pub(crate) fn finalized_streamed_signature_index(
                         crate::fir::ResolvedInterfaceDelegateSource::ConstructorBodyInitializer
                     }
                 };
-                Some(Some((interface, source)))
+                Some((interface, source))
             })
-            .collect::<Option<Vec<_>>>()
-            .map(|delegations| delegations.into_iter().flatten().collect::<Vec<_>>());
+            .collect::<Option<Vec<_>>>();
         let Some(interface_delegations) = interface_delegations else {
             crate::trace_compiler!(
                 "fir",
