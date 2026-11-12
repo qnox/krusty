@@ -89,6 +89,12 @@ impl Body<'_> {
                 };
                 self.generated_property_equals(*left, *right, ty)
             }
+            IrIntrinsic::DataClassArrayToString { ty } => {
+                let (None, [value]) = (receiver, args) else {
+                    return Err("a malformed generated array rendering".to_string());
+                };
+                self.generated_array_to_string(*value, ty)
+            }
             other => Err(format!("a call to the intrinsic {other:?}")),
         }
     }
