@@ -58311,25 +58311,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Whether this provider family contains the annotation-defined fallback constructor tier.
-    fn has_low_priority_constructor(
-        &self,
-        internal: TypeName,
-        classifier: &crate::libraries::LibraryType,
-    ) -> bool {
-        let annotation = crate::types::type_name("kotlin/internal/LowPriorityInOverloadResolution");
-        classifier
-            .constructors
-            .iter()
-            .chain(
-                self.checked_local_constructors
-                    .get(&internal)
-                    .into_iter()
-                    .flatten(),
-            )
-            .any(|constructor| constructor.annotations.contains(&annotation))
-    }
-
     fn record_resolved_library_constructor(
         &mut self,
         scope: &CheckerScope<'_>,
