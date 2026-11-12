@@ -1329,9 +1329,7 @@ fn build_state_machine(
                 return (line as i32, resume_line as i32);
             }
             let line = ir
-                .expr_lines
-                .get(&call)
-                .copied()
+                .statement_line(call)
                 .or(ir.function_position(fid).decl_line)
                 .unwrap_or_default() as i32;
             (line, line)

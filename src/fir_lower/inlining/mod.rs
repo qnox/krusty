@@ -934,15 +934,19 @@ impl BodyLowering<'_> {
                 escaping_lambda_plan,
                 &bindings,
                 &reified_bindings,
-                caller_declaration,
-                self.expansion_enclosure,
-                self.in_default_argument,
-                &caller_source_name,
-                function,
-                source_owner,
-                callee_source,
-                frame.callee,
-                &callee,
+                escaping_lambda::EscapingLambdaCaller {
+                    declaration: caller_declaration,
+                    enclosure: self.expansion_enclosure,
+                    is_default: self.in_default_argument,
+                    source_name: &caller_source_name,
+                },
+                escaping_lambda::EscapingInlineTemplate {
+                    function,
+                    owner: source_owner,
+                    source: callee_source,
+                    callee: frame.callee,
+                    callee_source_name: &callee,
+                },
             ),
             // The plan is empty: a dependency template declares no lambda.
             _ => Default::default(),
@@ -1393,6 +1397,10 @@ impl BodyLowering<'_> {
             && self.ir.suspend_funs.contains(&impl_fn)
         {
             let continuation = self.ir.add_expr(IrExpr::CurrentContinuation);
+            // The invocation is a suspend call, which kotlinc marks where it starts: the operand
+            // it passes is read at the invocation's position, not the inlined call's.
+            self.ir.copy_position(invocation, continuation);
+            self.ir.copy_inline_copy_mark(invocation, continuation);
             let ty = Ty::obj("kotlin/coroutines/Continuation");
             self.ir.set_logical_type(continuation, ty);
             let slot = self.allocate_temporary();
@@ -1439,7 +1447,7 @@ impl BodyLowering<'_> {
                 // physical instruction. Put that source point on the generated bindings; an
                 // enclosing inline copy maps it through the caller frame retained below.
                 for &declaration in &declarations {
-                    self.ir.expr_lines.insert(declaration, line);
+                    self.ir.set_statement_line(declaration, line);
                     self.ir.copy_inline_copy_mark(invocation, declaration);
                 }
                 self.ir.copy_inline_copy_mark(invocation, unit);

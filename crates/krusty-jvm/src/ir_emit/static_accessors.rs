@@ -504,14 +504,23 @@ pub(super) fn plan(
             }
             None => {
                 for &root in &context.roots {
+                    let first_use = uses.len();
+                    let synthesized_line = root_lines.get(&root).copied();
                     walk.collect(
                         context.owner,
                         root,
-                        root_lines.get(&root).copied().unwrap_or(0),
+                        synthesized_line.unwrap_or(0),
                         &carriers,
                         body_exports_private_access(ir, &exporting_private_access, root),
                         &mut uses,
                     );
+                    // A synthesized accessor's uses stand at its line as a whole, whatever line
+                    // its code marks.
+                    if let Some(line) = synthesized_line {
+                        for found in &mut uses[first_use..] {
+                            found.line = line;
+                        }
+                    }
                 }
             }
         }

@@ -1933,10 +1933,12 @@ where
                 module,
                 bodies,
                 default_arguments,
-                &mut files,
-                &local_class_contexts,
-                &parse_errors,
-                checked_count,
+                inline_preparation::StreamingPreparationInputs {
+                    files: &mut files,
+                    local_contexts: &local_class_contexts,
+                    skip: &parse_errors,
+                    checked_count,
+                },
                 &mut symbols,
                 diags,
             )

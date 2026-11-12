@@ -4,6 +4,16 @@
 use super::{ClassId, ExprId, IrClass, IrFile, IrGenericSig, IrTypeParameter};
 use crate::types::{Ty, TypeName};
 
+/// The Kotlin visibility a plugin gives a class it generates without a declaration. No declaration
+/// record describes the class, so its synthetic-class `@Metadata` records this one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IrDeclarationlessVisibility {
+    /// A file-level class of the module, such as Compose's `ComposableSingletons$<File>Kt`.
+    Internal,
+    /// A class local to a declaration's body or initializer, such as Parcelize's `Creator`.
+    Local,
+}
+
 impl IrFile {
     /// Whether `class` is declared in executable code: a local or anonymous class, or the copy of
     /// an anonymous object an inline expansion specialized for its call. No other file names such
@@ -36,7 +46,7 @@ impl IrFile {
             .retain(|owner, _| owners.contains(owner));
     }
 
-    pub(crate) fn declared_class_self_type(&self, classifier: TypeName) -> Option<Ty> {
+    pub fn declared_class_self_type(&self, classifier: TypeName) -> Option<Ty> {
         self.declared_class_self_types.get(&classifier).copied()
     }
 
@@ -48,12 +58,17 @@ impl IrFile {
         self.synthetic_classes.contains(&internal)
     }
 
-    pub(crate) fn mark_declarationless_class(&mut self, internal: TypeName) {
-        self.declarationless_classes.insert(internal);
+    pub(crate) fn mark_declarationless_class(
+        &mut self,
+        internal: TypeName,
+        visibility: IrDeclarationlessVisibility,
+    ) {
+        self.declarationless_classes.insert(internal, visibility);
     }
 
-    pub fn is_declarationless_class(&self, internal: TypeName) -> bool {
-        self.declarationless_classes.contains(&internal)
+    /// The visibility a class generated without a declaration was given, if it is one.
+    pub fn declarationless_class(&self, internal: TypeName) -> Option<IrDeclarationlessVisibility> {
+        self.declarationless_classes.get(&internal).copied()
     }
 
     pub fn mark_deprecated_class(&mut self, internal: TypeName) {

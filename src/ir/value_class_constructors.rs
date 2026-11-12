@@ -31,10 +31,7 @@ impl ValueClassConstructorFacts {
             .map(|(owner, parameters)| {
                 (
                     names.get(&owner).copied().unwrap_or(owner),
-                    parameters
-                        .into_iter()
-                        .map(|value| remap_ty(value))
-                        .collect(),
+                    parameters.into_iter().map(&remap_ty).collect(),
                 )
             })
             .collect();

@@ -216,6 +216,13 @@ impl SymbolSource for KlibLibraries {
         })
     }
 
+    fn klib_body_class_contract(
+        &self,
+        classifier: crate::types::TypeName,
+    ) -> Option<crate::libraries::KlibBodyClassContract> {
+        self.inventory.class_body_contract(classifier)
+    }
+
     fn external_callable(
         &self,
         identity: crate::fir::ExternalCallableId,

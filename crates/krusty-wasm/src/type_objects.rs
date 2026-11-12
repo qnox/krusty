@@ -10,8 +10,11 @@
 //! `toString` answers the text.
 //!
 //! The object's struct is declared the first time a module names a type, with its own dispatch
-//! table and an interface record saying its instances are `KType`s.
+//! table and an interface record saying its instances are `KType`s. The table carries the type
+//! information of `kotlin.wasm.internal.KTypeImpl`, the class Kotlin/Wasm gives every one of these
+//! objects, so a bound `::class` answers that class.
 
+use krusty::backend::class_names::{member_class_names, ReflectionNames};
 use krusty::fx_hash::HashMap;
 use krusty::types::TypeName;
 
@@ -234,7 +237,16 @@ impl TypeObjects {
             module.reference_function(function);
             init.ref_func(function);
         }
-        init.global_get(itable).struct_new(objects.any_table);
+        init.global_get(itable);
+        // Every `typeOf` object is an instance of Kotlin/Wasm's internal `KTypeImpl`. That class
+        // is not published to a dependent compilation, so its names are this runtime's fact about
+        // the objects it builds, read from the classifier identity rather than guessed.
+        let info = objects.type_infos.global(module, ktype_impl());
+        objects
+            .type_infos
+            .name(module, ktype_impl(), &ktype_impl_names());
+        objects.push_type_info(&mut init, Some(info));
+        init.struct_new(objects.any_table);
         let table = module.constant_global(ValType::reference(objects.any_table), init);
         Declared { structure, table }
     }
@@ -243,4 +255,21 @@ impl TypeObjects {
 /// `kotlin.reflect.KType`, the interface every object here is an instance of.
 pub(super) fn ktype() -> TypeName {
     krusty::types::wk::ktype()
+}
+
+/// `kotlin.wasm.internal.KTypeImpl`, the class of every object here.
+fn ktype_impl() -> TypeName {
+    krusty::types::type_name("kotlin/wasm/internal/KTypeImpl")
+}
+
+/// The reflection names of [`ktype_impl`], from its classifier identity.
+fn ktype_impl_names() -> ReflectionNames {
+    let classifier = ktype_impl();
+    let names = member_class_names(classifier);
+    ReflectionNames {
+        // Boundary conversion: the package path is spelled with `/` in the name tree.
+        package: classifier.package().replace('/', "."),
+        simple: Some(names.simple),
+        qualified: Some(names.qualified),
+    }
 }
