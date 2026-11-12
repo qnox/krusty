@@ -5,24 +5,22 @@ use krusty::ir::{ClassId, IrCapturedReceiver, IrCtorArg, IrCtorParameterProvenan
 use krusty::types::{Ty, TyKind, TypeName};
 
 pub(super) fn supported(ir: &IrFile, id: ClassId) -> bool {
-    let class = &ir.classes[id as usize];
-    // These edges carry a holder, while their logical Ty describes its element. The ordinary
-    // constructor/field operations do not implement that cross-body holder ABI.
+    // A superclass edge still carries a holder this form does not pass through a super
+    // constructor. A class field is the same cell a local holds, stored by the capture
+    // parameter that fills it, so it stays in the prefix proof below.
     if ir
-        .shared_class_capture_fields
+        .shared_super_capture_parameters
         .keys()
         .any(|(owner, _)| *owner == id)
-        || ir
-            .shared_super_capture_parameters
-            .keys()
-            .any(|(owner, _)| *owner == id)
         || ir
             .shared_secondary_super_capture_parameters
             .keys()
             .any(|(owner, _, _)| *owner == id)
+        || !shared_fields_are_captures(ir, id)
     {
         return false;
     }
+    let class = &ir.classes[id as usize];
     let Some(prefix) = class
         .ctor_args
         .get(..class.constructor_prefix_count as usize)
@@ -217,6 +215,28 @@ fn delegate_parameter(
                 || matches!(other.provenance,
                     IrCtorParameterProvenance::InterfaceDelegate { field: target, .. } if target == field)
         }).count() == 1
+}
+
+/// Every shared-capture field of `id` is one capture parameter of its constructor prefix,
+/// stored at that field, with the field's declared type equal to the recorded element.
+fn shared_fields_are_captures(ir: &IrFile, id: ClassId) -> bool {
+    let class = &ir.classes[id as usize];
+    let prefix = class.constructor_prefix_count as usize;
+    ir.shared_class_capture_fields
+        .iter()
+        .filter(|((owner, _), _)| *owner == id)
+        .all(|((_, field), element)| {
+            class.ctor_args.iter().take(prefix).any(|argument| {
+                argument.field_index == Some(*field)
+                    && argument.provenance == IrCtorParameterProvenance::Capture
+                    && argument.is_field
+                    && argument.ty == *element
+                    && class
+                        .fields
+                        .get(*field as usize)
+                        .is_some_and(|storage| storage.ty == *element && storage.is_final())
+            })
+        })
 }
 
 fn capture_parameter(ir: &IrFile, id: ClassId, parameter: u32, argument: &IrCtorArg) -> bool {

@@ -369,7 +369,7 @@ impl FileRecorder<'_, '_, '_> {
             }
             Slot::FieldGetter { class, field } | Slot::FieldSetter { class, field } => {
                 let setter = matches!(slot, Slot::FieldSetter { .. });
-                let value = field_carrier(ir, *class, *field)?;
+                let value = field_carrier(self.program.module, ir, *class, *field)?;
                 let signature = if setter {
                     (vec![REFERENCE, value], Vec::new())
                 } else {

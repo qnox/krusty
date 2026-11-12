@@ -67,7 +67,7 @@ use super::super::interface_dispatch::{ClassRef, MemberRef};
 use super::super::objects::{immutable, ObjectRoot, ITABLE_FIELD, REFERENCE};
 use super::super::runtime::Runtime;
 use super::laid_out_classes::{DependencyImplementation, LaidOutClass, LaidOutClasses, Placed};
-use super::lower::{carrier, parameter_carrier, Unsupported, STRING};
+use super::lower::{carrier, cell_reference, parameter_carrier, Unsupported, STRING};
 
 mod constructor_prefix;
 pub(super) use constructor_prefix::enclosing_field;
@@ -684,9 +684,9 @@ pub(super) fn declare(
             }
         }
         if let Some(parent) = table.superclass {
-            fields.extend(inherited_fields(ir, &tables, parent)?);
+            fields.extend(inherited_fields(module, ir, &tables, parent)?);
         }
-        fields.extend(own_fields(class)?);
+        fields.extend(own_fields(module, ir, id)?);
         let root = match bases[id as usize] {
             OwnedBase::None => objects.identified,
             OwnedBase::Enum => objects.enum_base,
@@ -1045,17 +1045,27 @@ fn table_struct(slots: &[Option<u32>], itable: u32, type_info: u32) -> Composite
 }
 
 /// The struct fields `class` declares, each mutable: a field is written by the constructor after
-/// the object exists.
-fn own_fields(class: &IrClass) -> Result<Vec<FieldType>, Unsupported> {
-    class
+/// the object exists. A shared capture is the cell reference, not the element's carrier.
+fn own_fields(
+    module: &mut Module,
+    ir: &IrFile,
+    class: ClassId,
+) -> Result<Vec<FieldType>, Unsupported> {
+    let declared = ir.classes[class as usize]
         .fields
         .iter()
-        .map(|field| {
-            let value = carrier(field.ty)?.ok_or_else(|| {
+        .enumerate()
+        .map(|(index, field)| (u32::try_from(index).expect("too many fields"), field.ty))
+        .collect::<Vec<_>>();
+    declared
+        .into_iter()
+        .map(|(index, ty)| {
+            let value = field_storage(module, ir, class, index, ty)?.ok_or_else(|| {
+                let declaration = &ir.classes[class as usize];
                 format!(
                     "a `Unit`-typed field (`{}.{}`)",
-                    class.fq_name(),
-                    field.name
+                    declaration.fq_name(),
+                    declaration.fields[index as usize].name
                 )
             })?;
             Ok(FieldType {
@@ -1068,15 +1078,16 @@ fn own_fields(class: &IrClass) -> Result<Vec<FieldType>, Unsupported> {
 
 /// Every field of `class` and its superclasses in this file, root first.
 fn inherited_fields(
+    module: &mut Module,
     ir: &IrFile,
     tables: &NumberedClassTables,
     class: ClassId,
 ) -> Result<Vec<FieldType>, Unsupported> {
     let mut fields = match tables.table(class).superclass {
-        Some(parent) => inherited_fields(ir, tables, parent)?,
+        Some(parent) => inherited_fields(module, ir, tables, parent)?,
         None => Vec::new(),
     };
-    fields.extend(own_fields(&ir.classes[class as usize])?);
+    fields.extend(own_fields(module, ir, class)?);
     Ok(fields)
 }
 
@@ -1113,11 +1124,11 @@ fn slot_types<'r>(
                 Slot::AnyMember(member) => Some(objects.any_slot_types[member.slot() as usize]),
                 Slot::Function(function) => Some(method_type(module, ir, *function)?),
                 Slot::FieldGetter { class, field } => {
-                    let value = field_carrier(ir, *class, *field)?;
+                    let value = field_carrier(module, ir, *class, *field)?;
                     Some(module.func_type(vec![REFERENCE], vec![value]))
                 }
                 Slot::FieldSetter { class, field } => {
-                    let value = field_carrier(ir, *class, *field)?;
+                    let value = field_carrier(module, ir, *class, *field)?;
                     Some(module.func_type(vec![REFERENCE, value], Vec::new()))
                 }
                 Slot::Abstract => match keys.get(&(slot as u32)) {
@@ -1231,18 +1242,59 @@ fn property_key_type(
     method_type(module, ir, function)
 }
 
-/// How field `field` of `class` is carried.
+/// How field `field` of `class` is carried. A shared capture is the cell, not its element.
 pub(super) fn field_carrier(
+    module: &mut Module,
     ir: &IrFile,
     class: ClassId,
     field: u32,
 ) -> Result<ValType, Unsupported> {
     let declaration = &ir.classes[class as usize];
-    carrier(declaration.fields[field as usize].ty)?.ok_or_else(|| {
+    let declared = &declaration.fields[field as usize];
+    field_storage(module, ir, class, field, declared.ty)?.ok_or_else(|| {
         format!(
             "a `Unit`-typed field (`{}.{}`)",
             declaration.fq_name(),
-            declaration.fields[field as usize].name
+            declared.name
         )
     })
+}
+
+/// The carrier of constructor argument `index`, a cell when that argument fills a shared capture.
+pub(super) fn constructor_argument_carrier(
+    module: &mut Module,
+    ir: &IrFile,
+    class: ClassId,
+    index: usize,
+    declared: Ty,
+) -> Result<ValType, Unsupported> {
+    let field = ir.classes[class as usize]
+        .ctor_args
+        .get(index)
+        .and_then(|argument| argument.field_index);
+    match field {
+        Some(field) if ir.shared_class_capture_fields.contains_key(&(class, field)) => {
+            field_storage(module, ir, class, field, declared)?.ok_or_else(|| {
+                format!(
+                    "a `Unit` shared capture (`{}`)",
+                    ir.classes[class as usize].fq_name()
+                )
+            })
+        }
+        _ => carrier(declared)?.ok_or_else(|| "a `Unit` constructor parameter".to_string()),
+    }
+}
+
+/// A shared capture field stores the cell. Every other field stores its declared carrier.
+fn field_storage(
+    module: &mut Module,
+    ir: &IrFile,
+    class: ClassId,
+    field: u32,
+    declared: Ty,
+) -> Result<Option<ValType>, Unsupported> {
+    match ir.shared_class_capture_fields.get(&(class, field)) {
+        Some(&element) => cell_reference(module, element).map(Some),
+        None => carrier(declared),
+    }
 }

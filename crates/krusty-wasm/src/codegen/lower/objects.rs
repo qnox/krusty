@@ -15,8 +15,8 @@ use krusty::fir::{
     ResolvedPropertyOverrideTarget,
 };
 use krusty::ir::{
-    Callee, ClassId, CtorDelegateTarget, FunId, IrLocalPropertyLayout, IrSuperCallKind, IrTypeOp,
-    IrVirtualTarget,
+    Callee, ClassId, CtorDelegateTarget, FunId, IrFile, IrLocalPropertyLayout, IrSuperCallKind,
+    IrTypeOp, IrVirtualTarget,
 };
 use krusty::types::{Ty, TyKind, TypeName};
 
@@ -166,8 +166,22 @@ impl Body<'_> {
         let object = self.local(REFERENCE);
         self.allocate(class)?;
         self.code.local_tee(object);
-        for (arg, param) in args.iter().zip(params) {
-            self.value(*arg, param)?;
+        for (index, (arg, param)) in args.iter().zip(params).enumerate() {
+            let element = self.ir.classes[class as usize]
+                .ctor_args
+                .get(index)
+                .and_then(|argument| argument.field_index)
+                .and_then(|field| {
+                    self.ir
+                        .shared_class_capture_fields
+                        .get(&(class, field))
+                        .copied()
+                });
+            if let Some(element) = element {
+                self.pass_shared_capture(*arg, element)?;
+            } else {
+                self.value(*arg, param)?;
+            }
         }
         self.code.call(constructor).local_get(object);
         Ok(())
@@ -216,8 +230,14 @@ impl Body<'_> {
             }
         }
         for &owner in chain.iter().rev() {
-            for field in &self.ir.classes[owner as usize].fields {
-                let value = carrier(field.ty)?.ok_or("a `Unit`-typed field")?;
+            let count = self.ir.classes[owner as usize].fields.len();
+            for index in 0..count {
+                let value = super::super::classes::field_carrier(
+                    self.module,
+                    self.ir,
+                    owner,
+                    u32::try_from(index).expect("too many fields"),
+                )?;
                 default_value(&mut self.code, value);
             }
         }
@@ -1236,7 +1256,8 @@ pub(super) fn define_class_functions(
             };
             body.primary_constructor(id)?;
             let lowered = body.finish();
-            define(module, constructor, &parameters, lowered)?;
+            let carriers = constructor_carriers(module, ir, id, &parameters)?;
+            define(module, constructor, &carriers, lowered)?;
         }
         for (ordinal, &constructor) in form.secondaries.iter().enumerate() {
             let secondary = &class.secondary_ctors[ordinal];
@@ -1259,7 +1280,8 @@ pub(super) fn define_class_functions(
             };
             body.secondary_constructor(id, ordinal)?;
             let lowered = body.finish();
-            define(module, constructor, &parameters, lowered)?;
+            let carriers = constructor_carriers(module, ir, id, &parameters)?;
+            define(module, constructor, &carriers, lowered)?;
         }
         if let Some(singleton) = form.singleton {
             let constructor = match (form.constructor, class.ctor_args.is_empty()) {
@@ -1588,18 +1610,40 @@ fn emit_module_property_dispatch(
     Ok(())
 }
 
+/// Wasm carriers of a constructor's parameters. Index 0 is `this`; each later entry is the
+/// constructor argument at that position, a cell when the argument fills a shared capture.
+fn constructor_carriers(
+    module: &mut Module,
+    ir: &IrFile,
+    class: ClassId,
+    parameters: &[Ty],
+) -> Result<Vec<ValType>, Unsupported> {
+    let mut carriers = Vec::with_capacity(parameters.len());
+    for (index, parameter) in parameters.iter().enumerate() {
+        let value = if index == 0 {
+            carrier(*parameter)?.ok_or("a `Unit` constructor parameter")?
+        } else {
+            super::super::classes::constructor_argument_carrier(
+                module,
+                ir,
+                class,
+                index - 1,
+                *parameter,
+            )?
+        };
+        carriers.push(value);
+    }
+    Ok(carriers)
+}
+
 /// Define `function`, taking `parameters` and answering nothing, as `(code, locals)`.
 fn define(
     module: &mut Module,
     function: u32,
-    parameters: &[Ty],
+    parameters: &[ValType],
     (code, locals): (Code, Vec<ValType>),
 ) -> Result<(), Unsupported> {
-    let mut params = Vec::with_capacity(parameters.len());
-    for parameter in parameters {
-        params.push(carrier(*parameter)?.ok_or("a `Unit` constructor parameter")?);
-    }
-    let ty = module.func_type(params, Vec::new());
+    let ty = module.func_type(parameters.to_vec(), Vec::new());
     module.define(function, Function { ty, locals, code });
     Ok(())
 }

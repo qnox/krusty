@@ -349,7 +349,9 @@ fn constructor_only_captures_reject_inconsistent_transport_roles() {
                 .insert((id, p), ClassCaptureIdentity::Receiver(7));
         }),
         ("shared capture field", |ir, id, _| {
-            ir.shared_class_capture_fields.insert((id, 0), Ty::String);
+            // A mark whose element is not the capture's declared type is not a shared cell.
+            ir.shared_class_capture_fields
+                .insert((id, 0), Ty::ty_param("Marked", Ty::obj("kotlin/Any")));
         }),
         ("shared superclass edge", |ir, id, _| {
             ir.shared_super_capture_parameters
@@ -564,7 +566,7 @@ fn incomplete_or_shared_capture_transport_is_rejected_without_panicking() {
                 .field_index
                 .unwrap();
             ir.shared_class_capture_fields
-                .insert((id, field), Ty::String);
+                .insert((id, field), Ty::ty_param("Marked", Ty::obj("kotlin/Any")));
         }),
         ("shared superclass edge", |ir, id, _| {
             ir.shared_super_capture_parameters
@@ -604,7 +606,7 @@ fn incomplete_or_shared_capture_transport_is_rejected_without_panicking() {
                 .field_index
                 .unwrap();
             ir.shared_class_capture_fields
-                .insert((id, field), Ty::String);
+                .insert((id, field), Ty::ty_param("Marked", Ty::obj("kotlin/Any")));
         }),
     ];
     let (original, class, parameter) = capture_transport();
@@ -1011,8 +1013,10 @@ fn enclosing_receivers_stay_stored_for_initializer_and_member_reads() {
                 let mut copy = copy_transport(&ir);
                 match shared {
                     0 => {
-                        copy.shared_class_capture_fields
-                            .insert((class, field), argument.ty);
+                        copy.shared_class_capture_fields.insert(
+                            (class, field),
+                            Ty::ty_param("Marked", Ty::obj("kotlin/Any")),
+                        );
                     }
                     1 => {
                         copy.shared_super_capture_parameters
@@ -1260,8 +1264,10 @@ fn interface_delegate_prefix_requires_positive_role_and_unique_typed_storage() {
                 .push((parameter, field));
         }),
         ("shared holder", |ir, class, _, field| {
-            ir.shared_class_capture_fields
-                .insert((class, field), Ty::String);
+            ir.shared_class_capture_fields.insert(
+                (class, field),
+                Ty::ty_param("Marked", Ty::obj("kotlin/Any")),
+            );
         }),
     ];
     let (original, class, parameter, field) = interface_delegate_transport();

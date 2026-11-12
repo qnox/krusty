@@ -36,6 +36,7 @@ mod objects;
 mod scalar_instructions;
 mod scalar_value_classes;
 mod shared_cells;
+pub(super) use shared_cells::cell_reference;
 mod string_conversion;
 mod type_of;
 
