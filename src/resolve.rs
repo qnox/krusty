@@ -276,7 +276,6 @@ mod plugin_expression_planning;
 mod plugin_noarg;
 mod plugin_status;
 mod postponed_applicability;
-mod postponed_array_factories;
 mod postponed_constraints;
 mod postponed_diagnostics;
 mod property_declaration_check;
@@ -13065,33 +13064,20 @@ impl<'a> Checker<'a> {
 
         // Array literals are compiler-provided constructions, selected from the expected array
         // classifier rather than from the provisional parser spelling. Primitive and unsigned
-        // arrays use their specialized vararg creator; `Array<T>` uses the reference creator.
+        // arrays use their specialized vararg operation; `Array<T>` uses the reference one.
         if let Some((expected, element)) = expected.zip(expected.and_then(Ty::array_elem)) {
-            let synthetic = if matches!(expected.kind(), TyKind::Obj(owner, _) if owner.matches("kotlin/Array"))
-            {
-                crate::synthetics::lookup("arrayOf")
+            let kind = if expected.is_reference_array() {
+                crate::synthetics::SyntheticKind::ReferenceVararg
             } else {
-                crate::synthetics::by_kind(crate::synthetics::SyntheticKind::PrimitiveVararg(
-                    element,
-                ))
-            };
-            let Some(synthetic) = synthetic else {
-                self.diags.error(
-                    span,
-                    format!(
-                        "collection literal cannot construct '{}'",
-                        expected.source_name()
-                    ),
-                );
-                return Ty::Error;
+                crate::synthetics::SyntheticKind::PrimitiveVararg(element)
             };
             let Some(result) =
-                self.check_array_builtin(scope, call, synthetic, args, span, Some(element))
+                self.check_array_builtin(scope, call, kind, None, args, span, Some(element))
             else {
                 return Ty::Error;
             };
             self.expr_lowers
-                .insert(call, ExprLowering::CompilerSynthetic(synthetic.kind));
+                .insert(call, ExprLowering::CompilerSynthetic(kind));
             return result;
         }
 
@@ -13876,27 +13862,15 @@ impl<'a> Checker<'a> {
                         // a fully-qualified constructor, and speculatively checking its lambda
                         // here would bind `it`/declared parameters without the constructor's SAM
                         // expectation. The selected callable path owns the first body check.
-                        if let Some(synthetic) = crate::synthetics::lookup_qualified(package, &name)
-                        {
-                            let element_hint = self
-                                .file
-                                .call_type_args
-                                .get(&call.0)
-                                .and_then(|arguments| arguments.first())
-                                .map(|reference| self.type_ref_ty(scope, reference))
-                                .or_else(|| expected.and_then(Ty::array_elem));
-                            if let Some(result) = self.check_array_builtin(
-                                scope,
-                                call,
-                                synthetic,
-                                args,
-                                span,
-                                element_hint,
-                            ) {
-                                self.expr_lowers
-                                    .insert(call, ExprLowering::CompilerSynthetic(synthetic.kind));
-                                return result;
-                            }
+                        if let Some(result) = self.try_commit_array_factory_call(
+                            scope,
+                            call,
+                            &name,
+                            args,
+                            Some(package),
+                            expected,
+                        ) {
+                            return result;
                         }
                         let (arg_tys, probe_mark) = self.probe_argument_types(scope, call, args);
                         let targs: Vec<Ty> = self
@@ -16335,7 +16309,8 @@ impl<'a> Checker<'a> {
                         if let Some(result) = self.check_array_builtin(
                             scope,
                             call,
-                            synthetic,
+                            synthetic.kind,
+                            Some(synthetic.name),
                             args,
                             span,
                             Some(element),
@@ -16357,7 +16332,8 @@ impl<'a> Checker<'a> {
                         if let Some(result) = self.check_array_builtin(
                             scope,
                             call,
-                            synthetic,
+                            synthetic.kind,
+                            Some(synthetic.name),
                             args,
                             span,
                             element_hint,
@@ -16366,6 +16342,11 @@ impl<'a> Checker<'a> {
                                 .insert(call, ExprLowering::CompilerSynthetic(synthetic.kind));
                             return result;
                         }
+                    }
+                    if let Some(result) = self
+                        .try_commit_array_factory_call(scope, call, &fname, args, None, expected)
+                    {
+                        return result;
                     }
                 }
                 let has_lambda_argument = args
@@ -16382,16 +16363,12 @@ impl<'a> Checker<'a> {
                     self.postponed_context_sensitive_name(scope, argument)
                         .is_some()
                 });
-                let has_contextual_empty_reference_array = args
-                    .iter()
-                    .any(|&argument| self.postponed_empty_reference_array_factory(scope, argument));
                 let toplevel_partial: Option<Vec<Option<Ty>>> = if !self
                     .lexical_value_declares(scope, &fname)
                     && (has_lambda_argument
                         || has_callable_ref_argument
                         || has_function_value_argument
-                        || has_context_sensitive_name_argument
-                        || has_contextual_empty_reference_array)
+                        || has_context_sensitive_name_argument)
                 {
                     Some(
                         args.iter()
@@ -16400,7 +16377,6 @@ impl<'a> Checker<'a> {
                                     self.file.expr(a),
                                     Expr::Lambda { .. } | Expr::CallableRef { .. }
                                 ) || self.postponed_context_sensitive_name(scope, a).is_some()
-                                    || self.postponed_empty_reference_array_factory(scope, a)
                                 {
                                     None
                                 } else {
@@ -17848,6 +17824,30 @@ impl<'a> Checker<'a> {
                                 );
                             }
                         }
+                        // The spread operand is the vararg's whole array, so a closed vararg
+                        // parameter is its expected type: each branch of
+                        // `*if (p) arrayOf("x") else arrayOf()` takes `Array<out String>` as its
+                        // expectation, as a direct `*arrayOf()` does. A parameter that still
+                        // mentions an open callee formal is no expectation yet.
+                        if self.file.is_spread_arg(a) && sig.vararg_index == Some(pi) {
+                            let closed = semantic_parameter.filter(|parameter| {
+                                !sig.generic_sig.as_ref().is_some_and(|generic| {
+                                    generic.formals.iter().any(|formal| {
+                                        !known_generic_bindings.contains_key(formal.as_str())
+                                            && ty_mentions_param(
+                                                *parameter,
+                                                std::slice::from_ref(formal),
+                                            )
+                                    })
+                                })
+                            });
+                            if let Some(expected) = closed {
+                                let actual = self.expr_expected(scope, a, expected);
+                                if let Some(element) = actual.array_read_elem() {
+                                    return element;
+                                }
+                            }
+                        }
                         if !self.file.is_spread_arg(a) {
                             // A lambda passed through an otherwise unconstrained generic slot
                             // still receives the call's implicit return label (`accept {
@@ -17968,9 +17968,7 @@ impl<'a> Checker<'a> {
                             call_fn_name.as_deref(),
                         );
                     }
-                    if self.postponed_context_sensitive_name(scope, a).is_some()
-                        || self.postponed_empty_reference_array_factory(scope, a)
-                    {
+                    if self.postponed_context_sensitive_name(scope, a).is_some() {
                         return Ty::Error;
                     }
                     // A callable reference whose parameter still mentions an open formal, or a
@@ -27593,7 +27591,14 @@ fun use() {
              }";
         let _ = crate::frontend::analyze_source(
             source,
-            jvm_platform(Box::new(FakeMemberPlatform)),
+            jvm_platform(Box::new(
+                crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+                    crate::jvm::classpath::Classpath::new(
+                        crate::toolchain::jvm_classpath_jars_for("// WITH_STDLIB"),
+                    ),
+                ))
+                .expect("JVM provider initialization"),
+            )),
             &mut diagnostics,
         );
         assert!(diagnostics.diags.is_empty(), "{:#?}", diagnostics.diags);
@@ -40391,6 +40396,7 @@ impl<'a> Checker<'a> {
             } => *selected,
             SourceConstructorSelection::NoMatch { rejected, .. } => {
                 if !self.report_single_constructor_argument_mismatches(
+                    scope,
                     arguments,
                     &candidates,
                     &rejected,
@@ -40432,8 +40438,7 @@ impl<'a> Checker<'a> {
             if matches!(
                 self.file.expr(argument),
                 Expr::Lambda { .. } | Expr::CallableRef { .. }
-            ) || self.postponed_empty_reference_array_factory(scope, argument)
-            {
+            ) {
                 let has_receiver = selected
                     .argument_lambda_receivers
                     .get(index)
@@ -45010,12 +45015,7 @@ impl<'a> Checker<'a> {
                             // A delegation lambda is contextual: leave its initial `Error`
                             // placeholder until the shared constructor selector maps it to a
                             // parameter slot, just like a primary class-header base argument.
-                            if !matches!(c.file.expr(argument), Expr::Lambda { .. })
-                                && !c.postponed_empty_reference_array_factory(
-                                    delegation_scope,
-                                    argument,
-                                )
-                            {
+                            if !matches!(c.file.expr(argument), Expr::Lambda { .. }) {
                                 c.expr(delegation_scope, argument);
                             }
                         }
@@ -45057,12 +45057,7 @@ impl<'a> Checker<'a> {
                     }
                     CtorDelegation::Super(delegation) => {
                         for &argument in &delegation.args {
-                            if !matches!(c.file.expr(argument), Expr::Lambda { .. })
-                                && !c.postponed_empty_reference_array_factory(
-                                    delegation_scope,
-                                    argument,
-                                )
-                            {
+                            if !matches!(c.file.expr(argument), Expr::Lambda { .. }) {
                                 c.expr(delegation_scope, argument);
                             }
                         }
@@ -46078,8 +46073,7 @@ impl<'a> Checker<'a> {
                     if !matches!(
                         self.file.expr(argument),
                         Expr::Lambda { .. } | Expr::CallableRef { .. }
-                    ) && !self.postponed_empty_reference_array_factory(scope, argument)
-                    {
+                    ) {
                         self.expr(scope, argument);
                     }
                 }
@@ -46099,6 +46093,7 @@ impl<'a> Checker<'a> {
                     }
                     SourceConstructorSelection::NoMatch { rejected, .. } => {
                         if !self.report_single_constructor_argument_mismatches(
+                            scope,
                             &arguments,
                             &constructor_candidates,
                             &rejected,
@@ -46139,16 +46134,7 @@ impl<'a> Checker<'a> {
                         .copied()
                         .unwrap_or(false);
                     let actual =
-                        match self.commit_postponed_array_factory(scope, argument, expected) {
-                            Some(actual) => actual,
-                            None => self.check_argument_expected(
-                                scope,
-                                argument,
-                                expected,
-                                has_receiver,
-                                None,
-                            ),
-                        };
+                        self.check_argument_expected(scope, argument, expected, has_receiver, None);
                     if !self.commit_implicit_integer_coercion(
                         argument,
                         expected,
@@ -46729,12 +46715,6 @@ impl<'a> Checker<'a> {
         {
             return self.expr_expected(scope, argument, expected);
         }
-        if self.postponed_empty_reference_array_factory(scope, argument)
-            && expected.non_null().is_reference_array()
-            && expected.non_null().array_elem().is_some()
-        {
-            return self.expr_expected(scope, argument, expected);
-        }
         // A literal's probe type (`Int`/`UInt`) is only its no-context default. Once overload and
         // generic inference select a concrete parameter, commit the contextual scalar type here so
         // checked FIR and final assignability observe the same decision candidate scoring used.
@@ -46775,14 +46755,6 @@ impl<'a> Checker<'a> {
         // Candidate probing already contextually checked ordinary arguments, especially lambdas.
         // Only a selected generic CALL result needs a second pass to commit expected-result
         // inference; re-entering an ordinary lambda here discards its receiver/function shape.
-        if matches!(
-            self.expr_lowers.get(&argument),
-            Some(ExprLowering::CompilerSynthetic(
-                crate::synthetics::SyntheticKind::EmptyReference
-            ))
-        ) {
-            return self.expr_expected(scope, argument, expected);
-        }
         if self.call_result_can_bind_expected(argument, expected) {
             let committed = self.expr_expected(scope, argument, expected);
             if let Some(signature) = unbound_result.as_ref() {
@@ -46836,6 +46808,19 @@ impl<'a> Checker<'a> {
         expected: Ty,
         signature: &GenericSig,
     ) -> Option<Ty> {
+        // An expectation with no type argument but stars (`Any`, `List<*>`) relates to no result
+        // formal: kotlinc leaves the producer's formals uninferred (`takeAny(arrayOf())`) and
+        // reports them, rather than completing them from their declarations. A result that is
+        // the bare formal itself (`fun <X> make(): X`) is constrained by any expectation.
+        if !signature.ret.non_null().is_ty_param()
+            && expected
+                .non_null()
+                .type_args()
+                .iter()
+                .all(|argument| argument.is_star_projection())
+        {
+            return None;
+        }
         let completed = crate::symbol_resolver::instantiate_unconstrained_result(signature, actual);
         if completed == Ty::Error
             || completed == actual
@@ -47097,11 +47082,6 @@ impl<'a> Checker<'a> {
             self.contextual_annotation_array_argument(scope, argument, actual, expected)
         {
             committed
-        } else if let Some(actual) = self.commit_postponed_array_factory(scope, argument, expected)
-        {
-            // A postponed empty array factory is still uncommitted: its `Error` placeholder is
-            // not a checked result. Check it under the selected parameter now.
-            actual
         } else if matches!(self.file.expr(argument), Expr::Call { .. })
             && self.expr_types[argument.0 as usize] == actual
             && (actual == expected
@@ -47332,6 +47312,9 @@ impl<'a> Checker<'a> {
         }
         if !declared.upper_bound_admits_null() {
             self.narrow_platform_value(expected, argument, PlatformNarrowing::Argument);
+        }
+        if self.report_uninferred_call_argument(scope, argument, expected, actual) {
+            return;
         }
         self.expect_call_argument_assignable(Some(scope), expected, actual, self.span(argument));
     }
@@ -49458,7 +49441,6 @@ impl<'a> Checker<'a> {
             if !self.file.is_callable_syntax(arg)
                 && self.expr_types[arg.0 as usize] == Ty::Error
                 && self.postponed_context_sensitive_name(scope, arg).is_none()
-                && !self.postponed_empty_reference_array_factory(scope, arg)
             {
                 self.expr(scope, arg);
             }
@@ -56570,14 +56552,117 @@ impl<'a> Checker<'a> {
         Ty::Error
     }
 
-    /// Recognize array-creation builtins: `intArrayOf(…)`/`charArrayOf(…)`/… and `arrayOf(…)`
-    /// (element = the common reference type of the arguments), and the size constructors
-    /// `IntArray(n)`/`CharArray(n)`/… Returns the array `Ty`, or `None` if `fname` isn't one of these.
+    /// The array operation selected at `expression`: a compiler-built array literal or size
+    /// constructor, or a call whose selected declaration is one of the `kotlin` array factory
+    /// functions (`arrayOf`, `intArrayOf`, `emptyArray`, …).
+    pub(super) fn selected_array_operation(
+        &self,
+        expression: ExprId,
+    ) -> Option<crate::synthetics::SyntheticKind> {
+        if let Some(ExprLowering::CompilerSynthetic(kind)) = self.expr_lowers.get(&expression) {
+            return Some(*kind);
+        }
+        match self.resolved_calls.get(&expression) {
+            Some(ResolvedCall::TopLevel(call)) => match call.callable.compiler_intrinsic {
+                Some(crate::libraries::CompilerIntrinsic::ArrayFactory(kind)) => Some(kind),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Check a call whose every candidate is one `kotlin` vararg array factory (`arrayOf`,
+    /// `intArrayOf`, …) once that declaration is known, before argument probes commit a type.
+    ///
+    /// A spread collection literal and a spread or named whole array have no element type until
+    /// the factory's own element is fixed: from an expected `Array<T>`, an explicit type
+    /// argument, or the array operand itself. Ordinary generic inference sees those operands
+    /// before that element exists and completes `T` to `Any`, or reifies the denotable parameter
+    /// where the operand was only a definitely-non-null array element. A call without a spread
+    /// or named whole-array argument is an ordinary generic call, whatever its expected type.
+    fn try_commit_array_factory_call(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        name: &str,
+        args: &[ExprId],
+        package: Option<crate::types::TypeName>,
+        expected: Option<Ty>,
+    ) -> Option<Ty> {
+        let candidates = match package {
+            Some(package) => self
+                .resolver_in_scope(std::slice::from_ref(&package))
+                .top_level_candidates(name),
+            None => self.resolver().top_level_candidates(name),
+        };
+        let kind = candidates
+            .first()
+            .and_then(Self::vararg_array_factory_kind)?;
+        if candidates
+            .iter()
+            .any(|candidate| Self::vararg_array_factory_kind(candidate) != Some(kind))
+        {
+            return None;
+        }
+        let has_whole_array_argument = args.iter().enumerate().any(|(index, &argument)| {
+            self.file.is_spread_arg(argument)
+                || self
+                    .file
+                    .call_arg_names
+                    .get(&call.0)
+                    .and_then(|names| names.get(index))
+                    .is_some_and(Option::is_some)
+        });
+        if !has_whole_array_argument {
+            return None;
+        }
+        let explicit_element = self.file.call_type_args.get(&call.0).and_then(|syntax| {
+            let argument = syntax.arguments.first()?;
+            if argument.is_inference_placeholder() {
+                None
+            } else {
+                Some(self.type_ref_ty(scope, argument))
+            }
+        });
+        let expected_element = expected
+            .and_then(Ty::array_elem)
+            .filter(|element| element.projection_inner().is_none());
+        let element_hint = explicit_element.or(expected_element);
+        let candidate = candidates.into_iter().next()?;
+        let result =
+            self.check_array_builtin(scope, call, kind, None, args, self.span(call), element_hint)?;
+        self.expr_lowers
+            .insert(call, ExprLowering::CompilerSynthetic(kind));
+        self.mark_top_level_call(call, &candidate, result, Vec::new());
+        Some(result)
+    }
+
+    fn vararg_array_factory_kind(
+        candidate: &crate::libraries::FunctionInfo,
+    ) -> Option<crate::types::ArrayFactoryKind> {
+        match candidate.callable.compiler_intrinsic {
+            Some(crate::libraries::CompilerIntrinsic::ArrayFactory(kind))
+                if matches!(
+                    kind,
+                    crate::types::ArrayFactoryKind::ReferenceVararg
+                        | crate::types::ArrayFactoryKind::PrimitiveVararg(_)
+                ) =>
+            {
+                Some(kind)
+            }
+            _ => None,
+        }
+    }
+
+    /// Check a compiler-built array: an array literal (`[a, b]`, annotation `[…]`), whose element
+    /// type the context fixes, or a size constructor `IntArray(n)`/`Array(n) { … }`. Returns the
+    /// array `Ty`, or `None` when the arguments do not fit the operation.
     fn check_array_builtin(
         &mut self,
         scope: &CheckerScope<'_>,
         call: ExprId,
-        synthetic: &'static crate::synthetics::Synthetic,
+        kind: crate::synthetics::SyntheticKind,
+        initializer_label: Option<&'static str>,
         args: &[ExprId],
         span: Span,
         element_hint: Option<Ty>,
@@ -56604,7 +56689,7 @@ impl<'a> Checker<'a> {
         // then let the enclosing assignability check validate `Array<T>` against the projection.
         let raw_hint = element_hint;
         let element_hint = raw_hint.filter(|element| element.projection_inner().is_none());
-        if let SyntheticKind::PrimitiveVararg(elem) = synthetic.kind {
+        if let SyntheticKind::PrimitiveVararg(elem) = kind {
             for (&argument, &whole_array) in args.iter().zip(&whole_array_arguments) {
                 let expected = if whole_array { Ty::array(elem) } else { elem };
                 let actual = self.expr_expected(scope, argument, expected);
@@ -56612,14 +56697,7 @@ impl<'a> Checker<'a> {
             }
             return Some(Ty::array(elem));
         }
-        if synthetic.kind == SyntheticKind::EmptyReference && args.is_empty() {
-            // With no elements, an explicit or contextual type is the only element evidence.
-            let element = raw_hint
-                .map(|element| element.projection_inner().unwrap_or(element))
-                .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-            return Some(Ty::obj_args("kotlin/Array", &[element]));
-        }
-        if synthetic.kind == SyntheticKind::ReferenceVararg {
+        if kind == SyntheticKind::ReferenceVararg {
             // An explicit type argument (`arrayOf<Byte>(1)`) or contextual `Array<T>` expectation fixes
             // the element type; otherwise infer it as the common type of the arguments.
             let mut elem: Option<Ty> = element_hint;
@@ -56662,7 +56740,10 @@ impl<'a> Checker<'a> {
                 // exclusively a backend decision and cannot make a source element inapplicable.
                 Some(e) => return Some(Ty::obj_args("kotlin/Array", &[e])),
                 None => {
-                    self.report_uninferred_array_factory(call, synthetic);
+                    self.diags.error(
+                        span,
+                        "krusty: empty arrayOf() needs an explicit type (unsupported)".to_string(),
+                    );
                     return Some(Ty::Error);
                 }
             }
@@ -56670,7 +56751,7 @@ impl<'a> Checker<'a> {
         // Size constructor: `IntArray(n)`, or `IntArray(n, init)` where `init` is any expression
         // assignable to `(Int) -> Element`. Lambda literals and callable references are not different
         // call shapes; both receive the selected initializer parameter type here.
-        if let SyntheticKind::PrimitiveSize(elem) = synthetic.kind {
+        if let SyntheticKind::PrimitiveSize(elem) = kind {
             if let [size] = args {
                 let actual = self.expr_expected(scope, *size, Ty::Int);
                 self.expect_assignable(Ty::Int, actual, self.span(*size), "array size");
@@ -56686,7 +56767,7 @@ impl<'a> Checker<'a> {
                         *initializer,
                         expected,
                         false,
-                        Some(synthetic.name),
+                        initializer_label,
                     )
                 });
                 self.expect_call_arg(scope, expected, *initializer, actual);
@@ -56695,7 +56776,7 @@ impl<'a> Checker<'a> {
         }
         // `Array(n, init)` — a reference array. As above, the initializer is a callable expression;
         // only an unconstrained lambda needs the lambda body to infer its result.
-        if let (SyntheticKind::ReferenceSize, [size, initializer]) = (synthetic.kind, args) {
+        if let (SyntheticKind::ReferenceSize, [size, initializer]) = (kind, args) {
             let size_type = self.expr_expected(scope, *size, Ty::Int);
             self.expect_assignable(Ty::Int, size_type, self.span(*size), "array size");
             let callable = if let Some(elem) = element_hint {
@@ -56706,7 +56787,7 @@ impl<'a> Checker<'a> {
                         *initializer,
                         expected,
                         false,
-                        Some(synthetic.name),
+                        initializer_label,
                     )
                 });
                 self.expect_call_arg(scope, expected, *initializer, actual);
@@ -56754,22 +56835,6 @@ impl<'a> Checker<'a> {
             // from a primitive array. The element stays LOGICAL `T` (a primitive `Int` reads as `Int`,
             // not a boxed wrapper); the backend owns the physical boxed/value-class array layout.
             return Some(Ty::obj_args("kotlin/Array", &[elem]));
-        }
-        if let (SyntheticKind::NullableReference, [size]) = (synthetic.kind, args) {
-            let size_type = self.expr_expected(scope, *size, Ty::Int);
-            self.expect_assignable(Ty::Int, size_type, self.span(*size), "array size");
-            let elem = element_hint.unwrap_or_else(|| Ty::obj("kotlin/Any"));
-            if elem.is_reference() {
-                return Some(Ty::obj_args("kotlin/Array", &[Ty::nullable(elem)]));
-            }
-            if elem.jvm_boxed_ref().is_some() {
-                return Some(Ty::obj_args("kotlin/Array", &[Ty::nullable(elem)]));
-            }
-            self.diags.error(
-                span,
-                "krusty: arrayOfNulls of this element type is not supported".to_string(),
-            );
-            return Some(Ty::Error);
         }
         None
     }
