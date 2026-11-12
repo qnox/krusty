@@ -276,12 +276,6 @@ fn wasm_applicability_reads_both_the_family_and_the_exact_target() {
 }
 
 #[test]
-fn primitive_reference_supertypes_run_on_wasm() {
-    let source = include_str!("box_regressions/primitiveReferenceSupertypes.kt");
-    expect_wasm_box(source, "primitiveReferenceSupertypes");
-}
-
-#[test]
 fn wasm_unsigned_range_membership_orders_high_bits_as_values() {
     expect_wasm_box(
         r#"

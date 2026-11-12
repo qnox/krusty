@@ -12,10 +12,6 @@ pub enum SemanticCallRole {
     KotlinAnyToString,
     /// The single comparison operation declared by `kotlin.Comparable`.
     KotlinComparableCompareTo,
-    /// A conversion `kotlin.Number` declares (`toLong`, `toInt`, and the rest). The declaration's
-    /// result type is the conversion's. A primitive's own conversion is a compiler intrinsic, not
-    /// this role.
-    KotlinNumberConversion,
     /// The invocation operation declared by a compiler-provided Kotlin function classifier.
     KotlinFunctionInvoke,
     /// The `name` property declared by Kotlin's callable-reflection contract.

@@ -32,7 +32,6 @@ mod function_values;
 mod generated_members;
 mod intrinsic_operations;
 mod objects;
-pub(super) mod primitive_supertypes;
 mod scalar_instructions;
 mod scalar_value_classes;
 mod shared_cells;
@@ -1216,20 +1215,6 @@ impl<'a> Body<'a> {
                 ..
             } if let Some(member) = any_members::call_member(self.ir, self.callables, id) => {
                 self.dependency_any_member_call(member, receiver, &args)?;
-            }
-            // `Number.toLong()` and `Comparable.compareTo` are abstract library members. A boxed
-            // primitive implements them; there is no dependency body to call.
-            IrExpr::Call {
-                callee: ref call_callee,
-                dispatch_receiver: Some(receiver),
-                args,
-            } if let Callee::External {
-                target, defaults, ..
-            } = &**call_callee
-                && defaults.is_empty()
-                && primitive_supertypes::is_realized(self.ir, self.callables, *target) =>
-            {
-                self.primitive_supertype_call(*target, receiver, &args)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,

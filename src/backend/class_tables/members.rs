@@ -19,7 +19,6 @@ pub(crate) fn any_slot(role: Option<crate::types::SemanticCallRole>) -> Option<u
         Some(
             crate::types::SemanticCallRole::KotlinArrayAllocation
             | crate::types::SemanticCallRole::KotlinComparableCompareTo
-            | crate::types::SemanticCallRole::KotlinNumberConversion
             | crate::types::SemanticCallRole::KotlinFunctionInvoke
             | crate::types::SemanticCallRole::KotlinCallableReferenceName
             | crate::types::SemanticCallRole::KotlinStringLength

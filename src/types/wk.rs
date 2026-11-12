@@ -41,7 +41,6 @@ names! {
     kclass => "kotlin/reflect/KClass",
     ktype => "kotlin/reflect/KType",
     comparable => "kotlin/Comparable",
-    number => "kotlin/Number",
     array => "kotlin/Array",
     string => "kotlin/String",
     char_sequence => "kotlin/CharSequence",

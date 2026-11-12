@@ -56,20 +56,6 @@ pub(crate) struct BuiltinPropertyDeclaration<'a> {
     pub mutable: bool,
 }
 
-/// The result of one conversion `kotlin.Number` declares, matched with the declaration's result.
-fn number_conversion_result(name: &str) -> Option<Ty> {
-    Some(match name {
-        "toByte" => Ty::Byte,
-        "toShort" => Ty::Short,
-        "toInt" => Ty::Int,
-        "toLong" => Ty::Long,
-        "toFloat" => Ty::Float,
-        "toDouble" => Ty::Double,
-        "toChar" => Ty::Char,
-        _ => return None,
-    })
-}
-
 /// Backend-relevant language role of one exact builtin declaration.
 ///
 /// Providers call this only after decoding the declaration's qualified owner and complete source
@@ -134,14 +120,6 @@ pub(crate) fn semantic_call_role(
         && !declaration.is_infix
     {
         return Some(SemanticCallRole::KotlinComparableCompareTo);
-    }
-    if declaration.owner == crate::types::wk::number()
-        && declaration.params.is_empty()
-        && !declaration.is_operator
-        && !declaration.is_infix
-        && number_conversion_result(declaration.name) == Some(declaration.ret)
-    {
-        return Some(SemanticCallRole::KotlinNumberConversion);
     }
 
     let property_arity = [
@@ -262,42 +240,6 @@ mod tests {
             )),
             None,
             "the Comparable owner and spelling do not replace its generic declaration signature"
-        );
-
-        for (name, result) in [
-            ("toByte", Ty::Byte),
-            ("toShort", Ty::Short),
-            ("toInt", Ty::Int),
-            ("toLong", Ty::Long),
-            ("toFloat", Ty::Float),
-            ("toDouble", Ty::Double),
-            ("toChar", Ty::Char),
-        ] {
-            assert_eq!(
-                semantic_call_role(declaration(crate::types::wk::number(), name, &[], result)),
-                Some(SemanticCallRole::KotlinNumberConversion),
-                "{name}"
-            );
-        }
-        assert_eq!(
-            semantic_call_role(declaration(
-                crate::types::wk::number(),
-                "toLong",
-                &[],
-                Ty::Int,
-            )),
-            None,
-            "a Number conversion is that declaration's result type"
-        );
-        assert_eq!(
-            semantic_call_role(declaration(
-                crate::types::type_name("kotlin/Int"),
-                "toLong",
-                &[],
-                Ty::Long,
-            )),
-            None,
-            "a primitive conversion is an intrinsic, not Number's virtual conversion"
         );
 
         let mut callable_name = declaration(
