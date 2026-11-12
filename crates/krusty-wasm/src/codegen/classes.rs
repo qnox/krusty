@@ -55,7 +55,7 @@ use krusty::backend::class_tables::{
 use krusty::backend::local_properties::RealizedLocalPropertyAccess;
 use krusty::backend::BackendClassifierSource;
 use krusty::fir::{CallableId, PropertyId, ResolvedPropertyOverrideTarget};
-use krusty::ir::{ClassId, FunId, IrClass, IrExpr, IrFile, IrLocalPropertyLayout};
+use krusty::ir::{ClassId, FunId, IrClass, IrFile, IrLocalPropertyLayout};
 use krusty::types::{Ty, TypeName};
 
 use super::super::encode::{
@@ -539,14 +539,10 @@ pub(super) fn module_plan(
 fn check_supported(ir: &IrFile, id: ClassId) -> Result<(), Unsupported> {
     let class = &ir.classes[id as usize];
     let name = class.fq_name();
-    // An annotation class that is only applied needs nothing at run time beyond an ordinary
-    // layout. An annotation INSTANCE compares, hashes, and prints by its members, which this
-    // object form does not provide, so a file constructing one is still declined.
-    let construct = if class.annotation_impl_of.is_some()
-        || (class.is_annotation && constructs(ir, class.fq_name))
-    {
-        "an annotation instance"
-    } else if class.prop_ref.is_some() || class.func_ref.is_some() {
+    // An annotation class, applied or constructed, is an ordinary layout. An annotation instance
+    // compares, hashes and prints by its members, which this object form does not provide: those
+    // three slots stay unrealized, so a use of one declines at the call.
+    let construct = if class.prop_ref.is_some() || class.func_ref.is_some() {
         "a callable reference"
     } else if class.lambda.is_some() || class.sam_wrapper.is_some() {
         "a function value's class"
@@ -594,17 +590,6 @@ fn check_exception_storage(
         ));
     }
     Ok(())
-}
-
-/// Whether a body `ir` emits constructs the class named `name`. Orphan expressions and
-/// cloning-only inline templates are not emitted, so a construction there is no obligation.
-fn constructs(ir: &IrFile, name: TypeName) -> bool {
-    krusty::ir::emitted_body_roots(ir)
-        .into_iter()
-        .flat_map(|root| krusty::ir::value_namespace_expressions(ir, root))
-        .any(|expression| {
-            matches!(ir.expr(expression), IrExpr::New { internal, .. } if *internal == name)
-        })
 }
 
 /// Lay out every class of `ir` in `module`: types, constructors' and accessors' indices, and the
@@ -1033,6 +1018,9 @@ fn inherited_any_member(
     member: AnyMember,
     base: OwnedBase,
 ) -> Option<u32> {
+    if ir.classes[class as usize].annotation_impl_of.is_some() {
+        return None;
+    }
     Some(match (member, base) {
         (AnyMember::Equals, _) => runtime.objects.identity_equals,
         (AnyMember::HashCode, _) => runtime.identity.hash_code,

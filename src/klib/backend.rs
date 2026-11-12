@@ -228,6 +228,8 @@ impl KlibBackend {
         let inner_classifier = |classifier| {
             crate::metadata::inner_classifiers::inner_classifier(ir, &file.classifiers, classifier)
         };
+        let approximate =
+            |ty| crate::metadata::declaration_approximation::approximate(&file.classifiers, ty);
         let tails = records
             .iter()
             .zip(secondary_constructors.iter().zip(&nested))
@@ -237,7 +239,7 @@ impl KlibBackend {
                         param_assertions: false,
                         annotations_in_metadata: self.annotations_in_metadata,
                         compiler_version_requirement: None,
-                        intersection: None,
+                        intersection: Some(&approximate),
                         inner_classifiers: &inner_classifier,
                         primary_ctor_annotations: None,
                     },
@@ -292,6 +294,7 @@ impl KlibBackend {
             &declarations,
             self.annotations_in_metadata,
             &inner_classifier,
+            Some(&approximate),
         ) {
             Ok(fragment) => fragment,
             Err(error) => {
@@ -715,8 +718,10 @@ fn record_class_function_exports(
 /// published secondary constructors in record order; `secondary_ordinals` joins each back to its
 /// IR declaration. Only an ordinary class whose object this file lays out is constructible from
 /// another module through an entry: an annotation is instantiated from its declaration instead,
-/// and a generic class would also need its type parameters on the entry, which the target-side
-/// entry does not declare yet. Neither publishes a constructor.
+/// and publishes no constructor. A generic class's entry takes its constructor's declared
+/// parameter types, which a KLIB target realizes as it realizes the class's own storage; an inner
+/// class's entry takes its enclosing instance first, as its constructor does. A class capturing
+/// type parameters of an enclosing declaration has no entry yet.
 fn record_constructor_exports(
     ir: &IrFile,
     module_name: &str,
@@ -759,9 +764,7 @@ fn record_constructor_exports(
         || source.is_companion
         || source.is_enum
         || source.is_value
-        || source.is_inner_class
         || source.is_annotation
-        || !source.type_params.is_empty()
         || !source.captured_type_params.is_empty()
     {
         return Ok(());

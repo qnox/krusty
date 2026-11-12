@@ -2,6 +2,7 @@
 
 mod artifact_origin;
 mod backend_handoff;
+mod builtin_implementations;
 mod capture_storage;
 mod checked_body_observer;
 mod declaration_metadata;
@@ -11,7 +12,6 @@ mod diagnostic_recovery;
 mod emission_session;
 mod local_visibility;
 mod metadata_handoff;
-mod primitive_implementations;
 #[cfg(test)]
 mod streaming_tests;
 
