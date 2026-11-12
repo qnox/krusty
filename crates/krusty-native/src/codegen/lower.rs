@@ -35,6 +35,7 @@ use declared_capabilities::{
     declares_its_own_comparable, implemented_collections, implemented_dependencies,
     overrides_a_throwable_accessor,
 };
+mod atomic_fields;
 mod functions;
 mod implementor_dispatch;
 mod imported_functions;
@@ -2165,6 +2166,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 finally,
                 result,
             } => self.try_catch(body, &catches, finally, result),
+            IrExpr::PluginPlaceholder {
+                plugin: "atomicfu",
+                kind,
+                exprs,
+                data,
+                types,
+            } => self.atomic_field_operation(kind, &exprs, &data, &types),
             IrExpr::Return(_)
             | IrExpr::Variable { .. }
             | IrExpr::SetValue { .. }
@@ -2439,14 +2447,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             Ty::Char => self.builder.ins().uextend(types::I32, operand),
             Ty::Int | Ty::UInt => operand,
             Ty::Long | Ty::ULong => self.fold_to_int(operand),
-            // A floating-point value hashes by its BITS, which is what makes `NaN`'s hash a
+            // A floating-point value hashes by `toBits()`, which is what makes `NaN`'s hash a
             // number at all: `Float` gives its 32 directly, and `Double` folds its 64 exactly as
-            // `Long` does. Reading the bits is a reinterpretation, not a conversion — a
-            // conversion would round `NaN` to something and lose the very distinction the rule
-            // exists for.
-            Ty::Float => self.bits_of(operand, types::I32),
+            // `Long` does. Reading the bits is a reinterpretation, not a conversion, but
+            // `toBits()` answers every `NaN` with the one canonical pattern, so the hash does too.
+            Ty::Float => self.canonical_bits_of(operand, types::I32),
             Ty::Double => {
-                let bits = self.bits_of(operand, types::I64);
+                let bits = self.canonical_bits_of(operand, types::I64);
                 self.fold_to_int(bits)
             }
             other => return Err(declined!("a data-class field of type `{other:?}`")),
@@ -2467,6 +2474,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let flags = cranelift_codegen::ir::MemFlagsData::new()
             .with_endianness(cranelift_codegen::ir::Endianness::Little);
         self.builder.ins().bitcast(clif, flags, value)
+    }
+
+    /// `toBits()`: the value's bits, except that every `NaN` answers the canonical quiet `NaN`
+    /// pattern (`0x7fc00000` for a `Float`, `0x7ff8000000000000` for a `Double`).
+    fn canonical_bits_of(&mut self, value: Value, clif: Type) -> Value {
+        let bits = self.bits_of(value, clif);
+        let canonical = if clif == types::I32 {
+            self.builder.ins().iconst(types::I32, 0x7fc0_0000)
+        } else {
+            self.builder.ins().iconst(types::I64, 0x7ff8_0000_0000_0000)
+        };
+        let is_nan = self.builder.ins().fcmp(FloatCC::Unordered, value, value);
+        self.builder.ins().select(is_nan, canonical, bits)
     }
 
     /// `(value xor (value ushr 32)).toInt()` — how Kotlin folds 64 bits into a hash.

@@ -18,7 +18,9 @@ use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrBody, KlibIrClass, KlibIrExprKind, KlibIrFunction, KlibIrMember,
     KlibIrStatement, KlibIrType,
 };
-use crate::metadata::klib_ir::{KlibIrModuleTrees, KlibIrSignature, KlibIrSymbolKind};
+use crate::metadata::klib_ir::{
+    KlibIrModuleTrees, KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind,
+};
 use crate::types::{type_name_child, TypeName};
 
 /// The decoded function declarations of a set of KLIB libraries, joined by exact signature.
@@ -106,6 +108,16 @@ impl KlibBodyLibrary {
         })
     }
 
+    /// Add the platform stdlib `module` as a dependency of this library. Every KLIB is compiled
+    /// and linked against its platform stdlib, which a producer need not record in `depends`:
+    /// kotlinc's Wasm and JS libraries record no `depends` at all.
+    pub(crate) fn depending_on_platform(mut self, module: &str) -> Self {
+        if self.module != module && !self.dependencies.iter().any(|known| known == module) {
+            self.dependencies.push(module.to_owned());
+        }
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn new(
         module: String,
@@ -180,13 +192,15 @@ impl std::fmt::Display for KlibDeclarationBodiesError {
 impl std::error::Error for KlibDeclarationBodiesError {}
 
 impl KlibDeclarationBodies {
-    /// Exactly one raw class header in this module with the requested function/constructor/getter
-    /// as a direct member. The current property primitives are reads: a getter stored in a setter
-    /// slot grants no authority. Equal names in other archives and inherited members do not join.
+    /// Exactly one raw class header in this module with the requested function/constructor or
+    /// accessor as a direct member. An accessor is found only in the slot of its `role`: a getter
+    /// stored in a setter slot grants no authority. Equal names in other archives and inherited
+    /// members do not join.
     pub(crate) fn class_member_header(
         &self,
         identity: &KlibDependencyCallable,
         signature: &KlibPublicIdSignature,
+        role: crate::libraries::KlibAccessorRole,
     ) -> Result<Option<KlibClassMember<'_>>, &'static str> {
         let Some(&library) = self.modules.get(&identity.module) else {
             return Ok(None);
@@ -231,7 +245,10 @@ impl KlibDeclarationBodies {
                     && property.base.symbol.signature
                         == KlibIrSignature::Public(accessor.property().clone()) =>
                 {
-                    [property.getter, None]
+                    match role {
+                        crate::libraries::KlibAccessorRole::Getter => [property.getter, None],
+                        crate::libraries::KlibAccessorRole::Setter => [property.setter, None],
+                    }
                 }
                 _ => [None, None],
             })
@@ -671,8 +688,22 @@ impl KlibDeclarationBodies {
         let Some((arena, function)) = self.function(identity) else {
             return Vec::new();
         };
-        arena
-            .emitted_callable_symbols(function, forms)
+        let mut symbols = arena.emitted_callable_symbols(function, forms);
+        // A file-local class the body constructs, an object literal's among them, is
+        // materialized with the body, every member included, since dispatch can run any of them.
+        let mut classes = crate::fx_hash::HashSet::default();
+        let mut next = 0;
+        while let Some(symbol) = symbols.get(next).copied() {
+            next += 1;
+            if let Some(class) = self.constructed_local_class(&identity.module, arena, symbol) {
+                if classes.insert(&class.base.symbol) {
+                    symbols.extend(
+                        arena.emitted_callable_symbols_from(arena.class_member_roots(class), forms),
+                    );
+                }
+            }
+        }
+        symbols
             .into_iter()
             .filter_map(|symbol| declaration_signature(&symbol.signature))
             .filter_map(
@@ -682,6 +713,29 @@ impl KlibDeclarationBodies {
                 },
             )
             .collect()
+    }
+
+    /// The file-local class of `module` whose constructor `symbol` names, serialized in `arena`.
+    fn constructed_local_class<'a>(
+        &'a self,
+        module: &str,
+        arena: &'a KlibIrArena,
+        symbol: &KlibIrSymbol,
+    ) -> Option<&'a KlibIrClass> {
+        if symbol.kind != KlibIrSymbolKind::Constructor
+            || !matches!(symbol.signature, KlibIrSignature::FileLocal { .. })
+        {
+            return None;
+        }
+        let (function_arena, function) = self.module_local_function(module, &symbol.signature)?;
+        let KlibIrType::Simple { classifier, .. } = function_arena.ty(function.return_type) else {
+            return None;
+        };
+        let (class_arena, class) = self.module_local_class(module, &classifier.signature)?;
+        (function.constructor
+            && std::ptr::eq(arena, function_arena)
+            && std::ptr::eq(arena, class_arena))
+        .then_some(class)
     }
 
     /// Whether `identity` is an executable dependency-support root: its own serialized body has a

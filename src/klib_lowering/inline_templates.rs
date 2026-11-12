@@ -480,43 +480,13 @@ impl CallLinker for TemplateCalls<'_> {
                 }
             }
         };
-        let Some((_, realization)) = self
-            .callees
-            .source
-            .external_callable_by_dependency(&binding.declaration)
-        else {
-            return Ok(None);
-        };
-        let accessor = realization
-            .klib_body_accessor
-            .as_ref()
-            .map(|accessor| matches!(accessor.role, crate::libraries::KlibAccessorRole::Getter));
-        match accessor {
-            Some(false) => {
-                return Err(KlibBodyDeclineReason::SignatureMismatch(
-                    "an object literal overrides a property setter".to_owned(),
-                ))
-            }
-            Some(true) if !property => {
-                return Err(KlibBodyDeclineReason::SignatureMismatch(
-                    "a function overrides a property".to_owned(),
-                ))
-            }
-            None if property => {
-                return Err(KlibBodyDeclineReason::SignatureMismatch(
-                    "a property overrides a function".to_owned(),
-                ))
-            }
-            Some(true) | None => {}
-        }
-        super::same_library_class::realized_member_override(
+        super::same_library_class::declared_override(
             binding.declaration,
-            &realization,
-            property,
+            self.callees.source,
             supertypes,
+            property,
             &|sub, owner| self.applied_supertype(sub, owner),
         )
-        .map(Some)
     }
 
     fn is_interface(&self, name: crate::types::TypeName) -> Result<bool, KlibBodyDeclineReason> {
