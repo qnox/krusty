@@ -7,6 +7,7 @@
 
 use krusty::fx_hash::{HashMap, HashSet};
 
+use krusty::backend::instance_links::InstanceEntry;
 use krusty::backend::module_links::ModuleLinks;
 use krusty::backend::{
     CheckedBackendCallables, DependencyExportSignatures, DependencyFunctionSignature,
@@ -47,11 +48,9 @@ pub(super) struct CallableRegistry {
     singleton_member_receivers: HashMap<KlibDependencyCallable, SingletonMemberReceiver>,
     singleton_extension_unread_receivers:
         HashMap<KlibDependencyCallable, SingletonExtensionUnreadReceiver>,
-    /// The entry answering each published object declaration's instance, by its classifier.
-    dependency_singletons: HashMap<krusty::backend::DependencyClassifier, u32>,
-    /// The entry answering each enum constant, linked by the constant (see
-    /// `krusty::backend::module_links`).
-    enum_constants: ModuleLinks<krusty::backend::EnumConstant, u32>,
+    /// The entry answering each object's instance and each enum constant, linked by the
+    /// instance (see `krusty::backend::instance_links`).
+    instances: ModuleLinks<InstanceEntry, u32>,
 }
 
 pub(super) struct FileCallTargets {
@@ -67,10 +66,8 @@ pub(super) struct FileCallTargets {
     singleton_member_receivers: HashMap<ExternalCallableId, SingletonMemberReceiver>,
     singleton_extension_unread_receivers:
         HashMap<ExternalCallableId, SingletonExtensionUnreadReceiver>,
-    /// The instance entry of each other module's object this file reads as a value.
-    singletons: HashMap<krusty::backend::DependencyClassifier, u32>,
-    /// The entry of each constant of another file's enum this file reads.
-    enum_constants: HashMap<krusty::backend::EnumConstant, u32>,
+    /// The entry of each object instance and enum constant of another file this file reads.
+    instances: HashMap<InstanceEntry, u32>,
 }
 
 impl CallableRegistry {
@@ -84,34 +81,39 @@ impl CallableRegistry {
         }
     }
 
-    /// Link the entry answering each constant of every enum this file publishes, reusing the index
-    /// a read in an earlier file reserved. [`Self::declare_file`] declares each entry there.
-    pub(super) fn link_enum_constants(
+    /// Link the entry answering each object instance and enum constant this file realizes,
+    /// reusing the index a read in an earlier file reserved. [`Self::declare_file`] declares each
+    /// entry there.
+    pub(super) fn link_instances(
         &mut self,
         exports: &DependencyExportSignatures,
         wasm: &mut Module,
     ) -> Result<Vec<(krusty::ir::FunId, u32)>, Unsupported> {
-        krusty::backend::enums::link_constant_entries(exports, &mut self.enum_constants, || {
+        krusty::backend::instance_links::link_entries(exports, &mut self.instances, || {
             wasm.declare()
         })
         .map_err(str::to_owned)
     }
 
-    /// The enum constants a read reserved an entry for and no file of the module defined.
+    /// The instances a read reserved an entry for and no file of the module defined.
     pub(super) fn check_links(&self) -> Result<(), Unsupported> {
-        match self.enum_constants.undefined().next() {
-            // Boundary conversion for a diagnostic.
-            Some(constant) => Err(format!(
+        // Boundary conversion for a diagnostic.
+        match self.instances.undefined().next() {
+            Some(InstanceEntry::EnumConstant(constant)) => Err(format!(
                 "an enum constant (`{}.{}`) without its declaring file's entry",
                 constant.classifier.render().replace('/', "."),
                 constant.name
+            )),
+            Some(InstanceEntry::Object(classifier)) => Err(format!(
+                "an object (`{}`) without its declaring file's entry",
+                classifier.render().replace('/', ".")
             )),
             None => Ok(()),
         }
     }
 
     /// Declare every emitted function defined by `ir`, reusing an index reserved by an earlier
-    /// cross-file call, or `linked` to an enum constant ([`Self::link_enum_constants`]). Every checked callable identity that realizes the same `FunId` binds to
+    /// cross-file call, or `linked` to an instance ([`Self::link_instances`]). Every checked callable identity that realizes the same `FunId` binds to
     /// that index, and so does every identity a default-argument entry is published under. An
     /// inline-only function is a cloning template, not a declaration, and therefore receives no
     /// Wasm index and binds no callable identity.
@@ -215,11 +217,10 @@ impl CallableRegistry {
             member_receivers: HashMap::default(),
             singleton_member_receivers: HashMap::default(),
             singleton_extension_unread_receivers: HashMap::default(),
-            singletons: HashMap::default(),
-            enum_constants: krusty::backend::enums::link_constant_reads(
+            instances: krusty::backend::instance_links::link_reads(
                 ir,
                 module_facts,
-                &mut self.enum_constants,
+                &mut self.instances,
                 || wasm.declare(),
             ),
         };
@@ -256,15 +257,6 @@ impl CallableRegistry {
                             .to_owned()
                     })?;
                     targets.signatures.insert(*target, signature.clone());
-                    continue;
-                }
-                // Another module's object is read through the entry its module publishes.
-                IrExpr::SingletonValue { classifier }
-                    if ir.class_id_by_name(*classifier).is_none() =>
-                {
-                    if let Some(&entry) = self.dependency_singletons.get(classifier) {
-                        targets.singletons.insert(*classifier, entry);
-                    }
                     continue;
                 }
                 IrExpr::Checked(operation) => {
@@ -475,14 +467,6 @@ impl CallableRegistry {
         exports: &DependencyExportSignatures,
         functions: &[Option<u32>],
     ) -> Result<(), Unsupported> {
-        for &(classifier, entry) in exports.singleton_entries() {
-            let entry = functions
-                .get(entry as usize)
-                .copied()
-                .flatten()
-                .ok_or_else(|| "an object instance entry without its function".to_string())?;
-            self.dependency_singletons.insert(classifier, entry);
-        }
         for (function, identity) in exports.callables() {
             let emitted = functions
                 .get(function as usize)
@@ -590,26 +574,9 @@ impl FileCallTargets {
         self.module.get(&target).copied()
     }
 
-    /// The entry answering the constant `name` of another file's enum `classifier`.
-    pub(super) fn dependency_enum_constant(
-        &self,
-        classifier: krusty::backend::DependencyClassifier,
-        name: &str,
-    ) -> Option<u32> {
-        self.enum_constants
-            .get(&krusty::backend::EnumConstant {
-                classifier,
-                name: name.into(),
-            })
-            .copied()
-    }
-
-    /// The entry answering the instance of another module's object `classifier`.
-    pub(super) fn dependency_singleton(
-        &self,
-        classifier: krusty::backend::DependencyClassifier,
-    ) -> Option<u32> {
-        self.singletons.get(&classifier).copied()
+    /// The entry answering `instance`, an object or enum constant another file realizes.
+    pub(super) fn instance(&self, instance: &InstanceEntry) -> Option<u32> {
+        self.instances.get(instance).copied()
     }
 
     pub(super) fn external(&self, target: ExternalCallableId) -> Option<u32> {

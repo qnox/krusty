@@ -598,11 +598,18 @@ impl BackendModuleFacts {
         self.classifiers.get(&classifier).cloned()
     }
 
-    /// Whether an enum class of this module declares `constant`, whichever file declares it.
-    pub fn declares_enum_constant(&self, constant: &super::EnumConstant) -> bool {
-        self.source_enum_constants
-            .get(&constant.classifier)
-            .is_some_and(|constants| constants.contains(&constant.name))
+    /// Whether a file of this module declares `instance`: an object, or a constant of an enum.
+    pub fn declares_instance(&self, instance: &super::instance_links::InstanceEntry) -> bool {
+        match instance {
+            super::instance_links::InstanceEntry::Object(classifier) => self
+                .classifiers
+                .get(classifier)
+                .is_some_and(|fact| fact.source && fact.kind == crate::libraries::TypeKind::Object),
+            super::instance_links::InstanceEntry::EnumConstant(constant) => self
+                .source_enum_constants
+                .get(&constant.classifier)
+                .is_some_and(|constants| constants.contains(&constant.name)),
+        }
     }
 
     pub fn classifiers(&self) -> impl Iterator<Item = (TypeName, &BackendClassifierFact)> {

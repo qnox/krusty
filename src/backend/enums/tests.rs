@@ -518,9 +518,16 @@ fn an_enum_publishes_an_entry_answering_each_constant() {
     let ir = lowered(ir);
 
     let published = exports
-        .enum_constant_entries()
+        .instance_entries()
         .iter()
-        .map(|(constant, entry)| (constant.classifier, &*constant.name, *entry))
+        .map(|(instance, entry)| match instance {
+            crate::backend::instance_links::InstanceEntry::EnumConstant(constant) => {
+                (constant.classifier, &*constant.name, *entry)
+            }
+            crate::backend::instance_links::InstanceEntry::Object(_) => {
+                panic!("an enum publishes no object entry")
+            }
+        })
         .collect::<Vec<_>>();
     let [(light_owner, "LIGHT", light), (dark_owner, "DARK", dark)] = published.as_slice() else {
         panic!("one entry per constant, in declaration order: {published:?}");
