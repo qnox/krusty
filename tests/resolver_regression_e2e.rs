@@ -2531,6 +2531,118 @@ fun box(): String {
 }
 
 #[test]
+fn an_inapplicable_package_function_falls_through_to_the_default_imported_constructor() {
+    // The same-package `Pair(Int, Int)` takes `Pair(1, 2)`; `Pair("x", 2)` does not fit it, so the
+    // default-imported `kotlin.Pair` constructor on the farther rung builds the pair.
+    let sources = [(
+        "main.kt",
+        r#"package demo
+
+fun Pair(a: Int, b: Int): String = "local"
+
+fun box(): String {
+    val local: String = Pair(1, 2)
+    val pair: kotlin.Pair<String, Int> = Pair("x", 2)
+    return if (local == "local" && pair.first == "x" && pair.second == 2) "OK" else "FAIL: $local"
+}
+"#,
+    )];
+    assert_accepted_and_runs_files(&sources, "ResolverPackageFunctionDefaultConstructor");
+    let differences = common::classes_against_kotlinc_module(&sources).differences();
+    assert!(
+        differences.is_empty(),
+        "classes differ from kotlinc's:\n\n{}",
+        differences.join("\n\n")
+    );
+}
+
+#[test]
+fn a_star_imported_function_outranks_the_default_imported_constructor() {
+    // `import other.*` puts `Triple` on a nearer import rung than the builtin `kotlin.Triple`.
+    let sources = [
+        (
+            "other.kt",
+            r#"package other
+
+fun Triple(a: Int, b: Int, c: Int): String = "star"
+"#,
+        ),
+        (
+            "main.kt",
+            r#"package demo
+
+import other.*
+
+fun box(): String {
+    val star: String = Triple(1, 2, 3)
+    return if (star == "star") "OK" else "FAIL: $star"
+}
+"#,
+        ),
+    ];
+    assert_accepted_and_runs_files(&sources, "ResolverStarImportFunctionConstructor");
+    let differences = common::classes_against_kotlinc_module(&sources).differences();
+    assert!(
+        differences.is_empty(),
+        "classes differ from kotlinc's:\n\n{}",
+        differences.join("\n\n")
+    );
+}
+
+#[test]
+fn an_explicitly_imported_classifier_outranks_a_same_package_function() {
+    // `import kotlin.Pair` puts the classifier on the explicit-import rung, nearer than the
+    // same-package function, so `Pair(1, 2)` constructs the pair.
+    let sources = [(
+        "main.kt",
+        r#"package demo
+
+import kotlin.Pair
+
+fun Pair(a: Int, b: Int): String = "local"
+
+fun box(): String {
+    val pair = Pair(1, 2)
+    return if (pair.first == 1 && pair.second == 2) "OK" else "FAIL"
+}
+"#,
+    )];
+    assert_accepted_and_runs_files(&sources, "ResolverExplicitImportConstructor");
+    let differences = common::classes_against_kotlinc_module(&sources).differences();
+    assert!(
+        differences.is_empty(),
+        "classes differ from kotlinc's:\n\n{}",
+        differences.join("\n\n")
+    );
+}
+
+#[test]
+fn an_ambiguous_nearer_function_family_is_not_a_constructor() {
+    // Both same-package functions apply to `Pair(1, 2)` and neither is more specific. The
+    // default-imported constructor is a farther rung and is not a candidate in the ambiguity.
+    let sources = [(
+        "main.kt",
+        r#"package demo
+
+fun Pair(a: Int, b: Number): String = "a"
+fun Pair(a: Number, b: Int): String = "b"
+
+fun box(): String = Pair(1, 2)
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "main.kt:6:21: overload resolution ambiguity between candidates:",
+            "| fun Pair(a: Int, b: Number): String",
+            "| fun Pair(a: Number, b: Int): String",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
+#[test]
 fn an_implicit_receiver_extension_property_root_binds_a_callable_suffix() {
     // The root `kotlin` names both a root package and an extension property on the lambda's
     // implicit receiver; the property wins at that receiver's level and the callable suffix binds

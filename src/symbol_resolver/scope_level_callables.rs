@@ -358,6 +358,33 @@ pub(super) fn level_properties(
 }
 
 impl SymbolResolver<'_> {
+    /// [`Self::top_level_candidates`], each stamped with the scope rung of the level that offers
+    /// them, so one selection can rank them against candidates from another family on the same
+    /// scope tower (a classifier's constructors).
+    pub(crate) fn ranked_top_level_candidates(&self, name: &str) -> Vec<FunctionInfo> {
+        let Some(scope) = self.fn_scope else {
+            return Vec::new();
+        };
+        let levels = tagged_symbol_levels_in_function_scope(&self.src, name, scope);
+        let symbols = levels
+            .iter()
+            .map(|level| level.symbols.clone())
+            .collect::<Vec<_>>();
+        let Some((index, functions)) = self.nearest_top_level_level(&symbols) else {
+            return Vec::new();
+        };
+        let level = &levels[index];
+        functions
+            .into_top_level()
+            .filter(|function| !function.callable.default_call)
+            .map(|mut function| {
+                function.scope_rung = level.kind.callable_scope_rung();
+                function.scope_rank = level.rank;
+                function
+            })
+            .collect()
+    }
+
     /// The receiver-less function overloads named `name` at the nearest scope level that offers one.
     pub(crate) fn top_level_candidates(&self, name: &str) -> Vec<FunctionInfo> {
         let functions = self.nearest_top_level_functions(&self.symbol_levels_in_scope(name));
@@ -433,8 +460,19 @@ impl SymbolResolver<'_> {
         &self,
         levels: &[Vec<Rc<ResolvedSymbols>>],
     ) -> FunctionSet {
+        self.nearest_top_level_level(levels)
+            .map(|(_, functions)| functions)
+            .unwrap_or_default()
+    }
+
+    /// The index of the scope level that owns a receiver-less call, with its functions: the
+    /// nearest level with an accessible receiver-less function, else the nearest with any.
+    fn nearest_top_level_level(
+        &self,
+        levels: &[Vec<Rc<ResolvedSymbols>>],
+    ) -> Option<(usize, FunctionSet)> {
         let mut nearest_inaccessible = None;
-        for symbols in levels {
+        for (index, symbols) in levels.iter().enumerate() {
             let functions = function_set_from_symbols(symbols);
             // Extensions require a receiver. Only the receiver-less facet can own this scope
             // level or supply the inaccessible candidates retained for a bare-call diagnostic.
@@ -445,11 +483,11 @@ impl SymbolResolver<'_> {
                 .top_level()
                 .any(|function| self.non_member_callable_accessible(function))
             {
-                return functions;
+                return Some((index, functions));
             }
-            nearest_inaccessible.get_or_insert(functions);
+            nearest_inaccessible.get_or_insert((index, functions));
         }
-        nearest_inaccessible.unwrap_or_default()
+        nearest_inaccessible
     }
 
     pub(super) fn nearest_top_level_properties(
