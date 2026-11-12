@@ -408,10 +408,29 @@ impl Checker<'_> {
         span: Span,
     ) -> bool {
         for capture in captures {
-            if capture.source != AnonymousObjectCaptureSource::LexicalValue
-                || capture.lexical_binding.is_none()
-            {
+            let Some(published) = capture.lexical_binding else {
                 continue;
+            };
+            // A forwarded class-storage capture embeds the same published value id. Retarget
+            // that id with the declaration; leave receiver and entry storage on their own paths.
+            if !matches!(
+                capture.source,
+                AnonymousObjectCaptureSource::LexicalValue
+                    | AnonymousObjectCaptureSource::ClassStorage(_)
+            ) {
+                continue;
+            }
+            // A binding recorded in this checker already carries the live id. Refreshing it
+            // would replace a proven type with whatever this visit currently knows. A published
+            // id from another checker is not that binding, even when the number collides.
+            if let Some((local, _)) =
+                self.lexical_binding_by_identity(scope, &capture.name, published)
+            {
+                if capture.lexical_declaration.is_none()
+                    || local.lexical_declaration == capture.lexical_declaration
+                {
+                    continue;
+                }
             }
             let selected = capture
                 .lexical_declaration
@@ -444,6 +463,16 @@ impl Checker<'_> {
                     .unwrap_or(local.ty)
                 };
             capture.storage_ty = local.delegate_storage_ty;
+            // The published class-storage owner stays. Only its value binding is from the
+            // other checker; replacing the source with this scope's local would drop the field.
+            if let AnonymousObjectCaptureSource::ClassStorage(storage) = &mut capture.source {
+                if let crate::fir::ClassCaptureIdentity::Value { binding, .. } =
+                    &mut storage.identity
+                {
+                    *binding = identity;
+                }
+                continue;
+            }
             capture.source = match local.origin {
                 ReceiverFnValueOrigin::ClassStorage(storage) => {
                     AnonymousObjectCaptureSource::ClassStorage(storage)

@@ -48,9 +48,10 @@ pub(super) fn constructor_receiver(
 /// `-java-parameters` entry, and the constructor's local-variable name.
 ///
 /// kotlinc allocates parameters and fields in the constructor's physical order, in separate
-/// namespaces. A capture that is only a constructor parameter (a context value read while the
-/// instance is built) takes a parameter name and does not consume the field spelling, so the next
-/// stored value keeps `$c` on its field while its parameter is `$c$1`.
+/// namespaces. A value capture that is only a constructor parameter (a context value read while
+/// the instance is built) takes a parameter name and does not consume the field spelling, so the
+/// next stored value keeps `$c` on its field while its parameter is `$c$1`. A receiver keeps a
+/// disambiguated field spelling even when that receiver has no stored field.
 pub(super) fn class_captures(ir: &IrFile, class: &IrClass) -> Vec<Option<CaptureNames>> {
     let mut names = class
         .ctor_args
@@ -59,7 +60,8 @@ pub(super) fn class_captures(ir: &IrFile, class: &IrClass) -> Vec<Option<Capture
             let capture = argument.capture.as_ref()?;
             let names = class_capture(ir, class, capture);
             let field = names.field.clone();
-            Some((names, argument.field_index.is_some(), field))
+            let numbers_field = argument.field_index.is_some() || capture.receiver.is_some();
+            Some((names, numbers_field, field))
         })
         .collect::<Vec<_>>();
     let physical = super::ir_emit::capture_order::physical(ir, class, (0..names.len()).collect());

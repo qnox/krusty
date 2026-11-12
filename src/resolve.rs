@@ -13753,13 +13753,14 @@ impl<'a> Checker<'a> {
                 return Ty::Error;
             };
             {
-                if self.fragment == SourceFragmentMode::InlinePreparation {
-                    if !self.refresh_published_lexical_captures(scope, &mut captures, span) {
-                        return Ty::Error;
-                    }
-                    self.discovered_anonymous_captures
-                        .insert(declaration, captures.clone());
+                // Published and seeded captures carry another checker's binding ids. The
+                // declaration role selects the value in this checker; a capture just recorded
+                // here already names its live binding and the refresh leaves that selection.
+                if !self.refresh_published_lexical_captures(scope, &mut captures, span) {
+                    return Ty::Error;
                 }
+                self.discovered_anonymous_captures
+                    .insert(declaration, captures.clone());
                 if !self.check_anonymous_capture_arguments(scope, &captures, span) {
                     return Ty::Error;
                 }

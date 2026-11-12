@@ -2,7 +2,8 @@ use super::*;
 use crate::fir::ClassCaptureIdentity;
 use crate::resolve::scope::ScopeKind;
 use crate::resolve::{
-    make_checker, AnonymousObjectCapture, AnonymousObjectCaptureSource, SymbolTable,
+    make_checker, AnonymousObjectCapture, AnonymousObjectCaptureSource, ClassStorageSource,
+    SymbolTable,
 };
 use crate::types::type_name;
 
@@ -105,6 +106,72 @@ fn published_operand_refresh_uses_declaration_and_keeps_original_transport_famil
             None
         );
     }
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+}
+
+#[test]
+fn published_class_storage_refresh_retargets_the_stale_value_binding() {
+    let mut diagnostics = crate::diag::DiagSink::new();
+    let tokens = crate::lexer::lex("", &mut diagnostics);
+    let file = crate::parser::parse("", &tokens, &mut diagnostics);
+    let symbols = SymbolTable::default();
+    let mut checker = make_checker(&file, 0, None, &symbols, &mut diagnostics);
+    let root = CheckerScope::root();
+    let outer = root.child(ScopeKind::Block);
+    // The other checker's value id is live here on a different declaration.
+    checker.declare(&outer, "text", Ty::Int, false);
+    checker.record_lexical_declaration(
+        &outer,
+        "text",
+        LexicalValueRole::Parameter(Span::new(1, 2)),
+    );
+    let owner = type_name("__krusty_local_3");
+    let current = ClassCaptureIdentity::Value { owner, binding: 4 };
+    let storage_scope = outer.child(ScopeKind::Block);
+    checker.declare_class_storage(
+        &storage_scope,
+        "text",
+        Ty::String,
+        false,
+        ClassStorageSource {
+            owner,
+            identity: current,
+        },
+        false,
+    );
+    let declaration = LexicalValueDeclaration {
+        file: 0,
+        role: LexicalValueRole::Statement {
+            declaration: Span::new(10, 14),
+            slot: 0,
+        },
+    };
+    let mut carrier = selected_capture(declaration, 4);
+    carrier.name = "text".into();
+    checker.retain_capture_declaration(&storage_scope, &carrier);
+    let stale = ClassCaptureIdentity::Value { owner, binding: 0 };
+    let mut capture = selected_capture(declaration, 0);
+    capture.name = "text".into();
+    capture.source = AnonymousObjectCaptureSource::ClassStorage(ClassStorageSource {
+        owner,
+        identity: stale,
+    });
+    capture.capture_dependency = Some(stale);
+    let mut captures = [capture];
+    assert!(checker.refresh_published_lexical_captures(
+        &storage_scope,
+        &mut captures,
+        Span::new(20, 22)
+    ));
+    assert_eq!(
+        captures[0].source,
+        AnonymousObjectCaptureSource::ClassStorage(ClassStorageSource {
+            owner,
+            identity: current,
+        })
+    );
+    assert_eq!(captures[0].lexical_binding, Some(4));
+    assert_eq!(captures[0].capture_dependency, Some(stale));
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
 }
 
