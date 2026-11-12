@@ -200,6 +200,7 @@ impl BodyLowering<'_> {
             update: Some(update),
             post_test: false,
             label: Some(label),
+            inline_return_frame: false,
         });
         Ok(self.ir.add_expr(IrExpr::Block {
             stmts: vec![

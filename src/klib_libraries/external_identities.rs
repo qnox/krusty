@@ -100,16 +100,18 @@ impl ExternalIdentities {
         function: &mut FunctionInfo,
     ) {
         self.assign_callable(
-            KlibDeclarationSignature::Public(signature),
-            ExternalCallableKind::Member,
-            &function.call_sig.parameter_identities,
-            false,
-            None,
-            BodyContract {
-                parameter_defaults: Some(function.call_sig.param_defaults),
-                ..Default::default()
+            PublishedDeclaration {
+                signature: KlibDeclarationSignature::Public(signature),
+                kind: ExternalCallableKind::Member,
+                parameters: &function.call_sig.parameter_identities,
+                internal_friend: false,
+                module: None,
+                body: BodyContract {
+                    parameter_defaults: Some(function.call_sig.param_defaults),
+                    ..Default::default()
+                },
+                direct_c_function: None,
             },
-            None,
             &mut function.callable,
         );
     }
