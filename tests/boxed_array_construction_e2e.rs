@@ -191,3 +191,12 @@ fun primitiveArray() {\n\
 fun box(): String { objectArray(); primitiveArray(); return \"OK\" }\n";
     assert_eq!(run(SRC).expect("inline array initializers"), "OK");
 }
+
+#[test]
+fn array_of_nulls_of_any_element_type() {
+    // `arrayOfNulls<T>` is defined for every runtime-available `T`: an unsigned value, a value
+    // class and `Unit` are as valid as `Int`. Each nullable element is stored and read as its box.
+    const SRC: &str = include_str!("box_regressions/ArrayOfNullsAnyElement.kt");
+    let jvm = krusty::conformance::prepare_test_source(SRC, krusty::conformance::TestTarget::Jvm);
+    common::expect_box_same_as_kotlinc(&jvm, "ArrayOfNullsAnyElement");
+}

@@ -171,7 +171,7 @@ mod transformed_suspensions;
 use lambda_implementation_placement::standalone_method_is_elided;
 mod try_emission;
 use annotation_impl::emit_annotation_impl_class;
-use array_elements::reference_array_scalar_adapter;
+use array_elements::{box_reference_scalar, reference_array_scalar_adapter};
 mod value_class_descriptors;
 mod value_class_override_metadata;
 mod value_class_signatures;
