@@ -1791,7 +1791,6 @@ inline/inlineNoReturn.kt
 inline/inlineOrder.kt
 inline/inlineSimpleAssignment.kt
 inline/inlinedLambdaWithErasedParamType.kt
-inline/innerInlineFunCapturesOuter.kt
 inline/iteratorOnInlineFunctionResult.kt
 inline/kt26117.kt
 inline/kt26787.kt
@@ -2378,7 +2377,6 @@ inlineSizeReduction/valAssignment.kt
 inlineSizeReduction/valDeclaration.kt
 inlineStdlib/callableRefToFunInCurrentModule.kt
 innerClass/inheritanceMultipleModules1.kt
-innerClass/inheritanceMultipleModules2.kt
 innerClass/inheritanceMultipleModules3.kt
 innerClass/multipleModules.kt
 innerClass/noPrimaryConstructor.kt
@@ -2415,7 +2413,6 @@ ir/enumClass2.kt
 ir/enumClass3.kt
 ir/fileClassInitializers.kt
 ir/kt41765.kt
-ir/kt55318.kt
 ir/lambdaWithLoop.kt
 ir/primitiveNumberComparisons/comparableToDouble.kt
 ir/primitiveNumberComparisons/doubleEqeq.kt
@@ -3973,7 +3970,6 @@ typeMapping/kt3863.kt
 typeMapping/kt3976.kt
 typeMapping/nullableNothing.kt
 typealias/abbreviationWithCapturedType.kt
-typealias/deserializedAbbreviationWithRedundantArgument.kt
 typealias/localTypeAliases.kt
 typealias/nestedTypeAliasesAndStaticScope.kt
 typealias/nestedTypeAliasesAndTypeArguments.kt
