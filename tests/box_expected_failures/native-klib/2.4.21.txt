@@ -238,7 +238,6 @@ closures/closureOnTopLevel2.kt
 closures/crossinlineLocalDeclaration.kt
 closures/kt47894_inlineFunWithObjectWithNothing.kt
 collectionLiterals/array.kt
-collectionLiterals/companionBlockOf.kt
 collectionLiterals/primitiveArrays.kt
 collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
