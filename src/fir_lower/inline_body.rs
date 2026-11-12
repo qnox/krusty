@@ -116,6 +116,15 @@ struct ExternalInlineLambdaArgument<'a> {
     ty: Ty,
 }
 
+/// Where an external inline lambda's receiver and its preamble sit in the caller's frame.
+struct ExternalInlineLambdaLayout {
+    /// A `finally` keeps the lambda parameters inside the protected region.
+    preamble_in_body: bool,
+    /// `apply` returns the callee receiver, and a `finally` keeps that local outside the
+    /// protected region, so those expansions store it separately from the lambda `$this$`.
+    distinct_callee_receiver: bool,
+}
+
 impl BodyLowering<'_> {
     pub(super) fn external_inline_call(
         &mut self,
@@ -367,13 +376,17 @@ impl BodyLowering<'_> {
             &invocation_operands,
             frame,
             source_line,
-            !cleanup.is_empty(),
-            // `apply` returns the callee receiver, so that local stays distinct from the
-            // extension lambda's `$this$`. Every other expansion uses one local: a copy
-            // would take a slot the next source local reuses, and the lambda receiver
-            // would land one slot above kotlinc.
-            matches!(returned_value, Some(crate::fir::FirInlineValue::Receiver))
-                || !cleanup.is_empty(),
+            ExternalInlineLambdaLayout {
+                preamble_in_body: !cleanup.is_empty(),
+                // `apply` returns the callee receiver, so that local stays distinct from the
+                // extension lambda's `$this$`. Every other expansion uses one local: a copy
+                // would take a slot the next source local reuses, and the lambda receiver
+                // would land one slot above kotlinc.
+                distinct_callee_receiver: matches!(
+                    returned_value,
+                    Some(crate::fir::FirInlineValue::Receiver)
+                ) || !cleanup.is_empty(),
+            },
         )?;
         // The distinct callee receiver holds the declaration's type-parameter value.
         // The lambda `$this$` keeps the call-site type: an unconstrained `T` erases to
@@ -1387,8 +1400,7 @@ impl BodyLowering<'_> {
         invocation_operands: &[(ExprId, Ty)],
         frame: &crate::fir::FirInlineBodyFrame,
         call_line: Option<u32>,
-        preamble_in_body: bool,
-        distinct_callee_receiver: bool,
+        layout: ExternalInlineLambdaLayout,
     ) -> Option<(ExprId, Option<u32>)> {
         let ExternalInlineLambdaArgument {
             arguments: args,
@@ -1515,7 +1527,7 @@ impl BodyLowering<'_> {
                 // outside the protected region, so those expansions store it separately and
                 // copy it into the extension lambda's `$this$`. Otherwise kotlinc has only
                 // the lambda receiver: the value is stored there directly.
-                let init = if distinct_callee_receiver {
+                let init = if layout.distinct_callee_receiver {
                     let callee_slot = self.allocate_temporary();
                     statements.push(self.ir.add_expr(IrExpr::Variable {
                         index: callee_slot,
@@ -1624,7 +1636,7 @@ impl BodyLowering<'_> {
         // A `finally` protects the lambda parameters and its inline-frame marker, so they open the
         // spliced body. A call without one keeps them as statements ahead of the body; that is
         // where an inlined `return this` closes the frame before the read.
-        let inline_body = if preamble_in_body {
+        let inline_body = if layout.preamble_in_body {
             self.prepend_lambda_preamble(inline_body, preamble)
         } else {
             statements.extend(preamble);
