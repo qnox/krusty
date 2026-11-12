@@ -667,7 +667,8 @@ cache's hit and miss counts. The reference compile is timed as the `target oracl
 Reference entries are cached in `KRUSTY_KLIB_REFERENCE_CACHE` (default
 `target/cache/klib-references/`), one archive per exact-input fingerprint. The fingerprint covers
 the target, the host architecture, the case source, its module plan, the derived compiler
-configuration and properties, the toolchain identity, and the format salt in
+configuration and properties, the directive-selected KLIB libraries, the toolchain identity, and
+the format salt in
 `tests/box_klib_bytes/reference-format`. The harness's own sources are not hashed, so bump that salt
 whenever the way the reference is produced or stored changes. In CI each row restores the newest
 `box-klib-references-<salt hash>-<os>-<arch>-<target>-<version>-…` entry from its base, and master

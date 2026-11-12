@@ -65,8 +65,9 @@ pub(super) fn compile(
 
 /// The reference-artifact format, bumped deliberately whenever how the reference is invoked or
 /// how its entries are stored changes. Everything a compile reads already rides the key: the
-/// target, architecture, source, module plan, derived compiler configuration and properties, and
-/// the toolchain identity. The harness's own sources are deliberately not hashed: an unrelated
+/// target, architecture, source, module plan, derived compiler configuration and properties,
+/// directive-selected KLIB libraries, and the toolchain identity. The harness's own sources are
+/// deliberately not hashed: an unrelated
 /// edit to one of them would turn every Native and Wasm row cold. CI hashes the same file into
 /// its cache key, so a bump starts a fresh cache instead of saving new archives beside the old.
 const REFERENCE_FORMAT: &str = include_str!("reference-format");
@@ -80,7 +81,17 @@ pub(super) fn key(target: TestTarget, source: &str, units: &[ModuleUnit], identi
             configuration.arguments.iter().map(String::as_str),
         )
     });
-    let settings = format!("{configuration:?}/{properties:?}");
+    // Directive libraries ride the key only when a case selects some, so an ordinary case keeps
+    // the fingerprint it had before those libraries were passed to the reference.
+    let mut settings = format!("{configuration:?}/{properties:?}");
+    if let Ok(libraries) =
+        krusty::toolchain::klib_libraries_for(source, target.compilation_target())
+    {
+        for library in libraries {
+            settings.push('\0');
+            settings.push_str(&library.to_string_lossy());
+        }
+    }
     byte_dump::fingerprint_parts(&[
         REFERENCE_FORMAT.as_bytes(),
         format!("{target:?}").as_bytes(),
@@ -201,13 +212,15 @@ fn live(
     let units = reference_units(source, units, target)?;
     let scratch = Scratch::new()?;
     let graph = FragmentGraph::new(source, target, &units)?;
+    let directive_libraries =
+        krusty::toolchain::klib_libraries_for(source, target.compilation_target())?;
     let mut built = BTreeMap::new();
     let mut inventory = BTreeMap::new();
     for (ordinal, unit) in units.iter().enumerate() {
         if !unit.java_files.is_empty() {
             return Err(format!("KLIB module {} contains Java sources", unit.name));
         }
-        let (libraries, friends) = dependencies(unit, &built)?;
+        let (mut libraries, friends) = dependencies(unit, &built)?;
         if foreign.contains(&unit.name) {
             let archive = foreign.compile(
                 &toolchain.compiler,
@@ -225,6 +238,11 @@ fn live(
                 },
             );
             continue;
+        }
+        for library in &directive_libraries {
+            if !libraries.contains(library) {
+                libraries.push(library.clone());
+            }
         }
         let work = scratch.0.join(format!("module-{ordinal}"));
         std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
@@ -271,6 +289,7 @@ fn live(
             &paths,
             &built,
             &toolchain.stdlib,
+            &directive_libraries,
             &graph,
         )?;
         let configuration = krusty::conformance::platform_compiler_configuration(source, target)?;
@@ -472,6 +491,7 @@ fn fragment_arguments(
     paths: &[PathBuf],
     built: &BTreeMap<String, BuiltModule>,
     stdlib: &Path,
+    directive_libraries: &[PathBuf],
     graph: &FragmentGraph,
 ) -> Result<(), String> {
     if unit.fragments.len() <= 1 {
@@ -505,6 +525,13 @@ fn fragment_arguments(
                 fragment.name,
                 stdlib.display()
             ));
+            for library in directive_libraries {
+                command.arg(format!(
+                    "-Xfragment-dependency={}:{}",
+                    fragment.name,
+                    library.display()
+                ));
+            }
             let block = graph
                 .blocks
                 .get(&fragment.name)
@@ -582,6 +609,20 @@ impl FragmentGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_atomicfu_case_compiles_once_its_directive_libraries_are_on_the_classpath() {
+        let target = match std::env::var("KRUSTY_KLIB_BYTE_TEST_TARGET").as_deref() {
+            Ok("native") => TestTarget::Native,
+            Ok("wasm-wasi") => TestTarget::WasmWasi,
+            Ok("wasm-js") | Err(_) => TestTarget::WasmJs,
+            other => panic!("unknown KLIB byte test target {other:?}"),
+        };
+        let source = include_str!("../box_regressions/atomicfu/fieldUpdaters.kt");
+        let units = super::super::units(source, "fieldUpdaters", target).unwrap();
+        compile(target, source, &units)
+            .expect("the atomicfu reference compile receives the directive plugin and runtime");
+    }
 
     #[test]
     fn reference_links_a_platform_library_from_common_source_dependencies() {

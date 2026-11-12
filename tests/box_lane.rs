@@ -289,24 +289,14 @@ fn atomicfu_plugins(
     native
 }
 
-/// The atomicfu runtime KLIB a `// WITH_ATOMICFU` native or wasm case resolves `kotlinx.atomicfu`
-/// against. The JVM lane compiles that directive with the compiler plugin and the JVM jar.
-fn atomicfu_runtime_dependencies(
+/// Directive-selected KLIBs for a native or wasm case, the same libraries the KLIB reference
+/// compiles that case against. The JVM lane uses the jars from `classpath_jars_for` instead.
+fn directive_klib_dependencies(
     directive_source: &str,
     target: krusty::compilation_target::CompilationTarget,
 ) -> Vec<PathBuf> {
-    if !krusty::conformance::directive(directive_source, "WITH_ATOMICFU") {
-        return Vec::new();
-    }
-    if matches!(
-        target,
-        krusty::compilation_target::CompilationTarget::Jvm
-            | krusty::compilation_target::CompilationTarget::Js
-    ) {
-        return Vec::new();
-    }
-    vec![krusty::toolchain::atomicfu_klib(target)
-        .unwrap_or_else(|| panic!("cannot provision the atomicfu runtime KLIB for {target:?}"))]
+    krusty::toolchain::klib_libraries_for(directive_source, target)
+        .unwrap_or_else(|error| panic!("{error}"))
 }
 
 /// Wasm publishes kotlin-test separately from its stdlib. Retain it as an ordinary dependency:
@@ -409,7 +399,7 @@ pub fn compile<B: Backend>(
             "the {target:?} corpus lane received a {compilation_target:?} backend"
         )));
     }
-    let dependencies = atomicfu_runtime_dependencies(directive_source, compilation_target);
+    let dependencies = directive_klib_dependencies(directive_source, compilation_target);
     let PlatformLibraries {
         semantics,
         native_imports,
@@ -520,7 +510,7 @@ pub fn analyze_module(
         .map(|(stem, _)| stem.clone())
         .collect::<Vec<_>>();
     let mut dependencies = module_dependencies.klibs.to_vec();
-    dependencies.extend(atomicfu_runtime_dependencies(
+    dependencies.extend(directive_klib_dependencies(
         directive_source,
         backend_target,
     ));
