@@ -55,7 +55,7 @@ use krusty::backend::class_tables::{
 use krusty::backend::local_properties::RealizedLocalPropertyAccess;
 use krusty::backend::BackendClassifierSource;
 use krusty::fir::{CallableId, PropertyId, ResolvedPropertyOverrideTarget};
-use krusty::ir::{ClassId, FunId, IrClass, IrExpr, IrFile, IrLocalPropertyLayout};
+use krusty::ir::{ClassId, FunId, IrExpr, IrFile, IrLocalPropertyLayout};
 use krusty::types::{Ty, TypeName};
 
 use super::super::encode::{
@@ -328,6 +328,7 @@ impl FileClasses {
     /// `signatures` are the file's function indices and types, by `FunId`.
     pub(super) fn records(
         &self,
+        module: &mut Module,
         ir: &IrFile,
         functions: &[Option<u32>],
         signatures: &[Option<u32>],
@@ -367,7 +368,7 @@ impl FileClasses {
             }
             for &owner in chain.iter().rev() {
                 fields.extend(
-                    own_fields(&ir.classes[owner as usize])
+                    own_fields(module, ir, owner)
                         .expect("every field was carried when the struct was declared"),
                 );
             }

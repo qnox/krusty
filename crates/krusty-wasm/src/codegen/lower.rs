@@ -353,7 +353,7 @@ pub(super) fn lower_file(
             module,
             runtime,
         )?;
-        for (name, record) in classes.records(ir, &indices, &signatures) {
+        for (name, record) in classes.records(module, ir, &indices, &signatures) {
             laid_out_classes.insert(name, record);
         }
     } else if !member_property_definitions.is_empty() {
