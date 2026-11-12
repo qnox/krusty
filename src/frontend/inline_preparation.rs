@@ -112,17 +112,13 @@ fn default_check_selection(
         if root.source != provider.source {
             return None;
         }
-        let Some(selected_bodies) = bodies.get_mut(provider.source.raw() as usize) else {
-            return None;
-        };
+        let selected_bodies = bodies.get_mut(provider.source.raw() as usize)?;
         // The provider selects the live syntax; the target selects the surviving semantic
         // declaration after expect/actual actualization. `bind_defaults` aliases both identities
         // to that one parser declaration for this bounded check.
         selected_bodies.insert(work.provider);
         selected_bodies.insert(work.target);
-        let Some(selected_roots) = roots.get_mut(root.source.raw() as usize) else {
-            return None;
-        };
+        let selected_roots = roots.get_mut(root.source.raw() as usize)?;
         selected_roots.insert(root_id);
     }
     Some(DefaultCheckSelection { roots, bodies })
@@ -555,17 +551,27 @@ pub(super) fn from_checked_analysis(
     finish(index, inline_bodies, sources, default_arguments, unexpected)
 }
 
+pub(super) struct StreamingPreparationInputs<'a> {
+    pub(super) files: &'a mut [File],
+    pub(super) local_contexts: &'a [crate::resolve::PassOneLocalClassContext],
+    pub(super) skip: &'a [bool],
+    pub(super) checked_count: usize,
+}
+
 pub(super) fn streaming(
     module: crate::fir::FrontendModule,
     bodies: crate::fir::BodyPartition,
     default_arguments: crate::fir::DefaultArgumentStore,
-    files: &mut [File],
-    local_contexts: &[crate::resolve::PassOneLocalClassContext],
-    skip: &[bool],
-    checked_count: usize,
+    inputs: StreamingPreparationInputs<'_>,
     symbols: &mut FrontendSymbols,
     diags: &mut crate::diag::DiagSink,
 ) -> Option<StreamedPassState> {
+    let StreamingPreparationInputs {
+        files,
+        local_contexts,
+        skip,
+        checked_count,
+    } = inputs;
     let selection = bodies.inline_check_selection(module.index(), files.len());
     let payload_roots = inline_payload_roots(&selection, module.index())?;
     let (mut index, mut inline_bodies, initial_defaults, mut sources) = module.into_parts();
