@@ -13,6 +13,7 @@ use crate::diag::{DiagSink, Span};
 use crate::fir::SourceFileId;
 use crate::resolve::PassTwoSymbols;
 
+mod coroutine_runtime;
 mod plugin_handoff;
 
 /// The module-wide facts every file of one emission hands its backend alongside its own IR.
@@ -24,6 +25,9 @@ pub(super) struct ModuleEmission<'a> {
     pub stems: &'a [String],
     /// Where each checked node came from, for a backend to place what it reports.
     pub origins: &'a crate::fir::OriginStore,
+    /// The backend lowers suspend functions with the shared common-IR coroutine passes
+    /// ([`crate::backend::Backend::lowers_coroutines_on_common_ir`]).
+    pub common_ir_coroutines: bool,
 }
 
 /// Freeze `ir`'s backend view, or report an internal error when a dependency identity the IR holds
@@ -46,6 +50,11 @@ pub(super) fn checked_ir_file<'a>(
         module_facts.serialization_generated_member_statuses(),
         &classifiers,
     );
+    // A suspend function's lowering calls two stdlib declarations the source need not name; select
+    // them now, so they are frozen with the file's other dependency declarations.
+    if module.common_ir_coroutines && !ir.suspend_funs.is_empty() {
+        ir.coroutine_runtime = coroutine_runtime::select(symbols.semantic_platform());
+    }
     let mut callables = match CheckedBackendCallables::freeze(&ir, symbols.semantic_platform()) {
         Ok(callables) => callables,
         Err(error) => {

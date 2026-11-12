@@ -190,6 +190,10 @@ impl Backend for CraneliftBackend {
         true
     }
 
+    fn lowers_coroutines_on_common_ir(&self) -> bool {
+        true
+    }
+
     fn numbers_slots(&self) -> bool {
         true
     }
