@@ -3,9 +3,9 @@
 
 use super::{
     AnonymousObjectCapture, AnonymousObjectCaptureSource, Checker, CheckerModuleSymbols,
-    CheckerScope, ClassSig, ClassStorageSource, DispatchPropertyBinding, EnumEntryPropertyBinding,
-    ErrorProvenance, ReceiverFnValueOrigin, ScopedProperty, SourceFragmentMode,
-    ValueBindingDeclaration,
+    CheckerScope, ClassSig, ClassStorageSource, DispatchPropertyBinding,
+    DispatchPropertyProvenance, EnumEntryPropertyBinding, ErrorProvenance, ReceiverFnValueOrigin,
+    ScopedProperty, SourceFragmentMode, ValueBindingDeclaration,
 };
 use crate::ast::{Decl, DeclId, PropParam};
 use crate::types::Ty;
@@ -199,8 +199,10 @@ impl Checker<'_> {
             },
             is_var,
             property.owner,
-            None,
-            property.dispatch_receiver_identity,
+            DispatchPropertyProvenance {
+                enum_entry: None,
+                selected_receiver: property.dispatch_receiver_identity,
+            },
         );
     }
 

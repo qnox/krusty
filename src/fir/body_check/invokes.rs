@@ -694,7 +694,7 @@ impl BodyFirChecker<'_> {
                 let target = self.member_extension_call_target(expression, selected)?;
                 let cause = self.expression_origin(expression)?;
                 let dispatch_receiver = self
-                    .materialize_implicit_receiver(cause, span, &dispatch_receiver)?
+                    .materialize_implicit_receiver(cause, span, dispatch_receiver)?
                     .ok_or_else(|| {
                         self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
                     })?;

@@ -2,15 +2,30 @@
 //! (`krusty::backend::class_tables`): a struct type per class, a dispatch-table type per class and
 //! one instance of it, and the functions every class needs beyond its methods.
 //!
-//! **Objects.** A class's struct is the root `$Object`'s single field — the dispatch table — then
-//! the fields of its superclasses in this file, root first, then its own: the tables' field order.
+//! **Objects.** A class's struct is `$Identified`'s two fields — the dispatch table, then the
+//! object's identity hash — then the fields of the base no file declares: `kotlin.Enum`'s for an
+//! enum class, a runtime exception's message and cause for a class extending one. The fields of its
+//! superclasses in this file follow, root first, then its own: the tables' field order.
 //! It is declared a subtype of its superclass's struct, so `ref.test` and `ref.cast` answer `is` and
 //! `as` along the class hierarchy directly.
 //!
+//! **Superclasses of earlier files.** A class whose superclass an earlier file of the source module
+//! laid out extends that file's record of it (`super::laid_out_classes`): its struct begins with the
+//! recorded fields after the identity prefix, its table repeats the recorded slot types and holds
+//! the recorded function wherever the class overrides nothing (`Slot::Inherited`). Every class this
+//! file lays out is recorded in turn.
+//!
 //! **Tables.** A class's table is a struct with one immutable field per slot of its shared table,
-//! each a typed function reference, and the interface table after `kotlin.Any`'s three
+//! each a typed function reference, and the interface table and the class's type information
+//! record after `kotlin.Any`'s three
 //! (`super::super::objects::slot_field`). It is declared a subtype of its superclass's table, or of
-//! `$AnyTable` for a root class. A slot a table does not type is `funcref` and null.
+//! `$AnyTable` for a root class. A slot a table does not type is `funcref` and null. A class that
+//! inherits `kotlin.Any`'s own `hashCode` gets its identity hash; one that inherits `toString` gets
+//! `kotlin.Enum`'s, its `name`, `kotlin.Throwable`'s for a class extending a runtime exception, or
+//! otherwise `kotlin.Any`'s default rendering. Both defaults print the name Kotlin gives the source
+//! class (`krusty::backend::class_names::source_class_names`). A compiler-generated class has no
+//! such name, so its slot holds the trap of a member with no body, and [`FileClasses::realizes`]
+//! says so.
 //!
 //! **Interfaces.** Interface members are numbered once for the module, from the declaration
 //! headers (`class_tables::module_interfaces`), and kept out of the class tables: a call through
@@ -18,8 +33,8 @@
 //! implementations (`super::super::interface_dispatch`, `super::interface_implementations`).
 //!
 //! **Refusals.** Anything this form does not cover declines by name: a class kind other than an
-//! ordinary class, interface or `object`, a superclass declared in another file, and an `invoke`
-//! whose function-type signature needs a bridge in a class table.
+//! ordinary class, interface or `object`, a superclass declared in a file not laid out yet, and an
+//! `invoke` whose function-type signature needs a bridge in a class table.
 //!
 //! **Bridges.** An override whose representation differs from the base member it overrides
 //! (`Derived : Base<Int>` returning an `i32` where `Base<T>` returns a reference) stands in the
@@ -30,14 +45,16 @@
 
 use krusty::fx_hash::HashMap;
 
+use krusty::backend::class_names::source_class_names;
 use krusty::backend::class_tables::module_classes::ModuleClasses;
 use krusty::backend::class_tables::module_slots::ModuleSlotPlan;
 use krusty::backend::class_tables::{
-    self, AnyMember, NumberedClassTables, Representation, Slot, SlotKey, ANY_SLOTS,
+    self, AnyMember, LaidOutSuperclass, NumberedClassTables, Representation, Slot, SlotKey,
+    ANY_SLOTS,
 };
 use krusty::backend::local_properties::RealizedLocalPropertyAccess;
 use krusty::backend::BackendClassifierSource;
-use krusty::fir::{PropertyId, ResolvedPropertyOverrideTarget};
+use krusty::fir::{CallableId, PropertyId, ResolvedPropertyOverrideTarget};
 use krusty::ir::{ClassId, FunId, IrClass, IrExpr, IrFile, IrLocalPropertyLayout};
 use krusty::types::{Ty, TypeName};
 
@@ -46,12 +63,15 @@ use super::super::encode::{
     ValType,
 };
 use super::super::exception_transport::ExceptionTransport;
-use super::super::interface_dispatch::ClassRef;
+use super::super::identity::PREFIX_FIELDS;
+use super::super::interface_dispatch::{ClassRef, MemberRef};
 use super::super::objects::{immutable, ObjectRoot, ITABLE_FIELD, REFERENCE};
 use super::super::runtime::{Runtime, AND32, EQ32, EQ64, OR32};
+use super::laid_out_classes::{DependencyImplementation, LaidOutClass, LaidOutClasses, Placed};
 use super::lower::{carrier, parameter_carrier, Unsupported, STRING};
 
 mod constructor_prefix;
+pub(super) use constructor_prefix::enclosing_field;
 
 #[cfg(test)]
 mod annotation_class_tests;
@@ -100,7 +120,7 @@ pub(super) fn is_runtime_exception(
 
 /// The base no file declares that a class's struct extends, through its superclasses of this file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OwnedBase {
+pub(super) enum OwnedBase {
     /// `kotlin.Any`: only the dispatch table.
     None,
     /// `kotlin.Enum`: `$Enum`'s `name` and `ordinal`.
@@ -232,9 +252,27 @@ pub(super) struct FileClasses {
     pub(super) bridges: Vec<(OverrideBridge, u32, u32)>,
     /// The checked property each realized member read or write (by expression) selected.
     properties: HashMap<u32, PropertyId>,
-    /// The base no file declares that each class extends, itself or through a superclass of this
-    /// file, whose fields lead its struct after the dispatch table.
+    /// The base no file declares that each class extends, itself or through its superclasses,
+    /// whose fields lead its struct after the identity prefix.
     bases: Vec<OwnedBase>,
+    /// The record of every superclass an earlier file laid out that a class here extends.
+    laid_out: HashMap<TypeName, LaidOutClass>,
+    /// The function each slot of each class's table holds; empty for an interface.
+    entries: Vec<Vec<Option<u32>>>,
+    /// Each class's struct, then every struct it is declared a subtype of, nearest first; empty
+    /// for an interface.
+    ancestors: Vec<Vec<u32>>,
+    /// The function each class's interface table holds at each number that no class slot fills,
+    /// as interface recording placed it.
+    pub(super) interface_bodies: Vec<HashMap<u32, Placed>>,
+    /// How each class implements each member of a dependency's interface, as interface recording
+    /// found it.
+    pub(super) dependency_implementations: Vec<Vec<(MemberRef, DependencyImplementation)>>,
+    /// Why a class with no instances of its own cannot be extended by a later file: what its
+    /// table or interface entries needed that this form does not provide.
+    pub(super) refusals: Vec<Option<Unsupported>>,
+    /// Which of `kotlin.Any`'s members each class's table has a body for, by class and slot.
+    realized: Vec<[bool; ANY_SLOTS as usize]>,
 }
 
 impl FileClasses {
@@ -248,14 +286,25 @@ impl FileClasses {
 
     /// The struct field holding field `index` of `class`.
     pub(super) fn field(&self, class: ClassId, index: u32) -> u32 {
-        1 + self.base_fields(class) + self.tables.table(class).first_field + index
+        PREFIX_FIELDS + self.base_fields(class) + self.tables.table(class).first_field + index
     }
 
-    /// How many fields of `class`'s struct, after the dispatch table, a base no file declares
-    /// contributes: `kotlin.Enum`'s `name` and `ordinal`, or a runtime exception's message and
-    /// cause.
+    /// Whether the table of `class`, a class with instances of its own, has a body for `member`:
+    /// `false` where the slot traps.
+    pub(super) fn realizes(&self, class: ClassId, member: AnyMember) -> bool {
+        self.realized[class as usize][member.slot() as usize]
+    }
+
+    /// How many fields of `class`'s struct, after the identity prefix, a base outside this file
+    /// contributes: a superclass an earlier file laid out, `kotlin.Enum`'s `name` and `ordinal`,
+    /// or a runtime exception's message and cause.
     pub(super) fn base_fields(&self, class: ClassId) -> u32 {
-        self.bases[class as usize].fields()
+        match (self.laid_out_superclass(class), self.bases[class as usize]) {
+            (Some(superclass), _) => superclass.fields.len() as u32,
+            (None, OwnedBase::None) => 0,
+            (None, OwnedBase::Enum) => ENUM_BASE_FIELDS,
+            (None, OwnedBase::Exception(_)) => EXCEPTION_BASE_FIELDS,
+        }
     }
 
     /// Whether `class`'s struct extends `kotlin.Enum`'s.
@@ -271,6 +320,152 @@ impl FileClasses {
         }
     }
 
+    /// The nearest superclass of `class` an earlier file laid out, if it has one.
+    pub(super) fn laid_out_superclass(&self, class: ClassId) -> Option<&LaidOutClass> {
+        self.tables
+            .table(class)
+            .laid_out_superclass
+            .map(|name| &self.laid_out[&name])
+    }
+
+    /// The function and type of `callable`, a method with a body of a superclass an earlier file
+    /// laid out.
+    pub(super) fn laid_out_method(&self, callable: CallableId) -> Option<(u32, u32)> {
+        self.laid_out
+            .values()
+            .find_map(|superclass| superclass.methods.get(&callable).copied())
+    }
+
+    /// What a later file extending each class of this file reads of it. `functions` and
+    /// `signatures` are the file's function indices and types, by `FunId`.
+    pub(super) fn records(
+        &self,
+        ir: &IrFile,
+        functions: &[Option<u32>],
+        signatures: &[Option<u32>],
+    ) -> Vec<(TypeName, LaidOutClass)> {
+        let callables: HashMap<FunId, CallableId> = ir
+            .checked_callable_functions
+            .iter()
+            .map(|(&callable, &function)| (function, callable))
+            .collect();
+        let mut records = Vec::new();
+        for &id in &self.tables.order {
+            let class = &ir.classes[id as usize];
+            let (Some(structure), Some(table_type)) = (
+                self.forms[id as usize].structure,
+                self.forms[id as usize].table_type,
+            ) else {
+                continue;
+            };
+            let first_own =
+                PREFIX_FIELDS + self.base_fields(id) + self.tables.table(id).first_field;
+            let mut fields: Vec<FieldType> =
+                match (self.laid_out_superclass(id), self.bases[id as usize]) {
+                    (Some(superclass), _) => superclass.fields.clone(),
+                    (None, OwnedBase::None) => Vec::new(),
+                    (None, OwnedBase::Enum) => vec![immutable(STRING), immutable(ValType::I32)],
+                    (None, OwnedBase::Exception(_)) => {
+                        ExceptionTransport::base_fields(STRING).to_vec()
+                    }
+                };
+            let mut chain = vec![id];
+            while let Some(parent) = self
+                .tables
+                .table(*chain.last().expect("non-empty"))
+                .superclass
+            {
+                chain.push(parent);
+            }
+            for &owner in chain.iter().rev() {
+                fields.extend(
+                    own_fields(&ir.classes[owner as usize])
+                        .expect("every field was carried when the struct was declared"),
+                );
+            }
+            debug_assert_eq!(
+                fields.len() as u32,
+                first_own - PREFIX_FIELDS + class.fields.len() as u32
+            );
+            let form = &self.forms[id as usize];
+            let mut constructors = vec![form.constructor.map(|constructor| {
+                (
+                    constructor,
+                    class.ctor_args.iter().map(|argument| argument.ty).collect(),
+                )
+            })];
+            for (secondary, &function) in class.secondary_ctors.iter().zip(&form.secondaries) {
+                let mut params = secondary.prefix_params.clone();
+                params.extend(secondary.params.iter().copied());
+                constructors.push(Some((function, params)));
+            }
+            let mut activation = self
+                .laid_out_superclass(id)
+                .map(|superclass| superclass.activation.clone())
+                .unwrap_or_default();
+            for &owner in chain.iter().rev() {
+                let declaration = &ir.classes[owner as usize];
+                // As construction initializes them: an enum's companion is the enum's own.
+                if declaration.is_enum || declaration.is_enum_entry {
+                    continue;
+                }
+                let companion = declaration
+                    .companion_class
+                    .and_then(|companion| ir.class_id_by_name(companion));
+                if let Some(getter) = companion
+                    .and_then(|companion| self.forms[companion as usize].singleton)
+                    .map(|singleton| singleton.getter)
+                {
+                    activation.push(getter);
+                }
+            }
+            let mut methods = self
+                .laid_out_superclass(id)
+                .map(|superclass| superclass.methods.clone())
+                .unwrap_or_default();
+            for &owner in chain.iter().rev() {
+                for &method in &ir.classes[owner as usize].methods {
+                    let (Some(&callable), Some(Some(function)), Some(Some(ty)), Some(_)) = (
+                        callables.get(&method),
+                        functions.get(method as usize),
+                        signatures.get(method as usize),
+                        ir.functions[method as usize].body,
+                    ) else {
+                        continue;
+                    };
+                    methods.insert(callable, (*function, *ty));
+                }
+            }
+            let table = self.tables.table(id);
+            records.push((
+                class.fq_name,
+                LaidOutClass {
+                    structure,
+                    table_type,
+                    fields,
+                    base: self.bases[id as usize],
+                    slot_types: self.slot_types[id as usize].clone(),
+                    entries: self.entries[id as usize].clone(),
+                    ancestors: self.ancestors[id as usize].clone(),
+                    constructors,
+                    methods,
+                    activation,
+                    table: LaidOutSuperclass {
+                        slots: table.vtable.len() as u32,
+                        interfaces: self.tables.interface_tables.implemented[id as usize].clone(),
+                        interface_entries: self.tables.interface_tables.members[id as usize]
+                            .clone(),
+                    },
+                    interface_bodies: self.interface_bodies[id as usize].clone(),
+                    dependency_implementations: self.dependency_implementations[id as usize]
+                        .clone(),
+                    refusal: self.refusals[id as usize].clone(),
+                },
+            ));
+        }
+        records
+    }
+
     /// The checked property the realized member access `operation` reads or writes.
     pub(super) fn realized_property(&self, operation: u32) -> Option<PropertyId> {
         self.properties.get(&operation).copied()
@@ -284,10 +479,11 @@ impl FileClasses {
     }
 }
 
-/// `kotlin.Enum`'s `name` and `ordinal`: fields 1 and 2 of `$Enum`.
+/// `kotlin.Enum`'s `name` and `ordinal`: the fields of `$Enum` after the identity prefix.
 pub(super) const ENUM_BASE_FIELDS: u32 = 2;
 
-/// A runtime exception's message and cause: fields 1 and 2 of its runtime struct.
+/// A runtime exception's message and cause: the fields of its runtime struct after the identity
+/// prefix.
 const EXCEPTION_BASE_FIELDS: u32 = 2;
 
 /// The wasm signature of a method of the file: the receiver, then its parameters.
@@ -319,13 +515,14 @@ fn accessor_type(module: &mut Module, ty: Ty, setter: bool) -> Result<u32, Unsup
     })
 }
 
-/// The module-wide numbering of the interface members of `classes`, as every file of the module
-/// reads it.
+/// The module-wide numbering of the dispatch tables of `classes` and of their interfaces'
+/// members, as every file of the module reads it: what lets a class extend one an earlier file
+/// laid out.
 pub(super) fn module_plan(
     classes: &ModuleClasses,
     classifiers: &dyn BackendClassifierSource,
 ) -> ModuleSlotPlan {
-    ModuleSlotPlan::interfaces_only(classes, &WasmRepresentation { classifiers })
+    ModuleSlotPlan::build(classes, &WasmRepresentation { classifiers })
 }
 
 /// Reject, by name, a class this form does not lay out.
@@ -401,22 +598,64 @@ fn constructs(ir: &IrFile, name: TypeName) -> bool {
 }
 
 /// Lay out every class of `ir` in `module`: types, constructors' and accessors' indices, and the
-/// dispatch tables, whose entries name `functions` (the file's function indices, by `FunId`).
+/// dispatch tables, whose entries name `functions` (the file's function indices, by `FunId`). A
+/// superclass no class of `ir` declares is read from `laid_out`, the classes earlier files of the
+/// source module laid out.
+/// What the source module says about classes beyond the file being declared.
+#[derive(Clone, Copy)]
+pub(super) struct BeyondFile<'a> {
+    pub(super) classifiers: &'a dyn BackendClassifierSource,
+    /// The module-wide numbering of every class's table and every interface member.
+    pub(super) plan: &'a ModuleSlotPlan,
+    /// The classes earlier files of the module laid out.
+    pub(super) laid_out: &'a LaidOutClasses,
+}
+
 pub(super) fn declare(
     ir: &IrFile,
     module: &mut Module,
     runtime: &mut Runtime,
-    classifiers: &dyn BackendClassifierSource,
     functions: &[Option<u32>],
     properties: &RealizedProperties,
-    plan: &ModuleSlotPlan,
+    beyond: BeyondFile<'_>,
 ) -> Result<FileClasses, Unsupported> {
+    let BeyondFile {
+        classifiers,
+        plan,
+        laid_out,
+    } = beyond;
     for class in 0..ir.classes.len() {
         check_supported(ir, class as ClassId)?;
         check_exception_storage(ir, classifiers, class as ClassId)?;
     }
-    let tables = class_tables::build_numbered(&WasmRepresentation { classifiers }, ir, plan)?;
-    let slot_types = slot_types(ir, module, &runtime.objects, &tables)?;
+    let tables = class_tables::build_numbered(
+        &WasmRepresentation { classifiers },
+        ir,
+        plan,
+        &|superclass| laid_out.get(superclass).map(|record| record.table.clone()),
+    )?;
+    let superclasses: HashMap<TypeName, LaidOutClass> = tables
+        .tables
+        .iter()
+        .filter_map(|table| table.laid_out_superclass)
+        .map(|name| {
+            let record = laid_out
+                .get(name)
+                .expect("the tables extend only a recorded class")
+                .clone();
+            match &record.refusal {
+                Some(reason) => Err(format!("a class extending one of another file: {reason}")),
+                None => Ok((name, record)),
+            }
+        })
+        .collect::<Result<_, _>>()?;
+    let laid_out_superclass = |class: ClassId| {
+        tables
+            .table(class)
+            .laid_out_superclass
+            .map(|name| &superclasses[&name])
+    };
+    let slot_types = slot_types(ir, module, &runtime.objects, &tables, &laid_out_superclass)?;
 
     let mut bases = Vec::with_capacity(ir.classes.len());
     for class in 0..ir.classes.len() {
@@ -425,16 +664,13 @@ pub(super) fn declare(
             root = parent;
         }
         let superclass = ir.classes[root as usize].superclass;
-        bases.push(if superclass == krusty::types::wk::kotlin_enum() {
-            OwnedBase::Enum
-        } else if is_runtime_exception(classifiers, superclass) {
-            OwnedBase::Exception(runtime.exceptions.ensure_class(
-                module,
-                classifiers,
-                superclass,
-            )?)
-        } else {
-            OwnedBase::None
+        bases.push(match laid_out_superclass(root) {
+            Some(superclass) => superclass.base,
+            None if superclass == krusty::types::wk::kotlin_enum() => OwnedBase::Enum,
+            None if is_runtime_exception(classifiers, superclass) => {
+                OwnedBase::Exception(runtime.exception_class(module, classifiers, superclass)?)
+            }
+            None => OwnedBase::None,
         });
     }
     let objects = &mut runtime.objects;
@@ -446,33 +682,51 @@ pub(super) fn declare(
         }
         let table = tables.table(id);
         let parent = table.superclass.map(|parent| &forms[parent as usize]);
-        let mut fields = vec![immutable(ValType::reference(objects.any_table))];
-        match bases[id as usize] {
-            OwnedBase::None => {}
-            OwnedBase::Enum => fields.extend([immutable(STRING), immutable(ValType::I32)]),
-            OwnedBase::Exception(_) => fields.extend(ExceptionTransport::base_fields(STRING)),
+        let laid_out_parent = match table.superclass {
+            None => laid_out_superclass(id),
+            Some(_) => None,
+        };
+        let mut fields = vec![
+            immutable(ValType::reference(objects.any_table)),
+            immutable(ValType::I32),
+        ];
+        match (laid_out_superclass(id), bases[id as usize]) {
+            (Some(superclass), _) => fields.extend(superclass.fields.iter().copied()),
+            (None, OwnedBase::None) => {}
+            (None, OwnedBase::Enum) => fields.extend([immutable(STRING), immutable(ValType::I32)]),
+            (None, OwnedBase::Exception(_)) => {
+                fields.extend(ExceptionTransport::base_fields(STRING));
+            }
         }
         if let Some(parent) = table.superclass {
             fields.extend(inherited_fields(ir, &tables, parent)?);
         }
         fields.extend(own_fields(class)?);
         let root = match bases[id as usize] {
-            OwnedBase::None => objects.object,
+            OwnedBase::None => objects.identified,
             OwnedBase::Enum => objects.enum_base,
             OwnedBase::Exception(structure) => structure,
         };
         let structure = module.subtype(SubType {
             composite: CompositeType::Struct(fields),
-            supertype: Some(parent.map_or(root, |parent| {
-                parent.structure.expect("a superclass has a struct")
-            })),
+            supertype: Some(match (parent, laid_out_parent) {
+                (Some(parent), _) => parent.structure.expect("a superclass has a struct"),
+                (None, Some(superclass)) => superclass.structure,
+                (None, None) => root,
+            }),
             open: true,
         });
         let table_type = module.subtype(SubType {
-            composite: table_struct(&slot_types[id as usize], objects.itable),
-            supertype: Some(parent.map_or(objects.any_table, |parent| {
-                parent.table_type.expect("a superclass has a table type")
-            })),
+            composite: table_struct(
+                &slot_types[id as usize],
+                objects.itable,
+                objects.type_infos.ty,
+            ),
+            supertype: Some(match (parent, laid_out_parent) {
+                (Some(parent), _) => parent.table_type.expect("a superclass has a table type"),
+                (None, Some(superclass)) => superclass.table_type,
+                (None, None) => objects.any_table,
+            }),
             open: true,
         });
         let form = &mut forms[id as usize];
@@ -492,48 +746,207 @@ pub(super) fn declare(
         }
     }
 
-    // One table instance per class that has instances of its own.
+    // What every class's table holds, and one table instance per class that has instances of its
+    // own. An abstract class's entries are what a later file extending it inherits.
     let mut accessors: Vec<(Accessor, u32, u32)> = Vec::new();
     let mut bridges: Vec<(OverrideBridge, u32, u32)> = Vec::new();
+    let mut realized = vec![[true; ANY_SLOTS as usize]; ir.classes.len()];
+    let mut entries: Vec<Vec<Option<u32>>> = vec![Vec::new(); ir.classes.len()];
+    let mut ancestry: Vec<Vec<u32>> = vec![Vec::new(); ir.classes.len()];
+    let mut refusals: Vec<Option<Unsupported>> = vec![None; ir.classes.len()];
     for &id in &tables.order {
         let class = &ir.classes[id as usize];
-        if class.is_interface || class.is_abstract || class.is_sealed {
+        if class.is_interface {
             continue;
         }
         let mut ancestors = Vec::new();
         let mut ancestor = Some(id);
+        let mut root = id;
         while let Some(current) = ancestor {
             ancestors.push(
                 forms[current as usize]
                     .structure
                     .expect("a class has a struct"),
             );
+            root = current;
             ancestor = tables.table(current).superclass;
         }
-        let (record, itable) = objects.interfaces.class(module, objects.itable, ancestors);
+        if let Some(superclass) = laid_out_superclass(root) {
+            ancestors.extend(superclass.ancestors.iter().copied());
+        }
         let table = tables.table(id);
-        let mut init = Code::default();
-        for (slot, entry) in table.vtable.iter().enumerate() {
-            if slot as u32 == ITABLE_FIELD {
-                init.global_get(itable);
+        let resolved = TableEntries {
+            ir,
+            functions,
+            tables: &tables,
+            slot_types: &slot_types,
+            laid_out: laid_out_superclass(id),
+            base: bases[id as usize],
+            value_field: single_value_field(&forms, &tables, &bases, id, class)?,
+        }
+        .resolve(
+            id,
+            (module, runtime),
+            &mut realized[id as usize],
+            Synthesized {
+                accessors: &mut accessors,
+                bridges: &mut bridges,
+            },
+        );
+        let instantiable = !(class.is_abstract || class.is_sealed);
+        let functions_here = match resolved {
+            Ok(functions_here) => functions_here,
+            // A class with no instances of its own needs its entries only for a later file
+            // extending it, which declines with the reason then.
+            Err(reason) if !instantiable => {
+                refusals[id as usize] = Some(reason);
+                Vec::new()
             }
+            Err(reason) => return Err(reason),
+        };
+        if instantiable {
+            let (record, itable) =
+                runtime
+                    .objects
+                    .interfaces
+                    .class(module, runtime.objects.itable, ancestors.clone());
+            let info = runtime.objects.type_infos.global(module, class.fq_name);
+            runtime.objects.type_infos.name(
+                module,
+                class.fq_name,
+                &krusty::backend::class_names::declared_class(ir, id),
+            );
+            let mut init = Code::default();
+            for (slot, function) in functions_here.iter().enumerate() {
+                if slot as u32 == ITABLE_FIELD {
+                    init.global_get(itable).global_get(info);
+                }
+                match function {
+                    Some(function) => {
+                        module.reference_function(*function);
+                        init.ref_func(*function);
+                    }
+                    None => {
+                        init.ref_null(HeapType::Func);
+                    }
+                }
+            }
+            if table.vtable.len() as u32 <= ITABLE_FIELD {
+                init.global_get(itable).global_get(info);
+            }
+            let table_type = forms[id as usize]
+                .table_type
+                .expect("a class has a table type");
+            init.struct_new(table_type);
+            let form = &mut forms[id as usize];
+            form.table = Some(module.constant_global(ValType::reference(table_type), init));
+            form.record = Some(record);
+        }
+        entries[id as usize] = functions_here;
+        ancestry[id as usize] = ancestors;
+    }
+    let classes = ir.classes.len();
+    Ok(FileClasses {
+        tables,
+        forms,
+        slot_types,
+        accessors,
+        bridges,
+        properties: properties
+            .iter()
+            .filter(|access| access.direct_member)
+            .map(|access| (access.operation, access.target))
+            .collect(),
+        bases,
+        realized,
+        laid_out: superclasses,
+        entries,
+        ancestors: ancestry,
+        interface_bodies: vec![HashMap::default(); classes],
+        dependency_implementations: vec![Vec::new(); classes],
+        refusals,
+    })
+}
+
+/// The functions a table names that the file defines with its bodies, declared as tables first
+/// name them.
+struct Synthesized<'a> {
+    accessors: &'a mut Vec<(Accessor, u32, u32)>,
+    bridges: &'a mut Vec<(OverrideBridge, u32, u32)>,
+}
+
+/// What one class's table entries are resolved against.
+struct TableEntries<'a> {
+    ir: &'a IrFile,
+    /// The file's function indices, by `FunId`.
+    functions: &'a [Option<u32>],
+    tables: &'a NumberedClassTables,
+    slot_types: &'a [Vec<Option<u32>>],
+    /// The nearest superclass an earlier file laid out, if the class has one.
+    laid_out: Option<&'a LaidOutClass>,
+    /// The base no file declares that the class extends.
+    base: OwnedBase,
+    /// The one stored field of a single-field value class, which answers `equals` and
+    /// `hashCode` from it.
+    value_field: Option<ValueStorage>,
+}
+
+impl TableEntries<'_> {
+    /// The function each slot of `id`'s table holds, declaring the accessors and bridges the
+    /// file defines with its bodies; `None` for an untyped slot. `realized` learns which of
+    /// `kotlin.Any`'s members have no body here and trap.
+    fn resolve(
+        &self,
+        id: ClassId,
+        (module, runtime): (&mut Module, &mut Runtime),
+        realized: &mut [bool; ANY_SLOTS as usize],
+        synthesized: Synthesized<'_>,
+    ) -> Result<Vec<Option<u32>>, Unsupported> {
+        let TableEntries {
+            ir,
+            functions,
+            tables,
+            slot_types,
+            laid_out,
+            base,
+            value_field,
+        } = *self;
+        let Synthesized { accessors, bridges } = synthesized;
+        let class = &ir.classes[id as usize];
+        let table = tables.table(id);
+        let mut resolved = Vec::with_capacity(table.vtable.len());
+        for (slot, entry) in table.vtable.iter().enumerate() {
             let Some(ty) = slot_types[id as usize][slot] else {
-                init.ref_null(HeapType::Func);
+                resolved.push(None);
                 continue;
             };
-            let value_field = single_value_field(&forms, &tables, &bases, id, class)?;
             let function = match entry {
                 Slot::AnyMember(AnyMember::Equals) if let Some(storage) = value_field => {
-                    value_class_equals(module, storage, ty, objects.object, runtime.object_equals)
+                    value_class_equals(
+                        module,
+                        storage,
+                        ty,
+                        runtime.objects.object,
+                        runtime.object_equals,
+                    )
                 }
-                Slot::AnyMember(AnyMember::Equals) => objects.identity_equals,
-                Slot::AnyMember(AnyMember::HashCode) if let Some(storage) = value_field => {
-                    value_class_hash(module, &runtime.hashing, storage, class.fields[0].ty, ty)
-                        .unwrap_or_else(|| objects.trap(module, ty))
+                Slot::AnyMember(AnyMember::HashCode)
+                    if let Some(function) = value_field.and_then(|storage| {
+                        value_class_hash(module, &runtime.hashing, storage, class.fields[0].ty, ty)
+                    }) =>
+                {
+                    function
                 }
-                Slot::AnyMember(AnyMember::HashCode | AnyMember::ToString) | Slot::Abstract => {
-                    objects.trap(module, ty)
+                Slot::AnyMember(member) => {
+                    match inherited_any_member(ir, runtime, module, id, *member, base) {
+                        Some(function) => function,
+                        None => {
+                            realized[slot] = false;
+                            runtime.objects.trap(module, ty)
+                        }
+                    }
                 }
+                Slot::Abstract => runtime.objects.trap(module, ty),
                 Slot::Function(function) => functions
                     .get(*function as usize)
                     .copied()
@@ -548,7 +961,7 @@ pub(super) fn declare(
                         field: *field,
                         setter: matches!(entry, Slot::FieldSetter { .. }),
                     };
-                    accessor_function(module, &mut accessors, accessor, ty)
+                    accessor_function(module, accessors, accessor, ty)
                 }
                 Slot::Bridge { .. } | Slot::AccessorBridge { .. } | Slot::FunctionBridge { .. } => {
                     let member = BridgedMember::of(entry).ok_or_else(|| {
@@ -582,33 +995,46 @@ pub(super) fn declare(
                         }
                     }
                 }
+                Slot::Inherited { slot } => laid_out
+                    .and_then(|superclass| {
+                        superclass.entries.get(*slot as usize).copied().flatten()
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "an inherited slot the superclass of another file holds nothing at \
+                             (`{}`)",
+                            class.fq_name()
+                        )
+                    })?,
             };
-            module.reference_function(function);
-            init.ref_func(function);
+            resolved.push(Some(function));
         }
-        if table.vtable.len() as u32 <= ITABLE_FIELD {
-            init.global_get(itable);
-        }
-        let table_type = forms[id as usize]
-            .table_type
-            .expect("a class has a table type");
-        init.struct_new(table_type);
-        let form = &mut forms[id as usize];
-        form.table = Some(module.constant_global(ValType::reference(table_type), init));
-        form.record = Some(record);
+        Ok(resolved)
     }
-    Ok(FileClasses {
-        tables,
-        forms,
-        slot_types,
-        accessors,
-        bridges,
-        properties: properties
-            .iter()
-            .filter(|access| access.direct_member)
-            .map(|access| (access.operation, access.target))
-            .collect(),
-        bases,
+}
+
+/// The body the table of `class` holds for `kotlin.Any`'s `member`, which the class inherits
+/// through `base`; `None` when this backend has none (see the module documentation).
+fn inherited_any_member(
+    ir: &IrFile,
+    runtime: &mut Runtime,
+    module: &mut Module,
+    class: ClassId,
+    member: AnyMember,
+    base: OwnedBase,
+) -> Option<u32> {
+    Some(match (member, base) {
+        (AnyMember::Equals, _) => runtime.objects.identity_equals,
+        (AnyMember::HashCode, _) => runtime.identity.hash_code,
+        (AnyMember::ToString, OwnedBase::Enum) => runtime.object_strings.enum_name,
+        (AnyMember::ToString, OwnedBase::None) => {
+            let names = source_class_names(ir, class)?;
+            runtime.identity_to_string(module, ir.classes[class as usize].fq_name_id(), &names)
+        }
+        (AnyMember::ToString, OwnedBase::Exception(_)) => {
+            let names = source_class_names(ir, class)?;
+            runtime.throwable_to_string(module, ir.classes[class as usize].fq_name_id(), &names)
+        }
     })
 }
 
@@ -631,12 +1057,13 @@ pub(super) fn accessor_function(
 }
 
 /// A table struct: one immutable typed function reference per typed slot, `funcref` elsewhere,
-/// and the interface table after `kotlin.Any`'s slots.
-fn table_struct(slots: &[Option<u32>], itable: u32) -> CompositeType {
-    let mut fields = Vec::with_capacity(slots.len() + 1);
+/// and the interface table and the type information after `kotlin.Any`'s slots.
+fn table_struct(slots: &[Option<u32>], itable: u32, type_info: u32) -> CompositeType {
+    let mut fields = Vec::with_capacity(slots.len() + 2);
     for (slot, ty) in slots.iter().enumerate() {
         if slot as u32 == ITABLE_FIELD {
             fields.push(immutable(ValType::nullable(itable)));
+            fields.push(immutable(ValType::nullable(type_info)));
         }
         fields.push(immutable(match ty {
             Some(ty) => ValType::reference(*ty),
@@ -648,6 +1075,7 @@ fn table_struct(slots: &[Option<u32>], itable: u32) -> CompositeType {
     }
     if slots.len() as u32 <= ITABLE_FIELD {
         fields.push(immutable(ValType::nullable(itable)));
+        fields.push(immutable(ValType::nullable(type_info)));
     }
     CompositeType::Struct(fields)
 }
@@ -838,12 +1266,14 @@ fn inherited_fields(
 /// A slot is typed by what introduced it: `kotlin.Any`'s member, the method or synthesized
 /// accessor standing in it, or — for an abstract one — the member its key names. Every class
 /// repeats its superclass's types, which is what makes its table type a subtype of the
-/// superclass's; a disagreement is an override this form cannot carry, and declines.
-fn slot_types(
+/// superclass's; a disagreement is an override this form cannot carry, and declines. A superclass
+/// an earlier file laid out (`laid_out_superclass`) contributes its recorded types.
+fn slot_types<'r>(
     ir: &IrFile,
     module: &mut Module,
     objects: &ObjectRoot,
     tables: &NumberedClassTables,
+    laid_out_superclass: &dyn Fn(ClassId) -> Option<&'r LaidOutClass>,
 ) -> Result<Vec<Vec<Option<u32>>>, Unsupported> {
     let mut types: Vec<Vec<Option<u32>>> = vec![Vec::new(); ir.classes.len()];
     for &id in &tables.order {
@@ -879,12 +1309,16 @@ fn slot_types(
                 Slot::AccessorBridge {
                     declared, setter, ..
                 } => Some(accessor_type(module, *declared, *setter)?),
-                Slot::FunctionBridge { .. } => None,
+                Slot::FunctionBridge { .. } | Slot::Inherited { .. } => None,
             };
             own[slot] = ty;
         }
-        if let Some(parent) = table.superclass {
-            for (slot, inherited) in types[parent as usize].iter().enumerate() {
+        let inherited = match table.superclass {
+            Some(parent) => Some(&types[parent as usize]),
+            None => laid_out_superclass(id).map(|superclass| &superclass.slot_types),
+        };
+        if let Some(inherited) = inherited {
+            for (slot, inherited) in inherited.iter().enumerate() {
                 match (inherited, own[slot]) {
                     (Some(inherited), Some(mine)) if *inherited != mine => {
                         return Err(format!(

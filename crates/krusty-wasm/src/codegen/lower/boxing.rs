@@ -49,7 +49,7 @@ impl Body<'_> {
             None => None,
         }
         .ok_or_else(|| format!("a reference cast to a `{}` value", describe(target)))?;
-        let failure = self.runtime.exceptions.ensure_class(
+        let failure = self.runtime.exception_class(
             self.module,
             self.classifiers,
             krusty::libraries::RuntimeExceptionKind::ClassCast.classifier(),
@@ -61,9 +61,12 @@ impl Body<'_> {
             .ref_test(nullable, HeapType::Concrete(form.structure))
             .op(EQZ32)
             .if_(BlockType::Empty);
-        self.runtime
-            .exceptions
-            .construct_class(&mut self.code, failure, None, self.runtime.string);
+        self.runtime.exceptions.construct_class(
+            &mut self.code,
+            failure,
+            None,
+            self.runtime.string,
+        )?;
         self.code
             .throw(self.runtime.exceptions.tag)
             .end()
