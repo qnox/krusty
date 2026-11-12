@@ -738,6 +738,15 @@ impl<'a> BodyLowering<'a> {
                 .is_subtype(parameters, Ty::obj_name(class.superclass), expected)
     }
 
+    /// Whether `supertype` counts as a supertype of `subtype`: one recorded for a local or
+    /// anonymous class lowered in this body, or one the calling compilation's class model proves.
+    fn is_supertype_of(&self, supertype: Ty, subtype: Ty) -> bool {
+        self.local_class_subtype(subtype, supertype)
+            || self
+                .linker
+                .is_subtype(self.header.type_parameters(), subtype, supertype)
+    }
+
     /// Lower `id` as a value used where `expected` is. The serialized body states every
     /// conversion explicitly but the two Kotlin leaves implicit, as checked FIR does: a value is
     /// one of each of its supertypes, with no conversion, and the widening of a non-null value to
@@ -761,10 +770,7 @@ impl<'a> BodyLowering<'a> {
     /// the coercion checked FIR lowering places when nullability or value/reference shape changes.
     /// `None` when `expected` is not a supertype of `actual`.
     fn upcast(&mut self, value: ExprId, actual: Ty, expected: Ty) -> Option<ExprId> {
-        let parameters = self.header.type_parameters();
-        if !self.local_class_subtype(actual, expected)
-            && !self.linker.is_subtype(parameters, actual, expected)
-        {
+        if !self.is_supertype_of(expected, actual) {
             return None;
         }
         Some(
@@ -926,6 +932,12 @@ impl<'a> BodyLowering<'a> {
     /// as a prepared-inline copy passes an erased value to a function parameter's invocation.
     fn declared_operand(&mut self, id: KlibIrExprId, declared: Ty) -> Lowered<ExprId> {
         let lowered = self.expression(id)?;
+        self.declared_lowered(lowered, declared)
+    }
+
+    /// The lowered `lowered` as a value of the declared type `declared`; see
+    /// [`Self::declared_operand`].
+    fn declared_lowered(&mut self, lowered: ExprId, declared: Ty) -> Lowered<ExprId> {
         let actual = self.lowered_type(lowered);
         if is_value_of(actual, declared) {
             return Ok(lowered);
