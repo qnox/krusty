@@ -265,3 +265,28 @@ fun box(): String = if (pair("x", 2) == "OOx") "OK" else pair("x", 2)
 "#,
     )]));
 }
+
+/// A dependency's inline function whose object literal captures the function's own `T`: the
+/// consumer reads the literal's classifier from a dependency fact, a non-inner class whose type
+/// parameters include a captured one, and regenerates it at its inlined call.
+#[test]
+fn a_dependency_classifier_with_captured_formals_matches_kotlinc() {
+    let classes = common::classes_against_kotlinc_lib(
+        "DependencyCapturedFormals",
+        &[(
+            "Tokens.kt",
+            r#"
+interface Token<T> { fun value(): T }
+inline fun <T> token(value: T): Token<T> = object : Token<T> {
+    override fun value(): T = value
+}
+"#,
+        )],
+        r#"
+fun <A> pick(value: A) = token(value)
+fun box(): String = pick("O").value() + token("K").value()
+"#,
+    )
+    .expect("reference provisions the dependency");
+    assert_complete_abi_and_metadata(&classes);
+}
