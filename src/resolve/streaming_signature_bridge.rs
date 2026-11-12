@@ -3270,9 +3270,11 @@ pub(crate) fn finalized_streamed_signature_index(
         let Some(classifier) = classifier else {
             continue;
         };
-        let entries = table.enums.entry(classifier).or_default();
-        if !entries.iter().any(|entry| entry == spelling) {
-            entries.push(spelling.to_owned());
+        let Some(class) = table.classes.get_mut(&classifier) else {
+            continue;
+        };
+        if !class.enum_entries.iter().any(|entry| entry == spelling) {
+            class.enum_entries.push(spelling.to_owned());
         }
     }
     let empty_extension_receivers = HashMap::default();
