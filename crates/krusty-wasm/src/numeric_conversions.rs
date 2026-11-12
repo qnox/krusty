@@ -74,13 +74,18 @@ fn narrow(code: &mut Code, from: ValType, to: ValType) {
     }
 }
 
-/// Wrap the `i32` on the stack, a `from` value, to the width of `to` when that is a `Byte`,
-/// `Short` or `Char`: the carrier must hold the narrow value's own bits.
+/// Wrap the `i32` on the stack, a `from` value, to the width of `to` when that is a narrow
+/// integer: the carrier must hold the narrow value's own bits. `UByte` and `UShort` keep their
+/// low bits even when `from` is already that type (`255u + 1` stored in a `UByte` is `0`).
 pub(super) fn fit(code: &mut Code, from: Ty, to: Ty) {
-    if from == to {
-        return;
-    }
     match to {
+        Ty::UByte => {
+            code.i32_const(0xff).op(AND32);
+        }
+        Ty::UShort => {
+            code.i32_const(0xffff).op(AND32);
+        }
+        _ if from == to => {}
         Ty::Byte => {
             code.op(0xc0);
         }

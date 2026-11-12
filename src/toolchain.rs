@@ -629,6 +629,36 @@ pub fn atomicfu_compiler_plugin_jar() -> Option<PathBuf> {
     )
 }
 
+/// KLIB libraries a box case's directives add for `target`.
+///
+/// [`classpath_jars_for`] is that selection for the JVM reference. A Native or Wasm reference
+/// compiles the same directives, so it receives the KLIB form of each extra library that has one.
+/// The target stdlib stays with the compiler invocation, as `kotlinc` supplies kotlin-stdlib
+/// itself. JVM and JS have no KLIB form of these libraries.
+pub fn klib_libraries_for(
+    src: &str,
+    target: crate::compilation_target::CompilationTarget,
+) -> Result<Vec<PathBuf>, String> {
+    let extra = crate::conformance::extra_libs(src);
+    let mut libraries = Vec::new();
+    if extra.atomicfu {
+        match atomicfu_klib(target) {
+            Some(library) => libraries.push(library),
+            None if matches!(
+                target,
+                crate::compilation_target::CompilationTarget::Jvm
+                    | crate::compilation_target::CompilationTarget::Js
+            ) => {}
+            None => {
+                return Err(format!(
+                    "box directive `// WITH_ATOMICFU` needs the atomicfu runtime KLIB for {target:?}"
+                ));
+            }
+        }
+    }
+    Ok(libraries)
+}
+
 /// The atomicfu runtime KLIB for `target`, pinned to [`ATOMICFU_RUNTIME_VERSION`].
 ///
 /// Native and Wasm `// WITH_ATOMICFU` cases resolve `kotlinx.atomicfu` against this library. The

@@ -13,6 +13,8 @@ use krusty::backend::class_tables::module_slots::PlanKey;
 use krusty::backend::interface_identity::{member_identity, property_member_identity};
 use krusty::fir::ResolvedFunctionOverrideTarget;
 
+use super::super::super::laid_out_classes::DependencyImplementation;
+
 impl FileLowering<'_> {
     /// Record, for the link, which function stands at each number of `itable`, the interface
     /// table of the type `descriptor` describes: see `native::interface_calls`. A number the type
@@ -171,6 +173,65 @@ impl FileLowering<'_> {
     ) -> Result<(), Unsupported> {
         let (vtable, itable) = tables;
         let mut implemented: Vec<(Vec<u8>, FuncId)> = Vec::new();
+        for (identity, implementation) in self.dependency_implementations(class)? {
+            let function = match implementation {
+                DependencyImplementation::Slot(slot) => vtable.get(slot as usize).copied(),
+                DependencyImplementation::Interface(number) => itable.get(number as usize).copied(),
+                DependencyImplementation::Function(function) => {
+                    Some(self.import_object_function(&function)?)
+                }
+            }
+            .ok_or_else(|| {
+                declined!(
+                    "an implementation of a dependency's interface member outside the tables of \
+                     `{}`",
+                    self.kotlin_name(class)
+                )
+            })?;
+            implemented.push((identity, function));
+        }
+        if implemented.is_empty() {
+            return Ok(());
+        }
+        let id = self.declare_local_data(&format!("kt_itfdep_{base}"), false)?;
+        let mut description = DataDescription::new();
+        let mut contents = Vec::new();
+        let mut fields = Vec::with_capacity(implemented.len());
+        for (identity, function) in &implemented {
+            let at = contents.len() as u32;
+            contents.extend_from_slice(&(identity.len() as u64).to_le_bytes());
+            contents.extend_from_slice(&[0; 16]);
+            push_padded(&mut contents, identity);
+            fields.push((at, *function));
+        }
+        description.define(contents.into_boxed_slice());
+        description.set_align(8);
+        description.set_custom_section(DEPENDENCY_IMPLEMENTATIONS_SECTION);
+        let ty = self
+            .module
+            .declare_data_in_data(descriptor, &mut description);
+        for (at, function) in fields {
+            description.write_data_addr(at + 8, ty, 0);
+            let function = self.module.declare_func_in_data(function, &mut description);
+            description.write_function_addr(at + 16, function);
+        }
+        self.module
+            .define_data(id, &description)
+            .map_err(|error| format!("defining `kt_itfdep_{base}` ({error})"))?;
+        Ok(())
+    }
+
+    /// How an instance of `class` implements each member of another source module's interface,
+    /// by the member's KLIB identity, most derived first: by the function at a slot of its vtable
+    /// (an override takes a slot of its own, so the most derived implementation is read there),
+    /// at a number of its interface table (a default of this module's interface), or by a
+    /// dependency's default. Past its superclasses in this file, a superclass an earlier file laid
+    /// out answers from its record.
+    pub(super) fn dependency_implementations(
+        &mut self,
+        class: ClassId,
+    ) -> Result<Vec<(Vec<u8>, DependencyImplementation)>, Unsupported> {
+        let mut implemented: Vec<(Vec<u8>, DependencyImplementation)> = Vec::new();
         // Only a source module of this program calls a member through a stub; the members of a
         // prebuilt library's interfaces need no records.
         let source_modules: krusty::fx_hash::HashSet<&str> = self
@@ -237,15 +298,7 @@ impl FileLowering<'_> {
                             .number(PlanKey::Callable(callable))
                     })
                 {
-                    let function = itable.get(number as usize).copied().ok_or_else(|| {
-                        declined!(
-                            "an interface default implementing a dependency's interface member \
-                             outside the type's interface table (`{}.{}`)",
-                            self.kotlin_name(owner),
-                            edge.name
-                        )
-                    })?;
-                    implemented.push((identity, function));
+                    implemented.push((identity, DependencyImplementation::Interface(number)));
                     continue;
                 }
                 let function = edge
@@ -272,11 +325,10 @@ impl FileLowering<'_> {
                         edge.name
                     )
                 })?;
-                implemented.push((identity, vtable[slot as usize]));
+                implemented.push((identity, DependencyImplementation::Slot(slot)));
             }
             self.record_dependency_property_implementations(
                 owner,
-                (vtable, itable),
                 &source_modules,
                 &mut implemented,
             )?;
@@ -326,39 +378,23 @@ impl FileLowering<'_> {
                     export.signature.result(),
                 );
                 let function = self.import(&symbol, &parameters, result)?;
-                implemented.push((identity, function));
+                implemented.push((
+                    identity,
+                    DependencyImplementation::Function(self.object_function(function)),
+                ));
             }
             current = self.model.layout(owner).superclass;
+            if current.is_none() {
+                if let Some(record) = self.laid_out_superclass(owner) {
+                    for (identity, implementation) in &record.dependency_implementations {
+                        if !implemented.iter().any(|(known, _)| known == identity) {
+                            implemented.push((identity.clone(), implementation.clone()));
+                        }
+                    }
+                }
+            }
         }
-        if implemented.is_empty() {
-            return Ok(());
-        }
-        let id = self.declare_local_data(&format!("kt_itfdep_{base}"), false)?;
-        let mut description = DataDescription::new();
-        let mut contents = Vec::new();
-        let mut fields = Vec::with_capacity(implemented.len());
-        for (identity, function) in &implemented {
-            let at = contents.len() as u32;
-            contents.extend_from_slice(&(identity.len() as u64).to_le_bytes());
-            contents.extend_from_slice(&[0; 16]);
-            push_padded(&mut contents, identity);
-            fields.push((at, *function));
-        }
-        description.define(contents.into_boxed_slice());
-        description.set_align(8);
-        description.set_custom_section(DEPENDENCY_IMPLEMENTATIONS_SECTION);
-        let ty = self
-            .module
-            .declare_data_in_data(descriptor, &mut description);
-        for (at, function) in fields {
-            description.write_data_addr(at + 8, ty, 0);
-            let function = self.module.declare_func_in_data(function, &mut description);
-            description.write_function_addr(at + 16, function);
-        }
-        self.module
-            .define_data(id, &description)
-            .map_err(|error| format!("defining `kt_itfdep_{base}` ({error})"))?;
-        Ok(())
+        Ok(implemented)
     }
 }
 
@@ -369,9 +405,8 @@ impl FileLowering<'_> {
     fn record_dependency_property_implementations(
         &mut self,
         owner: ClassId,
-        (vtable, itable): (&[FuncId], &[FuncId]),
         source_modules: &krusty::fx_hash::HashSet<&str>,
-        implemented: &mut Vec<(Vec<u8>, FuncId)>,
+        implemented: &mut Vec<(Vec<u8>, DependencyImplementation)>,
     ) -> Result<(), Unsupported> {
         let name = self.ir.classes[owner as usize].fq_name_id();
         for edge in self.ir.property_overrides.get(&name).into_iter().flatten() {
@@ -426,8 +461,8 @@ impl FileLowering<'_> {
                     }
                     krusty::fir::ResolvedPropertyOverrideTarget::External(_) => None,
                 };
-                let function = if let Some(number) = interface_number {
-                    itable.get(number as usize).copied()
+                let implementation = if let Some(number) = interface_number {
+                    Some(DependencyImplementation::Interface(number))
                 } else {
                     let key = if setter {
                         crate::classes::SlotKey::Setter(edge.overridden)
@@ -436,7 +471,7 @@ impl FileLowering<'_> {
                     };
                     self.model
                         .slot(owner, &key)
-                        .and_then(|slot| vtable.get(slot as usize).copied())
+                        .map(DependencyImplementation::Slot)
                 }
                 .ok_or_else(|| {
                     declined!(
@@ -446,7 +481,7 @@ impl FileLowering<'_> {
                         edge.name
                     )
                 })?;
-                implemented.push((identity, function));
+                implemented.push((identity, implementation));
             }
         }
         Ok(())
