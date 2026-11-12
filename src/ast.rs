@@ -1980,9 +1980,6 @@ pub struct File {
     /// Exact per-compilation warning text for that transition. Releases before the diagnostic split
     /// leave this absent and report the construct as an ordinary error.
     pub inapplicable_operator_modifier_warning: Option<String>,
-    /// `+NormalizeNaNValuesInConstContext`: every NaN a compile-time constant evaluates to is the
-    /// canonical NaN of its type, whatever sign and payload the arithmetic produced.
-    pub normalize_nan_in_const_context: bool,
     /// `+CustomEqualsInValueClasses`: permit the typed `equals(Self)` convention in a value class
     /// whose selected representation is inline rather than full/boxed.
     pub custom_equals_in_value_classes: bool,

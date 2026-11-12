@@ -9,9 +9,7 @@ use crate::fx_hash::{HashMap, HashSet};
 
 mod annotation_constructions;
 mod context_parameters;
-mod equality_bound;
 pub use annotation_constructions::{FirAnnotationConstruction, FirAnnotationDefaultValue};
-pub use equality_bound::FirEqualityBoundGuard;
 pub(super) mod value_parameters;
 pub use value_parameters::{FirDefaultValue, FirValueParameter, FirVarargParameter};
 pub(crate) mod debug_lines;
@@ -1743,14 +1741,6 @@ pub struct FirBody {
     /// Local-storage blocks originating from postfix `++`/`--`, whose checked shape snapshots the
     /// old value.
     postfix_updates: HashSet<FirExprId>,
-    /// Context arguments checking selected from the scope rather than from the call's source
-    /// arguments: a read of a context parameter or an implicit receiver, passed where the callee
-    /// takes it. An explicit context argument is an ordinary source argument and is not listed.
-    implicit_context_arguments: HashSet<FirExprId>,
-    /// Explicit context arguments (`receiver().f(context = value())`) the call evaluates after its
-    /// extension receiver, as they are written, although they are passed before it. kotlinc does so
-    /// since 2.5; earlier releases evaluate a call's operands in the order they are passed.
-    receiver_ordered_context_arguments: HashSet<FirExprId>,
     /// Conversion origins that realize, in place, a call of an inline function kotlinc inlines
     /// (`Char.code`'s getter): the conversion is the end of an inlined call.
     inlined_call_conversions: HashSet<OriginId>,
@@ -1779,7 +1769,6 @@ pub struct FirBody {
     /// crossinline capture wherever it is moved, which the target's inline ABI depends on.
     crossinline_parameters: Vec<LocalValueId>,
     parameters: Vec<FirValueParameter>,
-    equality_bound_guard: Option<FirEqualityBoundGuard>,
     default_values: Vec<FirDefaultValue>,
     captures: Vec<FirCapture>,
     capture_declaration_ordinals: Box<[u32]>,
@@ -1834,8 +1823,6 @@ impl FirBody {
             generated_class_provenance: HashMap::default(),
             source_forms: HashMap::default(),
             postfix_updates: HashSet::default(),
-            implicit_context_arguments: HashSet::default(),
-            receiver_ordered_context_arguments: HashSet::default(),
             inlined_call_conversions: HashSet::default(),
             lifting_site: None,
             declaration_span: None,
@@ -1850,7 +1837,6 @@ impl FirBody {
             spliced_inline_parameters: Vec::new(),
             crossinline_parameters: Vec::new(),
             parameters: Vec::new(),
-            equality_bound_guard: None,
             default_values: Vec::new(),
             captures: Vec::new(),
             capture_declaration_ordinals: Box::default(),
@@ -2539,22 +2525,6 @@ impl FirBody {
 
     pub(crate) fn is_postfix_update(&self, block: FirExprId) -> bool {
         self.postfix_updates.contains(&block)
-    }
-
-    pub(crate) fn record_implicit_context_argument(&mut self, value: FirExprId) {
-        self.implicit_context_arguments.insert(value);
-    }
-
-    pub(crate) fn is_implicit_context_argument(&self, value: FirExprId) -> bool {
-        self.implicit_context_arguments.contains(&value)
-    }
-
-    pub(crate) fn record_receiver_ordered_context_argument(&mut self, value: FirExprId) {
-        self.receiver_ordered_context_arguments.insert(value);
-    }
-
-    pub(crate) fn is_receiver_ordered_context_argument(&self, value: FirExprId) -> bool {
-        self.receiver_ordered_context_arguments.contains(&value)
     }
 
     pub(crate) fn record_inlined_call_conversion(&mut self, origin: OriginId) {

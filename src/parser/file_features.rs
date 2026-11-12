@@ -55,7 +55,6 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
         "'operator' modifier is not applicable to function: must override 'equals()' in Any.",
     );
     file.custom_equals_in_value_classes = features.has("CustomEqualsInValueClasses");
-    file.normalize_nan_in_const_context = features.has("NormalizeNaNValuesInConstContext");
     file.forbid_upper_bounds_violation_on_type_operator_and_parameter_bounds =
         features.has("ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds");
     // 2.5.0-Beta2 renamed the feature and moved its since-version from 2.5 to 2.6. A release

@@ -1291,7 +1291,6 @@ fn describe_function(ir: &IrFile, fid: u32) -> Option<FnMeta> {
         params_have_defaults: false,
         param_modifiers,
         vararg_index,
-        equality_bound: ir.declared_parameters(fid).equality_bound,
         context_count: member_context_count,
         context_parameter_kinds,
         // The declaration's own annotations, mirrored into the record. SOURCE-retained

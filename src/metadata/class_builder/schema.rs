@@ -937,10 +937,6 @@ pub(crate) fn class_message(
                 annotations_in_metadata,
                 carrier.annotation_field(AnnotationSite::ValueParameter),
             );
-            if let Some(bound) = m.equality_bound.filter(|bound| bound.index == i) {
-                let ty = type_pb(st, bound.bound, &function_type_parameters);
-                st.put_type(&mut vp, 9, 10, &ty); // ValueParameter.equality_bound_type(_id) = 9 / 10
-            }
             if i < m.context_count {
                 // Leading context parameters → Function.context_parameter = 13 (filled implicitly
                 // by callers), NOT the positional value_parameter list.
