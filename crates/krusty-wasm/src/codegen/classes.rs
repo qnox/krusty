@@ -55,7 +55,7 @@ use krusty::backend::class_tables::{
 use krusty::backend::local_properties::RealizedLocalPropertyAccess;
 use krusty::backend::BackendClassifierSource;
 use krusty::fir::{CallableId, PropertyId, ResolvedPropertyOverrideTarget};
-use krusty::ir::{ClassId, FunId, IrExpr, IrFile, IrLocalPropertyLayout};
+use krusty::ir::{ClassId, FunId, IrClass, IrExpr, IrFile, IrLocalPropertyLayout};
 use krusty::types::{Ty, TypeName};
 
 use super::super::encode::{
