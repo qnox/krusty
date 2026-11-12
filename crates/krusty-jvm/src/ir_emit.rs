@@ -171,7 +171,7 @@ mod transformed_suspensions;
 use lambda_implementation_placement::standalone_method_is_elided;
 mod try_emission;
 use annotation_impl::emit_annotation_impl_class;
-use array_elements::reference_array_scalar_adapter;
+use array_elements::{box_reference_scalar, reference_array_scalar_adapter};
 mod value_class_descriptors;
 mod value_class_override_metadata;
 mod value_class_signatures;
@@ -3177,6 +3177,9 @@ fn emit_enum_class(
         &krusty::ir::DeclarationAnnotations::default(),
         &ctor_parameters,
     );
+    // The source parameters' annotations follow the constructor header, before its body. A private
+    // enum constructor carries no nullability annotations.
+    cw.reserve_method_parameter_annotation_pool(None, &c.ctor_param_annotations, &[], false);
     // The ctor BODY's `super(name, ordinal)` call resolves before its LocalVariableTable strings.
     cw.methodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
     // The property backing fields are visited after the methods: each name interns where the
@@ -3335,6 +3338,9 @@ fn emit_enum_class(
             Some(&ctor_sig),
         );
         cw.set_method_parameters("<init>", &ctor_desc, &ctor_parameters);
+        // The synthetic `(String, int)` prefix is not annotable: the attributes count only the
+        // source parameters.
+        cw.set_annotable_method_param_annotations("<init>", &ctor_desc, &c.ctor_param_annotations);
     }
     if emits_primary_ctor {
         let header = c.decl_line;
