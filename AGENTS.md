@@ -41,6 +41,10 @@ upstream release notes, which can name an assistant that contributed upstream. T
 ## Engineering conventions
 
 - **TDD is required.** Every feature lands with a test; every phase ends on a green harness run.
+- **Register the outcome-manifest merge driver in every clone:** `just install-merge-drivers` (also
+  run by `just install-hooks`). The expected-failure and not-applicable lists merge as sets of
+  entries, so neighbouring removals on two branches never conflict. Without it git merges them line
+  by line and reports conflicts that are not real; never hand-merge one by re-adding entries.
 - **Use the test harness, not plain `cargo test`, for full-suite validation.** Run `./run-tests.sh`
   with no parameters for the normal gate. It self-provisions the reference Kotlin compiler and box
   corpus when `just` is available, uses the fast `gate` Cargo profile, builds once, then runs test
