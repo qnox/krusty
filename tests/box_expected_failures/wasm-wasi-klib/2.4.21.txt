@@ -2336,7 +2336,6 @@ inlineClasses/propertyDelegation/delegatedPropertyOfInlineClassType.kt
 inlineClasses/propertyDelegation/delegatedPropertyOfInlineClassTypeGeneric.kt
 inlineClasses/propertyDelegation/kt27070.kt
 inlineClasses/propertyDelegation/kt27070Generic.kt
-inlineClasses/propertyDelegation/kt42933Generic.kt
 inlineClasses/referToPropertyInCompanionObjectOfInlineClass.kt
 inlineClasses/referToPropertyInCompanionObjectOfInlineClassGeneric.kt
 inlineClasses/removeInInlineCollectionOfInlineClassAsInt.kt
@@ -2794,7 +2793,6 @@ objects/kt32749.kt
 objects/kt52540.kt
 objects/localFunctionInObjectInitializer_kt4516.kt
 objects/objectInLocalAnonymousObject.kt
-objects/objectLiteral.kt
 objects/objectVsClassInitialization_kt5291.kt
 objects/receiverInConstructor.kt
 objects/useAnonymousObjectAsIterator.kt
