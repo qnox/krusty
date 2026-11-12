@@ -138,11 +138,9 @@ pub(super) fn build_get_or_create(
         },
     );
     let new_when_bit_clear = new_cont(ir);
-    let inside_instance = k(
-        ir,
-        IrExpr::When {
-            branches: vec![(Some(resume_bit_set), reuse), (None, new_when_bit_clear)],
-        },
+    let inside_instance = ir.add_when(
+        vec![(Some(resume_bit_set), reuse), (None, new_when_bit_clear)],
+        *cont_ty,
     );
     let instance_branch = k(
         ir,
@@ -152,13 +150,11 @@ pub(super) fn build_get_or_create(
         },
     );
     let new_when_not_instance = new_cont(ir);
-    k(
-        ir,
-        IrExpr::When {
-            branches: vec![
-                (Some(is_instance), instance_branch),
-                (None, new_when_not_instance),
-            ],
-        },
+    ir.add_when(
+        vec![
+            (Some(is_instance), instance_branch),
+            (None, new_when_not_instance),
+        ],
+        *cont_ty,
     )
 }

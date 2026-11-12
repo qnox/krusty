@@ -7,6 +7,12 @@ use crate::types::Ty;
 
 use super::Checker;
 
+/// One stable declaration and the spelling role Pass 2 selected for its written type.
+pub(super) struct DeferredDeclarationSpelling<'a> {
+    pub(super) declaration: crate::fir::DeclarationId,
+    pub(super) role: Option<crate::spelling::DeclaredSpellingRole<'a>>,
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -473,14 +479,20 @@ impl Checker<'_> {
     pub(super) fn record_or_bind_deferred_constructor_property_type(
         &mut self,
         scope: &super::CheckerScope<'_>,
-        constructor: crate::fir::DeclarationId,
-        property: crate::fir::DeclarationId,
+        constructor: DeferredDeclarationSpelling<'_>,
+        property: DeferredDeclarationSpelling<'_>,
         reference: &TypeRef,
         is_vararg: bool,
         expected_semantic: Option<Ty>,
-        constructor_role: Option<crate::spelling::DeclaredSpellingRole<'_>>,
-        property_role: Option<crate::spelling::DeclaredSpellingRole<'_>>,
     ) -> Ty {
+        let DeferredDeclarationSpelling {
+            declaration: constructor,
+            role: constructor_role,
+        } = constructor;
+        let DeferredDeclarationSpelling {
+            declaration: property,
+            role: property_role,
+        } = property;
         let (Some(constructor_role), Some(property_role)) = (constructor_role, property_role)
         else {
             self.failed_local_declaration_bindings.insert(constructor);

@@ -76,7 +76,13 @@ pub(super) fn publish(
             continue;
         };
         // A `companion { … }` member belongs to its classifier's declarations, not the package's.
-        if header.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER) {
+        // An `expect` an `actual` replaces is realized as that `actual`.
+        if header.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER)
+            || index
+                .source_fragments()
+                .replacing_actual(declaration)
+                .is_some()
+        {
             continue;
         }
         let source_order = index

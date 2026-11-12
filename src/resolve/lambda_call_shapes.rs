@@ -482,9 +482,12 @@ impl Checker<'_> {
         self.merge_mapped_generic_argument_bindings(
             overload,
             receiver,
-            (args, arg_tys),
-            argument_map,
-            whole_array_varargs,
+            super::generic_call_bindings::MappedGenericArguments {
+                args,
+                arg_tys,
+                argument_map,
+                named_whole_array_varargs: whole_array_varargs,
+            },
             type_args,
             &mut binds,
         );
@@ -668,33 +671,49 @@ impl Checker<'_> {
             shape.expected_types = Some(expected_types);
             shape.fixed_expected_types = Some(fixed_expected_types);
         }
+        // The parameter's own function TYPE (already substituted into `param_types`) carries the
+        // receiver's type ARGUMENTS (`Config<T>.() -> Unit` with `T` bound by this call) and the
+        // context-parameter count. The call sig's per-parameter lists are the weaker fallback: a
+        // callable with no generic signature records only the receiver's CLASS, so preferring it
+        // would shape the lambda against a raw `Config` and lose the binding.
+        //
+        // A `Ty::Fun` whose `has_receiver` is set is the structured form of the same metadata fact
+        // carried by `lambda_receiver_params`.
+        let instantiated_function = |argument: usize| {
+            shape
+                .expected_types
+                .as_ref()
+                .and_then(|types| types.get(argument))
+                .copied()
+                .flatten()
+                .or_else(|| {
+                    argument_parameters.get(argument).copied().map(|parameter| {
+                        crate::symbol_resolver::ty_subst_keep_unbound(parameter, &binds)
+                    })
+                })
+                .and_then(|parameter| match parameter.non_null().kind() {
+                    TyKind::Fun(function) => Some(function),
+                    _ => None,
+                })
+        };
+        let declared_context_count = |argument: usize, parameter: usize| {
+            instantiated_function(argument).map_or_else(
+                || {
+                    overload
+                        .call_sig
+                        .lambda_context_counts
+                        .get(parameter)
+                        .copied()
+                        .unwrap_or_default()
+                },
+                |function| function.context_count,
+            )
+        };
         let receivers = argument_map
             .iter()
             .enumerate()
             .map(|(argument, &parameter)| {
-                // The receiver comes from the parameter's own function TYPE (already substituted into
-                // `param_types`), which carries the receiver's type ARGUMENTS (`Config<T>.() -> Unit` with
-                // `T` bound by this call). `call_sig.lambda_receivers` is the weaker fallback: a callable
-                // with no generic signature records only the receiver's CLASS, so preferring it would
-                // shape the lambda against a raw `Config` and lose the binding.
-                //
-                // A `Ty::Fun` whose `has_receiver` is set is the structured form of the same metadata
-                // fact carried by `lambda_receiver_params`.
-                let instantiated_function = shape
-                    .expected_types
-                    .as_ref()
-                    .and_then(|types| types.get(argument))
-                    .copied()
-                    .flatten()
-                    .or_else(|| {
-                        argument_parameters.get(argument).copied().map(|parameter| {
-                            crate::symbol_resolver::ty_subst_keep_unbound(parameter, &binds)
-                        })
-                    })
-                    .and_then(|parameter| match parameter.non_null().kind() {
-                        TyKind::Fun(function) => Some(function),
-                        _ => None,
-                    });
+                let instantiated_function = instantiated_function(argument);
                 let receiver_fun_param = overload
                     .call_sig
                     .lambda_receiver_params
@@ -704,17 +723,7 @@ impl Checker<'_> {
                     || instantiated_function.is_some_and(|function| function.has_receiver);
                 receiver_fun_param
                     .then(|| {
-                        let context_count = instantiated_function.map_or_else(
-                            || {
-                                overload
-                                    .call_sig
-                                    .lambda_context_counts
-                                    .get(parameter)
-                                    .copied()
-                                    .unwrap_or_default()
-                            },
-                            |function| function.context_count,
-                        );
+                        let context_count = declared_context_count(argument, parameter);
                         instantiated_function
                             .and_then(|function| {
                                 function.params.get(function.context_count).copied()
@@ -744,14 +753,8 @@ impl Checker<'_> {
         shape.context_counts = Some(
             argument_map
                 .iter()
-                .map(|&parameter| {
-                    overload
-                        .call_sig
-                        .lambda_context_counts
-                        .get(parameter)
-                        .copied()
-                        .unwrap_or_default()
-                })
+                .enumerate()
+                .map(|(argument, &parameter)| declared_context_count(argument, parameter))
                 .collect(),
         );
         shape.boxes_captures = Some(

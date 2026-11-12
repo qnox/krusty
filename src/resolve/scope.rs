@@ -341,6 +341,10 @@ struct ScopedReceiver {
     context_shadow_depth: usize,
 }
 
+/// One implicit receiver in lookup order: its type, the extension declaration that introduced it,
+/// its `(scope, slot)` identity, and whether it is a class dispatch receiver.
+pub(crate) type ImplicitReceiverDeclaration = (Ty, Option<Span>, (usize, usize), bool);
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum FunctionReceiverKind {
     Capturable,
@@ -798,10 +802,8 @@ impl<'p, B> Scope<'p, B> {
                 } if receiver_has_value(receiver) => {
                     return Some(RootValue::Receiver);
                 }
-                ScopeKind::Class { ty, .. } => {
-                    if receiver_has_value(ty) {
-                        return Some(RootValue::Receiver);
-                    }
+                ScopeKind::Class { ty, .. } if receiver_has_value(ty) => {
+                    return Some(RootValue::Receiver);
                 }
                 _ => {}
             }
@@ -1207,9 +1209,7 @@ impl<'p, B> Scope<'p, B> {
 
     /// Implicit receivers paired with the extension declaration, if any, that introduced their
     /// runtime value. Ordering is identical to [`Self::implicit_receivers`].
-    pub(crate) fn implicit_receivers_with_declarations(
-        &self,
-    ) -> Vec<(Ty, Option<Span>, (usize, usize), bool)> {
+    pub(crate) fn implicit_receivers_with_declarations(&self) -> Vec<ImplicitReceiverDeclaration> {
         self.implicit_receiver_values()
             .into_iter()
             .map(|receiver| {

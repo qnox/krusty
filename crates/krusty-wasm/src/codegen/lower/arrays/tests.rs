@@ -13,35 +13,40 @@ fn getter(source: Ty) -> IrCheckedOperation {
 }
 
 #[test]
-fn size_frames_keep_reference_arrays_and_int_array_storage() {
+fn size_frames_keep_generic_and_projected_reference_array_storage() {
     let formal = Ty::ty_param(
         "array-element",
         Ty::nullable(Ty::obj_name(krusty::types::wk::any())),
     );
-    let mut admitted = Vec::new();
     for element in [Ty::String, Ty::Int, formal, Ty::out_projection(formal)] {
-        admitted.push(Ty::obj_args_name(krusty::types::wk::array(), &[element]));
-    }
-    admitted.push(Ty::array(Ty::Int));
-    admitted.push(Ty::nullable(Ty::array(Ty::Int)));
-    for array in admitted {
-        assert_eq!(
-            array_size_receiver(&getter(array)),
-            Ok((23, array.non_null()))
-        );
+        let array = Ty::obj_args_name(krusty::types::wk::array(), &[element]);
+        assert_eq!(array_size_receiver(&getter(array)), Ok((23, array)));
     }
 }
 
 #[test]
-fn size_frames_reject_missing_or_extra_operands_and_other_primitive_storage() {
+fn size_frames_keep_primitive_array_storage() {
+    for element in [
+        Ty::Boolean,
+        Ty::Byte,
+        Ty::Short,
+        Ty::Char,
+        Ty::Int,
+        Ty::Long,
+        Ty::Float,
+        Ty::Double,
+    ] {
+        let array = Ty::array(element);
+        assert!(!array.is_reference_array());
+        assert_eq!(array_size_receiver(&getter(array)), Ok((23, array)));
+    }
+}
+
+#[test]
+fn size_frames_reject_missing_or_extra_operands_and_non_array_receivers() {
     let valid = getter(Ty::array(Ty::String));
     let mut malformed = Vec::new();
-    for replacement in [
-        None,
-        Some(Ty::Int),
-        Some(Ty::array(Ty::Long)),
-        Some(Ty::array(Ty::Byte)),
-    ] {
+    for replacement in [None, Some(Ty::Int), Some(Ty::String)] {
         let mut operation = valid.clone();
         let IrCheckedOperation::ExternalPropertyRead {
             source_receiver, ..

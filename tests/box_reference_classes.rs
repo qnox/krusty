@@ -94,8 +94,9 @@ pub fn checked_prepared_box(src: &str, stem: &str) -> Result<ReferenceClasses, S
     Ok(reference)
 }
 
-/// Bump when the on-disk cache layout or the comparison population changes — invalidates every
-/// cached entry. `v2` added per-module nesting and Java `.class` artifacts to `v1`'s flat tree.
+/// Bump when the on-disk cache layout, the comparison population, or how a case's reference
+/// compile is planned or invoked changes — invalidates every cached entry. CI keys the saved cache
+/// by Kotlin version only, so this salt is the one place such a change reaches existing entries. `v2` added per-module nesting and Java `.class` artifacts to `v1`'s flat tree.
 /// `v3` strips kotlinc diagnostic-test markers from the reference source, so marker-bearing cases
 /// that `v2` cached as FAILED must recompile. `v4` compiles folded multiplatform units as HMPP
 /// fragments instead of a flat `-Xcommon-sources` split (changing even a successful MPP case's
@@ -991,14 +992,29 @@ impl Drop for ScratchDir {
 
 /// Read a cached result. `None` = no cached entry (compile it); `Some(Ok|Err)` = a published
 /// success or a cached rejection with its complete diagnostics.
+///
+/// A read refreshes the entry's marker modification time. `scripts/prune-reference-cache.sh`
+/// drops entries whose marker has gone unread for a while, so the saved cache holds the current
+/// suite's inventories rather than every case and input any earlier run ever compiled.
 fn load_cache(cache: &Path) -> Option<Result<ReferenceClasses, ReferenceFailure>> {
+    let rejected = cache.join("REJECTED");
     if let Some(rejection) = reference_verdict::load_rejection(cache) {
+        mark_used(&rejected);
         return Some(Err(rejection));
     }
-    if cache.join("OK").is_file() {
+    let ok = cache.join("OK");
+    if ok.is_file() {
+        mark_used(&ok);
         return Some(read_cached_classes(cache).map_err(ReferenceFailure::Harness));
     }
     None
+}
+
+/// Stamp an entry's marker as read now. A failed stamp only lets the entry age out sooner.
+fn mark_used(marker: &Path) {
+    if let Ok(file) = std::fs::OpenOptions::new().write(true).open(marker) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
 }
 
 fn read_cached_classes(cache: &Path) -> Result<ReferenceClasses, String> {
@@ -1074,6 +1090,38 @@ mod tests {
     use super::*;
 
     const NO_HELPERS: &str = "";
+
+    #[test]
+    fn reading_a_cached_entry_refreshes_its_marker() {
+        let scratch = ScratchDir::new().expect("scratch dir");
+        let stale = std::time::SystemTime::now() - Duration::from_secs(30 * 24 * 3600);
+        for (marker, contents) in [
+            ("OK", ""),
+            ("REJECTED", "main\na.kt:1:1: error: unresolved\n"),
+        ] {
+            let cache = scratch.path().join(marker);
+            std::fs::create_dir_all(&cache).expect("entry dir");
+            let path = cache.join(marker);
+            std::fs::write(&path, contents).expect("marker");
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .and_then(|file| file.set_modified(stale))
+                .expect("age the marker");
+
+            assert!(load_cache(&cache).is_some(), "{marker} entry must load");
+
+            let modified = std::fs::metadata(&path).and_then(|meta| meta.modified());
+            let age = modified
+                .expect("marker mtime")
+                .elapsed()
+                .unwrap_or_default();
+            assert!(
+                age < Duration::from_secs(3600),
+                "{marker} marker stayed {age:?} old"
+            );
+        }
+    }
 
     fn kotlinc_available() -> bool {
         krusty::toolchain::kotlinc_path().is_some()

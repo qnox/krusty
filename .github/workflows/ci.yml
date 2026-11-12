@@ -327,17 +327,76 @@ jobs:
           echo "compile_missing=$compile_missing" >> "$GITHUB_OUTPUT"
       # The native runtime's thread drivers run on every supported architecture: built for each
       # with clang and lld, and run under QEMU's user-mode emulators (tests/native_runtime_e2e.rs).
+      # The packages are cached by the runner's release, so a run installs them without the Ubuntu
+      # archive: the hosted runners' resolver failed for every *.ubuntu.com host for hours at a time.
+      - name: select cross-architecture package cache
+        id: cross-packages
+        run: echo "key=cross-packages-v1-$(. /etc/os-release && echo "$ID-$VERSION_ID")-${{ runner.arch }}" >> "$GITHUB_OUTPUT"
+      - name: restore cross-architecture packages
+        id: cross-packages-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/cross-packages
+          key: ${{ steps.cross-packages.outputs.key }}
       - name: install cross-architecture runners
         # The POSIX drivers compile against each target's own glibc headers, so the layer's
         # hand-copied numbers and layouts are checked against the target's, not the host's.
         # Self-hosted runners ship these preinstalled and have no sudo.
         run: |
+          set -euo pipefail
           if [ -x /usr/bin/qemu-aarch64 ] && [ -x /usr/bin/qemu-riscv64 ] && [ -x /usr/bin/ld.lld ] &&
             [ -d /usr/aarch64-linux-gnu/include ] && [ -d /usr/riscv64-linux-gnu/include ]; then
             exit 0
           fi
-          sudo apt-get update
-          sudo apt-get install -y qemu-user lld libc6-dev-arm64-cross libc6-dev-riscv64-cross
+          packages=(qemu-user lld libc6-dev-arm64-cross libc6-dev-riscv64-cross)
+          # The cached packages are exactly what the archive installed on this release: no network.
+          if compgen -G "$HOME/cross-packages/*.deb" >/dev/null && sudo dpkg -i "$HOME"/cross-packages/*.deb; then
+            exit 0
+          fi
+          # From the archive, falling back to another official mirror when the archive's hosts do
+          # not resolve. apt verifies every index against Ubuntu's signing keys either way.
+          if ! sudo apt-get update --error-on=any; then
+            mirror=https://mirrors.edge.kernel.org/ubuntu/
+            echo "::warning::the Ubuntu archive is unreachable; installing from $mirror"
+            [ ! -f /etc/apt/apt-mirrors.txt ] || echo "$mirror" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+            for f in /etc/apt/sources.list.d/*.sources; do
+              [ ! -f "$f" ] || sudo sed -i -E "s#https?://([a-z0-9.-]+\.)?(archive|security)\.ubuntu\.com/ubuntu/?#$mirror#g" "$f"
+            done
+            sudo apt-get update --error-on=any
+          fi
+          sudo apt-get install -y --download-only "${packages[@]}"
+          mkdir -p "$HOME/cross-packages"
+          find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t "$HOME/cross-packages/" {} +
+          sudo apt-get install -y "${packages[@]}"
+      # Saved by master, as every cache here: a queue branch's own entry would be visible to it alone.
+      - name: save cross-architecture packages
+        if: github.ref == 'refs/heads/master' && steps.cross-packages-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/cross-packages
+          key: ${{ steps.cross-packages.outputs.key }}
+      # The KLIB semantics, value-class and kotlinc-native oracle tests are ordinary e2e and unit
+      # tests: the coverage gate runs them against the maximum-version Native distribution.
+      - name: restore integration Native toolchain
+        id: integration-native
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/cache/kotlin-native
+            ~/.konan/dependencies
+          key: integration-native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kotlin-versions') }}
+      - name: provision Native for the normal test suites
+        run: |
+          root=$(just kotlin-native "$(just max-version)")
+          echo "KRUSTY_KOTLIN_NATIVE=$root" >> "$GITHUB_ENV"
+      - name: save integration Native toolchain
+        if: github.ref == 'refs/heads/master' && steps.integration-native.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/cache/kotlin-native
+            ~/.konan/dependencies
+          key: ${{ steps.integration-native.outputs.cache-primary-key }}
       - name: coverage gate
         id: coverage
         env:
@@ -358,6 +417,8 @@ jobs:
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
           KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}
           KRUSTY_TOOLCHAIN_RUN_MISSING: 1
+          KRUSTY_REQUIRE_KLIB: "1"
+          KRUSTY_REQUIRE_KOTLIN_NATIVE: "1"
         run: just coverage-gate
       - name: save recorded kotlinc bytes
         if: steps.recorded-mode.outputs.write == '1'
@@ -462,7 +523,12 @@ jobs:
           path: conformance-bin
           if-no-files-found: error
 
-  build-klib-test-bins:
+  # The KLIB implementation-coverage ratchet needs the compiler unit binary, whose build takes about
+  # three times as long as the conformance binary. Its own job keeps that build off the conformance
+  # rows' critical path; no row waits for it, and it checks every release's exact Native and Wasm
+  # stdlib in one pass. The full cfg(test) unit harness exceeded the 8 GB self-hosted runners
+  # before, so it stays on hosted capacity.
+  klib-implementation-coverage:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -474,30 +540,36 @@ jobs:
           # Queue branches restore master's entries but never save their own: per-branch copies
           # overflowed the repository cache and evicted the master entries every branch restores.
           save-if: ${{ github.ref == 'refs/heads/master' }}
-      # Self-hosted runners have no JDK on PATH (ubuntu-latest defaults to 17); the justfile runs
-      # `java -version`.
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
           java-version: '17'
-      - name: build focused KLIB test binaries
+      - *just-on-path
+      - *install-just
+      - name: build the compiler unit binary
         run: |
           set -euo pipefail
           source scripts/phase-timing.sh
-          phase_log_prefix=klib-test-bins
+          phase_log_prefix=klib-implementation-coverage
           PHASE_TIMING_LOG="$(mktemp)"
           trap 'phase_report || true' EXIT
-          phase_begin focused-klib-test-binaries
-          scripts/build-klib-test-binaries.sh "$PWD"
-          phase_end focused-klib-test-binaries
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: klib-test-bins
-          path: |
-            klib-e2e-tests
-            klib-unit-tests
-            klib-native-unit-tests
-          if-no-files-found: error
+          phase_begin compiler-unit-tests
+          bin=$(just compiler-unit-tests)
+          phase_end compiler-unit-tests
+          cp "$bin" compiler-unit-tests
+      - name: enforce exact KLIB implementation coverage for every release
+        env:
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
+          KRUSTY_TEST_TIMEOUT_SECONDS: "600"
+        run: |
+          set -euo pipefail
+          for version in $(just supported-kotlin | tr , ' '); do
+            echo "::group::KLIB implementation coverage $version"
+            timeout 600s just klib-implementation-coverage "$PWD/compiler-unit-tests" "$version"
+            # Each release's Native distribution is only read here; drop it before the next.
+            rm -rf "$PWD/target/cache/kotlin-native/$version"
+            echo "::endgroup::"
+          done
 
   build-tool-bins:
     runs-on: [self-hosted, rust-4c-8gb]
@@ -554,22 +626,22 @@ jobs:
 
   conformance:
     name: conformance (${{ matrix.version }}, ${{ matrix.target }})
-    # JVM consumes no focused KLIB test binary, so keep it off that producer's critical path. Native
-    # and Wasm both enforce KLIB implementation coverage below and therefore wait for the artifact.
     needs: [build-conformance-bin, build-tool-bins]
     strategy:
       fail-fast: false
       matrix:
         version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
-        target: [jvm]
+        target: [jvm, native, wasm-js, wasm-wasi]
     # Cold reflective box() calls share one deadline. Hosted runners kept 2s. The 8 GB
     # pool missed it once: functions/functionNtoString.kt on Kotlin 2.4.0, while the same source
     # passed for 2.4.10, 2.4.20, and 2.4.21. Give that pool 8s. The client round-trip wait stays
-    # 8s above the JVM deadline.
+    # 8s above the JVM deadline. Every target uses the guarded self-hosted pool. Native once reached
+    # its suite deadline on these 8 GB runners; sharing decoded KLIB trees (#3274) halved its lane
+    # and its peak memory. Separate target rows preserve independent measurements.
     runs-on: [self-hosted, rust-4c-8gb]
     env:
       KRUSTY_BOX_CASE_TIMEOUT_MS: '8000'
-    steps: &conformance-steps
+    steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - *mq-base
       - *just-on-path
@@ -624,17 +696,6 @@ jobs:
         with:
           path: target/cache/kotlin-native/${{ matrix.version }}
           key: kotlin-native-conformance-${{ runner.os }}-${{ runner.arch }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
-      # Only the maximum-version Native row runs the focused kotlinc-native oracle checks. The
-      # ordinary Native conformance step below already provisions the exact compiler distribution.
-      - name: restore Kotlin/Native dependencies
-        if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max
-        id: konan
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.konan/dependencies
-            target/cache/krusty-deps
-          key: native-conformance-konan-${{ runner.os }}-${{ runner.arch }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
       # Every Native row replays the kotlinc-native results its box lane and focused checks
       # recorded: the box lane's owned multimodule fixtures alone run 68 kotlinc-native graphs,
       # about three quarters of a cold row's case time. Master records what is missing.
@@ -702,10 +763,10 @@ jobs:
       # The byte score compiles every applicable box case with that version's kotlinc. Those
       # inventories live in their own cache, target/cache/ref-classes, whose entries
       # tests/box_reference_classes.rs keys by source, classpath, unit modes, the exact compiler and
-      # the producing JDK. Restored from the base and saved by master like the recorded bytes; the
-      # key also hashes the inventory owner, shared case planning, reference server/Javac driver and
-      # content-identity implementation. A producer or layout change therefore starts a fresh cache
-      # instead of replaying inventories built by code that a hit would otherwise never execute.
+      # the producing JDK, plus REF_CACHE_SALT, which a producer or layout change bumps. Restored
+      # from the base and saved by master like the recorded bytes. The GHA key names only the
+      # Kotlin version: an edit to the test harness or to one case invalidates just the entries
+      # whose inputs it changed, instead of the ~7,300 compiles behind a fresh cache.
       # Owned Native/Wasm cases require these same JVM oracle inventories.
       # The bytecodeText and bytecodeListing reference checks in the non-box step compile through
       # the same cache, so master saves it after that step and pull requests replay those compiles.
@@ -714,9 +775,9 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/ref-classes
-          key: box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'tests/box_reference_classes/**', 'tests/common/kotlinc_server.rs', 'tests/common/server_pool.rs', 'tests/common/mod.rs', 'tests/common/producing_jdk.rs', 'tests/common/byte_dump.rs', 'tests/common/byte_dump/**', 'src/conformance.rs', 'src/conformance/**') }}-${{ steps.base.outputs.sha }}
+          key: box-reference-classes-${{ matrix.version }}-${{ steps.base.outputs.sha }}
           restore-keys: |
-            box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'tests/box_reference_classes/**', 'tests/common/kotlinc_server.rs', 'tests/common/server_pool.rs', 'tests/common/mod.rs', 'tests/common/producing_jdk.rs', 'tests/common/byte_dump.rs', 'tests/common/byte_dump/**', 'src/conformance.rs', 'src/conformance/**') }}-
+            box-reference-classes-${{ matrix.version }}-
       - name: download conformance binary
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -725,11 +786,6 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
-      - name: download focused KLIB test binaries
-        if: matrix.target != 'jvm'
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: klib-test-bins
       # One box run writes both reports over the same applicable cases: pct.txt is the case report
       # "<pct> <passed> <applicable>" and jvm-byte-equality.txt the JVM byte report
       # "<pct> <matched> <total>" (.class bytes). Printing their badge fields validates each and
@@ -782,33 +838,6 @@ jobs:
           name: native-pct-${{ matrix.version }}
           path: native-pct.txt
           if-no-files-found: error
-      - name: run focused KLIB semantics and Native oracle coverage
-        # The corpus step records its failure and enforcement follows this step, so the focused
-        # decoder/oracle coverage remains independent just as it was in its former standalone job.
-        if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max && (success() || steps.native_box.outcome == 'failure' || steps.native_focused.outcome == 'failure')
-        env:
-          KRUSTY_TEST_TIMEOUT_SECONDS: "600"
-          KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/native-recordings
-          KRUSTY_CLASS_DUMP_COMPILE_MISSING: "1"
-          KRUSTY_CLASS_DUMP_WRITE: ${{ steps.native-recording-mode.outputs.write }}
-          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
-          KRUSTY_REQUIRE_KLIB: "1"
-          KRUSTY_REQUIRE_KLIB_IMPLEMENTATION_TARGETS: native
-          KRUSTY_REQUIRE_KOTLIN_NATIVE: "1"
-          RUST_MIN_STACK: "134217728"
-        run: |
-          set -euo pipefail
-          chmod +x klib-e2e-tests klib-unit-tests klib-native-unit-tests
-          root=$(just kotlin-native "${{ matrix.version }}")
-          kotlinc=$(just kotlinc "${{ matrix.version }}")
-          export KRUSTY_KOTLIN_NATIVE="$root"
-          export KRUSTY_KOTLINC="$kotlinc"
-          timeout 600s ./klib-e2e-tests klib_ --nocapture
-          timeout 600s ./klib-e2e-tests value_class_declaration_e2e --nocapture
-          timeout 600s ./klib-e2e-tests \
-            native_value_classes_e2e::a_value_class_needs_no_jvm_inline_on_native --nocapture
-          timeout 600s ./klib-unit-tests klib_ --nocapture
-          timeout 600s ./klib-native-unit-tests klib_ --nocapture
       - name: save recorded kotlinc-native bytes
         if: matrix.target == 'native' && steps.native-recording-mode.outputs.write == '1'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -843,27 +872,6 @@ jobs:
         env:
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
         run: just wasm-conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
-      - name: enforce exact KLIB implementation coverage ${{ matrix.version }}
-        # The maximum Native row already runs every focused KLIB unit test above. The remaining
-        # Native rows and every Wasm row run this one provider-owned ratchet against their exact
-        # selected stdlib, so no version or target can hide a newly bodyless declaration.
-        if: startsWith(matrix.target, 'wasm-') || (matrix.target == 'native' && matrix.version != needs.build-tool-bins.outputs.max)
-        env:
-          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
-          KRUSTY_REQUIRE_KLIB: "1"
-          KRUSTY_REQUIRE_KLIB_IMPLEMENTATION_TARGETS: ${{ matrix.target }}
-          KRUSTY_TEST_TIMEOUT_SECONDS: "600"
-        run: |
-          set -euo pipefail
-          chmod +x klib-unit-tests
-          export KRUSTY_LANGUAGE_VERSION="${{ matrix.version }}"
-          if [ "${{ matrix.target }}" = native ]; then
-            export KRUSTY_KOTLIN_NATIVE="$(just kotlin-native "${{ matrix.version }}")"
-          else
-            export KRUSTY_KOTLINC="$(just kotlinc "${{ matrix.version }}")"
-          fi
-          timeout 600s ./klib-unit-tests \
-            klib_libraries::tests::implementation_coverage:: --nocapture
       - name: run non-box conformance ${{ matrix.version }}
         id: non_box
         if: matrix.target == 'jvm'
@@ -889,13 +897,26 @@ jobs:
         env:
           KRUSTY_DIAGNOSTICS_TIMEOUT_SECONDS: "10800"
         run: just diagnostics-conformance "$PWD/conformance-bin" "${{ matrix.version }}"
+      # Entries no run read for a week (removed or edited cases, an old salt) go before saving, so
+      # the cache follows the suite instead of growing with every input it ever compiled. Entries
+      # a cut-short run never reached stay until they have gone a week unread.
+      - name: prune kotlinc box references (${{ matrix.version }})
+        if: >-
+          !cancelled() && matrix.target == 'jvm' && github.ref == 'refs/heads/master'
+          && steps.box-references.outputs.cache-hit != 'true'
+        run: scripts/prune-reference-cache.sh target/cache/ref-classes 7
+      # Also after a failed or timed-out run: each entry is published whole (an OK or FAILED marker
+      # renamed into place) and only for a complete compile, so what a cut-short run saves is exact.
+      # A cold cache takes longer than the lane's deadline on the slower runners; saving only on
+      # success left it cold for every queue run.
       - name: save kotlinc box references (${{ matrix.version }})
-        # Also after a failed JVM step: the references compiled so far stay valid and took hours cold.
-        if: ${{ !cancelled() && matrix.target == 'jvm' && github.ref == 'refs/heads/master' && steps.box-references.outputs.cache-hit != 'true' }}
+        if: >-
+          !cancelled() && matrix.target == 'jvm' && github.ref == 'refs/heads/master'
+          && steps.box-references.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/ref-classes
-          key: box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'tests/box_reference_classes/**', 'tests/common/kotlinc_server.rs', 'tests/common/server_pool.rs', 'tests/common/mod.rs', 'tests/common/producing_jdk.rs', 'tests/common/byte_dump.rs', 'tests/common/byte_dump/**', 'src/conformance.rs', 'src/conformance/**') }}-${{ github.sha }}
+          key: box-reference-classes-${{ matrix.version }}-${{ github.sha }}
       - name: save recorded kotlinc bytes (${{ matrix.version }})
         if: matrix.target == 'jvm' && steps.recorded-mode.outputs.write == '1'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -944,14 +965,6 @@ jobs:
         with:
           path: target/cache/kotlin-native/${{ matrix.version }}
           key: ${{ steps.kotlin-native.outputs.cache-primary-key }}
-      - name: save Kotlin/Native dependencies
-        if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max && github.ref == 'refs/heads/master' && steps.konan.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.konan/dependencies
-            target/cache/krusty-deps
-          key: ${{ steps.konan.outputs.cache-primary-key }}
       - name: save box corpus (${{ matrix.version }})
         if: github.ref == 'refs/heads/master' && steps.box-corpus.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -959,31 +972,14 @@ jobs:
           path: target/cache/box-corpus/${{ matrix.version }}
           key: ${{ steps.box-corpus.outputs.cache-primary-key }}
 
-  # GitHub resolves `needs` before expanding a matrix, so the Native and Wasm focused-test producer
-  # dependency requires a second scheduler job. Both jobs execute the one anchored conformance step
-  # inventory; this is not a separate semantic suite or target-specific case list.
-  conformance-klib:
-    name: conformance (${{ matrix.version }}, ${{ matrix.target }})
-    needs: [build-conformance-bin, build-klib-test-bins, build-tool-bins]
-    strategy:
-      fail-fast: false
-      matrix:
-        version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
-        target: [native, wasm-js, wasm-wasi]
-    # Native and Wasm use the guarded self-hosted pool. Native once reached its suite deadline on
-    # these 8 GB runners; sharing decoded KLIB trees (#3274) halved its lane and its peak memory.
-    # Separate target rows preserve independent measurements.
-    runs-on: [self-hosted, rust-4c-8gb]
-    steps: *conformance-steps
-
   # The one check a ruleset requires: its context does not change with either matrix. A required
   # check that is skipped counts as passing, so this job is always scheduled and fails itself unless
-  # core CI, the complete conformance matrix (including KLIB semantics), the plugin build, and the
+  # core CI, the conformance matrix (including KLIB semantics), the plugin build, and the
   # complete Gradle matrix succeeded. A failed shared build or version inventory skips a consumer,
   # which fails this aggregate too.
   ci-and-conformance:
     name: ci-and-conformance
-    needs: [ci, lint, plugin-host, conformance, conformance-klib, build-gradle-plugin, gradle, maven, build-tools, bazel]
+    needs: [ci, lint, plugin-host, conformance, klib-implementation-coverage, build-gradle-plugin, gradle, maven, build-tools, bazel]
     if: always()
     runs-on: [self-hosted, helper-1c-1gb]
     steps:
@@ -993,7 +989,7 @@ jobs:
           LINT_RESULT: ${{ needs.lint.result }}
           PLUGIN_HOST_RESULT: ${{ needs.plugin-host.result }}
           CONFORMANCE_RESULT: ${{ needs.conformance.result }}
-          KLIB_CONFORMANCE_RESULT: ${{ needs.conformance-klib.result }}
+          KLIB_COVERAGE_RESULT: ${{ needs.klib-implementation-coverage.result }}
           GRADLE_PLUGIN_RESULT: ${{ needs.build-gradle-plugin.result }}
           GRADLE_RESULT: ${{ needs.gradle.result }}
           MAVEN_RESULT: ${{ needs.maven.result }}
@@ -1004,7 +1000,7 @@ jobs:
           echo "lint: $LINT_RESULT"
           echo "plugin-host: $PLUGIN_HOST_RESULT"
           echo "conformance: $CONFORMANCE_RESULT"
-          echo "KLIB conformance: $KLIB_CONFORMANCE_RESULT"
+          echo "klib-implementation-coverage: $KLIB_COVERAGE_RESULT"
           echo "build-gradle-plugin: $GRADLE_PLUGIN_RESULT"
           echo "gradle: $GRADLE_RESULT"
           echo "maven: $MAVEN_RESULT"
@@ -1014,13 +1010,13 @@ jobs:
             || [ "$LINT_RESULT" != success ] \
             || [ "$PLUGIN_HOST_RESULT" != success ] \
             || [ "$CONFORMANCE_RESULT" != success ] \
-            || [ "$KLIB_CONFORMANCE_RESULT" != success ] \
+            || [ "$KLIB_COVERAGE_RESULT" != success ] \
             || [ "$GRADLE_PLUGIN_RESULT" != success ] \
             || [ "$GRADLE_RESULT" != success ] \
             || [ "$MAVEN_RESULT" != success ] \
             || [ "$BUILD_TOOLS_RESULT" != success ] \
             || [ "$BAZEL_RESULT" != success ]; then
-            echo "lint, plugin host tests, coverage, conformance (including KLIB semantics), every Gradle gate, the Maven goal, every build-tools lane, and every Bazel lane must succeed" >&2
+            echo "lint, plugin host tests, coverage, conformance (including KLIB semantics), KLIB implementation coverage, every Gradle gate, the Maven goal, every build-tools lane, and every Bazel lane must succeed" >&2
             exit 1
           fi
 
@@ -1043,36 +1039,20 @@ jobs:
         with:
           distribution: zulu
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+      - &setup-gradle-cache
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
         with:
-          # The wrapper's distribution and the dependencies live in ~/.gradle, restored below.
-          # Basic caching shares one key across jobs and saves only the first job's home.
-          cache-provider: external
-      - &restore-gradle-home
-        name: restore Gradle user home
-        id: gradle-home
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-home-${{ github.job }}-${{ matrix.kotlin || 'plugin' }}-${{ hashFiles('tools/**/*.gradle*', 'tools/**/gradle-wrapper.properties', 'tools/**/*.versions.toml') }}
-          restore-keys: |
-            gradle-home-${{ github.job }}-${{ matrix.kotlin || 'plugin' }}-
+          # The wrapper's distribution and the dependencies live in Gradle's user home. The default
+          # provider keys an entry per job and matrix lane, stores the dependencies each lane
+          # shares once, writes only on master, and drops whatever this run did not read.
+          cache-cleanup: on-success
+          # A fixture's build cache serves only the run that filled it.
+          gradle-home-cache-excludes: caches/build-cache-1
       - name: build portable local-Maven distribution
         run: |
           set -euo pipefail
           version=$(just version)
           scripts/package-gradle-plugin.sh "$version" "$PWD/dist-gradle"
-      - &save-gradle-home
-        name: save Gradle user home
-        if: github.ref == 'refs/heads/master' && steps.gradle-home.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ steps.gradle-home.outputs.cache-primary-key }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: krusty-gradle-plugin
@@ -1105,10 +1085,7 @@ jobs:
         with:
           distribution: zulu
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
-        with:
-          cache-provider: external
-      - *restore-gradle-home
+      - *setup-gradle-cache
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
@@ -1117,7 +1094,6 @@ jobs:
           set -euo pipefail
           chmod +x krusty
           scripts/package-build-tools.sh "$(just version)" "${{ matrix.kotlin }}" "$PWD/krusty" "$PWD/dist-build-tools"
-      - *save-gradle-home
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: krusty-build-tools-kotlin-${{ matrix.kotlin }}
@@ -1185,23 +1161,18 @@ jobs:
             echo "$GRADLE_ENTRY/bin" >> "$GITHUB_PATH"
             echo "found=true" >> "$GITHUB_OUTPUT"
           fi
+      # The nested fixture builds share one isolated Gradle user home, outside the checkout.
+      # setup-gradle caches the user home GRADLE_USER_HOME names when it runs.
+      - name: select the integration Gradle user home
+        run: echo "GRADLE_USER_HOME=$RUNNER_TEMP/krusty-gradle-user-home" >> "$GITHUB_ENV"
       - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
         with:
           gradle-version: ${{ steps.gradle-on-path.outputs.found != 'true' && matrix.gradle || '' }}
-          # The integration harness deliberately uses an isolated user home below. Do not restore
-          # an unused ~/.gradle cache; the next step owns the exact home the nested builds consume.
-          cache-provider: external
-      - name: restore Gradle integration dependencies
-        id: gradle-integration
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/krusty-gradle-user-home/caches
-          # Each matrix lane has a different Gradle/KGP/KSP dependency graph. The generated fixture
-          # build scripts live in gradle.rs, while the tested plugin build lives under tools/.
-          key: gradle-integration-${{ runner.os }}-${{ runner.arch }}-${{ matrix.gradle }}-${{ matrix.kotlin }}-${{ matrix.ksp }}-${{ hashFiles('Cargo.lock', 'crates/krusty-build/src/gradle.rs', 'tools/krusty-gradle/**') }}
-          # A changed key restores the lane's last cache: most dependencies are unchanged, and a
-          # miss re-downloaded all ~780 MB (75% of lanes missed, 1.5-2.3 min each).
-          restore-keys: gradle-integration-${{ runner.os }}-${{ runner.arch }}-${{ matrix.gradle }}-${{ matrix.kotlin }}-${{ matrix.ksp }}-
+          # One entry per matrix lane, since each has its own Gradle/KGP/KSP/AGP graph. Dependencies
+          # the lanes share are stored once, and cleanup drops whatever the lane's tests did not read.
+          cache-cleanup: on-success
+          # A fixture's build cache serves only the run that filled it.
+          gradle-home-cache-excludes: caches/build-cache-1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
@@ -1226,7 +1197,7 @@ jobs:
           KRUSTY_GRADLE_VERSION: ${{ matrix.gradle }}
           # Keep Gradle's mutable Kotlin DSL workspace out of the checkout. A later archive of the
           # workspace must not retain a script directory without its metadata.bin.
-          KRUSTY_GRADLE_USER_HOME: ${{ runner.temp }}/krusty-gradle-user-home
+          KRUSTY_GRADLE_USER_HOME: ${{ env.GRADLE_USER_HOME }}
         run: |
           chmod +x krusty krusty-build-tests
           tests="kotlin_compiler_slice_compiles_through_krusty kotlin_dsl_build_src_compiles_through_krusty"
@@ -1246,12 +1217,6 @@ jobs:
           fi
           KRUSTY_GRADLE_BIN=$(command -v gradle) \
             ./krusty-build-tests --ignored $tests
-      - name: save Gradle integration dependencies
-        if: github.ref == 'refs/heads/master' && steps.gradle-integration.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/krusty-gradle-user-home/caches
-          key: ${{ steps.gradle-integration.outputs.cache-primary-key }}
 
   # Build the Maven plugin's release bytes once: a portable local Maven repository the release
   # publishes and the job below consumes.
@@ -1474,7 +1439,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [ci, lint, plugin-host, conformance, conformance-klib, build-gradle-plugin, gradle, build-maven-plugin, maven, build-tools, bazel, build-tool-bins, build-release]
+    needs: [ci, lint, plugin-host, conformance, klib-implementation-coverage, build-gradle-plugin, gradle, build-maven-plugin, maven, build-tools, bazel, build-tool-bins, build-release]
     if: github.ref == 'refs/heads/master'
     # Publication runs Gradle to build and sign Maven Central and Plugin Portal artifacts.
     runs-on: [self-hosted, rust-4c-8gb]

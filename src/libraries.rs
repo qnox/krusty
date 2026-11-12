@@ -121,9 +121,7 @@ pub use inline_body::{
 };
 #[cfg(test)]
 pub(crate) use klib_body_class::test_fixture as klib_body_class_fixture;
-pub(crate) use klib_body_class::{
-    KlibBodyClassContract, KlibBodyClassParameters, KlibClassStorage, KlibStoredField,
-};
+pub(crate) use klib_body_class::{KlibBodyClassContract, KlibBodyClassParameters, KlibStoredField};
 pub use member_flags::LmFlags;
 pub(crate) use metadata_normalization::{
     associated_function_parameter_identities, associated_property_parameter_identities,
@@ -1580,9 +1578,11 @@ impl FunctionInfo {
                             merge_method_arguments(declared, selected, formals)
                         })
                         .collect::<Vec<_>>();
-                    (merged.as_slice() != arguments)
-                        .then(|| Ty::obj_args_name(name, &merged))
-                        .unwrap_or(declared)
+                    if merged.as_slice() != arguments {
+                        Ty::obj_args_name(name, &merged)
+                    } else {
+                        declared
+                    }
                 }
                 (TyKind::Fun(function), TyKind::Fun(selected_function))
                     if function.params.len() == selected_function.params.len()
@@ -1600,17 +1600,17 @@ impl FunctionInfo {
                         })
                         .collect::<Vec<_>>();
                     let ret = merge_method_arguments(function.ret, selected_function.ret, formals);
-                    (params.as_slice() != function.params || ret != function.ret)
-                        .then(|| {
-                            Ty::fun_with_shape(
-                                params,
-                                ret,
-                                function.context_count,
-                                function.has_receiver,
-                                function.suspend,
-                            )
-                        })
-                        .unwrap_or(declared)
+                    if params.as_slice() != function.params || ret != function.ret {
+                        Ty::fun_with_shape(
+                            params,
+                            ret,
+                            function.context_count,
+                            function.has_receiver,
+                            function.suspend,
+                        )
+                    } else {
+                        declared
+                    }
                 }
                 (TyKind::Nullable(inner), TyKind::Nullable(selected_inner)) => {
                     Ty::nullable(merge_method_arguments(inner, selected_inner, formals))

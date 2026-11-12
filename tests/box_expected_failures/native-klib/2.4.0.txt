@@ -20,7 +20,6 @@ annotations/instances/instanceEquality.kt
 annotations/instances/multifileEqHc.kt
 annotations/instances/multimoduleTypeParams.kt
 annotations/instances/nested.kt
-annotations/instances/nestedDefaults.kt
 annotations/instances/typeAliasesAndGenericsInterop.kt
 annotations/selfReferentialAnnotation.kt
 annotations/typeAnnotations/checkingNotincorporatedInputTypes.kt
@@ -123,7 +122,6 @@ boxingOptimization/safeCallWithElvisMultipleFiles.kt
 boxingOptimization/simple.kt
 boxingOptimization/simpleUninitializedMerge.kt
 boxingOptimization/taintedValues.kt
-boxingOptimization/taintedValuesBox.kt
 boxingOptimization/unsafeRemoving.kt
 boxingOptimization/unsignedArrayForEach.kt
 boxingOptimization/variables.kt
@@ -158,7 +156,6 @@ builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
 callableReference/adaptedReferences/boundReferences.kt
 callableReference/adaptedReferences/inlineDefault.kt
 callableReference/adaptedReferences/inlineVararg.kt
-callableReference/adaptedReferences/inlineVarargInts.kt
 callableReference/adaptedReferences/manyDefaultsAndVararg.kt
 callableReference/adaptedReferences/suspendConversion/adaptedWithCoercionToUnit.kt
 callableReference/adaptedReferences/suspendConversion/adaptedWithDefaultArguments.kt
@@ -974,10 +971,6 @@ evaluate/serialization/annotationOnTypeOnFakeOverride.kt
 evaluate/serialization/annotationWithDefaultValueOnFakeOverride.kt
 evaluate/serialization/typeAnnotation.kt
 evaluate/thisPlusString.kt
-evaluate/ubyteOperations.kt
-evaluate/uintOperations.kt
-evaluate/ulongOperations.kt
-evaluate/ushortOperations.kt
 exceptions/catch1.kt
 exceptions/catch2.kt
 exceptions/rethrow.kt
@@ -1281,8 +1274,6 @@ inlineClasses/interfaceDelegation/memberFunDelegationToInlineClassWithInlineClas
 inlineClasses/interfaceDelegation/memberFunDelegationWithInlineClassParameterTypes.kt
 inlineClasses/interfaceDelegation/memberFunDelegationWithInlineClassParameterTypesGeneric.kt
 inlineClasses/jvmInline.kt
-inlineClasses/kt27096.kt
-inlineClasses/kt27096Generic.kt
 inlineClasses/kt27113.kt
 inlineClasses/kt28405.kt
 inlineClasses/kt32793.kt
@@ -1552,7 +1543,6 @@ nameBasedDestructuring/shortFormFromSmartCast.kt
 nameBasedDestructuring/shortFormLoopsAndLambdas.kt
 nonLocalReturns/suspendConversion.kt
 nothingValue/nothingValueException.kt
-nullCheckOptimization/kt22410.kt
 object/constructor0.kt
 object/fields.kt
 object/fields1.kt
@@ -2364,7 +2354,6 @@ regressions/multimodule/inlineAssertFailsWithCompletedBlock.kt
 regressions/multimodule/inlineNarrowElementInRange.kt
 regressions/multimodule/inlineStdlibRepeat.kt
 regressions/multimodule/inlineTextTrim.kt
-regressions/multimodule/inlineUnsignedConstructionAndData.kt
 regressions/objectCaptureOuterConstructorProperty.kt
 regressions/objectInsideDelegation.kt
 reified/callChain.kt
@@ -2534,13 +2523,6 @@ unsignedTypes/forInUnsignedProgression.kt
 unsignedTypes/forInUnsignedRangeWithCoercion.kt
 unsignedTypes/inUnsignedDownTo.kt
 unsignedTypes/kt47716.kt
-unsignedTypes/unsignedIntCompare.kt
-unsignedTypes/unsignedIntDivide.kt
-unsignedTypes/unsignedIntRemainder.kt
-unsignedTypes/unsignedLiteralsForMaxLongValue.kt
-unsignedTypes/unsignedLongCompare.kt
-unsignedTypes/unsignedLongDivide.kt
-unsignedTypes/unsignedLongRemainder.kt
 unsignedTypes/unsignedRangeIterator.kt
 unsignedTypes/varargsOfUnsignedTypes.kt
 vararg/inlineClassArraysAsNamedArgumentInVararg.kt

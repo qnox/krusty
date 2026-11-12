@@ -46,7 +46,11 @@ ci: lint coverage-gate
 # Lint gate (enforced locally + in CI + by the pre-commit hook): formatting must be clean, and
 # clippy must introduce NO new findings beyond the frozen baseline (clippy-baseline.tsv). Existing
 # findings are tolerated; any new one fails. Identical behaviour everywhere — it's plain cargo + sh.
-lint: versioning-tests release-tests legacy-ratchet-tests fmt-check legacy-baseline-check clippy-baseline-check
+lint: versioning-tests release-tests legacy-ratchet-tests reference-cache-tests fmt-check legacy-baseline-check clippy-baseline-check
+
+# The CI step that drops kotlinc reference inventories no recent run read, before master saves them.
+reference-cache-tests:
+    bash scripts/test-prune-reference-cache.sh
 
 # Cheap release-version contracts, without a compiler build or reference-toolchain download.
 versioning-tests:
@@ -533,6 +537,25 @@ krusty-build-tests:
     #!/usr/bin/env bash
     set -euo pipefail
     scripts/cargo-test-binary.sh krusty_build -p krusty-build --lib
+
+# The normal compiler unit suite, which exact-version CI rows run without rebuilding Rust.
+compiler-unit-tests:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scripts/cargo-test-binary.sh krusty -p krusty --lib
+
+# Hold one release's Native, Wasm/JS and Wasm/WASI stdlib KLIBs to their exact-identity
+# implementation backlogs (`tests/klib_uncovered_implementations/`), using the compiler unit binary
+# BIN (`just compiler-unit-tests`). Each target reads that release's own stdlib.
+klib-implementation-coverage BIN VERSION=`just max-version`:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bin="$(realpath "{{BIN}}")"
+    export KRUSTY_LANGUAGE_VERSION="{{VERSION}}"
+    export KRUSTY_KOTLIN_NATIVE="$(just kotlin-native "{{VERSION}}")"
+    export KRUSTY_KOTLINC="$(just kotlinc "{{VERSION}}")"
+    KRUSTY_REQUIRE_KLIB=1 KRUSTY_REQUIRE_KLIB_IMPLEMENTATION_TARGETS=native,wasm-js,wasm-wasi \
+      "$bin" klib_libraries::tests::implementation_coverage:: --nocapture
 
 # Build the conformance test binary and print its path.
 conformance-bin:

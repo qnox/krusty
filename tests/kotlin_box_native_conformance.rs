@@ -17,18 +17,16 @@ use std::process::Command;
 use krusty::conformance::TestTarget;
 use krusty_native::{CraneliftBackend, Entry, NativeTarget};
 
-use super::box_lane::{self, Lane, Libraries, Outcome};
+use super::box_lane::{self, Lane, ModuleCase, Outcome};
 use super::box_ratchet::Platform;
-
-/// Native cases are analyzed against the Kotlin/Native stdlib KLIB, as kotlinc-native compiles them.
-const LIBRARIES: Libraries = Libraries::StdlibKlib;
 
 /// The prefix the native backend puts on every decline; what follows names the construct.
 const DECLINE_PREFIX: &str = "krusty: the native backend does not support ";
 
 fn host() -> Option<NativeTarget> {
     let target = NativeTarget::host()?;
-    (krusty_native::can_link(target) && LIBRARIES.available(TestTarget::Native)).then_some(target)
+    (krusty_native::can_link(target) && box_lane::stdlib_klib_available(TestTarget::Native))
+        .then_some(target)
 }
 
 /// Why a case is outside this harness before any compilation, or `None` when it applies.
@@ -187,10 +185,6 @@ impl Lane for NativeLane {
         TestTarget::Native
     }
 
-    fn libraries(&self) -> Libraries {
-        LIBRARIES
-    }
-
     fn unavailable(&self) -> Option<String> {
         self.target.is_none().then(|| {
             "no prebuilt native runtime for this host, or no Kotlin/Native stdlib KLIB".to_string()
@@ -219,7 +213,6 @@ impl Lane for NativeLane {
         let program = match box_lane::compile(
             sources,
             directive_source,
-            LIBRARIES,
             TestTarget::Native,
             &backend,
             "box",
@@ -261,11 +254,12 @@ impl Lane for NativeLane {
             Err(error) => return Outcome::Harness(error.to_string()),
         };
         let program = match box_lane::compile_modules(
-            scratch,
-            stem,
-            modules,
+            ModuleCase {
+                scratch,
+                stem,
+                modules,
+            },
             directive_source,
-            LIBRARIES,
             TestTarget::Native,
             &backend,
             &metadata,
@@ -470,5 +464,231 @@ fn native_generic_class_members_instantiate_their_declared_dependency_exports() 
         run_native_abi_case(source, stem),
         Outcome::Pass,
         "class and method formals must instantiate independently without changing the export ABI"
+    );
+}
+
+/// Run a portable one-file program on the KLIB Native lane, after the pinned JVM compiler ran it
+/// to `OK`, which is the answer the Native program must give.
+fn run_native_portable_box(source: &str, stem: &str) -> Outcome {
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the portable program as OK");
+    let Some(target) = host() else {
+        return Outcome::Harness("required Native target/KLIB setup is unavailable".into());
+    };
+    let lane = NativeLane {
+        target: Some(target),
+    };
+    lane.compile_and_run(
+        &std::env::temp_dir(),
+        stem,
+        &[(format!("{stem}.kt"), source.to_string())],
+        source,
+    )
+}
+
+/// A `StringBuilder` appended to through `Appendable` from a file declaring no `Appendable` of
+/// its own: the call goes through the interface member, and the builder is one the runtime makes
+/// rather than a class of the program. The stdlib's `joinTo` appends to its buffer this way.
+#[test]
+fn native_appendable_calls_reach_the_runtime_string_builder() {
+    let source = r#"fun put(a: Appendable): Appendable = a.append('y').append("zz")
+
+fun <A : Appendable> bounded(buffer: A): A {
+    buffer.append(null)
+    return buffer
+}
+
+fun box(): String {
+    val sb = StringBuilder("x")
+    if (put(sb) !== sb) return "fail answer"
+    if (bounded(sb).toString() != "xyzznull") return "fail text: $sb"
+    return "OK"
+}
+"#;
+    assert_eq!(
+        run_native_portable_box(source, "appendableRuntimeBuilder"),
+        Outcome::Pass,
+        "an `Appendable` call must reach the runtime builder's own `append`"
+    );
+}
+
+/// A `StringBuilder` and a class of the program both appended to through one `Appendable` call
+/// site: each keeps its own `append`.
+#[test]
+fn native_appendable_calls_reach_the_runtime_string_builder_beside_an_implementor() {
+    let source = r#"class Counter : Appendable {
+    var count = 0
+    override fun append(value: Char): Appendable { count += 1; return this }
+    override fun append(value: CharSequence?): Appendable { count += 10; return this }
+    override fun append(value: CharSequence?, startIndex: Int, endIndex: Int): Appendable {
+        count += 100
+        return this
+    }
+}
+
+fun put(a: Appendable) {
+    a.append('y')
+    a.append("zz")
+}
+
+fun box(): String {
+    val sb = StringBuilder()
+    put(sb)
+    if (sb.toString() != "yzz") return "fail builder: $sb"
+    val counter = Counter()
+    put(counter)
+    if (counter.count != 11) return "fail counter: ${counter.count}"
+    return "OK"
+}
+"#;
+    assert_eq!(
+        run_native_portable_box(source, "appendableRuntimeBuilderBesideImplementor"),
+        Outcome::Pass,
+        "the runtime builder and the file's implementor must each keep their own `append`"
+    );
+}
+
+/// `Appendable.append(value, startIndex, endIndex)` on the runtime's builder, from a file with no
+/// implementor and from one whose own implementor shares the call site. A null value appends the
+/// range of `"null"`.
+#[test]
+fn native_appendable_range_appends_reach_the_runtime_string_builder() {
+    let alone = r#"class Letters : CharSequence {
+    override val length: Int get() = 4
+    override fun get(index: Int): Char = 'p' + index
+    override fun subSequence(startIndex: Int, endIndex: Int): CharSequence =
+        toString().subSequence(startIndex, endIndex)
+    override fun toString(): String = "pqrs"
+}
+
+fun put(a: Appendable): Appendable =
+    a.append("abcd", 1, 3).append(null, 1, 3).append(StringBuilder("xyz"), 0, 2)
+
+fun box(): String {
+    val sb = StringBuilder(">")
+    if (put(sb) !== sb) return "fail answer"
+    if (sb.toString() != ">bculxy") return "fail text: $sb"
+    (sb as Appendable).append(sb, 0, 2)
+    if (sb.toString() != ">bculxy>b") return "fail self: $sb"
+    (sb as Appendable).append(Letters(), 1, 3)
+    if (sb.toString() != ">bculxy>bqr") return "fail sequence: $sb"
+    (sb as Appendable).append("😀", 0, 1)
+    (sb as Appendable).append("😀", 1, 2)
+    if (sb.toString() != ">bculxy>bqr😀") return "fail pair: $sb"
+    return "OK"
+}
+"#;
+    assert_eq!(
+        run_native_portable_box(alone, "appendableRangeRuntimeBuilder"),
+        Outcome::Pass,
+        "a range `append` through `Appendable` must reach the runtime builder"
+    );
+    let beside = r#"class Counter : Appendable {
+    var count = 0
+    override fun append(value: Char): Appendable { count += 1; return this }
+    override fun append(value: CharSequence?): Appendable { count += 10; return this }
+    override fun append(value: CharSequence?, startIndex: Int, endIndex: Int): Appendable {
+        count += 100 * (endIndex - startIndex)
+        return this
+    }
+}
+
+fun put(a: Appendable) {
+    a.append('y')
+    a.append("zz")
+    a.append("abc", 0, 1)
+    a.append(null, 2, 4)
+}
+
+fun box(): String {
+    val sb = StringBuilder()
+    put(sb)
+    if (sb.toString() != "yzzall") return "fail builder: $sb"
+    val counter = Counter()
+    put(counter)
+    if (counter.count != 311) return "fail counter: ${counter.count}"
+    return "OK"
+}
+"#;
+    assert_eq!(
+        run_native_portable_box(beside, "appendableRangeRuntimeBuilderBesideImplementor"),
+        Outcome::Pass,
+        "a range `append` must reach the runtime builder and the file's implementor alike"
+    );
+}
+
+// PLATFORM-SPECIFIC: the bounds a range `append` checks and the exceptions it raises are
+// Kotlin/Native's builder's, which the JVM's `java.lang.StringBuilder` words and types otherwise.
+// Pinned kotlinc-native runs the same module graph before the product does; the library appends
+// through `Appendable` to the builder the final module hands it.
+#[test]
+fn native_appendable_range_append_checks_its_bounds_as_kotlin_native_does() {
+    let source = r#"// TARGET_BACKEND: NATIVE
+// MODULE: library
+// FILE: Put.kt
+package put
+
+fun put(a: Appendable, value: CharSequence?, start: Int, end: Int) {
+    a.append(value, start, end)
+}
+
+// MODULE: main(library)
+// FILE: Box.kt
+import put.put
+
+fun failure(value: CharSequence?, start: Int, end: Int): String {
+    val sb = StringBuilder("x")
+    try {
+        put(sb, value, start, end)
+    } catch (e: IndexOutOfBoundsException) {
+        return "bounds ${e.message} $sb"
+    } catch (e: IllegalArgumentException) {
+        return "argument ${e.message} $sb"
+    }
+    return "none $sb"
+}
+
+fun box(): String {
+    val past = failure("abc", 1, 4)
+    if (past != "bounds startIndex: 1, endIndex: 4, size: 3 x") return past
+    val negative = failure("abc", -1, 2)
+    if (negative != "bounds startIndex: -1, endIndex: 2, size: 3 x") return negative
+    val reversed = failure("abc", 2, 1)
+    if (reversed != "argument startIndex: 2 > endIndex: 1 x") return reversed
+    val nothing = failure(null, 0, 5)
+    if (nothing != "bounds startIndex: 0, endIndex: 5, size: 4 x") return nothing
+    return "OK"
+}
+"#;
+    assert_eq!(
+        run_native_abi_case(source, "appendableRangeBounds"),
+        Outcome::Pass,
+        "a range `append` on the runtime builder must check its bounds as Kotlin/Native's does"
+    );
+}
+
+#[test]
+fn native_virtual_field_getter_exports_run_the_override() {
+    let source = include_str!("box_regressions/multimodule/virtualFieldGetterExport.kt");
+    let stem = "virtualFieldGetterExport";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must establish the virtual field getter result");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "an open stored property must run the override"
+    );
+}
+
+#[test]
+fn native_virtual_explicit_getter_exports_run_the_override() {
+    let source = include_str!("box_regressions/multimodule/virtualExplicitGetterExport.kt");
+    let stem = "virtualExplicitGetterExport";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must establish the virtual explicit getter result");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "an open explicit getter must run the override"
     );
 }

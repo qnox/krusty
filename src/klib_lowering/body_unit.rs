@@ -182,8 +182,8 @@ pub struct DependencyBodyUnit {
     authenticated_singleton_classifiers: HashMap<KlibDependencyCallable, TypeName>,
     /// Private members of value classes, which only this unit's members of their class call.
     private_members: HashSet<KlibDependencyCallable>,
-    /// The receiver type of each value class member this unit emits, its `this`.
-    value_receivers: HashMap<KlibDependencyCallable, Ty>,
+    /// The dispatch receiver type of each class member this unit emits, its `this`.
+    member_receivers: HashMap<KlibDependencyCallable, Ty>,
     /// File-local classes materialized for bodies of their own library, keyed by that library.
     local_classes: HashMap<
         super::same_library_class::LocalIdentity,
@@ -198,6 +198,8 @@ pub struct DependencyBodyUnit {
 struct LocalFunction {
     function: FunId,
     class: super::same_library_class::LocalIdentity,
+    /// Whether the function is its property's setter.
+    setter: bool,
 }
 
 impl Default for DependencyBodyUnit {
@@ -211,7 +213,7 @@ impl Default for DependencyBodyUnit {
             authenticated_singleton_dispatches: HashMap::default(),
             authenticated_singleton_classifiers: HashMap::default(),
             private_members: HashSet::default(),
-            value_receivers: HashMap::default(),
+            member_receivers: HashMap::default(),
             local_classes: HashMap::default(),
             local_functions: HashMap::default(),
             builtins: IrBuiltinOperators::new(),
@@ -249,10 +251,6 @@ struct PendingBody<'a> {
     statements: &'a [KlibIrStatement],
     header: FunctionHeader,
     function: FunId,
-    initialization: Option<(
-        crate::ir::ClassId,
-        super::class_initialization::ClassInitialization<'a, 'a>,
-    )>,
     value_member: Option<ValueMember<'a>>,
     local_body: Option<super::same_library_class::LocalBody<'a>>,
 }
@@ -403,6 +401,10 @@ impl DependencyBodyUnit {
         declarations: &'a dyn crate::symbol_source::SymbolSource,
     ) -> Result<FunId, KlibBodyDecline> {
         if let Some(function) = self.functions.get(callable.identity()).copied() {
+            // A member installed with its class was authenticated with the class.
+            if self.installs_member(callable.identity()) {
+                return Ok(function);
+            }
             // Declared before, perhaps from its header alone as another body's callee: the
             // selection it is now asked for must describe it too.
             let (arena, declaration) = bodies.function(callable.identity()).ok_or_else(|| {
@@ -513,6 +515,29 @@ impl DependencyBodyUnit {
                 declarations,
             );
         }
+        if root.kind() == crate::libraries::ExternalCallableKind::Member
+            && root
+                .class_contract()
+                .is_some_and(|class| !class.is_value && !class.is_builtin_type())
+        {
+            // A member of an ordinary class is authenticated with the class that installs it.
+            let [callable] = callables else {
+                return Err(KlibBodyDecline::new(
+                    root.signature().clone(),
+                    KlibBodyDeclineReason::SignatureMismatch(
+                        "a class member root has several selected declarations".to_owned(),
+                    ),
+                ));
+            };
+            return self.lower_function_with_declarations(
+                *callable,
+                bodies,
+                callees,
+                intrinsics,
+                externals,
+                declarations,
+            );
+        }
         let (arena, declaration) = bodies.function(root.identity()).ok_or_else(|| {
             KlibBodyDecline::new(root.signature().clone(), KlibBodyDeclineReason::Unjoined)
         })?;
@@ -575,10 +600,16 @@ impl DependencyBodyUnit {
         self.ir
     }
 
-    /// The receiver type of the value class member `identity` this unit emits, which a call
-    /// passes as the member's dispatch receiver.
-    pub(crate) fn value_member_receiver(&self, identity: &KlibDependencyCallable) -> Option<Ty> {
-        self.value_receivers.get(identity).copied()
+    /// Whether `identity` is a member of a class this unit installed with all of its members.
+    fn installs_member(&self, identity: &KlibDependencyCallable) -> bool {
+        self.local_functions
+            .contains_key(&local_class::installed_identity(identity))
+    }
+
+    /// The receiver type of the class member `identity` this unit emits, which a call passes as
+    /// the member's dispatch receiver.
+    pub(crate) fn member_receiver(&self, identity: &KlibDependencyCallable) -> Option<Ty> {
+        self.member_receivers.get(identity).copied()
     }
 
     /// Every exact dependency identity realized by this closed unit that a caller outside it can
@@ -647,7 +678,7 @@ impl DependencyBodyUnit {
             authenticated_singleton_dispatches: &mut self.authenticated_singleton_dispatches,
             authenticated_singleton_classifiers: &mut self.authenticated_singleton_classifiers,
             private_members: &mut self.private_members,
-            value_receivers: &mut self.value_receivers,
+            member_receivers: &mut self.member_receivers,
             local_classes: &mut self.local_classes,
             local_functions: &mut self.local_functions,
             pending: &mut pending,
@@ -670,6 +701,26 @@ impl DependencyBodyUnit {
                         ),
                     )?;
                     Ok(self.ir.classes[*class as usize].methods[0])
+                } else if callable.kind() == crate::libraries::ExternalCallableKind::Member
+                    && callable
+                        .class_contract()
+                        .is_some_and(|class| !class.is_value && !class.is_builtin_type())
+                {
+                    // A member of an ordinary class is installed with the class that declares it.
+                    if !linker.materialize_declaring_class(&mut self.ir, callable)? {
+                        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                            "a member of a class this unit does not materialize",
+                        ));
+                    }
+                    linker
+                        .functions
+                        .get(callable.identity())
+                        .copied()
+                        .ok_or_else(|| {
+                            KlibBodyDeclineReason::SignatureMismatch(
+                                "a materialized class did not install its member".to_owned(),
+                            )
+                        })
                 } else {
                     linker.declare(
                         &mut self.ir,
@@ -718,26 +769,23 @@ impl DependencyBodyUnit {
                     .map(|()| lowered)
                 })
             } else {
-                match (&body.initialization, body.value_member) {
-                    (Some((class, plan)), _) => lowering.initialize_class(*class, plan),
-                    (None, value_member) => match value_member {
-                        Some(member) => lowering
-                            .reading_value_through(member.class, member.field)
-                            .body(body.statements),
-                        None => lowering.body(body.statements),
-                    }
-                    .and_then(|lowered| {
-                        publish_parameter_defaults(
-                            body.arena,
-                            function,
-                            &body.header,
-                            &self.builtins,
-                            &mut self.ir,
-                            &mut linker,
-                        )
-                        .map(|()| lowered)
-                    }),
+                match body.value_member {
+                    Some(member) => lowering
+                        .reading_value_through(member.class, member.field)
+                        .body(body.statements),
+                    None => lowering.body(body.statements),
                 }
+                .and_then(|lowered| {
+                    publish_parameter_defaults(
+                        body.arena,
+                        function,
+                        &body.header,
+                        &self.builtins,
+                        &mut self.ir,
+                        &mut linker,
+                    )
+                    .map(|()| lowered)
+                })
             }
             .map_err(|reason| match reason {
                 KlibBodyDeclineReason::CalleeDeclined(decline) => *decline,
@@ -759,7 +807,7 @@ struct Linker<'u, 's> {
     authenticated_singleton_dispatches: &'u mut HashMap<KlibDependencyCallable, Ty>,
     authenticated_singleton_classifiers: &'u mut HashMap<KlibDependencyCallable, TypeName>,
     private_members: &'u mut HashSet<KlibDependencyCallable>,
-    value_receivers: &'u mut HashMap<KlibDependencyCallable, Ty>,
+    member_receivers: &'u mut HashMap<KlibDependencyCallable, Ty>,
     local_classes: &'u mut HashMap<
         super::same_library_class::LocalIdentity,
         super::same_library_class::MaterializedLocalClass,
@@ -1034,6 +1082,64 @@ impl CallLinker for Linker<'_, '_> {
         (sub.kotlin_class_internal() == Some(owner)).then_some(sub)
     }
 
+    fn dependency_override(
+        &self,
+        symbol: &KlibIrSymbol,
+        supertypes: &[Ty],
+        property: bool,
+    ) -> Result<Option<super::same_library_class::MemberOverride>, KlibBodyDeclineReason> {
+        let signature = match &symbol.signature {
+            KlibIrSignature::Public(public) => KlibDeclarationSignature::Public(public.clone()),
+            KlibIrSignature::Accessor(accessor) => {
+                KlibDeclarationSignature::Accessor(accessor.clone())
+            }
+            KlibIrSignature::FileLocal { .. } => return Ok(None),
+        };
+        // The overridden symbol is the declaration itself, which this body's producer graph
+        // resolves exactly as it resolves a call of it.
+        let identity = match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, &signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => identity,
+            KlibCalleeOrigin::Missing => return Ok(None),
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "two libraries serialize one overridden declaration".to_owned(),
+                ))
+            }
+        };
+        super::same_library_class::declared_override(
+            identity,
+            self.sources.declarations,
+            supertypes,
+            property,
+            &|sub, owner| self.applied_supertype(sub, owner),
+        )
+    }
+
+    fn external_override(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Result<ExternalCallableId, KlibBodyDeclineReason> {
+        local_class::registered_override_handle(
+            identity,
+            self.sources.externals,
+            self.sources.declarations,
+        )
+        .map(|handle| handle.target())
+    }
+
+    fn is_interface(&self, name: TypeName) -> Result<bool, KlibBodyDeclineReason> {
+        match self.sources.declarations.classifier(name) {
+            Some(record) => Ok(record.is_interface()),
+            None => Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+                "an object literal's supertype {name:?} is not a selected classifier"
+            ))),
+        }
+    }
+
     fn link_accessor(
         &mut self,
         ir: &mut IrFile,
@@ -1058,6 +1164,21 @@ impl CallLinker for Linker<'_, '_> {
                 )))
             }
         };
+        // A materialized class's accessor was installed with its class.
+        if let Some((linked, setter)) = self.installed_member(ir, &identity)? {
+            let Callee::Local(function) = linked.callee else {
+                unreachable!("an installed member is a local function");
+            };
+            return Ok(LinkedAccessor {
+                target: LinkedAccessorTarget::Local(function),
+                write: setter,
+                receiver: linked.receiver,
+                params: linked.params,
+                ret: linked.ret,
+                context_count: linked.context_count,
+                class_type_parameters: linked.class_type_parameters,
+            });
+        }
         // A value class's getter with a body is emitted here, as its other members are.
         if let Some(linked) = self.value_member_getter(ir, &identity)? {
             return Ok(linked);
@@ -1321,6 +1442,12 @@ impl CallLinker for Linker<'_, '_> {
                 return Ok(linked);
             }
         }
+        if let Some((linked, _)) = self
+            .installed_member(ir, &identity)
+            .map_err(callee_declined)?
+        {
+            return Ok(linked);
+        }
         if declaration.dispatch_receiver.is_some() {
             // A value class's member is final and is emitted as a member of its materialized class.
             // Any other member call dispatches virtually unless the member is final; lowering
@@ -1491,7 +1618,7 @@ impl<'s> Linker<'_, 's> {
         };
         let declared = &ir.functions[function as usize];
         let (Some(receiver), params) = (
-            self.value_receivers.get(identity).copied(),
+            self.member_receivers.get(identity).copied(),
             &declared.params,
         ) else {
             return Err(KlibBodyDeclineReason::SignatureMismatch(
@@ -1531,7 +1658,7 @@ impl<'s> Linker<'_, 's> {
         };
         let declared = &ir.functions[function as usize];
         let (Some(receiver), params) = (
-            self.value_receivers.get(identity).copied(),
+            self.member_receivers.get(identity).copied(),
             &declared.params,
         ) else {
             return Err(KlibBodyDeclineReason::SignatureMismatch(
@@ -1580,16 +1707,15 @@ impl<'s> Linker<'_, 's> {
         match self
             .sources
             .bodies
-            .callee_origin(&self.active_module, &signature)
+            .linked_origin(&self.active_module, &signature)
         {
             KlibCalleeOrigin::Exact(identity) => Ok(identity),
             KlibCalleeOrigin::Ambiguous => Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(
                 Box::new(callee.clone()),
             )),
             KlibCalleeOrigin::Missing if callee.declaration().segments().len() > 1 => {
-                // A member no library serializes is, in a complete library set, a fake override:
-                // its real declaration is reached through serialized class declarations, which
-                // lowering does not follow yet.
+                // A member no library serializes is, in a complete library set, a fake override
+                // whose declared hierarchy did not bind it to one real declaration.
                 Err(KlibBodyDeclineReason::UnsupportedOperation(
                     "a call of a member no library serializes, such as a fake override",
                 ))
@@ -1678,7 +1804,7 @@ impl<'s> Linker<'_, 's> {
         let declared = declare_function(ir, &header);
         self.functions.insert(identity.clone(), declared);
         if let Some(receiver) = header.value_receiver() {
-            self.value_receivers.insert(identity.clone(), receiver);
+            self.member_receivers.insert(identity.clone(), receiver);
         }
         if let Some(singleton) = selected.and_then(KlibBodyCallable::singleton_dispatch) {
             self.authenticated_singleton_dispatches
@@ -1695,7 +1821,6 @@ impl<'s> Linker<'_, 's> {
             statements,
             header,
             function: declared,
-            initialization: None,
             value_member,
             local_body: None,
         });
@@ -1882,7 +2007,7 @@ impl UnitCheckpoint {
             .retain(|identity, _| functions.contains_key(identity));
         unit.private_members
             .retain(|identity| functions.contains_key(identity));
-        unit.value_receivers
+        unit.member_receivers
             .retain(|identity, _| functions.contains_key(identity));
         unit.local_classes
             .retain(|_, class| (class.class as usize) < unit.ir.classes.len());

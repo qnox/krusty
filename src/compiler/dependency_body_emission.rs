@@ -297,7 +297,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             .collect::<Vec<_>>();
         for (identity, function) in &closed {
             exports.record_callable(*function, identity.clone());
-            if let Some(receiver) = unit.value_member_receiver(identity) {
+            if let Some(receiver) = unit.member_receiver(identity) {
                 exports.record_member_receiver(*function, receiver);
             }
             if let Some(classifier) = unit.authenticated_singleton_classifier(identity) {
@@ -405,7 +405,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             }
             published.push((identity.clone(), PublishedDependency::AllocatingConstructor));
         }
-        let callables = match CheckedBackendCallables::freeze(unit.ir(), platform) {
+        let mut callables = match CheckedBackendCallables::freeze(unit.ir(), platform) {
             Ok(callables) => callables,
             Err(error) => {
                 diags.error(
@@ -417,6 +417,7 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         };
+        super::primitive_implementations::record(&mut callables, platform);
         let ordinal = support_state.emitted.len();
         let support_module = format!(
             "{}$klib_body${}${ordinal}",
