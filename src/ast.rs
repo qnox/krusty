@@ -1954,6 +1954,11 @@ pub struct File {
     /// `+AllowEagerSupertypeAccessibilityChecks`: a missing supertype found at a constructor call
     /// (or behind a dispatch receiver already reported) is an error rather than a warning.
     pub allow_eager_supertype_accessibility_checks: bool,
+    /// `ForbidSamConstructorCallsWithMissingDependencySupertype` when the reference release has
+    /// it. `None` on a release without the check. `Some(false)` warns at a SAM constructor or
+    /// SAM conversion whose interface is missing a dependency supertype; `Some(true)` makes that
+    /// an error.
+    pub sam_constructor_missing_dependency: Option<bool>,
     /// Before Kotlin language level 2.4, a lambda implementation keeps the body's inferred result
     /// separately from the caller-facing function result. The checked FIR boundary records that
     /// semantic choice so a backend never needs its own language-version switch.
@@ -1975,6 +1980,9 @@ pub struct File {
     /// Exact per-compilation warning text for that transition. Releases before the diagnostic split
     /// leave this absent and report the construct as an ordinary error.
     pub inapplicable_operator_modifier_warning: Option<String>,
+    /// `+NormalizeNaNValuesInConstContext`: every NaN a compile-time constant evaluates to is the
+    /// canonical NaN of its type, whatever sign and payload the arithmetic produced.
+    pub normalize_nan_in_const_context: bool,
     /// `+CustomEqualsInValueClasses`: permit the typed `equals(Self)` convention in a value class
     /// whose selected representation is inline rather than full/boxed.
     pub custom_equals_in_value_classes: bool,

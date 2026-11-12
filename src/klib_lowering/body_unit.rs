@@ -1382,7 +1382,7 @@ impl CallLinker for Linker<'_, '_> {
                             .is_some_and(|class| !class.parameters.formals.is_empty()) =>
                 {
                     Some(
-                        super::class_headers::authenticate(selected, self.sources.bodies, None)
+                        super::class_headers::authenticate(selected, self.sources.bodies)
                             .map_err(callee_declined)?,
                     )
                 }
@@ -1699,10 +1699,7 @@ impl<'s> Linker<'_, 's> {
                     .class_contract()
                     .is_some_and(|class| !class.parameters.formals.is_empty()) =>
             {
-                Ok(
-                    super::class_headers::authenticate(selected, self.sources.bodies, None)?
-                        .formals,
-                )
+                Ok(super::class_headers::authenticate(selected, self.sources.bodies)?.formals)
             }
             _ => Ok(Vec::new()),
         }
@@ -1891,7 +1888,7 @@ fn body_header(
             .is_some_and(|class| !class.parameters.formals.is_empty())
     }) {
         Some(member) => {
-            let class = super::class_headers::authenticate(member, bodies, None)?;
+            let class = super::class_headers::authenticate(member, bodies)?;
             super::function_lowering::raw_function_header_with_class(
                 Some(member),
                 HeaderPurpose::Body(None),

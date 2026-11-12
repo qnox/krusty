@@ -898,7 +898,7 @@ impl<'a> Body<'a> {
         };
         if source == target {
             // An `Int` stored where a `Byte`, `Short` or `Char` is declared (`b++` on a `Byte`)
-            // wraps to that width.
+            // wraps to that width. `UByte` and `UShort` keep their low bits on the same carrier.
             numeric_conversions::fit(&mut self.code, source_ty, target_ty);
             return Ok(());
         }
@@ -1318,17 +1318,22 @@ impl<'a> Body<'a> {
             }
             IrExpr::NotNullAssert { operand, .. } => {
                 let operand_carrier = self.carrier_of(operand)?;
-                if matches!(operand_carrier, Some(ValType::Ref { .. }))
-                    && matches!(
-                        self.carrier_of(id)?,
-                        Some(ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64)
-                    )
+                // `!!` on a nullable scalar reads the box back to its carrier. The box is keyed
+                // by the scalar's classifier, so a signed or an unsigned value reads through the
+                // same `unbox`, which declines a scalar with no box form.
+                let scalar_result = matches!(
+                    self.carrier_of(id)?,
+                    Some(ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64)
+                );
+                if let (Some(reference @ ValType::Ref { .. }), true) =
+                    (operand_carrier, scalar_result)
                 {
-                    return Err(
-                        "a not-null assertion requiring a scalar reference conversion".into(),
-                    );
-                }
-                if let Some(reference @ ValType::Ref { .. }) = operand_carrier {
+                    let result_ty = self
+                        .type_of(id)?
+                        .ok_or("a not-null assertion without a result type")?;
+                    self.assert_nonnull_reference(operand, reference)?;
+                    self.unbox(result_ty.non_null())?;
+                } else if let Some(reference @ ValType::Ref { .. }) = operand_carrier {
                     self.assert_nonnull_reference(operand, reference)?;
                 } else {
                     self.expression(operand)?;
@@ -1789,13 +1794,18 @@ impl<'a> Body<'a> {
             left.is_unsigned() || right.is_unsigned()
         };
         // Equality, shifts and the bitwise connectives are sign-agnostic on the carrier (a shift
-        // takes its right-shift kind from `unsigned` below); every other operator needs an
-        // unsigned instruction this lowering does not select yet.
+        // takes its right-shift kind from `unsigned` below). Addition, subtraction and
+        // multiplication have the same bits for a two's-complement unsigned value, so they use
+        // those instructions on purpose. Division, remainder and the signed comparisons still
+        // need an unsigned instruction this lowering does not select yet.
         if unsigned
             && !matches!(
                 op,
                 IrBinOp::Eq
                     | IrBinOp::Ne
+                    | IrBinOp::Add
+                    | IrBinOp::Sub
+                    | IrBinOp::Mul
                     | IrBinOp::Shl
                     | IrBinOp::Shr
                     | IrBinOp::Ushr
@@ -1851,11 +1861,21 @@ impl<'a> Body<'a> {
                 self.code.call(self.runtime.i64_div);
             }
         }
-        // `Char` arithmetic stays a 16-bit code unit.
-        if result == Ty::Char {
-            self.code.i32_const(0xffff).op(AND32);
-        }
+        // `Char`, `UByte` and `UShort` arithmetic stays inside the value's own width.
+        self.mask_narrow_bits(result);
         Ok(())
+    }
+
+    /// Keep a narrow `i32` result in its own bits. `UInt` and `ULong` already fill their carrier.
+    fn mask_narrow_bits(&mut self, result: Ty) {
+        let mask = match result {
+            Ty::Char | Ty::UShort => Some(0xffff),
+            Ty::UByte => Some(0xff),
+            _ => None,
+        };
+        if let Some(mask) = mask {
+            self.code.i32_const(mask).op(AND32);
+        }
     }
 
     fn equality(
