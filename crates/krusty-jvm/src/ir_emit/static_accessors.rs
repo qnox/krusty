@@ -144,6 +144,16 @@ pub(super) fn emission_contexts(
         })
         .filter_map(|(_, function)| function.body)
         .chain(
+            ir.functions
+                .iter()
+                .enumerate()
+                .filter(|(fid, function)| {
+                    !class_member_fids.contains(&(*fid as u32))
+                        && function.dispatch_receiver.is_none()
+                })
+                .flat_map(|(fid, _)| default_expression_roots(ir, fid as u32)),
+        )
+        .chain(
             ir.statics
                 .iter()
                 .filter(|property| property.owner.is_none())
@@ -313,10 +323,25 @@ pub(super) fn body_exports_private_access(
     exporting: &HashSet<u32>,
     root: krusty::ir::ExprId,
 ) -> bool {
-    ir.functions
-        .iter()
-        .enumerate()
-        .any(|(index, function)| function.body == Some(root) && exporting.contains(&(index as u32)))
+    ir.functions.iter().enumerate().any(|(index, function)| {
+        let function_id = index as u32;
+        exporting.contains(&function_id)
+            && (function.body == Some(root)
+                || default_expression_roots(ir, function_id).any(|default| default == root))
+    })
+}
+
+/// The default-argument expressions of `function`: the `$default` stub evaluates them, and an
+/// inline function's copies re-evaluate them in the caller.
+fn default_expression_roots(
+    ir: &IrFile,
+    function: u32,
+) -> impl Iterator<Item = krusty::ir::ExprId> + '_ {
+    ir.fn_params
+        .get(&function)
+        .and_then(|parameters| parameters.defaults.as_ref())
+        .into_iter()
+        .flat_map(|defaults| defaults.iter().flatten().copied())
 }
 
 /// Inline functions whose code `root` publishes: a direct call, or a same-module expansion
