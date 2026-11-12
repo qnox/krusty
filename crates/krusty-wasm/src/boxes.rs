@@ -5,25 +5,37 @@
 //! value, as a type parameter's value or through a supertype that is a class (`Number`,
 //! `Comparable`), as it is on every Kotlin target. Each such classifier has one box type: a
 //! struct of the dispatch table every object starts with, then the value itself. Its table holds
-//! that type's own `equals` and `hashCode`, which is what kotlinc's output observes. A box type
-//! and its table are declared the first time a file boxes a value of that classifier.
+//! that type's own `equals` and `hashCode`, which is what kotlinc's output observes, and
+//! `toString` where a scalar printer writes Kotlin's form: a boolean, a signed integer, or a
+//! character. A floating box and an unsigned box have no such printer, so the slot traps and
+//! lowering declines a `toString` that could reach it. A box type and its table are declared the
+//! first time a file boxes a value of that classifier. A box also implements the members of the
+//! library classes above its classifier that a call goes through (`Number.toLong`, see [`members`]).
 //!
 //! The box type is keyed by the classifier's identity, never by the carrier: a `Long` box never
 //! equals an `Int` box holding the same number, a `UInt` box never equals an `Int` box holding the
 //! same bits, and unboxing casts to exactly the type the frontend checked the value is.
 
 use krusty::fx_hash::HashMap;
-use krusty::types::{Ty, TypeName};
+use krusty::types::{Ty, TyKind, TypeName};
 
 use super::encode::{BlockType, Code, CompositeType, Function, HeapType, Module, SubType, ValType};
+use super::interface_dispatch::ClassRef;
 use super::objects::immutable;
 use super::runtime::{Runtime, AND32, EQ32, EQ64, OR32};
+
+mod members;
+
+pub(super) use members::BoxMembers;
 
 /// A scalar type's box struct and the global holding its dispatch table.
 #[derive(Clone, Copy)]
 pub(super) struct BoxForm {
     pub(super) structure: u32,
     pub(super) table: u32,
+    /// The boxed type, and the class its box is in the program's dispatch.
+    boxed: Ty,
+    class: ClassRef,
     /// The globals holding the only two `Boolean` boxes, `false` then `true`: the JVM's
     /// `Boolean.valueOf` answers one instance per value, which `===` observes.
     pub(super) booleans: Option<[u32; 2]>,
@@ -64,30 +76,57 @@ impl BoxForm {
     }
 }
 
+/// Whether a box of `ty` answers `toString` rather than trapping. `None` when `ty` is not a scalar
+/// this backend boxes: a signed integer, a boolean, or a character prints, and a floating or
+/// unsigned box traps.
+pub(super) fn box_prints(ty: Ty) -> Option<bool> {
+    match ty.kind() {
+        TyKind::BOOLEAN
+        | TyKind::BYTE
+        | TyKind::SHORT
+        | TyKind::CHAR
+        | TyKind::INT
+        | TyKind::LONG => Some(true),
+        TyKind::FLOAT
+        | TyKind::DOUBLE
+        | TyKind::UBYTE
+        | TyKind::USHORT
+        | TyKind::UINT
+        | TyKind::ULONG => Some(false),
+        _ => None,
+    }
+}
+
 /// The box types this module has declared.
 #[derive(Default)]
 pub(super) struct Boxes {
     /// By the boxed classifier's identity.
     forms: HashMap<TypeName, BoxForm>,
+    /// The library class members called on a value that may be a box.
+    members: BoxMembers,
     /// The global holding `kotlin.Unit`, once something reads it as a reference.
     unit: Option<u32>,
 }
 
 impl Runtime {
     /// The box of `ty`'s values, which are carried as `value`, declared on first use; `None` for a
-    /// type that names no classifier or has no scalar hash, which is not boxed here.
+    /// type that names no classifier or has no scalar hash, which is not boxed here. Declaring one
+    /// declines when a library class member called on such values has an implementation for the
+    /// classifier this generator cannot write.
     pub(super) fn box_form(
         &mut self,
         module: &mut Module,
         ty: Ty,
         value: ValType,
-    ) -> Option<BoxForm> {
-        let identity = ty.obj_internal()?;
+    ) -> Result<Option<BoxForm>, String> {
+        let Some(identity) = ty.obj_internal() else {
+            return Ok(None);
+        };
         if let Some(form) = self.boxes.forms.get(&identity) {
-            return Some(*form);
+            return Ok(Some(*form));
         }
         if !self.hashing.emit_scalar_hash(&mut Code::default(), ty) {
-            return None;
+            return Ok(None);
         }
         let objects = &self.objects;
         let structure = module.subtype(SubType {
@@ -101,19 +140,24 @@ impl Runtime {
         let [equals_ty, hash_code_ty, to_string_ty] = objects.any_slot_types;
         let equals = define(module, equals_ty, equals(value, structure));
         let hash_code = define(module, hash_code_ty, self.hash_code(ty, structure));
-        // A box's `toString` is reached only by a call of `kotlin.Any`'s members on an `Any`
-        // receiver, which this backend does not lower yet.
-        let to_string = self.objects.trap(module, to_string_ty);
+        let to_string = match self.boxed_to_string(ty, structure) {
+            Some(body) => define(module, to_string_ty, body),
+            // No printer writes Kotlin's form, so the slot traps. [`box_prints`] tells lowering.
+            None => self.objects.trap(module, to_string_ty),
+        };
         let objects = &mut self.objects;
-        let (_, itable) = objects
+        let (class, itable) = objects
             .interfaces
             .class(module, objects.itable, vec![structure]);
+        let info = objects.type_infos.global(module, identity);
         let mut init = Code::default();
         for function in [equals, hash_code, to_string] {
             module.reference_function(function);
             init.ref_func(function);
         }
-        init.global_get(itable).struct_new(objects.any_table);
+        init.global_get(itable);
+        objects.push_type_info(&mut init, Some(info));
+        init.struct_new(objects.any_table);
         let table = module.constant_global(ValType::reference(objects.any_table), init);
         let booleans = (ty == Ty::Boolean).then(|| {
             [0, 1].map(|value| {
@@ -127,10 +171,13 @@ impl Runtime {
         let form = BoxForm {
             structure,
             table,
+            boxed: ty,
+            class,
             booleans,
         };
         self.boxes.forms.insert(identity, form);
-        Some(form)
+        self.implement_box_members(module, form)?;
+        Ok(Some(form))
     }
 }
 
@@ -142,26 +189,32 @@ impl Runtime {
         if let Some(unit) = self.boxes.unit {
             return unit;
         }
-        let objects = &mut self.objects;
         let structure = module.subtype(SubType {
             composite: CompositeType::Struct(vec![immutable(ValType::reference(
-                objects.any_table,
+                self.objects.any_table,
             ))]),
-            supertype: Some(objects.object),
+            supertype: Some(self.objects.object),
             open: false,
         });
-        let [_, _, to_string_ty] = objects.any_slot_types;
         let hash_code = self.hashing.unit_hash_code;
-        let to_string = objects.trap(module, to_string_ty);
+        // Boundary conversion: `Unit`'s one instance prints its qualified name.
+        let to_string = self.constant_to_string(
+            module,
+            &krusty::backend::class_names::member_class_names(krusty::types::wk::unit()).qualified,
+        );
+        let objects = &mut self.objects;
         let (_, itable) = objects
             .interfaces
             .class(module, objects.itable, vec![structure]);
+        let info = objects.type_infos.global(module, krusty::types::wk::unit());
         let mut init = Code::default();
         for function in [objects.identity_equals, hash_code, to_string] {
             module.reference_function(function);
             init.ref_func(function);
         }
-        init.global_get(itable).struct_new(objects.any_table);
+        init.global_get(itable);
+        objects.push_type_info(&mut init, Some(info));
+        init.struct_new(objects.any_table);
         let table = module.constant_global(ValType::reference(objects.any_table), init);
         let mut init = Code::default();
         init.global_get(table).struct_new(structure);
@@ -214,6 +267,24 @@ fn equals(value: ValType, structure: u32) -> (Vec<ValType>, Code) {
 }
 
 impl Runtime {
+    /// `toString(this)`: the scalar the box holds, as Kotlin prints it. `None` for a floating or
+    /// unsigned box, which has no such printer ([`box_prints`]).
+    fn boxed_to_string(&self, ty: Ty, structure: u32) -> Option<(Vec<ValType>, Code)> {
+        let printer = match ty.kind() {
+            TyKind::BOOLEAN => self.string_of_boolean,
+            TyKind::BYTE | TyKind::SHORT | TyKind::INT => self.string_of_i32,
+            TyKind::LONG => self.string_of_i64,
+            TyKind::CHAR => self.string_of_char,
+            _ => return None,
+        };
+        let mut code = Code::default();
+        code.local_get(0)
+            .ref_cast(false, HeapType::Concrete(structure))
+            .struct_get(structure, BOX_VALUE_FIELD)
+            .call(printer);
+        Some((Vec::new(), code))
+    }
+
     /// `hashCode(this)`: the hash of the `ty` value the box holds.
     fn hash_code(&self, ty: Ty, structure: u32) -> (Vec<ValType>, Code) {
         let mut code = Code::default();

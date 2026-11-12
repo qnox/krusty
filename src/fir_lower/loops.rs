@@ -697,15 +697,15 @@ impl BodyLowering<'_> {
                 Err(FirLoweringFailure::UnsupportedIntrinsicCall)
             }
             crate::fir::FirCallTarget::Module(target) => self
-                .same_file_call(
-                    super::expect_realization::realized_callable(self.index, *target),
-                    super::source_calls::DispatchOperand::plain(dispatch_receiver),
+                .same_file_call(super::source_calls::SameFileCall {
+                    target: super::expect_realization::realized_callable(self.index, *target),
+                    dispatch: super::source_calls::DispatchOperand::plain(dispatch_receiver),
                     extension_receiver,
                     arguments,
-                    context_parameter_types,
-                    &[],
-                    None,
-                )
+                    specialized_parameters: context_parameter_types,
+                    substitutions: &[],
+                    source_line: None,
+                })
                 .unwrap_or(Err(FirLoweringFailure::MissingCallable(*target))),
             crate::fir::FirCallTarget::External {
                 declaration,
@@ -757,15 +757,15 @@ impl BodyLowering<'_> {
                 parameters,
                 result,
             } => self
-                .intrinsic_call(
-                    super::checked::lower_fir_intrinsic(operation),
-                    *receiver,
+                .intrinsic_call(super::source_calls::IntrinsicCall {
+                    operation: super::checked::lower_fir_intrinsic(operation),
+                    receiver_ty: *receiver,
                     parameters,
-                    *result,
+                    result: *result,
                     dispatch_receiver,
                     extension_receiver,
                     arguments,
-                )
+                })
                 .ok_or(FirLoweringFailure::UnsupportedIntrinsicCall),
         }
     }

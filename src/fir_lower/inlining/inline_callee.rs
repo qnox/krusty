@@ -32,9 +32,9 @@ pub(in super::super) enum InlineCallee {
 pub(super) struct InlineFrame {
     /// The name the expansion's frames are opened under.
     pub(super) name: String,
-    /// The module declaration whose body is copied. A call-site specialization of a lambda or an
-    /// anonymous class the body declares is named after it; a dependency template declares none.
-    pub(super) module: Option<CallableId>,
+    /// The declaration whose body is copied. A call-site specialization of a lambda or an
+    /// anonymous class the body declares records it.
+    pub(super) callee: crate::ir::IrInlineCallee,
     /// The copied declaration's owner and source file, for a same-module callee.
     source: Option<(Option<TypeName>, crate::fir::SourceFileId)>,
     label: String,
@@ -50,7 +50,7 @@ impl InlineCallee {
                     .map(|classifier| classifier.classifier);
                 InlineFrame {
                     name: index.callable_name(*target)?.to_owned(),
-                    module: Some(*target),
+                    callee: crate::ir::IrInlineCallee::Module(*target),
                     source: Some((
                         owner,
                         index.declaration_anchor(callable.declaration)?.source,
@@ -62,7 +62,7 @@ impl InlineCallee {
                 target, template, ..
             } => InlineFrame {
                 name: template.name.clone(),
-                module: None,
+                callee: crate::ir::IrInlineCallee::Dependency(*target),
                 source: None,
                 label: format!("$fir_dependency_inline${}", target.raw()),
             },

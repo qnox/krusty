@@ -48,6 +48,16 @@ struct BuiltNativeModule {
     dependency_closure: Vec<PathBuf>,
 }
 
+/// The module graph one kotlinc-native unit is compiled against. The same four values are passed
+/// for every unit: parsed blocks, the folded source-set representatives, KLIBs already built, and
+/// the stdlib KLIB common fragments name explicitly.
+struct NativeFragmentGraph<'a> {
+    module_blocks: &'a HashMap<&'a str, &'a krusty::conformance::ModuleBlock>,
+    representatives: &'a HashMap<String, String>,
+    built: &'a HashMap<String, BuiltNativeModule>,
+    stdlib: &'a Path,
+}
+
 fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<String, Vec<u8>>> {
     let native_root = kotlin_native_root()?;
     let compiler = native_root.join("bin/kotlinc-native");
@@ -164,10 +174,12 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
             unit,
             &source_paths,
             runner_path.as_deref(),
-            &module_blocks,
-            &representatives,
-            &built,
-            &stdlib,
+            &NativeFragmentGraph {
+                module_blocks: &module_blocks,
+                representatives: &representatives,
+                built: &built,
+                stdlib: &stdlib,
+            },
         );
 
         let klib = unit_root.join(format!("{}.klib", unit.name));
@@ -320,10 +332,7 @@ fn native_fragment_arguments(
     unit: &krusty::conformance::ModuleUnit,
     source_paths: &[PathBuf],
     runner_path: Option<&Path>,
-    module_blocks: &HashMap<&str, &krusty::conformance::ModuleBlock>,
-    representatives: &HashMap<String, String>,
-    built: &HashMap<String, BuiltNativeModule>,
-    stdlib: &Path,
+    graph: &NativeFragmentGraph<'_>,
 ) {
     if unit.fragments.len() <= 1 {
         return;
@@ -361,9 +370,10 @@ fn native_fragment_arguments(
         command.arg(format!(
             "-Xfragment-dependency={}:{}",
             fragment.name,
-            stdlib.to_string_lossy()
+            graph.stdlib.to_string_lossy()
         ));
-        let block = module_blocks
+        let block = graph
+            .module_blocks
             .get(fragment.name.as_str())
             .expect("every HMPP fragment came from a parsed module block");
         for (dependencies, argument) in [
@@ -371,14 +381,16 @@ fn native_fragment_arguments(
             (&block.friends, "-Xfragment-friend-dependency"),
         ] {
             for dependency in dependencies {
-                let representative = representatives
+                let representative = graph
+                    .representatives
                     .get(dependency)
                     .map(String::as_str)
                     .unwrap_or(dependency);
                 if representative == unit.name {
                     continue;
                 }
-                let klib = &built
+                let klib = &graph
+                    .built
                     .get(representative)
                     .unwrap_or_else(|| {
                         panic!(
@@ -557,6 +569,7 @@ mod tests {
         ];
         let runner = Path::new("/work/KrustyNativeBoxRunner.kt");
         let stdlib = Path::new("/konan/klib/common/stdlib");
+        let built = HashMap::default();
         let mut command = Command::new("kotlinc-native");
 
         native_fragment_arguments(
@@ -564,10 +577,12 @@ mod tests {
             &unit,
             &source_paths,
             Some(runner),
-            &module_blocks,
-            &representatives,
-            &HashMap::default(),
-            stdlib,
+            &NativeFragmentGraph {
+                module_blocks: &module_blocks,
+                representatives: &representatives,
+                built: &built,
+                stdlib,
+            },
         );
 
         let arguments = command.get_args().collect::<Vec<&OsStr>>();

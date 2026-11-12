@@ -31,13 +31,22 @@ pub(super) fn finish(cw: &mut ClassWriter, code: &mut CodeBuilder, baseline: i32
 #[cfg(test)]
 mod tests {
     use super::*;
+    use krusty::jvm::classfile::InlineSplice;
 
     #[test]
     fn a_zero_word_unreachable_producer_needs_no_second_termination() {
         let mut writer = ClassWriter::new("BottomCompletion", "java/lang/Object");
         let mut code = CodeBuilder::new(0);
         let baseline = code.stack_height();
-        code.splice_inline(&[0x01, 0xbf], &[], 1, 0, 0, 0, false);
+        code.splice_inline(InlineSplice {
+            bytes: &[0x01, 0xbf],
+            external_branches: &[],
+            body_stack: 1,
+            top_local: 0,
+            arg_words: 0,
+            ret_words: 0,
+            falls_through: false,
+        });
         let terminated = code.bytes.clone();
 
         finish(&mut writer, &mut code, baseline, true);
@@ -66,15 +75,15 @@ mod tests {
         // `ifnull left; throw null; left: throw null`: representative branch-bearing bulk bytes
         // whose transformed CFG has no caller continuation. Its selected result width is therefore
         // zero even if its descriptor declared a reference result before transformation.
-        code.splice_inline(
-            &[0x01, 0xc6, 0x00, 0x05, 0x01, 0xbf, 0x01, 0xbf],
-            &[],
-            1,
-            0,
-            0,
-            0,
-            false,
-        );
+        code.splice_inline(InlineSplice {
+            bytes: &[0x01, 0xc6, 0x00, 0x05, 0x01, 0xbf, 0x01, 0xbf],
+            external_branches: &[],
+            body_stack: 1,
+            top_local: 0,
+            arg_words: 0,
+            ret_words: 0,
+            falls_through: false,
+        });
 
         assert_eq!(code.stack_height(), 0);
         assert!(!code.can_fall_through());

@@ -1029,7 +1029,7 @@ fn ensure_flush_at_exit() {
 extern "C" fn flush_at_exit() {
     // No panic may cross the C ABI boundary. Normal test-time explicit flushes retain their exact
     // diagnostics; process teardown is best-effort and must never abort an otherwise valid run.
-    let _ = std::panic::catch_unwind(flush_dirty_archives);
+    let _ = std::panic::catch_unwind(flush_recorded_class_dumps);
 }
 
 fn file_stamp(path: &Path) -> Option<Stamp> {

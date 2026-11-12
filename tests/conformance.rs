@@ -16,6 +16,7 @@ mod asm_text;
 #[path = "box_byte_score.rs"]
 mod box_byte_score;
 mod box_inventory;
+mod box_klib_bytes;
 #[path = "box_lane.rs"]
 mod box_lane;
 #[path = "box_lane_profile.rs"]
@@ -24,6 +25,8 @@ mod box_lane_profile;
 mod box_ratchet;
 #[path = "box_reference_classes.rs"]
 mod box_reference_classes;
+#[path = "box_selection_reference.rs"]
+mod box_selection_reference;
 #[path = "box_vendored.rs"]
 mod box_vendored;
 #[path = "bytecode_corpus.rs"]

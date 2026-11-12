@@ -471,8 +471,8 @@ fn function_annotations_keep_string_arguments_on_both_declaration_views() {
         )],
     };
     assert_eq!(
-        class.functions[0].annotation_applications,
-        [expected.clone()]
+        class.functions[0].annotation_applications.as_slice(),
+        std::slice::from_ref(&expected)
     );
     assert_eq!(class.members[0].annotation_applications, [expected]);
     assert_eq!(

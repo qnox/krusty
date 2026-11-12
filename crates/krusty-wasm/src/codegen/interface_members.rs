@@ -33,6 +33,7 @@ use super::super::interface_dispatch::{ClassRef, MemberRef};
 use super::super::objects::{ObjectRoot, REFERENCE};
 use super::callable_registry::CallableRegistry;
 use super::classes::{accessor_function, field_carrier, Accessor, FileClasses};
+use super::laid_out_classes::DependencyImplementation;
 use super::lower::{carrier, Unsupported};
 
 /// A function's wasm parameters (the receiver first) and results.
@@ -74,10 +75,13 @@ pub(super) struct Destination<'a> {
     pub(super) callables: &'a mut CallableRegistry,
 }
 
-/// A function and the signature it is carried as.
-type Placed = (u32, Signature);
+use super::laid_out_classes::Placed;
 
 /// Publish the identities of the file's interface members and record what its classes implement.
+///
+/// A class with no instances of its own records nothing in the program, but what it would
+/// implement is kept for a later file extending it; where it needs what this form does not
+/// provide, that file declines with the reason instead.
 pub(super) fn record(
     recording: &Recording<'_>,
     classes: &mut FileClasses,
@@ -85,19 +89,41 @@ pub(super) fn record(
 ) -> Result<(), Unsupported> {
     publish_identities(recording, program)?;
     for &id in &classes.tables.order.clone() {
-        let Some(record) = classes.forms[id as usize].record else {
+        if recording.ir.classes[id as usize].is_interface {
             continue;
-        };
+        }
+        let record = classes.forms[id as usize].record;
+        if record.is_none() && classes.refusals[id as usize].is_some() {
+            continue;
+        }
         let mut file = FileRecorder {
             recording,
             classes: &mut *classes,
             program: &mut *program,
             id,
             record,
+            implemented: Vec::new(),
         };
-        let numbered = file.module_implementations()?;
-        file.dependency_implementations(&numbered)?;
+        let recorded = file.module_implementations().and_then(|numbered| {
+            file.dependency_implementations(&numbered)?;
+            Ok(numbered)
+        });
+        let numbered = match recorded {
+            Ok(numbered) => numbered,
+            Err(reason) if record.is_none() => {
+                classes.refusals[id as usize] = Some(reason);
+                continue;
+            }
+            Err(reason) => return Err(reason),
+        };
         file.instances();
+        let FileRecorder { implemented, .. } = file;
+        let members = &classes.tables.interface_tables.members[id as usize];
+        classes.interface_bodies[id as usize] = numbered
+            .into_iter()
+            .filter(|(number, _)| members.get(number) == Some(&None))
+            .collect();
+        classes.dependency_implementations[id as usize] = implemented;
     }
     Ok(())
 }
@@ -186,13 +212,17 @@ fn numbered(
         .numbered(program.module, recording.module_name, number, signature)
 }
 
-/// The recording of one class with instances.
+/// The recording of one class.
 struct FileRecorder<'r, 'a, 'd> {
     recording: &'r Recording<'a>,
     classes: &'r mut FileClasses,
     program: &'r mut Destination<'d>,
     id: ClassId,
-    record: ClassRef,
+    /// The class as interface dispatch knows it; `None` for a class with no instances of its own,
+    /// whose implementations are only kept for a later file extending it.
+    record: Option<ClassRef>,
+    /// How the class implements each member of a dependency's interface, most derived first.
+    implemented: Vec<(MemberRef, DependencyImplementation)>,
 }
 
 impl FileRecorder<'_, '_, '_> {
@@ -202,7 +232,7 @@ impl FileRecorder<'_, '_, '_> {
         let entries = self.classes.tables.interface_tables.tables[self.id as usize].clone();
         let mut placed = HashMap::default();
         for (number, entry) in entries.iter().enumerate() {
-            let Some((function, signature)) = self.entry(entry)? else {
+            let Some((function, signature)) = self.entry(number as u32, entry)? else {
                 continue;
             };
             let member = numbered(
@@ -211,20 +241,38 @@ impl FileRecorder<'_, '_, '_> {
                 number as u32,
                 signature.clone(),
             )?;
-            self.program
-                .objects
-                .interfaces
-                .implement(self.record, member, function)?;
+            if let Some(record) = self.record {
+                self.program
+                    .objects
+                    .interfaces
+                    .implement(record, member, function)?;
+            }
             placed.insert(number as u32, (function, signature));
         }
         Ok(placed)
     }
 
-    /// The function an interface table entry holds, or `None` for an abstract one.
-    fn entry(&mut self, entry: &InterfaceEntry) -> Result<Option<Placed>, Unsupported> {
+    /// The function the interface table entry at `number` holds, or `None` for an abstract one.
+    fn entry(
+        &mut self,
+        number: u32,
+        entry: &InterfaceEntry,
+    ) -> Result<Option<Placed>, Unsupported> {
         let ir = self.recording.ir;
         match entry {
             InterfaceEntry::Slot(Slot::Abstract) => Ok(None),
+            InterfaceEntry::Inherited => self
+                .classes
+                .laid_out_superclass(self.id)
+                .and_then(|superclass| superclass.interface_bodies.get(&number))
+                .cloned()
+                .map(Some)
+                .ok_or_else(|| {
+                    self.declined(
+                        "an interface member a superclass of another file bridges with nothing \
+                         recorded",
+                    )
+                }),
             InterfaceEntry::Slot(Slot::Bridge {
                 declared,
                 target_slot,
@@ -288,6 +336,23 @@ impl FileRecorder<'_, '_, '_> {
     fn slot_entry(&mut self, slot: &Slot) -> Result<Placed, Unsupported> {
         let ir = self.recording.ir;
         match slot {
+            Slot::Inherited { slot } => {
+                let placed = self
+                    .classes
+                    .laid_out_superclass(self.id)
+                    .and_then(|superclass| {
+                        let function = superclass.entries.get(*slot as usize).copied().flatten()?;
+                        let ty = superclass
+                            .slot_types
+                            .get(*slot as usize)
+                            .copied()
+                            .flatten()?;
+                        Some((function, self.program.module.func_signature(ty)?))
+                    });
+                placed.ok_or_else(|| {
+                    self.declined("an inherited slot with no function of another file")
+                })
+            }
             Slot::Function(function) => {
                 let index = self
                     .recording
@@ -426,10 +491,18 @@ impl FileRecorder<'_, '_, '_> {
                     .and_then(|callable| {
                         self.recording.numbers.number(PlanKey::Callable(callable))
                     });
-                let placed = match interface_number {
-                    Some(number) => numbered.get(&number).cloned().ok_or_else(|| {
-                        self.declined("an interface default implementing a dependency's member")
-                    })?,
+                let declared = (edge.declared_parameters.clone(), edge.declared_result);
+                let implemented = (
+                    edge.implementation_parameters.clone(),
+                    edge.implementation_result,
+                );
+                let (placed, slot) = match interface_number {
+                    Some(number) => (
+                        numbered.get(&number).cloned().ok_or_else(|| {
+                            self.declined("an interface default implementing a dependency's member")
+                        })?,
+                        None,
+                    ),
                     None => {
                         let function = edge
                             .implementation_function
@@ -445,15 +518,10 @@ impl FileRecorder<'_, '_, '_> {
                         let slot = self.classes.tables.slot(owner, &key).ok_or_else(|| {
                             self.declined("a dependency's interface member with no slot")
                         })?;
-                        self.slot_function(slot)?
+                        (self.slot_function(slot)?, Some(slot))
                     }
                 };
-                let placed = self.thunk(
-                    (&edge.declared_parameters, edge.declared_result),
-                    (&edge.implementation_parameters, edge.implementation_result),
-                    placed,
-                )?;
-                self.implement(member, placed)?;
+                self.implement_carried(member, placed, slot, declared, implemented)?;
             }
             self.dependency_property_implementations(owner, numbered)?;
             for default in ir.inherited_defaults.get(&name).into_iter().flatten() {
@@ -472,12 +540,7 @@ impl FileRecorder<'_, '_, '_> {
                 }) else {
                     continue;
                 };
-                if self
-                    .program
-                    .objects
-                    .interfaces
-                    .implements(self.record, member)
-                {
+                if self.implements(member) {
                     continue;
                 }
                 let function = self
@@ -489,12 +552,38 @@ impl FileRecorder<'_, '_, '_> {
                     .ok_or_else(|| {
                         self.declined("a default a dependency's interface declares with no body")
                     })?;
-                self.program
-                    .objects
-                    .interfaces
-                    .implement(self.record, member, function)?;
+                self.record_implementation(
+                    member,
+                    function,
+                    DependencyImplementation::Function(function),
+                )?;
             }
             current = self.classes.tables.table(owner).superclass;
+        }
+        // What the superclass an earlier file laid out implements, where nothing here did: the
+        // member at its slot is this class's own at that number, overridden or inherited.
+        let inherited = self
+            .classes
+            .laid_out_superclass(self.id)
+            .map(|superclass| superclass.dependency_implementations.clone())
+            .unwrap_or_default();
+        for (member, how) in inherited {
+            if self.implements(member) {
+                continue;
+            }
+            match how {
+                DependencyImplementation::Slot {
+                    slot,
+                    declared,
+                    implemented,
+                } => {
+                    let placed = self.slot_function(slot)?;
+                    self.implement_carried(member, placed, Some(slot), declared, implemented)?;
+                }
+                DependencyImplementation::Function(function) => {
+                    self.record_implementation(member, function, how)?;
+                }
+            }
         }
         Ok(())
     }
@@ -533,8 +622,8 @@ impl FileRecorder<'_, '_, '_> {
                     }
                     ResolvedPropertyOverrideTarget::External(_) => None,
                 };
-                let placed = match interface_number {
-                    Some(number) => numbered.get(&number).cloned(),
+                let (placed, slot) = match interface_number {
+                    Some(number) => (numbered.get(&number).cloned(), None),
                     None => {
                         let key = if setter {
                             SlotKey::Setter(edge.overridden)
@@ -542,21 +631,21 @@ impl FileRecorder<'_, '_, '_> {
                             SlotKey::Getter(edge.overridden)
                         };
                         match self.classes.tables.slot(owner, &key) {
-                            Some(slot) => Some(self.slot_function(slot)?),
-                            None => None,
+                            Some(slot) => (Some(self.slot_function(slot)?), Some(slot)),
+                            None => (None, None),
                         }
                     }
-                }
-                .ok_or_else(|| self.declined("a dependency's interface property with no slot"))?;
-                let (declared_params, declared_result) = accessor_types(edge.declared_type, setter);
-                let (implemented_params, implemented_result) =
-                    accessor_types(edge.implementation_type, setter);
-                let placed = self.thunk(
-                    (&declared_params, declared_result),
-                    (&implemented_params, implemented_result),
+                };
+                let placed = placed.ok_or_else(|| {
+                    self.declined("a dependency's interface property with no slot")
+                })?;
+                self.implement_carried(
+                    member,
                     placed,
+                    slot,
+                    accessor_types(edge.declared_type, setter),
+                    accessor_types(edge.implementation_type, setter),
                 )?;
-                self.implement(member, placed)?;
             }
         }
         Ok(())
@@ -581,30 +670,81 @@ impl FileRecorder<'_, '_, '_> {
             .identified(&identity(published)?)
     }
 
-    /// Record `placed` for `member` unless a more derived class of the chain already did.
-    fn implement(
+    /// Whether the class already implements `member`: a more derived class of the chain recorded
+    /// it, or the module's own numbering did.
+    fn implements(&self, member: MemberRef) -> bool {
+        self.implemented.iter().any(|(known, _)| *known == member)
+            || self
+                .record
+                .is_some_and(|record| self.program.objects.interfaces.implements(record, member))
+    }
+
+    /// Record `placed`, which takes `implemented`, for `member`, which takes `declared`, unless a
+    /// more derived class of the chain already did: through a thunk where the two are carried
+    /// differently. `slot` is the class slot `placed` was read from, which a subclass reads its own
+    /// implementation from in turn.
+    fn implement_carried(
         &mut self,
         member: MemberRef,
-        (function, signature): Placed,
+        placed: Placed,
+        slot: Option<u32>,
+        declared: (Vec<Ty>, Ty),
+        implemented: (Vec<Ty>, Ty),
     ) -> Result<(), Unsupported> {
-        let interfaces = &mut self.program.objects.interfaces;
-        if interfaces.implements(self.record, member) {
+        if self.implements(member) {
             return Ok(());
         }
+        let (function, signature) = self.thunk(
+            (&declared.0, declared.1),
+            (&implemented.0, implemented.1),
+            placed,
+        )?;
         let ty = self
             .program
             .module
             .func_type(signature.0.clone(), signature.1.clone());
-        if ty != interfaces.ty(member) {
+        if ty != self.program.objects.interfaces.ty(member) {
             return Err(
                 self.declined("a dependency's interface member implemented with other carriers")
             );
         }
-        interfaces.implement(self.record, member, function)
+        let how = match slot {
+            Some(slot) => DependencyImplementation::Slot {
+                slot,
+                declared,
+                implemented,
+            },
+            None => DependencyImplementation::Function(function),
+        };
+        self.record_implementation(member, function, how)
+    }
+
+    /// Record `function` for `member`, kept as `how` for a later file extending the class.
+    fn record_implementation(
+        &mut self,
+        member: MemberRef,
+        function: u32,
+        how: DependencyImplementation,
+    ) -> Result<(), Unsupported> {
+        if self.implements(member) {
+            return Ok(());
+        }
+        self.implemented.push((member, how));
+        match self.record {
+            Some(record) => self
+                .program
+                .objects
+                .interfaces
+                .implement(record, member, function),
+            None => Ok(()),
+        }
     }
 
     /// Record every interface the class's instances are instances of.
     fn instances(&mut self) {
+        let Some(record) = self.record else {
+            return;
+        };
         let ir = self.recording.ir;
         let class = &ir.classes[self.id as usize];
         let module = self.classes.tables.interface_tables.implemented[self.id as usize]
@@ -620,7 +760,7 @@ impl FileRecorder<'_, '_, '_> {
             self.program
                 .objects
                 .interfaces
-                .instance_of(self.record, interface);
+                .instance_of(record, interface);
         }
     }
 

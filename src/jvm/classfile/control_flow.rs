@@ -2,6 +2,22 @@
 
 use super::{CodeBuilder, Label};
 
+/// A pool-relocated inline body and the stack effect of appending it.
+///
+/// `bytes` already name this method's constant pool. `external_branches` are offsets in those
+/// bytes whose destinations belong to the caller. The remaining fields are the body's own peak,
+/// the highest local it uses, the words the caller pushed for it, the words it leaves, and whether
+/// control falls out of it.
+pub struct InlineSplice<'a> {
+    pub bytes: &'a [u8],
+    pub external_branches: &'a [(usize, Label)],
+    pub body_stack: u16,
+    pub top_local: u16,
+    pub arg_words: i32,
+    pub ret_words: i32,
+    pub falls_through: bool,
+}
+
 impl CodeBuilder {
     /// `nop`: occupies an offset and touches nothing. Its use is the caller's business — an
     /// exception table's bounds are one, since a range delimited by a real instruction of its own
@@ -257,16 +273,16 @@ impl CodeBuilder {
     }
 
     /// Append a pool-relocated inline body whose arguments are already on the stack.
-    pub fn splice_inline(
-        &mut self,
-        bytes: &[u8],
-        external_branches: &[(usize, Label)],
-        body_stack: u16,
-        top_local: u16,
-        arg_words: i32,
-        ret_words: i32,
-        falls_through: bool,
-    ) {
+    pub fn splice_inline(&mut self, splice: InlineSplice<'_>) {
+        let InlineSplice {
+            bytes,
+            external_branches,
+            body_stack,
+            top_local,
+            arg_words,
+            ret_words,
+            falls_through,
+        } = splice;
         let baseline = self.cur_stack - arg_words;
         // A dead splice has unbound inner frames/handlers and no pushed arguments to consume;
         // only its height bookkeeping survives for the enclosing emitter.

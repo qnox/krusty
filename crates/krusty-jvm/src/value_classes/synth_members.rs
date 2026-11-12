@@ -116,8 +116,8 @@ pub(super) fn record_renamed_functions(
 
 /// kotlinc's boxed `Any` member delegating to a source override's static `-impl` is that override
 /// on the box: it stands right after the `-impl`, at the override's place among the declared
-/// members, enters on the override's signature line and returns on its last line. The generated
-/// ones follow every declared member and map no line.
+/// members, enters on the override's signature line, where its delegating call is built, and
+/// returns on its last line. The generated ones follow every declared member and map no line.
 fn realize_delegator_of_override(
     ir: &mut IrFile,
     custom: Option<u32>,
@@ -138,6 +138,15 @@ fn realize_delegator_of_override(
         IrExpr::Block { stmts, value: None } => stmts.last().copied(),
         _ => None,
     };
+    // kotlinc builds the delegating call at the override's offsets, so the call marks the entry
+    // line where it starts.
+    let delegated = returned.and_then(|returned| match ir.expr(returned) {
+        IrExpr::Return(value) => *value,
+        _ => None,
+    });
+    if let (Some(call), Some(line)) = (delegated, entry) {
+        ir.position_generated_tree(call, line);
+    }
     // The return's line is an entry of its own only below the entry line; on that same line the
     // method's one entry at its start already covers it.
     let end = ir.function_position(custom).end_line;
@@ -1000,7 +1009,7 @@ fn reframe_value_class_secondary(ir: &mut IrFile, root: ExprId, this_value: u32,
 
 fn mark_line(ir: &mut IrFile, statement: ExprId, line: u32) {
     if line != 0 {
-        ir.expr_lines.insert(statement, line);
+        ir.set_statement_line(statement, line);
     }
 }
 
@@ -1225,9 +1234,7 @@ fn property_hash(ir: &mut IrFile, underlying: Ty) -> ExprId {
     });
     let zero = ir.add_expr(IrExpr::Const(krusty::ir::IrConst::Int(0)));
     let non_null = hash(ir);
-    ir.add_expr(IrExpr::When {
-        branches: vec![(Some(is_null), zero), (None, non_null)],
-    })
+    ir.add_when(vec![(Some(is_null), zero), (None, non_null)], Ty::Int)
 }
 
 /// Decrement every value-slot index (`GetValue`/`SetValue`/`Variable`) reachable from `root` by one —

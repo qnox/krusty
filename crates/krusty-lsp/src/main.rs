@@ -238,21 +238,6 @@ fn parse_parity_command(args: &[String]) -> Result<ParityCommand, String> {
     })
 }
 
-/// Directory names that never hold a module's own compilable sources, even when they sit under a
-/// declared source root. `testData` is the important one: IntelliJ keeps thousands of deliberately
-/// malformed Kotlin files there, and counting their diagnostics as parity failures would drown the
-/// signal.
-const PARITY_SKIP_DIRECTORIES: &[&str] = &[
-    ".git",
-    "testData",
-    "test-data",
-    "testdata",
-    "out",
-    "build",
-    "target",
-    "node_modules",
-];
-
 fn list_sources(root: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
@@ -263,9 +248,9 @@ fn list_sources(root: &Path, out: &mut Vec<PathBuf>) {
             continue;
         };
         if kind.is_dir() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if PARITY_SKIP_DIRECTORIES.contains(&name.as_ref()) {
+            // Same names the editor's workspace walk refuses, including fixture trees such as
+            // `testData`. A second list here would let the metric and the open disagree.
+            if krusty_lsp::project::is_ignored_directory(&path) {
                 continue;
             }
             list_sources(&path, out);
@@ -573,6 +558,8 @@ fn parity_failure_line(module: &str, status: &str, elapsed: Duration) -> String 
         "unreadable_checked_files": 0,
         "visible_declarations": [],
         "java_stub_failed": false,
+        "missing_classpath_entries": 0,
+        "open_complete": false,
         "error_count": 0,
         "warning_count": 0,
         "diagnostics": [],
@@ -2202,9 +2189,14 @@ mod tests {
             "unreadable_checked_files",
             "error_count",
             "warning_count",
+            "missing_classpath_entries",
         ] {
             assert_eq!(value[key], 0, "{key} must be present");
         }
+        assert_eq!(
+            value["open_complete"], false,
+            "a module that produced no analysis did not open completely"
+        );
         assert_eq!(value["truncated"], false);
         assert_eq!(value["java_stub_failed"], false);
         assert!(value["visible_declarations"].as_array().unwrap().is_empty());
@@ -2220,6 +2212,9 @@ mod tests {
             "src/Keep.java",
             "src/notes.txt",
             "src/testData/Broken.kt",
+            "src/test-data/Broken.kt",
+            "src/testdata/Broken.kt",
+            "src/.idea/Broken.kt",
             "src/out/Generated.kt",
         ] {
             let path = root.join(relative);

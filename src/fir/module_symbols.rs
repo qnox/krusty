@@ -62,6 +62,13 @@ impl StreamedModuleProjectionCache {
     }
 }
 
+/// Receiver and context shape of a property whose signature could not be published.
+struct PropertyProjectionShape {
+    receiver: Option<Ty>,
+    context_count: usize,
+    mutable: bool,
+}
+
 impl<'a> StreamedModuleSymbols<'a> {
     pub(crate) fn for_file(index: &'a ResolvedModuleIndex, source_file: u32) -> Self {
         Self {
@@ -598,17 +605,16 @@ impl<'a> StreamedModuleSymbols<'a> {
                 flags.has(DeclarationFlags::INTERFACE),
                 name,
             );
-            let stable_properties = direct_property_names
-                .contains(name)
-                .then(|| {
-                    self.member_properties(
-                        owner,
-                        internal,
-                        flags.has(DeclarationFlags::INTERFACE),
-                        name,
-                    )
-                })
-                .unwrap_or_default();
+            let stable_properties = if direct_property_names.contains(name) {
+                self.member_properties(
+                    owner,
+                    internal,
+                    flags.has(DeclarationFlags::INTERFACE),
+                    name,
+                )
+            } else {
+                Default::default()
+            };
             if stable_functions
                 .iter()
                 .any(|function| function.flags.deprecated_hidden)
@@ -624,10 +630,11 @@ impl<'a> StreamedModuleSymbols<'a> {
                     .filter(|member| !member.deprecated_hidden()),
             );
             let functions = FunctionSet {
-                overloads: direct_function_names
-                    .contains(name)
-                    .then_some(stable_functions)
-                    .unwrap_or_default(),
+                overloads: if direct_function_names.contains(name) {
+                    stable_functions
+                } else {
+                    Default::default()
+                },
             };
             let properties = PropertySet {
                 overloads: stable_properties,
@@ -755,10 +762,13 @@ impl<'a> StreamedModuleSymbols<'a> {
         name: &str,
         kind: PropKind,
         owner: TypeName,
-        receiver: Option<Ty>,
-        context_count: usize,
-        mutable: bool,
+        shape: PropertyProjectionShape,
     ) -> PropertyInfo {
+        let PropertyProjectionShape {
+            receiver,
+            context_count,
+            mutable,
+        } = shape;
         let mut parameters = vec![Ty::Error; context_count];
         if receiver.is_some() {
             let receiver_index = if matches!(kind, PropKind::MemberExtension) {
@@ -1287,19 +1297,24 @@ impl<'a> StreamedModuleSymbols<'a> {
                 let receiver = property
                     .and_then(|property| property.extension_receiver)
                     .map(|receiver| receiver.get());
-                properties.push(self.failed_property_projection(
-                    declaration,
-                    name,
-                    if receiver.is_some() {
-                        PropKind::MemberExtension
-                    } else {
-                        PropKind::Member
-                    },
-                    internal,
-                    receiver,
-                    property.map_or(0, |property| property.context_parameter_count as usize),
-                    property.is_some_and(|property| property.mutable),
-                ));
+                properties.push(
+                    self.failed_property_projection(
+                        declaration,
+                        name,
+                        if receiver.is_some() {
+                            PropKind::MemberExtension
+                        } else {
+                            PropKind::Member
+                        },
+                        internal,
+                        PropertyProjectionShape {
+                            receiver,
+                            context_count: property
+                                .map_or(0, |property| property.context_parameter_count as usize),
+                            mutable: property.is_some_and(|property| property.mutable),
+                        },
+                    ),
+                );
                 continue;
             };
             let Some(property) = property else {
@@ -1738,9 +1753,12 @@ impl<'a> StreamedModuleSymbols<'a> {
                     name,
                     kind,
                     TypeName::ROOT,
-                    receiver,
-                    property.map_or(0, |property| property.context_parameter_count as usize),
-                    property.is_some_and(|property| property.mutable),
+                    PropertyProjectionShape {
+                        receiver,
+                        context_count: property
+                            .map_or(0, |property| property.context_parameter_count as usize),
+                        mutable: property.is_some_and(|property| property.mutable),
+                    },
                 );
                 failed.associated_classifier = associated_classifier;
                 failed.companion_associated = associated_classifier.is_some();

@@ -1050,8 +1050,13 @@ fn realize_expressions(
             }
             Some(
                 krusty::libraries::CompilerIntrinsic::ThrowableConstructor { .. }
-                | krusty::libraries::CompilerIntrinsic::ThrowableMessage,
+                | krusty::libraries::CompilerIntrinsic::ThrowableMessage
+                | krusty::libraries::CompilerIntrinsic::ThrowableCause,
             ) => unreachable!("target KLIB Throwable storage cannot reach JVM call realization"),
+            // The JVM stdlib implements these as `KClass.getSimpleName` and
+            // `getQualifiedName`. A target that builds its own class tokens answers the same
+            // intrinsic from those tokens; that token is not a JVM callee.
+            Some(krusty::libraries::CompilerIntrinsic::ClassName(_)) => None,
             Some(
                 krusty::libraries::CompilerIntrinsic::ArraySize
                 | krusty::libraries::CompilerIntrinsic::FloatingIsNaN { .. }
@@ -1253,6 +1258,11 @@ fn realize_expressions(
                     }
                 }
                 krusty::libraries::MemberRealization::Direct { pass_receiver } => {
+                    if krusty::jvm::jvm_libraries::unsigned_intrinsics::realizes_jdk_unsigned_operation(
+                        &callable,
+                    ) {
+                        default_call_operands.record_intrinsic_call(expression);
+                    }
                     if pass_receiver {
                         args.insert(0, dispatch_receiver.take().ok_or(target)?);
                     } else {

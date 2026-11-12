@@ -846,7 +846,7 @@ fn write_closed_range_contains_klib_with_shadowed_declarations(
         tail: &class_tail,
     };
     let classes = shadowed_declarations
-        .then(|| crate::metadata::klib_fragment::KlibClass {
+        .then_some(crate::metadata::klib_fragment::KlibClass {
             declaration: dependency_only_class,
             constants: &[],
             in_source_file: true,
