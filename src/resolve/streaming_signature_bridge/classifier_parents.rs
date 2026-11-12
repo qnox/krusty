@@ -130,13 +130,20 @@ pub(super) fn compact_classifier_parents(
     let explicit_base = resolved_local
         .and_then(|(base, _)| *base)
         .or_else(|| base.and_then(|syntax| semantics.resolve_compact_header_type(scope, syntax)));
-    if base.is_some() && explicit_base.is_none() {
-        crate::trace_compiler!(
-            "signature",
-            "classifier parent resolution declaration={declaration:?} failed explicit base resolved_local={resolved_local:?}",
-        );
-        return None;
-    }
+    // A written superclass that does not resolve (already reported) keeps its position as an error
+    // edge. The classifier still publishes its header from the parents that did resolve, as in
+    // kotlinc, so members, entries and class literals of the class stay checkable.
+    let explicit_base = match (base.is_some(), explicit_base, resolved_local.is_some()) {
+        (true, None, false) => Some(Ty::Error),
+        (true, None, true) => {
+            crate::trace_compiler!(
+                "signature",
+                "classifier parent resolution declaration={declaration:?} failed explicit base resolved_local={resolved_local:?}",
+            );
+            return None;
+        }
+        (_, resolved, _) => resolved,
+    };
     if let (Some(callee), Some(superclass)) = (
         base_callee,
         explicit_base.and_then(|base| base.non_null().kotlin_class_internal()),
@@ -160,6 +167,8 @@ pub(super) fn compact_classifier_parents(
             resolved_local
                 .and_then(|(_, parents)| parents.get(ordinal).copied())
                 .or_else(|| semantics.resolve_compact_header_type(scope, *syntax))
+                // An unresolved written supertype (already reported) is an error edge.
+                .or_else(|| resolved_local.is_none().then_some(Ty::Error))
         })
         .collect::<Option<Vec<_>>>()?;
 
@@ -191,7 +200,7 @@ pub(super) fn compact_classifier_parents(
         .iter()
         .enumerate()
         .any(|(ordinal, parent)| {
-            parent_is_interface(*parent).is_none()
+            *parent != Ty::Error && parent_is_interface(*parent).is_none()
                 || parent_is_interface(*parent) == Some(false) && Some(ordinal) != source_superclass
         })
     {
