@@ -557,6 +557,9 @@ impl Backend for CraneliftBackend {
                 krusty::backend::instance_links::InstanceEntry::Object(classifier) => {
                     format!("an object (`{}`)", classifier.render().replace('/', "."))
                 }
+                krusty::backend::instance_links::InstanceEntry::Constructor { .. } => {
+                    "a constructor".to_owned()
+                }
                 krusty::backend::instance_links::InstanceEntry::EnumConstant(constant) => {
                     format!(
                         "an enum constant (`{}.{}`)",
