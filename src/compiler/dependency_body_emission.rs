@@ -705,10 +705,13 @@ fn prepare_bodyless_externals(
             match emitted_roots::is_external_member(platform, bodies, capabilities.callees, &callee)
             {
                 // A target realizing bodyless declarations realizes an abstract member of a class
-                // no unit materializes from its provider handle, as it does any bodyless leaf.
+                // no unit materializes from its provider handle, as it does any bodyless leaf. On
+                // every target, an abstract member that dispatches on its receiver is called
+                // through its provider handle, as a source call of it is.
                 Ok(true)
-                    if capabilities.target_realizes_bodyless
-                        && bodies.function_has_body(&callee) == Some(false) => {}
+                    if bodies.function_has_body(&callee) == Some(false)
+                        && (capabilities.target_realizes_bodyless
+                            || dispatches_to_an_override(platform, &callee)) => {}
                 Ok(true) => continue,
                 Ok(false) => {}
                 Err(error) => {
