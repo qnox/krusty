@@ -4579,6 +4579,8 @@ struct Emitter<'a> {
     function: Option<u32>,
     /// Declaration scope of a scratch inline-lambda body, without changing emission ownership.
     type_parameter_function: Option<u32>,
+    /// Inside a lambda passed to a `crossinline` parameter, which kotlinc may move into another class.
+    crossinline_lambda_body: bool,
     export_private_calls: bool,
     method_exports_private_access: bool,
     /// This method is `inline`, so each copy of a `finally` is bracketed by
@@ -4798,6 +4800,7 @@ impl<'a> Emitter<'a> {
             static_owner,
             function: None,
             type_parameter_function: None,
+            crossinline_lambda_body: false,
             export_private_calls: false,
             method_exports_private_access: false,
             finally_markers: false,
@@ -6392,37 +6395,6 @@ fn emit_return(t: Ty, code: &mut CodeBuilder) {
         Ty::Unit | Ty::Nothing => code.ret_void(),
         _ => code.areturn(),
     }
-}
-
-fn methodref_owner<'a>(body: &'a MethodCode, name: &str, descriptor: &str) -> Option<&'a str> {
-    fn utf8(cp: &[C], idx: u16) -> Option<&str> {
-        match cp.get(idx as usize)? {
-            C::Utf8(s) => Some(s.as_str()),
-            _ => None,
-        }
-    }
-    fn class_name(cp: &[C], idx: u16) -> Option<&str> {
-        match cp.get(idx as usize)? {
-            C::Class(name_idx) => utf8(cp, *name_idx),
-            _ => None,
-        }
-    }
-    fn name_and_desc(cp: &[C], idx: u16) -> Option<(&str, &str)> {
-        match cp.get(idx as usize)? {
-            C::NameAndType(name_idx, desc_idx) => {
-                Some((utf8(cp, *name_idx)?, utf8(cp, *desc_idx)?))
-            }
-            _ => None,
-        }
-    }
-
-    body.source_cp.iter().find_map(|entry| {
-        let C::Methodref(class_idx, nt_idx) = entry else {
-            return None;
-        };
-        let (n, d) = name_and_desc(&body.source_cp, *nt_idx)?;
-        (n == name && d == descriptor).then(|| class_name(&body.source_cp, *class_idx))?
-    })
 }
 
 #[cfg(test)]

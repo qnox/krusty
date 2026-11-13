@@ -74,11 +74,12 @@ impl Emitter<'_> {
         }
         // A body a caller may splice into another class cannot name this class's private field: a
         // non-private inline function reaches a non-private property through its getter or setter,
-        // as kotlinc does in a public inline scope. A private property keeps its exported field
-        // accessor. A writable `val` remains a direct deferred-initialization write because it has
+        // as kotlinc does in a public inline scope, and so does a lambda passed to a `crossinline`
+        // parameter, which the callee may move into an object it creates. A private property keeps
+        // its exported field accessor. A writable `val` remains a direct deferred-initialization write because it has
         // no setter. A private default setter has no method either: select its field so emission can
         // replace that field access with the planned export bridge.
-        if self.export_private_calls
+        if (self.export_private_calls || self.crossinline_lambda_body)
             && declared.is_some_and(|p| {
                 !p.is_private && (!writable || (p.is_var && !p.has_private_default_setter()))
             })
