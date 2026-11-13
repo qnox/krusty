@@ -1018,27 +1018,10 @@ impl BoxRunner {
     }
 }
 
-/// Milliseconds `BoxRunner` waits for one `box()` call.
-///
-/// Unset or blank keeps the hosted-runner deadline of 2s. An explicit positive integer selects
-/// up to `u32::MAX` milliseconds, keeping the Java long literal and the client's additional
-/// duration representable. The value is compiled into that run's runner.
+/// Milliseconds `BoxRunner` waits for one `box()` call: unset or blank keeps the hosted-runner
+/// deadline of 2s. The value is compiled into that run's runner.
 fn box_case_timeout_ms_from(raw: Option<&str>) -> u64 {
-    const DEFAULT_MS: u64 = 2_000;
-    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
-        return DEFAULT_MS;
-    };
-    let Ok(value) = raw.parse::<u32>() else {
-        panic!(
-            "KRUSTY_BOX_CASE_TIMEOUT_MS must be an integer from 1 through 4294967295, got {raw}"
-        );
-    };
-    if value == 0 {
-        panic!(
-            "KRUSTY_BOX_CASE_TIMEOUT_MS must be an integer from 1 through 4294967295, got {raw}"
-        );
-    }
-    u64::from(value)
+    common::timeout_ms_from("KRUSTY_BOX_CASE_TIMEOUT_MS", raw, 2_000)
 }
 
 fn box_case_timeout_ms() -> u64 {
@@ -1283,7 +1266,7 @@ fn write_flamegraph(guard: &pprof::ProfilerGuard<'_>) {
     }
 
     let mut v: Vec<_> = leaf.into_iter().collect();
-    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.sort_by_key(|frame| std::cmp::Reverse(frame.1));
     eprintln!("--- profiler: top krusty frames ({total} samples) ---");
     for (name, c) in v.into_iter().take(25) {
         eprintln!("  {:>5.1}%  {name}", 100.0 * c as f64 / total.max(1) as f64);
@@ -1708,8 +1691,8 @@ fn kotlin_codegen_box_conformance() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(usize::MAX);
 
-    let mut files =
-        super::box_inventory::discover(&box_dir).unwrap_or_else(|error| panic!("{error}"));
+    let mut files = super::box_inventory::discover(&box_dir, krusty::conformance::TestTarget::Jvm)
+        .unwrap_or_else(|error| panic!("{error}"));
     let corpus: BTreeSet<String> = files
         .iter()
         .map(|file| box_ratchet::corpus_key(&box_dir, file))
@@ -2241,7 +2224,7 @@ fn kotlin_codegen_box_conformance() {
     );
     if byte_diff_on {
         let mut diffs = byte_diffs.into_inner().unwrap();
-        diffs.sort_by(|a, b| a.0.cmp(&b.0));
+        diffs.sort_by_key(|(path, _)| path.clone());
         let (mut identical, mut divergent, mut ref_fail) = (0usize, 0, 0);
         let report_path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/byte_diff_report.txt");

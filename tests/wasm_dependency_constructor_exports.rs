@@ -10,6 +10,29 @@ use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantic
 fn wasm_official_dependency_constructor_roots_allocate_and_rebind() {
     let source =
         include_str!("box_regressions/multimodule/dependencyConstructorAllocationExports.kt");
+    let modules =
+        krusty::conformance::split_modules(source).expect("the entire shared two-module program");
+    assert_eq!(
+        modules[1].files.len(),
+        2,
+        "the later checked source must reuse the allocation export"
+    );
+    run_against_official_producer(source, "DependencyConstructorAllocation");
+}
+
+/// A public final class's members are lowered from the official producer's bodies: the consumer
+/// constructs it, calls its function and reads and writes its properties.
+#[test]
+fn wasm_official_dependency_class_members_lower_from_their_bodies() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyClassMembers.kt"),
+        "DependencyClassMembers",
+    );
+}
+
+/// Run the shared two-module program through the product producer, then compile its consumer
+/// against the library the exact official Wasm compiler produces and run it, on every target.
+fn run_against_official_producer(source: &str, name: &str) {
     let options = krusty::conformance::WasmCompilerOptions::from_source(source)
         .expect("the original module graph's compilation options");
     let modules =
@@ -22,16 +45,11 @@ fn wasm_official_dependency_constructor_roots_allocate_and_rebind() {
     let [(producer_stem, producer_text)] = producer.files.as_slice() else {
         panic!("one complete producer")
     };
-    assert_eq!(
-        consumer.files.len(),
-        2,
-        "the later checked source must reuse the allocation export"
-    );
     for target in WasmTarget::ALL {
         let lane = WasmLane { target };
         assert!(focused_wasm_lane_available(
             &lane,
-            "officialDependencyConstructorAllocation"
+            &format!("official{name}")
         ));
         let backend = lane
             .backend(source)
@@ -39,14 +57,9 @@ fn wasm_official_dependency_constructor_roots_allocate_and_rebind() {
         let compilation_target = backend.compilation_target();
         let work = crate::common::scratch_dir().expect("official dependency producer directory");
         assert_eq!(
-            lane.compile_modules_and_run(
-                &work,
-                "productDependencyConstructorAllocation",
-                &units,
-                source,
-            ),
+            lane.compile_modules_and_run(&work, &format!("product{name}"), &units, source,),
             Outcome::Pass,
-            "the product producer's existing constructor export remains callable"
+            "the product producer's program passes"
         );
         let producer_path = work.join(format!("{producer_stem}.kt"));
         std::fs::write(&producer_path, producer_text).unwrap();
@@ -101,7 +114,7 @@ fn wasm_official_dependency_constructor_roots_allocate_and_rebind() {
         assert!(diags.diags.is_empty(), "{:#?}", diags.diags);
         let outcome = lane.run_artifacts(
             &work,
-            "officialDependencyConstructorAllocation",
+            &format!("official{name}"),
             "import",
             box_lane::CompiledProgram {
                 artifacts,

@@ -173,10 +173,9 @@ invocation separately because each is a separate process with its own wall time.
 unfiltered binary name.
 
 CI builds the conformance test binary and CLI once. Every version in `kotlin-versions` expands into
-independent `jvm`, `native`, and `wasm` matrix rows from those artifacts. GitHub resolves a job's
-producer dependencies before it expands the matrix, so JVM rows use an early scheduler matrix that
-does not wait for the focused KLIB test binaries; Native and Wasm use a second scheduler matrix once
-that target-only artifact is ready. Both matrices execute one YAML-anchored conformance step
+independent `jvm`, `native`, and `wasm` matrix rows from those artifacts. Those rows never wait for the
+ordinary compiler unit test binary: the `klib-implementation-coverage` job builds it and checks every release's exact Native and Wasm stdlib KLIB implementation coverage with
+it (`just klib-implementation-coverage`). One conformance matrix executes one step
 inventory and the same backend-neutral case table. The JVM row runs its box corpus and JVM-owned
 regressions. The Native and Wasm rows run their own box corpora followed by
 their focused non-corpus regressions against the same exact target compiler and KLIB setup, so no
@@ -195,7 +194,8 @@ toolchain and JDK 17 in CI, not JVM matrix opt-in flags. Each row
 uses its target's configurable process-group deadline. The complete JVM non-box CI pass retains
 its 600-second cold serialization/reference-CLI toolchain budget. The local 120-second default
 and test inventory are unchanged; an exhausted deadline still fails. JVM rows upload `pct-<version>` and
-`jvm-byte-equality-<version>`; Native rows upload `native-pct-<version>`. A release publishes only
+`jvm-byte-equality-<version>`; Native rows upload `native-pct-<version>`, and every Native and Wasm
+row uploads its KLIB byte score as `klib-byte-equality-<version>-<target>`. A release publishes only
 after all target rows pass and every row matches its platform/version expectations.
 
 ### Box-test JDK
@@ -250,6 +250,16 @@ KRUSTY_BLESS_BOX_EXPECTATIONS=1 KRUSTY_LANGUAGE_VERSION=<v> \
 Blessing requires the exact value `1` and is refused under CI and on a partial run. Each tracked file
 is replaced atomically. Review and commit the platform/version diff. The failure lists only shrink;
 the long-term goal is zero expected failures on every platform.
+
+### Upstream case selection
+
+Each lane runs the `codegen/box` cases that kotlinc's own pinned test generators select for its
+target, read from the generator sources of the same checkout by `scripts/box_selection.py`. For
+example, the Wasm generators exclude the JVM-only `compileKotlinAgainstKotlin` directory, so the Wasm
+lanes do not run it; the JVM generators select the whole directory. `just box-corpus` provisions the
+generator sources listed in `tests/box_selection_sources.txt` and the box roots they name, and
+`box_selection_reference` executes each generator's own `main` against the checkout to confirm the
+extraction selects exactly the same roots and files.
 
 ### Repository-owned box regressions
 
@@ -374,9 +384,14 @@ Recording each of those compiles into the archive as well rewrote the whole arch
 pushed a cold scored run past its deadline. In CI each JVM conformance row restores that directory
 from its base commit's GHA cache (`box-reference-classes-<version>-…`), and master saves it under
 its own commit, so a pull request pays kotlinc only for cases whose inputs it changed. The outer key
-hashes the inventory owner, shared case planning, kotlinc server/Javac driver, and the content-
-identity implementation, so a producer change starts a fresh cache even though a hit does not run
-that producer. Each entry additionally uses the recorded-byte archive's process-memoized content
+names only the Kotlin version: a change to how references are planned, invoked, or laid out bumps
+`REF_CACHE_SALT` in `tests/box_reference_classes.rs`, which re-keys every entry, while any other
+harness edit keeps the cache. A read refreshes an entry's `OK`/`FAILED` marker time, and before
+master saves, `scripts/prune-reference-cache.sh` drops entries unread for a week, so the cache
+tracks the current suite instead of growing with every input it ever compiled. The Native and Wasm
+rows keep their own copy (`box-reference-classes-<target>-<version>-…`) for the JVM oracles of their
+focused tests. A row without one starts from the JVM row's cache, and its first save keeps only the
+entries that run read or compiled. Each entry additionally uses the recorded-byte archive's process-memoized content
 identity for the complete selected kotlinc installation, the exact JDK selected to run kotlinc and
 javac (`KRUSTY_REF_JAVA_HOME` before `JAVA_HOME`), the mock JDK when selected, and every explicit
 classpath dependency. Those immutable inputs are hashed once per process. Replacing a distribution
@@ -407,7 +422,7 @@ class-dump: live kotlinc summary cache-miss test=<module>::<case> invocations=<n
 `kotlin_cli_jvm_conformance` (in the `conformance` binary) runs Kotlin's own command-line test
 corpus, `compiler/testData/cli/jvm` at the reference tag, through the krusty binary. `just box-corpus`
 provisions it in the same checkout as the box corpus. CI caches that checkout under a key versioned
-for every input it carries (`box-and-cli-corpus-v2-…`); a cache hit sets `KRUSTY_BOX_CORPUS_OFFLINE=1`,
+for every input it carries (`box-cli-and-generator-corpus-v3-…`); a cache hit sets `KRUSTY_BOX_CORPUS_OFFLINE=1`,
 and `just box-corpus` then fails rather than fetch into an incomplete restored checkout, so adding a
 corpus input means bumping the salt. Each case is an `.args` file and the `.out`
 file kotlinc's `AbstractCliTest` compares against: the normalized stderr followed by the exit code's
@@ -495,7 +510,9 @@ kotlinc, `javac`, and `java` that the suite runs on every test are pooled. A cac
 start kotlinc. A miss uses a persistent compiler JVM (`KRUSTY_SERVER_POOL` caps the pool). `box()`
 and Java drivers use persistent `BoxRunner` and `JavaRunner` JVMs; `javac` runs once per runner
 source to compile that helper, then in-process. The conformance box runner is a separate persistent
-JVM per test thread, also compiled once.
+JVM per test thread, also compiled once. `BoxRunner` gives one `box()` call
+`KRUSTY_BOX_TIMEOUT_MS` (10s by default), and the conformance box runner gives one case
+`KRUSTY_BOX_CASE_TIMEOUT_MS` (2s by default).
 
 The `bytecode_parity_e2e` batch compares normalized disassembly for its named fixtures. Each
 fixture receives its own package on both compiler inputs, so independent declarations such as
@@ -523,12 +540,12 @@ Do not use `--release` for tests. The release build cycle takes longer than it s
 ## Required Check
 
 The `ci` workflow's `ci-and-conformance` job is the single check for master's ruleset to require.
-It needs the independent `lint` and coverage-owning `ci` jobs, both scheduler halves of the shared
-conformance matrix, `build-gradle-plugin`, and the whole `gradle` compatibility matrix. Every
+It needs the independent `lint` and coverage-owning `ci` jobs, the shared conformance matrix,
+`klib-implementation-coverage`, `build-gradle-plugin`, and the whole `gradle` compatibility matrix. Every
 supported Kotlin version has distinct JVM, Native and Wasm conformance
-rows; the maximum-version Native row also runs the focused KLIB decoder, value-class and
-kotlinc-native oracle coverage formerly owned by a standalone job, while `just klib-semantics`
-remains the focused local recipe. One backend-neutral box inventory includes upstream and owned
+rows. The KLIB decoder, value-class and kotlinc-native oracle tests are ordinary e2e and unit tests
+that the `ci` coverage gate runs against the maximum-version Native distribution, while
+`just klib-semantics` remains the focused local recipe. One backend-neutral box inventory includes upstream and owned
 portable regular/multimodule cases in every JVM, Native and Wasm row; directives may not silently
 skip owned cases. Genuinely platform-specific sources live in named target-owned tests with a
 `PLATFORM-SPECIFIC` marker. The JVM row owns JVM regressions; Native
@@ -639,6 +656,32 @@ diff -rq target/dump-before target/dump-after
 Two dumps from the same build must also be identical: the compiler's output may not depend on hash
 map iteration order.
 
+## KLIB Byte Score
+
+The Native, Wasm/JS and Wasm/WASI box lanes also score KLIB bytes when their report variable is
+set: `KRUSTY_NATIVE_BYTE_REPORT`, `KRUSTY_WASM_JS_BYTE_REPORT` or `KRUSTY_WASM_WASI_BYTE_REPORT`.
+Each applicable case's module graph is compiled to KLIBs by the row's exact kotlinc (through the
+persistent server, with the target per request) and compared entry by entry, per module, with what
+krusty emitted. A case that fails or does not run scores its reference entries as unmatched. The
+lane writes `<pct> <matched> <total>` to the report file and prints the score and the reference
+cache's hit and miss counts. The reference compile is timed as the `target oracle` stage.
+
+Reference entries are cached in `KRUSTY_KLIB_REFERENCE_CACHE` (default
+`target/cache/klib-references/`), one archive per exact-input fingerprint. The fingerprint covers
+the target, the host architecture, the case source, its module plan, the derived compiler
+configuration and properties, the directive-selected KLIB libraries, the toolchain identity, and
+the format salt in
+`tests/box_klib_bytes/reference-format`. The harness's own sources are not hashed, so bump that salt
+whenever the way the reference is produced or stored changes. In CI each row restores the newest
+`box-klib-references-<salt hash>-<os>-<arch>-<target>-<version>-…` entry from its base, and master
+saves a new entry only when the run added reference archives (`scripts/cache-entries.sh`). The CI
+key hashes the same salt file, so a bump starts every row from an empty cache rather than saving
+the new archives beside the old ones.
+
+Reference failures fail the row closed. A case whose reference cannot be compiled, even after the
+server pool's one retry, withholds the byte report rather than scoring fewer cases, and fails the
+lane. That assertion follows the box ratchet, so the row's conformance result is still reported.
+
 ## Profiling
 
 For full-suite performance work, run:
@@ -687,9 +730,11 @@ is compiled once and the cfg(test) harness overlaps the binaries. Nightly rustc 
 job per core (`-Z threads`). The run ends with `coverage: phases` repeating every
 finished phase and `coverage: phase total <seconds>s`, which is wall time from the first phase rather than
 the sum of the rows. The conformance box runner prints the same shape as
-`conformance-run: phase box-conformance <seconds>s`. The shared binary job prints
-`shared-bins: phase conformance-test-binary`, `shared-bins: phase krusty-cli`, and
-`shared-bins: phase krusty-build-tests`. Conformance lanes and Gradle lanes run those binaries. A
+`conformance-run: phase box-conformance <seconds>s`. The KLIB coverage job prints
+`klib-implementation-coverage: phase compiler-unit-tests`, and the tool producer, which builds the
+conformance binary, the CLI and the krusty-build tests over one krusty library, prints
+`tool-bins: phase conformance-and-cli` and `tool-bins: phase krusty-build-tests`. Conformance lanes
+and Gradle lanes run those binaries. A
 Gradle lane does not compile krusty.
 
 Performance-relevant harness state:

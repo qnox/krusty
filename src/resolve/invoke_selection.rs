@@ -17,6 +17,18 @@ use crate::types::TyKind;
 /// One property read and the exact `invoke` declaration selected for its value before contextual
 /// lambda checking. The call keeps this object until commitment, so completed lambda types cannot
 /// reopen the overload family and replace the declaration that supplied their expectations.
+/// Source arguments of an `invoke`, with the types known before postponed lambdas are checked.
+pub(super) struct InvokeArguments<'a> {
+    pub(super) expressions: &'a [ExprId],
+    pub(super) partial_types: &'a [Option<Ty>],
+}
+
+/// The receiver expression an `invoke` plan records, and the type that plan selected it at.
+pub(super) struct InvokeReceiver {
+    pub(super) expression: ExprId,
+    pub(super) ty: Ty,
+}
+
 pub(super) struct PropertyInvokePlan {
     pub(super) property: PropertyReadSelection,
     pub(super) invoke: SelectedInvokePlan,
@@ -300,10 +312,13 @@ impl Checker<'_> {
         call: ExprId,
         receiver: Ty,
         name: &str,
-        args: &[ExprId],
-        partial: &[Option<Ty>],
+        arguments: InvokeArguments<'_>,
         result_constraint: CallResultConstraint,
     ) -> Option<PropertyInvokePlan> {
+        let InvokeArguments {
+            expressions: args,
+            partial_types: partial,
+        } = arguments;
         if !args
             .iter()
             .any(|argument| matches!(self.file.expr(*argument), Expr::Lambda { .. }))
@@ -750,10 +765,12 @@ impl Checker<'_> {
             let selected_ret = selected.ret;
             ret = self.commit_selected_call_intersections(
                 call,
-                &signature,
-                &explicit_type_args,
-                &shape.parameter_indices,
-                &shape.call_sig,
+                super::intersection_inference::GenericCallCommitment {
+                    signature: &signature,
+                    explicit_type_args: &explicit_type_args,
+                    parameter_indices: &shape.parameter_indices,
+                    call_sig: &shape.call_sig,
+                },
                 &mut selected.bindings,
                 &mut selected.intersection_bindings,
                 selected_ret,
@@ -951,12 +968,15 @@ impl Checker<'_> {
         &mut self,
         scope: &CheckerScope<'_>,
         call_args: CallArgs<'_>,
-        receiver: ExprId,
-        receiver_ty: Ty,
+        receiver: InvokeReceiver,
         span: Span,
         plan: SelectedInvokePlan,
         result_constraint: CallResultConstraint,
     ) -> Ty {
+        let InvokeReceiver {
+            expression: receiver,
+            ty: receiver_ty,
+        } = receiver;
         match self.record_planned_invoke(
             scope,
             call_args,
@@ -1026,7 +1046,10 @@ impl Checker<'_> {
                     &argument_map,
                     &named_whole_array_varargs(&argument_map, arg_names, &overload.call_sig),
                 ),
-                type_args,
+                ExplicitTypeArgumentProbe {
+                    arguments: type_args,
+                    bounds: ExplicitTypeArgumentBounds::Enforced,
+                },
             ) {
                 continue;
             }
@@ -1223,10 +1246,12 @@ impl Checker<'_> {
                         let selected_ret = selected.ret;
                         ret = self.commit_selected_call_intersections(
                             call,
-                            &signature,
-                            &explicit_type_args,
-                            &shape.parameter_indices,
-                            &shape.call_sig,
+                            super::intersection_inference::GenericCallCommitment {
+                                signature: &signature,
+                                explicit_type_args: &explicit_type_args,
+                                parameter_indices: &shape.parameter_indices,
+                                call_sig: &shape.call_sig,
+                            },
                             &mut selected.bindings,
                             &mut selected.intersection_bindings,
                             selected_ret,
@@ -1425,10 +1450,12 @@ impl Checker<'_> {
                             );
                             self.commit_selected_call_intersections(
                                 call,
-                                &signature,
-                                &[],
-                                &shape.parameter_indices,
-                                &shape.call_sig,
+                                super::intersection_inference::GenericCallCommitment {
+                                    signature: &signature,
+                                    explicit_type_args: &[],
+                                    parameter_indices: &shape.parameter_indices,
+                                    call_sig: &shape.call_sig,
+                                },
                                 &mut bindings,
                                 &mut intersections,
                                 selected.ret,
@@ -1488,8 +1515,10 @@ impl Checker<'_> {
                     args[i],
                     *a,
                     *p,
-                    &positional_signature,
-                    i,
+                    SelectedFormal {
+                        signature: &positional_signature,
+                        index: i,
+                    },
                     implicit_lambda_label.as_deref(),
                 );
                 self.expect_call_arg(scope, *p, args[i], actual);

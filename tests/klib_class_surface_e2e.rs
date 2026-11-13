@@ -784,7 +784,7 @@ fn klib_serialization_plugin_declarations_match_kotlinc_native() {
     .expect("the directed KLIB regression has its required analysis toolchain");
     let (messages, fragments) = written_fragments(analysis, &stems, diags);
     assert_eq!(messages, Vec::<String>::new());
-    assert_eq!(fragments, [expected.clone()]);
+    assert_eq!(fragments, std::slice::from_ref(expected));
 }
 
 fn kotlin_native_root() -> Option<std::path::PathBuf> {

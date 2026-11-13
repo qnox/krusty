@@ -202,8 +202,8 @@ KRef kt_array_new(const KType *type, kt_int length) {
 
 /* `<a><first><b><second>`, then `<c><third>` when `c` is not NULL: the JVM's wording of an index
    exception, the numbers rendered in decimal. */
-static KRef kt_bounds_text(const char *a, kt_int first, const char *b, kt_int second,
-                           const char *c, kt_int third) {
+KRef kt_bounds_text(const char *a, kt_int first, const char *b, kt_int second, const char *c,
+                    kt_int third) {
     const char *parts[] = {a, b, c};
     kt_int values[] = {first, second, third};
     KRef text = kt_string_utf8("", 0);

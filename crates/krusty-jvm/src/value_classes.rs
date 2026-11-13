@@ -3,6 +3,7 @@
 
 mod accessor_names;
 mod aggregate_boundaries;
+mod any_member_calls;
 mod body_scopes;
 mod boxed_generic_overrides;
 mod boxedness;
@@ -36,6 +37,7 @@ mod mangled_calls;
 mod member_names;
 mod module_members;
 mod operand_nullness;
+mod override_calls;
 mod parameter_guards;
 mod private_accessor_calls;
 mod property_annotation_markers;
@@ -55,6 +57,7 @@ mod unboxing_rewrites;
 mod value_boundaries;
 use tail_boxing::{box_nullable_vc_tail, box_ref_tail, box_tail, restore_boxed_suspension_tails};
 mod value_members;
+mod when_merges;
 use crate::operation_relocation::clone_below_representation_wrapper;
 use body_scopes::{append_inline_body_scopes, collect_reachable, collect_reachable_scoped};
 use boxing_rewrites::{box_wrap, box_wrap_nullable, to_string_wrap};
@@ -79,7 +82,7 @@ pub(crate) use representation::{
     boxed_value_class_carrier, boxed_value_class_underlying, instance_representation,
     is_boxed_value_class, type_operation_internal_name,
 };
-use representation::{erase, is_ref};
+use representation::{boxed_vc, erase, is_ref, nullable_is_boxed};
 use result_tail_boxing::box_vc_tail;
 use suspend_results::{record_suspend_results, suspend_result_representation};
 use unboxing_rewrites::{narrow_wrap, unbox_call, unbox_wrap, unbox_wrap_nullable};
@@ -1068,6 +1071,7 @@ pub(crate) fn lower_value_classes(
         mangled_calls::rename(
             ir,
             &renamed_functions,
+            &orig_params,
             &lowered_value_members,
             &suspend_fids,
             &under,
@@ -1316,14 +1320,6 @@ pub(crate) fn lower_value_classes(
             for p in &mut sc.params {
                 *p = erase(p, &under);
             }
-            let target_params = match &mut sc.delegate {
-                krusty::ir::CtorDelegateTarget::This { target_params, .. }
-                | krusty::ir::CtorDelegateTarget::Super { target_params, .. } => target_params,
-                krusty::ir::CtorDelegateTarget::ImplicitEnumBase => continue,
-            };
-            for parameter in target_params {
-                *parameter = erase(parameter, &under);
-            }
         }
     }
     for (internal, declared) in value_param_ctors {
@@ -1563,14 +1559,7 @@ pub(crate) fn lower_value_classes(
                 IrExpr::Const(krusty::ir::IrConst::zero_for_value_type(erased));
         }
     }
-    // The exhaustive `when` result drives the emitter's verifier-visible merge type, not Kotlin type checking.
-    // Once a value class has been realized as its carrier, the merge frame must use that same carrier
-    // (`SampleId?` over a non-null `String` field is `String`, including its null branch). Leaving the
-    // semantic classifier here while branch expressions have been erased produces a StackMapTable that
-    // claims `LSampleId;` above an actual `String`.
-    for result in ir.whens.exhaustive.values_mut() {
-        *result = erase(result, &under);
-    }
+    when_merges::erase_when_merges(ir, &under);
 
     // 4. Rewrite construction / property access. Each body carries its pre-erasure semantic slot types,
     //    so the same representation analysis used by step 5 distinguishes an unboxed carrier from a box.
@@ -1705,6 +1694,7 @@ pub(crate) fn lower_value_classes(
     // records sole-property reads and later `BoxOp::Unbox` results for the tail rewrites.
     let mut carrier_unboxes = CarrierUnboxes::default();
     let mut value_member_constructor_ops: Vec<(ExprId, BoxOp)> = Vec::new();
+    let override_statics = override_calls::OverrideStatics::plan(ir);
     for &id in &targets {
         let body = &s4_bodies[target_slots[&id]];
         let slots = &body.1;
@@ -1850,6 +1840,27 @@ pub(crate) fn lower_value_classes(
         ) {
             return false;
         }
+        // A call of a member this file's value class realized as a static: the former dispatch
+        // receiver becomes argument zero of that static.
+        let own_static_call = |receiver, owner, fid: u32, args, declared_parameters| {
+            let function = &ir.functions[fid as usize];
+            Rw::ImplCall {
+                receiver,
+                owner,
+                name: function.name.clone(),
+                parameters: function.params.clone(),
+                result: function.ret,
+                args,
+                extension_receiver: ir.extension_receiver_fns.contains(&fid),
+                function: Some(fid),
+                module_target: None,
+                declared_parameters,
+            }
+        };
+        let value_class_of = |receiver| match repr_ctx.repr(receiver) {
+            Repr::Unboxed(owner) | Repr::Boxed(owner) => Some(owner),
+            Repr::NotVc => None,
+        };
         let rw = match &ir.exprs[i] {
             // `new X(args)` → `X.constructor-impl(args): U`. The return is the underlying `U`; the
             // PARAMETER types come from the actual constructor arguments (a secondary constructor's
@@ -2225,9 +2236,8 @@ pub(crate) fn lower_value_classes(
                     _ => None,
                 }
             }
-            // A source call resolved by class+method index before value-class realization may still
-            // point at a user-written Any override after `synth_value_members` turns that exact
-            // function into static `toString-impl`/`hashCode-impl`/`equals-impl`. Retain the selected
+            // A source call resolved by class+method index before value-class realization names a
+            // member `synth_value_members` realized over the carrier. Retain the selected
             // declaration, but realize its new ABI: the former dispatch receiver is parameter zero.
             IrExpr::MethodCall {
                 class,
@@ -2235,26 +2245,15 @@ pub(crate) fn lower_value_classes(
                 receiver,
                 args,
             } if is_vc[*class as usize]
-                && ir.classes[*class as usize]
-                    .methods
-                    .get(*index as usize)
-                    .and_then(|fid| ir.functions.get(*fid as usize))
-                    .is_some_and(|function| function.is_static) =>
+                && let Some(fid) = any_member_calls::realized_static(ir, *class, *index) =>
             {
-                let fid = ir.classes[*class as usize].methods[*index as usize];
-                let function = &ir.functions[fid as usize];
-                Some(Rw::ImplCall {
-                    receiver: *receiver,
-                    owner: fq[*class as usize],
-                    name: function.name.clone(),
-                    parameters: function.params.clone(),
-                    result: function.ret,
-                    args: args.clone(),
-                    extension_receiver: ir.extension_receiver_fns.contains(&fid),
-                    function: Some(fid),
-                    module_target: None,
-                    declared_parameters: None,
-                })
+                Some(own_static_call(
+                    *receiver,
+                    fq[*class as usize],
+                    fid,
+                    args.clone(),
+                    None,
+                ))
             }
             // `x.getV()` getter: identity on an unboxed value, `unbox-impl()` on a boxed one.
             IrExpr::MethodCall {
@@ -2280,13 +2279,11 @@ pub(crate) fn lower_value_classes(
                     None
                 }
             }
-            // An interface default the receiver's value class inherits without overriding: the
-            // class realizes that fake override as a static over its carrier, which the call takes.
+            // A supertype member the receiver's value class overrides, in source or by delegation,
+            // or an interface default it inherits without overriding: the class realizes either as
+            // a static over its carrier, which the call takes.
             call => inherited_default_statics
-                .select(ir, call, |receiver| match repr_ctx.repr(receiver) {
-                    Repr::Unboxed(owner) | Repr::Boxed(owner) => Some(owner),
-                    Repr::NotVc => None,
-                })
+                .select(ir, call, value_class_of)
                 .map(|call| Rw::ImplCall {
                     receiver: call.receiver,
                     owner: call.value_class,
@@ -2300,6 +2297,16 @@ pub(crate) fn lower_value_classes(
                     function: None,
                     module_target: None,
                     declared_parameters: Some(call.realized.declared_parameters.clone()),
+                })
+                .or_else(|| {
+                    let call = override_statics.select(ir, call, value_class_of)?;
+                    Some(own_static_call(
+                        call.receiver,
+                        call.value_class,
+                        call.function,
+                        call.args,
+                        Some(call.parameters),
+                    ))
                 }),
         };
         let rewrite = match rw {
@@ -3358,6 +3365,10 @@ pub(crate) fn lower_value_classes(
                     Some(t) if t.is_nullable() => vec![(*value, *t)],
                     _ => continue,
                 },
+                IrExpr::When { .. } => match value_boundaries::when_merge_pairs(ir, id, &under) {
+                    Some(pairs) => pairs,
+                    None => continue,
+                },
                 _ => continue,
             };
             for (a, p) in pairs {
@@ -3531,16 +3542,9 @@ pub(crate) fn lower_value_classes(
         equality::realize(ir, id, specialized, &under, &mut fresh);
     }
 
-    // `super_ctor_params` preserves the checker-selected declaration shape long enough to drive
-    // the argument boundary operations above. Emission consumes the same selected parameter list
-    // as a physical JVM descriptor, so realize value-class carriers only after those semantic
-    // boundary decisions are complete. Shared mutable-capture positions are rewritten to their
-    // holder types by the following JVM pass from their separate exact coordinate map.
-    for class in &mut ir.classes {
-        for parameter in &mut class.super_ctor_params {
-            *parameter = erase(parameter, &under);
-        }
-    }
+    // Constructor delegations keep their selected parameter shape until here, where the argument
+    // boundary decisions above are complete; emission reads them as physical descriptors.
+    constructor_bodies::erase_delegation_targets(ir, &under);
 
     // Execute the storage realization decided above. A facade property marked erased takes the
     // carrier, and its setter takes the mangled name a value-class PARAMETER always earns (the
@@ -3955,22 +3959,6 @@ impl ReprCtx<'_> {
     }
 }
 
-/// Whether a NULLABLE value class `X?` is represented BOXED. Only true when its underlying erases to a
-/// primitive (a primitive can't carry null, so `X?` keeps the boxed `X`). Over a reference underlying,
-/// `X?` erases to that underlying reference — represented unboxed, exactly like a non-null `X`.
-fn nullable_is_boxed(x: TypeName, under: &Under) -> bool {
-    // `X?` stays UNBOXED (its underlying reference carries null) only when the underlying is a NON-NULL
-    // reference. Over a primitive (can't hold null) OR a NULLABLE reference (where `X(null)` and a `null`
-    // `X?` would otherwise be indistinguishable), `X?` is the boxed `X`.
-    under
-        .get(&x)
-        .map(|u| {
-            !is_ref(&erase(u, under))
-                || krusty::value_classes::nullable_value_requires_distinct_null(x, under)
-        })
-        .unwrap_or(false)
-}
-
 /// Whether a NON-NULL value-class type's unboxed underlying can hold null (so a `checkNotNullParameter`
 /// on it would wrongly reject a legal value). True when the value class's field type erases to a
 /// nullable reference (`X(val v: Int?)` → `Integer`; `X(val v: String?)` → `String?`).
@@ -4352,18 +4340,6 @@ fn property_has_erased_generic_slot(class: TypeName, declared: Ty, under: &Under
         && under
             .get(&class)
             .is_some_and(|carrier| erase(carrier, under).is_erased_top())
-}
-
-/// A NULLABLE value-class type `X?` (which stays boxed) → its internal name.
-fn boxed_vc(t: &Ty, under: &Under) -> Option<TypeName> {
-    if t.is_nullable() {
-        if let Some(fq_name) = t.non_null().obj_internal() {
-            if under.contains_key(&fq_name) && nullable_is_boxed(fq_name, under) {
-                return Some(fq_name);
-            }
-        }
-    }
-    None
 }
 
 /// Whether the lambda `impl_fn` was SAM-converted to a method whose DECLARED return is the very value

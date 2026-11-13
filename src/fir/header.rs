@@ -19,6 +19,7 @@ mod annotation_strings;
 mod declaration;
 mod executable_owners;
 mod flags;
+mod inventory_args;
 mod nested_classifiers;
 mod property_flags;
 mod source_classifiers;
@@ -31,6 +32,7 @@ use annotation_strings::HeaderAnnotationStringArena;
 pub use declaration::{HeaderDeclaration, HeaderDeclarationKind, HeaderResultType};
 use executable_owners::local_executable_owner;
 pub use flags::{HeaderParameterFlags, HeaderTypeFlags, HeaderTypeParameterFlags};
+use inventory_args::{header_arenas, stub_build, ClassStubKind, HeaderArenas, StubBuild};
 use nested_classifiers::{
     bind_parser_identity, classifier_identity, companion_declarations, nested_classifier_owners,
 };
@@ -705,6 +707,36 @@ struct ExtractedFileStubs {
     /// can say which positions are free; this carries its answer past the AST.
     continuation_ordinals: Vec<(DeclarationId, u32)>,
     local_class_name_provenance: Vec<(DeclarationId, super::LocalClassNameProvenance)>,
+    /// The classifier each `companion { … }` block member was written in. The member is hoisted
+    /// to file level, so its anchor has no owner, but its source position is among that
+    /// classifier's members.
+    lexical_owners: LexicalOwners,
+}
+
+/// Declarations whose source position is inside a classifier they are not anchored under: each
+/// `companion { … }` block member, keyed to the classifier whose block declared it.
+pub(super) type LexicalOwners = crate::fx_hash::HashMap<DeclarationId, DeclarationId>;
+
+/// [`LexicalOwners`] of one parsed file, in the identity space `identities` binds it to.
+fn companion_block_lexical_owners(
+    file: &File,
+    identities: &ParserDeclarationIdentities,
+) -> LexicalOwners {
+    let mut owners = LexicalOwners::default();
+    for &declaration in &file.decls {
+        let Decl::Class(class) = file.decl(declaration) else {
+            continue;
+        };
+        let Some(&classifier) = identities.get(&declaration) else {
+            continue;
+        };
+        for member in &class.companion_block_members {
+            if let Some(&member) = identities.get(&member.declaration) {
+                owners.insert(member, classifier);
+            }
+        }
+    }
+    owners
 }
 
 #[derive(Clone, Copy)]
@@ -799,9 +831,7 @@ fn extract_file_stub_inventory(
     }
 
     fn generated_function_stub(
-        source: SourceFileId,
-        ids: &mut DeclarationIds,
-        names: &mut LookupNames,
+        build: &mut StubBuild<'_>,
         owner: DeclarationId,
         range: TextRange,
         sibling: u32,
@@ -809,6 +839,9 @@ fn extract_file_stub_inventory(
         flags: DeclarationFlags,
         visibility: Visibility,
     ) -> DeclarationStub {
+        let source = build.source;
+        let ids = &mut *build.ids;
+        let names = &mut *build.names;
         let id = ids.intern(DeclarationAnchor {
             source,
             range,
@@ -832,15 +865,16 @@ fn extract_file_stub_inventory(
 
     fn property_stubs(
         file: &File,
-        source: SourceFileId,
-        ids: &mut DeclarationIds,
-        names: &mut LookupNames,
+        build: &mut StubBuild<'_>,
         property: &PropDecl,
         owner: Option<DeclarationId>,
         sibling: u32,
         initialization_order: Option<u32>,
         out: &mut Vec<DeclarationStub>,
     ) {
+        let source = build.source;
+        let ids = &mut *build.ids;
+        let names = &mut *build.names;
         let id = ids.intern(DeclarationAnchor {
             source,
             range: property.span,
@@ -852,14 +886,14 @@ fn extract_file_stub_inventory(
             .delegate
             .map(|_| BodyKind::Delegate)
             .or_else(|| property.init.map(|_| BodyKind::Initializer));
-        let inferred_expression = if property
+        let inferred_expression = if let Some(initializer) = property
             .explicit_backing_field
             .as_ref()
-            .is_some_and(|field| field.ty.is_none())
-            && property.init.is_some()
+            .filter(|field| field.ty.is_none())
+            .and(property.init)
         {
             Some((
-                property.init.expect("checked above"),
+                initializer,
                 BodyKind::Initializer,
                 InferredSignatureKind::BackingFieldInitializer,
             ))
@@ -970,16 +1004,20 @@ fn extract_file_stub_inventory(
 
     fn class_stubs(
         file: &File,
-        source: SourceFileId,
-        ids: &mut DeclarationIds,
-        names: &mut LookupNames,
+        build: &mut StubBuild<'_>,
         class: &ClassDecl,
-        is_companion: bool,
-        classifier_member: bool,
+        kind: ClassStubKind,
         owner: Option<DeclarationId>,
         sibling: u32,
         out: &mut Vec<DeclarationStub>,
     ) {
+        let ClassStubKind {
+            companion: is_companion,
+            classifier_member,
+        } = kind;
+        let source = build.source;
+        let ids = &mut *build.ids;
+        let names = &mut *build.names;
         let class_id = ids.intern(DeclarationAnchor {
             source,
             range: class.span,
@@ -1049,12 +1087,12 @@ fn extract_file_stub_inventory(
             };
             class_stubs(
                 file,
-                source,
-                ids,
-                names,
+                &mut stub_build(source, ids, names),
                 companion,
-                true,
-                true,
+                ClassStubKind {
+                    companion: true,
+                    classifier_member: true,
+                },
                 Some(class_id),
                 0,
                 out,
@@ -1108,9 +1146,7 @@ fn extract_file_stub_inventory(
                     .checked_sub(ordinal as u32)
                     .expect("too many generated data-class components");
                 out.push(generated_function_stub(
-                    source,
-                    ids,
-                    names,
+                    &mut stub_build(source, ids, names),
                     class_id,
                     class.span,
                     sibling,
@@ -1122,9 +1158,7 @@ fn extract_file_stub_inventory(
                 ));
             }
             out.push(generated_function_stub(
-                source,
-                ids,
-                names,
+                &mut stub_build(source, ids, names),
                 class_id,
                 class.span,
                 u32::MAX / 2,
@@ -1137,11 +1171,11 @@ fn extract_file_stub_inventory(
                 Visibility::Public,
             ));
         }
-        // A final `value class` gets the same structural trio as a data class. `componentN`/`copy`
-        // stay data-only. An abstract or sealed value class has no constructor properties and does
-        // not generate the trio, so a regular subclass keeps `Any`'s identity members. `@JvmInline`
-        // later suppresses these stubs and unboxes the class instead.
-        if class.is_data || (class.value_modifier_span.is_some() && class.is_final()) {
+        // A final `value class` (or legacy `inline class`) gets the same structural trio as a data
+        // class. `componentN`/`copy` stay data-only. An abstract or sealed value class has no
+        // constructor properties and does not generate the trio, so a regular subclass keeps
+        // `Any`'s identity members. A target realizes the trio of an unboxed class over its carrier.
+        if class.is_data || (class.is_value && class.is_final()) {
             for (ordinal, (name, parameter_count)) in
                 [("toString", 0), ("hashCode", 0), ("equals", 1)]
                     .into_iter()
@@ -1156,9 +1190,7 @@ fn extract_file_stub_inventory(
                     continue;
                 }
                 out.push(generated_function_stub(
-                    source,
-                    ids,
-                    names,
+                    &mut stub_build(source, ids, names),
                     class_id,
                     class.span,
                     u32::MAX / 2 - ordinal as u32 - 1,
@@ -1210,9 +1242,7 @@ fn extract_file_stub_inventory(
         for (index, property) in class.body_props.iter().enumerate() {
             property_stubs(
                 file,
-                source,
-                ids,
-                names,
+                &mut stub_build(source, ids, names),
                 property,
                 Some(class_id),
                 u32::try_from(index).expect("too many class properties"),
@@ -1314,9 +1344,7 @@ fn extract_file_stub_inventory(
             for (property_index, property) in entry.props.iter().enumerate() {
                 property_stubs(
                     file,
-                    source,
-                    ids,
-                    names,
+                    &mut stub_build(source, ids, names),
                     property,
                     Some(entry_id),
                     u32::try_from(property_index).expect("too many enum-entry properties"),
@@ -1393,9 +1421,7 @@ fn extract_file_stub_inventory(
             )),
             Decl::Property(property) => property_stubs(
                 file,
-                source,
-                ids,
-                names,
+                &mut stub_build(source, ids, names),
                 property,
                 None,
                 u32::try_from(index).expect("too many file declarations"),
@@ -1416,12 +1442,12 @@ fn extract_file_stub_inventory(
                 let class_stub = stubs.len();
                 class_stubs(
                     file,
-                    source,
-                    ids,
-                    names,
+                    &mut stub_build(source, ids, names),
                     class,
-                    false,
-                    classifier_member,
+                    ClassStubKind {
+                        companion: false,
+                        classifier_member,
+                    },
                     nested_owners.get(declaration).copied(),
                     u32::try_from(index).expect("too many file declarations"),
                     &mut stubs,
@@ -1619,8 +1645,10 @@ fn extract_file_stub_inventory(
             &stubs,
         );
     }
+    let lexical_owners = companion_block_lexical_owners(file, &stable_by_transient);
     ExtractedFileStubs {
         stubs,
+        lexical_owners,
         stable_by_transient,
         source_declarations: source_declarations
             .into_iter()
@@ -1658,15 +1686,15 @@ pub(crate) fn extract_file_stubs_for_stable_binding(
     source: SourceFileId,
     ids: &mut DeclarationIds,
     names: &mut LookupNames,
-) -> Vec<DeclarationStub> {
-    extract_file_stub_inventory(
+) -> (Vec<DeclarationStub>, LexicalOwners) {
+    let extracted = extract_file_stub_inventory(
         file,
         source,
         ids,
         names,
         LocalClassProvenanceOwnership::AlreadyPublished,
-    )
-    .stubs
+    );
+    (extracted.stubs, extracted.lexical_owners)
 }
 
 /// Put one file's declarations into the stable stream shared by Pass 1 and a fresh Pass-2 parse.
@@ -1676,7 +1704,13 @@ pub(crate) fn extract_file_stubs_for_stable_binding(
 /// 2 reparses one such bounded unit at a time. Within an owner, compiler-generated data-class members
 /// have no source position and follow every written sibling in stable synthesis order. Only the
 /// resulting declaration-id stream survives the parse; the ranges and temporary hierarchy do not.
-pub(super) fn order_file_stubs(stubs: &mut [DeclarationStub], ids: &DeclarationIds) {
+/// A declaration with a [`LexicalOwners`] entry is ordered among that classifier's members, where
+/// source wrote it; it is still part of the same top-level subtree.
+pub(super) fn order_file_stubs(
+    stubs: &mut [DeclarationStub],
+    ids: &DeclarationIds,
+    lexical_owners: &LexicalOwners,
+) {
     let ordering = stubs
         .iter()
         .enumerate()
@@ -1709,10 +1743,11 @@ pub(super) fn order_file_stubs(stubs: &mut [DeclarationStub], ids: &DeclarationI
             if let Some(order) = ordering.get(&declaration).copied() {
                 path.push(order);
             }
-            current = ids
-                .anchor(declaration)
-                .unwrap_or_else(|| panic!("declaration {declaration:?} has no stable anchor"))
-                .owner;
+            current = lexical_owners.get(&declaration).copied().or_else(|| {
+                ids.anchor(declaration)
+                    .unwrap_or_else(|| panic!("declaration {declaration:?} has no stable anchor"))
+                    .owner
+            });
         }
         path.reverse();
         path
@@ -1889,10 +1924,11 @@ pub fn extract_file_header_syntax(
         owner: Option<DeclarationId>,
         sibling: u32,
         function: &FunDecl,
-        ids: &mut DeclarationIds,
-        names: &mut LookupNames,
-        headers: &mut HeaderSyntaxArena,
+        arenas: &mut HeaderArenas<'_>,
     ) {
+        let ids = &mut *arenas.ids;
+        let names = &mut *arenas.names;
+        let headers = &mut *arenas.headers;
         let declaration = id_for(
             ids,
             source,
@@ -1952,10 +1988,11 @@ pub fn extract_file_header_syntax(
         owner: Option<DeclarationId>,
         sibling: u32,
         property: &PropDecl,
-        ids: &mut DeclarationIds,
-        names: &mut LookupNames,
-        headers: &mut HeaderSyntaxArena,
+        arenas: &mut HeaderArenas<'_>,
     ) {
+        let ids = &mut *arenas.ids;
+        let names = &mut *arenas.names;
+        let headers = &mut *arenas.headers;
         let declaration = id_for(
             ids,
             source,
@@ -2064,10 +2101,11 @@ pub fn extract_file_header_syntax(
         sibling: u32,
         source_name: &str,
         class: &ClassDecl,
-        ids: &mut DeclarationIds,
-        names: &mut LookupNames,
-        headers: &mut HeaderSyntaxArena,
+        arenas: &mut HeaderArenas<'_>,
     ) {
+        let ids = &mut *arenas.ids;
+        let names = &mut *arenas.names;
+        let headers = &mut *arenas.headers;
         let declaration = id_for(
             ids,
             source,
@@ -2219,9 +2257,7 @@ pub fn extract_file_header_syntax(
                     .map(String::as_str)
                     .unwrap_or(&companion.name),
                 companion,
-                ids,
-                names,
-                headers,
+                &mut header_arenas(ids, names, headers),
             );
         }
         for (index, parameter) in class.props.iter().enumerate() {
@@ -2291,9 +2327,7 @@ pub fn extract_file_header_syntax(
                 Some(declaration),
                 u32::try_from(index).expect("too many class methods"),
                 method,
-                ids,
-                names,
-                headers,
+                &mut header_arenas(ids, names, headers),
             );
         }
         for (index, value) in class.body_props.iter().enumerate() {
@@ -2303,9 +2337,7 @@ pub fn extract_file_header_syntax(
                 Some(declaration),
                 u32::try_from(index).expect("too many class properties"),
                 value,
-                ids,
-                names,
-                headers,
+                &mut header_arenas(ids, names, headers),
             );
         }
         for (index, value) in class.type_aliases.iter().enumerate() {
@@ -2335,9 +2367,7 @@ pub fn extract_file_header_syntax(
                     Some(entry_id),
                     u32::try_from(index).expect("too many enum-entry methods"),
                     method,
-                    ids,
-                    names,
-                    headers,
+                    &mut header_arenas(ids, names, headers),
                 );
             }
             for (index, value) in entry.props.iter().enumerate() {
@@ -2347,9 +2377,7 @@ pub fn extract_file_header_syntax(
                     Some(entry_id),
                     u32::try_from(index).expect("too many enum-entry properties"),
                     value,
-                    ids,
-                    names,
-                    headers,
+                    &mut header_arenas(ids, names, headers),
                 );
             }
         }
@@ -2368,9 +2396,7 @@ pub fn extract_file_header_syntax(
                 None,
                 u32::try_from(index).expect("too many file declarations"),
                 value,
-                ids,
-                names,
-                headers,
+                &mut header_arenas(ids, names, headers),
             ),
             Decl::Property(value) => property(
                 file,
@@ -2378,9 +2404,7 @@ pub fn extract_file_header_syntax(
                 None,
                 u32::try_from(index).expect("too many file declarations"),
                 value,
-                ids,
-                names,
-                headers,
+                &mut header_arenas(ids, names, headers),
             ),
             Decl::Class(value) => classifier(
                 file,
@@ -2392,9 +2416,7 @@ pub fn extract_file_header_syntax(
                     .map(String::as_str)
                     .unwrap_or(&value.name),
                 value,
-                ids,
-                names,
-                headers,
+                &mut header_arenas(ids, names, headers),
             ),
         }
     }
@@ -2902,7 +2924,7 @@ impl HeaderInventoryBuilder {
         );
         let mut stubs = extracted.stubs;
         let stable_by_transient = extracted.stable_by_transient;
-        order_file_stubs(&mut stubs, &self.declarations);
+        order_file_stubs(&mut stubs, &self.declarations, &extracted.lexical_owners);
         self.source_declarations[source.raw() as usize] = extracted.source_declarations;
         self.expect_keywords.extend(extracted.expect_keywords);
         self.continuation_ordinals

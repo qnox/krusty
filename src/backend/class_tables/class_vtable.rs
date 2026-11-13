@@ -111,7 +111,7 @@ pub(super) fn class_table(
         .iter()
         .filter_map(|&function| property_accessor_key(ir, id, function).map(|key| (function, key)))
         .collect();
-    let overridden_functions = overridden_functions(ir, class, numbered)?;
+    let overridden_functions = overridden_functions(ir, class, numbered, false)?;
     let overridden_properties = overridden_properties(ir, id, class)?;
 
     for &fid in &class.methods {
@@ -241,7 +241,7 @@ pub(super) fn class_table(
                 None => match &own_key {
                     SlotKey::Getter(target) | SlotKey::Setter(target) => {
                         let setter = matches!(own_key, SlotKey::Setter(..));
-                        let implemented = property_type(ir, *target, &overridden_properties)
+                        let implemented = property_type(ir, class, *target, &overridden_properties)
                             .ok_or_else(|| {
                                 format!(
                                     "a property accessor without a recorded semantic type (`{}.{}`)",
@@ -428,6 +428,7 @@ pub(super) fn class_table(
 
     Ok(ClassTable {
         superclass,
+        laid_out_superclass: None,
         first_field: parent.map_or(0, |parent| {
             let parent_class = superclass.expect("a parent table is a superclass's");
             parent.first_field + ir.classes[parent_class as usize].fields.len() as u32

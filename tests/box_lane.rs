@@ -28,7 +28,6 @@ use rayon::prelude::*;
 use krusty::backend::{Artifact, Backend, BOX_RESULT_FRAME};
 use krusty::conformance::TestTarget;
 use krusty::diag::{DiagSink, Severity};
-use krusty::jvm::classpath::Classpath;
 use krusty::source::SourceInput;
 
 use super::box_lane_profile::{timed, Stage};
@@ -90,9 +89,6 @@ pub trait Lane: Sync {
     fn env_infix(&self) -> &'static str;
 
     fn test_target(&self) -> TestTarget;
-
-    /// What this lane's cases are analyzed against.
-    fn libraries(&self) -> Libraries;
 
     /// Why this host cannot run the lane, or `None` when it can.
     fn unavailable(&self) -> Option<String>;
@@ -174,20 +170,6 @@ impl Drop for Scratch {
     }
 }
 
-/// What a lane's cases are analyzed against. It is the lane's own setting, so a target moves to its
-/// own library surface without forking the driver.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Libraries {
-    /// The JVM stdlib and `kotlin-test` jars with the JDK modules, which is what the JVM lane
-    /// compiles against. A mapped builtin like `kotlin.Throwable` is a typealias for a `java.lang`
-    /// class there, so the JDK has to be present for those names to resolve at all.
-    JvmArtifacts,
-    /// The target's own stdlib KLIB (`toolchain::kotlin_stdlib_klib`), the library kotlinc
-    /// compiles that target against. Native includes `kotlin.test`; Wasm adds its exact target
-    /// kotlin-test KLIB as an ordinary dependency.
-    StdlibKlib,
-}
-
 struct PlatformLibraries {
     semantics: Box<dyn krusty::libraries::SemanticPlatform>,
     native_imports: Vec<krusty_native::ImportLibrary>,
@@ -199,94 +181,69 @@ pub struct CompiledProgram {
     pub native_imports: Vec<krusty_native::ImportLibrary>,
 }
 
-impl Libraries {
-    /// Whether this host has the libraries a `target` case is analyzed against.
-    pub fn available(self, target: TestTarget) -> bool {
-        match self {
-            Self::JvmArtifacts => {
-                krusty::toolchain::stdlib_jar().is_some()
-                    && krusty::toolchain::jdk_modules().is_some()
-            }
-            Self::StdlibKlib => {
-                krusty::toolchain::kotlin_stdlib_klib(target.compilation_target()).is_some()
-            }
-        }
-    }
+/// Whether this host has the target's stdlib KLIB, the library kotlinc compiles that target
+/// against. Native includes `kotlin.test`; Wasm adds its exact target kotlin-test KLIB as an
+/// ordinary dependency.
+pub fn stdlib_klib_available(target: TestTarget) -> bool {
+    krusty::toolchain::kotlin_stdlib_klib(target.compilation_target()).is_some()
+}
 
-    /// A fresh semantic platform for one compilation.
-    fn platform(
-        self,
-        target: krusty::compilation_target::CompilationTarget,
-        dependencies: &[PathBuf],
-        friend_dependencies: &[PathBuf],
-    ) -> PlatformLibraries {
-        match self {
-            Self::JvmArtifacts if !dependencies.is_empty() || !friend_dependencies.is_empty() => {
-                panic!("JVM box libraries cannot ingest KLIB dependency modules")
-            }
-            Self::JvmArtifacts => PlatformLibraries {
-                semantics: Box::new(
-                    krusty::jvm::jvm_libraries::JvmLibraries::new(
-                        CLASSPATH.with(std::rc::Rc::clone),
-                    )
-                    .expect("JVM provider initialization"),
-                ),
-                native_imports: Vec::new(),
-            },
-            Self::StdlibKlib => STDLIB_KLIBS.with(|opened| {
-                if !dependencies.is_empty() {
-                    let mut libraries = dependencies
-                        .iter()
-                        .map(|path| {
-                            if friend_dependencies.contains(path) {
-                                krusty::klib_libraries::KlibLibraryInput::friend(path.clone())
-                            } else {
-                                krusty::klib_libraries::KlibLibraryInput::dependency(path.clone())
-                            }
-                        })
-                        .collect::<Vec<_>>();
-                    libraries.push(krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
-                        krusty::toolchain::kotlin_stdlib_klib(target)
-                            .expect("checked by `Libraries::available`"),
-                        klib_stdlib_semantics(target),
-                    ));
-                    libraries.extend(wasm_test_library(target));
-                    let (libraries, native_imports) = open_klib_inputs(target, &libraries)
-                        .unwrap_or_else(|error| {
-                            panic!("opening the {target:?} dependency KLIBs: {error}")
-                        });
-                    return PlatformLibraries {
-                        semantics: Box::new(libraries),
-                        native_imports,
-                    };
-                }
-                let mut opened = opened.borrow_mut();
-                if let Some((_, libraries, native_imports)) =
-                    opened.iter().find(|(opened, _, _)| *opened == target)
-                {
-                    return PlatformLibraries {
-                        semantics: Box::new(libraries.for_compilation()),
-                        native_imports: native_imports.clone(),
-                    };
-                }
-                let stdlib = krusty::toolchain::kotlin_stdlib_klib(target)
-                    .expect("checked by `Libraries::available`");
-                let mut inputs = vec![krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
-                    stdlib,
-                    klib_stdlib_semantics(target),
-                )];
-                inputs.extend(wasm_test_library(target));
-                let (libraries, native_imports) = open_klib_inputs(target, &inputs)
-                    .unwrap_or_else(|error| panic!("opening the {target:?} stdlib KLIB: {error}"));
-                let compilation = PlatformLibraries {
-                    semantics: Box::new(libraries.for_compilation()),
-                    native_imports: native_imports.clone(),
-                };
-                opened.push((target, libraries, native_imports));
-                compilation
-            }),
+/// A fresh semantic platform for one compilation against that stdlib KLIB.
+fn stdlib_platform(
+    target: krusty::compilation_target::CompilationTarget,
+    dependencies: &[PathBuf],
+    friend_dependencies: &[PathBuf],
+) -> PlatformLibraries {
+    STDLIB_KLIBS.with(|opened| {
+        if !dependencies.is_empty() {
+            let mut libraries = dependencies
+                .iter()
+                .map(|path| {
+                    if friend_dependencies.contains(path) {
+                        krusty::klib_libraries::KlibLibraryInput::friend(path.clone())
+                    } else {
+                        krusty::klib_libraries::KlibLibraryInput::dependency(path.clone())
+                    }
+                })
+                .collect::<Vec<_>>();
+            libraries.push(krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
+                krusty::toolchain::kotlin_stdlib_klib(target)
+                    .expect("checked by `stdlib_klib_available`"),
+                klib_stdlib_semantics(target),
+            ));
+            libraries.extend(wasm_test_library(target));
+            let (libraries, native_imports) = open_klib_inputs(target, &libraries)
+                .unwrap_or_else(|error| panic!("opening the {target:?} dependency KLIBs: {error}"));
+            return PlatformLibraries {
+                semantics: Box::new(libraries),
+                native_imports,
+            };
         }
-    }
+        let mut opened = opened.borrow_mut();
+        if let Some((_, libraries, native_imports)) =
+            opened.iter().find(|(opened, _, _)| *opened == target)
+        {
+            return PlatformLibraries {
+                semantics: Box::new(libraries.for_compilation()),
+                native_imports: native_imports.clone(),
+            };
+        }
+        let stdlib = krusty::toolchain::kotlin_stdlib_klib(target)
+            .expect("checked by `stdlib_klib_available`");
+        let mut inputs = vec![krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
+            stdlib,
+            klib_stdlib_semantics(target),
+        )];
+        inputs.extend(wasm_test_library(target));
+        let (libraries, native_imports) = open_klib_inputs(target, &inputs)
+            .unwrap_or_else(|error| panic!("opening the {target:?} stdlib KLIB: {error}"));
+        let compilation = PlatformLibraries {
+            semantics: Box::new(libraries.for_compilation()),
+            native_imports: native_imports.clone(),
+        };
+        opened.push((target, libraries, native_imports));
+        compilation
+    })
 }
 
 /// The atomicfu compiler plugin for a `// WITH_ATOMICFU` native or wasm case. The JVM lane
@@ -332,29 +289,19 @@ fn atomicfu_plugins(
     native
 }
 
-/// The atomicfu runtime KLIB a `// WITH_ATOMICFU` native or wasm case resolves `kotlinx.atomicfu`
-/// against. The JVM lane compiles that directive with the compiler plugin and the JVM jar.
-fn atomicfu_runtime_dependencies(
+/// Directive-selected KLIBs for a native or wasm case, the same libraries the KLIB reference
+/// compiles that case against. The JVM lane uses the jars from `classpath_jars_for` instead.
+fn directive_klib_dependencies(
     directive_source: &str,
     target: krusty::compilation_target::CompilationTarget,
 ) -> Vec<PathBuf> {
-    if !krusty::conformance::directive(directive_source, "WITH_ATOMICFU") {
-        return Vec::new();
-    }
-    if matches!(
-        target,
-        krusty::compilation_target::CompilationTarget::Jvm
-            | krusty::compilation_target::CompilationTarget::Js
-    ) {
-        return Vec::new();
-    }
-    vec![krusty::toolchain::atomicfu_klib(target)
-        .unwrap_or_else(|| panic!("cannot provision the atomicfu runtime KLIB for {target:?}"))]
+    krusty::toolchain::klib_libraries_for(directive_source, target)
+        .unwrap_or_else(|error| panic!("{error}"))
 }
 
 /// Wasm publishes kotlin-test separately from its stdlib. Retain it as an ordinary dependency:
 /// these coordinates select the exact target/version but confer no compiler intrinsic authority.
-fn wasm_test_library(
+pub(super) fn wasm_test_library(
     target: krusty::compilation_target::CompilationTarget,
 ) -> Option<krusty::klib_libraries::KlibLibraryInput> {
     use krusty::compilation_target::CompilationTarget;
@@ -411,21 +358,6 @@ fn open_klib_inputs(
 }
 
 thread_local! {
-    /// One classpath per worker thread: it is `Rc`-shared and caches parsed class files, so
-    /// building it per case would redo the stdlib jar's index thousands of times.
-    static CLASSPATH: std::rc::Rc<Classpath> = std::rc::Rc::new(Classpath::new(
-        [
-            krusty::toolchain::stdlib_jar().expect("checked by `Libraries::available`"),
-            krusty::toolchain::jdk_modules().expect("checked by `Libraries::available`"),
-        ]
-        .into_iter()
-        // `kotlin-test`, which is what `// WITH_STDLIB` means on top of the stdlib: the corpus
-        // checks itself with `assertEquals`, `assertTrue` and `assertFailsWith`, and without the
-        // jar those do not resolve — nor does the `kotlin.test` package path itself.
-        .chain(krusty::toolchain::kotlin_test_jar())
-        .collect::<Vec<_>>(),
-    ));
-
     /// Each target's stdlib KLIB, opened once per worker thread: opening decodes and signs every
     /// declaration, which `for_compilation` then shares with each case.
     static STDLIB_KLIBS: std::cell::RefCell<
@@ -448,7 +380,6 @@ thread_local! {
 pub fn compile<B: Backend>(
     sources: &[(String, String)],
     directive_source: &str,
-    libraries: Libraries,
     target: TestTarget,
     backend: &B,
     module_name: &str,
@@ -468,11 +399,11 @@ pub fn compile<B: Backend>(
             "the {target:?} corpus lane received a {compilation_target:?} backend"
         )));
     }
-    let dependencies = atomicfu_runtime_dependencies(directive_source, compilation_target);
+    let dependencies = directive_klib_dependencies(directive_source, compilation_target);
     let PlatformLibraries {
         semantics,
         native_imports,
-    } = libraries.platform(compilation_target, &dependencies, &[]);
+    } = stdlib_platform(compilation_target, &dependencies, &[]);
     let platform = krusty::frontend::PlatformProvider::new(compilation_target, semantics)
         .with_native_plugins(atomicfu_plugins(directive_source, compilation_target));
     let features = krusty::features::LangFeatures::from_source(directive_source);
@@ -483,8 +414,24 @@ pub fn compile<B: Backend>(
     if let Some(first) = first_error(&diags, 0) {
         return Err(Outcome::Frontend(first.msg.clone()));
     }
-    let artifacts =
-        krusty::compiler::emit_analyzed(analysis, &stems, backend, module_name, &mut diags);
+    let artifacts = if super::box_klib_bytes::capturing() {
+        let metadata = super::box_klib_bytes::metadata_backend(target, directive_source)
+            .map_err(Outcome::Harness)?;
+        let observer = super::box_klib_bytes::MetadataObserver(metadata);
+        let mut session = krusty::compiler::EmissionSession::new(backend);
+        if session
+            .emit_module(analysis, &stems, &observer, module_name, &mut diags)
+            .is_none()
+            && !diags.has_errors()
+        {
+            return Err(Outcome::Harness(
+                "source emission failed without a diagnostic".into(),
+            ));
+        }
+        session.finish(module_name, &mut diags)
+    } else {
+        krusty::compiler::emit_analyzed(analysis, &stems, backend, module_name, &mut diags)
+    };
     if let Some(decline) = diags
         .diags
         .iter()
@@ -503,6 +450,13 @@ pub fn compile<B: Backend>(
     })
 }
 
+/// The KLIB archives one corpus module is analyzed against: its dependency closure, and the
+/// subset of those archives that are friends.
+pub(crate) struct ModuleDependencies<'a> {
+    klibs: &'a [PathBuf],
+    friends: &'a [PathBuf],
+}
+
 /// Analyze one independently built corpus module against the exact KLIB artifacts of its
 /// dependencies. `common_file_count` is the dependency-first `dependsOn` prefix folded into this
 /// unit; those sources remain common rather than being flattened into platform sources.
@@ -519,10 +473,8 @@ fn module_features(
 
 pub fn analyze_module(
     unit: &krusty::conformance::ModuleUnit,
-    dependency_klibs: &[PathBuf],
-    friend_klibs: &[PathBuf],
+    module_dependencies: ModuleDependencies<'_>,
     directive_source: &str,
-    libraries: Libraries,
     target: TestTarget,
     backend_target: krusty::compilation_target::CompilationTarget,
     diags: &mut DiagSink,
@@ -557,15 +509,15 @@ pub fn analyze_module(
         .iter()
         .map(|(stem, _)| stem.clone())
         .collect::<Vec<_>>();
-    let mut dependencies = dependency_klibs.to_vec();
-    dependencies.extend(atomicfu_runtime_dependencies(
+    let mut dependencies = module_dependencies.klibs.to_vec();
+    dependencies.extend(directive_klib_dependencies(
         directive_source,
         backend_target,
     ));
     let PlatformLibraries {
         semantics,
         native_imports,
-    } = libraries.platform(backend_target, &dependencies, friend_klibs);
+    } = stdlib_platform(backend_target, &dependencies, module_dependencies.friends);
     let platform = krusty::frontend::PlatformProvider::new(backend_target, semantics)
         .with_native_plugins(atomicfu_plugins(directive_source, backend_target));
     let features = module_features(directive_source, unit.common_file_count);
@@ -579,21 +531,31 @@ pub fn analyze_module(
     Ok((analysis, stems, native_imports))
 }
 
+/// One multi-module corpus case: where its generated KLIBs live, the case name, and its source
+/// modules in dependency order.
+pub struct ModuleCase<'a> {
+    pub scratch: &'a Path,
+    pub stem: &'a str,
+    pub modules: &'a [krusty::conformance::ModuleUnit],
+}
+
 /// Analyze each source module against only its declared dependency KLIB closure, emit all target
 /// code through one backend session, and retain every generated dependency as a distinct archive.
 /// The target lane supplies `metadata`: Native owns its concrete Konan target here, while each Wasm
 /// lane owns its exact JS/WASI platform.
 pub fn compile_modules<B: Backend, M: krusty::backend::DependencyMetadata>(
-    scratch: &Path,
-    stem: &str,
-    modules: &[krusty::conformance::ModuleUnit],
+    case: ModuleCase<'_>,
     directive_source: &str,
-    libraries: Libraries,
     target: TestTarget,
     backend: &B,
     metadata: &M,
     decline_prefix: &str,
 ) -> Result<CompiledProgram, Outcome> {
+    let ModuleCase {
+        scratch,
+        stem,
+        modules,
+    } = case;
     #[derive(Clone)]
     struct GeneratedDependency {
         archive: PathBuf,
@@ -699,10 +661,11 @@ pub fn compile_modules<B: Backend, M: krusty::backend::DependencyMetadata>(
         }
         let (analysis, stems, module_imports) = analyze_module(
             unit,
-            &dependency_klibs,
-            &friend_klibs,
+            ModuleDependencies {
+                klibs: &dependency_klibs,
+                friends: &friend_klibs,
+            },
             directive_source,
-            libraries,
             target,
             compilation_target,
             &mut diags,
@@ -716,6 +679,7 @@ pub fn compile_modules<B: Backend, M: krusty::backend::DependencyMetadata>(
             });
             return Err(outcome);
         };
+        super::box_klib_bytes::capture_artifacts(&unit.name, dependency.artifacts());
         let archive = write_dependency_archive(&generated_root.0, ordinal, dependency.artifacts())?;
         generated.insert(
             unit.name.clone(),
@@ -1074,11 +1038,8 @@ fn owned_fatal_outcomes_cannot_be_blessed_as_box_failures() {
     );
 }
 
-fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
-    let source = match std::fs::read_to_string(file) {
-        Ok(source) => source,
-        Err(error) => return Outcome::Harness(format!("reading case: {error}")),
-    };
+fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path, source: &str) -> Outcome {
+    let source = source.to_owned();
     let stem = file
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -1209,7 +1170,8 @@ pub fn run(lane: &dyn Lane) {
     super::box_inventory::require_setup(unavailable.as_deref(), provisioned)
         .unwrap_or_else(|error| panic!("{label}: {error}"));
     let corpus = krusty::toolchain::box_corpus_dir().expect("validated corpus setup");
-    let files = super::box_inventory::discover(&corpus).unwrap_or_else(|error| panic!("{error}"));
+    let files = super::box_inventory::discover(&corpus, lane.test_target())
+        .unwrap_or_else(|error| panic!("{error}"));
     let relative = |file: &Path| box_ratchet::corpus_key(&corpus, file);
     let platform = lane.platform();
     let version = krusty::kotlin_version::target();
@@ -1262,6 +1224,7 @@ pub fn run(lane: &dyn Lane) {
     }
     let pool = pool.build().expect("build the worker pool");
 
+    let bytes = super::box_klib_bytes::ByteRun::new(lane);
     let started = Instant::now();
     let timed_outcomes: Vec<((&PathBuf, Outcome), Duration)> = pool.install(|| {
         files
@@ -1271,21 +1234,32 @@ pub fn run(lane: &dyn Lane) {
                 // A panic inside the compiler is a failure of THAT case, recorded like any other
                 // so one bug does not hide the picture for the rest of the corpus; the test still
                 // fails.
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    outcome(lane, &scratch.0, file)
-                }))
-                .unwrap_or_else(|panic| {
-                    let message = panic
-                        .downcast_ref::<String>()
-                        .cloned()
-                        .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
-                        .unwrap_or_else(|| "panic".to_string());
-                    let origin = LAST_PANIC_FILE.with(|last| last.borrow_mut().take());
-                    Outcome::CompilerPanic(match origin {
-                        Some(origin) => format!("{message} ({origin})"),
-                        None => message,
-                    })
-                });
+                let capture = bytes.capture();
+                let source = std::fs::read_to_string(file);
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &source {
+                        Ok(source) => outcome(lane, &scratch.0, file, source),
+                        Err(error) => Outcome::Harness(format!("reading case: {error}")),
+                    }))
+                    .unwrap_or_else(|panic| {
+                        let message = panic
+                            .downcast_ref::<String>()
+                            .cloned()
+                            .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                            .unwrap_or_else(|| "panic".to_string());
+                        let origin = LAST_PANIC_FILE.with(|last| last.borrow_mut().take());
+                        Outcome::CompilerPanic(match origin {
+                            Some(origin) => format!("{message} ({origin})"),
+                            None => message,
+                        })
+                    });
+                bytes.record(
+                    lane,
+                    file,
+                    source.as_ref().map(String::as_str),
+                    &result,
+                    capture,
+                );
                 ((file, result), case_started.elapsed())
             })
             .collect()
@@ -1479,11 +1453,21 @@ pub fn run(lane: &dyn Lane) {
     for (file, reason) in &failed {
         eprintln!("FAILED {}: {reason}", file.display());
     }
+    let byte_reference_failures = bytes.finish();
+    for failure in &byte_reference_failures {
+        eprintln!("KLIB byte reference failure {failure}");
+    }
     assert!(
         failed.is_empty(),
         "{} {label} conformance failure(s): every applicable non-pass must match the committed \
          expected-failure inventory, and compiler panics are never expected",
         failed.len()
+    );
+    assert!(
+        byte_reference_failures.is_empty(),
+        "{} {label} KLIB byte reference failure(s): the byte score is withheld rather than \
+         computed over fewer cases",
+        byte_reference_failures.len()
     );
 }
 

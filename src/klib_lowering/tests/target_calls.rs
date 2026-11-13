@@ -163,6 +163,49 @@ fn copy_type(source: &KlibIrArena, target: &mut KlibIrArena, ty: KlibIrTypeId) -
     target.push_type(copied)
 }
 
+/// [`target_tree`] of the member `selected`, inside the header of the class declaring it: a
+/// member's header is authenticated through its class.
+pub(super) fn member_target_tree(
+    libraries: &crate::klib_libraries::KlibLibraries,
+    selected: crate::libraries::KlibBodyCallable<'_>,
+    source: &KlibIrArena,
+    function: &KlibIrFunction,
+) -> KlibIrDeclarationTree {
+    let contract = selected.class_contract().unwrap();
+    let raw = libraries
+        .declaration_bodies()
+        .class_member_header(
+            selected.identity(),
+            &contract.signature,
+            selected
+                .accessor()
+                .map_or(crate::libraries::KlibAccessorRole::Getter, |accessor| {
+                    accessor.role
+                })
+                .into(),
+        )
+        .unwrap()
+        .unwrap();
+    let KlibIrDeclarationTree {
+        mut arena,
+        declaration: KlibIrMember::Function(member),
+    } = target_tree(source, function)
+    else {
+        unreachable!("a target tree declares its function")
+    };
+    let mut class = raw.class.clone();
+    class.members = vec![KlibIrMember::Function(member)];
+    class.supertypes.clear();
+    if let Some(this) = &mut class.this_receiver {
+        this.ty = copy_type(raw.arena, &mut arena, this.ty);
+    }
+    let class = arena.push_class(class);
+    KlibIrDeclarationTree {
+        arena,
+        declaration: KlibIrMember::Class(class),
+    }
+}
+
 pub(super) fn target_tree(
     source: &KlibIrArena,
     function: &KlibIrFunction,
@@ -248,7 +291,12 @@ fn assert_string_plus_leaf(
         KlibBodyLibrary::new(
             selected.identity().module.clone(),
             [],
-            KlibIrModuleTrees::from_trees(vec![target_tree(arena, function)]).unwrap(),
+            KlibIrModuleTrees::from_trees(vec![if selected.is_member() {
+                member_target_tree(libraries, selected, arena, function)
+            } else {
+                target_tree(arena, function)
+            }])
+            .unwrap(),
         ),
     ])
     .unwrap();
@@ -670,6 +718,113 @@ fn klib_target_primitive_hash_codes_are_target_dependency_leaves() {
                     .unwrap(),
                 Some(CompilerIntrinsic::PrimitiveHashCode),
                 "{scalar}"
+            );
+        }
+    }
+}
+
+/// Each primitive iterator's own `next()` is the provider's primitive-iterator operation. A target
+/// that realizes that operation itself (Native does; `krusty-native` asserts the capability)
+/// therefore reaches a target leaf when a stdlib body walks a primitive array
+/// (`IntArray.contentHashCode` iterates its receiver), rather than the iterator's ordinary member
+/// body, which a dependency support unit has no contract to emit.
+#[test]
+fn klib_target_primitive_iterator_nexts_are_target_dependency_leaves() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let capability = |operation| operation == CompilerIntrinsic::PrimitiveIteratorNext;
+    for iterator in [
+        "kotlin/collections/BooleanIterator",
+        "kotlin/collections/CharIterator",
+        "kotlin/collections/ByteIterator",
+        "kotlin/collections/ShortIterator",
+        "kotlin/collections/IntIterator",
+        "kotlin/collections/LongIterator",
+        "kotlin/collections/FloatIterator",
+        "kotlin/collections/DoubleIterator",
+    ] {
+        let classifier = libraries.classifier(type_name(iterator)).unwrap();
+        let selected = classifier.declared_callables["next"]
+            .functions()
+            .iter()
+            .map(|candidate| {
+                libraries
+                    .external_callable(candidate.callable.external_identity.unwrap())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let [provider] = selected.as_slice() else {
+            panic!("{iterator} declares one `next()`: {selected:?}");
+        };
+        let selected = provider.klib_body_callable().unwrap();
+        assert_eq!(
+            selected.compiler_intrinsic(),
+            Some(CompilerIntrinsic::PrimitiveIteratorNext),
+            "{iterator}"
+        );
+        for facts in [
+            KlibCalleeFacts::new([selected]),
+            KlibCalleeFacts::with_declarations([], [selected]),
+        ] {
+            assert_eq!(
+                facts
+                    .target_intrinsic(
+                        selected.identity(),
+                        libraries.declaration_bodies(),
+                        &capability
+                    )
+                    .unwrap(),
+                Some(CompilerIntrinsic::PrimitiveIteratorNext),
+                "{iterator}"
+            );
+        }
+    }
+}
+
+/// A target that realizes `Array`'s members as its own leaves, as Wasm does, authenticates each
+/// member's header with `Array`'s type parameter bound from the class header, as a serialized
+/// caller's call of the member does.
+#[test]
+fn klib_target_members_of_a_generic_class_bind_the_class_type_parameters() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let array = libraries.classifier(type_name("kotlin/Array")).unwrap();
+    let size = array.declared_callables["size"].properties()[0]
+        .getter
+        .external_identity;
+    let get = array.declared_callables["get"].functions()[0]
+        .callable
+        .external_identity;
+    let set = array.declared_callables["set"].functions()[0]
+        .callable
+        .external_identity;
+    for (identity, operation) in [
+        (size, CompilerIntrinsic::ArraySize),
+        (get, CompilerIntrinsic::ArrayGet),
+        (set, CompilerIntrinsic::ArraySet),
+    ] {
+        let provider = libraries
+            .external_callable(identity.expect("provider identity"))
+            .unwrap();
+        let selected = provider.klib_body_callable().unwrap();
+        assert_eq!(selected.compiler_intrinsic(), Some(operation));
+        for facts in [
+            KlibCalleeFacts::new([selected]),
+            KlibCalleeFacts::with_declarations([], [selected]),
+        ] {
+            assert_eq!(
+                facts
+                    .target_intrinsic(
+                        selected.identity(),
+                        libraries.declaration_bodies(),
+                        &|found| { found == operation }
+                    )
+                    .unwrap_or_else(|reason| panic!("{operation:?}: {reason:?}")),
+                Some(operation)
             );
         }
     }

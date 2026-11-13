@@ -106,6 +106,9 @@ impl ReferencedDependencies {
                 IrCallableReferenceTarget::External { declaration, .. } => {
                     self.callables.insert(*declaration);
                 }
+                IrCallableReferenceTarget::Property(property) => {
+                    self.property_reference(&property.target);
+                }
                 IrCallableReferenceTarget::Module(_)
                 | IrCallableReferenceTarget::Constructor { .. }
                 | IrCallableReferenceTarget::Local { .. }
@@ -268,13 +271,15 @@ impl ReferencedDependencies {
             IrCheckedOperation::PropertyReference { target, .. } => {
                 self.property_reference(target);
             }
+            IrCheckedOperation::RangeConstruction { declaration, .. } => {
+                self.callables.extend(*declaration);
+            }
             IrCheckedOperation::Call { .. }
             | IrCheckedOperation::PropertyRead { .. }
             | IrCheckedOperation::PropertyWrite { .. }
             | IrCheckedOperation::LateinitFieldRead { .. }
             | IrCheckedOperation::BackingFieldRead { .. }
             | IrCheckedOperation::BackingFieldWrite { .. }
-            | IrCheckedOperation::RangeConstruction { .. }
             | IrCheckedOperation::ComparableRangeContains { .. }
             | IrCheckedOperation::IllegalProgressionStep { .. } => {}
         }

@@ -85,26 +85,43 @@ pub(super) fn bind_member_return(
     bind_member_return_from_call_args_tracking(
         source,
         gsig,
-        receiver,
-        &args,
-        type_args,
-        None,
-        &[],
-        provider_ret,
+        MemberReturnCall {
+            receiver,
+            arguments: &args,
+            type_arguments: type_args,
+            vararg_index: None,
+            no_infer_params: &[],
+            provider_return: provider_ret,
+        },
     )
     .0
+}
+
+/// The call that completes one member return: its receiver, value arguments, explicit type
+/// arguments, and the erased provider return those arguments specialize.
+pub(super) struct MemberReturnCall<'a> {
+    pub(super) receiver: Ty,
+    pub(super) arguments: &'a [CallArgKind],
+    pub(super) type_arguments: &'a [Ty],
+    pub(super) vararg_index: Option<usize>,
+    /// Declaration parameters that do not contribute argument-inference constraints.
+    pub(super) no_infer_params: &'a [bool],
+    pub(super) provider_return: Ty,
 }
 
 pub(super) fn bind_member_return_from_call_args_tracking(
     source: &dyn SymbolSource,
     gsig: &GenericSig,
-    receiver: Ty,
-    args: &[CallArgKind],
-    type_args: &[Ty],
-    vararg_index: Option<usize>,
-    no_infer_params: &[bool],
-    provider_ret: Ty,
+    call: MemberReturnCall<'_>,
 ) -> (Ty, GSigBinds) {
+    let MemberReturnCall {
+        receiver,
+        arguments: args,
+        type_arguments: type_args,
+        vararg_index,
+        no_infer_params,
+        provider_return: provider_ret,
+    } = call;
     let mut binds = seeded_gsig_binds(gsig, type_args);
     if let TyKind::Obj(owner, arguments) = receiver.non_null().kind() {
         if let Some(classifier) = source.classifier(owner) {
