@@ -632,7 +632,9 @@ impl Emitter<'_> {
         let caller_type_parameters = self.type_parameter_function.replace(impl_fn);
         let caller_fakes = self.enter_placed_fake_continuations(&fake_continuations);
         let brace_depth = self.unit_lambda_brace_depth();
+        let caller_in_lambda = self.enter_inline_lambda_body();
         let result = self.emit_fn_body_inline(inline_body, &parameter_slots, &mut scratch);
+        self.leave_inline_lambda_body(caller_in_lambda);
         self.leave_placed_fake_continuations(&fake_continuations, caller_fakes);
         self.type_parameter_function = caller_type_parameters;
         if let Some(caller_machine) = caller_machine {
