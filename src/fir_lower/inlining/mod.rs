@@ -1026,8 +1026,11 @@ impl BodyLowering<'_> {
         // Consuming a source lambda implementation is the only irreversible part of escaping
         // inline-lambda specialization. Commit it only after every transformation that can decline
         // this expansion has succeeded; otherwise the original call still needs that body.
+        // A default lambda's implementation stays a method of the declaration's default stub,
+        // whichever way this expansion took its body.
         for function in inlined_escaping_implementations
             .into_iter()
+            .filter(|function| !default_lambda_implementation_set.contains(function))
             .chain(directly_spliced_implementations)
         {
             self.ir.inline_only_fns.insert(function);
