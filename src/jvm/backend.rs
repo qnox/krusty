@@ -10,7 +10,7 @@ use crate::frontend::FrontendSymbols;
 use crate::jvm::names::{file_class_name, type_descriptor};
 use crate::types::{type_name, Ty};
 
-/// Why [`run_backend_passes`] declined a file: the named pass met a shape it can't lower yet, so the
+/// Why [`run_backend_passes_with_checked_metadata`] declined a file: the named pass met a shape it can't lower yet, so the
 /// caller must skip (or diagnose) the file rather than miscompile it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReason {
@@ -70,59 +70,6 @@ pub enum SkipReason {
 ///     machines. Runs after all IR→IR transforms, before emit.
 ///
 /// Per-site concerns (timing counters, bail-reason strings, diagnostics) stay at the call sites.
-pub fn run_backend_passes(
-    ir: &mut crate::ir::IrFile,
-    facade: &str,
-    module_name: &str,
-    syms: &FrontendSymbols,
-    classpath: &crate::jvm::classpath::Classpath,
-    classifiers: &dyn crate::types::ClassifierAnnotationSource,
-) -> Result<(), SkipReason> {
-    let mut discard = crate::jvm::suspend::ContinuationMetadataMap::default();
-    run_backend_passes_with_metadata(
-        ir,
-        facade,
-        module_name,
-        syms,
-        classpath,
-        classifiers,
-        &mut discard,
-    )
-}
-
-/// Run the JVM pass pipeline and retain continuation metadata for class emission.
-pub fn run_backend_passes_with_metadata(
-    ir: &mut crate::ir::IrFile,
-    facade: &str,
-    module_name: &str,
-    syms: &FrontendSymbols,
-    classpath: &crate::jvm::classpath::Classpath,
-    classifiers: &dyn crate::types::ClassifierAnnotationSource,
-    continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
-) -> Result<(), SkipReason> {
-    crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor, classifiers);
-    let module_value_classes: std::collections::HashMap<_, _> = syms
-        .classes
-        .values()
-        .filter_map(|class| {
-            class
-                .value_field
-                .as_ref()
-                .map(|(_, ty)| (class.internal_name(), *ty))
-        })
-        .collect();
-    let module_readable_value_classes = module_value_classes.keys().copied().collect();
-    run_backend_passes_after_plugins(
-        ir,
-        facade,
-        &module_value_classes,
-        &module_readable_value_classes,
-        classpath,
-        continuation_metadata,
-        None,
-    )
-}
-
 /// Streaming JVM pipeline entry. Native plugins consume only checked common-IR declaration
 /// metadata; the reparsed Pass-2 source unit is not part of their contract.
 pub fn run_backend_passes_with_checked_metadata(
@@ -1283,9 +1230,9 @@ mod tests {
         assert!(!syms.fn_facades_by_decl.contains_key(&(0, splice_only.0)));
     }
 
-    /// JVM post-lowering passes must run through `run_backend_passes`.
+    /// JVM post-lowering passes must run through the checked JVM pipeline.
     #[test]
-    fn backend_passes_are_only_called_via_run_backend_passes() {
+    fn backend_passes_are_only_called_via_checked_pipeline() {
         // token that marks a CALL of the pass → files allowed to contain it (the defining module's
         // internal/recursive uses, and the shared pipeline in this file).
         let rules: &[(&str, &[&str])] = &[
@@ -1345,7 +1292,7 @@ mod tests {
         }
         assert!(
             offenders.is_empty(),
-            "backend passes must go through jvm::backend::run_backend_passes (so a new pass lands \
+            "backend passes must go through jvm::backend::run_backend_passes_with_checked_metadata (so a new pass lands \
              in every pipeline by construction), but:\n  {}",
             offenders.join("\n  ")
         );

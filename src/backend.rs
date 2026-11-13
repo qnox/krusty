@@ -7,8 +7,7 @@ mod module_facts;
 
 pub use module_facts::{
     BackendClassifierFact, BackendClassifierSource, BackendFactError, BackendMemberFact,
-    BackendMemberName, BackendModuleFacts, CheckedBackendClassifiers, SymbolSourceClassifiers,
-    UndeterminedType,
+    BackendMemberName, BackendModuleFacts, CheckedBackendClassifiers, UndeterminedType,
 };
 
 use crate::diag::DiagSink;

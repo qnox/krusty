@@ -109,6 +109,30 @@ mod tests {
                 "JVM backend retained a legacy syntax-lowering path: {legacy}"
             );
         }
+        for legacy in [
+            "pub fn run_backend_passes(",
+            "run_backend_passes_with_metadata(",
+        ] {
+            assert!(
+                !jvm.contains(legacy),
+                "JVM backend retained a source-symbol pass entry point: {legacy}"
+            );
+        }
+
+        let emitter =
+            fs::read_to_string(source_path("src/jvm/ir_emit.rs")).expect("read JVM emitter");
+        for legacy in [
+            "SymbolSourceClassifiers",
+            "LegacyEmitContext",
+            "pub fn emit_all(",
+            "pub fn emit_all_with_opts(",
+            "FrontendSymbols",
+        ] {
+            assert!(
+                !emitter.contains(legacy),
+                "JVM emitter retained a source-symbol entry point: {legacy}"
+            );
+        }
 
         let js =
             fs::read_to_string(source_path("src/js/backend.rs")).expect("read JavaScript backend");
@@ -576,8 +600,10 @@ mod tests {
         assert_allowed_crate_modules(
             "src/bin/bytediff.rs",
             &[
+                "compiler",
                 "conformance",
                 "diag",
+                "features",
                 "frontend",
                 "ir_lower",
                 "jvm",

@@ -13,38 +13,35 @@
 //! everywhere.
 
 use krusty::diag::DiagSink;
-use krusty::frontend::{check_file, collect_signatures};
-use krusty::ir_lower::lower_file;
+use krusty::frontend::{
+    analyze_source_set_with_features, check_file, collect_signatures, SourceInput,
+};
 use krusty::jvm::classpath::Classpath;
-use krusty::jvm::ir_emit::emit_all;
-use krusty::jvm::names::file_class_name;
 use krusty::lexer::lex;
 use krusty::parser::parse;
+use std::rc::Rc;
 
 /// Returns (diagnostics, emitted-through-the-whole-pipeline). Lowering may legitimately bail
 /// (`None`) past the depth guard — the promise under test is "degrade, never crash".
 fn compile(src: &str) -> (Vec<String>, bool) {
     let mut d = DiagSink::new();
-    let toks = lex(src, &mut d);
-    let files = vec![parse(src, &toks, &mut d)];
-    let mut syms = collect_signatures(&files, &mut d);
-    let info = check_file(&files[0], &mut syms, &mut d);
-    let mut emitted = false;
-    if !d.has_errors() {
-        // Drive the checked file through the rest of the in-memory pipeline (lowering → backend
-        // passes → emit): each stage recurses over the same deep expression and must survive too.
-        let runtime = krusty::libraries::EmptySymbolSource;
-        if let Some(mut ir) = lower_file(&files[0], &info, &syms, &runtime) {
-            let facade = file_class_name("Deep", None);
-            let cp = Classpath::new(vec![]);
-            krusty::jvm::backend::run_backend_passes(
-                &mut ir, &facade, "main", &syms, &cp, &runtime,
-            )
-            .expect("backend passes should accept the deep chain");
-            emitted = emit_all(&ir, &facade, &cp, None, &syms).is_some();
-        }
-    }
-    (d.diags.iter().map(|x| x.msg.clone()).collect(), emitted)
+    let stems = ["Deep".to_string()];
+    let inputs = [SourceInput::kotlin(src).with_file_stem("Deep")];
+    let analysis = analyze_source_set_with_features(
+        &inputs,
+        Box::new(krusty::libraries::EmptySymbolSource),
+        &krusty::features::LangFeatures::from_source(src),
+        &mut d,
+    );
+    let backend = krusty::jvm::JvmBackend::new(Rc::new(Classpath::new(vec![])));
+    let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut d);
+    (
+        d.diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.clone())
+            .collect(),
+        artifacts.iter().any(|(path, _)| path.ends_with(".class")),
+    )
 }
 
 const REGRESSION_STACK_BYTES: usize = 2 * 1024 * 1024;

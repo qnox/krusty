@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::backend::{BackendClassifierSource, SymbolSourceClassifiers};
+use crate::backend::BackendClassifierSource;
 use crate::ir::{
     Callee, IrBinOp, IrClass, IrConst, IrCtorArg, IrExpr, IrField, IrFile, IrFunction, IrTypeOp,
 };
@@ -18,7 +18,6 @@ use crate::jvm::names::{
     reference_array_element, type_descriptor,
 };
 use crate::kt_string::{KtString, KtStringBuf};
-use crate::symbol_source::CompositeSource;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
 
 mod bottom_values;
@@ -126,7 +125,7 @@ fn has_ctor_marker_accessor(ir: &IrFile, class: &IrClass) -> bool {
 
 /// Mutable per-emit-run accumulators, owned by the caller and shared (by `&`, via interior mutability)
 /// down the emit callgraph — formerly three thread-locals. The caller reads `inline_bail`/`emit_bail`
-/// after `emit_all_with_opts` returns `None` to distinguish an inline-splice failure (a backend bug to
+/// after checked class emission returns `None` to distinguish an inline-splice failure (a backend bug to
 /// fix) from an unsupported construct (skip the file).
 #[derive(Default)]
 pub struct EmitRun {
@@ -3787,130 +3786,10 @@ pub fn mark_must_inline_lambdas(ir: &mut IrFile) {
     }
 }
 
-pub fn emit_all(
-    ir: &IrFile,
-    facade: &str,
-    bodies: &dyn MethodBodies,
-    metadata: Option<&KotlinMetadata>,
-    symbols: &crate::frontend::FrontendSymbols,
-) -> Option<Vec<(String, Vec<u8>)>> {
-    // [`EmitOptions::default`]: per-class `@Metadata` ON, as on the shipping path — what this default
-    // lacks is the `SourceFile`, the inner-class resolver and any `-jvm-target` class version, so it is
-    // NOT the artifact `krusty -d …` writes. A caller that must emit the shipping bytes (the
-    // byte-identity gates, the conformance corpus, `survey`) goes through
-    // [`crate::jvm::backend::shipping_emit_options`] and the `emit_all_with_opts*` entry points; a
-    // caller that must attach a per-class `@Metadata` it computed elsewhere uses
-    // [`emit_all_with_class_meta`], which this passes a provider returning `None` for every class. The
-    // run accumulators are discarded here (callers that need the inline-bail reason use
-    // `emit_all_with_opts` with their own `EmitRun`).
-    let run = EmitRun::default();
-    let empty_continuation_metadata = crate::jvm::suspend::ContinuationMetadataMap::default();
-    let module = crate::module_symbols::ModuleSymbols::new(symbols);
-    let signature_symbols = CompositeSource::new(vec![&module, &*symbols.libraries]);
-    let signature_symbols = SymbolSourceClassifiers::new(&signature_symbols);
-    let property_realizations = Default::default();
-    let env = EmitEnv {
-        bodies,
-        run: &run,
-        continuation_metadata: &empty_continuation_metadata,
-        signature_symbols: &signature_symbols,
-        jvm_default: JvmDefaultMode::default(),
-        lambda_modes: LambdaModes::default(),
-        java_parameters: false,
-        property_realizations: &property_realizations,
-        inner_classes: crate::jvm::inner_classes::InnerClasses::new(ir),
-    };
-    emit_all_with_class_meta(ir, facade, &env, metadata, &EmitOptions::default(), &|_| {
-        None
-    })
-}
-
-/// Like [`emit_all`], but with explicit per-file [`EmitOptions`] (class version, source name) and a
-/// caller-owned [`EmitRun`] the caller inspects after a `None` return (the inline-bail reason). Every
-/// shipping-bytes path uses this — the CLI backend, `survey`, the conformance corpus and the
-/// in-process test helpers — so `-jvm-target`, the `SourceFile` name and the inner-class resolver reach
-/// every emitted class.
-pub fn emit_all_with_opts(
-    ir: &IrFile,
-    facade: &str,
-    bodies: &dyn MethodBodies,
-    metadata: Option<&KotlinMetadata>,
-    opts: &EmitOptions,
-    run: &EmitRun,
-    symbols: &crate::frontend::FrontendSymbols,
-) -> Option<Vec<(String, Vec<u8>)>> {
-    let continuation_metadata = Default::default();
-    emit_all_with_opts_and_metadata(
-        ir,
-        facade,
-        bodies,
-        EmitMetadata {
-            facade: metadata,
-            continuations: &continuation_metadata,
-        },
-        opts,
-        run,
-        symbols,
-    )
-}
-
 /// Semantic metadata emitted beside one file's JVM classes.
 pub struct EmitMetadata<'a> {
     pub facade: Option<&'a KotlinMetadata>,
     pub continuations: &'a crate::jvm::suspend::ContinuationMetadataMap,
-}
-
-pub(crate) struct LegacyEmitContext<'a> {
-    pub symbols: &'a crate::frontend::FrontendSymbols,
-    pub property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
-}
-
-/// Emit classes with continuation metadata produced by the JVM suspend pass.
-pub fn emit_all_with_opts_and_metadata(
-    ir: &IrFile,
-    facade: &str,
-    bodies: &dyn MethodBodies,
-    metadata: EmitMetadata<'_>,
-    opts: &EmitOptions,
-    run: &EmitRun,
-    symbols: &crate::frontend::FrontendSymbols,
-) -> Option<Vec<(String, Vec<u8>)>> {
-    emit_all_with_opts_and_metadata_and_realizations(
-        ir,
-        facade,
-        bodies,
-        metadata,
-        opts,
-        run,
-        LegacyEmitContext {
-            symbols,
-            property_realizations: &Default::default(),
-        },
-    )
-}
-
-pub(crate) fn emit_all_with_opts_and_metadata_and_realizations(
-    ir: &IrFile,
-    facade: &str,
-    bodies: &dyn MethodBodies,
-    metadata: EmitMetadata<'_>,
-    opts: &EmitOptions,
-    run: &EmitRun,
-    context: LegacyEmitContext<'_>,
-) -> Option<Vec<(String, Vec<u8>)>> {
-    let module = crate::module_symbols::ModuleSymbols::new(context.symbols);
-    let signature_symbols = CompositeSource::new(vec![&module, &*context.symbols.libraries]);
-    let signature_symbols = SymbolSourceClassifiers::new(&signature_symbols);
-    emit_all_with_checked_classifiers(
-        ir,
-        facade,
-        bodies,
-        metadata,
-        opts,
-        run,
-        &signature_symbols,
-        context.property_realizations,
-    )
 }
 
 pub(crate) fn emit_all_with_checked_classifiers(
@@ -20988,10 +20867,12 @@ mod fail_soft_tests {
 
     // A `GetValue` of a value slot that was never allocated is malformed IR (e.g. an unsupported
     // suspend shape the lowering should have bailed on). The emitter must SKIP the file
-    // (`emit_all` -> `None`), never panic — a compiler must not crash on its own IR.
+    // (`emit_all_with_checked_classifiers` -> `None`), never panic — a compiler must not crash on its own IR.
     #[test]
     fn getvalue_of_unallocated_slot_skips_not_panics() {
-        let symbols = crate::frontend::FrontendSymbols::default();
+        let module = crate::backend::BackendModuleFacts::from_classifiers([], []).unwrap();
+        let dependencies = crate::libraries::EmptySymbolSource;
+        let classifiers = crate::backend::CheckedBackendClassifiers::new(&module, &dependencies);
         let mut ir = IrFile::default();
         let body = ir.add_expr(IrExpr::GetValue(99));
         ir.add_fun(IrFunction {
@@ -21003,12 +20884,28 @@ mod fail_soft_tests {
             dispatch_receiver: None,
             param_checks: vec![],
         });
-        assert!(emit_all(&ir, "TestKt", &NoBodies, None, &symbols).is_none());
+        let continuations = crate::jvm::suspend::ContinuationMetadataMap::default();
+        assert!(emit_all_with_checked_classifiers(
+            &ir,
+            "TestKt",
+            &NoBodies,
+            EmitMetadata {
+                facade: None,
+                continuations: &continuations,
+            },
+            &EmitOptions::default(),
+            &EmitRun::default(),
+            &classifiers,
+            &Default::default(),
+        )
+        .is_none());
     }
 
     #[test]
     fn arity_failure_exposes_category_without_owner_or_callable_name() {
-        let symbols = crate::frontend::FrontendSymbols::default();
+        let module = crate::backend::BackendModuleFacts::from_classifiers([], []).unwrap();
+        let dependencies = crate::libraries::EmptySymbolSource;
+        let classifiers = crate::backend::CheckedBackendClassifiers::new(&module, &dependencies);
         let mut ir = IrFile::default();
         let unit = ir.add_expr(IrExpr::Block {
             stmts: vec![],
@@ -21041,14 +20938,19 @@ mod fail_soft_tests {
         // The trace may identify `SensitiveFacade.realCallableName`, but the result read by the CLI
         // and survey is deliberately a stable category with neither source nor JVM owner spelling.
         let run = EmitRun::default();
-        assert!(emit_all_with_opts(
+        let continuations = crate::jvm::suspend::ContinuationMetadataMap::default();
+        assert!(emit_all_with_checked_classifiers(
             &ir,
             "SensitiveFacade",
             &NoBodies,
-            None,
+            EmitMetadata {
+                facade: None,
+                continuations: &continuations,
+            },
             &EmitOptions::default(),
             &run,
-            &symbols,
+            &classifiers,
+            &Default::default(),
         )
         .is_none());
         assert_eq!(run.inline_bail().as_deref(), Some("call arity mismatch"));
