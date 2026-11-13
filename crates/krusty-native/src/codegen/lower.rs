@@ -674,15 +674,26 @@ impl<'a> FileLowering<'a> {
             // A file-level function, and a member another file calls directly, is reached across
             // the module by its `kt_mod_` symbol, which stays hidden. The public C name, when
             // there is one, is a separate export.
-            let linkage = match self.unit_kind {
-                krusty::backend::CheckedIrUnitKind::DependencySupport => Linkage::Local,
-                krusty::backend::CheckedIrUnitKind::Source
-                    if super::super::c_abi::is_file_level(self.ir, index)
-                        || self.symbols.cross_file[index] =>
-                {
-                    Linkage::Hidden
+            let linkage = if self
+                .dependency_signatures
+                .is_property_accessor_entry(index as krusty::ir::FunId)
+            {
+                // The exact KLIB accessor identity is exported by a trampoline below. This
+                // generated body is only that trampoline's private target; exporting its
+                // per-file helper spelling would collide with the same property role in another
+                // file of the module.
+                Linkage::Local
+            } else {
+                match self.unit_kind {
+                    krusty::backend::CheckedIrUnitKind::DependencySupport => Linkage::Local,
+                    krusty::backend::CheckedIrUnitKind::Source
+                        if super::super::c_abi::is_file_level(self.ir, index)
+                            || self.symbols.cross_file[index] =>
+                    {
+                        Linkage::Hidden
+                    }
+                    krusty::backend::CheckedIrUnitKind::Source => Linkage::Export,
                 }
-                krusty::backend::CheckedIrUnitKind::Source => Linkage::Export,
             };
             let id = self
                 .module

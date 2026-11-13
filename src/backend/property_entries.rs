@@ -152,6 +152,7 @@ pub fn realize(
             param_checks: Vec::new(),
         });
         ir.synthetic_methods.insert(function);
+        exports.record_property_accessor_entry(function, accessor);
         exports.record_callable(function, identity);
         if let Some(receiver_type) = receiver_type {
             exports.record_member_receiver(function, receiver_type);
