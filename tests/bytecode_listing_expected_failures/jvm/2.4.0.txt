@@ -112,8 +112,6 @@ jvm8/defaults/enable/generatedBridgeGenericSpecializedInline.kt
 jvm8/defaults/enable/interfaceProperty.kt
 jvm8/defaults/enable/specialization/primitiveAndAny.kt
 jvm8/defaults/enable/specialization/primitiveAndNullable.kt
-jvm8/defaults/noCompatibility/bridgeInInterface.kt
-jvm8/defaults/noCompatibility/bridgeInInterface_inline.kt
 jvmOverloadsAndParametersAnnotations.kt
 jvmOverloadsExternal.kt
 jvmStatic/jvmStaticExternal.kt
