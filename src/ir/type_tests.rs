@@ -67,6 +67,105 @@ impl IrFile {
         })
     }
 
+    /// `value as? target`, for a `value` of the checked type `operand_type`: one evaluation followed
+    /// by an `is target` guard, a checked cast on the successful branch, and `null` otherwise.
+    /// `IrTypeOp::SafeCast` cannot be a backend no-op: the guarded shape is language semantics, so
+    /// it is built here for every common-IR producer. A stable read is tested and cast in place;
+    /// any other operand is evaluated once into the temporary slot `temporary` allocates, which is
+    /// asked for only then.
+    pub(crate) fn safe_cast(
+        &mut self,
+        mut value: ExprId,
+        operand_type: Ty,
+        target: Ty,
+        temporary: impl FnOnce() -> u32,
+    ) -> ExprId {
+        // A safe cast to either `Nothing` or `Nothing?` can never produce a non-null value. Fold
+        // the whole cast here, while the semantic target is still available: retaining the generic
+        // guarded `when` would leave an unreachable cast branch whose JVM stack type (`Object`)
+        // still has to verify against the null-only result branch. The operand remains a statement,
+        // so its effects and divergence are preserved exactly once.
+        if settled_instance_answer(target) == Some(false) {
+            let null = self.add_expr(IrExpr::Const(IrConst::Null));
+            return self.add_expr(IrExpr::Block {
+                stmts: vec![value],
+                value: Some(null),
+            });
+        }
+        let storage_type = if operand_type == Ty::Unit {
+            let unit = self.add_expr(IrExpr::UnitInstance);
+            value = self.add_expr(IrExpr::Block {
+                stmts: vec![value],
+                value: Some(unit),
+            });
+            Ty::obj("kotlin/Unit")
+        } else if operand_type.scalar_value_repr().is_some() {
+            let any = Ty::obj("kotlin/Any");
+            value = self.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: value,
+                type_operand: any,
+            });
+            any
+        } else {
+            crate::types::stored_value_ty(operand_type)
+        };
+
+        // A safe cast to a primitive tests and retains its nullable wrapper. Reference targets and
+        // erased type parameters already have a reference representation of their own.
+        let target = target.non_null();
+        let runtime_target = if target == Ty::Unit {
+            Ty::obj("kotlin/Unit")
+        } else {
+            target.nullable_boxed().unwrap_or(target)
+        };
+        // kotlinc's `irLetS`: a read of an immutable binding is tested and cast in place; any other
+        // operand is evaluated once into a temporary.
+        let (declaration, operand_slot) = match self.stable_value_read(value) {
+            Some(slot) => (None, slot),
+            None => {
+                let temporary = temporary();
+                let declaration = self.add_expr(IrExpr::Variable {
+                    index: temporary,
+                    ty: storage_type,
+                    init: Some(value),
+                    named: false,
+                });
+                self.safe_cast_temporaries.insert(declaration);
+                (Some(declaration), temporary)
+            }
+        };
+        let read = self.add_expr(IrExpr::GetValue(operand_slot));
+        let matches = self.instance_check(false, read, runtime_target);
+        let read = self.add_expr(IrExpr::GetValue(operand_slot));
+        // `as? T` yields `T?`. A concrete primitive already names its boxed wrapper (`Int?`).
+        // A type parameter does not: an inline call later substitutes `T` with `Int`, and a
+        // success cast recorded as bare `T` unboxes that match and then unboxes the `null`
+        // mismatch. Recording `T?` specializes to `Int?`, which stays a boxed reference.
+        let cast_target = if runtime_target.is_ty_param() {
+            Ty::nullable(runtime_target)
+        } else {
+            runtime_target
+        };
+        let cast = self.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg: read,
+            type_operand: cast_target,
+        });
+        let null = self.add_expr(IrExpr::Const(IrConst::Null));
+        let result = self.add_expr(IrExpr::When {
+            branches: vec![(Some(matches), cast), (None, null)],
+        });
+        self.set_logical_type(result, Ty::nullable(cast_target));
+        match declaration {
+            Some(declaration) => self.add_expr(IrExpr::Block {
+                stmts: vec![declaration],
+                value: Some(result),
+            }),
+            None => result,
+        }
+    }
+
     /// `operand is target` (or `!is`) for a target that admits `null` and is not a reified type
     /// parameter, as kotlinc's `TypeOperatorLowering.lowerInstanceOf` shapes it from the operand's
     /// type: an operand that admits `null` is bound once (`irLetS`) and becomes

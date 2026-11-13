@@ -2,9 +2,9 @@
 //!
 //! Each lowers to the type operation checked FIR lowering produces for the source form, where
 //! that is one operation over the lowered operand, or to the shared shape of an `is` of a nullable
-//! type. A form checked FIR lowering expands into other control flow of its own (`as?`), settles without a test (`is
-//! Nothing`), or derives from facts a KLIB does not carry (a platform type's implicit non-null
-//! assertion names the call that produced the value) declines by its name.
+//! type or of an `as?`. A form checked FIR lowering settles without a test (`is Nothing`), or
+//! derives from facts a KLIB does not carry (a platform type's implicit non-null assertion names
+//! the call that produced the value) declines by its name.
 
 use super::{mismatch, unsupported, BodyLowering, Lowered};
 use crate::ir::{ExprId, IrExpr, IrTypeOp};
@@ -27,6 +27,7 @@ impl BodyLowering<'_> {
         let target = self.semantic(operand)?;
         let op = match operator {
             KlibIrTypeOperator::ImplicitCast => return self.implicit_cast(target, argument, ty),
+            KlibIrTypeOperator::SafeCast => return self.safe_cast(target, argument, ty),
             KlibIrTypeOperator::InstanceOf | KlibIrTypeOperator::NotInstanceOf => {
                 if ty != Ty::Boolean {
                     return Err(mismatch("an `is` check is not typed `Boolean`"));
@@ -100,6 +101,23 @@ impl BodyLowering<'_> {
             .ir
             .nullable_target_type_test(negated, arg, actual, target, || locals.anonymous_slot());
         Ok(self.typed(test, Ty::Boolean))
+    }
+
+    /// `argument as? target`, typed `ty` (`target?`), through the guarded shape checked FIR
+    /// lowering builds for the source form ([`crate::ir::IrFile::safe_cast`]).
+    fn safe_cast(&mut self, target: Ty, argument: KlibIrExprId, ty: Ty) -> Lowered<ExprId> {
+        if ty != Ty::nullable(target) {
+            return Err(mismatch(
+                "a safe cast is typed apart from its nullable target",
+            ));
+        }
+        let arg = self.expression(argument)?;
+        let actual = self.lowered_type(arg);
+        let locals = &mut self.locals;
+        let cast = self
+            .ir
+            .safe_cast(arg, actual, target, || locals.anonymous_slot());
+        Ok(self.typed(cast, ty))
     }
 
     /// An implicit cast to `target`. One to the value's own type converts nothing and adds no
