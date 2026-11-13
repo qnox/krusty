@@ -1707,6 +1707,9 @@ fn remap_expression_facts(ir: &mut super::IrFile, expression: ExprId, names: &Id
     if let Some(parameters) = ir.physical_call_parameters.get_mut(&expression) {
         tys(parameters, names);
     }
+    if let Some(source_callee) = ir.suspend_call_declarations.get_mut(&expression) {
+        callee(source_callee, names);
+    }
     if let Some(access) = ir.module_member_accesses.get_mut(&expression) {
         module_member_access(access, names);
     }

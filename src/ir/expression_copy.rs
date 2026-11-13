@@ -123,6 +123,7 @@ fn expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId, relocating:
         value_class_constructor_facts,
         value_class_suspend_calls,
         suspend_calls,
+        suspend_call_declarations,
         suspend_lambda_placements,
         suspend_call_overridden_results,
         intrinsic_suspension_points,
@@ -439,6 +440,7 @@ fn expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId, relocating:
         (value_class_constructor_facts, true),
         (value_class_suspend_calls, true),
         (suspend_calls, true),
+        (suspend_call_declarations, true),
         (suspend_lambda_placements, true),
         (suspend_call_overridden_results, true),
         (intrinsic_suspension_points, true),
@@ -578,21 +580,25 @@ mod tests {
     #[test]
     fn relocation_moves_selected_call_facts_but_keeps_source_value_type() {
         let mut ir = IrFile::default();
+        let argument = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+        let source_callee = Callee::External {
+            target: crate::fir::ExternalCallableId::from_raw(3),
+            default_provider: None,
+            params: vec![Ty::Int],
+            ret: Ty::Int,
+            substitutions: Vec::new(),
+            defaults: Vec::new(),
+            extension_receiver_parameter: None,
+        };
         let source = ir.add_expr(IrExpr::Call {
-            callee: Box::new(Callee::External {
-                target: crate::fir::ExternalCallableId::from_raw(3),
-                default_provider: None,
-                params: Vec::new(),
-                ret: Ty::Int,
-                substitutions: Vec::new(),
-                defaults: Vec::new(),
-                extension_receiver_parameter: None,
-            }),
+            callee: Box::new(source_callee.clone()),
             dispatch_receiver: None,
-            args: Vec::new(),
+            args: vec![argument],
         });
         let singleton = type_name("sample/Companion");
         ir.external_singleton_dispatches.insert(source, singleton);
+        ir.suspend_call_declarations
+            .insert(source, source_callee.clone());
         ir.call_declared_ret.insert(source, Ty::Int);
         ir.set_logical_type(source, Ty::Int);
         ir.set_physical_type(source, Ty::Int);
@@ -605,6 +611,11 @@ mod tests {
         assert_eq!(
             ir.external_singleton_dispatches.get(&target),
             Some(&singleton)
+        );
+        assert!(!ir.suspend_call_declarations.contains_key(&source));
+        assert_eq!(
+            ir.suspend_call_declarations.get(&target),
+            Some(&source_callee)
         );
         assert!(!ir.call_declared_ret.contains_key(&source));
         assert_eq!(ir.call_declared_ret.get(&target).copied(), Some(Ty::Int));

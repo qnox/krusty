@@ -2,10 +2,10 @@
 
 use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{
-    for_each_child, Callee, ClassId, ExprId, IrCheckedOperation, IrExpr, IrField, IrFile,
-    IrPropertyDispatch,
+    Callee, ClassId, ExprId, IrCheckedOperation, IrExpr, IrField, IrFile, IrPropertyDispatch,
+    for_each_child,
 };
-use crate::types::{continuation_passing, wk, Ty};
+use crate::types::{Ty, continuation_passing, wk};
 
 use super::label_reentry::{MachineStorage, ReentryDecline};
 use super::suspension_points::{recorded_suspension_result, suspend_call_fid};
@@ -47,11 +47,30 @@ pub(super) fn plan_frame_values(
         .collect::<Vec<_>>();
     value_types.sort_unstable_by_key(|(value, _)| *value);
 
+    let mut shared_cell_elements = HashMap::default();
+    for &expression in &expressions {
+        let IrExpr::Variable {
+            index,
+            init: Some(initializer),
+            ..
+        } = ir.expr(expression)
+        else {
+            continue;
+        };
+        if let IrExpr::RefNew { elem, .. } = ir.expr(*initializer) {
+            shared_cell_elements.insert(*index, *elem);
+        }
+    }
+
     let mut slots = HashMap::default();
     for (value, ty) in value_types {
         let field = u32::try_from(ir.classes[class as usize].fields.len())
             .expect("a continuation frame has fewer than u32::MAX fields");
-        let field_ty = if ty == Ty::Unit {
+        let field_ty = if let Some(&element) = shared_cell_elements.get(&value) {
+            ir.shared_class_capture_fields
+                .insert((class, field), element);
+            element
+        } else if ty == Ty::Unit {
             Ty::obj_name(wk::unit())
         } else {
             crate::types::stored_value_ty(ty)
@@ -70,8 +89,12 @@ pub(super) fn plan_frame_values(
 
 /// Rewrite only the source expression IDs collected before splitting. Newly generated machine
 /// receivers and temporaries share the same arena but belong to a different value namespace.
-pub(super) fn realize_frame_values(ir: &mut IrFile, frame: &FrameValues, class: ClassId) {
-    let owner_ty = Ty::obj_name(ir.classes[class as usize].fq_name_id());
+pub(super) fn realize_frame_values(
+    ir: &mut IrFile,
+    frame: &FrameValues,
+    class: ClassId,
+    owner_ty: Ty,
+) {
     for &expression in &frame.original_expressions {
         match ir.expr(expression).clone() {
             IrExpr::CurrentContinuation => {
@@ -164,6 +187,7 @@ fn collect_frame_expressions(
 /// Field coordinates owned by a generated continuation class.
 pub(super) struct ContinuationFields {
     pub(super) class: crate::ir::ClassId,
+    pub(super) machine_ty: Ty,
     pub(super) label: u32,
     pub(super) result: u32,
     pub(super) runtime: crate::ir::IrCoroutineRuntime,
@@ -173,10 +197,7 @@ pub(super) struct ContinuationFields {
 impl ContinuationFields {
     fn this(&self, ir: &mut IrFile) -> ExprId {
         let receiver = ir.add_expr(IrExpr::GetValue(0));
-        ir.set_logical_type(
-            receiver,
-            Ty::obj_name(ir.classes[self.class as usize].fq_name_id()),
-        );
+        ir.set_logical_type(receiver, self.machine_ty);
         receiver
     }
 
@@ -267,19 +288,23 @@ impl MachineStorage for ContinuationFields {
         else {
             return Err(ReentryDecline::UnsupportedCallShape);
         };
-        if ir.suspend_calls.contains_key(&call)
-            && matches!(
-                ir.expr(call),
-                IrExpr::Call {
-                    callee,
-                    ..
-                } if matches!(&**callee, Callee::External { .. })
-            )
-        {
-            // Dependency-call authentication currently owns the provider's pre-CPS signature.
-            // Until that checked ABI has an explicit continuation adaptation contract, decline
-            // this call shape rather than relaxing signature verification after adding the tail.
-            return Err(ReentryDecline::UnsupportedCallShape);
+        let source_declaration = if ir.suspend_calls.contains_key(&call) {
+            match ir.expr(call) {
+                IrExpr::Call { callee, .. } if matches!(&**callee, Callee::External { .. }) => {
+                    Some((**callee).clone())
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(source_declaration) = source_declaration {
+            // Keep the exact checked source application beside this expression as its physical
+            // call is rewritten below. Dependency authentication uses this selected declaration
+            // and substitution frame; target emission separately checks the appended continuation
+            // against the exported CPS signature.
+            ir.suspend_call_declarations
+                .insert(call, source_declaration);
         }
         let continuation_ty = continuation_passing(logical_result).0;
         let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));

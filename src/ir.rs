@@ -2257,6 +2257,11 @@ pub struct IrFile {
     /// return, before CPS erasure to `Object`), recorded from the checked FIR call target: the
     /// cross-unit complement of `suspend_funs`, for a callee in ANOTHER file or a dependency.
     pub suspend_calls: crate::fx_hash::HashMap<u32, Ty>,
+    /// A dependency suspend call after CPS rewriting → the exact checked source call application
+    /// before its physical continuation parameter and `Any?` result were added. The selected
+    /// declaration and substitutions remain available for provider authentication while targets
+    /// separately consume the transformed `Callee::External` as the physical call ABI.
+    pub suspend_call_declarations: crate::fx_hash::HashMap<ExprId, Callee>,
     /// Each suspend literal an emitted inline call binds to an inline parameter → where its body
     /// runs: in the caller's frame, in an object the callee constructs, or nowhere. Decided before
     /// coroutine lowering, from the callee's compiled body where the callee is spliced from one.

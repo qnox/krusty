@@ -2,7 +2,7 @@
 //! Checked instantiation proves operand roles; the stored export signature owns physical carriers.
 
 use krusty::backend::{
-    instantiate_dependency_signature, DependencyCallShape, DependencyExportCall,
+    DependencyCallShape, DependencyExportCall, instantiate_dependency_signature,
 };
 use krusty::ir::IrCheckedOperation;
 
@@ -49,18 +49,52 @@ impl Body<'_> {
         dispatch_receiver: Option<u32>,
         arguments: &[u32],
     ) -> Result<(), Unsupported> {
+        let semantic_callee = self
+            .ir
+            .suspend_call_declarations
+            .get(&site)
+            .unwrap_or(callee);
+        let Callee::External {
+            params: semantic_params,
+            ret: semantic_ret,
+            extension_receiver_parameter: semantic_extension_receiver_parameter,
+            ..
+        } = semantic_callee
+        else {
+            return Err(
+                "a dependency coroutine call without its checked source declaration".into(),
+            );
+        };
         let Callee::External {
             target,
             default_provider,
             params,
             ret,
             defaults,
-            extension_receiver_parameter,
             ..
         } = callee
         else {
             return Err("an emitted dependency call without a checked external identity".into());
         };
+        if let Some(source) = self.ir.suspend_call_declarations.get(&site) {
+            let logical_result = self
+                .ir
+                .suspend_calls
+                .get(&site)
+                .copied()
+                .ok_or_else(|| "a CPS dependency call without a logical result".to_string())?;
+            let signature = self
+                .calls
+                .signature(*target)
+                .ok_or_else(|| "a CPS dependency call without an exported signature".to_string())?;
+            krusty::backend::authenticate_dependency_coroutine_call(
+                source,
+                callee,
+                logical_result,
+                signature,
+            )
+            .map_err(str::to_owned)?;
+        }
         let default_entry = match self.calls.external_default(*target) {
             _ if defaults.is_empty() => None,
             Some(entry) => Some(entry),
@@ -68,7 +102,7 @@ impl Body<'_> {
                 return Err(
                     "a dependency call with omitted arguments and no exported default bridge"
                         .into(),
-                )
+                );
             }
         };
         if arguments.len() + defaults.len() != params.len() {
@@ -103,7 +137,7 @@ impl Body<'_> {
             .callable(*target)
             .ok_or_else(|| "a dependency call without frozen callable facts".to_owned())?;
         let instantiated =
-            instantiate_dependency_signature(callable, callee).map_err(str::to_owned)?;
+            instantiate_dependency_signature(callable, semantic_callee).map_err(str::to_owned)?;
         // An override's omitted arguments are the defaults of the declaration it inherits them
         // from, whose entry evaluates them before dispatching to the actual member.
         let provider = match default_provider {
@@ -118,7 +152,7 @@ impl Body<'_> {
             .generic_sig
             .as_ref()
             .is_some_and(|s| !s.formals.is_empty())
-            && instantiated.result != *ret
+            && instantiated.result != *semantic_ret
         {
             return Err("a dependency generic result disagrees with its checked call".into());
         }
@@ -153,8 +187,8 @@ impl Body<'_> {
             source_receiver: instantiated.receiver,
             context_count: callable.context_count,
             emitted_params: &instantiated.parameters,
-            call_params: params,
-            extension_receiver_parameter: *extension_receiver_parameter,
+            call_params: semantic_params,
+            extension_receiver_parameter: *semantic_extension_receiver_parameter,
             has_dispatch_receiver: dispatch_receiver.is_some(),
             unread_receiver: unread.map(|effect| effect.semantic_type()),
             companion_receiver_position: callable.klib_body_companion_receiver_position(),
