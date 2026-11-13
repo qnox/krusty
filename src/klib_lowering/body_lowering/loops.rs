@@ -251,7 +251,9 @@ impl BodyLowering<'_> {
             Some(crate::libraries::IndicesReceiver::Array) => {}
             Some(_) => return unsupported("a `for` loop over the indices of a non-array receiver"),
             None => {
-                return unsupported("a `for` loop over a progression that is not a range literal")
+                return unsupported(
+                    "a `for` loop over an extension property that is not an array's indices",
+                )
             }
         }
         let variable = self.arena.variable(binding);
