@@ -425,11 +425,29 @@ mod tests {
                 "metadata",
                 "module_symbols",
                 "plugins",
-                "symbol_resolver",
                 "trace_compiler",
                 "types",
             ],
         );
+    }
+
+    #[test]
+    fn representation_backends_do_not_call_the_symbol_resolver() {
+        let mut paths = rust_files_under("src/backend");
+        paths.extend(jvm_backend_files());
+        paths.extend(rust_files_under("src/js"));
+        for path in paths {
+            let text = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            let production = text.split("#[cfg(test)]").next().unwrap_or(&text);
+            for forbidden in ["SymbolResolver", "symbol_resolver::", "resolve_symbol("] {
+                assert!(
+                    !production.contains(forbidden),
+                    "{} calls frontend selection from production backend code: {forbidden}",
+                    path.display(),
+                );
+            }
+        }
     }
 
     #[test]
