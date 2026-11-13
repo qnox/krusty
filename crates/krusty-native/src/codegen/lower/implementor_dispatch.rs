@@ -5,6 +5,21 @@
 
 use super::*;
 
+fn require_same_interface_abi(
+    name: &str,
+    declared: &cranelift_codegen::ir::Signature,
+    applied: &cranelift_codegen::ir::Signature,
+    declared_representations: &[(crate::classes::CKind, Option<krusty::types::TypeName>)],
+    applied_representations: &[(crate::classes::CKind, Option<krusty::types::TypeName>)],
+) -> Result<(), Unsupported> {
+    if declared == applied && declared_representations == applied_representations {
+        return Ok(());
+    }
+    Err(declined!(
+        "the dependency interface member `{name}` has an applied Native ABI different from its declaration"
+    ))
+}
+
 /// A class of this file that implements a dependency declaration, and the slot it does it in.
 pub(super) struct ImplementorArm {
     class: ClassId,
@@ -131,6 +146,39 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         params: &[Ty],
         ret: Ty,
     ) -> Result<Option<Value>, Unsupported> {
+        let mut declared_member_params = signature.params.to_vec();
+        if let Some(receiver) = signature.receiver {
+            if signature.context_count > declared_member_params.len() {
+                return Err(declined!(
+                    "the dependency interface member `{}` has malformed context parameters",
+                    signature.name
+                ));
+            }
+            declared_member_params.insert(signature.context_count, receiver);
+        }
+        let mut declared_params = vec![any()];
+        declared_params.extend(declared_member_params);
+        let mut applied_params = vec![any()];
+        applied_params.extend_from_slice(params);
+        let declared_abi = self.file.signature_of(&declared_params, signature.ret)?;
+        let applied_abi = self.file.signature_of(&applied_params, ret)?;
+        let declared_representations: Vec<_> = declared_params
+            .iter()
+            .chain([&signature.ret])
+            .map(|&ty| crate::classes::representation(self.file.values, ty))
+            .collect();
+        let applied_representations: Vec<_> = applied_params
+            .iter()
+            .chain([&ret])
+            .map(|&ty| crate::classes::representation(self.file.values, ty))
+            .collect();
+        require_same_interface_abi(
+            signature.name,
+            &declared_abi,
+            &applied_abi,
+            &declared_representations,
+            &applied_representations,
+        )?;
         let runtime = self.runtime_implementations(signature)?;
         let number = self.file.dependency_interface_number(identity);
         let Some(object) = self.receiver(receiver)? else {
@@ -422,5 +470,61 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 self.builder.ins().jump(merge, &[]);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cranelift_codegen::ir::{types, AbiParam, Signature};
+    use cranelift_codegen::isa::CallConv;
+
+    use super::require_same_interface_abi;
+    use crate::classes::CKind;
+    use krusty::types::TypeName;
+
+    fn signature(parameter: cranelift_codegen::ir::Type) -> Signature {
+        let mut signature = Signature::new(CallConv::SystemV);
+        signature.params.push(AbiParam::new(types::I64));
+        signature.params.push(AbiParam::new(parameter));
+        signature.returns.push(AbiParam::new(parameter));
+        signature
+    }
+
+    #[test]
+    fn an_applied_primitive_cannot_change_a_generic_interface_slot_abi() {
+        let erased_generic = signature(types::I64);
+        let applied_int = signature(types::I32);
+        let erased = [(CKind::Ref, None)];
+        assert!(require_same_interface_abi(
+            "get",
+            &erased_generic,
+            &erased_generic,
+            &erased,
+            &erased
+        )
+        .is_ok());
+        assert_eq!(
+            require_same_interface_abi(
+                "get",
+                &erased_generic,
+                &applied_int,
+                &erased,
+                &[(CKind::Scalar("kt_int"), None)]
+            )
+            .unwrap_err()
+            .construct(),
+            "the dependency interface member `get` has an applied Native ABI different from its declaration"
+        );
+    }
+
+    #[test]
+    fn equal_machine_carriers_do_not_make_distinct_kotlin_representations_compatible() {
+        let abi = signature(types::I64);
+        let reference = [(CKind::Ref, None)];
+        let long = [(CKind::Scalar("kt_long"), None)];
+        assert!(require_same_interface_abi("get", &abi, &abi, &reference, &long).is_err());
+
+        let value_class = [(CKind::Scalar("kt_long"), Some(TypeName::from("sample/Id")))];
+        assert!(require_same_interface_abi("get", &abi, &abi, &long, &value_class).is_err());
     }
 }

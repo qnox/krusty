@@ -89,6 +89,8 @@ pub(super) struct FunctionSignature<'a> {
     pub(super) owner: DeclarationOwner,
     pub(super) name: &'a str,
     pub(super) receiver: Option<Ty>,
+    /// Context parameters that precede an extension receiver in the source call ABI.
+    pub(super) context_count: usize,
     pub(super) params: &'a [Ty],
     pub(super) ret: Ty,
     /// Exact declarations this one overrides, as the member hierarchy froze them.
@@ -101,6 +103,7 @@ impl<'a> FunctionSignature<'a> {
             owner,
             name,
             receiver: None,
+            context_count: 0,
             params,
             ret,
             overridden: &[],
@@ -109,6 +112,11 @@ impl<'a> FunctionSignature<'a> {
 
     pub(super) fn with_receiver(mut self, receiver: Option<Ty>) -> Self {
         self.receiver = receiver;
+        self
+    }
+
+    pub(super) fn with_context_count(mut self, context_count: usize) -> Self {
+        self.context_count = context_count;
         self
     }
 
@@ -1301,6 +1309,7 @@ pub(super) fn iteration_runtime_member(
         owner: _,
         name,
         receiver: _,
+        context_count: _,
         params,
         ret,
         overridden: _,

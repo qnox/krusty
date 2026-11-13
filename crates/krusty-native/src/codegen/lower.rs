@@ -226,6 +226,8 @@ pub struct FileInput<'a> {
     /// The exported entry answering each object instance and enum constant another file
     /// realizes.
     pub dependency_instances: &'a HashMap<krusty::backend::instance_links::InstanceEntry, String>,
+    /// Stable dependency-member numbers shared by every file in the source module.
+    pub dependency_interface_numbers: &'a mut HashMap<Vec<u8>, u32>,
     /// The accessors synthesized for each reference to a dependency property, by site; see
     /// [`crate::dependency_references`].
     pub dependency_properties:
@@ -264,6 +266,7 @@ pub fn lower_file(
         dependency_signatures,
         dependency_symbols,
         dependency_instances,
+        dependency_interface_numbers,
         value_classes,
         slot_plan,
         module_facts,
@@ -362,6 +365,7 @@ pub fn lower_file(
         dependency_signatures,
         dependency_symbols,
         dependency_interface_calls: Vec::new(),
+        dependency_interface_numbers,
         dependency_instances,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
@@ -589,6 +593,10 @@ struct FileLowering<'a> {
     /// Dependency interface members this file calls, numbered after the module's own interfaces.
     /// The identity bytes are what a dependent implementation records itself under.
     dependency_interface_calls: Vec<(u32, Vec<u8>)>,
+    /// Module-wide numbers for imported interface identities. The local vector above is only
+    /// this file's emitted identity records; the shared map prevents a second file from reusing
+    /// one stub number for another dependency member.
+    dependency_interface_numbers: &'a mut krusty::fx_hash::HashMap<Vec<u8>, u32>,
     /// The exported entry answering each object instance and enum constant another file
     /// realizes.
     dependency_instances: &'a HashMap<krusty::backend::instance_links::InstanceEntry, String>,

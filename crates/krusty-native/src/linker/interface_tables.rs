@@ -65,11 +65,10 @@ impl InterfaceTables {
                     entries.resize(index as usize + 1, None);
                 }
                 match &entries[index as usize] {
-                    Some(known) if known != function => {
-                        return Err(ProgramLinkError::Unsupported(
-                            "a type records two implementations of one interface member".into(),
-                        ))
-                    }
+                    // Different object symbols can name the same final function (for example a
+                    // local symbol and its exported module alias). `InterfaceStubs::decide`
+                    // resolves addresses and validates this slot before tables are written.
+                    Some(_) => {}
                     _ => entries[index as usize] = Some(function.clone()),
                 }
             }
@@ -169,13 +168,10 @@ mod tests {
     }
 
     #[test]
-    fn two_implementations_for_one_type_are_refused() {
+    fn duplicate_type_records_wait_for_relocated_function_validation() {
         let member = pairs(&[("A", "a1"), ("A", "a2"), ("B", "b1")]);
-        assert_eq!(
-            InterfaceTables::number([member.as_slice()]).unwrap_err(),
-            ProgramLinkError::Unsupported(
-                "a type records two implementations of one interface member".into()
-            )
-        );
+        let (tables, indices) = InterfaceTables::number([member.as_slice()]).unwrap();
+        assert_eq!(indices, [0]);
+        assert_eq!(tables.size(), 2 * 8);
     }
 }

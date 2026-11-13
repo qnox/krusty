@@ -500,6 +500,7 @@ impl BodyLowering<'_, '_, '_> {
                     declared_ret,
                 )
                 .with_receiver(declared_receiver)
+                .with_context_count(realization.context_count)
                 .with_overridden(&realization.overridden_declarations);
                 match dispatch_receiver {
                     // A member: the receiver is the runtime function's first argument, and
