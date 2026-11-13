@@ -21,7 +21,6 @@
 
 mod block_splicing;
 mod bottom_completion;
-mod class_storage;
 mod continuation_parameters;
 mod control_flow;
 mod hoisting;
