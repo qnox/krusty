@@ -118,6 +118,19 @@ mod tests {
                 "JavaScript backend retained a legacy syntax-lowering path: {legacy}"
             );
         }
+
+        let bytediff = fs::read_to_string(source_path("src/bin/bytediff.rs"))
+            .expect("read bytecode differential tool");
+        for legacy in [
+            "ir_lower::lower_file",
+            "run_backend_passes(",
+            "ir_emit::emit_all(",
+        ] {
+            assert!(
+                !bytediff.contains(legacy),
+                "bytediff bypasses the checked backend handoff: {legacy}"
+            );
+        }
     }
 
     #[test]

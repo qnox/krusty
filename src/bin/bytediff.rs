@@ -14,14 +14,11 @@
 //!   cargo run --release --bin bytediff -- <box_dir> [limit] [--samples]
 
 use krusty::diag::DiagSink;
-use krusty::frontend::{check_file, collect_signatures_with_cp};
-use krusty::ir_lower::lower_file;
+use krusty::frontend::{analyze_source_set_with_features_and_prepare, SourceInput};
 use krusty::jvm::classpath::Classpath;
-use krusty::jvm::ir_emit::emit_all;
 use krusty::jvm::jvm_libraries::JvmLibraries;
-use krusty::jvm::names::file_class_name;
-use krusty::lexer::lex;
-use krusty::parser::parse;
+use krusty::jvm::JvmBackend;
+use krusty::{compiler::emit_analyzed, features::LangFeatures};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
@@ -30,30 +27,29 @@ use std::rc::Rc;
 /// krusty can't compile it (then there's nothing to diff).
 fn krusty_compile(src: &str, stem: &str, cp: &Rc<Classpath>) -> Option<Vec<(String, Vec<u8>)>> {
     let mut d = DiagSink::new();
-    let toks = lex(src, &mut d);
-    let files = vec![parse(src, &toks, &mut d)];
-    if d.has_errors() {
-        return None;
-    }
+    let stems = [stem.to_string()];
+    let inputs = [SourceInput::kotlin(src).with_file_stem(stem)];
     let platform = Box::new(JvmLibraries::new(cp.clone()));
-    let mut syms = collect_signatures_with_cp(&files, platform, &mut d);
+    let analysis = analyze_source_set_with_features_and_prepare(
+        &inputs,
+        platform,
+        &LangFeatures::from_source(src),
+        |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
+        &mut d,
+    );
+    let backend = JvmBackend::new(cp.clone());
+    let artifacts = emit_analyzed(analysis, &stems, &backend, "main", &mut d);
     if d.has_errors() {
-        return None;
-    }
-    let info = check_file(&files[0], &mut syms, &mut d);
-    if d.has_errors() {
-        return None;
-    }
-    let facade = file_class_name(stem, files[0].package.as_deref());
-    let runtime = JvmLibraries::new(cp.clone());
-    let mut ir = lower_file(&files[0], &info, &syms, &runtime)?;
-    // Shared post-lowering pass pipeline (jvm/backend.rs).
-    krusty::jvm::backend::run_backend_passes(&mut ir, &facade, "main", &syms, cp, &runtime).ok()?;
-    let out = emit_all(&ir, &facade, &**cp, None, &syms)?;
-    if out.is_empty() {
         None
     } else {
-        Some(out)
+        let classes = artifacts
+            .into_iter()
+            .filter_map(|(path, bytes)| {
+                path.strip_suffix(".class")
+                    .map(|internal| (internal.to_string(), bytes))
+            })
+            .collect::<Vec<_>>();
+        (!classes.is_empty()).then_some(classes)
     }
 }
 
