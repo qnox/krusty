@@ -173,7 +173,7 @@ const BUILTIN_TYPE_NAMES: [(&str, TypeName); 16] = [
 ///
 /// `Unit` and `Nothing` are the enum variants. The scalar and `String` classifiers are the
 /// `Ty::Obj` constants. Every other name, including `kotlin/Array`, is `None`.
-pub(crate) fn builtin_semantic(name: TypeName) -> Option<Ty> {
+pub fn builtin_semantic(name: TypeName) -> Option<Ty> {
     Some(match name {
         KOTLIN_BOOLEAN => Ty::Boolean,
         KOTLIN_BYTE => Ty::Byte,

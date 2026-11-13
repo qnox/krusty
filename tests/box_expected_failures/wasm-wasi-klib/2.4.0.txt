@@ -348,7 +348,6 @@ callableReference/function/genericCallableReferencesWithOverload.kt
 callableReference/function/genericWithDependentType.kt
 callableReference/function/kt21787.kt
 callableReference/function/kt32462.kt
-callableReference/function/kt47741.kt
 callableReference/function/local/enumExtendsTrait.kt
 callableReference/function/local/localFunctionName.kt
 callableReference/function/overloadedFunVsVal.kt
@@ -463,7 +462,6 @@ classes/kt1980.kt
 classes/kt2391.kt
 classes/kt2417.kt
 classes/kt2566_2.kt
-classes/kt2711.kt
 classes/kt3114.kt
 classes/kt343.kt
 classes/kt500.kt
@@ -539,7 +537,6 @@ contextParameters/useFromAnotherModuleSuspending.kt
 contextParameters/withExtensionReceiverInSupertype.kt
 contracts/contractForCast.kt
 contracts/destructuredVariable.kt
-contracts/exception.kt
 contracts/fieldInConstructorParens.kt
 contracts/forLoop.kt
 contracts/isNullString.kt
@@ -634,9 +631,6 @@ controlStructures/forInSequenceWithIndex/forInSequenceWithIndexWithExplicitlyTyp
 controlStructures/forInSmartCastToArray.kt
 controlStructures/forNullableCharInString.kt
 controlStructures/forUserType.kt
-controlStructures/kt1742.kt
-controlStructures/kt2291.kt
-controlStructures/kt2416.kt
 controlStructures/kt3203_1.kt
 controlStructures/kt3203_2.kt
 controlStructures/kt3280.kt
@@ -645,7 +639,6 @@ controlStructures/kt42455.kt
 controlStructures/kt513.kt
 controlStructures/kt628.kt
 controlStructures/kt910.kt
-controlStructures/longRange.kt
 controlStructures/slowDsl/slowHtmlLikeDsl.kt
 controlStructures/tryCatchInExpressions/differentTypes.kt
 controlStructures/tryCatchInExpressions/tryCatchAfterWhileTrue.kt
@@ -1389,7 +1382,6 @@ evaluate/inJavaLangPackage.kt
 evaluate/inJavaPackage.kt
 evaluate/intrinsicConst/charConstructor.kt
 evaluate/intrinsicConst/constTrim.kt
-evaluate/intrinsicConst/incDec.kt
 evaluate/intrinsicConst/kCallableName.kt
 evaluate/intrinsicConst/kCallableNameWithSideEffect.kt
 evaluate/intrinsicConst/kt58717.kt
@@ -1454,7 +1446,6 @@ fieldRename/delegates.kt
 finally/kt4134.kt
 finally/notChainCatch.kt
 finally/someStuff.kt
-finally/tryFinally.kt
 fir/functionsDifferInTypeParameterBounds.kt
 fir/inferenceWithTypeAliasFromOtherModule.kt
 fir/kt68806.kt
@@ -1537,7 +1528,6 @@ functions/bigArity/subclass.kt
 functions/functionExpression/functionExpression.kt
 functions/functionExpression/functionExpressionWithThisReference.kt
 functions/functionExpression/functionLiteralExpression.kt
-functions/invoke/invoke.kt
 functions/invoke/kt3190.kt
 functions/kt1038.kt
 functions/kt1199.kt
@@ -1619,8 +1609,6 @@ inference/pcla/issues/kt52838c.kt
 inference/pcla/issues/kt54400b.kt
 inference/pcla/issues/kt54767a.kt
 inference/pcla/issues/kt54767b.kt
-inference/pcla/issues/kt60291a.kt
-inference/pcla/issues/kt63840a.kt
 inference/pcla/issues/kt64066.kt
 inference/pcla/issues/kt64069.kt
 inference/pcla/issues/kt66229.kt
@@ -2352,7 +2340,6 @@ intrinsics/kt10131.kt
 intrinsics/kt10131a.kt
 intrinsics/kt52163_doubleCompareToInt.kt
 intrinsics/kt8666.kt
-intrinsics/longRangeWithExplicitDot.kt
 intrinsics/nullPlusString.kt
 intrinsics/rangeFromCollection.kt
 intrinsics/stringFromCollection.kt
@@ -2478,7 +2465,6 @@ multiDecl/forIterator/longIterator/MultiDeclForComponentExtensions.kt
 multiDecl/forIterator/longIterator/MultiDeclForComponentExtensionsValCaptured.kt
 multiDecl/forIterator/longIterator/MultiDeclForComponentMemberExtensions.kt
 multiDecl/forIterator/longIterator/MultiDeclForComponentMemberExtensionsInExtensionFunction.kt
-multiDecl/forRange/explicitRangeToWithDot/long/MultiDeclForComponentExtensions.kt
 multiDecl/kt9828_hashMap.kt
 multiplatform/k2/aliasSuperTypeInLazy.kt
 multiplatform/k2/annotations/expectAnnotationCallInLibrary.kt
@@ -2688,7 +2674,6 @@ primitiveTypes/kt36952_identityEqualsWithBooleanInLocalFunction.kt
 primitiveTypes/kt46864_double.kt
 primitiveTypes/kt6590_identityEquals.kt
 primitiveTypes/kt711.kt
-primitiveTypes/kt756.kt
 primitiveTypes/kt79977.kt
 primitiveTypes/kt79977_withIncrementalCompilation.kt
 primitiveTypes/kt887.kt
@@ -2699,7 +2684,6 @@ primitiveTypes/numberToChar/simple.kt
 primitiveTypes/numberToChar/superCallToClass.kt
 primitiveTypes/numberToChar/superCallToInterface.kt
 primitiveTypes/numberToChar/superCallToNumber.kt
-primitiveTypes/rangeTo.kt
 primitiveTypes/reassignDestructured.kt
 primitiveTypes/smartCastOnNullableDoubleIdentityEquals.kt
 primitiveTypes/stringEqualsHashCodeToString.kt
@@ -2823,15 +2807,12 @@ ranges/contains/inOptimizableFloatRange.kt
 ranges/contains/inOptimizableIntRange.kt
 ranges/contains/inOptimizableLongRange.kt
 ranges/contains/inPrimitiveProgression.kt
-ranges/contains/inPrimitiveRange.kt
 ranges/contains/inRangeLiteralComposition.kt
 ranges/contains/inRangeWithCustomContains.kt
 ranges/contains/inRangeWithImplicitReceiver.kt
 ranges/contains/inRangeWithNonmatchingArguments.kt
 ranges/contains/inRangeWithSmartCast.kt
 ranges/contains/kt20106.kt
-ranges/contains/nullableInPrimitiveRange.kt
-ranges/contains/rangeContainsString.kt
 ranges/contains/smartCastOnBothEnds.kt
 ranges/contains/smartCastOnBothEndsGeneric.kt
 ranges/contains/uintInUByteRangeWithPossibleOverflow.kt
@@ -3031,8 +3012,6 @@ ranges/literal/simpleRangeWithNonConstantEnds.kt
 ranges/literal/simpleSteppedDownTo.kt
 ranges/literal/simpleSteppedRange.kt
 ranges/multiAssignmentIterationOverIntRange.kt
-ranges/nullableLoopParameter/progressionExpression.kt
-ranges/nullableLoopParameter/rangeExpression.kt
 ranges/safeCallRangeTo.kt
 ranges/stepped/expression/downTo/emptyProgression.kt
 ranges/stepped/expression/downTo/illegalStepNegative.kt
@@ -3903,7 +3882,6 @@ unit/kt3634.kt
 unit/kt4212.kt
 unsignedTypes/boxConstValOfUnsignedType.kt
 unsignedTypes/boxedUnsignedEqualsZero.kt
-unsignedTypes/checkBasicUnsignedLiterals.kt
 unsignedTypes/equalsImplForInlineClassWrappingNullableInlineClass.kt
 unsignedTypes/forEachIndexedInListOfUInts.kt
 unsignedTypes/forInUnsignedDownTo.kt
@@ -3986,7 +3964,6 @@ wasm-new-exception-handling/try4.kt
 wasm-new-exception-handling/tryCatch.kt
 wasm-new-exception-handling/tryCatchFinallyWithHandleResult.kt
 wasm-new-exception-handling/tryCatchWithHandleResult.kt
-wasm-new-exception-handling/tryFinally.kt
 wasm-new-exception-handling/tryFinallyInsideInlineLambda.kt
 wasm-new-exception-handling/tryFinallyWithHandleResult.kt
 wasm-old-exception-handling/catch1.kt
@@ -4022,7 +3999,6 @@ wasm-old-exception-handling/try4.kt
 wasm-old-exception-handling/tryCatch.kt
 wasm-old-exception-handling/tryCatchFinallyWithHandleResult.kt
 wasm-old-exception-handling/tryCatchWithHandleResult.kt
-wasm-old-exception-handling/tryFinally.kt
 wasm-old-exception-handling/tryFinallyInsideInlineLambda.kt
 wasm-old-exception-handling/tryFinallyWithHandleResult.kt
 when/enumOptimization/bigEnum.kt

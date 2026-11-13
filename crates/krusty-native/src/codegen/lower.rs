@@ -2200,6 +2200,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     end,
                     end_type,
                     result,
+                    ..
                 } = &**checked_op =>
             {
                 self.range_construction(*operation, *start, *start_type, *end, *end_type, *result)
