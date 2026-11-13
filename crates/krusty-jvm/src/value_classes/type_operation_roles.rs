@@ -254,9 +254,19 @@ mod tests {
         ir.set_physical_type(boxed, Ty::obj("kotlin/Any"));
         let storage = ir.add_expr(IrExpr::GetValue(1));
         ir.set_physical_type(storage, carrier);
+        let logical_box = ir.add_expr(IrExpr::GetValue(2));
+        ir.set_logical_type(logical_box, Ty::obj("kotlin/Any"));
+        let physical_storage = ir.add_expr(IrExpr::GetValue(3));
+        ir.set_physical_type(physical_storage, carrier);
+        ir.set_logical_type(physical_storage, Ty::obj("kotlin/Any"));
         let mut operations = Vec::new();
-        for arg in [boxed, storage] {
-            for op in [IrTypeOp::Cast, IrTypeOp::ImplicitCoercion] {
+        for arg in [boxed, logical_box, storage, physical_storage] {
+            for op in [
+                IrTypeOp::Cast,
+                IrTypeOp::CastNonNull,
+                IrTypeOp::SafeCast,
+                IrTypeOp::ImplicitCoercion,
+            ] {
                 operations.push(ir.add_expr(IrExpr::TypeOp {
                     op,
                     arg,
@@ -270,12 +280,10 @@ mod tests {
                 .into_iter()
                 .map(|id| ir.value_class_type_operations[&id].role)
                 .collect::<Vec<_>>(),
-            [
-                IrValueClassTypeRole::Box,
-                IrValueClassTypeRole::Box,
-                IrValueClassTypeRole::Carrier,
-                IrValueClassTypeRole::Carrier
-            ]
+            [IrValueClassTypeRole::Box; 8]
+                .into_iter()
+                .chain([IrValueClassTypeRole::Carrier; 8])
+                .collect::<Vec<_>>()
         );
     }
 
