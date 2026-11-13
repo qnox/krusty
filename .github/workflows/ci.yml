@@ -12,6 +12,8 @@ jobs:
   generic-layout:
     runs-on: [self-hosted, rust-4c-8gb]
     timeout-minutes: 360
+    env:
+      CARGO_BUILD_JOBS: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -23,9 +25,26 @@ jobs:
         with:
           distribution: zulu
           java-version: "17"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: just
+      - name: Provision Native runtime compiler and exact 2.4.21 inputs
+        run: |
+          set -euo pipefail
+          if ! command -v clang >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y clang
+          fi
+          runtime_cc="$(command -v clang)"
+          "$runtime_cc" --version
+          echo "KRUSTY_RUNTIME_CC=$runtime_cc" >> "$GITHUB_ENV"
+          echo "KRUSTY_LANGUAGE_VERSION=2.4.21" >> "$GITHUB_ENV"
+          echo "KRUSTY_KOTLINC=$(just kotlinc 2.4.21)" >> "$GITHUB_ENV"
+          echo "KRUSTY_KOTLIN_NATIVE=$(just kotlin-native 2.4.21)" >> "$GITHUB_ENV"
+          echo "KRUSTY_KOTLIN_BOX_DIR=$(just box-corpus 2.4.21)" >> "$GITHUB_ENV"
       - name: Verify exact source and prepare evidence
         id: prepare
         run: |
@@ -43,13 +62,54 @@ jobs:
         id: binaries
         if: ${{ always() && steps.prepare.outcome == 'success' }}
         run: |
-          set -euo pipefail
-          unitbin="$(just compiler-unit-tests)"
-          conformancebin="$(just conformance-bin)"
+          set -uo pipefail
+          snapshot() {
+            {
+              date -Is
+              free -h
+              for path in /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.peak /sys/fs/cgroup/memory.events; do
+                if [ -r "$path" ]; then
+                  printf '\n--- %s ---\n' "$path"
+                  cat "$path"
+                fi
+              done
+              printf '\n--- top resident processes ---\n'
+              ps -eo pid,ppid,rss,etime,comm,args --sort=-rss | awk 'NR <= 12'
+            } >> "$EVIDENCE/compiler-memory.log" 2>&1
+          }
+          build_one() {
+            local kind="$1"
+            local recipe="$2"
+            local logfile="$EVIDENCE/${kind}-build.log"
+            snapshot
+            just "$recipe" > "$logfile" 2>&1 &
+            local build_pid=$!
+            (
+              while kill -0 "$build_pid" 2>/dev/null; do
+                snapshot
+                sleep 5
+              done
+            ) &
+            local monitor_pid=$!
+            set +e
+            wait "$build_pid"
+            local status=$?
+            set -e
+            kill "$monitor_pid" 2>/dev/null || true
+            wait "$monitor_pid" 2>/dev/null || true
+            snapshot
+            cat "$logfile" >&2
+            printf '%s\n' "$status" > "$EVIDENCE/${kind}-build.exit-code"
+            if [ "$status" -ne 0 ]; then return "$status"; fi
+            tail -n 1 "$logfile"
+          }
+          set -e
+          unitbin="$(build_one compiler-unit compiler-unit-tests)"
+          conformancebin="$(build_one conformance conformance-bin)"
+          echo "$unitbin" > "$EVIDENCE/unit-binary.txt"
+          echo "$conformancebin" > "$EVIDENCE/conformance-binary.txt"
           echo "UNITBIN=$(realpath "$unitbin")" >> "$GITHUB_ENV"
           echo "CONFORMANCEBIN=$(realpath "$conformancebin")" >> "$GITHUB_ENV"
-          printf '%s\n' "$unitbin" > "$EVIDENCE/unit-binary.txt"
-          printf '%s\n' "$conformancebin" > "$EVIDENCE/conformance-binary.txt"
       - name: Run exact Native KLIB unit tests and implementation censuses at all stable releases
         id: release-checks
         if: ${{ always() && steps.prepare.outcome == 'success' && steps.binaries.outcome == 'success' }}
