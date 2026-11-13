@@ -212,6 +212,10 @@ pub struct BackendModuleFacts {
     /// Each dependency classifier the module's own classes stand behind, with the file of every
     /// source class that can be an instance of it, body-local ones included.
     dependency_implementors: HashMap<TypeName, Box<[crate::fir::SourceFileId]>>,
+    /// The constants of every enum class this module declares, in declaration order. Another file
+    /// of the module reads one through the entry its declaring file publishes, and links that read
+    /// by this fact before the declaring file is lowered (see `super::module_links`).
+    source_enum_constants: HashMap<TypeName, Box<[Box<str>]>>,
     /// Each `expect` classifier an `actual typealias` actualizes, mapped to the alias's target.
     /// Common code types the `expect` as its own classifier; every target realizes the target.
     actualized_expects: HashMap<TypeName, TypeName>,
@@ -252,6 +256,7 @@ impl BackendModuleFacts {
         let mut generated_classifiers = Vec::new();
         let mut source_supertypes = HashMap::default();
         let mut source_class_members = HashMap::default();
+        let mut source_enum_constants = HashMap::default();
         let mut actualized_expects = HashMap::default();
         let mut actualized_nested_expects = HashMap::default();
         for raw in 0..index.declaration_count() {
@@ -347,6 +352,23 @@ impl BackendModuleFacts {
             } else {
                 crate::libraries::TypeKind::Class
             };
+            if kind == crate::libraries::TypeKind::Enum {
+                let constants = index
+                    .owned_declarations(declaration)
+                    .iter()
+                    .filter(|&&child| {
+                        index.declaration_header(child).is_some_and(|header| {
+                            header.kind == crate::fir::DeclarationKind::EnumEntry
+                        })
+                    })
+                    .map(|&child| {
+                        index.declaration_name(child).map(Box::from).ok_or(
+                            BackendFactError::IncompleteClassifier(classifier.classifier),
+                        )
+                    })
+                    .collect::<Result<Box<[_]>, _>>()?;
+                source_enum_constants.insert(classifier.classifier, constants);
+            }
             let is_interface = matches!(
                 kind,
                 crate::libraries::TypeKind::Interface | crate::libraries::TypeKind::Annotation
@@ -516,6 +538,7 @@ impl BackendModuleFacts {
             classes: Default::default(),
             source_class_members,
             dependency_implementors: dependency_implementors(&source_supertypes),
+            source_enum_constants,
             actualized_expects,
             actualized_nested_expects,
         })
@@ -565,6 +588,7 @@ impl BackendModuleFacts {
             classes: Default::default(),
             source_class_members: HashMap::default(),
             dependency_implementors: HashMap::default(),
+            source_enum_constants: HashMap::default(),
             actualized_expects: HashMap::default(),
             actualized_nested_expects: HashMap::default(),
         })
@@ -572,6 +596,13 @@ impl BackendModuleFacts {
 
     pub fn classifier(&self, classifier: TypeName) -> Option<Arc<BackendClassifierFact>> {
         self.classifiers.get(&classifier).cloned()
+    }
+
+    /// Whether an enum class of this module declares `constant`, whichever file declares it.
+    pub fn declares_enum_constant(&self, constant: &super::EnumConstant) -> bool {
+        self.source_enum_constants
+            .get(&constant.classifier)
+            .is_some_and(|constants| constants.contains(&constant.name))
     }
 
     pub fn classifiers(&self) -> impl Iterator<Item = (TypeName, &BackendClassifierFact)> {

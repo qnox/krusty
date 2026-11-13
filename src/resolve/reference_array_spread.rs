@@ -19,7 +19,13 @@ impl Checker<'_> {
         let spread_array = |element| Ty::obj_args("kotlin/Array", &[Ty::out_projection(element)]);
         let expected = element_hint
             .filter(|hint| !matches!(hint.kind(), TyKind::InProjection(_)))
-            .map(|hint| spread_array(hint.projection_read_ty()));
+            .map(|hint| {
+                if matches!(hint.kind(), TyKind::OutProjection(_)) {
+                    spread_array(hint.projection_read_ty())
+                } else {
+                    Ty::obj_args("kotlin/Array", &[hint])
+                }
+            });
         let actual = match expected {
             Some(expected) => self.expr_expected(scope, argument, expected),
             None => self.expr(scope, argument),
