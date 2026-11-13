@@ -1,3 +1,4 @@
+// LANGUAGE: +UnnamedLocalVariables
 // An unnamed local (`val _ = ...`) binds no name, so several of them share one scope.
 // Each initializer is still evaluated, in order.
 
