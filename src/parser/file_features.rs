@@ -57,7 +57,7 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.custom_equals_in_value_classes = features.has("CustomEqualsInValueClasses");
     file.forbid_upper_bounds_violation_on_type_operator_and_parameter_bounds =
         features.has("ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds");
-    // 2.5.0-Beta2 renamed the feature and moved its since-version from 2.5 to 2.6. A release
+    // 2.5.0-RC renamed the feature and moved its since-version from 2.5 to 2.6. A release
     // declares one spelling; the bit is that spelling.
     let useless_type_arguments = [
         "ForbidUselessTypeArgumentsIn26",
@@ -226,12 +226,12 @@ mod tests {
     }
 
     #[test]
-    fn beta2_postpones_useless_type_arguments_under_the_renamed_feature() {
+    fn rc_postpones_useless_type_arguments_under_the_renamed_feature() {
         let mut before = File::default();
         apply_file_features(
             &mut before,
             &LangFeatures::for_release(
-                KotlinVersion::V2_5_0_BETA2,
+                KotlinVersion::V2_5_0_RC,
                 LanguageVersion::V2_4,
                 LanguageVersion::V2_4,
             ),
@@ -250,7 +250,7 @@ mod tests {
         apply_file_features(
             &mut at_since,
             &LangFeatures::for_release(
-                KotlinVersion::V2_5_0_BETA2,
+                KotlinVersion::V2_5_0_RC,
                 LanguageVersion::V2_6,
                 LanguageVersion::V2_6,
             ),
@@ -271,22 +271,22 @@ mod tests {
         );
         assert_eq!(before.sam_constructor_missing_dependency, None);
 
-        let mut beta = File::default();
+        let mut rc = File::default();
         apply_file_features(
-            &mut beta,
+            &mut rc,
             &LangFeatures::for_release(
-                KotlinVersion::V2_5_0_BETA2,
+                KotlinVersion::V2_5_0_RC,
                 LanguageVersion::V2_5,
                 LanguageVersion::V2_5,
             ),
         );
-        assert_eq!(beta.sam_constructor_missing_dependency, Some(false));
+        assert_eq!(rc.sam_constructor_missing_dependency, Some(false));
 
         let mut at_since = File::default();
         apply_file_features(
             &mut at_since,
             &LangFeatures::for_release(
-                KotlinVersion::V2_5_0_BETA2,
+                KotlinVersion::V2_5_0_RC,
                 LanguageVersion::V2_6,
                 LanguageVersion::V2_6,
             ),

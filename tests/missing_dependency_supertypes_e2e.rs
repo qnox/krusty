@@ -290,18 +290,18 @@ fun ok() = Local { }
 fun interface Local { fun run() }
 ";
 
-/// 2.5.0-Beta2 warns when a SAM constructor or conversion targets an interface whose supertype
+/// 2.5.0-RC warns when a SAM constructor or conversion targets an interface whose supertype
 /// is missing, and `ForbidSamConstructorCallsWithMissingDependencySupertype` (on at language 2.6,
 /// under `-progressive`, or by name) makes that an error. 2.4.21 has no such check.
 #[test]
-fn a_sam_constructor_missing_a_dependency_supertype_follows_beta2() {
-    let beta2 = "2.5.0-Beta2";
-    let stdlib = common::kotlinc_lib_for_release(beta2)
-        .expect("kotlinc 2.5.0-Beta2")
+fn a_sam_constructor_missing_a_dependency_supertype_follows_rc() {
+    let rc = "2.5.0-RC";
+    let stdlib = common::kotlinc_lib_for_release(rc)
+        .expect("kotlinc 2.5.0-RC")
         .join("kotlin-stdlib.jar");
     let work = common::scratch_dir().expect("allocate a scratch directory");
-    let a = release_library(beta2, &work, "sam-a", SAM_A, None);
-    let b = release_library(beta2, &work, "sam-b", SAM_B, Some(&a));
+    let a = release_library(rc, &work, "sam-a", SAM_A, None);
+    let b = release_library(rc, &work, "sam-b", SAM_B, Some(&a));
     for arguments in [
         &["-language-version", "2.5"][..],
         &[
@@ -311,12 +311,12 @@ fn a_sam_constructor_missing_a_dependency_supertype_follows_beta2() {
         ][..],
         &["-language-version", "2.6"][..],
     ] {
-        assert_like_release(&work, beta2, &b, Some(&stdlib), arguments);
+        assert_like_release(&work, rc, &b, Some(&stdlib), arguments);
     }
     // `-progressive` turns this modeled feature on, and it also turns on features no phase
     // implements. krusty refuses that command line, so the row checks the refusal. Language 2.6
     // above is where the feature's own state is the error kotlinc reports.
-    assert_progressive_refuses(&work, beta2, &b, &stdlib);
+    assert_progressive_refuses(&work, rc, &b, &stdlib);
     let _ = std::fs::remove_dir_all(&work);
 
     // 2.4.21 reports nothing for the same program.

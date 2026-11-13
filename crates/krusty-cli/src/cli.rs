@@ -898,14 +898,14 @@ mod tests {
             &["-Xuse-inline-scopes-numbers"][..],
             &["-XXLanguage:+JvmInlineScopesNumbers"][..],
         ] {
-            let mut command = vec!["-Xkotlin-reference-version=2.5.0-Beta2"];
+            let mut command = vec!["-Xkotlin-reference-version=2.5.0-RC"];
             command.extend_from_slice(arguments);
             command.push("x.kt");
             let parsed = parse_args(&command);
             assert_eq!(parsed.refusals, Vec::<String>::new(), "{arguments:?}");
             assert!(parsed.inline_scopes_numbers, "{arguments:?}");
         }
-        let parsed = parse_args(&["-Xkotlin-reference-version=2.5.0-Beta2", "x.kt"]);
+        let parsed = parse_args(&["-Xkotlin-reference-version=2.5.0-RC", "x.kt"]);
         assert!(!parsed.inline_scopes_numbers);
     }
 

@@ -40,7 +40,7 @@ macro_rules! releases {
 releases! {
     V2_4_0 => "2.4.0",
     V2_4_20 => "2.4.20",
-    V2_5_0_BETA2 => "2.5.0-Beta2",
+    V2_5_0_RC => "2.5.0-RC",
 }
 
 /// The vendored table text a supported release reads, for comparison with a fresh dump.

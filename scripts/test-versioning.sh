@@ -80,12 +80,12 @@ fi
 cat >"$fixture/kotlin-versions" <<EOF
 2.4.21 $baseline
 2.5.0 $baseline
-2.5.0-Beta2 $baseline
+2.5.0-RC $baseline
 EOF
 expect_output 2.5.0 max-version
 
 cat >"$fixture/kotlin-versions" <<EOF
-2.5.0-Beta2 $baseline
+2.5.0-RC $baseline
 2.4.21 $baseline
 EOF
 expect_output 2.4.21 max-version

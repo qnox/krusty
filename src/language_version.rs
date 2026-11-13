@@ -189,7 +189,7 @@ mod tests {
     fn the_default_language_version_is_the_newest_stable_release() {
         assert_eq!(
             KotlinVersion::supported().last().copied(),
-            Some(KotlinVersion::V2_5_0_BETA2)
+            Some(KotlinVersion::V2_5_0_RC)
         );
         assert_eq!(KotlinVersion::newest(), KotlinVersion::V2_4_21);
         assert_eq!(LanguageVersion::default(), LanguageVersion::V2_4);
@@ -202,7 +202,7 @@ mod tests {
             Some(LanguageVersion::V2_5)
         );
         assert_eq!(
-            LanguageVersion::default_for(KotlinVersion::V2_5_0_BETA2),
+            LanguageVersion::default_for(KotlinVersion::V2_5_0_RC),
             LanguageVersion::V2_5
         );
     }

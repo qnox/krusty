@@ -141,7 +141,7 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
             .collect::<Vec<_>>();
         // Kotlin/Native coalesces equal internal linker symbols from distinct KLIBs by library
         // order even though frontend selection correctly admits only the friend. Releases before
-        // 2.4.20 and from 2.5.0-Beta2 on select the first definition while 2.4.20 and 2.4.21
+        // 2.4.20 and from 2.5.0-RC on select the first definition while 2.4.20 and 2.4.21
         // select the last, so put the friend at the precedence position used by the pinned
         // compiler.
         order_libraries_for_native_linker(
@@ -234,7 +234,7 @@ fn order_libraries_for_native_linker(
     friends: &[PathBuf],
     version: KotlinVersion,
 ) {
-    if (KotlinVersion::V2_4_20..KotlinVersion::V2_5_0_BETA2).contains(&version) {
+    if (KotlinVersion::V2_4_20..KotlinVersion::V2_5_0_RC).contains(&version) {
         libraries.sort_by_key(|library| friends.contains(library));
     } else {
         libraries.sort_by_key(|library| !friends.contains(library));
@@ -539,7 +539,7 @@ mod tests {
         order_libraries_for_native_linker(
             &mut since_2_5,
             std::slice::from_ref(&friend),
-            KotlinVersion::V2_5_0_BETA2,
+            KotlinVersion::V2_5_0_RC,
         );
         assert_eq!(since_2_5, original);
     }
