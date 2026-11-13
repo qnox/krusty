@@ -79,12 +79,9 @@ jobs:
   # Lint and coverage are independent merge gates. Give each its own runner so the clean Clippy
   # build does not sit on the coverage critical path. Conformance and Gradle run prebuilt artifact
   # families from their independent producer jobs below; neither matrix compiles krusty again.
-  # TEMP (2026-11-07): GHA hosted queue is backed up — temporarily run the heavy ubuntu-latest
-  # jobs on self-hosted rust-4c-8gb too. Revert once the hosted backlog clears; then dual-label +
-  # route enforce can choose GHA vs own. route stays on ubuntu-latest. Fork PRs no longer run CI:
-  # only the queue's own branches do.
+  # Run test gates and their artifact producers on GitHub-hosted Linux runners.
   lint:
-    runs-on: [self-hosted, rust-4c-8gb]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       # Cancels the rest of a merge queue run after a lint failure.
@@ -165,7 +162,7 @@ jobs:
   plugin-host:
     # GitHub-hosted: these tests ran out of memory on the 8 GB self-hosted runners, and GitHub's
     # Linux runners (16 GB) had free slots.
-    runs-on: [self-hosted, rust-4c-8gb]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -548,7 +545,7 @@ jobs:
           done
 
   build-tool-bins:
-    runs-on: [self-hosted, rust-4c-8gb]
+    runs-on: ubuntu-latest
     outputs:
       # Every consumer already waits for this artifact family. Publish the manifest-derived matrix
       # here instead of scheduling a separate ten-second runner solely for these two values.
@@ -617,13 +614,9 @@ jobs:
       matrix:
         version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
         target: [jvm, native, wasm-js, wasm-wasi]
-    # Cold reflective box() calls share one deadline. Hosted runners kept 2s. The 8 GB
-    # pool missed it once: functions/functionNtoString.kt on Kotlin 2.4.0, while the same source
-    # passed for 2.4.10, 2.4.20, and 2.4.21. Give that pool 8s. The client round-trip wait stays
-    # 8s above the JVM deadline. Every target uses the guarded self-hosted pool. Native once reached
-    # its suite deadline on these 8 GB runners; sharing decoded KLIB trees (#3274) halved its lane
-    # and its peak memory. Separate target rows preserve independent measurements.
-    runs-on: [self-hosted, rust-4c-8gb]
+    # Preserve per-case and whole-lane deadlines on GitHub-hosted runners.
+    # Separate target rows preserve independent measurements.
+    runs-on: ubuntu-latest
     env:
       KRUSTY_BOX_CASE_TIMEOUT_MS: '8000'
       # Each target row keeps its own kotlinc box reference cache; see its restore step.
@@ -1022,7 +1015,7 @@ jobs:
     name: ci-and-conformance
     needs: [ci, lint, plugin-host, conformance, klib-implementation-coverage, build-gradle-plugin, gradle, maven, build-tools, bazel]
     if: always()
-    runs-on: [self-hosted, helper-1c-1gb]
+    runs-on: ubuntu-latest
     steps:
       - name: require every merge gate to succeed
         env:
@@ -1066,7 +1059,7 @@ jobs:
   build-gradle-plugin:
     # GitHub-hosted: a one- or two-minute producer that the gradle matrix waits for; in the
     # self-hosted queue it waited hours (2026-11-04), holding the whole run open.
-    runs-on: [self-hosted, rust-4c-8gb]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1159,7 +1152,7 @@ jobs:
       fail-fast: false
       matrix:
         kotlin: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
-    runs-on: [self-hosted, rust-4c-8gb]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1219,7 +1212,7 @@ jobs:
           - { kotlin: 2.4.0,  gradle: 9.5.0,  ksp: true,  suite: boundary }
           - { kotlin: 2.4.10, gradle: 8.14.3, ksp: true,  suite: boundary }
           - { kotlin: 2.4.20, gradle: 7.6.3,  ksp: false, suite: boundary }
-    runs-on: [self-hosted, rust-4c-8gb]
+    runs-on: ubuntu-latest
     # A lane takes under 10 minutes; one stuck on its runner (a download that never finished) ran for
     # hours, holding the batch that waits on it.
     timeout-minutes: 30
@@ -1332,7 +1325,7 @@ jobs:
   build-maven-plugin:
     # GitHub-hosted: a one- or two-minute producer that the maven matrix waits for; in the
     # self-hosted queue it waited hours (2026-11-04), holding the whole run open.
-    runs-on: [self-hosted, rust-4c-8gb]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1369,7 +1362,7 @@ jobs:
   # kotlin-maven-plugin builds, with the shared krusty binary.
   maven:
     needs: [build-tool-bins, build-maven-plugin]
-    runs-on: [self-hosted, rust-4c-8gb]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1418,7 +1411,7 @@ jobs:
       fail-fast: false
       matrix:
         bazel: [8.4.2, 9.3.1]
-    runs-on: [self-hosted, rust-4c-8gb]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
