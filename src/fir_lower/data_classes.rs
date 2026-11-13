@@ -9,6 +9,7 @@ use crate::ir::{
 };
 use crate::types::Ty;
 
+use super::equals_guards::{identity_and_type_guards, return_guard};
 use super::FirFileLoweringFailure;
 
 pub(super) fn finalize_data_classes(
@@ -506,26 +507,15 @@ fn synthesize_equals(
     let classifier = ir.classes[class as usize].fq_name_id();
     let mut statements = Vec::new();
 
-    // An inline value class has no identity to compare: kotlinc's generated `equals` starts at the
-    // type test.
-    if !inline_value {
-        let this_value = ir.add_expr(IrExpr::GetValue(0));
-        let other_value = ir.add_expr(IrExpr::GetValue(1));
-        let identical = ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::RefEq,
-            lhs: this_value,
-            rhs: other_value,
-        });
-        statements.push(return_guard(ir, identical, true));
-    }
-
-    let other_value = ir.add_expr(IrExpr::GetValue(1));
-    let wrong_type = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::NotInstanceOf,
-        arg: other_value,
-        type_operand: Ty::obj_name(classifier),
-    });
-    statements.push(return_guard(ir, wrong_type, false));
+    statements.extend(identity_and_type_guards(
+        ir,
+        0,
+        1,
+        Ty::obj_name(classifier),
+        // An inline value class has no identity to compare: kotlinc's generated `equals` starts at
+        // the type test.
+        !inline_value,
+    ));
 
     const OTHER: u32 = 2;
     let other_value = ir.add_expr(IrExpr::GetValue(1));
@@ -583,23 +573,6 @@ fn synthesize_equals(
     }));
     ir.open_methods.insert(function);
     Ok(())
-}
-
-fn return_guard(ir: &mut IrFile, condition: u32, value: bool) -> u32 {
-    let value = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Boolean(value)));
-    let returned = ir.add_expr(IrExpr::Return(Some(value)));
-    ir.set_logical_type(returned, Ty::Nothing);
-    let branch = ir.add_expr(IrExpr::Block {
-        stmts: vec![returned],
-        value: None,
-    });
-    ir.set_logical_type(branch, Ty::Unit);
-    // An `if` without an `else` is a `Unit` statement, as the checker types the source form.
-    let guard = ir.add_expr(IrExpr::When {
-        branches: vec![(Some(condition), branch)],
-    });
-    ir.set_logical_type(guard, Ty::Unit);
-    guard
 }
 
 fn has_method(ir: &IrFile, class: ClassId, name: &str, parameter_count: usize) -> bool {
