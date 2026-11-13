@@ -26,11 +26,13 @@ impl BodyLowering<'_, '_, '_> {
         classifier: krusty::types::TypeName,
         name: &str,
     ) -> Result<Option<Value>, Unsupported> {
-        let constant = krusty::backend::EnumConstant {
-            classifier,
-            name: name.into(),
-        };
-        let Some(symbol) = self.file.dependency_enum_constants.get(&constant) else {
+        let constant = krusty::backend::instance_links::InstanceEntry::EnumConstant(
+            krusty::backend::EnumConstant {
+                classifier,
+                name: name.into(),
+            },
+        );
+        let Some(symbol) = self.file.dependency_instances.get(&constant) else {
             return Err(declined!(
                 "an enum another file declares (`{}`)",
                 classifier.render()

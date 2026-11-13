@@ -188,9 +188,8 @@ pub(super) fn lower_file(
         let results = carrier(function.ret)?.into_iter().collect::<Vec<_>>();
         signatures.push(Some(module.func_type(params, results)));
     }
-    let enum_constant_entries =
-        callable_registry.link_enum_constants(dependency_exports, module)?;
-    let indices = callable_registry.declare_file(ir, module, &enum_constant_entries)?;
+    let instance_entries = callable_registry.link_instances(dependency_exports, module)?;
+    let indices = callable_registry.declare_file(ir, module, &instance_entries)?;
     let reference_file =
         runtime
             .callable_references
@@ -1513,7 +1512,11 @@ impl<'a> Body<'a> {
             IrExpr::EnumEntry { classifier, name } => {
                 let entry = self
                     .calls
-                    .dependency_enum_constant(classifier, &name)
+                    .instance(
+                        &krusty::backend::instance_links::InstanceEntry::EnumConstant(
+                            krusty::backend::EnumConstant { classifier, name },
+                        ),
+                    )
                     .ok_or_else(|| {
                         // Boundary conversion for a diagnostic.
                         format!(

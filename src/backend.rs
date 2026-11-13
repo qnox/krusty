@@ -17,6 +17,7 @@ mod dependency_signature;
 pub mod dispatch_entries;
 mod entry;
 pub mod enums;
+pub mod instance_links;
 pub mod interface_identity;
 pub mod local_properties;
 mod module_facts;
