@@ -34,8 +34,12 @@ jobs:
           EVIDENCE="$RUNNER_TEMP/kotlin-2.5.0-RC-validation"
           echo "EVIDENCE=$EVIDENCE" >> "$GITHUB_ENV"
           mkdir -p "$EVIDENCE"
-          git rev-parse HEAD^ > "$EVIDENCE/source-base.txt"
-          test "$(cat "$EVIDENCE/source-base.txt")" = 508017992e2b1bd4812248d834ff0d7e5aca0563
+          source_commit=508017992e2b1bd4812248d834ff0d7e5aca0563
+          git merge-base --is-ancestor "$source_commit" HEAD
+          printf '%s\n' "$source_commit" > "$EVIDENCE/source-base.txt"
+          git diff --quiet "$source_commit" HEAD -- . \
+            ':(exclude).github/workflows/ci.yml' \
+            ':(exclude)scripts/rc-klib-stamp-probe.sh'
           git rev-parse HEAD > "$EVIDENCE/workflow-commit.txt"
           git status --short --branch > "$EVIDENCE/checkout-status.txt"
       - name: Check all four RC release tables against kotlinc
