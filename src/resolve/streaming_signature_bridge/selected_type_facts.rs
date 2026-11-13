@@ -114,18 +114,6 @@ impl SelectedTypeFacts {
         self.shared.borrow().spellings.get(&syntax).copied()
     }
 
-    /// The typealias application the written type `syntax` selected: its alias applied to the
-    /// resolved types of its written arguments, marked nullable as written.
-    pub(super) fn alias_application(
-        &self,
-        arena: &crate::fir::HeaderSyntaxArena,
-        syntax: HeaderTypeId,
-    ) -> Option<crate::libraries::DeclaredResultAlias> {
-        super::super::type_spellings::written_alias_application(arena, syntax, |ty| {
-            self.spelling(ty)
-        })
-    }
-
     /// Whether compact resolution selected every node needed to publish one declaration-owned
     /// written type. A graph edge records only potential ownership; an undemanded graph expression
     /// never publishes these facts and therefore leaves the occurrence to active Pass 2.

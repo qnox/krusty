@@ -1,6 +1,10 @@
 //! Selection-time result and publication facts for a qualified member-property read.
 
 use super::ProductionSignatureSemantics;
+use crate::resolve::selected_result_aliases::SelectionInputs;
+use crate::resolve::selected_result_publication::{
+    CompactSelectedResultPublication, SelectedSignature,
+};
 use crate::types::Ty;
 
 impl ProductionSignatureSemantics<'_> {
@@ -21,10 +25,7 @@ impl ProductionSignatureSemantics<'_> {
             &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
         ]);
         let implicit_receivers = self.implicit_receivers(scope);
-        let inputs = super::selected_result_publication::SelectionInputs {
-            receiver: Some(receiver),
-            arguments: &[],
-        };
+        let inputs = SelectionInputs::new(Some(receiver), &[]);
         let selected = self.with_resolver(scope, |resolver| {
             resolver.select_member_property_applicable_where(receiver, spelling, |property| {
                 let context_types = property.getter.params.get(..property.context_count)?;
@@ -55,14 +56,12 @@ impl ProductionSignatureSemantics<'_> {
                 };
                 self.commit_postponed_property_receiver(scope, &extension, receiver);
                 let publication = publication_origin.map(|_| {
-                    self.selected_callable_publication(
+                    CompactSelectedResultPublication::callable(
                         &extension.getter,
-                        crate::resolve::selected_result_publication::SelectedSignature::of_getter(
-                            &extension,
-                        ),
+                        SelectedSignature::of_getter(&extension),
                         Box::new([]),
-                        &[],
-                        &[],
+                        Box::new([]),
+                        Box::new([]),
                     )
                 });
                 let finish = |result: crate::fir::ResolvedTy, alias| {
@@ -99,12 +98,12 @@ impl ProductionSignatureSemantics<'_> {
         };
         let publication = publication_origin.and_then(|_| {
             let member = selected.read(receiver)?;
-            Some(self.selected_member_publication(
+            Some(CompactSelectedResultPublication::member(
                 &member.member,
                 selected.declaration_receiver,
                 Box::new([]),
-                &[],
-                &[],
+                Box::new([]),
+                Box::new([]),
             ))
         });
         let finish = |result: crate::fir::ResolvedTy, alias| {

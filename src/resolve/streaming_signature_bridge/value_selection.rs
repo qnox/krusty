@@ -56,6 +56,18 @@ impl SelectedValue {
 }
 
 impl ProductionSignatureSemantics<'_> {
+    /// A value read through the member selection that recorded its declared alias at `origin`.
+    fn selected_value(
+        &self,
+        origin: crate::fir::OriginId,
+        result: crate::fir::ResolvedTy,
+    ) -> SelectedValue {
+        SelectedValue {
+            result_alias: self.selected_aliases.get(origin),
+            ..SelectedValue::plain(result)
+        }
+    }
+
     /// The value of enum entry `name` of `classifier`, which has the enum's type.
     fn enum_entry_value(
         classifier: TypeName,
@@ -97,11 +109,7 @@ impl ProductionSignatureSemantics<'_> {
             if let Some(receiver) =
                 self.qualified_value_receiver(scope, spelling, origin, demand)?
             {
-                // The last segment's member selection recorded the alias it was declared through.
-                return Ok(SelectedValue {
-                    result_alias: self.selected_calls.result_alias(origin),
-                    ..SelectedValue::plain(receiver)
-                });
+                return Ok(self.selected_value(origin, receiver));
             }
             if let Some((qualifier, name)) = spelling.rsplit_once('.') {
                 if qualifier
@@ -145,10 +153,7 @@ impl ProductionSignatureSemantics<'_> {
                 }
             }
             if let Ok(value) = self.qualified_receiver_ty(scope, spelling, origin, demand) {
-                return Ok(SelectedValue {
-                    result_alias: self.selected_calls.result_alias(origin),
-                    ..SelectedValue::plain(value)
-                });
+                return Ok(self.selected_value(origin, value));
             }
             if let Some((qualifier, name)) = spelling.rsplit_once('.') {
                 let package = crate::types::type_name(&qualifier.replace('.', "/"));
@@ -329,10 +334,7 @@ impl ProductionSignatureSemantics<'_> {
             if let Some(result) =
                 self.selected_member_property_type(scope, receiver, spelling, Some(origin), demand)?
             {
-                return Ok(SelectedValue {
-                    result_alias: self.selected_calls.result_alias(origin),
-                    ..SelectedValue::plain(result)
-                });
+                return Ok(self.selected_value(origin, result));
             }
             // Compile-time constants are declaration facts on the receiver classifier, not
             // property accessor candidates. This is the same provider-normalized constant channel
