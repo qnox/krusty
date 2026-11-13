@@ -197,6 +197,8 @@ pub struct FileInput<'a> {
     pub ir: &'a IrFile,
     /// Provider-normalized facts for classifiers whose representation this file needs.
     pub classifiers: &'a dyn krusty::backend::BackendClassifierSource,
+    /// Checked class layouts, including compiler-owned dependency support additions.
+    pub class_layouts: &'a krusty::backend::class_tables::module_classes::ModuleClasses,
     /// Provider-normalized facts for exactly the dependency identities this checked file names.
     pub callables: &'a krusty::backend::CheckedBackendCallables,
     /// Every symbol the prebuilt runtime defines, which the program's own names must avoid. Read
@@ -252,6 +254,7 @@ pub fn lower_file(
     let FileInput {
         ir,
         classifiers,
+        class_layouts,
         callables,
         dependency_properties,
         runtime_symbols,
@@ -270,7 +273,7 @@ pub fn lower_file(
         laid_out,
     } = input;
     let class_model = model::build(ir, value_classes, slot_plan, laid_out)?;
-    let extended = extended_elsewhere(ir, unit_kind, classifiers.classes());
+    let extended = extended_elsewhere(ir, unit_kind, class_layouts);
     let exported = module_abi::exported_classes(&class_model, &extended);
     // Another file calls a default-argument entry by the one symbol its identity names.
     if let Some(declaration) = ir.default_entries.keys().find(|&&declaration| {

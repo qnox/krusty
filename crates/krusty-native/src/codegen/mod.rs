@@ -498,6 +498,7 @@ impl Backend for CraneliftBackend {
             lower::FileInput {
                 ir: &file.ir,
                 classifiers: &file.classifiers,
+                class_layouts: file.classifiers.classes(),
                 callables: &file.callables,
                 runtime_symbols,
                 abi_symbols: &mut state.abi_symbols,
