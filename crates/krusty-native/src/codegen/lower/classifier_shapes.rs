@@ -572,6 +572,10 @@ fn runtime_interface_descriptors(
 }
 
 impl<'a> FileLowering<'a> {
+    pub(super) fn collection_declaration(&self, owner: TypeName) -> Option<CollectionDeclaration> {
+        collection_declaration(self.classifiers, owner)
+    }
+
     pub(super) fn collection_shape(&self, internal: TypeName) -> Option<CollectionShape> {
         collection_shape(self.classifiers, internal)
     }
