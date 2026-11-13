@@ -19768,8 +19768,9 @@ impl<'a> Checker<'a> {
         // Legal *nested* shadowing (`val x` inside a block, shadowing an outer `val x`) lowers
         // fine — each declaration gets a fresh slot and the lowering's scope is truncated at block
         // exit, restoring the outer mapping (verified). Only a same-scope *redeclaration* is
-        // rejected (kotlinc errors on it too — conflicting declarations).
-        if self.declared_in_current_scope(scope, &name) {
+        // rejected (kotlinc errors on it too — conflicting declarations). An unnamed local
+        // (`val _ = ...`) binds no name, so it can neither conflict nor be conflicted with.
+        if name != "_" && self.declared_in_current_scope(scope, &name) {
             self.diags.error(
                 self.file.stmt_spans[s.0 as usize],
                 format!("krusty: conflicting local declaration '{name}'"),
