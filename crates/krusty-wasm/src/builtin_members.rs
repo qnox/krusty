@@ -18,6 +18,7 @@ use krusty::backend::{BackendCompilerIntrinsic, BuiltinImplementation};
 use krusty::types::{Ty, TypeName};
 
 use super::boxes::BoxForm;
+use super::builtin_order;
 use super::encode::{Code, Function, HeapType, Module, ValType};
 use super::interface_dispatch::MemberRef;
 use super::numeric_conversions;
@@ -65,6 +66,11 @@ enum Operation {
     StringLength,
     /// A string's code unit at an index.
     StringGet,
+    /// The order of a string and another (`String.compareTo`).
+    StringCompare,
+    /// The order of the value a box holds and the value another box of its class holds
+    /// (`Int.compareTo(Int)`).
+    Compare,
 }
 
 impl Runtime {
@@ -162,15 +168,36 @@ impl Runtime {
     /// A function carried as `member` is that reads its receiver as `receiver` holds it and
     /// performs `operation` on it and the member's other parameters.
     fn define_implementation(
-        &self,
+        &mut self,
         module: &mut Module,
         member: MemberRef,
         receiver: Receiver,
         operation: Operation,
     ) -> Result<u32, String> {
         let mut code = Code::default();
+        let mut locals = Vec::new();
         code.local_get(0);
         match (receiver, operation) {
+            (Receiver::Box(form), Operation::Compare) => {
+                let carrier = builtin_order::ordered_carrier(form.boxed)
+                    .ok_or_else(|| format!("an order of boxed `{:?}`", form.boxed))?;
+                // The receiver and the argument, each read out of its box, then the scratch.
+                let (left, right) = (2, 3);
+                form.emit_unbox(&mut code);
+                code.local_set(left).local_get(1);
+                form.emit_unbox(&mut code);
+                code.local_set(right);
+                locals.extend([carrier, carrier]);
+                locals.extend(builtin_order::order_scratch(carrier));
+                builtin_order::emit_order(&mut code, carrier, left, right, 4);
+            }
+            (Receiver::String, Operation::StringCompare) => {
+                let compare = self.string_compare(module);
+                code.ref_cast(false, HeapType::Concrete(self.string))
+                    .local_get(1)
+                    .ref_cast(false, HeapType::Concrete(self.string))
+                    .call(compare);
+            }
             (Receiver::Box(form), Operation::Convert(to)) => {
                 form.emit_unbox(&mut code);
                 numeric_conversions::convert(&mut code, form.boxed, to)?;
@@ -193,7 +220,7 @@ impl Runtime {
             function,
             Function {
                 ty: self.objects.interfaces.ty(member),
-                locals: Vec::new(),
+                locals,
                 code,
             },
         );
@@ -243,6 +270,23 @@ fn operation(
                 && *results == [ValType::I32] =>
         {
             Ok(Operation::StringGet)
+        }
+        (Representation::Box(boxed), Some(BackendCompilerIntrinsic::PrimitiveCompare))
+            if *declaration.params == [boxed]
+                && declaration.ret == Ty::Int
+                && builtin_order::ordered_carrier(boxed).is_some()
+                && params.len() == 2
+                && *results == [ValType::I32] =>
+        {
+            Ok(Operation::Compare)
+        }
+        (Representation::String, Some(BackendCompilerIntrinsic::StringCompare))
+            if *declaration.params == [Ty::String]
+                && declaration.ret == Ty::Int
+                && params.len() == 2
+                && *results == [ValType::I32] =>
+        {
+            Ok(Operation::StringCompare)
         }
         (_, Some(operation)) => Err(format!(
             "a library member {} overrides as {operation:?}",

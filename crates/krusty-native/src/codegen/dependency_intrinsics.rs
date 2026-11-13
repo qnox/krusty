@@ -6,6 +6,8 @@ use krusty::libraries::{CompilerIntrinsic, ListStorageConstruction};
 pub(super) enum DependencyOperation {
     ListStorage(ListStorageConstruction),
     StringPlus,
+    /// `String.compareTo(String)`, the lexicographic order of the two strings' UTF-16 units.
+    StringCompare,
     /// A builtin scalar's own `hashCode()`, which Kotlin fixes per scalar type.
     PrimitiveHashCode,
     /// A primitive iterator's own `next()` (`IntIterator.next(): Int`). The runtime's iteration
@@ -19,6 +21,7 @@ pub(super) fn operation_plan(operation: CompilerIntrinsic) -> Option<DependencyO
             Some(DependencyOperation::ListStorage(plan))
         }
         CompilerIntrinsic::StringPlus => Some(DependencyOperation::StringPlus),
+        CompilerIntrinsic::StringCompare => Some(DependencyOperation::StringCompare),
         CompilerIntrinsic::PrimitiveHashCode => Some(DependencyOperation::PrimitiveHashCode),
         CompilerIntrinsic::PrimitiveIteratorNext => {
             Some(DependencyOperation::PrimitiveIteratorNext)
@@ -38,6 +41,14 @@ mod tests {
         for &target in NativeTarget::ALL {
             assert!(CraneliftBackend::new(target)
                 .realizes_dependency_intrinsic(CompilerIntrinsic::StringPlus));
+        }
+    }
+
+    #[test]
+    fn klib_string_compare_is_a_native_dependency_capability() {
+        for &target in NativeTarget::ALL {
+            assert!(CraneliftBackend::new(target)
+                .realizes_dependency_intrinsic(CompilerIntrinsic::StringCompare));
         }
     }
 

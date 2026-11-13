@@ -118,12 +118,12 @@ fn every_primitive_compares_through_its_own_comparable_override() {
                 declaration.identity.params.as_ref(),
                 [implementation.receiver]
             );
-            if implementation.receiver != Ty::String {
-                assert_eq!(
-                    operation(&declaration.callable),
-                    Some(CompilerIntrinsic::PrimitiveCompare)
-                );
-            }
+            let expected = if implementation.receiver == Ty::String {
+                CompilerIntrinsic::StringCompare
+            } else {
+                CompilerIntrinsic::PrimitiveCompare
+            };
+            assert_eq!(operation(&declaration.callable), Some(expected));
         }
     }
 }

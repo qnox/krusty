@@ -142,6 +142,17 @@ impl BodyLowering<'_, '_, '_> {
                     }
                     self.string_plus(left, right, ret)
                 }
+                DependencyOperation::StringCompare => {
+                    let (Some(left), [right], None) =
+                        (receiver, args, extension_receiver_parameter)
+                    else {
+                        return Some(Err("a malformed `String.compareTo`".into()));
+                    };
+                    if ret != Ty::Int {
+                        return Some(Err("a `String.compareTo` with a non-Int result".into()));
+                    }
+                    self.string_compare(left, *right)
+                }
                 DependencyOperation::PrimitiveHashCode => {
                     let (Some(operand), [], None) = (receiver, args, extension_receiver_parameter)
                     else {

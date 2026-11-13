@@ -19,6 +19,7 @@
 mod exception_classes;
 mod object_equality;
 mod object_strings;
+mod string_order;
 
 pub(super) use object_strings::ObjectStrings;
 
@@ -55,6 +56,8 @@ pub(super) struct Runtime {
     /// Every Kotlin array classifier's object type; `Array<T>` shares one reference storage.
     pub(super) arrays: ArrayObjects,
     pub(super) string_equals: u32,
+    /// `String.compareTo(String)`, once a call needs it.
+    string_compare: Option<u32>,
     pub(super) object_equals: u32,
     pub(super) string_concat: u32,
     pub(super) string_of_i32: u32,
@@ -153,6 +156,7 @@ impl Runtime {
             string,
             arrays,
             string_equals: module.declare(),
+            string_compare: None,
             object_equals,
             string_concat,
             string_of_i32: module.declare(),
