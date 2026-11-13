@@ -195,14 +195,16 @@ impl Split<'_> {
                     let count = self.count(ir, body)?;
                     let forward = self.label_is(ir, 0);
                     let taken = match condition {
-                        Some(condition) => binary(ir, IrBinOp::And, forward, condition),
+                        // Resuming tests the label alone: the condition ran when the branch was
+                        // first taken.
+                        Some(condition) => and_then(ir, forward, condition),
                         None => forward,
                     };
                     let taken = match count {
                         0 => taken,
                         _ => {
                             let held = self.label_in(ir, first, first + count - 1);
-                            binary(ir, IrBinOp::Or, taken, held)
+                            or_else(ir, taken, held)
                         }
                     };
                     let body = self.stmt_or_plain(ir, body)?;
@@ -229,8 +231,8 @@ impl Split<'_> {
                 });
                 let read_resuming = ir.add_expr(IrExpr::GetValue(resuming_index));
                 let forward = self.label_is(ir, 0);
-                let tested = binary(ir, IrBinOp::And, forward, cond);
-                let cond = binary(ir, IrBinOp::Or, read_resuming, tested);
+                let tested = and_then(ir, forward, cond);
+                let cond = or_else(ir, read_resuming, tested);
                 let resumed = bool_const(ir, false);
                 let clear = ir.add_expr(IrExpr::SetValue {
                     var: resuming_index,
@@ -294,8 +296,16 @@ impl Split<'_> {
         let returned = ir.add_expr(IrExpr::GetValue(result));
         let leave = ir.add_expr(IrExpr::Return(Some(returned)));
         let leave_if_suspended = when(ir, vec![(Some(suspended), leave)]);
+        // A call that completed without suspending goes on forward, as a resumed one does.
+        let zero = int_const(ir, 0);
+        let completed_forward = self.storage.write_label(ir, zero);
         let run = ir.add_expr(IrExpr::Block {
-            stmts: vec![store_label, store_result, leave_if_suspended],
+            stmts: vec![
+                store_label,
+                store_result,
+                leave_if_suspended,
+                completed_forward,
+            ],
             value: None,
         });
 
@@ -366,6 +376,22 @@ fn bool_const(ir: &mut IrFile, value: bool) -> ExprId {
 
 fn binary(ir: &mut IrFile, op: IrBinOp, lhs: ExprId, rhs: ExprId) -> ExprId {
     ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs, rhs })
+}
+
+/// `lhs && rhs`, evaluating `rhs` only when `lhs` holds.
+fn and_then(ir: &mut IrFile, lhs: ExprId, rhs: ExprId) -> ExprId {
+    let otherwise = bool_const(ir, false);
+    let test = when(ir, vec![(Some(lhs), rhs), (None, otherwise)]);
+    ir.set_logical_type(test, Ty::Boolean);
+    test
+}
+
+/// `lhs || rhs`, evaluating `rhs` only when `lhs` does not hold.
+fn or_else(ir: &mut IrFile, lhs: ExprId, rhs: ExprId) -> ExprId {
+    let held = bool_const(ir, true);
+    let test = when(ir, vec![(Some(lhs), held), (None, rhs)]);
+    ir.set_logical_type(test, Ty::Boolean);
+    test
 }
 
 fn when(ir: &mut IrFile, branches: Vec<(Option<ExprId>, ExprId)>) -> ExprId {

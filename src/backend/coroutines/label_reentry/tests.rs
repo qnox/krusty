@@ -98,6 +98,42 @@ fn is_label(ir: &IrFile, expression: ExprId, value: i32) -> bool {
                 && matches!(ir.exprs[rhs as usize], IrExpr::Const(IrConst::Int(v)) if v == value))
 }
 
+/// The operands of `lhs && rhs` as a `when` that evaluates `rhs` only when `lhs` holds.
+fn and_then(ir: &IrFile, expression: ExprId) -> Option<(ExprId, ExprId)> {
+    let IrExpr::When { branches } = &ir.exprs[expression as usize] else {
+        return None;
+    };
+    match branches[..] {
+        [(Some(lhs), rhs), (None, otherwise)]
+            if matches!(
+                ir.exprs[otherwise as usize],
+                IrExpr::Const(IrConst::Boolean(false))
+            ) =>
+        {
+            Some((lhs, rhs))
+        }
+        _ => None,
+    }
+}
+
+/// The operands of `lhs || rhs` as a `when` that evaluates `rhs` only when `lhs` does not hold.
+fn or_else(ir: &IrFile, expression: ExprId) -> Option<(ExprId, ExprId)> {
+    let IrExpr::When { branches } = &ir.exprs[expression as usize] else {
+        return None;
+    };
+    match branches[..] {
+        [(Some(lhs), held), (None, rhs)]
+            if matches!(
+                ir.exprs[held as usize],
+                IrExpr::Const(IrConst::Boolean(true))
+            ) =>
+        {
+            Some((lhs, rhs))
+        }
+        _ => None,
+    }
+}
+
 /// The one guard and body of a single-branch `when`.
 fn guarded(ir: &IrFile, expression: ExprId) -> (ExprId, ExprId) {
     match &ir.exprs[expression as usize] {
@@ -144,8 +180,8 @@ fn each_suspension_takes_the_next_label_and_plain_runs_go_forward_only() {
         };
         assert!(is_label(&ir, forward, 0));
         assert!(is_label(&ir, at, label));
-        let [store_label, made, leave] = stmts(&ir, run)[..] else {
-            panic!("suspension {label}: store the label, call, leave if suspended");
+        let [store_label, made, leave, completed_forward] = stmts(&ir, run)[..] else {
+            panic!("suspension {label}: store the label, call, leave if suspended, go forward");
         };
         assert!(matches!(ir.exprs[store_label as usize],
             IrExpr::SetValue { var: 0, value } if matches!(ir.exprs[value as usize], IrExpr::Const(IrConst::Int(v)) if v == label)));
@@ -155,6 +191,9 @@ fn each_suspension_takes_the_next_label_and_plain_runs_go_forward_only() {
         assert!(matches!(&ir.exprs[made as usize], IrExpr::Call { args, .. } if args.len() == 1));
         let (_, left) = guarded(&ir, leave);
         assert!(matches!(ir.exprs[left as usize], IrExpr::Return(Some(_))));
+        // A call that completed without suspending clears the label, so the statement completes.
+        assert!(matches!(ir.exprs[completed_forward as usize],
+            IrExpr::SetValue { var: 0, value } if matches!(ir.exprs[value as usize], IrExpr::Const(IrConst::Int(0)))));
         let [cleared, taken] = stmts(&ir, resume)[..] else {
             panic!("suspension {label}: clear the label, take the resumed value");
         };
@@ -203,16 +242,15 @@ fn a_branch_holding_the_label_is_taken_without_its_condition() {
     let [(Some(first), _), (Some(second), otherwise)] = branches[..] else {
         panic!("both branches are guarded");
     };
-    let IrExpr::PrimitiveBinOp {
-        op: IrBinOp::Or,
-        lhs: forward,
-        rhs: held,
-    } = ir.exprs[first as usize]
-    else {
+    let Some((forward, held)) = or_else(&ir, first) else {
         panic!("taken forward or by its label");
     };
-    assert!(matches!(ir.exprs[forward as usize],
-        IrExpr::PrimitiveBinOp { op: IrBinOp::And, lhs, rhs } if is_label(&ir, lhs, 0) && rhs == condition));
+    // The condition runs only forward: resuming does not evaluate it again.
+    let Some((at_zero, tested)) = and_then(&ir, forward) else {
+        panic!("taken forward by its condition");
+    };
+    assert!(is_label(&ir, at_zero, 0));
+    assert_eq!(tested, condition);
     assert!(is_label(&ir, held, 1));
     assert!(is_label(&ir, second, 0));
     assert_eq!(otherwise, plain);
@@ -250,11 +288,15 @@ fn a_loop_holding_the_label_is_entered_without_testing_its_condition() {
     let IrExpr::While { cond, body, .. } = ir.exprs[looped as usize] else {
         panic!("the loop");
     };
-    assert!(matches!(ir.exprs[cond as usize],
-        IrExpr::PrimitiveBinOp { op: IrBinOp::Or, lhs, rhs }
-            if matches!(ir.exprs[lhs as usize], IrExpr::GetValue(10))
-                && matches!(ir.exprs[rhs as usize],
-                    IrExpr::PrimitiveBinOp { op: IrBinOp::And, lhs, rhs } if is_label(&ir, lhs, 0) && rhs == condition)));
+    let Some((resuming, forward)) = or_else(&ir, cond) else {
+        panic!("entered while resuming or forward");
+    };
+    assert!(matches!(ir.exprs[resuming as usize], IrExpr::GetValue(10)));
+    let Some((at_zero, tested)) = and_then(&ir, forward) else {
+        panic!("entered forward by its condition");
+    };
+    assert!(is_label(&ir, at_zero, 0));
+    assert_eq!(tested, condition);
     let [cleared, _] = stmts(&ir, body)[..] else {
         panic!("clear the flag, then the body");
     };
