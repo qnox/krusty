@@ -1234,6 +1234,13 @@ impl Body<'_> {
                         .exception_class(self.module, self.classifiers, name)?;
                 self.code.ref_test(nullable, HeapType::Concrete(structure));
             }
+            // Each array classifier is an object type of its own, so the test is its type's:
+            // `UIntArray` is not an `IntArray`, though one wraps the other's storage.
+            _ if tested.is_array() => {
+                let (form, _) = self.array_form(tested)?;
+                self.code
+                    .ref_test(nullable, HeapType::Concrete(form.object));
+            }
             _ => match (self.interface_of_type(tested), self.class_of_type(tested)) {
                 (Some(interface), _) => self.interface_test(interface, nullable),
                 (None, Some(class)) => self.instance_test(class, nullable)?,

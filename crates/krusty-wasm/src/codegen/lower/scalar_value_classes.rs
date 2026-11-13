@@ -29,6 +29,12 @@ fn scalar_representation(
         {
             Some(scalar)
         }
+        // An unsigned array class is an object of its own over the signed array it wraps.
+        Some(array @ ValType::Ref { .. })
+            if underlying == carried && declaration.underlying.non_null().is_array() =>
+        {
+            Some(array)
+        }
         _ => None,
     })
 }
@@ -64,6 +70,23 @@ impl Body<'_> {
         };
         let underlying = [declaration.underlying];
         Some(match args {
+            // The size constructor of an array class allocates the wrapped array: `this(IntArray(size))`.
+            [size]
+                if declaration.underlying.non_null().is_array()
+                    && selected.is_some_and(|selected| selected == [Ty::Int]) =>
+            {
+                self.new_array(Ty::obj_name(internal), *size)
+            }
+            // Wrapping a signed array shares its storage: the new object is the class's own.
+            [argument]
+                if declaration.underlying.non_null().is_array()
+                    && selected.is_none_or(|selected| selected == underlying) =>
+            {
+                self.value(*argument, declaration.underlying)
+                    .and_then(|()| {
+                        self.rewrap_array(declaration.underlying, Ty::obj_name(internal))
+                    })
+            }
             // The argument arrives in its own type's carrier form, which need not be the class's:
             // a `Byte` is sign-extended where a `UByte` holds its zero-extended bits. The
             // ordinary coercion between the two types converts it.
@@ -110,6 +133,9 @@ impl Body<'_> {
         let class = Ty::obj_name(property.owner).canonical_semantic();
         let underlying = property.result;
         self.value(receiver, class)?;
+        if underlying.non_null().is_array() {
+            return self.rewrap_array(Ty::obj_name(property.owner), underlying);
+        }
         self.coerce_emitted_value(class, underlying)
     }
 }
