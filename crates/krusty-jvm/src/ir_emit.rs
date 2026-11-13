@@ -853,10 +853,12 @@ fn emit_jvm_interface_companion_surface(
         .iter()
         .enumerate()
         .filter(|(_, s)| s.owner_matches(&fq_name))
+        .filter(|(index, _)| !companion_blocks::in_interface_storage_class(ir, *index as u32))
         .filter_map(|(index, s)| Some((index as u32, s, static_fields::clinit_initializer(ir, s)?)))
         .collect();
     let array = delegated_property_array::exists(env, c.fq_name);
-    if c.companion_class.is_some() || !clinit_statics.is_empty() || array {
+    let stores_blocks = companion_blocks::has_interface_storage(ir, c);
+    if c.companion_class.is_some() || !clinit_statics.is_empty() || array || stores_blocks {
         cw.reserve_method_name("<clinit>");
         cw.seed_utf8("()V");
         let mut emitter = Emitter::new(
@@ -877,7 +879,21 @@ fn emit_jvm_interface_companion_surface(
         if array {
             emitter.cw.omit_method_lines("<clinit>", "()V");
         }
+        companion_blocks::emit_interface_storage_initialization(
+            ir,
+            c,
+            companion_blocks::StorageGroup::BeforeCompanion,
+            emitter.cw,
+            &mut clinit,
+        );
         emit_companion_init(emitter.cw, &mut clinit, &fq_name, c);
+        companion_blocks::emit_interface_storage_initialization(
+            ir,
+            c,
+            companion_blocks::StorageGroup::AfterCompanion,
+            emitter.cw,
+            &mut clinit,
+        );
         let mut clinit_lines = Vec::new();
         for &(static_index, s, init) in &clinit_statics {
             let pc = clinit.bytes.len() as u16;
@@ -2795,6 +2811,13 @@ fn finish_code_sig<const ACCESS: u16>(
 /// with no body is a `public abstract` declaration; a method WITH a body is a Kotlin default method —
 /// emitted as a concrete instance method (Code, no `ACC_ABSTRACT`), which the JVM treats as a default
 /// method.
+/// A member of an interface's source-ordered method table.
+enum InterfaceMember {
+    Function(u32),
+    /// A block property's compiler-default accessor over its static storage.
+    DefaultAccessor(u32, static_fields::StaticAccessor),
+}
+
 fn emit_interface_class(
     ir: &IrFile,
     c: &krusty::ir::IrClass,
@@ -2833,9 +2856,39 @@ fn emit_interface_class(
     // functions before property accessors. Sort by the recorded source offset (stable, so a
     // property's getter stays before its setter); synthesized members without one trail in
     // registration order, kotlinc's placement for them too.
-    let mut member_fids: Vec<u32> = c.methods.clone();
-    member_fids.sort_by_key(|fid| ir.fn_source_order.get(fid).copied().unwrap_or(u32::MAX));
-    for &fid in &member_fids {
+    // A stored `companion { … }` block property's compiler-default accessors take the property's
+    // place among them, as in a class.
+    let mut members: Vec<((u32, u8), InterfaceMember)> = c
+        .methods
+        .iter()
+        .map(|&fid| {
+            (
+                (ir.fn_source_order.get(&fid).copied().unwrap_or(u32::MAX), 0),
+                InterfaceMember::Function(fid),
+            )
+        })
+        .collect();
+    members.extend(
+        member_schedule::static_default_accessors(ir, c)
+            .map(|(key, index, accessor)| (key, InterfaceMember::DefaultAccessor(index, accessor))),
+    );
+    members.sort_by_key(|(key, _)| *key);
+    for (_, member) in members {
+        let fid = match member {
+            InterfaceMember::Function(fid) => fid,
+            InterfaceMember::DefaultAccessor(index, accessor) => {
+                static_fields::emit_default_static_accessor(
+                    ir,
+                    &fq_name,
+                    &mut cw,
+                    env,
+                    opts.param_assertions,
+                    index,
+                    accessor,
+                );
+                continue;
+            }
+        };
         if standalone_method_is_elided(ir, fid, env) {
             continue;
         }
@@ -3038,6 +3091,9 @@ fn emit_interface_class(
         extra.push((holder, env.run.finish_class(di)));
     }
     emit_jvm_interface_companion_surface(ir, c, facade, env, &mut cw);
+    extra.extend(companion_blocks::emit_interface_storage_classes(
+        ir, c, facade, env, opts,
+    ));
     // An interface is a VIEW of the same `IrClass` every other kind is — compute its `@Metadata` (and
     // therefore its debug tables/annotations) through the shared path, exactly like `emit_class`.
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
