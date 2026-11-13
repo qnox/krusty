@@ -56,6 +56,15 @@ pub enum DiagnosticIdentity {
     CyclicUpperBound { reference: Span },
 }
 
+impl DiagnosticIdentity {
+    pub fn classifier_access(reference: Span, classifier: TypeName) -> Self {
+        Self::ClassifierAccess {
+            reference,
+            classifier,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Diagnostic {
     /// Compiler-facing source range.

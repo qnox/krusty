@@ -79,23 +79,18 @@ impl Checker<'_> {
         written: &[Ty],
         callable_bounds: bool,
     ) -> Vec<bool> {
-        let owner_spans = source_bounds
-            .iter()
-            .map(|(_, reference)| {
-                self.file
-                    .type_parameter_bound_owners
-                    .get(&reference.span.lo)
-                    .copied()
-                    .unwrap_or(reference.span)
-            })
-            .collect::<Vec<_>>();
         let diags = &mut *self.diags;
         super::cyclic_upper_bounds::report(
             source_names,
-            source_bounds
-                .iter()
-                .map(|(owner, reference)| (owner.as_str(), reference.span)),
-            &owner_spans,
+            source_bounds.iter().map(|(owner, reference)| {
+                let owners = &self.file.type_parameter_bound_owners;
+                let owner_span = owners.get(&reference.span.lo).copied();
+                (
+                    owner.as_str(),
+                    reference.span,
+                    owner_span.unwrap_or(reference.span),
+                )
+            }),
             written,
             identities,
             !callable_bounds,

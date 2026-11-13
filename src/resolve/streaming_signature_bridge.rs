@@ -823,32 +823,6 @@ impl ProductionSignatureSemantics<'_> {
         crate::fir::DiagnosticId::from_raw(diagnostics.len() as u32)
     }
 
-    fn record_classifier_access_diagnostic_at(
-        &self,
-        declaration: crate::fir::DeclarationId,
-        source: crate::fir::SourceFileId,
-        span: Span,
-        classifier: crate::types::TypeName,
-        message: String,
-    ) -> crate::fir::DiagnosticId {
-        let identity = crate::diag::DiagnosticIdentity::ClassifierAccess {
-            reference: span,
-            classifier,
-        };
-        self.record_unconditional_diagnostic_at(declaration, source, span, identity, message)
-    }
-
-    fn record_cyclic_upper_bound(
-        &self,
-        declaration: crate::fir::DeclarationId,
-        source: crate::fir::SourceFileId,
-        span: Span,
-        message: String,
-    ) {
-        let identity = crate::diag::DiagnosticIdentity::CyclicUpperBound { reference: span };
-        self.record_unconditional_diagnostic_at(declaration, source, span, identity, message);
-    }
-
     /// A finding reported on every exit, once per `identity`.
     fn record_unconditional_diagnostic_at(
         &self,

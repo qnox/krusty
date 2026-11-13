@@ -383,6 +383,7 @@ mod superclass_validation;
 mod type_parameter_owners;
 use type_parameter_owners::ty_param_names_into;
 mod cyclic_upper_bounds;
+mod resolved_bound_view;
 mod uninferred_call_results;
 mod upper_bound_violations;
 mod value_class_parameters;

@@ -137,14 +137,14 @@ fn analyze(
     }
 }
 
-/// Report the cycles among a declaration's type `parameters`, from its written bounds
-/// (`owner` name and written span) beside the declaring parameter's span and the resolved type of
-/// each bound. `record` receives each report; the result says, per bound, whether it closes a
-/// cycle and so must constrain nothing.
+/// Report the cycles among a declaration's type `parameters`, from its written bounds (`owner`
+/// name, written span and the declaring parameter's span) beside the resolved type of each bound.
+/// `identities` are the declaration's own type-parameter identities in declaration order. `record`
+/// receives each report; the result says, per bound, whether it closes a cycle and so must
+/// constrain nothing.
 pub(super) fn report<'a>(
     parameters: &[String],
-    written: impl Iterator<Item = (&'a str, Span)>,
-    owner_spans: &[Span],
+    written: impl Iterator<Item = (&'a str, Span, Span)>,
     resolved: &[Ty],
     identities: &[&str],
     at_classifier_bound: bool,
@@ -152,12 +152,11 @@ pub(super) fn report<'a>(
 ) -> Vec<bool> {
     let bounds = written
         .zip(resolved)
-        .zip(owner_spans)
-        .map(|(((owner, span), resolved), owner_span)| WrittenBound {
+        .map(|((owner, span, owner_span), resolved)| WrittenBound {
             owner,
             resolved: *resolved,
             span,
-            owner_span: *owner_span,
+            owner_span,
         })
         .collect::<Vec<_>>();
     let analysis = analyze(parameters, &bounds, identities, at_classifier_bound);
