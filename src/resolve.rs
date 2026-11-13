@@ -1841,6 +1841,12 @@ impl ClassSig {
     pub fn is_enum(&self) -> bool {
         self.flags.has(ClassFlags::ENUM)
     }
+    /// Record a declared enum entry once, keeping source order.
+    pub(crate) fn declare_enum_entry(&mut self, name: &str) {
+        if !self.enum_entries.iter().any(|entry| entry == name) {
+            self.enum_entries.push(name.to_owned());
+        }
+    }
     /// True if declared `object` (a singleton).
     #[inline]
     pub fn is_object(&self) -> bool {
