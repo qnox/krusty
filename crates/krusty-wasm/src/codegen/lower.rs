@@ -37,8 +37,8 @@ mod scalar_instructions;
 mod scalar_value_classes;
 mod shared_cells;
 mod string_builders;
-pub(super) use string_builders::{declared_by_string_builder, is_string_builder};
 pub(super) use shared_cells::cell_reference;
+pub(super) use string_builders::{declared_by_string_builder, is_string_builder};
 mod string_conversion;
 mod type_of;
 
