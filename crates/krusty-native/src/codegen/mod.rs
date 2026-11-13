@@ -349,7 +349,10 @@ impl Backend for CraneliftBackend {
             state.slot_plan = Some((file.module_name.to_owned(), plan));
         }
         let slot_plan = &state.slot_plan.as_ref().expect("planned just above").1;
-        state.laid_out.enter_source_module(file.module_name);
+        state.laid_out.enter_source_module(
+            file.module_name,
+            file.kind != krusty::backend::CheckedIrUnitKind::Source,
+        );
         let mut dependency_exports = krusty::fx_hash::HashMap::default();
         let mut exports = file.dependency_exports.callables().collect::<Vec<_>>();
         // `DependencyExportSignatures` is a lookup map; target symbol allocation must not inherit

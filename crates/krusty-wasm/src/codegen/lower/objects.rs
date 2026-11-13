@@ -32,7 +32,7 @@ use super::super::property_registry::{MemberProperty, MemberPropertyDefinition, 
 use super::{carrier, Body, FileContext, Unsupported, STRING};
 
 /// The heap type of the runtime's `String`, type 1 (see `STRING`).
-const STRING_HEAP: HeapType = HeapType::Concrete(1);
+pub(super) const STRING_HEAP: HeapType = HeapType::Concrete(1);
 
 mod override_bridges;
 mod unrealized_members;
@@ -301,8 +301,12 @@ impl Body<'_> {
         receiver: u32,
         args: &[u32],
     ) -> Result<(), Unsupported> {
+        let tables = &self.file_classes()?.tables;
+        if tables.table(class).direct_methods.contains(&function) {
+            return self.direct_method_call(class, function, receiver, args);
+        }
         let key = function_key(self.ir, class, function);
-        let slot = self.file_classes()?.tables.slot(class, &key);
+        let slot = tables.slot(class, &key);
         if slot.is_none() && self.ir.classes[class as usize].is_interface {
             let call = self
                 .ir
@@ -333,6 +337,27 @@ impl Body<'_> {
             return Err("a call whose arguments do not match its parameters".into());
         }
         self.dispatch(class, slot, receiver, args, &params, Some(function))
+    }
+
+    /// Call a method its class's table does not dispatch: a member of a dependency class that no
+    /// subclass can override, such as its constructor initializer or a final member.
+    fn direct_method_call(
+        &mut self,
+        class: ClassId,
+        function: FunId,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        if self.ir.functions[function as usize].params.len() != args.len() {
+            return Err("a call whose arguments do not match its parameters".into());
+        }
+        self.value(receiver, self.object_type(class))?;
+        for (parameter, &arg) in args.iter().enumerate() {
+            self.function_argument(function, parameter as u32, arg)?;
+        }
+        let function = self.emitted_function(function)?;
+        self.code.call(function);
+        Ok(())
     }
 
     /// Dispatch a member-extension property's recorded accessor. Its extension receiver and any
@@ -1115,6 +1140,26 @@ impl Body<'_> {
         interface.then_some(name)
     }
 
+    /// The library interface `ty` names, which no file of the program declares.
+    fn library_interface_of_type(&self, ty: Ty) -> Option<TypeName> {
+        let TyKind::Obj(name, _) = ty.non_null().kind() else {
+            return None;
+        };
+        self.classifiers
+            .classifier(name)
+            .is_some_and(|fact| !fact.source && fact.is_interface() && !fact.is_annotation())
+            .then_some(name)
+    }
+
+    /// Replace the reference on the stack with whether it is an instance of the library interface
+    /// `interface` — or null, when `nullable`. Its instances are the program's classes below it and
+    /// the builtin values its builtin subclasses carry (`crate::builtin_instances`).
+    fn library_interface_test(&mut self, interface: TypeName, nullable: bool) {
+        let subtypes = self.classifiers.builtin_subtypes(interface);
+        self.runtime.builtin_instances(interface, subtypes);
+        self.interface_test(interface, nullable);
+    }
+
     /// Replace the reference on the stack with whether it is an instance of `interface` — or
     /// null, when `nullable`.
     fn interface_test(&mut self, interface: TypeName, nullable: bool) {
@@ -1192,9 +1237,12 @@ impl Body<'_> {
             _ => match (self.interface_of_type(tested), self.class_of_type(tested)) {
                 (Some(interface), _) => self.interface_test(interface, nullable),
                 (None, Some(class)) => self.instance_test(class, nullable)?,
-                (None, None) => {
-                    return Err(format!("a type test against `{}`", super::describe(tested)));
-                }
+                (None, None) => match self.library_interface_of_type(tested) {
+                    Some(interface) => self.library_interface_test(interface, nullable),
+                    None => {
+                        return Err(format!("a type test against `{}`", super::describe(tested)));
+                    }
+                },
             },
         }
         match op {

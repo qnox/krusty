@@ -17,10 +17,8 @@ use crate::metadata::klib_ir::KlibIrSignature;
 use crate::types::Ty;
 
 impl BodyLowering<'_> {
-    /// A source `while` (`post_test` false) or `do`-`while` loop. Checked FIR lowering lowers its
-    /// condition, then its body block, and records no type for the loop: it is a statement. The
-    /// condition is lowered first for a `do`-`while` too, so a condition that reads a variable
-    /// its body declares declines as a read of a value the body does not declare yet.
+    /// A source `while` (`post_test` false) or `do`-`while` loop, which records no type: it is a
+    /// statement.
     pub(super) fn loop_statement(
         &mut self,
         serialized: &KlibIrLoop,
@@ -41,12 +39,22 @@ impl BodyLowering<'_> {
         let Some(body) = serialized.body else {
             return unsupported("a loop without a body");
         };
-        let KlibIrExprKind::Block {
-            statements,
-            origin: None,
-        } = &self.arena.expr(body).kind
-        else {
-            return unsupported("a loop whose body is not a block");
+        // A body written without braces is serialized as its one statement. A `do`-`while` body
+        // is serialized as a composite, whose declarations its condition reads.
+        let single = [KlibIrStatement::Expression(body)];
+        let statements = match &self.arena.expr(body).kind {
+            KlibIrExprKind::Block {
+                statements,
+                origin: None,
+            } => statements.as_slice(),
+            KlibIrExprKind::Composite {
+                statements,
+                origin: None,
+            } if post_test => statements.as_slice(),
+            KlibIrExprKind::Block { .. } => {
+                return unsupported("a loop whose body is a block the compiler introduced")
+            }
+            _ => &single,
         };
         self.labeled_loop(serialized, post_test, statements, None)
     }
@@ -381,6 +389,19 @@ impl BodyLowering<'_> {
     }
 
     /// A loop labeled for the jumps that name `serialized`, whose body block holds `statements`.
+    /// A loop's body block, opening with the element `temporary` binds when there is one.
+    fn loop_body(
+        &mut self,
+        statements: &[KlibIrStatement],
+        temporary: Option<KlibIrVariableId>,
+    ) -> Lowered<ExprId> {
+        let (prefix, statements) = match temporary {
+            Some(binding) => (vec![self.unnamed_local(binding)?], &statements[1..]),
+            None => (Vec::new(), statements),
+        };
+        self.block_with_prefix(prefix, statements)
+    }
+
     fn labeled_loop(
         &mut self,
         serialized: &KlibIrLoop,
@@ -393,16 +414,15 @@ impl BodyLowering<'_> {
         }
         let label = format!("$klib_loop_{}_{}", self.function.function, serialized.id);
         self.loops.push((serialized.id, label.clone()));
-        let lowered = self
-            .operand(serialized.condition, Ty::Boolean)
-            .and_then(|cond| {
-                let (prefix, statements) = match temporary {
-                    Some(binding) => (vec![self.unnamed_local(binding)?], &statements[1..]),
-                    None => (Vec::new(), statements),
-                };
-                let body = self.block_with_prefix(prefix, statements)?;
-                Ok((cond, body))
-            });
+        // A `do`-`while` condition is in the scope of its body, so it may read a variable the
+        // body declares: the body is lowered first and declares it.
+        let lowered = if post_test {
+            self.loop_body(statements, temporary)
+                .and_then(|body| Ok((self.operand(serialized.condition, Ty::Boolean)?, body)))
+        } else {
+            self.operand(serialized.condition, Ty::Boolean)
+                .and_then(|cond| Ok((cond, self.loop_body(statements, temporary)?)))
+        };
         self.loops.pop();
         let (cond, body) = lowered?;
         Ok(self.ir.add_expr(IrExpr::While {

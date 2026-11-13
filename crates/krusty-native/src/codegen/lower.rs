@@ -447,19 +447,21 @@ pub fn lower_file(
 
 /// The classes of `ir` another file of the module extends, with their superclasses in this file:
 /// what a later file's subclass names by symbol, so their objects define those symbols for the
-/// link to find. A support unit's classes are no source file's to extend.
+/// link to find. Of a support unit's classes, the dependency classes the module plan numbers are
+/// the ones a source file extends.
 fn extended_elsewhere(
     ir: &IrFile,
     unit_kind: krusty::backend::CheckedIrUnitKind,
     module_facts: &krusty::backend::BackendModuleFacts,
 ) -> krusty::fx_hash::HashSet<krusty::ir::ClassId> {
     let mut extended = krusty::fx_hash::HashSet::default();
-    if unit_kind != krusty::backend::CheckedIrUnitKind::Source {
-        return extended;
-    }
     let classes = module_facts.classes();
+    let support = unit_kind != krusty::backend::CheckedIrUnitKind::Source;
     for (id, class) in ir.classes.iter().enumerate() {
         if class.is_interface || ir.local_class_name_provenance.contains_key(&(id as u32)) {
+            continue;
+        }
+        if support && !classes.is_dependency_class(class.fq_name) {
             continue;
         }
         if classes
@@ -678,13 +680,21 @@ impl<'a> FileLowering<'a> {
                 .dependency_signatures
                 .is_property_accessor_entry(index as krusty::ir::FunId)
             {
-                // The exact KLIB accessor identity is exported by a trampoline below. This
-                // generated body is only that trampoline's private target; exporting its
-                // per-file helper spelling would collide with the same property role in another
-                // file of the module.
+                // Only the exact KLIB trampoline exports this generated implementation. Its
+                // per-file helper spelling can repeat in another file of the module.
                 Linkage::Local
             } else {
                 match self.unit_kind {
+                    krusty::backend::CheckedIrUnitKind::DependencySupport
+                        if self.exported.iter().any(|&class| {
+                            self.ir.classes[class as usize]
+                                .methods
+                                .contains(&(index as krusty::ir::FunId))
+                        }) =>
+                    {
+                        // Source subclasses inherit a materialized dependency class's methods.
+                        Linkage::Hidden
+                    }
                     krusty::backend::CheckedIrUnitKind::DependencySupport => Linkage::Local,
                     krusty::backend::CheckedIrUnitKind::Source
                         if super::super::c_abi::is_file_level(self.ir, index)

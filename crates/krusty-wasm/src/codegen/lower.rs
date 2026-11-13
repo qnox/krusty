@@ -36,7 +36,9 @@ mod objects;
 mod scalar_instructions;
 mod scalar_value_classes;
 mod shared_cells;
+mod string_builders;
 pub(super) use shared_cells::cell_reference;
+pub(super) use string_builders::{declared_by_string_builder, is_string_builder};
 mod string_conversion;
 mod type_of;
 
@@ -1315,6 +1317,21 @@ impl<'a> Body<'a> {
             }
             IrExpr::Call {
                 callee: ref call_callee,
+                dispatch_receiver: Some(receiver),
+                args,
+            } if let Callee::External {
+                target, defaults, ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self
+                    .callables
+                    .callable(*target)
+                    .is_some_and(string_builders::declared_by_string_builder) =>
+            {
+                self.string_builder_call(*target, receiver, &args)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
                 dispatch_receiver,
                 args,
             } if let Callee::External {
@@ -1635,6 +1652,21 @@ impl<'a> Body<'a> {
                     && self.is_string_length_property(*target) =>
             {
                 self.intrinsic(IrIntrinsic::StringLength, Some(*receiver), &[])?;
+            }
+            IrExpr::Checked(ref checked_op)
+                if let krusty::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch: krusty::ir::IrPropertyDispatch::Ordinary,
+                    receiver: Some(receiver),
+                    arguments,
+                    parameters,
+                    ..
+                } = &**checked_op
+                    && parameters.is_empty()
+                    && arguments.is_empty()
+                    && self.is_string_builder_property(*target) =>
+            {
+                self.string_builder_property(*target, *receiver)?;
             }
             IrExpr::Checked(ref checked_op)
                 if let krusty::ir::IrCheckedOperation::PropertyWrite {

@@ -19,7 +19,8 @@
 //! identity ([`InterfaceDispatch::library`]): an interface's, which the program's classes implement
 //! like any other, and a class's that builtin classes override (`super::builtin_members`). A value
 //! the runtime carries in a representation of its own, a string, has no interface table: a member
-//! it implements records the representation's struct, and its stub tests for it first.
+//! it implements records the representation's struct, and its stub tests for it first, as the
+//! `is` function of an interface it is an instance of does (`super::builtin_instances`).
 
 use krusty::fx_hash::HashMap;
 use krusty::types::TypeName;
@@ -49,6 +50,9 @@ pub(super) struct InterfaceDispatch {
     classes: Vec<ClassRecord>,
     /// The `is` function of each interface something tests, in the order they were asked for.
     tests: Vec<(TypeName, u32)>,
+    /// Each runtime representation with no interface table, by its struct, and the interfaces
+    /// its values are instances of.
+    representations: Vec<(u32, Vec<TypeName>)>,
 }
 
 struct Member {
@@ -304,6 +308,26 @@ impl InterfaceDispatch {
         }
     }
 
+    /// Record that every value of the runtime representation `structure`, which has no interface
+    /// table, is an instance of `interface`.
+    pub(super) fn representation_instance_of(&mut self, structure: u32, interface: TypeName) {
+        let index = match self
+            .representations
+            .iter()
+            .position(|(known, _)| *known == structure)
+        {
+            Some(index) => index,
+            None => {
+                self.representations.push((structure, Vec::new()));
+                self.representations.len() - 1
+            }
+        };
+        let interfaces = &mut self.representations[index].1;
+        if !interfaces.contains(&interface) {
+            interfaces.push(interface);
+        }
+    }
+
     /// `(ref null eq) -> i32`: whether a value is an instance of `interface`.
     pub(super) fn test(&mut self, module: &mut Module, interface: TypeName) -> u32 {
         if let Some((_, function)) = self.tests.iter().find(|(known, _)| *known == interface) {
@@ -427,7 +451,8 @@ impl InterfaceDispatch {
         }
     }
 
-    /// `ref.test` of every struct implementing `interface`, but a subtype of one already tested.
+    /// `ref.test` of every representation and struct implementing `interface`, but a subtype of
+    /// a struct already tested.
     fn test_body(&self, interface: TypeName) -> Code {
         let implementors = self
             .classes
@@ -436,6 +461,13 @@ impl InterfaceDispatch {
             .collect::<Vec<_>>();
         let mut code = Code::default();
         code.i32_const(0);
+        for (structure, interfaces) in &self.representations {
+            if interfaces.contains(&interface) {
+                code.local_get(0)
+                    .ref_test(false, HeapType::Concrete(*structure))
+                    .op(OR32);
+            }
+        }
         let mut tested = Vec::new();
         for class in &implementors {
             let structure = class.ancestors[0];

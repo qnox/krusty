@@ -327,6 +327,10 @@ impl CallableRegistry {
                         // `typeOf` keeps its checked call, and emission makes the `KType` it names.
                         continue;
                     }
+                    if super::lower::declared_by_string_builder(callable) {
+                        // The runtime lays `StringBuilder` out and realizes its members.
+                        continue;
+                    }
                     if super::lower::any_members::call_member(ir, callables, expression).is_some() {
                         // `kotlin.Any`'s members, and the declarations overriding them, are
                         // realized through the receiver's own representation.
