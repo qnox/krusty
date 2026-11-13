@@ -425,6 +425,47 @@ fn nested_class_block_members_belong_to_the_nested_class() {
     assert_eq!(run(SRC).expect("nested block"), "OK");
 }
 
+/// A class's static state initializes in kotlinc's order relative to its `companion object`: the
+/// stores of the block properties written before it, the companion's construction, properties and
+/// `init` blocks, then the block properties written after it. kotlinc 2.4 instead stored every
+/// block property before the companion's initialization; the directive names both releases'
+/// features so the same program pins whichever reference compiler the harness runs.
+#[test]
+fn block_and_companion_object_initialization_follow_kotlinc() {
+    const SRC: &str =
+        "// LANGUAGE: +CompanionBlocksAndExtensions +CompanionBlocks +CompanionExtensions\n\
+        var log = \"\"\n\
+        fun l(s: String): String { log += s; return s }\n\
+        class A {\n\
+        \x20   companion { val b1 = l(\"b1\") }\n\
+        \x20   companion object {\n\
+        \x20       val o1 = l(\"o1\")\n\
+        \x20       init { l(\"oi\") }\n\
+        \x20       val o2 = l(\"o2\")\n\
+        \x20   }\n\
+        \x20   companion { val b2 = l(\"b2\") }\n\
+        }\n\
+        class B {\n\
+        \x20   companion object { val o = l(\"o\") }\n\
+        \x20   companion { val b = l(\"b\") }\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   A.b1\n\
+        \x20   log += \"|\"\n\
+        \x20   B.b\n\
+        \x20   return log\n\
+        }\n";
+    let expected = common::kotlinc_box_result(SRC);
+    assert!(
+        expected.contains('|'),
+        "kotlinc ran the program: {expected}"
+    );
+    assert_eq!(
+        common::compile_and_run_with_stdlib(SRC, "Main").expect("initialization order"),
+        expected
+    );
+}
+
 /// A block member's source position is among its class's members, where it was written: the
 /// accessors and functions of a block between two methods sit between those methods.
 #[test]
@@ -1155,4 +1196,120 @@ fn a_block_member_names_its_block_before_the_companion_object() {
         );
     }
     assert_eq!(run(SRC).expect("block first"), "OK");
+}
+
+/// One program compiled by a Kotlin release's kotlinc and by krusty pinned to that release, each
+/// against that release's standard library.
+struct ReleaseBuild {
+    work: std::path::PathBuf,
+    stdlib: std::path::PathBuf,
+    facade: String,
+    reference: std::path::PathBuf,
+    krusty: std::path::PathBuf,
+}
+
+impl ReleaseBuild {
+    /// Compile `src`, saved as `<stem>.kt`, with `release`'s kotlinc and with krusty under
+    /// `-Xkotlin-reference-version=<release>`, both with the `-XXLanguage` `features`.
+    fn new(stem: &str, src: &str, release: &str, features: &[&str]) -> Self {
+        let work = common::scratch_dir().expect("allocate a scratch directory");
+        let source = work.join(format!("{stem}.kt"));
+        std::fs::write(&source, src).expect("write the fixture");
+        let stdlib = common::kotlinc_lib_for_release(release)
+            .unwrap_or_else(|| panic!("kotlinc {release}"))
+            .join("kotlin-stdlib.jar");
+        let build = ReleaseBuild {
+            reference: work.join("kotlinc"),
+            krusty: work.join("krusty"),
+            facade: format!("{stem}Kt"),
+            stdlib,
+            work,
+        };
+        for krusty in [false, true] {
+            let output = if krusty {
+                &build.krusty
+            } else {
+                &build.reference
+            };
+            let mut args: Vec<String> = vec![
+                source.to_string_lossy().into_owned(),
+                "-no-stdlib".into(),
+                "-cp".into(),
+                build.stdlib.to_string_lossy().into_owned(),
+                "-d".into(),
+                output.to_string_lossy().into_owned(),
+            ];
+            args.extend(
+                features
+                    .iter()
+                    .map(|feature| format!("-XXLanguage:{feature}")),
+            );
+            let (code, stderr) = if krusty {
+                args.insert(0, format!("-Xkotlin-reference-version={release}"));
+                let result = std::process::Command::new(common::krusty_binary())
+                    .args(&args)
+                    .output()
+                    .expect("run krusty");
+                (
+                    result.status.code().unwrap_or(1),
+                    String::from_utf8_lossy(&result.stderr).into_owned(),
+                )
+            } else {
+                common::kotlinc_compile_for_release(release, &args)
+                    .unwrap_or_else(|| panic!("kotlinc {release}"))
+            };
+            assert_eq!(code, 0, "{stem}: compile with krusty={krusty}: {stderr}");
+        }
+        build
+    }
+
+    /// `box()`'s result from kotlinc's classes and from krusty's.
+    fn box_results(&self) -> (String, String) {
+        let run = |dir: &std::path::Path| {
+            common::run_box(&[], &self.facade, &[self.stdlib.clone(), dir.to_path_buf()])
+                .expect("the JVM runs box()")
+        };
+        (run(&self.reference), run(&self.krusty))
+    }
+}
+
+impl Drop for ReleaseBuild {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.work);
+    }
+}
+
+/// On the 2.5 reference, a delegated companion property's `x$delegate` hoisted to its class is
+/// part of the companion's initialization: it is stored before the companion's later properties
+/// read it, even when a block property follows the companion object.
+#[test]
+fn hoisted_companion_delegate_initializes_with_its_companion_on_2_5() {
+    const SRC: &str = "var log = \"\"\n\
+        class A {\n\
+        \x20   val p1 = 1\n\
+        \x20   fun f1() = 1\n\
+        \x20   fun f2() = 1\n\
+        \x20   companion { val b0: String = run { log += \"0\"; \"0\" } }\n\
+        \x20   companion object {\n\
+        \x20       val x by lazy { log += \"X\"; \"O\" }\n\
+        \x20       val y = x + \"K\"\n\
+        \x20   }\n\
+        \x20   companion { val block: String = run { log += \"B\"; \"b\" } }\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   val r = A.y + A.block\n\
+        \x20   return if (r == \"OKb\") \"OK:$log\" else \"FAIL:$r:$log\"\n\
+        }\n";
+    let build = ReleaseBuild::new(
+        "HoistedDelegate",
+        SRC,
+        "2.5.0-RC",
+        &["+CompanionBlocks", "+CompanionExtensions"],
+    );
+    let (expected, actual) = build.box_results();
+    assert!(
+        expected.starts_with("OK:"),
+        "kotlinc ran the program: {expected}"
+    );
+    assert_eq!(actual, expected);
 }

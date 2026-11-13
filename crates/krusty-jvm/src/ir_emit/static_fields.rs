@@ -976,29 +976,43 @@ pub(super) fn emit_class_static_initializer(
         } else {
             Vec::new()
         };
-        emit_companion_init(e.cw, &mut clinit, fq_name, c);
         // The `Companion` construction itself has no entry. Each store opens on its initializer's
         // line and keeps the lines its value marks inside itself, as a file facade's do.
         // A generated static that ends the initializer returns on its declaration's last line.
         let mut closing_line = None;
-        for &(static_index, s, _) in &clinit_statics {
-            let Some(init) = stored_clinit_initializer(ir, s) else {
-                continue;
-            };
-            let first = clinit.line_marks().len();
-            e.emit_clinit_static_store(fq_name, static_index, init, &mut clinit);
-            let marks = clinit.line_marks()[first..]
-                .iter()
-                .map(|&(pc, line)| (pc, u32::from(line)));
-            clinit_lines.extend(marks);
-            clinit_lines.dedup();
-            closing_line = (s.source_order == u32::MAX)
-                .then_some(s.accessor_lines.declaration_end)
-                .filter(|&end| end != 0);
-        }
-        if let Some(body) = companion_initializer {
-            e.emit_companion_clinit_body(c, fq_name, body, &mut clinit, &mut clinit_lines);
-            closing_line = None;
+        for step in class_initializer_steps(ir, c, &clinit_statics) {
+            match step {
+                ClassInitializerStep::Store(static_index, s) => {
+                    let Some(init) = stored_clinit_initializer(ir, s) else {
+                        continue;
+                    };
+                    let first = clinit.line_marks().len();
+                    e.emit_clinit_static_store(fq_name, static_index, init, &mut clinit);
+                    let marks = clinit.line_marks()[first..]
+                        .iter()
+                        .map(|&(pc, line)| (pc, u32::from(line)));
+                    clinit_lines.extend(marks);
+                    clinit_lines.dedup();
+                    closing_line = (s.source_order == u32::MAX)
+                        .then_some(s.accessor_lines.declaration_end)
+                        .filter(|&end| end != 0);
+                }
+                ClassInitializerStep::ConstructCompanion => {
+                    emit_companion_init(e.cw, &mut clinit, fq_name, c);
+                }
+                ClassInitializerStep::CompanionBody => {
+                    if let Some(body) = companion_initializer {
+                        e.emit_companion_clinit_body(
+                            c,
+                            fq_name,
+                            body,
+                            &mut clinit,
+                            &mut clinit_lines,
+                        );
+                        closing_line = None;
+                    }
+                }
+            }
         }
         if let Some(end) =
             closing_line.filter(|&end| clinit_lines.last().is_some_and(|&(_, last)| last != end))
@@ -1013,6 +1027,62 @@ pub(super) fn emit_class_static_initializer(
             e.cw.set_method_lines("<clinit>", "()V", &clinit_lines);
         }
     }
+}
+
+/// One step of a class's `<clinit>`.
+enum ClassInitializerStep<'ir> {
+    /// Store a class-owned static's initializer.
+    Store(u32, &'ir krusty::ir::IrStatic),
+    /// Construct the `Companion` instance and store it.
+    ConstructCompanion,
+    /// Run the companion's initializer body, if it has one.
+    CompanionBody,
+}
+
+/// The steps of a class's `<clinit>`: the `Companion`'s construction and initialization among the
+/// stores of the class's own statics.
+///
+/// kotlinc 2.5 initializes a class's static state in program order: a `companion { … }` block
+/// property written before the `companion object` is stored before the companion is constructed,
+/// and one written after it is stored after the companion's whole initialization. Earlier releases
+/// construct the companion first and store every class-owned static before the companion's
+/// initializer body.
+fn class_initializer_steps<'ir>(
+    ir: &IrFile,
+    c: &IrClass,
+    statics: &[(u32, &'ir krusty::ir::IrStatic, krusty::ir::ExprId)],
+) -> Vec<ClassInitializerStep<'ir>> {
+    let store = |&(index, s, _): &(u32, &'ir krusty::ir::IrStatic, krusty::ir::ExprId)| {
+        ClassInitializerStep::Store(index, s)
+    };
+    let companion_order = c
+        .companion_class
+        .filter(|_| {
+            krusty::kotlin_version::at_least(krusty::kotlin_version::KotlinVersion::V2_5_0_BETA2)
+        })
+        .and_then(|companion| ir.class_id_by_name(companion))
+        .and_then(|companion| ir.class_source_order(companion));
+    let mut steps = Vec::with_capacity(statics.len() + 2);
+    let Some(companion_order) = companion_order else {
+        steps.push(ClassInitializerStep::ConstructCompanion);
+        steps.extend(statics.iter().map(store));
+        steps.push(ClassInitializerStep::CompanionBody);
+        return steps;
+    };
+    let declared_by_companion =
+        |&(index, _, _): &(u32, &krusty::ir::IrStatic, krusty::ir::ExprId)| {
+            ir.is_jvm_companion_hoisted_static(index)
+        };
+    let (companion, own): (Vec<_>, Vec<_>) = statics.iter().partition(|s| declared_by_companion(s));
+    let (before, after): (Vec<_>, Vec<_>) = own
+        .into_iter()
+        .partition(|&&(_, s, _)| s.source_order < companion_order);
+    steps.extend(before.into_iter().map(store));
+    steps.push(ClassInitializerStep::ConstructCompanion);
+    steps.extend(companion.into_iter().map(store));
+    steps.push(ClassInitializerStep::CompanionBody);
+    steps.extend(after.into_iter().map(store));
+    steps
 }
 
 impl<'a> Emitter<'a> {
