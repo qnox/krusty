@@ -763,6 +763,14 @@ impl ClassWriter {
         self.add_field_sig(access, name, desc, None);
     }
 
+    /// Intern a copied anonymous class's field name and descriptor when its fields are visited,
+    /// before method bodies add `NameAndType` and `Fieldref` entries. The field table itself stays
+    /// on the late visit; these utf8s are already present, so that visit dedups them.
+    pub fn intern_copied_field(&mut self, name: &str, desc: &str) {
+        self.cp.utf8(name);
+        self.cp.utf8(desc);
+    }
+
     /// Like [`add_field`], plus an optional generic `Signature` attribute string (`TA;` for a field
     /// typed by a type parameter).
     pub fn add_field_sig(&mut self, access: u16, name: &str, desc: &str, signature: Option<&str>) {

@@ -32,14 +32,14 @@ const LENGTH_DELIMITED: u64 = 2;
 
 /// A class's `@Metadata` `d1` (the encoded message) and `d2` (its strings).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct MetadataStrings {
+pub struct MetadataStrings {
     pub d1: Vec<String>,
     pub d2: Vec<String>,
 }
 
 /// The `d1` and `d2` of the regenerated copy of a class whose metadata is `kind` over `strings`
 /// and whose internal name is `origin`. `None` for a kind kotlinc leaves as it is.
-pub(crate) fn record_origin_name(
+pub fn record_origin_name(
     kind: i32,
     strings: &MetadataStrings,
     origin: &str,
