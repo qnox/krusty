@@ -306,3 +306,28 @@ fn same_package_references_need_no_import() {
     ]);
     assert_eq!(diags, Vec::<String>::new());
 }
+
+#[test]
+fn on_demand_import_from_an_object_is_reported_and_still_resolves_its_members() {
+    common::assert_errors_match_kotlinc(
+        &[
+            ("o.kt", "package p\nobject O { fun make(x: Int) = x + 1 }\n"),
+            ("main.kt", "import p.O.*\nfun f() = make(1)\n"),
+        ],
+        &[],
+    );
+}
+
+#[test]
+fn on_demand_import_from_a_class_brings_in_neither_instance_nor_companion_object_members() {
+    common::assert_errors_match_kotlinc(
+        &[
+            (
+                "k.kt",
+                "package p\nclass K {\n    fun inst() = 1\n    companion object { fun comp() = 2 }\n}\n",
+            ),
+            ("main.kt", "import p.K.*\nfun f() = inst() + comp()\n"),
+        ],
+        &[],
+    );
+}

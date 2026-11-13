@@ -10,17 +10,27 @@ static DHAT_ALLOC: krusty::dhat::Alloc = krusty::dhat::Alloc;
 
 mod common;
 
+#[path = "common/asm_text.rs"]
+mod asm_text;
+
 #[path = "box_byte_score.rs"]
 mod box_byte_score;
 mod box_inventory;
+mod box_klib_bytes;
 #[path = "box_lane.rs"]
 mod box_lane;
+#[path = "box_lane_profile.rs"]
+mod box_lane_profile;
 #[path = "box_ratchet.rs"]
 mod box_ratchet;
 #[path = "box_reference_classes.rs"]
 mod box_reference_classes;
+#[path = "box_selection_reference.rs"]
+mod box_selection_reference;
 #[path = "box_vendored.rs"]
 mod box_vendored;
+#[path = "bytecode_corpus.rs"]
+mod bytecode_corpus;
 mod dependency_template_rejections;
 #[path = "kotlin_box_ir_jvm_conformance.rs"]
 mod kotlin_box_ir_jvm_conformance;
@@ -28,6 +38,10 @@ mod kotlin_box_ir_jvm_conformance;
 mod kotlin_box_native_conformance;
 #[path = "kotlin_box_wasm_conformance.rs"]
 mod kotlin_box_wasm_conformance;
+#[path = "kotlin_bytecode_listing_conformance.rs"]
+mod kotlin_bytecode_listing_conformance;
+#[path = "kotlin_bytecode_text_conformance.rs"]
+mod kotlin_bytecode_text_conformance;
 #[path = "kotlin_cli_jvm_conformance.rs"]
 mod kotlin_cli_jvm_conformance;
 #[path = "common/kotlin_native_multimodule.rs"]

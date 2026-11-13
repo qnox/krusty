@@ -846,6 +846,9 @@ version = "0.0.1"
 dependencies = [
  "krusty",
  "krusty-test-support",
+ "libc",
+ "object 0.40.0",
+ "once_cell",
 ]
 
 [[package]]

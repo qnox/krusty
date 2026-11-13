@@ -17,7 +17,7 @@ use krusty::ir::{
 };
 use krusty::jvm::array_representation::prim_newarray_atype;
 use krusty::jvm::classfile::{
-    ClassWriter, CodeBuilder, InnerClassResolver, Label, VerifType, MAJOR_JAVA8,
+    ClassWriter, CodeBuilder, InlineSplice, InnerClassResolver, Label, VerifType, MAJOR_JAVA8,
 };
 use krusty::jvm::classreader::{MethodCode, C};
 use krusty::jvm::inline::MethodBodies;
@@ -95,6 +95,7 @@ mod frame_map;
 mod function_annotations;
 mod function_debug;
 mod function_invocation;
+mod main_bridge;
 mod static_function_calls;
 use function_invocation::{
     is_high_arity_function, jvm_function_interface, jvm_function_invoke_descriptor,
@@ -170,7 +171,7 @@ mod transformed_suspensions;
 use lambda_implementation_placement::standalone_method_is_elided;
 mod try_emission;
 use annotation_impl::emit_annotation_impl_class;
-use array_elements::reference_array_scalar_adapter;
+use array_elements::{box_reference_scalar, reference_array_scalar_adapter};
 mod value_class_descriptors;
 mod value_class_override_metadata;
 mod value_class_signatures;
@@ -1253,7 +1254,9 @@ fn emit_pass(
             && !lambdas.dead.contains(&i);
         emitted.then_some(i)
     });
-    for member in member_schedule::facade_source_ordered_members(ir, facade_functions) {
+    let facade_functions: Vec<u32> = facade_functions.collect();
+    let main_bridge = main_bridge::MainBridge::plan(ir, env, &facade_functions);
+    for member in member_schedule::facade_source_ordered_members(ir, facade_functions.into_iter()) {
         let i = match member {
             member_schedule::FacadeMember::Function(function) => function as usize,
             member_schedule::FacadeMember::DefaultAccessor(static_index, accessor) => {
@@ -1309,33 +1312,11 @@ fn emit_pass(
             &mut cw,
         );
         facade_has_method = true;
-        // A PARAMETERLESS `fun main()` is not a JVM entry point on its own: the launcher looks for
-        // `main([Ljava/lang/String;)V`, and the no-arg form is only recognized by JEP 445 (Java 21+
-        // preview, final in 25). kotlinc therefore emits a synthetic bridge that calls it, so the
-        // output runs on any JVM. A declared `fun main(args: Array<String>)` IS the entry point and
-        // gets no bridge; a `suspend fun main` has a continuation parameter after lowering and so is
-        // not parameterless here (its bridge needs the coroutine runner and is not emitted yet).
-        if f.name == "main" && f.params.is_empty() && matches!(f.ret, Ty::Unit) {
-            // kotlinc visits the bridge's header before its body's call to `main()`.
-            cw.reserve_method_pool("main", "([Ljava/lang/String;)V", None, &[]);
-            let mut bridge = CodeBuilder::new(1);
-            let target = cw.methodref(facade, "main", "()V");
-            bridge.invokestatic(target, 0, 0);
-            bridge.ret_void();
-            bridge.ensure_locals(1);
-            bridge.link();
-            cw.add_method(
-                0x1009, // PUBLIC | STATIC | SYNTHETIC
-                "main",
-                "([Ljava/lang/String;)V",
-                &bridge,
-            );
-            cw.set_method_debug(
-                "main",
-                "([Ljava/lang/String;)V",
-                None,
-                &[("args".to_string(), "[Ljava/lang/String;".to_string(), 0)],
-            );
+        if let Some(bridge) = main_bridge
+            .as_ref()
+            .filter(|bridge| bridge.follows(i as u32))
+        {
+            bridge.emit(ir, facade, &mut cw);
         }
         // A top-level function (or extension) with parameter defaults gets kotlinc's
         // `foo$default(params…, int mask, Object marker)` synthetic (dispatches to the real method,
@@ -1655,76 +1636,6 @@ pub(super) enum PropertyAccessorSide {
 pub(crate) use declared_property_accessor::declared_signature as declared_property_accessor_signature;
 pub(crate) use static_fields::declared_default_static_accessor_signature;
 
-/// What emitting one class's property accessors (and the `$annotations` markers beside them) needs
-/// besides the IR: the class's JVM name, its file facade, the signature formatter, and the emit
-/// environment. Grouped so the accessor walk stays within the argument-count limit, like
-/// [`krusty::metadata::class_builder::ClassTail`] does for the metadata writer.
-struct PropertyAccessorEmit<'a> {
-    fq_name: &'a str,
-    facade: &'a str,
-    formatter: &'a JvmSignatureFormatter<'a>,
-    param_assertions: bool,
-    env: &'a EmitEnv<'a>,
-}
-
-fn emit_declared_property_accessors(
-    ir: &IrFile,
-    c: &krusty::ir::IrClass,
-    cw: &mut ClassWriter,
-    emit: &PropertyAccessorEmit<'_>,
-) {
-    let (fq_name, facade, formatter, param_assertions, env) = (
-        emit.fq_name,
-        emit.facade,
-        emit.formatter,
-        emit.param_assertions,
-        emit.env,
-    );
-    let accessor_owner = declared_property_accessor::AccessorOwner {
-        ir,
-        class: c,
-        fq_name,
-        formatter,
-        param_assertions,
-        override_results: env.override_results,
-        run: env.run,
-    };
-    for property in &c.properties {
-        declared_property_accessor::emit(
-            &accessor_owner,
-            property,
-            PropertyAccessorSide::Getter,
-            cw,
-        );
-        declared_property_accessor::emit(
-            &accessor_owner,
-            property,
-            PropertyAccessorSide::Setter,
-            cw,
-        );
-        // The property's own annotations ride a synthetic marker method, emitted right here so the
-        // method table (and the constant pool behind it) matches kotlinc's.
-        if let Some(&marker) = ir
-            .property_annotation_markers
-            .get(&(c.fq_name_id(), property.source_order))
-        {
-            // The marker is STATIC (kotlinc's shape): no `this` slot.
-            emit_method(
-                ir,
-                marker,
-                MethodSlot {
-                    static_owner: StaticOwner::Class(c.fq_name),
-                    instance: false,
-                },
-                fq_name,
-                facade,
-                cw,
-                env,
-            );
-        }
-    }
-}
-
 /// What emitting one member of a class's source schedule needs besides the writer.
 struct ScheduledMemberEmission<'a> {
     ir: &'a IrFile,
@@ -1736,6 +1647,8 @@ struct ScheduledMemberEmission<'a> {
     env: &'a EmitEnv<'a>,
     markers: &'a krusty::fx_hash::HashSet<u32>,
     byte_parity: bool,
+    /// The leading synthetic parameters every constructor of the class threads through.
+    owner_prefix: &'a OwnerConstructorPrefix,
 }
 
 /// Emit one member of the class's source schedule: a property's accessors (and its annotation
@@ -1755,6 +1668,7 @@ fn emit_scheduled_member(
         env,
         markers,
         byte_parity,
+        owner_prefix,
     } = *emission;
     let fid = match member {
         SourceOrderedMember::Property(property) => {
@@ -1835,7 +1749,7 @@ fn emit_scheduled_member(
                 facade,
                 env,
                 writer: cw,
-                owner_prefix: &OwnerConstructorPrefix::none(),
+                owner_prefix,
             }
             .emit(ordinal, constructor);
             return;
@@ -1955,6 +1869,50 @@ fn assert_determined_member_signatures(ir: &IrFile, c: &krusty::ir::IrClass) {
     }
 }
 
+/// The identity source map of an anonymous object regenerated at an inline call. Its primary file
+/// is the declaration class, not the `$$inlined$` binary name the copy is emitted under.
+fn start_regenerated_anonymous_source_map(
+    ir: &IrFile,
+    class_id: ClassId,
+    writer: &mut krusty::jvm::classfile::ClassWriter,
+) {
+    let Some(specialization) = ir.specialized_anonymous_classes.get(&class_id) else {
+        return;
+    };
+    let Some(source) = ir.classes.get(specialization.source as usize) else {
+        return;
+    };
+    let lines = u16::try_from(ir.source_line_count)
+        .unwrap_or(u16::MAX)
+        .max(1);
+    writer.start_inline_origin_source_map_at(lines, &source.fq_name());
+}
+
+/// Intern the declaration class's enclosing method. kotlinc visits it before replacing the copy's
+/// enclosure with the call site, and those constants stay at the front of the pool.
+fn retain_declaration_enclosure(
+    ir: &IrFile,
+    class_id: ClassId,
+    facade: &str,
+    env: &EmitEnv,
+    writer: &mut krusty::jvm::classfile::ClassWriter,
+) {
+    let Some(specialization) = ir.specialized_anonymous_classes.get(&class_id) else {
+        return;
+    };
+    let Some(source) = ir.classes.get(specialization.source as usize) else {
+        return;
+    };
+    let Some((owner, method)) =
+        enclosure::class_enclosure(ir, env.override_results, source, facade)
+    else {
+        return;
+    };
+    if let Some((name, descriptor)) = method {
+        writer.retain_replaced_enclosing_method(&owner, &name, &descriptor);
+    }
+}
+
 fn emit_class(
     ir: &IrFile,
     class_id: ClassId,
@@ -2009,7 +1967,11 @@ fn emit_class(
             None => cw.set_enclosing_class(&owner),
         }
     }
-    enclosure::start_inline_body_source_map(ir, c, &mut cw);
+    if ir.specialized_anonymous_classes.contains_key(&class_id) {
+        start_regenerated_anonymous_source_map(ir, class_id, &mut cw);
+    } else {
+        enclosure::start_inline_body_source_map(ir, c, &mut cw);
+    }
     let transformed = env.run.transformed_coroutine(&fq_name);
     let transformed_metadata = env
         .continuation_metadata
@@ -2038,6 +2000,9 @@ fn emit_class(
     // first — `object Fast : Factory` pool: this, super, `lib/Factory`, then `<init>`), so add them
     // ahead of the pool seeding below.
     supertype_markers::add_interfaces(&mut cw, ir, c);
+    if ir.specialized_anonymous_classes.contains_key(&class_id) {
+        retain_declaration_enclosure(ir, class_id, facade, env, &mut cw);
+    }
     // Seed the constant pool in kotlinc's interning order for a plain property class that will carry a
     // computed `@Metadata` + debug tables — so the emitted class is byte-identical, not just
     // structurally equal. Gated exactly like the debug tables (opt-in, non-data, qualifying shape).
@@ -2220,6 +2185,13 @@ fn emit_class(
             let field_ann = field_visibility::publishes_field_nullability(c, field_index)
                 .then(|| declared_field_annotation(c, field_index))
                 .flatten();
+            // A class regenerated from an inline declaration is copied: kotlinc visits every field
+            // (name and descriptor only) before the constructor body introduces field refs. A
+            // capture the constructor's local table omits would otherwise be interned at its first
+            // `putfield`, after the previous field's ref.
+            if ir.specialized_anonymous_classes.contains_key(&class_id) {
+                cw.intern_copied_field(&physical_name, &field_desc);
+            }
             cw.add_field_late_sig(
                 acc,
                 &physical_name,
@@ -2300,6 +2272,7 @@ fn emit_class(
         env,
         markers: &markers,
         byte_parity,
+        owner_prefix: &OwnerConstructorPrefix::none(),
     };
     // A value class's members precede its `<init>`, which the representation members follow.
     let (before_primary, after_primary) = split_around_primary_constructor(
@@ -2714,8 +2687,12 @@ fn emit_class(
         );
     }
     // A cross-module provider's `@Metadata` wins; otherwise compute one from the IR (bounded shapes).
+    // A call-site copy of an anonymous object keeps the declaration's record plus its origin.
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
-        .then(|| build_class_metadata(ir, c, opts, env))
+        .then(|| {
+            class_metadata::regenerated_anonymous_metadata(ir, class_id, c, opts, env)
+                .or_else(|| build_class_metadata(ir, c, opts, env))
+        })
         .flatten();
     // A value class visits generated nullability before its class-level `@JvmInline`.
     let early_value_nullability =
@@ -3262,6 +3239,9 @@ fn emit_enum_class(
         &krusty::ir::DeclarationAnnotations::default(),
         &ctor_parameters,
     );
+    // The source parameters' annotations follow the constructor header, before its body. A private
+    // enum constructor carries no nullability annotations.
+    cw.reserve_method_parameter_annotation_pool(None, &c.ctor_param_annotations, &[], false);
     // The ctor BODY's `super(name, ordinal)` call resolves before its LocalVariableTable strings.
     cw.methodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
     // The property backing fields are visited after the methods: each name interns where the
@@ -3420,6 +3400,9 @@ fn emit_enum_class(
             Some(&ctor_sig),
         );
         cw.set_method_parameters("<init>", &ctor_desc, &ctor_parameters);
+        // The synthetic `(String, int)` prefix is not annotable: the attributes count only the
+        // source parameters.
+        cw.set_annotable_method_param_annotations("<init>", &ctor_desc, &c.ctor_param_annotations);
     }
     if emits_primary_ctor {
         let header = c.decl_line;
@@ -3479,40 +3462,33 @@ fn emit_enum_class(
         }
     }
 
-    emit_declared_property_accessors(
-        ir,
-        c,
-        &mut cw,
-        &PropertyAccessorEmit {
-            fq_name: &fq,
-            facade,
-            formatter: &signature_formatter,
-            param_assertions: opts.param_assertions,
-            env,
-        },
-    );
-    // An enum's SECONDARY constructors, after the declared accessors — the order kotlinc emits for
-    // `enum class My(val s: String) { ENTRY; constructor(): this("OK") }`: `My(String)`, `getS()`,
-    // `My()`. The enum writer is a separate path from `emit_class`, so they were not emitted at
-    // all, and an entry declared with no arguments called an `<init>` that does not exist: the
-    // class failed to load with a `NoSuchMethodError`.
-    for (ordinal, constructor) in c.secondary_ctors.iter().enumerate() {
-        SecondaryConstructorEmitter {
-            ir,
-            class: c,
-            owner: &fq,
-            facade,
-            env,
-            writer: &mut cw,
-            owner_prefix: &OwnerConstructorPrefix::enum_class(),
-        }
-        .emit(ordinal, constructor);
-    }
     let markers = member_schedule::property_annotation_marker_fids(ir, c);
     // kotlinc's enum member order is `<init>`, the DECLARED members, `values`/`valueOf`/
     // `getEntries`, the lifted local functions, `$values`, the lambdas, anything a PLUGIN
     // synthesized onto the class (`_init_$_anonymous_`, `access$…`), then `<clinit>`.
     let schedule = member_schedule::enum_member_schedule(ir, c);
+    // The declared members are an ordinary class's source schedule: property accessors (a
+    // `companion { … }` block property's among them), secondary constructors and methods, each at
+    // its declaration's place. The lowered members follow the synthesized ones below.
+    let declared_members = ScheduledMemberEmission {
+        ir,
+        class: c,
+        fq_name: &fq,
+        facade,
+        signature_formatter: &signature_formatter,
+        param_assertions: opts.param_assertions,
+        env,
+        markers: &markers,
+        byte_parity: false,
+        owner_prefix: &OwnerConstructorPrefix::enum_class(),
+    };
+    for member in source_ordered_members(ir, c, None) {
+        if matches!(member, SourceOrderedMember::Function(function) if !schedule.declared.contains(&function))
+        {
+            continue;
+        }
+        emit_scheduled_member(&declared_members, member, &mut cw);
+    }
     let emit_members = |cw: &mut ClassWriter, members: &[u32]| {
         for &fid in members {
             if markers.contains(&fid) || standalone_method_is_elided(ir, fid, env) {
@@ -3568,7 +3544,6 @@ fn emit_enum_class(
             }
         }
     };
-    emit_members(&mut cw, &schedule.declared);
     // The synthesized members follow the declared ones, in kotlinc's visit order, each with the entries its body
     // references: `values()` reads `$VALUES` and calls `Object.clone()`; `valueOf` delegates to
     // `Enum.valueOf` and names its parameter `value`; `getEntries` returns the `@NotNull`
@@ -4137,7 +4112,6 @@ fn emit_placed_method(
         &reserved_desc,
         reserved_sig,
     );
-    let lambda_impl = ir.lambda_own_params_from.contains_key(&fid);
     let declared_nullability::DeclaredNullability {
         result: ret_ann,
         parameters: param_anns,
@@ -4159,11 +4133,8 @@ fn emit_placed_method(
         function_annotations::nullability_annotated(ir, fid, &declared_annotations)
             && !placement.is_for_inline_copy();
     // The USER annotations on this function's parameters.
-    let user_param_anns: &[krusty::ir::DeclarationAnnotations] = ir
-        .fn_param_annotations
-        .get(&fid)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
+    let user_param_anns: &[krusty::ir::DeclarationAnnotations] =
+        &ir.declared_parameters(fid).annotations;
     let method_parameters = if env.java_parameters {
         super::method_parameters::function(ir, fid, &param_tys, holder_receiver)
     } else {
@@ -4193,13 +4164,6 @@ fn emit_placed_method(
         &mut e,
         &mut code,
     );
-    // A LAMBDA IMPL's LineNumberTable starts at the post-guard pc, mapped to the body's line.
-    if let Some(line) = lambda_impl
-        .then(|| function_debug::lambda_entry_line(ir, fid))
-        .flatten()
-    {
-        code.mark_line(line);
-    }
     // kotlinc opens every EMITTED `inline fun` body with an inline-depth marker: `iconst_0;
     // istore_<n>` into a synthetic `$i$f$<name>` int local covering the body — its inliner tracks
     // splice depth through these. Emitted after the parameter guards; the body's LineNumberTable
@@ -4762,13 +4726,8 @@ struct Emitter<'a> {
     copied_operand_binding: Option<ExprId>,
     /// The `&&`/`||` operand whose line is marked again before the jump that consumes it.
     short_circuit_operand_line: Option<ExprId>,
-    /// The enclosing unsigned operation's decision to move its eager source boundary.
-    unsigned_receiver_line_moves: Option<bool>,
     /// A plain local operand of an unsigned bitwise member is being loaded, so it records no line.
     suppress_unsigned_local_line: bool,
-    /// An assignment of an unsigned bitwise value keeps its line on the receiver load. The store
-    /// writes that line again after `constructor-impl`.
-    unsigned_assignment_line: bool,
     /// Slot 0 remains the verifier's special uninitialized receiver until the constructor delegates.
     this_uninitialized: bool,
     /// Independent realization strategies for plain lambdas and SAM conversions.
@@ -4895,9 +4854,7 @@ impl<'a> Emitter<'a> {
             inside_condition: false,
             copied_operand_binding: None,
             short_circuit_operand_line: None,
-            unsigned_receiver_line_moves: None,
             suppress_unsigned_local_line: false,
-            unsigned_assignment_line: false,
             this_uninitialized: false,
             lambda_modes: env.lambda_modes,
             inline_string_concat: env.inline_string_concat,
@@ -5199,7 +5156,7 @@ impl<'a> Emitter<'a> {
 
     fn emit_node(&mut self, e: u32, code: &mut CodeBuilder) {
         match self.ir.expr(e).clone() {
-            IrExpr::Block { stmts, value } => self.emit_statement_block(e, stmts, value, code),
+            IrExpr::Block { stmts, value } => self.emit_block_node(e, stmts, value, code),
             IrExpr::Return(value) => self.emit_return_node(e, value, code),
             IrExpr::Variable {
                 index,
@@ -5217,22 +5174,16 @@ impl<'a> Emitter<'a> {
                     );
                 };
                 let deferred = self.inline_return_frame_result_type(var).is_some();
+                // kotlinc's `visitSetValue` marks the value's start before evaluating it, whatever
+                // the value's kind: an `iinc` that never evaluates it keeps that line. A store into
+                // an inline-return frame's result is kotlinc's `return` from the inlined body,
+                // which marks only after its value (`visitReturn`).
+                if !deferred {
+                    self.mark_expression_start(value, code);
+                }
                 match local_updates::iinc_delta(self.ir, e, var, value, jt) {
                     Some(delta) if !deferred => code.iinc(self.slots[&var].0, delta),
                     _ => {
-                        // `visitSetValue` marks the assignment before the value, so a literal
-                        // argument does not take the line the way a declaration initializer's does.
-                        // The store writes the line again once `constructor-impl` has forgotten it.
-                        let unsigned = self.completes_unsigned_bitwise_value(value);
-                        let saved_assignment = self.unsigned_assignment_line;
-                        if unsigned {
-                            self.unsigned_assignment_line = true;
-                            // The value's own mark follows at this same pc. When its right operand
-                            // is itself unsigned, kotlinc keeps both.
-                            if self.unsigned_bitwise_rhs_is_unsigned(value) {
-                                debug_lines::mark_statement_retained(self.ir, e, code);
-                            }
-                        }
                         // An erased `FunctionN.invoke` stored into an `Object` slot stays `Object`.
                         // The consumer after the store narrows it; casting at the store would put
                         // the checkcast inside the protected range.
@@ -5250,7 +5201,6 @@ impl<'a> Emitter<'a> {
                         if keep_erased_invoke {
                             self.erased_invocations.remove(&value);
                         }
-                        self.unsigned_assignment_line = saved_assignment;
                         // Coerced to the slot's type as the initializer is: a value of another
                         // class is cast to the declared one, which is what a join of the two
                         // stores reads back. The erased invoke already left `Object`.
@@ -5260,10 +5210,6 @@ impl<'a> Emitter<'a> {
                         // An inlined `return` stores on the return's line, after the value.
                         self.mark_expression_start(e, code);
                         let slot = self.activate_inline_return_frame_result(var, jt);
-                        if unsigned {
-                            code.forget_line();
-                            debug_lines::mark_statement(self.ir, e, code);
-                        }
                         store(jt, slot, code);
                     }
                 }
@@ -6005,11 +5951,6 @@ impl<'a> Emitter<'a> {
         if let Some(result) = self.transformed_result(e) {
             return jvm_declared_ty(&result);
         }
-        if matches!(self.ir.expr(e), IrExpr::When { .. }) {
-            if let Some(result) = self.ir.whens.exhaustive.get(&e) {
-                return ir_ty_to_jvm(result);
-            }
-        }
         match self.ir.expr(e) {
             IrExpr::StringConcat(_) => Ty::String,
             // A JVM class literal is a reference, so equality uses reference comparison.
@@ -6126,7 +6067,7 @@ impl<'a> Emitter<'a> {
                 },
             },
             IrExpr::PrimitiveNeg { ty, .. } => ir_ty_to_jvm(ty),
-            IrExpr::When { branches } => self.value_ty_of_when(branches),
+            IrExpr::When { .. } => self.when_value_ty(e),
             IrExpr::EnumEntry { classifier, .. } => Ty::obj_name(*classifier),
             IrExpr::EnumValueOf { classifier, .. } => Ty::obj_name(*classifier),
             IrExpr::StaticInstance { ty, .. } => {
@@ -6755,9 +6696,10 @@ mod invariant_tests {
             value: None,
         });
         let condition = ir.add_expr(IrExpr::GetValue(0));
-        let branch = ir.add_expr(IrExpr::When {
-            branches: vec![(Some(condition), then_branch), (None, else_branch)],
-        });
+        let branch = ir.add_when(
+            vec![(Some(condition), then_branch), (None, else_branch)],
+            Ty::Unit,
+        );
         let body = ir.add_expr(IrExpr::Block {
             stmts: vec![branch],
             value: None,

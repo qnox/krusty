@@ -144,7 +144,10 @@ pub(crate) fn is_reifiable(ir: &IrFile, fid: u32) -> bool {
 /// `vararg`, so Java may call it in element form. Captured values and receivers lead the physical
 /// list and do not move it; a suspend function's trailing continuation does.
 pub(super) fn varargs_access(ir: &IrFile, fid: u32) -> u16 {
-    let trailing = ir.fn_varargs.get(&fid).is_some_and(|vararg| vararg.is_last);
+    let trailing = ir
+        .declared_parameters(fid)
+        .vararg
+        .is_some_and(|vararg| vararg.is_last);
     if trailing && !ir.suspend_funs.contains(&fid) {
         ACC_VARARGS
     } else {
@@ -236,9 +239,20 @@ pub(super) fn primary_constructor_access(
     is_continuation: bool,
     value_param_ctor: bool,
 ) -> u16 {
+    let regenerated_from_inline = ir
+        .class_id_by_name(class.fq_name_id())
+        .and_then(|id| ir.specialized_anonymous_classes.get(&id))
+        .is_some_and(|specialization| {
+            ir.classes
+                .get(specialization.source as usize)
+                .is_some_and(|source| super::enclosure::in_inline_function_scope(ir, source))
+        });
     let access = if class.is_anonymous_object
-        && super::enclosure::in_inline_function_scope(ir, class)
+        && (super::enclosure::in_inline_function_scope(ir, class) || regenerated_from_inline)
     {
+        // A call-site copy of an anonymous object declared in an inline function is constructed
+        // from every call, including one in another package, so kotlinc keeps that constructor
+        // public. The copy's own enclosure is the caller, which may not be inline.
         ACC_PUBLIC
     } else if is_continuation
         && ir

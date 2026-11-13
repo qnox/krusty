@@ -91,7 +91,11 @@ pub(super) fn emit_dependencies<B: Backend>(
     let intrinsics = facts.intrinsics();
     let selected = source.callables.klib_body_callables();
     let type_oracle = crate::symbol_resolver::SourceOracle(platform);
-    let callees = KlibCalleeFacts::new(selected.iter().copied()).with_type_oracle(&type_oracle);
+    let target_represents_classifier =
+        |classifier| backend.represents_dependency_classifier(classifier);
+    let callees = KlibCalleeFacts::new(selected.iter().copied())
+        .with_type_oracle(&type_oracle)
+        .with_target_classifiers(&target_represents_classifier);
     let mut roots: Vec<crate::libraries::KlibBodyCallable<'_>> = Vec::new();
     for callable in selected.iter().copied().filter(|callable| {
         !support_state.emitted.contains_key(callable.identity())
@@ -110,9 +114,8 @@ pub(super) fn emit_dependencies<B: Backend>(
     let target_realizes_getter = |signature: crate::backend::DependencyGetterSignature<'_>| {
         backend.realizes_dependency_getter(signature)
     };
-    let target_represents_classifier =
-        |classifier| backend.represents_dependency_classifier(classifier);
     let mut ordinary = match emitted_roots::ordinary_roots(
+        platform,
         source,
         bodies,
         intrinsics,
@@ -150,7 +153,11 @@ pub(super) fn emit_dependencies<B: Backend>(
         let Some(mut externals) = rebound_externals(platform, &support_state.emitted, diags) else {
             return Vec::new();
         };
-        let mut unit = DependencyBodyUnit::default();
+        // An enum an earlier unit materialized keeps its one set of constants there; this unit
+        // reads them through that unit's exports.
+        let mut unit = DependencyBodyUnit::reading_realized_enums(
+            support_state.materialized_classes.keys().copied(),
+        );
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
             callees: &callees,
@@ -159,7 +166,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             target_realizes_getter: &target_realizes_getter,
             target_represents_classifier: &target_represents_classifier,
         };
-        let declarations = match emitted_roots::declarations(
+        let closure = match emitted_roots::declarations(
             platform,
             bodies,
             intrinsics,
@@ -168,7 +175,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             &capabilities,
             !requires_intrinsic_link,
         ) {
-            Ok(declarations) => declarations,
+            Ok(closure) => closure,
             Err(error) => {
                 diags.error(
                     Span::new(0, 0),
@@ -177,6 +184,10 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         };
+        let emitted_roots::FrozenClosure {
+            declarations,
+            member_edges,
+        } = closure;
         let callees = KlibCalleeFacts::with_reference_declarations(
             selected.iter().copied(),
             declarations.iter().filter_map(|(target, declaration)| {
@@ -185,6 +196,7 @@ pub(super) fn emit_dependencies<B: Backend>(
                     .map(|callable| (*target, callable))
             }),
         )
+        .with_member_edges(member_edges)
         .with_type_oracle(&type_oracle)
         .with_target_classifiers(&target_represents_classifier);
         let capabilities = DependencyLeafCapabilities {
@@ -290,7 +302,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             .collect::<Vec<_>>();
         for (identity, function) in &closed {
             exports.record_callable(*function, identity.clone());
-            if let Some(receiver) = unit.value_member_receiver(identity) {
+            if let Some(receiver) = unit.member_receiver(identity) {
                 exports.record_member_receiver(*function, receiver);
             }
             if let Some(classifier) = unit.authenticated_singleton_classifier(identity) {
@@ -304,8 +316,10 @@ pub(super) fn emit_dependencies<B: Backend>(
             }
             if let Some(&receiver) = unit.ir().singleton_extension_unread_receivers.get(function) {
                 let inert_platform_singleton = match receiver.kind() {
-                    TyKind::Obj(classifier, arguments) if arguments.is_empty() => {
-                        bodies.singleton_initialization_is_inert(&identity.module, classifier)
+                    TyKind::Obj(classifier, arguments) => {
+                        arguments.is_empty()
+                            && bodies
+                                .singleton_initialization_is_inert(&identity.module, classifier)
                     }
                     _ => false,
                 };
@@ -318,12 +332,12 @@ pub(super) fn emit_dependencies<B: Backend>(
         }
         let constructors = unit
             .allocating_constructors()
-            .map(|(identity, class)| (identity.clone(), class))
+            .map(|(identity, constructor)| (identity.clone(), constructor))
             .collect::<Vec<_>>();
-        for (identity, class) in &constructors {
+        for (identity, constructor) in &constructors {
             if unit
                 .ir()
-                .declared_class_self_type(unit.ir().classes[*class as usize].fq_name)
+                .declared_class_self_type(unit.ir().classes[constructor.class as usize].fq_name)
                 .is_none()
             {
                 diags.error(
@@ -334,8 +348,8 @@ pub(super) fn emit_dependencies<B: Backend>(
             }
             exports.record_constructor(
                 crate::backend::ExportedConstructor {
-                    class: *class,
-                    secondary: None,
+                    class: constructor.class,
+                    secondary: constructor.secondary,
                 },
                 identity.clone(),
             );
@@ -398,7 +412,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             }
             published.push((identity.clone(), PublishedDependency::AllocatingConstructor));
         }
-        let callables = match CheckedBackendCallables::freeze(unit.ir(), platform) {
+        let mut callables = match CheckedBackendCallables::freeze(unit.ir(), platform) {
             Ok(callables) => callables,
             Err(error) => {
                 diags.error(
@@ -410,6 +424,7 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         };
+        super::builtin_implementations::record(&mut callables, platform);
         let ordinal = support_state.emitted.len();
         let support_module = format!(
             "{}$klib_body${}${ordinal}",
@@ -549,6 +564,20 @@ fn prepare_bodyless_externals(
         } else {
             bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
         };
+        // A member of a materialized class is lowered with the class its constructor creates.
+        match emitted_roots::member_class_constructor(
+            platform,
+            bodies,
+            capabilities.callees,
+            &identity,
+        ) {
+            Ok(Some(primary)) => pending.push_back(primary),
+            Ok(None) => {}
+            Err(error) => {
+                diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                return false;
+            }
+        }
         for callee in edges {
             if externals.contains_key(&callee) {
                 continue;
@@ -651,6 +680,9 @@ fn prepare_bodyless_externals(
                 .callees
                 .target_member(&callee, capabilities.target_represents_classifier)
             {
+                // A member the closure froze no call edge for is one this target does not
+                // realize outside its emitted bodies; lowering declines its call.
+                Ok(true) if capabilities.callees.member_edge(&callee).is_none() => continue,
                 Ok(true) => {
                     let Some(external) = provider_external(platform, &callee, diags) else {
                         return false;
@@ -670,6 +702,23 @@ fn prepare_bodyless_externals(
                     return false;
                 }
             }
+            match emitted_roots::is_external_member(platform, bodies, capabilities.callees, &callee)
+            {
+                // A target realizing bodyless declarations realizes an abstract member of a class
+                // no unit materializes from its provider handle, as it does any bodyless leaf. On
+                // every target, an abstract member that dispatches on its receiver is called
+                // through its provider handle, as a source call of it is.
+                Ok(true)
+                    if bodies.function_has_body(&callee) == Some(false)
+                        && (capabilities.target_realizes_bodyless
+                            || dispatches_to_an_override(platform, &callee)) => {}
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                    return false;
+                }
+            }
             let Some(has_body) = bodies.function_has_body(&callee) else {
                 continue;
             };
@@ -677,10 +726,43 @@ fn prepare_bodyless_externals(
                 pending.push_back(callee);
                 continue;
             }
+            // An abstract member of a class the unit materializes is a slot of its dispatch
+            // table, which every call of it dispatches through.
+            match emitted_roots::member_class_constructor(
+                platform,
+                bodies,
+                capabilities.callees,
+                &callee,
+            ) {
+                Ok(Some(_))
+                    if bodies.function(&callee).is_some_and(|(_, function)| {
+                        crate::metadata::semantic::declaration_modality(function.base.flags)
+                            == crate::metadata::semantic::KotlinModality::Abstract
+                    }) =>
+                {
+                    continue
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                    return false;
+                }
+            }
+            // An abstract member has no body on any target: a call of it dispatches through its
+            // receiver to the override the receiver's class supplies, as a source call does.
+            if dispatches_to_an_override(platform, &callee) {
+                let Some(external) = provider_external(platform, &callee, diags) else {
+                    return false;
+                };
+                externals.insert(callee, external);
+                continue;
+            }
             if !capabilities.target_realizes_bodyless {
                 diags.error(
                     Span::new(0, 0),
-                    "internal error: the target cannot realize a bodyless KLIB support dependency",
+                    format!(
+                        "internal error: the target cannot realize a bodyless KLIB support dependency: {callee:?}"
+                    ),
                 );
                 return false;
             }
@@ -691,6 +773,24 @@ fn prepare_bodyless_externals(
         }
     }
     true
+}
+
+/// Whether the provider declares `callee` an abstract member that dispatches on its receiver.
+fn dispatches_to_an_override(
+    platform: &dyn crate::libraries::SemanticPlatform,
+    callee: &KlibDependencyCallable,
+) -> bool {
+    platform
+        .external_callable_by_dependency(callee)
+        .is_some_and(|(_, realization)| {
+            realization.kind == crate::libraries::ExternalCallableKind::Member
+                && realization.callable.member_realization
+                    == crate::libraries::MemberRealization::Dispatch
+                && realization.callable.compiler_intrinsic.is_none()
+                && realization
+                    .klib_body_declaration_modifiers
+                    .is_some_and(|modifiers| modifiers.declares_abstract_implementation())
+        })
 }
 
 /// The provider's opaque handle for a reachable declaration support code calls without a body of

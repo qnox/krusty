@@ -4,6 +4,18 @@ use crate::types::TyKind;
 mod actualized_expect_defaults;
 mod local_class_provenance;
 
+/// The JVM provider over the toolchain classpath a box directive (`// WITH_STDLIB`) selects.
+fn jvm_platform(directives: &str) -> Box<crate::jvm::jvm_libraries::JvmLibraries> {
+    Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
+                directives,
+            )),
+        ))
+        .expect("JVM provider initialization"),
+    )
+}
+
 fn finish_pass_one(analysis: SourceSetAnalysis) -> StreamingSourceSetAnalysis {
     let analysis = StreamingSourceSetAnalysis::from(analysis);
     assert!(
@@ -300,14 +312,7 @@ fn pass_two_uses_stable_header_flags_for_top_level_val_smart_casts() {
     )
     .with_file_stem("StableTopLevelVal")];
     let mut diagnostics = DiagSink::new();
-    let platform = Box::new(
-        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
-                "// WITH_REFLECT",
-            )),
-        ))
-        .expect("JVM provider initialization"),
-    );
+    let platform = jvm_platform("// WITH_REFLECT");
     let analysis = analyze_source_set_with_features_and_prepare(
         &inputs,
         crate::frontend::PlatformProvider::jvm(platform),
@@ -958,14 +963,7 @@ fn enum_entry_generic_member_signature_finalizes_from_compact_headers() {
     )
     .with_file_stem("EnumEntryGenericMember")];
     let mut diagnostics = DiagSink::new();
-    let platform = Box::new(
-        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
-                "// WITH_STDLIB",
-            )),
-        ))
-        .expect("JVM provider initialization"),
-    );
+    let platform = jvm_platform("// WITH_STDLIB");
     let analysis = analyze_source_set_with_features_and_prepare(
         &inputs,
         crate::frontend::PlatformProvider::jvm(platform),
@@ -1871,14 +1869,7 @@ fn dependency_receiver_function_typealias_keeps_its_function_shape() {
         .with_file_stem("ReceiverAliasDependency"),
     ];
     let mut diagnostics = DiagSink::new();
-    let platform = Box::new(
-        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
-                "// WITH_STDLIB",
-            )),
-        ))
-        .expect("JVM provider initialization"),
-    );
+    let platform = jvm_platform("// WITH_STDLIB");
     let analysis = analyze_source_set_with_features_and_prepare_prefix(
         &inputs,
         1,
@@ -2208,7 +2199,7 @@ fn pass_one_inline_fir_publishes_owned_anonymous_object_members() {
                 index.callable_for_declaration(declaration).map(|callable| {
                     (
                         declaration,
-                        callable.clone(),
+                        callable,
                         index
                             .signature(declaration)
                             .map(|signature| signature.result.get()),
@@ -3928,7 +3919,7 @@ fn reparsed_call_parameter_contextualizes_an_empty_reference_array_factory() {
     let mut diagnostics = DiagSink::new();
     let analysis = analyze_source_set_with_features_and_prepare(
         &inputs,
-        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+        crate::frontend::PlatformProvider::jvm(jvm_platform("// WITH_STDLIB")),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,

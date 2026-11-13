@@ -34,6 +34,16 @@
 //! for a target whose companion getter runs before the companion is built, calling the enum's
 //! initializer there ([`IrFile::enum_initializers`]).
 //!
+//! Another file reads a constant of an enum this file declares through an entry: an ordinary
+//! function of this file answering the constant ([`publish_constants`]), which a target exports by
+//! the enum and constant name, as it exports an object's instance entry. Only the declaring file
+//! holds the constants' storage, so every read of a constant, in any file, finds the one object.
+//!
+//! A file may read a constant before the file declaring its enum is lowered. Both files link the
+//! read by the constant's identity ([`link_constant_entries`], [`link_constant_reads`]), which
+//! Pass 1's module facts certify for every enum of the module, so the order of files does not
+//! matter (see [`super::module_links`]).
+//!
 //! A target runs this before the shared default-argument lowering, which then realizes a
 //! constant that leaves constructor arguments out like any other construction. The JVM keeps
 //! kotlinc's `<clinit>`, `$VALUES` and `$ENTRIES` and does not run it. An enum that another file
@@ -78,6 +88,99 @@ pub enum Contract {
     /// `values()` is an array of the constants as they stand, in declaration order; `entries` is
     /// built from `values()` on its first read.
     KotlinWasm,
+}
+
+/// Build the entry answering each constant of every enum `ir` declares, before [`realize`] rewrites
+/// the entries' reads into reads of the constants' storage. Every enum gets them, whether its
+/// module is a library or the program: another file of the module, as much as another module, may
+/// read any of its constants.
+pub fn publish_constants(ir: &mut IrFile, exports: &mut super::DependencyExportSignatures) {
+    let enums: Vec<ClassId> = (0..ir.classes.len())
+        .map(|class| ClassId::try_from(class).expect("too many classes"))
+        .filter(|&class| is_enum(&ir.classes[class as usize]))
+        .collect();
+    for class in enums {
+        let classifier = ir.classes[class as usize].fq_name_id();
+        let Some(result) = ir.declared_class_self_type(classifier) else {
+            continue;
+        };
+        let names: Vec<Box<str>> = ir.classes[class as usize]
+            .enum_entries
+            .iter()
+            .map(|entry| entry.name.as_str().into())
+            .collect();
+        for name in names {
+            let value = ir.add_expr(crate::ir::IrExpr::EnumEntry {
+                classifier,
+                name: name.clone(),
+            });
+            ir.set_logical_type(value, result);
+            let entry = super::construction_entries::entry(
+                ir,
+                &format!("<enum constant {name}>$get"),
+                Vec::new(),
+                result,
+                value,
+            );
+            ir.construction_entries.insert(entry, class);
+            exports.record_enum_constant_entry(super::EnumConstant { classifier, name }, entry);
+        }
+    }
+}
+
+/// Define the link of every constant entry [`publish_constants`] built for this file, each by its
+/// constant: the link a read in an earlier file reserved, or a fresh one from `allocate`.
+pub fn link_constant_entries<V: Clone>(
+    exports: &super::DependencyExportSignatures,
+    links: &mut super::module_links::ModuleLinks<super::EnumConstant, V>,
+    mut allocate: impl FnMut() -> V,
+) -> Result<Vec<(FunId, V)>, &'static str> {
+    exports
+        .enum_constant_entries()
+        .iter()
+        .map(|(constant, entry)| {
+            links
+                .define(constant.clone(), &mut allocate)
+                .map(|link| (*entry, link))
+                .map_err(|_| "two files export one enum constant")
+        })
+        .collect()
+}
+
+/// The link of each constant of another file's enum that `ir` reads, after [`realize`] rewrote the
+/// reads of this file's own enums: the declaring file's defined link, or, for an enum of this
+/// module whose file comes later, a link reserved from `allocate` for that file to define. A
+/// constant of neither kind has no link, and the target declines its read.
+pub fn link_constant_reads<V: Clone>(
+    ir: &IrFile,
+    module: &super::BackendModuleFacts,
+    links: &mut super::module_links::ModuleLinks<super::EnumConstant, V>,
+    mut allocate: impl FnMut() -> V,
+) -> HashMap<super::EnumConstant, V> {
+    let mut reads = HashMap::default();
+    for expression in crate::ir::emitted_body_roots(ir)
+        .into_iter()
+        .flat_map(|root| crate::ir::value_namespace_expressions(ir, root))
+    {
+        let crate::ir::IrExpr::EnumEntry { classifier, name } = ir.expr(expression) else {
+            continue;
+        };
+        if ir.class_id_by_name(*classifier).is_some() {
+            continue;
+        }
+        let constant = super::EnumConstant {
+            classifier: *classifier,
+            name: name.clone(),
+        };
+        if reads.contains_key(&constant) {
+            continue;
+        }
+        let declared = module.declares_enum_constant(&constant);
+        if let Some(link) = links.read(constant.clone(), declared, &mut allocate) {
+            reads.insert(constant, link);
+        }
+    }
+    reads
 }
 
 /// Realize every enum class `ir` declares and rewrite every emitted use of one.

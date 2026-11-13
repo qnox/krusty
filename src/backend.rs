@@ -2,6 +2,7 @@
 //!
 //! A backend consumes checked frontend output and emits target artifacts.
 
+pub mod class_names;
 pub mod class_tables;
 pub mod construction_entries;
 mod constructor_selection;
@@ -19,7 +20,9 @@ pub mod enums;
 pub mod interface_identity;
 pub mod local_properties;
 mod module_facts;
+pub mod module_links;
 pub mod property_entries;
+pub mod range_constructions;
 mod source_class_members;
 pub mod value_classes;
 
@@ -29,13 +32,14 @@ pub use dependency_call_shape::{DeclaredOperandRoles, DependencyCallShape, Depen
 pub use dependency_facts::referenced_dependencies;
 pub use dependency_facts::{
     BackendCallableFact, BackendCompilerIntrinsic, BackendPropertyFact, BackendSemanticCallRole,
-    CheckedBackendCallables, DependencyClassifier, DependencyFactError, DependencyGetterSignature,
+    BuiltinImplementation, BuiltinOverrideDeclaration, CheckedBackendCallables,
+    DependencyClassifier, DependencyFactError, DependencyGetterSignature,
 };
 pub(crate) use dependency_metadata::has_standalone_dependency_code;
 pub use dependency_metadata::KlibDependencyCallable;
 pub use dependency_metadata::{authenticated_singleton_receiver, inert_staged_singleton_bindings};
 pub use dependency_metadata::{
-    DependencyExportSignatures, DependencyMemberReceiver, DependencyMetadata,
+    DependencyExportSignatures, DependencyMemberReceiver, DependencyMetadata, EnumConstant,
     SingletonExtensionUnreadReceiver, SingletonMemberReceiver,
 };
 pub(crate) use dependency_metadata::{ExportedConstructor, ExportedPropertyAccessor};

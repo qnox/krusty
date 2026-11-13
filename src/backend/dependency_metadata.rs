@@ -199,6 +199,10 @@ pub struct DependencyExportSignatures {
     /// identity a dependent module's implementation of the member is recorded under.
     interface_members: HashMap<FunId, KlibDependencyCallable>,
     interface_properties: HashMap<crate::fir::PropertyId, KlibDependencyCallable>,
+    /// Every property of this file another module may name, by its getter's published identity,
+    /// whether or not the getter has code of its own: what a reference to the property is equal
+    /// by in every module.
+    property_declarations: HashMap<crate::fir::PropertyId, KlibDependencyCallable>,
     member_receivers: HashMap<FunId, DependencyMemberReceiver>,
     singleton_member_receivers: HashMap<FunId, SingletonMemberReceiver>,
     singleton_extension_unread_receivers: HashMap<FunId, SingletonExtensionUnreadReceiver>,
@@ -212,6 +216,16 @@ pub struct DependencyExportSignatures {
     /// target realized it, the entry answering its instance (see `super::construction_entries`).
     singletons: Vec<crate::ir::ClassId>,
     singleton_entries: Vec<(crate::types::TypeName, FunId)>,
+    /// The entry a target realized answering each constant of every enum of this file (see
+    /// `super::enums`).
+    enum_constant_entries: Vec<(EnumConstant, FunId)>,
+}
+
+/// One constant of an enum class, as a read of it names it: the enum and the constant's name.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct EnumConstant {
+    pub classifier: crate::types::TypeName,
+    pub name: Box<str>,
 }
 
 /// One constructor [`DependencyExportSignatures`] publishes: the class and which of its
@@ -281,6 +295,23 @@ impl DependencyExportSignatures {
         self.interface_properties.get(&property)
     }
 
+    /// The published identity of `property`, which another module names it by: its getter's.
+    pub fn property_declaration(
+        &self,
+        property: crate::fir::PropertyId,
+    ) -> Option<&KlibDependencyCallable> {
+        self.property_declarations.get(&property)
+    }
+
+    /// Every property identity this file publishes.
+    pub fn property_declarations(
+        &self,
+    ) -> impl Iterator<Item = (crate::fir::PropertyId, &KlibDependencyCallable)> {
+        self.property_declarations
+            .iter()
+            .map(|(&property, identity)| (property, identity))
+    }
+
     /// Exact unread extension receiver and its separately authenticated source-evaluation effect.
     pub fn singleton_extension_unread_receiver(
         &self,
@@ -340,6 +371,16 @@ impl DependencyExportSignatures {
         &self.singleton_entries
     }
 
+    /// Record the target-realized entry answering one constant of a published enum.
+    pub(crate) fn record_enum_constant_entry(&mut self, constant: EnumConstant, entry: FunId) {
+        self.enum_constant_entries.push((constant, entry));
+    }
+
+    /// Every enum constant entry a target realized.
+    pub fn enum_constant_entries(&self) -> &[(EnumConstant, FunId)] {
+        &self.enum_constant_entries
+    }
+
     /// Record one declaration at the metadata owner that computed its exact identity.
     pub fn record_callable(&mut self, callable: FunId, identity: KlibDependencyCallable) {
         let previous = self.callables.insert(callable, identity);
@@ -370,6 +411,18 @@ impl DependencyExportSignatures {
         assert!(
             previous.is_none(),
             "one interface property cannot publish two KLIB declaration identities"
+        );
+    }
+
+    pub(crate) fn record_property_declaration(
+        &mut self,
+        property: crate::fir::PropertyId,
+        getter: KlibDependencyCallable,
+    ) {
+        let previous = self.property_declarations.insert(property, getter);
+        assert!(
+            previous.is_none(),
+            "one property cannot publish two KLIB declaration identities"
         );
     }
 

@@ -219,6 +219,41 @@ pub(super) fn accept_active_debug_metadata(
         let accessor_lines = body_property.map(|property| property.accessor_lines);
         if let Some(property) = index.property_for_declaration(declaration) {
             if let Some(property) = ir.checked_properties.get_mut(&property) {
+                property.declaration_source = body_property
+                    .map(|source| (source.span, source.name_span))
+                    .or_else(|| {
+                        constructor_parameter.map(|source| (source.declaration_span, source.span))
+                    })
+                    // A script result is a compiler-created property, not a written declaration.
+                    .filter(|_| !property.flags.has(DeclarationFlags::SCRIPT_RESULT))
+                    .map(|(declaration, name)| {
+                        let prefix = file
+                            .declaration_prefixes
+                            .at(declaration.lo)
+                            .expect("a written property retains its declaration prefix");
+                        let visibility_modifier =
+                            file.declaration_prefixes.keywords(prefix).iter().find_map(
+                                |&(keyword, span)| {
+                                    matches!(
+                                        keyword,
+                                        crate::ast::ModifierKeyword::Public
+                                            | crate::ast::ModifierKeyword::Private
+                                            | crate::ast::ModifierKeyword::Internal
+                                            | crate::ast::ModifierKeyword::Protected
+                                    )
+                                    .then_some(span)
+                                },
+                            );
+                        crate::ir::IrPropertyDeclarationSource {
+                            declaration: crate::diag::Span::new(
+                                prefix.declaration_start,
+                                declaration.hi,
+                            ),
+                            name,
+                            keyword: prefix.keyword,
+                            visibility_modifier,
+                        }
+                    });
                 property.diagnostic_span = body_property
                     .map(|property| property.span)
                     .or_else(|| constructor_parameter.map(|property| property.span));
@@ -356,8 +391,7 @@ fn attach_function_metadata(
         .iter()
         .any(crate::ir::DeclarationAnnotations::declares_annotations)
     {
-        ir.fn_param_annotations
-            .insert(function_id, parameter_annotations);
+        ir.declared_parameters_mut(function_id).annotations = parameter_annotations;
     }
     if let Some(spelling) = published_declaration_spellings(declaration, info, index) {
         ir.fn_declared_spellings
@@ -410,7 +444,7 @@ pub(super) fn attach_stable_function_inference_metadata(
             );
         }
         if no_infer.iter().any(|flag| *flag) {
-            ir.fn_param_no_infer.insert(function, no_infer);
+            ir.declared_parameters_mut(function).no_infer = no_infer;
         }
     }
 }

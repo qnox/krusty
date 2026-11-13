@@ -21,7 +21,7 @@ use crate::metadata::id_signature::{
     MetadataAccessor, MetadataClass, MetadataContainer,
 };
 use crate::metadata::klib_fragment::{
-    package_fragment_with_inner_classifiers, KlibClass, KlibFileMembers,
+    package_fragment_with_classifier_applications, KlibClass, KlibFileMembers,
 };
 use crate::metadata::semantic::parse_package_fragment_checked;
 
@@ -225,9 +225,15 @@ impl KlibBackend {
             .iter()
             .map(|record| record.enum_entries())
             .collect::<Vec<_>>();
-        let inner_classifier = |classifier| {
-            crate::metadata::inner_classifiers::inner_classifier(ir, &file.classifiers, classifier)
+        let classifier_application = |classifier| {
+            crate::metadata::classifier_applications::classifier_application(
+                ir,
+                &file.classifiers,
+                classifier,
+            )
         };
+        let approximate =
+            |ty| crate::metadata::declaration_approximation::approximate(&file.classifiers, ty);
         let tails = records
             .iter()
             .zip(secondary_constructors.iter().zip(&nested))
@@ -237,8 +243,8 @@ impl KlibBackend {
                         param_assertions: false,
                         annotations_in_metadata: self.annotations_in_metadata,
                         compiler_version_requirement: None,
-                        intersection: None,
-                        inner_classifiers: &inner_classifier,
+                        intersection: Some(&approximate),
+                        classifier_applications: &classifier_application,
                         primary_ctor_annotations: None,
                     },
                     secondary,
@@ -286,12 +292,13 @@ impl KlibBackend {
                 },
             )
             .collect::<Vec<_>>();
-        let fragment = match package_fragment_with_inner_classifiers(
+        let fragment = match package_fragment_with_classifier_applications(
             &segments,
             &members,
             &declarations,
             self.annotations_in_metadata,
-            &inner_classifier,
+            &classifier_application,
+            Some(&approximate),
         ) {
             Ok(fragment) => fragment,
             Err(error) => {
@@ -508,6 +515,23 @@ fn package_exports(
             crate::ir::IrLocalPropertyLayout::Member { .. }
             | crate::ir::IrLocalPropertyLayout::MemberExtension { .. } => continue,
         };
+        match package_property_accessor_signature(container, declaration, MetadataAccessor::Getter)
+        {
+            Ok(signature) => exports.record_property_declaration(
+                source.property,
+                crate::libraries::KlibDependencyCallable {
+                    module: module_name.to_owned(),
+                    declaration: crate::libraries::KlibDeclarationSignature::Accessor(signature),
+                },
+            ),
+            Err(error) => {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    format!("internal error: cannot sign generated KLIB property: {error}"),
+                );
+                return None;
+            }
+        }
         for (callable, accessor) in [
             getter.map(|getter| (getter, MetadataAccessor::Getter)),
             setter.map(|setter| (setter, MetadataAccessor::Setter)),
@@ -690,15 +714,18 @@ fn record_class_function_exports(
     Ok(())
 }
 
-/// Record the identity of every constructor of `source` another module may call, and an object
-/// declaration another module may read as a value.
+/// Record the identity of every constructor of `source` another module may call, an object
+/// declaration another module may read as a value, and an enum class another module may read a
+/// constant of.
 ///
 /// The decoded class lists the primary constructor first when the record publishes one, then the
 /// published secondary constructors in record order; `secondary_ordinals` joins each back to its
 /// IR declaration. Only an ordinary class whose object this file lays out is constructible from
 /// another module through an entry: an annotation is instantiated from its declaration instead,
-/// and a generic class would also need its type parameters on the entry, which the target-side
-/// entry does not declare yet. Neither publishes a constructor.
+/// and publishes no constructor. A generic class's entry takes its constructor's declared
+/// parameter types, which a KLIB target realizes as it realizes the class's own storage; an inner
+/// class's entry takes its enclosing instance first, as its constructor does. A class capturing
+/// type parameters of an enclosing declaration has no entry yet.
 fn record_constructor_exports(
     ir: &IrFile,
     module_name: &str,
@@ -733,9 +760,7 @@ fn record_constructor_exports(
         || source.is_companion
         || source.is_enum
         || source.is_value
-        || source.is_inner_class
         || source.is_annotation
-        || !source.type_params.is_empty()
         || !source.captured_type_params.is_empty()
     {
         return Ok(());
@@ -904,8 +929,11 @@ fn record_class_property_exports(
                 })
                 .map_err(|error| format!("{}.{}: {error}", source.fq_name(), declaration.name))
         };
-        if let (true, Some(property)) = (source.is_interface, property) {
-            exports.record_interface_property(property, accessor(MetadataAccessor::Getter)?);
+        if let Some(property) = property {
+            exports.record_property_declaration(property, accessor(MetadataAccessor::Getter)?);
+            if source.is_interface {
+                exports.record_interface_property(property, accessor(MetadataAccessor::Getter)?);
+            }
         }
         for (function, role, modifiers, present) in [
             (

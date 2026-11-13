@@ -20,7 +20,6 @@ use super::{
 };
 use crate::jvm::classreader::MethodSig;
 use crate::metadata::decode::Pb;
-use crate::types::Ty;
 
 /// `Package.function`, `Package.property`, `Class.constructor`, `Class.function`, and
 /// `Class.property`: the member messages [`KotlinMembers`] decodes.
@@ -61,10 +60,10 @@ struct PackedMembers {
     d1: Vec<u8>,
     d2: Vec<String>,
     is_class: bool,
+    /// `Class.flags.IS_VALUE`: the class is a value class, inline or full.
+    is_value_class: bool,
     /// Type parameters of the outer classes an inner class addresses by id.
     enclosing: Vec<ScopedTypeParameter>,
-    /// A `data` class's own type, which bounds its generated `equals` parameter.
-    data_equality_bound: Option<Ty>,
     declares_package_members: bool,
     decoded: OnceLock<MetadataResult<KotlinMembers>>,
     package_member_names: OnceLock<MetadataResult<PackageMemberNames>>,
@@ -77,8 +76,8 @@ impl std::fmt::Debug for PackedMembers {
             .field("d1", &self.d1)
             .field("d2", &self.d2)
             .field("is_class", &self.is_class)
+            .field("is_value_class", &self.is_value_class)
             .field("enclosing", &self.enclosing)
-            .field("data_equality_bound", &self.data_equality_bound)
             .finish()
     }
 }
@@ -88,8 +87,8 @@ impl LazyMembers {
         d1: Vec<u8>,
         d2: Vec<String>,
         is_class: bool,
+        is_value_class: bool,
         enclosing: &[ScopedTypeParameter],
-        data_equality_bound: Option<Ty>,
     ) -> Self {
         let declared = declared_member_fields(&d1);
         if declared.iter().all(|declared| !declared) {
@@ -99,8 +98,8 @@ impl LazyMembers {
             d1,
             d2,
             is_class,
+            is_value_class,
             enclosing: enclosing.to_vec(),
-            data_equality_bound,
             declares_package_members: declared[0] || declared[1],
             decoded: OnceLock::new(),
             package_member_names: OnceLock::new(),
@@ -183,13 +182,8 @@ impl PackedMembers {
     ) -> MetadataResult<KotlinMembers> {
         let (scope_tparams, scope_bounds) = enclosing_type_parameters::split(scope);
         let realizations = Realizations::new(methods);
-        let class_functions = realizations.stamp_functions(decode_functions(
-            ctx,
-            9,
-            &scope_tparams,
-            &scope_bounds,
-            self.data_equality_bound,
-        )?);
+        let class_functions =
+            realizations.stamp_functions(decode_functions(ctx, 9, &scope_tparams, &scope_bounds)?);
         // A package's field 5 is `Package.type_alias`, while a class's field 5 is
         // `Class.type_parameter`. Constructor decoding owns only the Class schema; running it over
         // a package would feed each complete TypeAlias message to the strict type-parameter
@@ -200,14 +194,16 @@ impl PackedMembers {
             Vec::new()
         };
         realizations.stamp_constructors(&mut constructors);
-        let class_properties = realizations.stamp_properties(decode_properties(
+        let mut class_properties = realizations.stamp_properties(decode_properties(
             ctx,
             10,
             &scope_tparams,
             &scope_bounds,
         )?);
-        let package_functions =
-            realizations.stamp_functions(decode_functions(ctx, 3, &[], &[], None)?);
+        if self.is_value_class {
+            stamp_value_class_components(&mut class_properties, &constructors);
+        }
+        let package_functions = realizations.stamp_functions(decode_functions(ctx, 3, &[], &[])?);
         let package_properties =
             realizations.stamp_properties(decode_properties(ctx, 4, &[], &[])?);
         Ok(KotlinMembers {
@@ -217,6 +213,18 @@ impl PackedMembers {
             package_properties: package_properties.into(),
             constructors: constructors.into(),
         })
+    }
+}
+
+/// Mark the properties a value class declares as its components: the primary constructor's value
+/// parameters. Metadata names an underlying property only for an inline value class and nothing
+/// for a full one, but both declare their components through the primary constructor.
+fn stamp_value_class_components(properties: &mut [MetaProp], constructors: &[MetaConstructor]) {
+    let Some(primary) = constructors.iter().find(|constructor| constructor.primary) else {
+        return;
+    };
+    for property in properties {
+        property.is_value_class_component = primary.params.names.contains(&property.name);
     }
 }
 

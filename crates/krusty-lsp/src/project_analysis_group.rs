@@ -43,7 +43,7 @@ pub(super) fn project_analysis_groups(
     groups
 }
 
-pub(super) fn project_group_compiler_config(
+pub(crate) fn project_group_compiler_config(
     model: Option<&ProjectModel>,
     module_index: Option<usize>,
     platform_classpath: &[PathBuf],

@@ -90,6 +90,12 @@ pub fn lower_inline_template(
     let declaration = Declaration {
         callable,
         formals: &formals,
+        formal_bounds: selected
+            .callable
+            .generic_sig
+            .as_deref()
+            .map_or(&[][..], |generic| &generic.formal_bounds),
+        reified: &selected.callable.reified_type_parameter_ordinals,
         inline_modifiers: &selected.callable.inline_modifiers,
         suspend: selected.callable.suspend,
     };
@@ -114,6 +120,10 @@ struct Declaration<'a> {
     callable: KlibBodyCallable<'a>,
     /// The semantic type parameters the record's types name, in declaration order.
     formals: &'a [Ty],
+    /// Each formal's declared upper bounds, parallel to [`Self::formals`]; empty for none.
+    formal_bounds: &'a [Vec<Ty>],
+    /// The ordinals of the formals the record declares `reified`.
+    reified: &'a [u32],
     /// Each value parameter's `noinline`/`crossinline` modifier, context parameters included and
     /// the extension receiver excluded, in declaration order.
     inline_modifiers: &'a [InlineParameterModifier],
@@ -131,6 +141,7 @@ fn lower(
     let mut calls = TemplateCalls {
         module: &callable.identity().module,
         callees,
+        bodies,
     };
     if declaration.suspend {
         return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
@@ -185,6 +196,7 @@ fn lower(
         header.extension_receiver_index(),
     );
     info.expansion_modes = modes;
+    sign_template(ir, template, declaration, function, &calls)?;
     let builtins = IrBuiltinOperators::new();
     let body = BodyLowering::new(
         arena,
@@ -213,6 +225,80 @@ fn lower(
     ir.inline_fns.insert(template);
     ir.inline_only_fns.insert(template);
     Ok((template, class_type_parameters))
+}
+
+/// Record the template's own type parameters, as checked FIR records a source declaration's.
+///
+/// The template keeps the declaration's body in the file together with the anonymous objects and
+/// lambdas it declares. Its signature is the provenance that tells every target which of their
+/// type operations name a parameter the template itself declares `reified`.
+fn sign_template(
+    ir: &mut IrFile,
+    template: FunId,
+    declaration: Declaration<'_>,
+    function: &crate::metadata::klib_ir::tree::KlibIrFunction,
+    calls: &TemplateCalls<'_>,
+) -> Result<(), KlibBodyDeclineReason> {
+    if declaration.formals.is_empty() {
+        return Ok(());
+    }
+    if function.type_parameters.len() != declaration.formals.len()
+        || !(declaration.formal_bounds.is_empty()
+            || declaration.formal_bounds.len() == declaration.formals.len())
+        || declaration
+            .reified
+            .iter()
+            .any(|&ordinal| ordinal as usize >= declaration.formals.len())
+    {
+        return Err(KlibBodyDeclineReason::SignatureMismatch(
+            "the template's type parameters are not parallel to its selected formals".to_owned(),
+        ));
+    }
+    let mut type_params = Vec::with_capacity(declaration.formals.len());
+    for (index, (formal, serialized)) in declaration
+        .formals
+        .iter()
+        .zip(&function.type_parameters)
+        .enumerate()
+    {
+        let TyKind::TyParam(semantic, _) = formal.kind() else {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+                "the type parameter `{}` is selected as {formal:?}",
+                serialized.name
+            )));
+        };
+        let mut bounds = Vec::new();
+        for &bound in declaration
+            .formal_bounds
+            .get(index)
+            .map_or(&[][..], Vec::as_slice)
+        {
+            // A bound naming another type parameter names no classifier.
+            let interface = match bound.non_null().kotlin_class_internal() {
+                Some(classifier) => calls.is_interface(classifier)?,
+                None => false,
+            };
+            bounds.push((bound, interface));
+        }
+        type_params.push(crate::ir::IrTypeParameter {
+            name: serialized.name.clone(),
+            semantic_name: semantic.as_str().to_owned(),
+            bounds,
+            // Kotlin declares no variance on a function's type parameter.
+            variance: crate::types::TypeVariance::Invariant,
+            reified: declaration.reified.contains(&(index as u32)),
+            captured_from_enclosing: false,
+        });
+    }
+    let declared = &ir.functions[template as usize];
+    let signature = crate::ir::IrGenericSig {
+        type_params,
+        params: declared.params.clone(),
+        ret: Some(declared.ret),
+        supers: Vec::new(),
+    };
+    ir.signatures.insert(template, signature);
+    Ok(())
 }
 
 /// How a call expands each parameter, as checked FIR publishes it for a source inline function:
@@ -260,6 +346,8 @@ struct TemplateCalls<'a> {
     /// The template's declaring module, whose producer graph resolves its calls.
     module: &'a str,
     callees: TemplateCallees<'a>,
+    /// The prepared bodies of the template's library, which name its file-local classes.
+    bodies: &'a KlibDeclarationBodies,
 }
 
 impl TemplateCalls<'_> {
@@ -300,6 +388,28 @@ impl TemplateCalls<'_> {
 }
 
 impl CallLinker for TemplateCalls<'_> {
+    /// A template is expanded into a source file, whose read of the constant reaches the enum
+    /// through the entry its declaring file exports. The selected library record proves the
+    /// enum and its constant.
+    fn enum_entry(
+        &mut self,
+        _ir: &mut IrFile,
+        entry: &KlibPublicIdSignature,
+    ) -> Result<(crate::types::TypeName, String), KlibBodyDeclineReason> {
+        let classifier = member_owner(entry)?;
+        let name = entry.declaration().segments().last().ok_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch("an enum entry has no name".to_owned())
+        })?;
+        match self.callees.source.classifier(classifier) {
+            Some(record) if record.is_enum() && record.is_enum_entry(name) => {
+                Ok((classifier, name.clone()))
+            }
+            _ => Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+                "the serialized enum entry {name} of {classifier:?} is selected as no enum entry"
+            ))),
+        }
+    }
+
     fn singleton(&self, classifier: crate::types::TypeName) -> Result<(), KlibBodyDeclineReason> {
         match self.callees.source.classifier(classifier) {
             Some(record) if record.is_object() => Ok(()),
@@ -375,6 +485,102 @@ impl CallLinker for TemplateCalls<'_> {
             target,
             declaration,
         })
+    }
+
+    fn local_class(
+        &self,
+        signature: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Result<Option<crate::types::TypeName>, KlibBodyDeclineReason> {
+        super::same_library_class::classifier(self.bodies, self.module, signature)
+    }
+
+    fn external_override(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Result<ExternalCallableId, KlibBodyDeclineReason> {
+        self.callees
+            .source
+            .external_callable_by_dependency(identity)
+            .map(|(target, _)| target)
+            .ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch(
+                    "an override whose declaration handle was not registered".to_owned(),
+                )
+            })
+    }
+
+    fn dependency_override(
+        &self,
+        symbol: &crate::metadata::klib_ir::KlibIrSymbol,
+        supertypes: &[crate::types::Ty],
+        property: bool,
+    ) -> Result<Option<super::same_library_class::MemberOverride>, KlibBodyDeclineReason> {
+        use crate::metadata::id_signature::KlibDeclarationSignature;
+        use crate::metadata::klib_ir::KlibIrSignature;
+        let signature = match &symbol.signature {
+            KlibIrSignature::Public(public) => KlibDeclarationSignature::Public(public.clone()),
+            KlibIrSignature::Accessor(accessor) => {
+                KlibDeclarationSignature::Accessor(accessor.clone())
+            }
+            KlibIrSignature::FileLocal { .. } => return Ok(None),
+        };
+        let binding = match self.callees.references.get(self.module, &signature) {
+            KlibReferenceOrigin::Exact(binding) => binding,
+            KlibReferenceOrigin::Ambiguous => {
+                let KlibDeclarationSignature::Public(callee) = &signature else {
+                    return Err(KlibBodyDeclineReason::SignatureMismatch(
+                        "an object literal overrides an ambiguous accessor".to_owned(),
+                    ));
+                };
+                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
+                    callee.clone(),
+                )));
+            }
+            KlibReferenceOrigin::Missing => {
+                // An override symbol is the declaration itself, not a call. The prepared
+                // reference index only records calls, so a member that this body does not call
+                // is still the declaration the producer published under that signature.
+                match self
+                    .callees
+                    .declarations
+                    .linked_origin(self.module, &signature)
+                {
+                    crate::klib_libraries::KlibCalleeOrigin::Exact(declaration) => {
+                        KlibReferenceBinding {
+                            declaration,
+                            dispatch: None,
+                        }
+                    }
+                    crate::klib_libraries::KlibCalleeOrigin::Missing => return Ok(None),
+                    crate::klib_libraries::KlibCalleeOrigin::Ambiguous => {
+                        let KlibDeclarationSignature::Public(callee) = &signature else {
+                            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                                "an object literal overrides an ambiguous accessor".to_owned(),
+                            ));
+                        };
+                        return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
+                            callee.clone(),
+                        )));
+                    }
+                }
+            }
+        };
+        super::same_library_class::declared_override(
+            binding.declaration,
+            self.callees.source,
+            supertypes,
+            property,
+            &|sub, owner| self.applied_supertype(sub, owner),
+        )
+    }
+
+    fn is_interface(&self, name: crate::types::TypeName) -> Result<bool, KlibBodyDeclineReason> {
+        match self.callees.source.classifier(name) {
+            Some(record) => Ok(record.is_interface()),
+            None => Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+                "an object literal's supertype {name:?} is not a selected classifier"
+            ))),
+        }
     }
 
     fn constructor_bound(&self, parameters: &KlibTypeParameters, argument: Ty, bound: Ty) -> bool {
@@ -533,6 +739,7 @@ impl CallLinker for TemplateCalls<'_> {
             type_parameter_bounds: Some(Vec::new()),
             class_type_parameters: Vec::new(),
             parameter_defaults: Vec::new(),
+            edge: Default::default(),
         })
     }
 
@@ -625,6 +832,7 @@ fn generic_call(
             .map(|signature| signature.formal_bounds.clone()),
         class_type_parameters: Vec::new(),
         parameter_defaults: Vec::new(),
+        edge: Default::default(),
     })
 }
 
@@ -714,6 +922,7 @@ fn member_call(
         type_parameter_bounds: Some(Vec::new()),
         class_type_parameters,
         parameter_defaults: Vec::new(),
+        edge: Default::default(),
     })
 }
 

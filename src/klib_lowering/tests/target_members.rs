@@ -70,13 +70,16 @@ fn klib_target_member_links_the_root_class_member_at_its_receiver() {
         KlibBodyLibrary::new(
             selected.identity().module.clone(),
             [],
-            KlibIrModuleTrees::from_trees(vec![super::target_calls::target_tree(arena, function)])
-                .unwrap(),
+            KlibIrModuleTrees::from_trees(vec![super::target_calls::member_target_tree(
+                &libraries, selected, arena, function,
+            )])
+            .unwrap(),
         ),
     ])
     .unwrap();
     let root = records["a"].klib_body_callable().unwrap();
-    let facts = KlibCalleeFacts::with_declarations([root], [selected]);
+    let facts = KlibCalleeFacts::with_declarations([root], [selected])
+        .with_member_edges(super::non_overriding_edges([selected]));
     let external = crate::fir::ExternalCallableId::from_raw(73);
 
     let leaves = [(

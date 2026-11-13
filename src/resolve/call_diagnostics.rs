@@ -12,6 +12,12 @@ use rejection_plan::{
     MappedRejectionCandidate, MappedRejectionPlan, RejectedArgumentInput, RejectedArgumentSite,
 };
 
+/// The generic declaration and the formal whose contextual result constraints disagree.
+pub(super) struct ContextualFormal<'a> {
+    pub(super) signature: &'a crate::libraries::GenericSig,
+    pub(super) formal: &'a String,
+}
+
 #[derive(Clone, Copy)]
 enum ReceiverAdmissionPhase {
     BeforeArguments,
@@ -96,6 +102,30 @@ fn rejected_candidate_argument_shape(
         .collect()
 }
 
+fn type_mentions_formal(ty: Ty, formal: &str) -> bool {
+    match ty.kind() {
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => name.as_str() == formal,
+        TyKind::Obj(_, arguments) => arguments
+            .iter()
+            .any(|argument| type_mentions_formal(*argument, formal)),
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::StarProjection(inner)
+        | TyKind::RawProjection(inner)
+        | TyKind::DefinitelyNotNull(inner) => type_mentions_formal(inner, formal),
+        TyKind::Fun(signature) => signature
+            .params
+            .iter()
+            .chain(std::iter::once(&signature.ret))
+            .any(|part| type_mentions_formal(*part, formal)),
+        TyKind::Intersection(parts) => parts.iter().any(|part| type_mentions_formal(*part, formal)),
+        _ => false,
+    }
+}
+
 impl Checker<'_> {
     pub(super) fn assignability_error_message(
         &self,
@@ -147,6 +177,91 @@ impl Checker<'_> {
         Some(msg)
     }
 
+    /// Remember the dependency candidate these diagnostics select, so a missing class in its
+    /// declared signature is still reported. A none-applicable family selects nobody: the missing
+    /// class check inspects only a resolved callee. Bounds stay out: `bounded(Any())` is an
+    /// inference failure, not a missing class, even when the bound names a class that is absent.
+    fn note_selected_dependency_signature(
+        &mut self,
+        call: ExprId,
+        candidate: &crate::libraries::FunctionInfo,
+    ) {
+        if candidate.callable.external_identity.is_none() {
+            return;
+        }
+        let (ret, params) = if let Some(signature) = candidate.generic_sig.as_ref() {
+            (signature.ret, signature.params.as_slice())
+        } else {
+            (candidate.callable.ret, candidate.callable.params.as_slice())
+        };
+        let mut types = vec![ret];
+        types.extend(params.iter().copied());
+        self.rejected_dependency_signatures.insert(call, types);
+    }
+
+    /// A single static candidate that has more source arguments than value parameters. The extra
+    /// argument does not map, so the mapped-candidate path reports nothing; the candidate still
+    /// owns the unbound type parameter and the arity error.
+    pub(super) fn report_single_candidate_excess_arguments(
+        &mut self,
+        call: ExprId,
+        type_args: &[Ty],
+        candidates: &[crate::libraries::FunctionInfo],
+        args: &[ExprId],
+    ) -> bool {
+        let [candidate] = candidates else {
+            return false;
+        };
+        if candidate.call_sig.vararg_index.is_some() {
+            return false;
+        }
+        let value_count = candidate
+            .callable
+            .params
+            .len()
+            .saturating_sub(candidate.context_count);
+        if args.len() <= value_count {
+            return false;
+        }
+        if let Some(signature) = candidate.generic_sig.as_ref() {
+            for formal in signature.formals.iter().skip(type_args.len()) {
+                let constrained = signature
+                    .params
+                    .iter()
+                    .take(value_count)
+                    .any(|parameter| type_mentions_formal(*parameter, formal.as_str()));
+                if constrained {
+                    continue;
+                }
+                self.diags.error(
+                    self.call_callee_name_span(call),
+                    format!(
+                        "cannot infer type for type parameter '{}'. Specify it explicitly.",
+                        crate::types::type_parameter_source_name(formal)
+                    ),
+                );
+            }
+        }
+        let display =
+            super::declaration_rendering::declared_static_function(&self.fed_source(), candidate);
+        self.report_function_arity(
+            call,
+            super::DiagnosticFunction {
+                name: &candidate.callable.name,
+                params: &candidate.callable.params,
+                param_names: &candidate.call_sig.param_names,
+                param_defaults: &candidate.call_sig.param_defaults,
+                required: candidate.callable.params.len(),
+                vararg_index: None,
+                context_count: candidate.context_count,
+                ret: candidate.callable.ret,
+                source_display: Some(display),
+            },
+            args,
+        );
+        true
+    }
+
     /// When overload selection rejects a family by type but exactly one declaration has a valid
     /// source-argument mapping, report that declaration's mapped argument errors. This diagnostic
     /// step is origin-neutral: top-level and extension candidates carry the same semantic shape and
@@ -155,13 +270,16 @@ impl Checker<'_> {
     pub(super) fn report_single_mapped_candidate_type_errors(
         &mut self,
         scope: &CheckerScope<'_>,
-        call: ExprId,
+        call_args: CallArgs<'_>,
         name: &str,
-        args: &[ExprId],
-        arg_tys: &[Ty],
         constraints: CallConstraints<'_>,
         candidates: &[crate::libraries::FunctionInfo],
     ) -> Option<Ty> {
+        let CallArgs {
+            call,
+            args,
+            arg_tys,
+        } = call_args;
         let type_args = constraints.type_args;
         let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
@@ -200,6 +318,7 @@ impl Checker<'_> {
         let [mapped_candidate] = mapped.as_slice() else {
             return reported_type_arity.then_some(Ty::Error);
         };
+        self.note_selected_dependency_signature(call, mapped_candidate.candidate);
         let MappedRejectionCandidate {
             candidate,
             shape,
@@ -411,6 +530,7 @@ impl Checker<'_> {
             self.diags.sort_source_order_from(checkpoint);
             return Some(Ty::Error);
         }
+        self.rejected_dependency_signatures.remove(&call);
         None
     }
 
@@ -468,7 +588,9 @@ impl Checker<'_> {
         if self.diags.diags.len() == checkpoint {
             return false;
         }
-        if has_value_arguments {
+        if has_value_arguments
+            && !self.report_shaped_lambda_bound_mismatches(call, candidate, signature, &bindings)
+        {
             let display = self.source_callable_display(candidate).unwrap_or_else(|| {
                 Self::callable_candidate_display(&candidate.callable.name, candidate)
             });
@@ -478,6 +600,60 @@ impl Checker<'_> {
             );
         }
         true
+    }
+
+    /// A shaped lambda on the only overload is the call's argument diagnostic, not an
+    /// inapplicable-candidate line: kotlinc reports the bound and `argument type mismatch` for
+    /// the lambda even when both sides render as the explicit argument's function type.
+    fn report_shaped_lambda_bound_mismatches(
+        &mut self,
+        call: ExprId,
+        candidate: &crate::libraries::FunctionInfo,
+        signature: &crate::libraries::GenericSig,
+        bindings: &crate::symbol_resolver::GSigBinds,
+    ) -> bool {
+        let Expr::Call { args, .. } = self.file.expr(call).clone() else {
+            return false;
+        };
+        let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let context_count = candidate.context_count.min(signature.params.len());
+        let Some(argument_parameters) = call_argument_parameter_indices(
+            args.len(),
+            signature.params.len().saturating_sub(context_count),
+            argument_names,
+            trailing_lambda,
+            &candidate.call_sig.suffix(context_count),
+        ) else {
+            return false;
+        };
+        let mut reported = false;
+        for (source, parameter) in argument_parameters.into_iter().enumerate() {
+            let argument = args[source];
+            if !matches!(self.file.expr(argument), Expr::Lambda { .. }) {
+                continue;
+            }
+            let Some(expected) = signature
+                .params
+                .get(parameter + context_count)
+                .copied()
+                .map(|parameter| {
+                    crate::types::ty_subst_formals(parameter, &signature.formals, bindings)
+                })
+                .filter(|expected| expected.non_null().is_fun())
+            else {
+                continue;
+            };
+            let actual = self.expr_types[argument.0 as usize];
+            if !actual.non_null().is_fun() {
+                continue;
+            }
+            if let Some(message) = self.assignability_error_message(expected, actual, "argument") {
+                self.diags.error(self.span(argument), message);
+                reported = true;
+            }
+        }
+        reported
     }
 
     /// Retain upper-bound diagnostics when a rejected call still has one shape-matching candidate.
@@ -553,10 +729,10 @@ impl Checker<'_> {
         call: ExprId,
         args: &[ExprId],
         argument_parameters: Option<&[usize]>,
-        signature: &crate::libraries::GenericSig,
-        formal: &String,
+        inferred: ContextualFormal<'_>,
         implicit_lambda_label: Option<&str>,
     ) {
+        let ContextualFormal { signature, formal } = inferred;
         let message = format!(
             "cannot infer type for type parameter '{}'. Specify it explicitly.",
             crate::types::type_parameter_source_name(formal)
@@ -738,20 +914,14 @@ impl Checker<'_> {
         constraints: CallConstraints<'_>,
         candidates: &[crate::libraries::FunctionInfo],
     ) {
-        let CallArgs {
-            call,
-            args,
-            arg_tys,
-        } = call_args;
+        let CallArgs { call, args, .. } = call_args;
         let reported = self.report_member_and_extensions_inapplicable(call, name, args, candidates)
             || self.report_inapplicable_member_mapping_error(call, name, args, candidates)
             || self
                 .report_single_mapped_candidate_type_errors(
                     scope,
-                    call,
+                    call_args,
                     name,
-                    args,
-                    arg_tys,
                     constraints,
                     candidates,
                 )
@@ -962,7 +1132,7 @@ impl Checker<'_> {
                 param_names: &candidate.call_sig.param_names,
                 param_defaults: &candidate.call_sig.param_defaults,
                 required: candidate.call_sig.required,
-                vararg: candidate.call_sig.vararg,
+                vararg_index: candidate.call_sig.vararg_index,
                 context_count: candidate.context_count,
                 ret: candidate.callable.ret,
                 // Retained mapping failures can name an inherited declaration whose SourceMember

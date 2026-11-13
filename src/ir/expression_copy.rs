@@ -52,7 +52,6 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         inline_cleanup_results,
         annotation_constructions,
         property_initializer_stores,
-        expr_lines,
         positions,
         generated_lines,
         value_names,
@@ -81,10 +80,8 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         inline_callable_reference_receiver_bindings,
         inline_regions,
         callable_scopes,
-        kept_start_lines,
         builtin_calls,
         safe_calls,
-        safe_call_reads,
         elvis_temporaries,
         call_operand_bindings,
         argument_evaluation_bindings,
@@ -239,6 +236,8 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         function_annotations: _,
         function_source_annotations: _,
         compose: _,
+        atomicfu: _,
+        parcelize: _,
         plugin_extended_signatures: _,
         property_annotation_markers: _,
         jvm_package_property_annotation_markers: _,
@@ -260,7 +259,6 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         dispatch_entries: _,
         enum_initializers: _,
         fn_params: _,
-        fn_param_declared_nullable: _,
         fn_declared_spellings: _,
         fn_source_names: _,
         class_declared_spellings: _,
@@ -269,7 +267,6 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         extension_receiver_fns: _,
         companion_blocks: _,
         class_declarations: _,
-        fn_context_counts: _,
         member_ext_props: _,
         type_reflection: _,
         inline_fns: _,
@@ -277,11 +274,9 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         operator_fns: _,
         infix_fns: _,
         tailrec_fns: _,
-        fn_param_annotations: _,
         accessor_annotations: _,
         package_property_annotations: _,
         companion_block_field_annotations: _,
-        fn_param_no_infer: _,
         fn_return_value_statuses: _,
         class_ctor_defaults: _,
         open_methods: _,
@@ -329,10 +324,10 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         ctor_open_lines: _,
         secondary_ctor_lines: _,
         ctor_visibilities: _,
-        fn_varargs: _,
         declared_class_statics: _,
         prop_decl_lines: _,
         function_positions: _,
+        declared_parameters: _,
         fn_debug_locals: _,
         fn_source_order: _,
         fn_continuation_ordinal: _,
@@ -347,6 +342,7 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         serialization_cache_methods: _,
         singleton_extension_unread_receivers: _,
         external_overridden_declarations: _,
+        dependency_methods: _,
         callable_semantic_roles: _,
         lambda_own_params_from: _,
         lambda_inferred_results: _,
@@ -354,7 +350,7 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         lambda_sam_jvm_signature: _,
     } = ir;
 
-    let inherited: [&mut dyn InheritedFacts; 79] = [
+    let inherited: [&mut dyn InheritedFacts; 76] = [
         module_constructions,
         callable_reference_provenance,
         callable_reference_enclosures,
@@ -366,7 +362,6 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         inline_cleanup_results,
         annotation_constructions,
         property_initializer_stores,
-        expr_lines,
         positions,
         generated_lines,
         value_names,
@@ -395,10 +390,8 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         inline_callable_reference_receiver_bindings,
         inline_regions,
         callable_scopes,
-        kept_start_lines,
         builtin_calls,
         safe_calls,
-        safe_call_reads,
         elvis_temporaries,
         call_operand_bindings,
         argument_evaluation_bindings,
@@ -485,6 +478,7 @@ mod tests {
         let source = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
         let target = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
         ir.set_source_line(source, 4);
+        ir.set_statement_line(source, 3);
         ir.mark_positionless(source);
         ir.mark_value_class_parameter_construction(source);
         ir.record_inline_copy_owner(source, 2, None, SourceFileId::from_raw(0));
@@ -494,6 +488,7 @@ mod tests {
         copy_expression_facts(&mut ir, source, target);
 
         assert_eq!(ir.source_line(target), Some(4));
+        assert_eq!(ir.statement_line(target), Some(3));
         assert!(ir.is_positionless(target));
         assert!(ir.has_value_class_parameter_construction(target));
         let frames = ir

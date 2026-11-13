@@ -1,4 +1,5 @@
-//! Installing a same-library file-local class into the unit that lowers its bodies.
+//! Installing a same-library class into the unit that lowers its bodies, and linking calls of
+//! the members it installs.
 
 use super::*;
 use crate::ir::{IrExpr, IrFile};
@@ -9,6 +10,18 @@ impl<'s> Linker<'_, 's> {
         &mut self,
         ir: &mut IrFile,
         prepared: Box<super::super::same_library_class::PreparedLocalClass<'s>>,
+    ) -> Result<super::super::same_library_class::LocalConstructor, KlibBodyDeclineReason> {
+        self.install_class(ir, prepared, None)
+    }
+
+    /// Install `prepared` in this unit. A public class's `constructor` publishes its allocation,
+    /// and each of its public members is published under its own identity, so a caller outside
+    /// the unit names them as it names any other emitted dependency declaration.
+    pub(super) fn install_class(
+        &mut self,
+        ir: &mut IrFile,
+        prepared: Box<super::super::same_library_class::PreparedLocalClass<'s>>,
+        constructor: Option<&KlibDependencyCallable>,
     ) -> Result<super::super::same_library_class::LocalConstructor, KlibBodyDeclineReason> {
         if ir.class_id_by_name(prepared.classifier).is_some() {
             return Err(KlibBodyDeclineReason::SignatureMismatch(
@@ -66,9 +79,57 @@ impl<'s> Linker<'_, 's> {
                 },
             )),
         });
+        if let Some(constructor) = constructor {
+            self.classes.insert(constructor.clone(), class_id);
+        }
         for member in prepared.members {
             let function = declare_function(ir, &member.header);
-            ir.set_method_visibility(function, crate::types::Visibility::Private);
+            let declaration = match &member.signature {
+                KlibIrSignature::Public(signature) => {
+                    Some(KlibDeclarationSignature::Public(signature.clone()))
+                }
+                KlibIrSignature::Accessor(signature) => {
+                    Some(KlibDeclarationSignature::Accessor(signature.clone()))
+                }
+                _ => None,
+            };
+            // A private member is called only by its class's members in this unit; no provider
+            // publishes it to a caller outside the class.
+            let published = match (constructor, declaration) {
+                (Some(_), Some(declaration))
+                    if member.visibility != crate::types::Visibility::Private =>
+                {
+                    match self
+                        .sources
+                        .bodies
+                        .linked_origin(&prepared.key.module, &declaration)
+                    {
+                        KlibCalleeOrigin::Exact(identity) => Some(identity),
+                        KlibCalleeOrigin::Missing => None,
+                        KlibCalleeOrigin::Ambiguous => {
+                            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                                "two libraries serialize one class member".to_owned(),
+                            ))
+                        }
+                    }
+                }
+                _ => None,
+            };
+            ir.set_method_visibility(
+                function,
+                if published.is_some() {
+                    member.visibility
+                } else {
+                    crate::types::Visibility::Private
+                },
+            );
+            if let Some(identity) = published {
+                if ir.functions[function as usize].dispatch_receiver.is_some() {
+                    self.member_receivers
+                        .insert(identity.clone(), prepared.self_type);
+                }
+                self.functions.insert(identity, function);
+            }
             ir.classes[class_id as usize].methods.push(function);
             ir.note_class_method(class_id, function);
             self.local_functions.insert(
@@ -79,6 +140,7 @@ impl<'s> Linker<'_, 's> {
                 LocalFunction {
                     function,
                     class: prepared.key.clone(),
+                    setter: member.setter,
                 },
             );
             self.pending.push_back(PendingBody {
@@ -174,6 +236,14 @@ impl<'s> Linker<'_, 's> {
         self.linked_local_member(ir, &key)
     }
 
+    pub(super) fn linked_installed_member(
+        &self,
+        ir: &IrFile,
+        key: &super::super::same_library_class::LocalIdentity,
+    ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
+        self.linked_local_member(ir, key)
+    }
+
     fn linked_local_member(
         &self,
         ir: &IrFile,
@@ -189,11 +259,25 @@ impl<'s> Linker<'_, 's> {
                 "a member's class was not materialized".to_owned(),
             ));
         };
-        let Some((_, declaration)) = self
-            .sources
-            .bodies
-            .module_local_function(&key.module, &key.signature)
-        else {
+        let serialized = match &key.signature {
+            KlibIrSignature::Public(signature) => {
+                self.sources.bodies.function(&KlibDependencyCallable {
+                    module: key.module.clone(),
+                    declaration: KlibDeclarationSignature::Public(signature.clone()),
+                })
+            }
+            KlibIrSignature::Accessor(signature) => {
+                self.sources.bodies.function(&KlibDependencyCallable {
+                    module: key.module.clone(),
+                    declaration: KlibDeclarationSignature::Accessor(signature.clone()),
+                })
+            }
+            local => self
+                .sources
+                .bodies
+                .module_local_function(&key.module, local),
+        };
+        let Some((_, declaration)) = serialized else {
             return Err(KlibBodyDeclineReason::SignatureMismatch(
                 "a materialized member has no serialized declaration".to_owned(),
             ));
@@ -286,7 +370,7 @@ fn publish_overrides(
 
 /// The provider handle of an authenticated override. The call closure may already carry the same
 /// handle when a body calls the member; a body that only constructs the class still publishes it.
-fn registered_override_handle(
+pub(super) fn registered_override_handle(
     identity: &KlibDependencyCallable,
     externals: &HashMap<KlibDependencyCallable, EmittedDependencyCallable>,
     declarations: &dyn crate::symbol_source::SymbolSource,
@@ -337,4 +421,45 @@ fn class_constructor(
     found.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
         "a call of a file-private declaration",
     ))
+}
+
+impl Linker<'_, '_> {
+    /// The member `identity` of a public class this unit installed, which every call in the
+    /// unit reaches directly: the class is final, so no override can replace it.
+    pub(super) fn installed_member(
+        &self,
+        ir: &IrFile,
+        identity: &KlibDependencyCallable,
+    ) -> Result<Option<(LinkedCallee, bool)>, KlibBodyDeclineReason> {
+        let key = installed_identity(identity);
+        let Some(setter) = self
+            .local_functions
+            .get(&key)
+            .map(|function| function.setter)
+        else {
+            return Ok(None);
+        };
+        self.linked_installed_member(ir, &key)
+            .map(|linked| Some((linked, setter)))
+    }
+}
+
+/// The key under which a class installed with all of its members records the member `identity`.
+pub(super) fn installed_identity(
+    identity: &KlibDependencyCallable,
+) -> super::super::same_library_class::LocalIdentity {
+    let signature = match &identity.declaration {
+        KlibDeclarationSignature::Public(signature) => KlibIrSignature::Public(signature.clone()),
+        KlibDeclarationSignature::Accessor(signature) => {
+            KlibIrSignature::Accessor(signature.clone())
+        }
+        KlibDeclarationSignature::FileLocal { file, slot } => KlibIrSignature::FileLocal {
+            file: *file,
+            slot: *slot,
+        },
+    };
+    super::super::same_library_class::LocalIdentity {
+        module: identity.module.clone(),
+        signature,
+    }
 }

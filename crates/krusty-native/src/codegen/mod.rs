@@ -125,6 +125,10 @@ pub struct CodegenModule {
     /// The exported entry answering each preceding source module's object instance, by the
     /// object's classifier.
     dependency_singletons: krusty::fx_hash::HashMap<krusty::backend::DependencyClassifier, String>,
+    /// The exported entry answering each enum constant, linked by the constant (see
+    /// `krusty::backend::module_links`).
+    enum_constants:
+        krusty::backend::module_links::ModuleLinks<krusty::backend::EnumConstant, String>,
     next_dependency_symbol: usize,
     next_dependency_support_object: usize,
     next_disambiguated_source_object: usize,
@@ -135,6 +139,9 @@ pub struct CodegenModule {
         String,
         krusty::backend::class_tables::module_slots::ModuleSlotPlan,
     )>,
+    /// The classes the files of the module being emitted laid out so far, which a later file's
+    /// subclass extends.
+    laid_out: super::laid_out_classes::LaidOutClasses,
 }
 
 impl CodegenModule {
@@ -232,6 +239,7 @@ impl Backend for CraneliftBackend {
         krusty::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
         // Before default arguments: a constant leaving constructor arguments out is then an
         // ordinary construction for that lowering.
+        krusty::backend::enums::publish_constants(&mut file.ir, &mut file.dependency_exports);
         krusty::backend::enums::realize(
             &mut file.ir,
             krusty::backend::enums::Contract::KotlinNative,
@@ -241,6 +249,20 @@ impl Backend for CraneliftBackend {
             &mut file.callables,
             |function| file.dependency_exports.callable(function).is_some(),
         );
+        // After default arguments, so a `$default` entry's call of the declaration is the one
+        // that gains the continuation, and before dispatch entries, which copy the signature.
+        if let Err(declined) =
+            krusty::backend::coroutines::add_continuation_parameters(&mut file.ir)
+        {
+            diags.error(
+                krusty::diag::Span::new(0, 0),
+                format!(
+                    "krusty: the native backend does not support {} yet",
+                    declined.construct()
+                ),
+            );
+            return Vec::new();
+        }
         krusty::backend::construction_entries::realize(&mut file.ir, &mut file.dependency_exports);
         if let Err(error) =
             krusty::backend::property_entries::realize(&mut file.ir, &mut file.dependency_exports)
@@ -324,6 +346,7 @@ impl Backend for CraneliftBackend {
             state.slot_plan = Some((file.module_name.to_owned(), plan));
         }
         let slot_plan = &state.slot_plan.as_ref().expect("planned just above").1;
+        state.laid_out.enter_source_module(file.module_name);
         let mut dependency_exports = krusty::fx_hash::HashMap::default();
         let mut exports = file.dependency_exports.callables().collect::<Vec<_>>();
         // `DependencyExportSignatures` is a lookup map; target symbol allocation must not inherit
@@ -444,6 +467,58 @@ impl Backend for CraneliftBackend {
                 },
             );
         }
+        let constants = match krusty::backend::enums::link_constant_entries(
+            &file.dependency_exports,
+            &mut state.enum_constants,
+            || {
+                let symbol = format!("kt_klib_enum_constant_{}", state.next_dependency_symbol);
+                state.next_dependency_symbol += 1;
+                symbol
+            },
+        ) {
+            Ok(constants) => constants,
+            Err(error) => {
+                diags.error(
+                    krusty::diag::Span::new(0, 0),
+                    format!("internal error: {error}"),
+                );
+                return Vec::new();
+            }
+        };
+        for (entry, symbol) in constants {
+            let signature = match krusty::backend::DependencyFunctionSignature::from_ir(
+                &file.ir, entry, None,
+            ) {
+                Ok(signature) => signature,
+                Err(error) => {
+                    diags.error(
+                        krusty::diag::Span::new(0, 0),
+                        format!("internal error: {error}"),
+                    );
+                    return Vec::new();
+                }
+            };
+            dependency_exports.insert(
+                entry,
+                DependencyExportDefinition {
+                    symbol,
+                    signature,
+                    member_receiver: None,
+                    default_entry: None,
+                    dispatch_entry: None,
+                },
+            );
+        }
+        let enum_constant_reads = krusty::backend::enums::link_constant_reads(
+            &file.ir,
+            file.classifiers.module(),
+            &mut state.enum_constants,
+            || {
+                let symbol = format!("kt_klib_enum_constant_{}", state.next_dependency_symbol);
+                state.next_dependency_symbol += 1;
+                symbol
+            },
+        );
         let lowered = match lower::lower_file(
             lower::FileInput {
                 ir: &file.ir,
@@ -463,6 +538,8 @@ impl Backend for CraneliftBackend {
                 dependency_signatures: &file.dependency_exports,
                 dependency_symbols: &state.dependency_symbols,
                 dependency_singletons: &state.dependency_singletons,
+                dependency_enum_constants: &enum_constant_reads,
+                laid_out: &state.laid_out,
             },
             self.target,
             &object_stem,
@@ -488,7 +565,29 @@ impl Backend for CraneliftBackend {
             state.entry_file = Some(source_stem);
         }
         state.abi.extend(lowered.abi);
+        for (class, record) in lowered.laid_out {
+            state.laid_out.insert(class, record);
+        }
         vec![(format!("{object_stem}.o"), lowered.object)]
+    }
+
+    fn check_module(&self, state: &Self::State, diags: &mut DiagSink) {
+        // A file that declined may be the one that would have defined the link; its own
+        // diagnostic already explains why the module is not emitted.
+        if diags.error_count() > 0 {
+            return;
+        }
+        if let Some(constant) = state.enum_constants.undefined().next() {
+            // Boundary conversion for a diagnostic.
+            diags.error(
+                krusty::diag::Span::new(0, 0),
+                format!(
+                    "internal error: an enum constant (`{}.{}`) without its declaring file's entry",
+                    constant.classifier.render().replace('/', "."),
+                    constant.name
+                ),
+            );
+        }
     }
 
     fn finalize(&self, state: Self::State, module_name: &str) -> Vec<Artifact> {

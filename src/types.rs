@@ -10,8 +10,10 @@ mod diagnostic_rendering;
 mod intersection;
 pub use intersection::declaration_approximation;
 mod overridden_declaration;
+mod qualified_name;
 mod semantic_call_role;
 mod semantic_callable_owner;
+mod suspension;
 pub use classifier_declarations::{
     ClassifierDeclarationFacts, ClassifierDeclarationKind, ClassifierDeclarationName,
     DeclaredValueClass, GeneratedClassifierFact, GeneratedClassifierKind,
@@ -25,6 +27,7 @@ pub use deprecation::{
 pub use overridden_declaration::OverriddenDeclaration;
 pub use semantic_call_role::{ConstNumericOperation, SemanticCallRole};
 pub use semantic_callable_owner::SemanticCallableOwner;
+pub use suspension::continuation_passing;
 mod annotation_targets;
 mod interning;
 mod spelling;
@@ -170,7 +173,7 @@ const BUILTIN_TYPE_NAMES: [(&str, TypeName); 16] = [
 ///
 /// `Unit` and `Nothing` are the enum variants. The scalar and `String` classifiers are the
 /// `Ty::Obj` constants. Every other name, including `kotlin/Array`, is `None`.
-pub(crate) fn builtin_semantic(name: TypeName) -> Option<Ty> {
+pub fn builtin_semantic(name: TypeName) -> Option<Ty> {
     Some(match name {
         KOTLIN_BOOLEAN => Ty::Boolean,
         KOTLIN_BYTE => Ty::Byte,
@@ -1226,6 +1229,36 @@ impl Ty {
             TyKind::Fun(signature) => {
                 signature.ret.mentions_ty_param()
                     || signature.params.iter().any(|p| p.mentions_ty_param())
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether this type mentions a call variable, or a type parameter for which `fixed` does not
+    /// hold. A type parameter lexically in scope names the enclosing declaration's own type and is
+    /// as determined as any classifier; any other one is still open.
+    pub fn mentions_open_ty_param(self, fixed: &dyn Fn(&str) -> bool) -> bool {
+        match self.kind() {
+            TyKind::TyParam(name, _) => !fixed(name.as_str()),
+            TyKind::Var(..) => true,
+            TyKind::DefinitelyNotNull(inner)
+            | TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner)
+            | TyKind::InProjection(inner)
+            | TyKind::OutProjection(inner)
+            | TyKind::StarProjection(inner)
+            | TyKind::RawProjection(inner) => inner.mentions_open_ty_param(fixed),
+            TyKind::Intersection(parts) => {
+                parts.iter().any(|part| part.mentions_open_ty_param(fixed))
+            }
+            TyKind::Obj(_, args) => args.iter().any(|a| a.mentions_open_ty_param(fixed)),
+            TyKind::Fun(signature) => {
+                signature.ret.mentions_open_ty_param(fixed)
+                    || signature
+                        .params
+                        .iter()
+                        .any(|p| p.mentions_open_ty_param(fixed))
             }
             _ => false,
         }

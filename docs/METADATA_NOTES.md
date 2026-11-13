@@ -518,7 +518,7 @@ keeps abbreviation off type equality for the same reason). The spelling therefor
   `member_spellings`.
 - Class metadata is built from the IR alone, so the spelling reaches it on IR side tables
   (`fn_declared_spellings`, `class_declared_spellings`, `prop_declared_spellings`), filled at
-  lowering — the same mechanism `fn_param_declared_nullable` already used. Property spellings use
+  lowering — the same mechanism the declared parameter nullability uses. Property spellings use
   `(classifier identity, stable declaration order)`, not `(classifier, source name)`: ordinary and
   member-extension properties may legally share a name.
 
@@ -657,3 +657,11 @@ The class metadata projection excludes only that role, after retaining each prop
 index; ordinary and plugin-generated declarations remain properties. Physical fields and capture
 storage demand remain separate facts, owned by the current declaration-keyed capture plan.
 Tests: `tests/capture_storage_metadata_e2e.rs` and the FIR local-class owner tests.
+
+## Lexical and inner classifier applications
+
+A local classifier's JVM metadata application records only its own type arguments. Checked
+applications retain enclosing-method lexical arguments for captured formal references. Actual inner
+instances encode `outer_type`. KLIB retains its flattened lexical-application argument policy; JVM
+inner types with a local outer retain their flat form. Tests:
+`tests/local_metadata_applications_e2e.rs`.

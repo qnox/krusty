@@ -1018,13 +1018,10 @@ impl BodyLowering<'_> {
         self.ir
             .set_method_visibility(function, crate::types::Visibility::Private);
         if let Some(vararg) = body.vararg_parameter() {
-            self.ir.fn_varargs.insert(
-                function,
-                crate::ir::IrVarargParameter {
-                    index: vararg.index as usize,
-                    is_last: vararg.is_last,
-                },
-            );
+            self.ir.declared_parameters_mut(function).vararg = Some(crate::ir::IrVarargParameter {
+                index: vararg.index as usize,
+                is_last: vararg.is_last,
+            });
         }
         if let Some((sequence, site)) = lifting_sequence(body, self.index).zip(body.lifting_site())
         {
@@ -1426,6 +1423,7 @@ impl BodyLowering<'_> {
                 body_origin(body),
             )?
         };
+        nested.settle_body_positions();
         let published_local_callables = std::mem::take(&mut nested.published_local_callables);
         drop(nested);
         self.published_local_callables = published_local_callables;

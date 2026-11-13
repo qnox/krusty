@@ -328,7 +328,6 @@ pub(crate) enum ContextValue {
     },
     Binding {
         name: String,
-        shadow_depth: usize,
     },
 }
 
@@ -340,6 +339,10 @@ struct ScopedReceiver {
     context_name: Option<String>,
     context_shadow_depth: usize,
 }
+
+/// One implicit receiver in lookup order: its type, the extension declaration that introduced it,
+/// its `(scope, slot)` identity, and whether it is a class dispatch receiver.
+pub(crate) type ImplicitReceiverDeclaration = (Ty, Option<Span>, (usize, usize), bool);
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum FunctionReceiverKind {
@@ -798,10 +801,8 @@ impl<'p, B> Scope<'p, B> {
                 } if receiver_has_value(receiver) => {
                     return Some(RootValue::Receiver);
                 }
-                ScopeKind::Class { ty, .. } => {
-                    if receiver_has_value(ty) {
-                        return Some(RootValue::Receiver);
-                    }
+                ScopeKind::Class { ty, .. } if receiver_has_value(ty) => {
+                    return Some(RootValue::Receiver);
                 }
                 _ => {}
             }
@@ -862,27 +863,22 @@ impl<'p, B> Scope<'p, B> {
                 });
             }
         }
-        let mut same_name_depths = HashMap::<String, usize>::default();
         for scope in self.ancestors() {
             for binding in scope.bindings.borrow().iter().rev() {
                 if binding.ns != Ns::Value {
                     continue;
                 }
-                let shadow_depth = *same_name_depths.get(&binding.name).unwrap_or(&0);
                 if binding_matches(&binding.payload) {
                     return Some(ContextValue::Binding {
                         name: binding.name.clone(),
-                        shadow_depth,
                     });
                 }
-                *same_name_depths.entry(binding.name.clone()).or_default() += 1;
             }
         }
         None
     }
 
-    /// The `name` binding with `depth` nearer same-named bindings in front of it, the coordinate
-    /// [`Self::find_context_value`] reports.
+    /// The `name` binding with `depth` nearer same-named bindings in front of it.
     pub(crate) fn shadowed_binding(&self, ns: Ns, name: &str, depth: usize) -> Option<B>
     where
         B: Clone,
@@ -1207,9 +1203,7 @@ impl<'p, B> Scope<'p, B> {
 
     /// Implicit receivers paired with the extension declaration, if any, that introduced their
     /// runtime value. Ordering is identical to [`Self::implicit_receivers`].
-    pub(crate) fn implicit_receivers_with_declarations(
-        &self,
-    ) -> Vec<(Ty, Option<Span>, (usize, usize), bool)> {
+    pub(crate) fn implicit_receivers_with_declarations(&self) -> Vec<ImplicitReceiverDeclaration> {
         self.implicit_receiver_values()
             .into_iter()
             .map(|receiver| {
@@ -1659,7 +1653,7 @@ mod tests {
         let selected = parameters.find_context_value(|ty| ty == Ty::String, |value| *value == 1);
         assert!(matches!(
             selected,
-            Some(ContextValue::Binding { name, shadow_depth: 0 }) if name == "value"
+            Some(ContextValue::Binding { name }) if name == "value"
         ));
     }
 

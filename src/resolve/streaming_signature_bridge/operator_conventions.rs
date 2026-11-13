@@ -212,15 +212,11 @@ impl ProductionSignatureSemantics<'_> {
             &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
         ]);
         let oracle = crate::symbol_resolver::SourceOracle(&source);
-        if super::super::context_argument_types(
+        super::super::context_argument_types(
             &self.implicit_receivers(scope),
             &signature.params[..context_count],
             &oracle,
-        )
-        .is_none()
-        {
-            return None;
-        }
+        )?;
         let context = crate::assignable::TyCtx::new();
         let operands = std::iter::once(receiver.get())
             .chain(arguments.iter().map(|argument| argument.ty.get()));

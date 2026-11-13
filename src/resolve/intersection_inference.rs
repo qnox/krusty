@@ -339,6 +339,37 @@ impl TypeInfo {
     }
 }
 
+/// The selected generic call intersection commitment reads: its signature, the call's explicit
+/// type arguments, the source-to-declaration parameter map, and the call convention.
+#[derive(Clone, Copy)]
+pub(super) struct GenericCallCommitment<'a> {
+    pub(super) signature: &'a crate::libraries::GenericSig,
+    pub(super) explicit_type_args: &'a [Ty],
+    pub(super) parameter_indices: &'a [usize],
+    pub(super) call_sig: &'a CallSig,
+}
+
+/// An ordinary module member's generic call, before its selected-call record is built.
+pub(super) struct ModuleMemberGenericCall<'a> {
+    pub(super) signature: Option<&'a crate::libraries::GenericSig>,
+    pub(super) inferred_arguments: Option<Vec<Option<Ty>>>,
+    pub(super) explicit_type_args: &'a [Ty],
+    pub(super) logical_arg_tys: &'a [Ty],
+    pub(super) call_sig: &'a CallSig,
+}
+
+/// One selected call's intersection facts, ready to replace any previous record for that call.
+struct PublishedCallIntersections<'a> {
+    signature: &'a crate::libraries::GenericSig,
+    call_sig: &'a CallSig,
+    arguments: Vec<Option<Ty>>,
+    selected_bindings: &'a crate::symbol_resolver::GSigBinds,
+    intersection_bindings: &'a HashMap<String, Vec<Ty>>,
+    propagated: &'a HashMap<String, InferredIntersection>,
+    argument_provenance: Vec<ReifiedArgumentProvenance>,
+    final_result: Ty,
+}
+
 fn bounds_other_than_primary(parts: &[Ty], selected_result: Ty) -> Vec<Ty> {
     parts
         .iter()
@@ -514,14 +545,24 @@ impl Checker<'_> {
         } else {
             checked
         };
-        crate::symbol_resolver::reified_runtime_type(checked, &|name| {
-            Some(
-                crate::assignable::TypeOracle::direct_supertypes(self, Ty::obj_name(name))
-                    .into_iter()
-                    .filter_map(|supertype| supertype.obj_internal())
-                    .collect(),
-            )
-        })
+        crate::symbol_resolver::reified_runtime_type(
+            checked,
+            &crate::symbol_resolver::ReifiedDeclarations {
+                direct_supertypes: &|name| {
+                    Some(
+                        crate::assignable::TypeOracle::direct_supertypes(self, Ty::obj_name(name))
+                            .into_iter()
+                            .filter_map(|supertype| supertype.obj_internal())
+                            .collect(),
+                    )
+                },
+                variance_at: &|name, index| {
+                    Some(crate::assignable::TypeOracle::type_param_variance(
+                        self, name, index,
+                    ))
+                },
+            },
+        )
     }
 
     fn reified_parameters(
@@ -596,13 +637,16 @@ impl Checker<'_> {
     pub(super) fn commit_module_member_generic_call(
         &mut self,
         call: ExprId,
-        signature: Option<&crate::libraries::GenericSig>,
-        inferred_arguments: Option<Vec<Option<Ty>>>,
-        explicit_type_args: &[Ty],
-        logical_arg_tys: &[Ty],
-        call_sig: &CallSig,
+        member: ModuleMemberGenericCall<'_>,
         mut ret: Ty,
     ) -> Ty {
+        let ModuleMemberGenericCall {
+            signature,
+            inferred_arguments,
+            explicit_type_args,
+            logical_arg_tys,
+            call_sig,
+        } = member;
         let Some(signature) = signature else {
             self.clear_selected_generic_call(call);
             return ret;
@@ -625,10 +669,12 @@ impl Checker<'_> {
         let parameter_indices = (0..signature.params.len()).collect::<Vec<_>>();
         ret = self.commit_selected_call_intersections(
             call,
-            signature,
-            explicit_type_args,
-            &parameter_indices,
-            call_sig,
+            GenericCallCommitment {
+                signature,
+                explicit_type_args,
+                parameter_indices: &parameter_indices,
+                call_sig,
+            },
             &mut bindings,
             &mut intersection_bindings,
             Default::default(),
@@ -681,10 +727,12 @@ impl Checker<'_> {
         let mut intersection_bindings = self.intersection_bindings_from_lower_inputs(&lower_inputs);
         ret = self.commit_selected_call_intersections(
             call,
-            signature,
-            explicit_type_args,
-            parameter_indices,
-            call_sig,
+            GenericCallCommitment {
+                signature,
+                explicit_type_args,
+                parameter_indices,
+                call_sig,
+            },
             &mut bindings,
             &mut intersection_bindings,
             Default::default(),
@@ -759,13 +807,16 @@ impl Checker<'_> {
     pub(super) fn retain_postponed_argument_intersections(
         &self,
         call: ExprId,
-        signature: &crate::libraries::GenericSig,
-        explicit_type_args: &[Ty],
-        parameter_indices: &[usize],
-        call_sig: &CallSig,
+        commitment: GenericCallCommitment<'_>,
         selected_bindings: &mut crate::symbol_resolver::GSigBinds,
         intersection_bindings: &mut HashMap<String, Vec<Ty>>,
     ) -> HashMap<String, InferredIntersection> {
+        let GenericCallCommitment {
+            signature,
+            explicit_type_args,
+            parameter_indices,
+            call_sig,
+        } = commitment;
         let mut propagated = HashMap::default();
         let Some(slots) = self.resolved_call_arg_slots.get(&call) else {
             return propagated;
@@ -788,23 +839,19 @@ impl Checker<'_> {
                     let Some(&parameter) = parameter_indices.get(visible_parameter) else {
                         return false;
                     };
-                    if call_sig.vararg_index == Some(visible_parameter)
-                        || call_sig
+                    call_sig.vararg_index != Some(visible_parameter)
+                        && !call_sig
                             .exact_params
                             .get(visible_parameter)
                             .copied()
                             .unwrap_or(false)
-                        || signature
+                        && signature
                             .params
                             .get(parameter)
                             .copied()
                             .map(Ty::non_null)
                             .and_then(Ty::ty_param_name)
-                            != Some(formal.as_str())
-                    {
-                        return false;
-                    }
-                    true
+                            == Some(formal.as_str())
                 })
                 .collect::<Vec<_>>();
             for argument in &direct_arguments {
@@ -851,21 +898,21 @@ impl Checker<'_> {
     pub(super) fn commit_selected_call_intersections(
         &mut self,
         call: ExprId,
-        signature: &crate::libraries::GenericSig,
-        explicit_type_args: &[Ty],
-        parameter_indices: &[usize],
-        call_sig: &CallSig,
+        commitment: GenericCallCommitment<'_>,
         selected_bindings: &mut crate::symbol_resolver::GSigBinds,
         intersection_bindings: &mut HashMap<String, Vec<Ty>>,
         return_info: crate::libraries::ReturnInfo,
         mut final_result: Ty,
     ) -> Ty {
-        let propagated = self.retain_postponed_argument_intersections(
-            call,
+        let GenericCallCommitment {
             signature,
             explicit_type_args,
             parameter_indices,
             call_sig,
+        } = commitment;
+        let propagated = self.retain_postponed_argument_intersections(
+            call,
+            commitment,
             selected_bindings,
             intersection_bindings,
         );
@@ -894,32 +941,37 @@ impl Checker<'_> {
             .collect::<Vec<_>>();
         self.publish_selected_call_intersections(
             call,
-            signature,
-            call_sig,
-            resolved,
-            selected_bindings,
-            intersection_bindings,
-            &propagated,
-            argument_provenance,
-            final_result,
+            PublishedCallIntersections {
+                signature,
+                call_sig,
+                arguments: resolved,
+                selected_bindings,
+                intersection_bindings,
+                propagated: &propagated,
+                argument_provenance,
+                final_result,
+            },
         );
         final_result
     }
 
     /// Publish one selected call's exact intersection facts after its final result policy and type
     /// arguments have committed. Rechecks replace all prior facts for this call.
-    pub(super) fn publish_selected_call_intersections(
+    fn publish_selected_call_intersections(
         &mut self,
         call: ExprId,
-        signature: &crate::libraries::GenericSig,
-        call_sig: &CallSig,
-        arguments: Vec<Option<Ty>>,
-        selected_bindings: &crate::symbol_resolver::GSigBinds,
-        intersection_bindings: &HashMap<String, Vec<Ty>>,
-        propagated: &HashMap<String, InferredIntersection>,
-        argument_provenance: Vec<ReifiedArgumentProvenance>,
-        final_result: Ty,
+        published: PublishedCallIntersections<'_>,
     ) {
+        let PublishedCallIntersections {
+            signature,
+            call_sig,
+            arguments,
+            selected_bindings,
+            intersection_bindings,
+            propagated,
+            argument_provenance,
+            final_result,
+        } = published;
         self.clear_selected_generic_call(call);
         let mut additional_bounds = vec![Vec::new(); signature.formals.len()];
         let mut intersections = HashMap::default();
@@ -934,6 +986,15 @@ impl Checker<'_> {
                 .get(formal.as_str())
                 .copied()
                 .unwrap_or(parts[0]);
+            // The lower inputs' common supertype is an intersection only when it is what the
+            // formal was inferred to. Another constraint (an expected `Array<Any>`) can fix the
+            // formal to a proper supertype of every part; that type is denotable.
+            if !parts
+                .iter()
+                .any(|part| *part == selected_result || *part == selected_result.non_null())
+            {
+                continue;
+            }
             let through_flexible = propagated
                 .get(formal.as_str())
                 .is_some_and(|fact| fact.through_flexible);

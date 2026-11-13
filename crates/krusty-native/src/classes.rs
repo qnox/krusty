@@ -16,8 +16,13 @@
 //!
 //! **Refusals.** [`check_supported`] declines, by name, the two class kinds this model does not lay
 //! out — an annotation's implementation class and a callable reference's class — and the shared
-//! tables decline a superclass declared in another file and an override of a method declared
+//! tables decline a superclass declared in a later file and an override of a method declared
 //! outside it, so the file declines with a diagnostic instead of emitting something unverified.
+//!
+//! **A superclass an earlier file laid out** is read from its record
+//! ([`crate::laid_out_classes`]): its fields end where a subclass's begin, its reference offsets
+//! lead the subclass's, and every vtable slot the subclass does not override is that file's entry
+//! ([`Slot::Inherited`]).
 //!
 //! **Interfaces** of the module are not slots of the vtable: each class also has an interface
 //! table indexed by the module-wide member number ([`Dispatch::Interface`]), so a call through an
@@ -29,10 +34,12 @@ use krusty::fx_hash::HashMap;
 use krusty::backend::class_tables::module_interfaces::ModuleInterfaces;
 use krusty::backend::class_tables::module_slots::{ModuleSlotPlan, PlanKey};
 use krusty::backend::class_tables::planned_itable::InterfaceEntry;
-use krusty::backend::class_tables::{self, ClassTable, Representation};
+use krusty::backend::class_tables::{self, ClassTable, LaidOutSuperclass, Representation};
 use krusty::fir::{CallableId, ResolvedPropertyOverrideTarget};
 use krusty::ir::{ClassId, FunId, IrClass, IrFile};
 use krusty::types::{Ty, TypeName};
+
+use super::laid_out_classes::{LaidOutClass, LaidOutClasses};
 
 pub(super) use krusty::backend::class_tables::{
     function_key, local_property_target, AnyMember, SlotKey, FUNCTION_SLOT,
@@ -272,9 +279,6 @@ pub(super) enum Slot {
     /// identity. `hashCode` is the contract sum of `(127 * name.hashCode()) xor value.hashCode()`,
     /// and a program can read it: the corpus computes the same sum in Kotlin and compares.
     AnnotationMember { class: ClassId, member: AnyMember },
-    /// `kotlin.Any`'s three for a VALUE CLASS's box, answered by the value it holds: two boxes of
-    /// one value class are equal when their values are, and `V(x=1)` is how one renders.
-    ValueMember { class: ClassId, member: AnyMember },
     /// A value class's own member, reached through its BOX. The member itself takes the value as
     /// `this` — that is what a value class is — while a vtable is read off an object, so this
     /// entry takes the box, reads the value out of it, and calls the member with that.
@@ -289,22 +293,35 @@ pub(super) enum Slot {
     },
     /// See [`InterfaceEntry::ModuleFunction`]: an interface's body another file defines.
     ModuleFunction(CallableId),
+    /// What the vtable of the nearest superclass an earlier file laid out holds at `slot`.
+    Inherited { slot: u32 },
+    /// What the interface table of the nearest superclass an earlier file laid out holds at
+    /// `number`, which no class slot of it fills: a bridge.
+    InheritedInterface { number: u32 },
 }
 
 impl Slot {
     /// An interface table entry as Native realizes it.
-    fn interface_entry(entry: InterfaceEntry, root: &IrClass) -> Self {
+    fn interface_entry(entry: InterfaceEntry, root: Root<'_>, number: u32) -> Self {
         match entry {
             InterfaceEntry::Slot(slot) => Self::realized(slot, root),
             InterfaceEntry::ModuleFunction(callable) => Self::ModuleFunction(callable),
+            InterfaceEntry::Inherited => Self::InheritedInterface { number },
         }
     }
 
     /// A shared table's slot as Native realizes it, where `kotlin.Any`'s members are those of the
-    /// base `root` — the class at the top of the hierarchy in this file — extends.
-    fn realized(slot: class_tables::Slot, root: &IrClass) -> Self {
+    /// base the hierarchy's `root` extends.
+    fn realized(slot: class_tables::Slot, root: Root<'_>) -> Self {
         match slot {
-            class_tables::Slot::AnyMember(member) => Self::Runtime(any_member_symbol(root, member)),
+            // Above a superclass an earlier file laid out, `kotlin.Any`'s members are whatever
+            // that file realized them as: a `Throwable` base renders its own way.
+            class_tables::Slot::AnyMember(member) => match root {
+                Root::InFile(root) => Self::Runtime(any_member_symbol(root, member)),
+                Root::LaidOut => Self::Inherited {
+                    slot: member.slot(),
+                },
+            },
             class_tables::Slot::Function(function) => Self::Function(function),
             class_tables::Slot::Abstract => Self::Abstract,
             class_tables::Slot::FieldGetter { class, field } => Self::FieldGetter { class, field },
@@ -340,6 +357,26 @@ impl Slot {
                 setter,
                 target_slot,
             },
+            class_tables::Slot::Inherited { slot } => Self::Inherited { slot },
+        }
+    }
+}
+
+/// Where the hierarchy of a class starts, as its `kotlin.Any` members read it.
+#[derive(Clone, Copy)]
+enum Root<'a> {
+    /// The class at the top of the hierarchy in this file, whose base is `kotlin.Any` or one the
+    /// runtime owns.
+    InFile(&'a IrClass),
+    /// A superclass an earlier file laid out.
+    LaidOut,
+}
+
+impl<'a> Root<'a> {
+    fn of(ir: &'a IrFile, id: ClassId, table: &ClassTable) -> Self {
+        match table.laid_out_superclass {
+            Some(_) => Self::LaidOut,
+            None => Self::InFile(root_class(ir, id)),
         }
     }
 }
@@ -393,6 +430,9 @@ impl Representation for NativeRepresentation<'_> {
 pub(super) struct ClassLayout {
     /// The superclass in this file, or `None` for a class extending `kotlin.Any`.
     pub superclass: Option<ClassId>,
+    /// The nearest superclass an earlier file laid out, whose record [`Slot::Inherited`] and
+    /// [`Slot::InheritedInterface`] entries read.
+    pub laid_out_superclass: Option<TypeName>,
     /// Parallel to `IrClass::fields`.
     pub fields: Vec<FieldLayout>,
     /// The first byte after the last field, before any rounding — where a subclass's own fields
@@ -425,6 +465,8 @@ pub(super) struct ClassModel {
     pub implemented: Vec<Vec<TypeName>>,
     /// The checked callable each function of this file realizes.
     callables: HashMap<FunId, CallableId>,
+    /// What a later file extending each class reads of its tables. Indexed by `ClassId`.
+    pub laid_out_tables: Vec<LaidOutSuperclass>,
 }
 
 /// Which table a member dispatches through, and at which index.
@@ -499,11 +541,15 @@ pub(super) fn build(
     ir: &IrFile,
     values: &ValueClassInventory,
     plan: &ModuleSlotPlan,
+    laid_out: &LaidOutClasses,
 ) -> Result<ClassModel, Unsupported> {
     for class in &ir.classes {
         check_supported(class)?;
     }
-    let numbered = class_tables::build_numbered(&NativeRepresentation(values), ir, plan)?;
+    let numbered =
+        class_tables::build_numbered(&NativeRepresentation(values), ir, plan, &|superclass| {
+            laid_out.get(superclass).map(|record| record.table.clone())
+        })?;
     let mut layouts: Vec<Option<ClassLayout>> = vec![None; ir.classes.len()];
     for &id in &numbered.order {
         let table = &numbered.tables[id as usize];
@@ -513,11 +559,20 @@ pub(super) fn build(
                     .as_ref()
                     .expect("superclasses are laid out first")
             });
-            let mut layout = layout_class(values, ir, id, table, parent)?;
-            let root = root_class(ir, id);
+            let laid_out_parent = match table.superclass {
+                Some(_) => None,
+                None => table.laid_out_superclass.map(|name| {
+                    laid_out
+                        .get(name)
+                        .expect("the tables extend a recorded class")
+                }),
+            };
+            let mut layout = layout_class(values, ir, id, table, (parent, laid_out_parent))?;
+            let root = Root::of(ir, id, table);
             layout.itable = numbered.interface_tables.tables[id as usize]
                 .iter()
-                .map(|entry| Slot::interface_entry(entry.clone(), root))
+                .enumerate()
+                .map(|(number, entry)| Slot::interface_entry(entry.clone(), root, number as u32))
                 .collect();
             layout
         };
@@ -545,7 +600,15 @@ pub(super) fn build(
             }
         }
     }
+    let laid_out_tables = (0..ir.classes.len())
+        .map(|id| LaidOutSuperclass {
+            slots: layouts[id].vtable.len() as u32,
+            interfaces: numbered.interface_tables.implemented[id].clone(),
+            interface_entries: numbered.interface_tables.members[id].clone(),
+        })
+        .collect();
     Ok(ClassModel {
+        laid_out_tables,
         layouts,
         order: numbered.order,
         interfaces: numbered.interfaces,
@@ -570,41 +633,29 @@ fn root_class(ir: &IrFile, mut id: ClassId) -> &IrClass {
     &ir.classes[id as usize]
 }
 
-/// Lay out class `id` in memory over its shared `table`, whose superclass in this file (already
-/// laid out) is `parent`.
+/// Lay out class `id` in memory over its shared `table`, whose superclass is either in this file
+/// (already laid out) or one an earlier file laid out.
 fn layout_class(
     values: &ValueClassInventory,
     ir: &IrFile,
     id: ClassId,
     table: &ClassTable,
-    parent: Option<&ClassLayout>,
+    superclass: (Option<&ClassLayout>, Option<&LaidOutClass>),
 ) -> Result<ClassLayout, Unsupported> {
     let class = &ir.classes[id as usize];
 
     // ---- fields ----
     let external = external_base(class.superclass);
-    let mut end = parent.map_or_else(
-        || {
-            if is_enum(class) {
-                ENUM_FIELDS_END
-            } else {
-                external.map_or(HEADER_SIZE, |base| base.fields_end)
-            }
-        },
-        |parent| parent.fields_end,
-    );
-    let mut reference_offsets = parent.map_or_else(
-        || {
-            // The constant's name is a reference the collector traces like any other, and so is
-            // a `Throwable`'s message: what the base stores is traced through the subclass.
-            if is_enum(class) {
-                vec![ENUM_NAME_OFFSET]
-            } else {
-                external.map_or_else(Vec::new, |base| base.reference_offsets.to_vec())
-            }
-        },
-        |parent| parent.reference_offsets.clone(),
-    );
+    let (mut end, mut reference_offsets) = match superclass {
+        (Some(parent), _) => (parent.fields_end, parent.reference_offsets.clone()),
+        (None, Some(laid_out)) => (laid_out.fields_end, laid_out.reference_offsets.clone()),
+        // The constant's name is a reference the collector traces like any other, and so is a
+        // `Throwable`'s message: what the base stores is traced through the subclass.
+        (None, None) if is_enum(class) => (ENUM_FIELDS_END, vec![ENUM_NAME_OFFSET]),
+        (None, None) => external.map_or((HEADER_SIZE, Vec::new()), |base| {
+            (base.fields_end, base.reference_offsets.to_vec())
+        }),
+    };
     let mut fields = Vec::with_capacity(class.fields.len());
     for (index, field) in class.fields.iter().enumerate() {
         // A field carrying a mutable local this class captured holds the shared cell, not a copy
@@ -626,7 +677,7 @@ fn layout_class(
     }
     let instance_size = round_up(end, 8);
     // ---- vtable ----
-    let root = root_class(ir, id);
+    let root = Root::of(ir, id, table);
     let mut vtable: Vec<Slot> = table
         .vtable
         .iter()
@@ -645,22 +696,9 @@ fn layout_class(
             vtable[slot] = Slot::AnnotationMember { class: id, member };
         }
     }
-    // A value class's box answers `kotlin.Any`'s three by the value it holds. One the class
-    // declares itself keeps its own, reached through the unboxing bridge `build` installs.
-    if values.is_value_class(class.fq_name) {
-        value_field(ir, id)?;
-        for (slot, member) in [
-            (0, AnyMember::Equals),
-            (1, AnyMember::HashCode),
-            (2, AnyMember::ToString),
-        ] {
-            if matches!(vtable[slot], Slot::Runtime(_)) {
-                vtable[slot] = Slot::ValueMember { class: id, member };
-            }
-        }
-    }
     Ok(ClassLayout {
         superclass: table.superclass,
+        laid_out_superclass: table.laid_out_superclass,
         fields,
         fields_end: end,
         instance_size,
@@ -686,6 +724,7 @@ mod tests {
             ir,
             &ValueClassInventory::default(),
             &ModuleSlotPlan::empty(),
+            &LaidOutClasses::default(),
         )
     }
 
@@ -1116,6 +1155,7 @@ mod tests {
             &ir,
             &ValueClassInventory::default(),
             &ModuleSlotPlan::empty(),
+            &LaidOutClasses::default(),
         )
         .expect("layout");
         let foo_slot = model.slot(b, &SlotKey::Function(foo)).expect("foo's slot");

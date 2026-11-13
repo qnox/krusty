@@ -50,6 +50,88 @@ pub enum IrCallableReferenceTarget {
         classifier: TypeName,
         operation: IrClassifierCallable,
     },
+    /// A property read as a function value (`P::n` passed as `(P) -> Int`). The adapter reads the
+    /// property; a use that is not spliced into an inline call is the property reference itself,
+    /// whose carrier a backend realizes from this checked identity.
+    Property(Box<IrPropertyFunctionReference>),
+}
+
+/// The checked property reference a function-typed property reference value denotes. Its receiver
+/// operand, when it is bound, is the reference's `bound_receiver`; `bound_extension_receiver` says
+/// which receiver of the property that operand is.
+#[derive(Clone, Debug)]
+pub struct IrPropertyFunctionReference {
+    pub target: crate::fir::FirPropertyReferenceTarget,
+    pub binding: crate::fir::FirCallableReferenceBinding,
+    pub bound_extension_receiver: bool,
+    pub mutable: bool,
+    pub substitutions: Vec<IrCheckedSubstitution>,
+}
+
+/// The property declaration a function-typed property reference reads: the identity two such
+/// references are equal by.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrReferencedProperty {
+    Module(crate::fir::PropertyId),
+    External(crate::fir::ExternalPropertyId),
+}
+
+impl IrPropertyFunctionReference {
+    /// The declaration this reference reads. `None` for a classifier read, and for a dependency
+    /// reference whose getter is not the dependency property's.
+    pub fn referenced_property(&self) -> Option<IrReferencedProperty> {
+        match &self.target {
+            crate::fir::FirPropertyReferenceTarget::Module(property)
+            | crate::fir::FirPropertyReferenceTarget::SpecializedModule { property, .. } => {
+                Some(IrReferencedProperty::Module(*property))
+            }
+            crate::fir::FirPropertyReferenceTarget::External { getter, .. } => {
+                match getter.as_ref() {
+                    crate::fir::FirPropertyTarget::External { property, .. } => {
+                        Some(IrReferencedProperty::External(*property))
+                    }
+                    _ => None,
+                }
+            }
+            crate::fir::FirPropertyReferenceTarget::Classifier { .. } => None,
+        }
+    }
+
+    /// The getter is an inline accessor whose body each read splices, so no accessor method
+    /// performs the read.
+    pub fn getter_is_spliced(&self) -> bool {
+        matches!(
+            &self.target,
+            crate::fir::FirPropertyReferenceTarget::SpecializedModule {
+                getter_inline_splice: Some(_),
+                ..
+            }
+        )
+    }
+
+    /// The checked property reference this value is, with its bound receiver operand and the
+    /// reference's adaptation in place.
+    pub fn checked_operation(
+        &self,
+        bound_receiver: Option<ExprId>,
+        adaptation: Option<Box<crate::fir::FirReferenceAdaptation>>,
+    ) -> IrCheckedOperation {
+        let (dispatch_receiver, extension_receiver) = if self.bound_extension_receiver {
+            (None, bound_receiver)
+        } else {
+            (bound_receiver, None)
+        };
+        IrCheckedOperation::PropertyReference {
+            target: self.target.clone(),
+            delegated: false,
+            binding: self.binding,
+            dispatch_receiver,
+            extension_receiver,
+            mutable: self.mutable,
+            substitutions: self.substitutions.clone(),
+            adaptation,
+        }
+    }
 }
 
 /// The selected constructor declaration, retained independently of its invocation adapter.
@@ -288,6 +370,10 @@ pub struct PropRef {
     /// accessor is static in the same way. Which of the two this is, is a JVM selection answer,
     /// recorded with the rest of them in `jvm::property_references::PropertyReferenceRealization`.
     pub ext_facade: Option<Option<TypeName>>,
+    /// The carrier's own `get`, holding a spliced (inline) getter's body: kotlinc writes the splice
+    /// into the carrier because such a getter is never called. `None` for a carrier whose `get`
+    /// calls the selected accessor.
+    pub get: Option<super::FunId>,
 }
 
 impl FuncRef {

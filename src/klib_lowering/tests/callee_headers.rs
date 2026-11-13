@@ -36,7 +36,7 @@ fn declarations(unit: &DependencyBodyUnit) -> Vec<String> {
         .map(|(index, function)| {
             let id = crate::ir::FunId::try_from(index).expect("fits");
             format!(
-                "{} {:?} -> {:?} static={} dispatch={:?} identities={:?} extension={} contexts={:?}",
+                "{} {:?} -> {:?} static={} dispatch={:?} identities={:?} extension={} contexts={}",
                 function.name,
                 function.params,
                 function.ret,
@@ -44,7 +44,7 @@ fn declarations(unit: &DependencyBodyUnit) -> Vec<String> {
                 function.dispatch_receiver,
                 ir.fn_params[&id].identities,
                 ir.extension_receiver_fns.contains(&id),
-                ir.fn_context_counts.get(&id),
+                ir.declared_parameters(id).context_count,
             )
         })
         .collect()
@@ -75,10 +75,10 @@ fn a_callee_no_checked_call_selected_is_declared_from_its_header() {
         [
             "a [Obj(TypeName(\"kotlin/Int\"), [])] -> Obj(TypeName(\"kotlin/Int\"), []) static=true \
              dispatch=None identities=[IrParameterIdentity { source_name: Some(\"a\"), role: Value, \
-             provenance: SourceDeclared }] extension=false contexts=None",
+             provenance: SourceDeclared }] extension=false contexts=0",
             "b [Obj(TypeName(\"kotlin/Int\"), [])] -> Obj(TypeName(\"kotlin/Int\"), []) static=true \
              dispatch=None identities=[IrParameterIdentity { source_name: Some(\"a\"), role: Value, \
-             provenance: SourceDeclared }] extension=false contexts=None",
+             provenance: SourceDeclared }] extension=false contexts=0",
         ]
     );
 }
@@ -1084,17 +1084,10 @@ fn demo_signature(
 
 /// A serialized function with a dispatch receiver when `dispatch`, these context and value
 /// parameters, all `Int`, whose body returns its first context or value parameter.
-fn function_tree(
-    signature: KlibPublicIdSignature,
-    name: &str,
-    dispatch: bool,
-    contexts: usize,
-    values: usize,
-) -> KlibIrDeclarationTree {
-    let mut arena = KlibIrArena::default();
-    let int = arena.push_type(T::Int.klib());
+/// The public signature of the fixture class `demo.Box`.
+fn box_classifier() -> KlibPublicIdSignature {
     let demo_package = ["demo".to_owned()];
-    let box_classifier = metadata_class_signature(
+    metadata_class_signature(
         MetadataContainer {
             package: &demo_package,
             classes: &[],
@@ -1105,7 +1098,104 @@ fn function_tree(
             type_params: &[],
             expect: false,
         },
-    );
+    )
+}
+
+/// [`function_tree`] of the member `get` inside the header of `demo.Box`: a member's header is
+/// authenticated through its class.
+fn box_member_tree(member: KlibPublicIdSignature) -> KlibIrDeclarationTree {
+    let KlibIrDeclarationTree {
+        mut arena,
+        declaration: KlibIrMember::Function(function),
+    } = function_tree(member, "get", true, 0, 1)
+    else {
+        unreachable!("a function tree declares its function")
+    };
+    let class = arena.push_class(crate::metadata::klib_ir::tree::KlibIrClass {
+        base: base(public_symbol(KlibIrSymbolKind::Class, box_classifier())),
+        name: "Box".to_owned(),
+        this_receiver: None,
+        type_parameters: Vec::new(),
+        supertypes: Vec::new(),
+        members: vec![KlibIrMember::Function(function)],
+        value_class_representation: None,
+        sealed_subclasses: Vec::new(),
+    });
+    KlibIrDeclarationTree {
+        arena,
+        declaration: KlibIrMember::Class(class),
+    }
+}
+
+/// Make `record` a member of `demo.Box` as its provider records one: owned by the class, with
+/// the class's contract.
+fn as_box_member(record: &mut crate::backend::BackendCallableFact) {
+    let classifier = crate::types::type_name("demo/Box");
+    record.kind = ExternalCallableKind::Member;
+    record.declaration_owner = Some(crate::types::SemanticCallableOwner::Classifier(classifier));
+    record.klib_body_class_contract = Some(crate::libraries::KlibBodyClassContract {
+        module: "demo".into(),
+        signature: box_classifier(),
+        classifier,
+        parameters: crate::libraries::KlibBodyClassParameters {
+            formals: Box::default(),
+            bounds: Box::default(),
+            variances: Box::default(),
+            own_count: 0,
+        },
+        kind: crate::libraries::TypeKind::Class,
+        modality: crate::metadata::semantic::KotlinModality::Final,
+        is_value: false,
+        is_inner: false,
+        is_expect: false,
+        primary_constructor: None,
+    });
+}
+
+/// The contract a provider records for the singleton `demo.OtherBox`, which inherits `get` from
+/// `demo.Box` and serializes no member of its own.
+fn other_box_contract() -> crate::libraries::KlibBodyClassContract {
+    let demo_package = ["demo".to_owned()];
+    crate::libraries::KlibBodyClassContract {
+        module: "demo".into(),
+        signature: metadata_class_signature(
+            MetadataContainer {
+                package: &demo_package,
+                classes: &[],
+                native_interop_library: false,
+            },
+            MetadataClass {
+                name: "OtherBox",
+                type_params: &[],
+                expect: false,
+            },
+        ),
+        classifier: crate::types::type_name("demo/OtherBox"),
+        parameters: crate::libraries::KlibBodyClassParameters {
+            formals: Box::default(),
+            bounds: Box::default(),
+            variances: Box::default(),
+            own_count: 0,
+        },
+        kind: crate::libraries::TypeKind::Object,
+        modality: crate::metadata::semantic::KotlinModality::Final,
+        is_value: false,
+        is_inner: false,
+        is_expect: false,
+        primary_constructor: None,
+    }
+}
+
+fn function_tree(
+    signature: KlibPublicIdSignature,
+    name: &str,
+    dispatch: bool,
+    contexts: usize,
+    values: usize,
+) -> KlibIrDeclarationTree {
+    let mut arena = KlibIrArena::default();
+    let int = arena.push_type(T::Int.klib());
+    let box_classifier = box_classifier();
     let box_type = arena.push_type(KlibIrType::Simple {
         classifier: public_symbol(KlibIrSymbolKind::Class, box_classifier),
         nullability: KlibIrNullability::NotSpecified,
@@ -1233,7 +1323,7 @@ fn a_later_support_unit_selects_the_matching_singleton_edge_variant() {
     let member = demo_signature(Some("Box"), "get", &[], &[T::Int]);
     let demo = demo_with(
         &MEMBER_CALLER,
-        vec![function_tree(member.clone(), "get", true, 0, 1)],
+        vec![box_member_tree(member.clone())],
         |_, body| {
             let receiver = body.param(0);
             let value = body.param(1);
@@ -1243,7 +1333,7 @@ fn a_later_support_unit_selects_the_matching_singleton_edge_variant() {
     );
     let mut selected_record = demo.facts["a"].clone();
     selected_record.name = "get".to_owned();
-    selected_record.kind = ExternalCallableKind::Member;
+    as_box_member(&mut selected_record);
     selected_record.params = vec![T::Int.semantic()];
     selected_record
         .generic_sig
@@ -1264,6 +1354,7 @@ fn a_later_support_unit_selects_the_matching_singleton_edge_variant() {
     inherited_record.singleton_dispatch = Some(SingletonDispatch {
         classifier: crate::types::type_name("demo/OtherBox"),
     });
+    inherited_record.klib_body_class_contract = Some(other_box_contract());
     let selected = selected_record
         .klib_body_callable()
         .expect("the selected member is signed");
@@ -1337,17 +1428,13 @@ fn a_later_support_unit_selects_the_matching_singleton_edge_variant() {
 #[test]
 fn a_root_group_publishes_the_singleton_variant_which_matches_its_header() {
     let member = demo_signature(Some("Box"), "get", &[], &[T::Int]);
-    let demo = demo_with(
-        &CALLER,
-        vec![function_tree(member.clone(), "get", true, 0, 1)],
-        |_, body| {
-            let value = body.param(0);
-            Some(vec![body.ret(value)])
-        },
-    );
+    let demo = demo_with(&CALLER, vec![box_member_tree(member.clone())], |_, body| {
+        let value = body.param(0);
+        Some(vec![body.ret(value)])
+    });
     let mut selected_record = demo.facts["a"].clone();
     selected_record.name = "get".to_owned();
-    selected_record.kind = ExternalCallableKind::Member;
+    as_box_member(&mut selected_record);
     selected_record.singleton_dispatch = Some(SingletonDispatch {
         classifier: crate::types::type_name("demo/Box"),
     });
@@ -1360,6 +1447,7 @@ fn a_root_group_publishes_the_singleton_variant_which_matches_its_header() {
     inherited_record.singleton_dispatch = Some(SingletonDispatch {
         classifier: crate::types::type_name("demo/OtherBox"),
     });
+    inherited_record.klib_body_class_contract = Some(other_box_contract());
     let selected = selected_record
         .klib_body_callable()
         .expect("the selected member is signed");
@@ -1533,8 +1621,11 @@ fn stdlib_calls_reach_header_declared_callees() {
     // they are not expected-failure allowances for executable conformance tests. Elvis and safe-call
     // blocks, then generic calls and `when` subject blocks, now reach further declared callees;
     // so do callees that declare parameter defaults, which their headers now carry, and callees
-    // reached past a call that leaves a parameter to its default. The same complete inputs were
-    // measured on every release.
+    // reached past a call that leaves a parameter to its default, and past a `for` loop over an
+    // array, which loops by index. The same complete inputs were measured on every release. A
+    // call of an inherited member no library serializes now links to the declaration it inherits
+    // and declines there as a member function call. A `for` loop over a range literal counts, and
+    // one over another progression declines at the loop rather than at its protocol calls.
     let expected =
         if crate::kotlin_version::target() >= crate::kotlin_version::KotlinVersion::V2_4_20 {
             vec![
@@ -1542,17 +1633,19 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it calls `kotlin.NumberFormatException.<init>`)", 4),
                 ("it calls `kotlin.UInt.<init>`)", 4),
                 ("it converts a value implicitly)", 4),
-                ("it declares type parameters)", 205),
-                ("it uses a block of a compiler-introduced form)", 1),
-                ("it uses a call of a file-private declaration)", 6),
-                ("it uses a call of a member function)", 74),
+                ("it declares type parameters)", 207),
                 (
-                    "it uses a call of a member no library serializes, such as a fake override)",
-                    10,
+                    "it uses a `for` loop over a progression that is not a range literal)",
+                    4,
                 ),
-                ("it uses a call through a property accessor signature)", 35),
+                ("it uses a call of a member function)", 94),
+                ("it uses a call through a property accessor signature)", 40),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),
+                (
+                    "it uses an object literal with a superclass constructor argument)",
+                    1,
+                ),
                 ("its library serializes none)", 100),
             ]
         } else {
@@ -1561,17 +1654,19 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it calls `kotlin.NumberFormatException.<init>`)", 4),
                 ("it calls `kotlin.UInt.<init>`)", 4),
                 ("it converts a value implicitly)", 4),
-                ("it declares type parameters)", 187),
-                ("it uses a block of a compiler-introduced form)", 1),
-                ("it uses a call of a file-private declaration)", 4),
-                ("it uses a call of a member function)", 71),
+                ("it declares type parameters)", 189),
                 (
-                    "it uses a call of a member no library serializes, such as a fake override)",
-                    10,
+                    "it uses a `for` loop over a progression that is not a range literal)",
+                    4,
                 ),
-                ("it uses a call through a property accessor signature)", 35),
+                ("it uses a call of a member function)", 86),
+                ("it uses a call through a property accessor signature)", 40),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),
+                (
+                    "it uses an object literal with a superclass constructor argument)",
+                    1,
+                ),
                 ("its library serializes none)", 100),
             ]
         };
@@ -1617,7 +1712,7 @@ fn stdlib_bodies_decline_inside_header_declared_callees() {
                 &[int],
             ),
             "the KLIB body of `kotlin.collections.contains` (it reaches the KLIB body of \
-             `kotlin.collections.indexOf` (it uses a call of a member no library serializes, such as a fake override))",
+             `kotlin.collections.indexOf` (it uses a call of a member function))",
         ),
     ];
     let declines = cases
@@ -1644,4 +1739,79 @@ fn stdlib_bodies_decline_inside_header_declared_callees() {
             .map(|(_, expected)| expected.to_owned())
             .collect::<Vec<_>>()
     );
+}
+
+/// A stdlib body iterating a primitive array calls `IntIterator.hasNext`, which `IntIterator`
+/// inherits from `Iterator` without declaring it, so no library serializes it. The call links to
+/// the declaration it inherits, by the declared hierarchy, under that declaration's own identity.
+#[test]
+fn an_unserialized_inherited_member_call_links_to_its_declaration() {
+    use crate::klib_libraries::KlibCalleeOrigin;
+    use crate::metadata::klib_ir::KlibIrSignature;
+    let Some(root) = super::distribution_root() else {
+        return;
+    };
+    let libraries = super::stdlib(&root);
+    let bodies = libraries.declaration_bodies();
+    let int_array = kotlin("IntArray");
+    let member = |owner: &str, name: &str, signature: &KlibPublicIdSignature| {
+        signature.package().segments() == ["kotlin", "collections"]
+            && signature.declaration().segments() == [owner, name]
+    };
+    for (name, receiver, params) in [
+        ("contentHashCode", Ty::nullable(int_array), vec![]),
+        ("indexOf", int_array, vec![kotlin("Int")]),
+    ] {
+        let record = super::frozen_function(
+            &libraries,
+            "kotlin/collections",
+            name,
+            Some(receiver),
+            &params,
+        );
+        let callable = record.klib_body_callable().expect("signed");
+        let (arena, function) = bodies
+            .function(callable.identity())
+            .expect("a serialized body");
+        let references = arena
+            .call_symbols_in_body(function)
+            .filter_map(|symbol| match &symbol.signature {
+                KlibIrSignature::Public(signature)
+                    if member("IntIterator", "hasNext", signature) =>
+                {
+                    Some(KlibDeclarationSignature::Public(signature.clone()))
+                }
+                _ => None,
+            })
+            .fold(Vec::new(), |mut unique, reference| {
+                if !unique.contains(&reference) {
+                    unique.push(reference);
+                }
+                unique
+            });
+        assert_eq!(references.len(), 1, "{name} calls IntIterator.hasNext once");
+        let reference = references.into_iter().next().unwrap();
+        let module = &callable.identity().module;
+        assert!(matches!(
+            bodies.callee_origin(module, &reference),
+            KlibCalleeOrigin::Missing
+        ));
+        let KlibCalleeOrigin::Exact(linked) = bodies.linked_origin(module, &reference) else {
+            panic!("{name}: IntIterator.hasNext links to no declaration");
+        };
+        let (
+            KlibDeclarationSignature::Public(linked_signature),
+            KlibDeclarationSignature::Public(reference),
+        ) = (&linked.declaration, &reference)
+        else {
+            unreachable!()
+        };
+        assert_eq!(linked.module, "stdlib");
+        assert!(member("Iterator", "hasNext", linked_signature));
+        assert_eq!(linked_signature.member_id(), reference.member_id());
+        assert!(matches!(
+            bodies.callee_origin(module, &linked.declaration),
+            KlibCalleeOrigin::Exact(serialized) if serialized == linked
+        ));
+    }
 }

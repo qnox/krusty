@@ -351,7 +351,7 @@ pub struct ClassTailOptions<'a> {
     pub compiler_version_requirement:
         Option<crate::metadata::version_requirements::VersionRequirement>,
     pub intersection: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
-    pub inner_classifiers: crate::metadata::InnerClassifiers<'a>,
+    pub classifier_applications: crate::metadata::ClassifierApplications<'a>,
     /// The primary constructor's annotations in the order the target lists them; the record's own
     /// (source) order when `None`.
     pub primary_ctor_annotations: Option<&'a MetadataAnnotations>,
@@ -367,7 +367,7 @@ impl ClassDeclarationRecord {
     ) -> ClassTail<'a> {
         ClassTail {
             intersection_approximation: options.intersection,
-            inner_classifiers: options.inner_classifiers,
+            classifier_applications: options.classifier_applications,
             spellings: self.spellings.clone(),
             supertype_spellings: &self.supertype_spellings,
             type_params: &self.type_params,
@@ -896,21 +896,6 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         .iter()
         .map(|(&callable, &function)| (function, callable))
         .collect();
-    let class_type_arguments = ir
-        .class_signature(&c.fq_name())
-        .map(|signature| {
-            signature
-                .type_params
-                .iter()
-                .map(crate::ir::IrTypeParameter::ty)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let class_ty = if class_type_arguments.is_empty() {
-        Ty::obj_name(c.fq_name)
-    } else {
-        Ty::obj_args_name(c.fq_name, &class_type_arguments)
-    };
     let declared_method_list = declared_fids
         .iter()
         .filter_map(|&fid| {
@@ -925,12 +910,7 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
     let declared_method_count = declared_method_list.len();
     let inferred_methods = if c.is_data {
         let mut methods = declared_method_list;
-        methods.extend(data_class_functions(
-            ir,
-            c,
-            &data_component_properties,
-            class_ty,
-        )?);
+        methods.extend(data_class_functions(ir, c, &data_component_properties)?);
         methods
     } else if c.is_value {
         let mut declared = declared_method_list;
@@ -1177,7 +1157,7 @@ fn describe_function(ir: &IrFile, fid: u32) -> Option<FnMeta> {
         .unwrap_or(ret);
     // A parameter's declared `?` lives in a side-table, not in `params` (which stays non-null so the
     // value-class mangle is undisturbed) — re-apply it for the record.
-    let declared_nullable = ir.fn_param_declared_nullable.get(&fid);
+    let declared = ir.declared_parameters(fid);
     let function_type_params = semantic_signature
         .map(|signature| {
             signature
@@ -1207,7 +1187,7 @@ fn describe_function(ir: &IrFile, fid: u32) -> Option<FnMeta> {
         .unwrap_or_default();
     // Restore an extension receiver to `Function.receiver_type` so metadata keeps only the
     // declaration's logical value parameters.
-    let member_context_count = ir.fn_context_counts.get(&fid).copied().unwrap_or(0);
+    let member_context_count = ir.declared_parameters(fid).context_count;
     let is_ext =
         ir.extension_receiver_fns.contains(&fid) && member_context_count < metadata_params.len();
     let receiver_index = is_ext.then_some(member_context_count);
@@ -1218,11 +1198,7 @@ fn describe_function(ir: &IrFile, fid: u32) -> Option<FnMeta> {
         "metadata declaration parameters retain their exact identities"
     );
     let apply_nullable = |source_index: usize, t: Ty| {
-        if declared_nullable
-            .and_then(|v| v.get(source_index))
-            .copied()
-            .unwrap_or(false)
-        {
+        if declared.is_nullable(source_index) {
             Ty::nullable(t)
         } else {
             t
@@ -1271,7 +1247,10 @@ fn describe_function(ir: &IrFile, fid: u32) -> Option<FnMeta> {
     });
     let param_modifiers =
         crate::metadata::declaration_records::declared_value_parameters(ir, fid, defaults);
-    let vararg_index = ir.fn_varargs.get(&fid).map(|vararg| vararg.index);
+    let vararg_index = ir
+        .declared_parameters(fid)
+        .vararg
+        .map(|vararg| vararg.index);
     Some(FnMeta {
         // How SOURCE spelled this member's declared types — carried on the IR because class
         // metadata is built without the AST (see `IrFile::fn_declared_spellings`).
@@ -1302,22 +1281,15 @@ fn describe_function(ir: &IrFile, fid: u32) -> Option<FnMeta> {
         param_annotations: logical_param_indices
             .iter()
             .map(|&metadata_index| {
-                ir.fn_param_annotations
-                    .get(&fid)
-                    .and_then(|table| table.get(metadata_index))
+                declared
+                    .annotations_of(metadata_index)
                     .map(MetadataAnnotations::of)
                     .unwrap_or_default()
             })
             .collect(),
         no_infer_params: logical_param_indices
             .iter()
-            .map(|&metadata_index| {
-                ir.fn_param_no_infer
-                    .get(&fid)
-                    .and_then(|flags| flags.get(metadata_index))
-                    .copied()
-                    .unwrap_or(false)
-            })
+            .map(|&metadata_index| declared.is_no_infer(metadata_index))
             .collect(),
         contract: ir.fn_contracts.get(&fid).map(|contract| contract.to_arc()),
         has_source: true,
@@ -1331,7 +1303,6 @@ fn data_class_functions(
     ir: &IrFile,
     c: &IrClass,
     components: &[&IrProperty],
-    class_ty: Ty,
 ) -> Option<Vec<(FnMeta, FunctionOrigin)>> {
     let owner = c.fq_name_id();
     let mut methods = Vec::new();
@@ -1351,6 +1322,11 @@ fn data_class_functions(
     // there is nothing to copy from and no primary-constructor property to destructure.
     if c.is_data && !c.is_singleton() {
         ir.data_class_member(owner, IrDataClassMemberRole::Copy)?;
+        // The class signature declares only this classifier's own parameters. Its checked self
+        // application also retains lexical captures, which the metadata encoder validates before
+        // applying the carrier's declaration policy. A class built without that fact has no
+        // record, like one missing a generated member, so a target reports the missing record.
+        let class_ty = ir.declared_class_self_type(owner)?;
         let mut record = FnMeta::plain(
             "copy".into(),
             components
@@ -1421,7 +1397,7 @@ fn open_value_class_functions(ir: &IrFile, c: &IrClass) -> Vec<(FnMeta, Function
         .collect()
 }
 
-/// Each `Any` member, in kotlinc's order, that no function of `c` overrides.
+/// Each `Any` member, in kotlinc's order, that no source function of `c` overrides.
 fn any_members_not_overridden<'a>(
     ir: &IrFile,
     c: &'a IrClass,
@@ -1762,6 +1738,9 @@ fn secondary_constructor_flags(visibility: Visibility) -> u64 {
 }
 
 #[cfg(test)]
+mod copy_self_type_tests;
+
+#[cfg(test)]
 mod tests {
     use super::secondary_constructors;
     use super::{generated_function_flags, generated_functions, SecondaryConstructorRecord};
@@ -1837,7 +1816,7 @@ mod tests {
             &record.enum_entry_bodies,
             &record.anonymous_classifiers,
             None,
-            crate::metadata::MetadataTypeLookups::default().inner_classifiers,
+            crate::metadata::MetadataTypeLookups::default().classifier_applications,
         );
         assert_eq!(strings.class_id(renamed), 0);
         assert_eq!(
