@@ -1601,7 +1601,6 @@ ranges/contains/generated/uintDownTo.kt
 ranges/contains/generated/uintUntil.kt
 ranges/contains/generated/ulongDownTo.kt
 ranges/contains/generated/ulongUntil.kt
-ranges/contains/inArray.kt
 ranges/contains/inCharSequence.kt
 ranges/contains/inComparableRange.kt
 ranges/contains/inCustomObjectRange.kt
@@ -1614,7 +1613,6 @@ ranges/contains/inOptimizableFloatRange.kt
 ranges/contains/inOptimizableIntRange.kt
 ranges/contains/inOptimizableLongRange.kt
 ranges/contains/inPrimitiveProgression.kt
-ranges/contains/inRangeLiteralComposition.kt
 ranges/contains/inRangeWithCustomContains.kt
 ranges/contains/inRangeWithImplicitReceiver.kt
 ranges/contains/inRangeWithNonmatchingArguments.kt
