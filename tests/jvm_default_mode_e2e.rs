@@ -1607,3 +1607,56 @@ fn an_any_carrier_default_runs_through_its_bridge_and_overriding_super_call() {
         &["-jvm-default=disable"],
     );
 }
+
+/// `@JvmDefaultWithoutCompatibility` (allowed under `enable`) and `@JvmDefaultWithCompatibility`
+/// (allowed under `no-compatibility`) put one interface or class under the other mode. Whether its
+/// `$DefaultImpls` holder exists, which forwarders and erased bridges the class writes, and the
+/// interface's `access$…$jd` surface follow the declaration and not the module mode.
+const WITHOUT_COMPATIBILITY_SOURCE: &str = "interface Plain<T> { fun m(t: T): T = t }\n\
+@JvmDefaultWithoutCompatibility\n\
+interface Lean<T> { fun n(t: T): T = t }\n\
+interface Sub : Lean<String> { override fun n(t: String): String = t }\n\
+class Implements : Plain<String>, Lean<String>\n\
+@JvmDefaultWithoutCompatibility\n\
+class LeanClass : Plain<String>, Lean<String>\n\
+class Inherits : Sub\n";
+
+const WITH_COMPATIBILITY_SOURCE: &str = "interface Plain<T> { fun m(t: T): T = t }\n\
+@JvmDefaultWithCompatibility\n\
+interface Compat<T> { fun o(t: T): T = t }\n\
+interface Sub : Compat<String> { override fun o(t: String): String = t }\n\
+class Implements : Plain<String>, Compat<String>\n\
+@JvmDefaultWithCompatibility\n\
+class CompatClass : Plain<String>, Compat<String>\n\
+class Inherits : Sub\n";
+
+#[test]
+fn a_declaration_annotated_with_a_jvm_default_mode_matches_kotlinc() {
+    for (mode, flag, source) in [
+        (
+            JvmDefaultMode::Enable,
+            "enable",
+            WITHOUT_COMPATIBILITY_SOURCE,
+        ),
+        (
+            JvmDefaultMode::NoCompatibility,
+            "no-compatibility",
+            WITH_COMPATIBILITY_SOURCE,
+        ),
+    ] {
+        let ours = compile_source(mode, source, "Declared");
+        let reference = compile_reference_source(flag, source, "Declared");
+        assert_eq!(
+            class_names(&ours),
+            class_names(&reference),
+            "-jvm-default={flag}: the emitted classes differ"
+        );
+        for (name, _) in &reference {
+            assert_eq!(
+                public_method_shape(&ours, name),
+                public_method_shape(&reference, name),
+                "-jvm-default={flag}: {name} diverges"
+            );
+        }
+    }
+}
