@@ -23,7 +23,7 @@ jobs:
     - name: check exact machine source and test compilation
       run: 'set -euo pipefail
 
-        git diff --exit-code d56bb8816079303d572baee0498d8f52e5d3d6e2 HEAD -- . '':!.github/workflows/ci.yml''
+        git diff --exit-code 28839532a9e565fbde1397bdbc1da3f5a38ae5c3 HEAD -- . '':!.github/workflows/ci.yml''
 
         git rev-parse HEAD > compiler-source.txt
 
