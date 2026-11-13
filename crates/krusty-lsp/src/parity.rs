@@ -589,6 +589,7 @@ mod tests {
             kind: ProviderKind::Jps,
             jdk_home: None,
             modules,
+            repository_libraries: Vec::new(),
         }
     }
 

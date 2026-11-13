@@ -403,14 +403,16 @@ fn run_parity_command(args: &[String]) -> bool {
         plans.len(),
         started.elapsed()
     );
-    let classpath = plans
-        .iter()
-        .flat_map(|plan| plan.classpath.iter().cloned())
-        .collect::<Vec<_>>();
-    let fetched = krusty_lsp::project::maven_repository::ensure_maven_repository_jars(&classpath);
+    // Editor refresh does not download. Only this scan resolves a named JPS
+    // library through the Maven artifacts it maps to.
+    let fetched = krusty_lsp::project::maven_repository::ensure_repository_libraries(
+        model.kind,
+        &root,
+        &model.repository_libraries,
+    );
     if fetched.installed > 0 || fetched.failed > 0 {
         eprintln!(
-            "krusty-lsp parity: downloaded {} Maven repository jar(s), {} still missing",
+            "krusty-lsp parity: resolved {} named Maven libraries, {} still missing",
             fetched.installed, fetched.failed
         );
     }

@@ -1,23 +1,21 @@
-//! Download Maven repository jars a parity scan already named.
+//! Resolve named JPS repository libraries with Maven.
 //!
-//! A JPS library table records the resolved coordinate as a path under `$MAVEN_REPOSITORY$`. The
-//! parity command fetches that artifact from Maven Central into the path the library table names.
-//! The editor refresh does not: it runs on the analysis thread. A jar that is not in that layout,
-//! or whose download fails, stays missing. Callers must not treat the classpath as present until
-//! the file exists.
+//! A repository library maps one `maven-id` onto the jars in its `CLASSES` roots.
+//! Those extra jars are the transitive closure of that coordinate, recorded after
+//! IntelliJ resolved it. They are not coordinates of their own. Transitives are
+//! therefore requested unless the library sets `include-transitive-deps="false"`
+//! (every such library in the IntelliJ model lists only its own jar). Named
+//! `<exclude>` entries are the only other dependencies left out.
+//!
+//! One `mvn`/`mvnw` invocation resolves every library that still has a missing jar,
+//! with the user's settings, mirrors, and credentials. Editor refresh does not call
+//! this. A library whose jars do not all exist afterwards stays missing.
 
 use std::io;
-use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::path::{Path, PathBuf};
 
-const MAVEN_CENTRAL: &str = "https://repo.maven.apache.org/maven2";
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RepositoryJar {
-    pub path: PathBuf,
-    pub coordinate: String,
-    pub url: String,
-}
+use super::model::{ProviderKind, RepositoryLibrary};
+use super::runner::{Command, CommandRunner, ProcessRunner, MAVEN, SCAN_PROBE_TIMEOUT};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InstallResult {
@@ -25,243 +23,386 @@ pub struct InstallResult {
     pub failed: usize,
 }
 
-/// Where a missing Maven-repository jar may be downloaded.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RepositoryFetch {
-    /// Editor refresh. Missing jars stay missing; nothing is fetched.
-    Editor,
-    /// `krusty-lsp parity`.
-    Parity,
+/// One Maven invocation for every library that still has a missing jar. No repository
+/// URL and no global transitive exclusion: a library that includes transitives must
+/// be able to install them, and a library that opted out excludes them on its own
+/// dependency.
+pub fn maven_batch_command(root: &Path, reactor_pom: &Path) -> Command {
+    Command::new(MAVEN.resolve(root), root)
+        .args([
+            "-B".to_string(),
+            "--quiet".to_string(),
+            "-fae".to_string(),
+            "-f".to_string(),
+            reactor_pom.to_string_lossy().into_owned(),
+            "dependency:resolve".to_string(),
+        ])
+        .with_timeout(SCAN_PROBE_TIMEOUT)
 }
 
-impl RepositoryFetch {
-    /// Install missing repository jars when this is the parity scan.
-    ///
-    /// The editor value returns without reading the local repository or calling out to the network.
-    pub fn fetch_named_jars(self, classpath: &[PathBuf]) -> InstallResult {
-        let repository = match self {
-            Self::Editor => None,
-            Self::Parity => maven_repository_dir(),
-        };
-        fetch_repository_jars(self, classpath, repository.as_deref(), curl_fetch)
+fn write_resolution_reactor(
+    directory: &Path,
+    libraries: &[&RepositoryLibrary],
+) -> io::Result<usize> {
+    std::fs::create_dir_all(directory)?;
+    let mut modules = String::new();
+    for (index, library) in libraries.iter().enumerate() {
+        let name = format!("m{index}");
+        let module_dir = directory.join(&name);
+        std::fs::create_dir_all(&module_dir)?;
+        std::fs::write(module_dir.join("pom.xml"), module_pom(index, library))?;
+        modules.push_str(&format!("    <module>{name}</module>\n"));
     }
+    std::fs::write(directory.join("pom.xml"), aggregator_pom(&modules))?;
+    Ok(libraries.len())
 }
 
-/// Fetch missing repository jars when `site` is [`RepositoryFetch::Parity`].
-///
-/// `Editor` returns before `fetch` is called, even when `repository` names a missing jar.
-fn fetch_repository_jars(
-    site: RepositoryFetch,
-    classpath: &[PathBuf],
-    repository: Option<&Path>,
-    fetch: impl FnMut(&str, &Path) -> io::Result<()>,
-) -> InstallResult {
-    if site != RepositoryFetch::Parity {
-        return InstallResult::default();
+fn module_pom(index: usize, library: &RepositoryLibrary) -> String {
+    let mut exclusions = String::new();
+    if !library.include_transitive {
+        exclusions.push_str(
+            "        <exclusion>\n          <groupId>*</groupId>\n          <artifactId>*</artifactId>\n        </exclusion>\n",
+        );
     }
-    let Some(repository) = repository else {
-        return InstallResult::default();
-    };
-    install_missing_repository_jars(classpath, repository, fetch)
-}
-
-pub fn maven_repository_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    Some(PathBuf::from(home).join(".m2").join("repository"))
-}
-
-/// Classpath entries that are missing jars in `repository`'s Maven layout.
-pub fn missing_repository_jars(classpath: &[PathBuf], repository: &Path) -> Vec<RepositoryJar> {
-    classpath
-        .iter()
-        .filter(|path| !path.exists())
-        .filter_map(|path| repository_jar(repository, path))
-        .collect()
-}
-
-pub fn repository_jar(repository: &Path, jar: &Path) -> Option<RepositoryJar> {
-    let relative = jar.strip_prefix(repository).ok()?;
-    let mut segments = Vec::new();
-    for component in relative.components() {
-        match component {
-            Component::Normal(segment) => {
-                let segment = segment.to_str()?;
-                if !artifact_token(segment) {
-                    return None;
-                }
-                segments.push(segment);
-            }
-            _ => return None,
-        }
+    for excluded in &library.excluded {
+        exclusions.push_str(&format!(
+            "        <exclusion>\n          <groupId>{}</groupId>\n          <artifactId>{}</artifactId>\n        </exclusion>\n",
+            xml_text(&excluded.group),
+            xml_text(&excluded.artifact),
+        ));
     }
-    if segments.len() < 4 {
-        return None;
-    }
-    let file = segments.pop()?;
-    let version = segments.pop()?;
-    let artifact = segments.pop()?;
-    if segments.is_empty() {
-        return None;
-    }
-    let stem = file.strip_suffix(".jar")?;
-    let prefix = format!("{artifact}-{version}");
-    let coordinate = if stem == prefix {
-        format!("{}:{artifact}:{version}", segments.join("."))
+    let exclusions = if exclusions.is_empty() {
+        String::new()
     } else {
-        let classifier = stem.strip_prefix(&format!("{prefix}-"))?;
-        if !artifact_token(classifier) {
-            return None;
-        }
-        format!("{}:{artifact}:{version}:{classifier}", segments.join("."))
+        format!("      <exclusions>\n{exclusions}      </exclusions>\n")
     };
-    segments.push(artifact);
-    segments.push(version);
-    segments.push(file);
-    Some(RepositoryJar {
-        path: jar.to_path_buf(),
-        coordinate,
-        url: format!("{MAVEN_CENTRAL}/{}", segments.join("/")),
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>krusty.resolution</groupId>
+  <artifactId>library-{index}</artifactId>
+  <version>1</version>
+  <dependencies>
+    <dependency>
+      <groupId>{group}</groupId>
+      <artifactId>{artifact}</artifactId>
+      <version>{version}</version>
+      <type>{packaging}</type>
+{exclusions}    </dependency>
+  </dependencies>
+</project>
+"#,
+        group = xml_text(&library.group),
+        artifact = xml_text(&library.artifact),
+        version = xml_text(&library.version),
+        packaging = xml_text(&library.packaging),
+    )
+}
+
+fn aggregator_pom(modules: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>krusty.resolution</groupId>
+  <artifactId>repository-libraries</artifactId>
+  <version>1</version>
+  <packaging>pom</packaging>
+  <modules>
+{modules}  </modules>
+</project>
+"#
+    )
+}
+
+fn xml_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// JPS only. Gradle and Maven projects keep the classpath their own probe returned.
+/// Editor refresh does not call this.
+pub fn ensure_repository_libraries(
+    kind: ProviderKind,
+    root: &Path,
+    libraries: &[RepositoryLibrary],
+) -> InstallResult {
+    resolve_missing_libraries(kind, libraries, |libraries| {
+        maven_resolve_all(root, libraries)
     })
 }
 
-/// Fetch each missing repository jar. `fetch` writes the artifact bytes to the destination.
-/// A failed fetch leaves that path absent.
-pub fn install_missing_repository_jars(
-    classpath: &[PathBuf],
-    repository: &Path,
-    mut fetch: impl FnMut(&str, &Path) -> io::Result<()>,
+fn library_missing(library: &RepositoryLibrary) -> bool {
+    library.jars.iter().any(|jar| !jar.is_file())
+}
+
+fn library_complete(library: &RepositoryLibrary) -> bool {
+    !library.jars.is_empty() && library.jars.iter().all(|jar| jar.is_file())
+}
+
+/// `resolve` runs once. A library counts as installed only when every jar it lists
+/// is present afterwards. A jar that landed without its siblings does not make the
+/// library resolved.
+fn resolve_missing_libraries(
+    kind: ProviderKind,
+    libraries: &[RepositoryLibrary],
+    resolve: impl FnOnce(&[&RepositoryLibrary]) -> io::Result<()>,
 ) -> InstallResult {
+    if kind != ProviderKind::Jps {
+        return InstallResult::default();
+    }
+    let pending: Vec<&RepositoryLibrary> = libraries
+        .iter()
+        .filter(|library| library_missing(library))
+        .collect();
+    if pending.is_empty() {
+        return InstallResult::default();
+    }
+    let _ = resolve(&pending);
     let mut result = InstallResult::default();
-    for jar in missing_repository_jars(classpath, repository) {
-        match fetch(&jar.url, &jar.path) {
-            Ok(()) if jar.path.is_file() => result.installed += 1,
-            _ => {
-                if !jar.path.is_file() {
-                    result.failed += 1;
-                }
-            }
+    for library in &pending {
+        if library_complete(library) {
+            result.installed += 1;
+        } else {
+            result.failed += 1;
         }
     }
     result
 }
 
-/// Download one Maven Central artifact with `curl` into `destination`.
-pub fn curl_fetch(url: &str, destination: &Path) -> io::Result<()> {
-    if let Some(parent) = destination.parent() {
-        std::fs::create_dir_all(parent)?;
+fn maven_resolve_all(root: &Path, libraries: &[&RepositoryLibrary]) -> io::Result<()> {
+    let directory = std::env::temp_dir().join(format!(
+        "krusty-maven-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos())
+    ));
+    let _cleanup = RemoveDir(directory.clone());
+    let written = write_resolution_reactor(&directory, libraries)?;
+    if written == 0 {
+        return Ok(());
     }
-    let temporary = destination.with_extension("partial");
-    let output = Command::new("curl")
-        .args(["-fsSL", "--max-time", "60", "-o"])
-        .arg(&temporary)
-        .arg(url)
-        .output()
-        .map_err(|error| io::Error::other(format!("curl: {error}")))?;
-    if !output.status.success() {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(io::Error::other(format!(
-            "curl exited {} for {url}",
-            output.status
-        )));
-    }
-    std::fs::rename(&temporary, destination).inspect_err(|_| {
-        let _ = std::fs::remove_file(&temporary);
-    })
+    let command = maven_batch_command(root, &directory.join("pom.xml"));
+    let program = command.program.display().to_string();
+    ProcessRunner
+        .run(&command)
+        .map(|_| ())
+        .map_err(|error| io::Error::other(format!("{program}: {error}")))
 }
 
-pub fn ensure_maven_repository_jars(classpath: &[PathBuf]) -> InstallResult {
-    RepositoryFetch::Parity.fetch_named_jars(classpath)
-}
+struct RemoveDir(PathBuf);
 
-fn artifact_token(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+impl Drop for RemoveDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project::model::ExcludedMavenArtifact;
 
-    fn stdlib(repository: &Path) -> PathBuf {
-        repository
-            .join("org/jetbrains/kotlin/kotlin-stdlib/2.5.0-Beta2/kotlin-stdlib-2.5.0-Beta2.jar")
+    fn library(name: &str, coordinate: &str, jars: Vec<PathBuf>) -> RepositoryLibrary {
+        let mut parts = coordinate.split(':');
+        RepositoryLibrary {
+            name: name.to_string(),
+            group: parts.next().unwrap().to_string(),
+            artifact: parts.next().unwrap().to_string(),
+            version: parts.next().unwrap().to_string(),
+            packaging: "jar".to_string(),
+            include_transitive: true,
+            excluded: Vec::new(),
+            jars,
+        }
+    }
+
+    fn exclusion(group: &str, artifact: &str) -> ExcludedMavenArtifact {
+        ExcludedMavenArtifact {
+            group: group.to_string(),
+            artifact: artifact.to_string(),
+        }
+    }
+
+    fn write_jars(library: &RepositoryLibrary) -> io::Result<()> {
+        for jar in &library.jars {
+            if let Some(parent) = jar.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(jar, "jar")?;
+        }
+        Ok(())
     }
 
     #[test]
-    fn a_repository_jar_names_its_maven_central_artifact() {
-        let repository = Path::new("/m2");
-        let jar = repository_jar(repository, &stdlib(repository)).unwrap();
-        assert_eq!(
-            jar.coordinate,
-            "org.jetbrains.kotlin:kotlin-stdlib:2.5.0-Beta2"
-        );
-        assert_eq!(
-            jar.url,
-            "https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/2.5.0-Beta2/kotlin-stdlib-2.5.0-Beta2.jar"
-        );
-    }
-
-    #[test]
-    fn a_classifier_jar_keeps_the_classifier() {
-        let repository = Path::new("/m2");
-        let jar = repository.join(
-            "org/jetbrains/kotlin/kotlin-stdlib/2.5.0-Beta2/kotlin-stdlib-2.5.0-Beta2-sources.jar",
-        );
-        let jar = repository_jar(repository, &jar).unwrap();
-        assert_eq!(
-            jar.coordinate,
-            "org.jetbrains.kotlin:kotlin-stdlib:2.5.0-Beta2:sources"
-        );
-    }
-
-    #[test]
-    fn a_path_outside_the_repository_or_with_a_bad_name_is_not_fetched() {
-        let repository = Path::new("/m2");
-        assert!(repository_jar(repository, Path::new("/repo/out/production/core")).is_none());
-        assert!(repository_jar(
-            repository,
-            &repository.join("org/example/lib/1.0/not-the-artifact.jar")
-        )
-        .is_none());
-        assert!(
-            repository_jar(repository, &repository.join("org/../lib/1.0/lib-1.0.jar")).is_none()
-        );
-    }
-
-    #[test]
-    fn a_failed_fetch_leaves_the_jar_missing_and_a_successful_one_installs_it() {
-        let tree = crate::project::testing::TempTree::new("maven-repository");
+    fn a_library_with_several_artifacts_is_one_dependency_and_keeps_transitives() {
+        let tree = crate::project::testing::TempTree::new("maven-library-reactor");
+        tree.write("mvnw", "#!/bin/sh\n");
         let repository = tree.directory("m2");
-        let present = stdlib(&repository);
-        let missing = repository.join("com/example/lib/1.0/lib-1.0.jar");
-        let classpath = vec![
-            present.clone(),
-            missing.clone(),
-            tree.path("out/production/core"),
+        let classic =
+            repository.join("ch/qos/logback/logback-classic/1.3.14/logback-classic-1.3.14.jar");
+        let core = repository.join("ch/qos/logback/logback-core/1.3.14/logback-core-1.3.14.jar");
+        let mut logback = library(
+            "fleet:logback-classic",
+            "ch.qos.logback:logback-classic:1.3.14",
+            vec![classic, core],
+        );
+        logback.excluded = vec![
+            exclusion("org.slf4j", "slf4j-api"),
+            exclusion("com.sun.mail", "javax.mail"),
         ];
+        let dex = repository
+            .join("com/android/tools/smali/smali-dexlib2/3.0.10/smali-dexlib2-3.0.10.jar");
+        let mut dexlib = library(
+            "google-dexlib2",
+            "com.android.tools.smali:smali-dexlib2:3.0.10",
+            vec![dex],
+        );
+        dexlib.include_transitive = false;
 
-        let failed = install_missing_repository_jars(&classpath, &repository, |_url, _path| {
-            Err(io::Error::other("offline"))
-        });
+        let reactor = tree.directory("reactor");
+        let libraries = [&logback, &dexlib];
+        assert_eq!(write_resolution_reactor(&reactor, &libraries).unwrap(), 2);
+        let aggregator = std::fs::read_to_string(reactor.join("pom.xml")).unwrap();
+        assert!(aggregator.contains("<module>m0</module>"), "{aggregator}");
+        assert!(aggregator.contains("<module>m1</module>"), "{aggregator}");
+        assert!(
+            aggregator.contains("<packaging>pom</packaging>"),
+            "{aggregator}"
+        );
+
+        let with_transitives = std::fs::read_to_string(reactor.join("m0/pom.xml")).unwrap();
         assert_eq!(
-            failed,
+            with_transitives.matches("<dependency>").count(),
+            1,
+            "{with_transitives}"
+        );
+        assert!(
+            with_transitives.contains("<artifactId>logback-classic</artifactId>"),
+            "{with_transitives}"
+        );
+        assert!(
+            !with_transitives.contains("logback-core"),
+            "{with_transitives}"
+        );
+        assert!(
+            !with_transitives.contains("<groupId>*</groupId>"),
+            "{with_transitives}"
+        );
+        assert!(
+            with_transitives.contains("<artifactId>slf4j-api</artifactId>"),
+            "{with_transitives}"
+        );
+        assert!(
+            with_transitives.contains("<artifactId>javax.mail</artifactId>"),
+            "{with_transitives}"
+        );
+
+        let without_transitives = std::fs::read_to_string(reactor.join("m1/pom.xml")).unwrap();
+        assert_eq!(
+            without_transitives.matches("<dependency>").count(),
+            1,
+            "{without_transitives}"
+        );
+        assert!(
+            without_transitives.contains("<artifactId>smali-dexlib2</artifactId>"),
+            "{without_transitives}"
+        );
+        assert!(
+            without_transitives.contains("<groupId>*</groupId>"),
+            "{without_transitives}"
+        );
+        assert!(
+            without_transitives.contains("<artifactId>*</artifactId>"),
+            "{without_transitives}"
+        );
+        assert!(
+            !aggregator.contains("http")
+                && !with_transitives.contains("http")
+                && !without_transitives.contains("curl"),
+            "a resolution reactor must not name a repository"
+        );
+
+        let command = maven_batch_command(tree.root(), &reactor.join("pom.xml"));
+        assert_eq!(command.program, tree.path("mvnw"));
+        assert_eq!(command.working_directory, tree.root());
+        assert_eq!(
+            command.args,
+            vec![
+                "-B".to_string(),
+                "--quiet".to_string(),
+                "-fae".to_string(),
+                "-f".to_string(),
+                reactor.join("pom.xml").to_string_lossy().into_owned(),
+                "dependency:resolve".to_string(),
+            ]
+        );
+        assert!(command.args.iter().all(|arg| {
+            !arg.contains("http")
+                && !arg.contains("curl")
+                && !arg.contains("dependency:get")
+                && !arg.contains("excludeTransitive")
+        }));
+        assert_eq!(command.timeout, SCAN_PROBE_TIMEOUT);
+    }
+
+    #[test]
+    fn a_library_stays_missing_until_every_artifact_lands() {
+        let tree = crate::project::testing::TempTree::new("maven-library-partial");
+        let repository = tree.directory("m2");
+        let classic =
+            repository.join("ch/qos/logback/logback-classic/1.3.14/logback-classic-1.3.14.jar");
+        let core = repository.join("ch/qos/logback/logback-core/1.3.14/logback-core-1.3.14.jar");
+        let logback = library(
+            "fleet:logback-classic",
+            "ch.qos.logback:logback-classic:1.3.14",
+            vec![classic.clone(), core.clone()],
+        );
+        let dex = repository
+            .join("com/android/tools/smali/smali-dexlib2/3.0.10/smali-dexlib2-3.0.10.jar");
+        let mut dexlib = library(
+            "google-dexlib2",
+            "com.android.tools.smali:smali-dexlib2:3.0.10",
+            vec![dex.clone()],
+        );
+        dexlib.include_transitive = false;
+        let libraries = vec![logback, dexlib];
+
+        let mut calls = 0;
+        let partial = resolve_missing_libraries(ProviderKind::Jps, &libraries, |pending| {
+            calls += 1;
+            assert_eq!(pending.len(), 2);
+            assert!(pending[0].include_transitive);
+            assert!(!pending[1].include_transitive);
+            assert_eq!(pending[0].jars.len(), 2);
+            if let Some(parent) = pending[0].jars[0].parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&pending[0].jars[0], "jar")?;
+            Ok(())
+        });
+        assert_eq!(calls, 1);
+        assert_eq!(
+            partial,
             InstallResult {
                 installed: 0,
                 failed: 2
             }
         );
-        assert!(!present.exists());
-        assert!(!missing.exists());
+        assert!(classic.is_file());
+        assert!(!core.exists());
+        assert!(!dex.exists());
 
-        let installed = install_missing_repository_jars(&classpath, &repository, |url, path| {
-            assert!(url.starts_with("https://repo.maven.apache.org/maven2/"));
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
+        let installed = resolve_missing_libraries(ProviderKind::Jps, &libraries, |pending| {
+            assert_eq!(pending.len(), 2);
+            for library in pending {
+                write_jars(library)?;
             }
-            std::fs::write(path, url)?;
-            Ok(())
+            Err(io::Error::other("a later module failed"))
         });
         assert_eq!(
             installed,
@@ -270,68 +411,35 @@ mod tests {
                 failed: 0
             }
         );
-        assert!(present.is_file());
-        assert!(missing.is_file());
-        assert!(!tree.path("out/production/core").exists());
+        assert!(core.is_file());
+        assert!(dex.is_file());
 
-        let again = install_missing_repository_jars(&classpath, &repository, |_url, _path| {
-            panic!("an installed jar must not be fetched again");
+        let again = resolve_missing_libraries(ProviderKind::Jps, &libraries, |_| {
+            panic!("an installed library must not be resolved again");
         });
         assert_eq!(again, InstallResult::default());
     }
 
     #[test]
-    fn the_editor_fetch_gate_does_not_download_a_missing_jar() {
-        let tree = crate::project::testing::TempTree::new("editor-fetch-gate");
-        let repository = tree.directory("m2");
-        let missing = repository.join("com/example/lib/1.0/lib-1.0.jar");
-        let mut calls = 0;
-        let result = fetch_repository_jars(
-            RepositoryFetch::Editor,
-            std::slice::from_ref(&missing),
-            Some(&repository),
-            |_url, _path| {
-                calls += 1;
-                Ok(())
-            },
-        );
-        assert_eq!(calls, 0);
-        assert_eq!(result, InstallResult::default());
-        assert!(!missing.exists());
-        assert_eq!(
-            RepositoryFetch::Editor.fetch_named_jars(std::slice::from_ref(&missing)),
-            InstallResult::default()
-        );
-    }
-
-    #[test]
-    fn the_parity_fetch_gate_downloads_a_missing_repository_jar() {
-        let tree = crate::project::testing::TempTree::new("parity-fetch-gate");
-        let repository = tree.directory("m2");
-        let missing = repository.join("com/example/lib/1.0/lib-1.0.jar");
-        let mut calls = 0;
-        let result = fetch_repository_jars(
-            RepositoryFetch::Parity,
-            std::slice::from_ref(&missing),
-            Some(&repository),
-            |url, path| {
-                calls += 1;
-                assert!(url.starts_with("https://repo.maven.apache.org/maven2/"));
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::write(path, url)?;
-                Ok(())
-            },
-        );
-        assert_eq!(calls, 1);
-        assert_eq!(
-            result,
-            InstallResult {
-                installed: 1,
-                failed: 0
-            }
-        );
-        assert!(missing.is_file());
+    fn other_providers_do_not_resolve_jps_libraries() {
+        let tree = crate::project::testing::TempTree::new("maven-library-other");
+        let missing = tree.path("missing.jar");
+        let libraries = vec![library(
+            "kotlin-stdlib",
+            "org.jetbrains.kotlin:kotlin-stdlib:2.2.20",
+            vec![missing],
+        )];
+        for kind in [
+            ProviderKind::Gradle,
+            ProviderKind::Maven,
+            ProviderKind::Bsp,
+            ProviderKind::Explicit,
+            ProviderKind::None,
+        ] {
+            let result = resolve_missing_libraries(kind, &libraries, |_| {
+                panic!("{} must not resolve repository libraries", kind.as_str());
+            });
+            assert_eq!(result, InstallResult::default(), "{}", kind.as_str());
+        }
     }
 }

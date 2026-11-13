@@ -10,13 +10,13 @@ use super::model::{
     Module, ModuleId, ModuleOutput, ProjectModel, ProviderKind, SourceRoot, SourceRootKind,
 };
 use super::provider::{ProbeError, ProjectProvider};
-use super::runner::{Command, CommandRunner, BUILD_TOOL_TIMEOUT, GRADLE};
+use super::runner::{Command, CommandRunner, BUILD_TOOL_TIMEOUT, GRADLE, SCAN_PROBE_TIMEOUT};
 
 const PROBE_VERSION: &str = "6";
 /// Cold `krustyModel` configuration of a repository the size of the Kotlin compiler. Used only by
 /// the offline model and parity probes. The editor probe keeps the ordinary 120-second ceiling:
 /// it runs on the analysis thread, and a hung Gradle sync must not stall analysis for this long.
-pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(45 * 60);
+pub(crate) const PROBE_TIMEOUT: Duration = SCAN_PROBE_TIMEOUT;
 const SENTINEL: &str = "KRUSTY_MODEL_JSON ";
 const TASK: &str = "krustyModel";
 const MAX_FAILURE_DETAILS: usize = 8;
@@ -434,6 +434,7 @@ fn parse_model(root: &Path, stdout: &str) -> Result<ProjectModel, ProbeError> {
         kind: ProviderKind::Gradle,
         jdk_home,
         modules,
+        repository_libraries: Vec::new(),
     })
 }
 
