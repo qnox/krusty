@@ -1367,3 +1367,36 @@ mod unsigned_decimal;
 
 #[path = "wasm_enclosing_instances.rs"]
 mod enclosing_instances;
+
+#[test]
+fn unsigned_array_whole_fixture_diagnostics() {
+    let source = include_str!("box_regressions/unsignedArrayViews.kt");
+    crate::box_reference_classes::checked_box(source, "unsignedArrayViews")
+        .expect("reference must execute the unchanged whole fixture");
+    let sources = vec![("unsignedArrayViews.kt".to_string(), source.to_owned())];
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        let backend = lane.backend(source).expect("whole fixture backend policy");
+        let program = box_lane::compile(
+            &sources,
+            source,
+            lane.test_target(),
+            &backend,
+            "box",
+            DECLINE_PREFIX,
+        )
+        .expect("whole fixture compilation");
+        let output = std::path::PathBuf::from("evidence").join(target.name());
+        std::fs::create_dir_all(&output).unwrap();
+        for (name, bytes) in program.artifacts {
+            std::fs::write(output.join(name), bytes).unwrap();
+        }
+        let result = Command::new("node")
+            .arg(output.join("box.mjs"))
+            .output()
+            .unwrap();
+        std::fs::write(output.join("runtime.stdout"), result.stdout).unwrap();
+        std::fs::write(output.join("runtime.stderr"), result.stderr).unwrap();
+        std::fs::write(output.join("runtime.exit"), result.status.to_string()).unwrap();
+    }
+}
