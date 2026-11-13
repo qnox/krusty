@@ -71,10 +71,10 @@ mod tests {
 
     #[test]
     fn backend_contract_uses_only_frontend_handoff_dependencies() {
-        // The streaming handoff owns one common-IR unit plus a classifier-only semantic view. The
-        // legacy `lower_file` method still names `CheckedFile`; production `CheckedIrFile` cannot
-        // expose parser arenas, source maps, resolver entry points, or the frontend symbol table.
-        assert_allowed_crate_modules("src/backend.rs", &["diag", "fir", "frontend", "ir"]);
+        // The streaming handoff owns one common-IR unit plus a classifier-only semantic view;
+        // parser arenas, source maps, resolver entry points, and the frontend symbol table do not
+        // cross the backend contract.
+        assert_allowed_crate_modules("src/backend.rs", &["diag", "fir", "ir"]);
         assert_allowed_crate_modules_in_tree(
             "src/backend",
             &[
@@ -87,6 +87,37 @@ mod tests {
                 "types",
             ],
         );
+    }
+
+    #[test]
+    fn backend_contract_has_no_legacy_syntax_lowering() {
+        let contract =
+            fs::read_to_string(source_path("src/backend.rs")).expect("read backend contract");
+        assert!(
+            !contract.contains("CheckedFile") && !contract.contains("fn lower_file("),
+            "the backend contract must expose checked common IR only"
+        );
+
+        let jvm = fs::read_to_string(source_path("src/jvm/backend.rs")).expect("read JVM backend");
+        for legacy in [
+            "emit_legacy_ir",
+            "BackendReadyClassifiers::Legacy",
+            "fn lower_file(",
+        ] {
+            assert!(
+                !jvm.contains(legacy),
+                "JVM backend retained a legacy syntax-lowering path: {legacy}"
+            );
+        }
+
+        let js =
+            fs::read_to_string(source_path("src/js/backend.rs")).expect("read JavaScript backend");
+        for legacy in ["fn lower_file(", "ir_lower::lower_file_at"] {
+            assert!(
+                !js.contains(legacy),
+                "JavaScript backend retained a legacy syntax-lowering path: {legacy}"
+            );
+        }
     }
 
     #[test]

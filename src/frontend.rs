@@ -40,17 +40,6 @@ pub(crate) use crate::resolve::{selected_context_values, SelectedContextSources}
 /// adapters do not have to reach through the frontend boundary into source classification.
 pub use crate::source::{SourceInput, SourceKind};
 
-/// A single parsed file together with the frontend facts needed by a backend.
-pub struct CheckedFile<'a> {
-    pub file: &'a File,
-    pub file_index: u32,
-    pub info: &'a FrontendTypeInfo,
-    pub symbols: &'a FrontendSymbols,
-    /// The compilation's module name (kotlinc `-module-name`), for the serialization plugin's
-    /// `write$Self$<module>` helper. `"main"` by default.
-    pub module_name: &'a str,
-}
-
 /// Analysis result for a jointly compiled source set.
 ///
 /// Inspection-oriented entry points retain `files`/`types`. Emission-oriented analysis deliberately

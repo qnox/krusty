@@ -556,7 +556,7 @@ pub fn backend_outcome_in_process(
 #[allow(dead_code)]
 pub fn compile_js_in_process(src: &str, stem: &str) -> Result<String, Vec<String>> {
     let platform = Box::new(krusty::libraries::EmptySymbolSource);
-    let backend = krusty::js::JsBackend::new(krusty::libraries::EmptySymbolSource);
+    let backend = krusty::js::JsBackend::new();
     let report = emit_in_process(src, stem, platform, &backend);
     if !report.diagnostics.is_empty() {
         return Err(report.diagnostics);
