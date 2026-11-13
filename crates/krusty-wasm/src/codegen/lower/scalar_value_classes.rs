@@ -162,7 +162,7 @@ impl Body<'_> {
         if index != 0
             || owner.fields.len() != 1
             || owner.fields[0].ty != declaration.underlying
-            || owner.fields[0].name != declaration.property
+            || owner.fields[0].name.as_str() != declaration.property.as_ref()
         {
             return Some(Err(
                 "a target-owned value-class field apart from its declared storage".into(),
