@@ -511,7 +511,10 @@ fun use() {
 }
 ";
     common::assert_errors_match_kotlinc(
-        &[("marker.kt", COLLECTION_LITERALS_MARKER), ("main.kt", enabled)],
+        &[
+            ("marker.kt", COLLECTION_LITERALS_MARKER),
+            ("main.kt", enabled),
+        ],
         &allow_kotlin_package,
     );
 }
@@ -525,7 +528,10 @@ fn the_marker_needs_opt_in_without_collection_literals() {
 }
 ";
     common::assert_errors_match_kotlinc(
-        &[("marker.kt", COLLECTION_LITERALS_MARKER), ("main.kt", disabled)],
+        &[
+            ("marker.kt", COLLECTION_LITERALS_MARKER),
+            ("main.kt", disabled),
+        ],
         &allow_kotlin_package,
     );
 }
