@@ -2352,6 +2352,28 @@ impl LibraryType {
         &self.type_parameters.type_params
     }
 
+    /// `classifier`, this declaration, applied to its own formals, each bounded by its first
+    /// declared bound (`kotlin.Any?` when it declares none): the root its members are declared
+    /// against.
+    pub fn declared_self_type(&self, classifier: crate::types::TypeName) -> Ty {
+        let arguments = self
+            .type_params()
+            .iter()
+            .enumerate()
+            .map(|(index, parameter)| {
+                Ty::ty_param(
+                    parameter,
+                    self.type_param_bounds()
+                        .get(index)
+                        .and_then(|bounds| bounds.first())
+                        .copied()
+                        .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
+                )
+            })
+            .collect::<Vec<_>>();
+        Ty::obj_args_name(classifier, &arguments)
+    }
+
     pub fn type_param_bounds(&self) -> &Vec<Vec<Ty>> {
         &self.type_parameters.type_param_bounds
     }

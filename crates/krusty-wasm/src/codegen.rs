@@ -224,6 +224,8 @@ impl Backend for WasmBackend {
             started.callables.enter_source_module(file.module_name);
             started.properties.enter_source_module(file.module_name);
             started.classes.enter_source_module(file.module_name);
+        } else {
+            started.classes.enter_dependency_support();
         }
         if state
             .slot_plan

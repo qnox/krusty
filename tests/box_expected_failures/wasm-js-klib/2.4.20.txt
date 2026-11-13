@@ -2720,11 +2720,6 @@ primitiveTypes/kt79977_withIncrementalCompilation.kt
 primitiveTypes/kt887.kt
 primitiveTypes/numberEqualsHashCodeToString.kt
 primitiveTypes/numberToChar/abstractMethodInSuperinterface.kt
-primitiveTypes/numberToChar/fakeOverride.kt
-primitiveTypes/numberToChar/simple.kt
-primitiveTypes/numberToChar/superCallToClass.kt
-primitiveTypes/numberToChar/superCallToInterface.kt
-primitiveTypes/numberToChar/superCallToNumber.kt
 primitiveTypes/reassignDestructured.kt
 primitiveTypes/smartCastOnNullableDoubleIdentityEquals.kt
 primitiveTypes/stringEqualsHashCodeToString.kt
