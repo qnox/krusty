@@ -349,7 +349,8 @@ pub(super) struct BodyLowering<'a> {
     /// Enclosing values a member of an object literal reads through its constructor fields.
     captures: HashMap<KlibIrSymbol, object_literals::CaptureField>,
     /// The members of the object literals being lowered, by serialized signature.
-    object_members: HashMap<crate::metadata::klib_ir::KlibIrSignature, object_literals::ObjectMember>,
+    object_members:
+        HashMap<crate::metadata::klib_ir::KlibIrSignature, object_literals::ObjectMember>,
     /// The member function whose `return`s are being lowered, when that is not the template.
     member_return: Option<KlibIrSymbol>,
     /// The result type of [`Self::member_return`].
