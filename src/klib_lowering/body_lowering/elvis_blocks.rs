@@ -42,8 +42,14 @@ impl BodyLowering<'_> {
         let fallback = self.elvis_result(fallback, fallback_type, ty)?;
         let present = self.elvis_read(local.index);
         // Only this read has the authenticated null proof. Its storage remains the temporary's
-        // declared type; the branch conversion consumes its proven non-null value.
-        let present = self.elvis_result(present, shape.input.non_null(), ty)?;
+        // declared type; the branch conversion consumes its proven non-null value. A nullable
+        // type-parameter bound needs its original identity under `T & Any`, as when a value
+        // contributes through a nullable formal; stripping only a nullable wrapper loses it.
+        let present = self.elvis_result(
+            present,
+            shape.input.contributed_through_nullable_formal(),
+            ty,
+        )?;
         let when = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(condition), fallback), (None, present)],
         });
@@ -112,7 +118,7 @@ impl BodyLowering<'_> {
             ));
         }
         let result_type = self.ty(result, "Elvis present read")?;
-        if result_type != input && result_type != input.non_null() {
+        if result_type != input && result_type != input.contributed_through_nullable_formal() {
             return Err(mismatch(
                 "an Elvis present read has another type than its temporary",
             ));
@@ -182,7 +188,6 @@ impl BodyLowering<'_> {
                 .linker
                 .is_subtype(self.header.type_parameters(), proven, target)
         {
-            crate::trace_compiler!("lower", "KLIB Elvis conversion declined: expression={value:?} proven={proven:?} target={target:?}");
             return Err(super::KlibBodyDeclineReason::ImplicitConversion);
         }
         let coerced = if target == Ty::Unit {
