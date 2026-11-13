@@ -50,6 +50,14 @@ pub trait BackendClassifierSource {
             crate::libraries::ClassifierDeclarationKey::TypeAlias(_) => None,
         }
     }
+
+    /// Every builtin class (`String`, a primitive) whose classifier is a proper subtype of
+    /// `classifier`, from the frontend's supertype traversal: the builtin values a target carrying
+    /// them in representations of its own must count as instances of `classifier`. A source that
+    /// holds no dependency hierarchy has none.
+    fn builtin_subtypes(&self, _classifier: TypeName) -> Vec<crate::types::Ty> {
+        Vec::new()
+    }
 }
 
 /// The exact classifier information representation backends may inspect after semantic checking.
@@ -801,6 +809,14 @@ impl BackendClassifierSource for CheckedBackendClassifiers<'_> {
         Some(Arc::new(BackendClassifierFact::from_library(
             classifier, &shape,
         )))
+    }
+
+    fn builtin_subtypes(&self, classifier: TypeName) -> Vec<crate::types::Ty> {
+        // A classifier of this module is below no builtin class.
+        if self.module.classifier(classifier).is_some() || self.module.is_body_local(classifier) {
+            return Vec::new();
+        }
+        crate::symbol_resolver::builtin_subtypes(self.dependencies, classifier)
     }
 }
 

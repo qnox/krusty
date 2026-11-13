@@ -113,16 +113,7 @@ pub(crate) fn builtin_overrides(
     name: &str,
     identity: ExternalCallableId,
 ) -> Vec<BuiltinOverride> {
-    let subtypes = BUILTIN_TYPES
-        .into_iter()
-        .filter(|builtin| {
-            builtin.kotlin_class_internal().is_some_and(|classifier| {
-                supertype_preorder(source, classifier)
-                    .get(&owner)
-                    .is_some_and(|&visit| visit > 0)
-            })
-        })
-        .collect::<Vec<_>>();
+    let subtypes = builtin_subtypes(source, owner);
     if subtypes.is_empty() {
         return Vec::new();
     }
@@ -134,6 +125,22 @@ pub(crate) fn builtin_overrides(
         .map(|receiver| BuiltinOverride {
             receiver,
             declaration: classifier_override(source, receiver, &base),
+        })
+        .collect()
+}
+
+/// Every builtin class whose classifier is a proper subtype of `owner`: the builtin values an
+/// instance of `owner` can be, which a target carrying them in representations of its own must
+/// answer a call of `owner`'s member or a type test against `owner` for.
+pub(crate) fn builtin_subtypes(source: &dyn SymbolSource, owner: TypeName) -> Vec<Ty> {
+    BUILTIN_TYPES
+        .into_iter()
+        .filter(|builtin| {
+            builtin.kotlin_class_internal().is_some_and(|classifier| {
+                supertype_preorder(source, classifier)
+                    .get(&owner)
+                    .is_some_and(|&visit| visit > 0)
+            })
         })
         .collect()
 }

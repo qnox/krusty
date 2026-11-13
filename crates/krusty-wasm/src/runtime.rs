@@ -26,6 +26,7 @@ use krusty::fx_hash::HashMap;
 
 use super::array_objects::ArrayObjects;
 use super::boxes::Boxes;
+use super::builtin_instances::BuiltinInstances;
 use super::builtin_members::BuiltinMembers;
 use super::callable_references::CallableReferences;
 use super::class_tokens::{ClassTokens, TokenRuntime};
@@ -79,6 +80,8 @@ pub(super) struct Runtime {
     pub(super) boxes: Boxes,
     /// The library members a call goes through that builtin classes implement.
     pub(super) builtin_members: BuiltinMembers,
+    /// The library interfaces something tests for that builtin values are instances of.
+    pub(super) builtin_instance_tests: BuiltinInstances,
     /// The table types of the function values this module creates.
     pub(super) functions: FunctionShapes,
     pub(super) callable_references: CallableReferences,
@@ -173,6 +176,7 @@ impl Runtime {
             object_strings,
             boxes: Boxes::default(),
             builtin_members: BuiltinMembers::default(),
+            builtin_instance_tests: BuiltinInstances::default(),
             functions: FunctionShapes::default(),
             callable_references,
             type_objects: TypeObjects::default(),
