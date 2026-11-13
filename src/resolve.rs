@@ -33995,6 +33995,13 @@ impl<'a> Checker<'a> {
         expected: &'static crate::types::FnSig,
         allow_unit_coercion: bool,
     ) -> bool {
+        // An open result variable is bound through the declared result's view as the expected
+        // result's classifier: `List<String>` against `Iterable<R>` binds `R` from `Iterable<String>`.
+        let ret = if expected.ret.non_null().mentions_ty_param() {
+            crate::assignable::applied_supertype(self, ret, expected.ret.non_null()).unwrap_or(ret)
+        } else {
+            ret
+        };
         callable_reference_selection::is_compatible(
             params,
             ret,
@@ -34810,6 +34817,59 @@ impl<'a> Checker<'a> {
             })
     }
 
+    /// Whether some declaration the receiver-less reference `name` can name produces a result the
+    /// expected function type's result accepts. Parameters are specialized from the expected
+    /// shape only to bind the declaration's type variables; the probe commits nothing.
+    /// `None` when the name denotes no top-level or local function.
+    fn unqualified_callable_reference_result_fits(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        expected: &'static crate::types::FnSig,
+    ) -> Option<bool> {
+        if let Some(overloads) = self.lookup_local_fun_overloads(scope, name) {
+            return Some(overloads.into_iter().any(|(_, signature)| {
+                self.contextual_local_function_reference_shape(
+                    &signature,
+                    None,
+                    &expected.params,
+                    expected.ret,
+                )
+                .is_some()
+            }));
+        }
+        let candidates = self.resolver().top_level_candidates(name);
+        if candidates.is_empty() {
+            return None;
+        }
+        Some(candidates.into_iter().any(|mut function| {
+            function.kind == crate::libraries::FnKind::TopLevel
+                && self
+                    .specialize_callable_ref_candidate(
+                        &mut function,
+                        None,
+                        Some(&expected.params),
+                        None,
+                    )
+                    .is_ok()
+                && {
+                    let ret = function.callable.ret;
+                    expected.ret == Ty::Unit
+                        || expected.ret.non_null().is_ty_param()
+                        || if expected.ret.non_null().mentions_ty_param() {
+                            crate::assignable::applied_supertype(
+                                self,
+                                ret,
+                                expected.ret.non_null(),
+                            )
+                            .is_some()
+                        } else {
+                            self.receiver_is_assignable(ret, expected.ret)
+                        }
+                }
+        }))
+    }
+
     /// Read-only applicability for a classifier-qualified callable reference while an enclosing
     /// overload is still being ranked. This deliberately handles only a simple classifier root;
     /// richer qualified/applied LHS forms continue through the ordinary selected reference pass.
@@ -35044,6 +35104,12 @@ impl<'a> Checker<'a> {
                 if structurally_fits {
                     structurally_adaptable.push(function.clone());
                 }
+                // Overload specificity compares the declarations, not their instantiation for this
+                // expected shape: `listOf(vararg elements: T)` takes `Array<out T>` where
+                // `listOf(element: T)` takes any `T`, whatever the expected array type binds.
+                let declared_shape = callable_reference_selection::erased_declared_parameters(
+                    &function.callable.params,
+                );
                 let specialization = self.specialize_callable_ref_candidate(
                     &mut function,
                     None,
@@ -35156,6 +35222,7 @@ impl<'a> Checker<'a> {
                     argument_mapping,
                     type_arguments,
                     plan,
+                    declared_shape,
                 ))
             })
             .collect::<Vec<_>>();
@@ -35218,7 +35285,7 @@ impl<'a> Checker<'a> {
             .iter()
             .map(
                 |candidate| callable_reference_selection::AdaptedReferenceSpecificity {
-                    parameters: &candidate.0.callable.params,
+                    parameters: &candidate.7,
                     plan: &candidate.6,
                     is_vararg: candidate.0.call_sig.vararg_index.is_some(),
                 },
@@ -35253,6 +35320,7 @@ impl<'a> Checker<'a> {
             vararg_collect,
             argument_mapping,
             type_arguments,
+            _,
             _,
         ) = &candidates[*selected_index];
         self.replace_call_type_arguments(

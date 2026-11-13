@@ -86,6 +86,16 @@ pub(super) fn maximal_adapted_references(
     }
 }
 
+/// A declaration's value parameters as overload specificity compares them: each of its own type
+/// parameters erased to its upper bound.
+pub(super) fn erased_declared_parameters(parameters: &[Ty]) -> Vec<Ty> {
+    let unbound = crate::fx_hash::HashMap::<String, Ty>::default();
+    parameters
+        .iter()
+        .map(|parameter| parameter.substitute_erased(&unbound))
+        .collect()
+}
+
 fn adaptation_specificity_shape(params: &[Ty], plan: &[AdaptedRefArgument]) -> Vec<Ty> {
     let mut shape = Vec::new();
     for (index, argument) in plan.iter().enumerate() {
@@ -280,11 +290,20 @@ pub(super) fn specialize_generic_signature(
     }
     if let Some(expected) = expected_params {
         let vararg = call_sig.vararg_index;
+        // The expected array is the whole vararg only where it is the declared array's own kind: a
+        // reference array for `vararg xs: E` (`Array<out E>`), the same primitive array for
+        // `vararg xs: Int`. Any other argument, a primitive array against `E`, is one element.
         let whole_vararg = vararg.is_some_and(|index| {
-            expected.len() == generic.params.len()
-                && expected
-                    .get(index)
-                    .is_some_and(|parameter| parameter.array_elem().is_some())
+            (expected.len() == generic.params.len() || expected.len() == index + 1)
+                && expected.get(index).is_some_and(|actual| {
+                    let actual = actual.non_null();
+                    let declared = generic.params[index].non_null();
+                    if declared.is_reference_array() {
+                        actual.is_reference_array()
+                    } else {
+                        actual.array_elem().is_some() && actual == declared
+                    }
+                })
         });
         let actuals = expected
             .iter()

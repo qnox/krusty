@@ -329,6 +329,22 @@ pub(super) fn score_with_declaration(
                         None => Some(0),
                     }
                 }
+                // A receiver-less reference supplies a result classifier before any lambda body
+                // would: a candidate whose function result the named callable cannot produce is
+                // marked a misfit, which an `OverloadResolutionByLambdaReturnType` tie then drops.
+                Expr::CallableRef {
+                    receiver: None,
+                    name,
+                } if expected.non_null().is_fun() => {
+                    let TyKind::Fun(expected_function) = expected.non_null().kind() else {
+                        unreachable!("guarded function expectation")
+                    };
+                    let fits = checker
+                        .unqualified_callable_reference_result_fits(scope, name, expected_function)
+                        .unwrap_or(true);
+                    lambda_result_mismatch.set(lambda_result_mismatch.get() || !fits);
+                    Some(2)
+                }
                 _ => Some(0),
             };
         }
@@ -531,18 +547,26 @@ pub(super) fn refine_lambda_tie<T>(
                 "kotlin/OverloadResolutionByLambdaReturnType",
             ))
     };
+    let postponed = |argument: ExprId| {
+        matches!(
+            file.expr(argument),
+            Expr::Lambda { .. } | Expr::CallableRef { receiver: None, .. }
+        )
+    };
     let mut lambdas = args
         .iter()
         .enumerate()
-        .filter(|(_, &argument)| matches!(file.expr(argument), Expr::Lambda { .. }))
+        .filter(|(_, &argument)| postponed(argument))
         .map(|(position, _)| position);
     let (Some(lambda), None) = (lambdas.next(), lambdas.next()) else {
         return;
     };
-    // Before the lambda is analyzed (a call's pre-lambda selection) a tie stays a tie.
-    let analyzed = arg_tys.get(lambda).is_some_and(|actual| {
-        matches!(actual.non_null().kind(), TyKind::Fun(function) if !function.ret.mentions_error())
-    });
+    // Before the lambda is analyzed (a call's pre-lambda selection) a tie stays a tie. A
+    // callable reference carries its result evidence in the candidates' misfit marks instead.
+    let analyzed = matches!(file.expr(args[lambda]), Expr::CallableRef { .. })
+        || arg_tys.get(lambda).is_some_and(|actual| {
+            matches!(actual.non_null().kind(), TyKind::Fun(function) if !function.ret.mentions_error())
+        });
     if !analyzed {
         return;
     }
