@@ -243,10 +243,19 @@ impl BodyLowering<'_> {
         let super::super::for_loops::IndicesForLoop {
             getter,
             receiver,
+            reversed,
             inner: serialized,
             body: statements,
             binding,
         } = indices_loop;
+        if let Some(reversed) = reversed {
+            let KlibIrSignature::Public(callee) = &reversed.symbol.signature else {
+                return Err(mismatch("a reversed indices loop names a non-public callee"));
+            };
+            if !self.linker.reverses_progression(callee)? {
+                return unsupported("a `for` loop over indices through another progression call");
+            }
+        }
         match self.linker.indices_receiver(getter)? {
             Some(crate::libraries::IndicesReceiver::Array) => {}
             Some(_) => return unsupported("a `for` loop over the indices of a non-array receiver"),
@@ -291,8 +300,17 @@ impl BodyLowering<'_> {
             dispatch_receiver: Some(array_read),
             args: Vec::new(),
         });
-        let end = self.typed(size, Ty::Int);
-        let start = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+        let size = self.typed(size, Ty::Int);
+        // Counting down starts at the last index and ends at the first: `size - 1 downTo 0`.
+        let (operation, start, end) = if reversed.is_some() {
+            let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+            let last = self.ir.add_arithmetic(IrBinOp::Sub, size, one, Ty::Int);
+            let first = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+            (crate::fir::FirRangeOperation::DownTo, last, first)
+        } else {
+            let first = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+            (crate::fir::FirRangeOperation::Until, first, size)
+        };
         let symbol = variable.base.symbol.clone();
         let name = variable.name.clone();
         let local = self.locals.slot(variable, Ty::Int)?;
@@ -310,7 +328,7 @@ impl BodyLowering<'_> {
                 variable_name: Some(name.into()),
                 counter: Ty::Int,
                 source: IrProgressionSource::Literal {
-                    operation: crate::fir::FirRangeOperation::Until,
+                    operation,
                     start,
                     end,
                 },

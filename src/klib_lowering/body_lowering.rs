@@ -176,6 +176,15 @@ pub(super) trait CallLinker {
         Ok(None)
     }
 
+    /// Whether `callee` is kotlinc's progression `reversed`, by its provider declaration. A
+    /// linker that does not model it keeps the iterator protocol.
+    fn reverses_progression(
+        &self,
+        _callee: &crate::metadata::id_signature::KlibPublicIdSignature,
+    ) -> Lowered<bool> {
+        Ok(false)
+    }
+
     /// The function a call of the public declaration `callee` invokes.
     fn link(&mut self, ir: &mut IrFile, callee: &KlibPublicIdSignature) -> Lowered<LinkedCallee>;
 

@@ -994,6 +994,40 @@ impl CallLinker for Linker<'_, '_> {
             }))
     }
 
+    fn reverses_progression(
+        &self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<bool, KlibBodyDeclineReason> {
+        let signature = KlibDeclarationSignature::Public(callee.clone());
+        let identity = match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, &signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => identity,
+            KlibCalleeOrigin::Missing => {
+                return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                    "a `for` loop over a `reversed` call without a provider declaration",
+                ))
+            }
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
+                    callee.clone(),
+                )))
+            }
+        };
+        Ok(self
+            .sources
+            .declarations
+            .external_callable_by_dependency(&identity)
+            .is_some_and(|(_, realization)| {
+                realization
+                    .klib_body_callable()
+                    .and_then(|callable| callable.compiler_intrinsic())
+                    == Some(crate::libraries::CompilerIntrinsic::ProgressionReversed)
+            }))
+    }
+
     fn local_class(
         &self,
         signature: &KlibIrSignature,
