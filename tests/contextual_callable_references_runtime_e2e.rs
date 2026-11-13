@@ -1,15 +1,15 @@
 //! Runtime behavior of `CallableReferencesToContextual` references: a reference to a declaration with context parameters selects
 //! a scope value for each of them where the reference is written and binds it, so the reference's
 //! own type shows only the remaining parameters. The language feature exists from Kotlin
-//! 2.5.0-Beta2, whose runtime library also carries the `boundContextArguments` the compiled
+//! 2.5.0-RC, whose runtime library also carries the `boundContextArguments` the compiled
 //! references hand over; both programs run against that release.
 
 use crate::common;
 
 fn run_against_beta2(source: &str, stem: &str) -> String {
-    let release = "2.5.0-Beta2";
+    let release = "2.5.0-RC";
     let stdlib = common::kotlinc_lib_for_release(release)
-        .expect("kotlinc 2.5.0-Beta2")
+        .expect("kotlinc 2.5.0-RC")
         .join("kotlin-stdlib.jar");
     let jdk = common::jdk_modules();
     common::expect_box_run(source, stem, &[stdlib], Some(jdk.as_path()))
