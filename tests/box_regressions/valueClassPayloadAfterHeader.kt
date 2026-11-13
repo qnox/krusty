@@ -1,6 +1,9 @@
-@JvmInline value class HeaderInt(val value: Int)
-@JvmInline value class HeaderLong(val value: Long)
-@JvmInline value class HeaderText(val value: String)
+OPTIONAL_JVM_INLINE_ANNOTATION
+value class HeaderInt(val value: Int)
+OPTIONAL_JVM_INLINE_ANNOTATION
+value class HeaderLong(val value: Long)
+OPTIONAL_JVM_INLINE_ANNOTATION
+value class HeaderText(val value: String)
 
 fun checkHeaderPayload(first: Any, same: Any, other: Any, expectedHash: Int): String {
     if (first != same || same != first) return "equal payloads differ"
