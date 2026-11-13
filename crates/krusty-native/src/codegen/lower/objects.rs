@@ -2281,7 +2281,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     /// A call of a method its class's table does not dispatch: a member of a dependency class
     /// that no subclass can override, such as its constructor initializer or a final member.
-    fn direct_method_call(
+    pub(super) fn direct_method_call(
         &mut self,
         fid: FunId,
         receiver: u32,
