@@ -343,6 +343,7 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         serialization_cache_methods: _,
         singleton_extension_unread_receivers: _,
         external_overridden_declarations: _,
+        dependency_methods: _,
         callable_semantic_roles: _,
         lambda_own_params_from: _,
         lambda_inferred_results: _,

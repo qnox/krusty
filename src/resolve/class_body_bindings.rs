@@ -266,6 +266,13 @@ impl Checker<'_> {
         for (parameter, ty) in parameters.iter().zip(types) {
             if !parameter.is_property && !parameter.is_script_parameter {
                 self.declare(scope, &parameter.name, ty, parameter.is_var);
+                self.record_lexical_declaration(
+                    scope,
+                    &parameter.name,
+                    super::lexical_bindings::LexicalValueRole::Parameter(
+                        parameter.declaration_span,
+                    ),
+                );
             }
         }
     }
@@ -318,6 +325,7 @@ impl Checker<'_> {
             super::ClassStorageSource { owner, identity },
             capture.shared_cell,
         );
+        self.retain_capture_declaration(scope, &capture);
     }
 
     /// Shadow synthetic immutable capture properties with their semantic source bindings. A shared
@@ -370,6 +378,7 @@ impl Checker<'_> {
                     super::ClassStorageSource { owner, identity },
                     capture.shared_cell,
                 );
+                self.retain_capture_declaration(scope, &capture);
             }
         }
     }

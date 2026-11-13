@@ -83,7 +83,6 @@ classes/inheritSetAndHashSet.kt
 classes/kt1120.kt
 closures/closureThisByUsingMethodFromParentClass.kt
 collections/kt41123.kt
-compileKotlinAgainstKotlin/jvm8/defaults/interop/likeMemberClash.kt
 constants/comparisonTrue.kt
 constants/numberLiteralCoercionToInferredType.kt
 contextParameters/contextualCallableReferenceEquality.kt

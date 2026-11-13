@@ -108,6 +108,8 @@ mod references;
 mod reified_markers;
 mod reified_templates;
 mod sam_target;
+mod type_tests;
+pub(crate) use type_tests::{admits_null_at_runtime, settled_instance_answer};
 mod source_debug;
 pub(crate) use source_debug::SourceDebug;
 mod static_properties;
@@ -2418,6 +2420,9 @@ pub struct IrFile {
     pub semantic_call_roles: crate::fx_hash::HashMap<ExprId, crate::types::SemanticCallRole>,
     /// See [`external_overrides::ExternalOverriddenDeclarations`].
     pub external_overridden_declarations: external_overrides::ExternalOverriddenDeclarations,
+    /// The dependency member declarations this file emits as methods of a class it materializes,
+    /// so an override edge naming one is an override of a method of this file.
+    pub dependency_methods: crate::fx_hash::HashMap<crate::fir::ExternalCallableId, FunId>,
     /// Current-module functions that play a language role through the declaration they override
     /// (an override of `Any.toString`), as the frontend's override resolution published them.
     pub callable_semantic_roles:
