@@ -213,11 +213,29 @@ impl Checker<'_> {
         }) || self
             .postponed_diagnostics
             .contains_error_in_span(self.file_index, call_span);
-        let Some((index, formal)) = signature
+        // A parameter constrains a formal only through an argument the call passes to it. An
+        // empty `vararg` (`arrayOf()`) or an omitted defaulted parameter supplies no evidence. Any
+        // leading context parameters precede the committed value slots.
+        let committed = self.resolved_call_arg_slots.get(&call);
+        let context_parameters = committed.map_or(0, |committed| {
+            signature.params.len().saturating_sub(committed.slots.len())
+        });
+        let parameter_receives_argument = |parameter: usize| {
+            committed.is_none_or(|committed| {
+                parameter < context_parameters
+                    || committed
+                        .argument_bindings
+                        .iter()
+                        .any(|binding| binding.parameter + context_parameters == parameter)
+            })
+        };
+        // kotlinc reports every formal the call leaves open, in declaration order
+        // (`emptyMap()` reports both `K` and `V`).
+        let uninferred = signature
             .formals
             .iter()
             .enumerate()
-            .find(|(index, formal)| {
+            .filter(|(index, formal)| {
                 // A recorded argument that is only a lambda result's open nested-call variable
                 // (`R := T` of `Mono.empty()`) leaves this formal uninferred along with it.
                 let open_dependency = resolved
@@ -237,8 +255,10 @@ impl Checker<'_> {
                         || !signature
                             .params
                             .iter()
-                            .any(|parameter| {
+                            .enumerate()
+                            .any(|(position, parameter)| {
                                 ty_mentions_param(*parameter, std::slice::from_ref(*formal))
+                                    && parameter_receives_argument(position)
                             }))
                     && (open_lambda_result_formals
                         .is_some_and(|formals| formals.contains(*formal))
@@ -262,11 +282,25 @@ impl Checker<'_> {
                                 || lexical_formals.iter().any(|lexical| lexical == bound)
                         })
             })
-        else {
+            .map(|(index, formal)| (index, *formal))
+            .collect::<Vec<_>>();
+        if uninferred.is_empty() {
             return false;
-        };
-        // With written type arguments, only a `_` placeholder leaves a formal open; kotlinc
-        // reports it at that placeholder rather than at the callee.
+        }
+        for (index, formal) in uninferred {
+            self.report_uninferred_call_formal(call, index, formal);
+        }
+        true
+    }
+
+    /// Report one open formal of `call`. With written type arguments, only a `_` placeholder
+    /// leaves a formal open; kotlinc reports it at that placeholder rather than at the callee.
+    fn report_uninferred_call_formal(
+        &mut self,
+        call: ExprId,
+        index: usize,
+        formal: crate::types::TyParamName,
+    ) {
         let span = self
             .file
             .call_type_args
@@ -276,13 +310,46 @@ impl Checker<'_> {
                 || self.call_callee_name_span(call),
                 |argument| argument.span,
             );
-        self.diags.error(
-            span,
-            format!(
-                "cannot infer type for type parameter '{}'. Specify it explicitly.",
-                crate::types::type_parameter_source_name(formal)
-            ),
-        );
+        self.report_uninferred_formal_at(span, formal.as_str());
+    }
+}
+
+impl Checker<'_> {
+    /// A generic call passed as an argument whose own formal nothing constrains: kotlinc reports
+    /// that formal at the nested callee, then the argument against its parameter with the formal
+    /// rendered `uninferred T (of fun <T> name)`. Returns whether the argument is reported.
+    pub(super) fn report_uninferred_call_argument(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        argument: ExprId,
+        expected: Ty,
+        actual: Ty,
+    ) -> bool {
+        let Some(ResolvedCall::TopLevel(selected)) = self.resolved_calls.get(&argument) else {
+            return false;
+        };
+        let name = selected.callable.name.clone();
+        let Some(signature) = self
+            .unbound_call_result_signature(argument)
+            .map(std::borrow::Cow::into_owned)
+        else {
+            return false;
+        };
+        if !self.report_unbound_call_result_type_parameter(scope, argument) {
+            return false;
+        }
+        if !self.receiver_is_assignable(actual, expected) {
+            let owner = Self::uninferred_callable_owner(&name, &signature);
+            let owners = self.publish_formal_identity_owners(
+                signature
+                    .formals
+                    .iter()
+                    .map(|formal| (formal.as_str(), Some(false))),
+                owner,
+            );
+            self.report_assignability_error(expected, actual, self.span(argument), "argument");
+            self.restore_type_parameter_owners(owners);
+        }
         true
     }
 }
