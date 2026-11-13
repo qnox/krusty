@@ -24,8 +24,8 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory(prefix="krusty-kotlin-pins-") as temp:
         root = Path(temp)
-        deps = root / "dependencies"
         pom = root / "pom.xml"
+        classpath_file = root / "classpath.txt"
         pom.write_text(
             f"""<project xmlns=\"http://maven.apache.org/POM/4.0.0\"
               xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"
@@ -46,34 +46,45 @@ def main() -> None:
         subprocess.run(
             [
                 "mvn", "-B", "-f", str(pom),
-                "org.apache.maven.plugins:maven-dependency-plugin:3.8.1:copy-dependencies",
-                "-DincludeScope=runtime", "-DuseRepositoryLayout=true",
-                f"-DoutputDirectory={deps}",
+                "org.apache.maven.plugins:maven-dependency-plugin:3.8.1:build-classpath",
+                "-DincludeScope=runtime", f"-Dmdep.outputFile={classpath_file}",
+                "-Dmdep.pathSeparator=:",
             ],
             check=True,
             stdout=sys.stderr,
         )
-        jars = sorted(deps.rglob("*.jar"))
+        if not classpath_file.exists():
+            raise SystemExit("Maven did not write the resolved runtime classpath")
+        jar_paths = [Path(value) for value in classpath_file.read_text().strip().split(":") if value]
+        jars = []
+        for jar in jar_paths:
+            if not jar.is_file() or jar.suffix != ".jar":
+                raise SystemExit(f"resolved Maven classpath contains a missing/non-JAR entry: {jar}")
+            parts = jar.parts
+            try:
+                repository_index = len(parts) - 1 - parts[::-1].index("repository")
+            except ValueError as error:
+                raise SystemExit(f"Maven artifact is outside a repository layout: {jar}") from error
+            relative = parts[repository_index + 1 :]
+            if len(relative) < 4:
+                raise SystemExit(f"unexpected Maven repository path: {jar}")
+            jars.append((jar, relative))
         expected = {
             "kotlin-compiler-embeddable", "kotlin-build-tools-api", "kotlin-daemon-embeddable",
             "kotlin-script-runtime", "kotlin-stdlib", "kotlin-reflect",
             "kotlinx-coroutines-core-jvm", "annotations", "kotlin-scripting-common",
             "kotlin-scripting-jvm",
         }
-        found = {p.parts[-3] for p in jars}
+        found = {relative[-3] for _, relative in jars}
         if not expected <= found:
             raise SystemExit(f"resolved Maven classpath is missing expected artifacts: {sorted(expected - found)}")
 
         rows = []
-        for jar in jars:
-            rel = jar.relative_to(deps)
-            parts = rel.parts
-            if len(parts) < 4:
-                raise SystemExit(f"unexpected Maven repository path: {rel}")
+        for jar, parts in jars:
             group = ".".join(parts[:-3])
             artifact, artifact_version = parts[-3], parts[-2]
             if jar.name != f"{artifact}-{artifact_version}.jar":
-                raise SystemExit(f"unexpected artifact filename: {rel}")
+                raise SystemExit(f"unexpected artifact filename: {jar}")
             data = jar.read_bytes()
             sha256 = hashlib.sha256(data).hexdigest()
             sha1_url = (
