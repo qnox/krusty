@@ -6,6 +6,9 @@ use crate::libraries::{FnKind, PropKind};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{type_name, SemanticCallableOwner};
 
+#[cfg(test)]
+mod tests;
+
 /// The runtime of a file that declares a suspend function, or `None` when the classpath does not
 /// publish the exact marker, completion, and continuation method declarations this lowering uses.
 pub(super) fn select(source: &dyn SymbolSource) -> Option<IrCoroutineRuntime> {
@@ -34,15 +37,16 @@ pub(super) fn select(source: &dyn SymbolSource) -> Option<IrCoroutineRuntime> {
         return None;
     };
 
-    let companion = crate::types::type_name_nested_child(result, "Companion");
+    let result_class = source.classifier(result)?;
+    let companion = result_class.companion_object.as_ref()?.1;
+    let companion_class = source.classifier(companion)?;
     let throwable = type_name("kotlin/Throwable");
-    let failures = source.symbols(SymbolNamespace::Package(type_name("kotlin")), "failure");
-    let mut result_failure = failures.callables.functions().iter().filter(|function| {
-        function.kind == FnKind::Extension
-            && function
-                .semantic_receiver()
-                .and_then(|ty| ty.non_null().obj_internal())
-                == Some(companion)
+    let failures = companion_class.declared_callables.get("failure")?;
+    let mut result_failure = failures.functions().iter().filter(|function| {
+        function.kind == FnKind::Member
+            && function.semantic_receiver().is_none()
+            && function.callable.declaration_owner
+                == Some(SemanticCallableOwner::Classifier(companion))
             && function.semantic_params().len() == 1
             && function.semantic_params()[0].non_null().obj_internal() == Some(throwable)
             && function
@@ -57,13 +61,11 @@ pub(super) fn select(source: &dyn SymbolSource) -> Option<IrCoroutineRuntime> {
     };
 
     let continuation = type_name("kotlin/coroutines/Continuation");
-    let resume_with = source.symbols(SymbolNamespace::Classifier(continuation), "resumeWith");
-    let mut declarations = resume_with.callables.functions().iter().filter(|function| {
+    let continuation_class = source.classifier(continuation)?;
+    let resume_with = continuation_class.declared_callables.get("resumeWith")?;
+    let mut declarations = resume_with.functions().iter().filter(|function| {
         function.kind == FnKind::Member
-            && function
-                .semantic_receiver()
-                .and_then(|ty| ty.non_null().obj_internal())
-                == Some(continuation)
+            && function.semantic_receiver().is_none()
             && function.callable.declaration_owner
                 == Some(SemanticCallableOwner::Classifier(continuation))
             && function.semantic_params().len() == 1
