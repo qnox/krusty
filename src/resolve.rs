@@ -176,6 +176,7 @@ mod explicit_receiver_levels;
 mod expression_qualifier_tree;
 mod expression_qualifiers;
 mod extension_reference_selection;
+mod callable_reference_result;
 mod misfit_callable_references;
 use misfit_callable_references::{MisfitReference, ReferenceCandidateLevels};
 mod nested_type_aliases;
@@ -33987,31 +33988,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn callable_ref_is_compatible(
-        &self,
-        params: &[Ty],
-        ret: Ty,
-        suspend: bool,
-        expected: &'static crate::types::FnSig,
-        allow_unit_coercion: bool,
-    ) -> bool {
-        // An open result variable is bound through the declared result's view as the expected
-        // result's classifier: `List<String>` against `Iterable<R>` binds `R` from `Iterable<String>`.
-        let ret = if expected.ret.non_null().mentions_ty_param() {
-            crate::assignable::applied_supertype(self, ret, expected.ret.non_null()).unwrap_or(ret)
-        } else {
-            ret
-        };
-        callable_reference_selection::is_compatible(
-            params,
-            ret,
-            suspend,
-            expected,
-            allow_unit_coercion,
-            |actual, target| self.receiver_is_assignable(actual, target),
-        )
-    }
-
     fn callable_ref_parameter_shape_at_least_as_specific(
         &self,
         left_params: &[Ty],
@@ -34815,58 +34791,6 @@ impl<'a> Checker<'a> {
                         true,
                     )
             })
-    }
-
-    /// Whether some declaration the receiver-less reference `name` can name produces a result the
-    /// expected function type's result accepts. Parameters are specialized from the expected
-    /// shape only to bind the declaration's type variables; the probe commits nothing.
-    /// `None` when the name denotes no top-level or local function.
-    fn unqualified_callable_reference_result_fits(
-        &self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-        expected: &'static crate::types::FnSig,
-    ) -> Option<bool> {
-        if let Some(overloads) = self.lookup_local_fun_overloads(scope, name) {
-            return Some(overloads.into_iter().any(|(_, signature)| {
-                self.contextual_local_function_reference_shape(
-                    &signature,
-                    None,
-                    &expected.params,
-                    expected.ret,
-                )
-                .is_some()
-            }));
-        }
-        let candidates = self.resolver().top_level_candidates(name);
-        if candidates.is_empty() {
-            return None;
-        }
-        Some(candidates.into_iter().any(|mut function| {
-            function.kind == crate::libraries::FnKind::TopLevel
-                && self
-                    .specialize_callable_ref_candidate(
-                        &mut function,
-                        None,
-                        Some(&expected.params),
-                        None,
-                    )
-                    .is_ok()
-                && self
-                    .callable_ref_argument_plan(&function, expected)
-                    .is_some()
-                && {
-                    let ret = function.callable.ret;
-                    expected.ret == Ty::Unit
-                        || expected.ret.non_null().is_ty_param()
-                        || if expected.ret.non_null().mentions_ty_param() {
-                            crate::assignable::applied_supertype(self, ret, expected.ret.non_null())
-                                .is_some()
-                        } else {
-                            self.receiver_is_assignable(ret, expected.ret)
-                        }
-                }
-        }))
     }
 
     /// Read-only applicability for a classifier-qualified callable reference while an enclosing

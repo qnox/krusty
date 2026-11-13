@@ -2,7 +2,7 @@
 
 // A receiver-less callable reference passed where overloads differ only in the result of their
 // function parameter (like `flatMap` over Iterable and Sequence results) selects the overload
-// whose result the referenced function produces, for a generic and for an overloaded target.
+// whose result the referenced function produces, for a generic, an overloaded and a local target.
 class Source<T>(val value: T)
 
 class Once<T>(val value: T) : Iterable<T> {
@@ -35,5 +35,11 @@ fun box(): String {
     if (picked != "iterable") return "FAIL overloaded $picked"
     val sequence = Source("a").expand(::twice)
     if (sequence != "sequence") return "FAIL sequence $sequence"
+    fun localIterable(x: Int): Iterable<Int> = Once(x)
+    fun localSequence(x: Int): Sequence<Int> = Sequence { Once(x).iterator() }
+    val localFirst = Source(1).expand(::localIterable)
+    if (localFirst != "iterable") return "FAIL local iterable $localFirst"
+    val localSecond = Source(1).expand(::localSequence)
+    if (localSecond != "sequence") return "FAIL local sequence $localSecond"
     return "OK"
 }
