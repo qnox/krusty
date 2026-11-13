@@ -41,7 +41,6 @@
 //! so the file declines with a diagnostic instead of emitting something unverified.
 
 mod class_vtable;
-mod dependency_classes;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fixtures;
 mod hierarchy;

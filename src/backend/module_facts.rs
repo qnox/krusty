@@ -632,17 +632,11 @@ impl BackendModuleFacts {
         self.body_local_classifiers.contains(&classifier)
     }
 
-    /// These facts with the dispatch shape of every named class of `index`, and of the dependency
-    /// classes they extend as `dependencies` publish them, which only a target that numbers
-    /// dispatch slots itself reads ([`Backend::numbers_slots`](super::Backend)).
-    pub(crate) fn with_classes(
-        mut self,
-        index: &crate::fir::ResolvedModuleIndex,
-        dependencies: &dyn SymbolSource,
-    ) -> Self {
+    /// These facts with the dispatch shape of every named class of `index`, which only a target
+    /// that numbers dispatch slots itself reads ([`Backend::numbers_slots`](super::Backend)).
+    pub(crate) fn with_classes(mut self, index: &crate::fir::ResolvedModuleIndex) -> Self {
         self.classes =
-            super::class_tables::module_classes::ModuleClasses::from_resolved_index(index)
-                .with_dependency_superclasses(dependencies);
+            super::class_tables::module_classes::ModuleClasses::from_resolved_index(index);
         self
     }
 

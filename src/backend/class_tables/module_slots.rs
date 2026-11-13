@@ -166,7 +166,10 @@ impl ModuleSlotPlan {
         };
         // Planning is a pure function of each class, so the order classes are visited in only
         // decides which table is computed first.
-        for (name, _) in classes.iter() {
+        for (name, class) in classes.iter() {
+            if class.dependency && representation.owns_base(name) {
+                continue;
+            }
             let _ = planner.plan(name);
         }
         let mut signatures: HashMap<PlanKey, (Box<[Ty]>, Ty)> = HashMap::default();
@@ -191,7 +194,7 @@ impl ModuleSlotPlan {
                         } else {
                             (parameters.clone(), *result)
                         };
-                        signatures.insert(PlanKey::Callable(*callable), signature);
+                        signatures.insert(PlanKey::function(*callable), signature);
                     }
                     ModuleMember::Property {
                         property,
@@ -201,11 +204,11 @@ impl ModuleSlotPlan {
                         ..
                     } => {
                         signatures.insert(
-                            PlanKey::Getter(*property),
+                            PlanKey::accessor(*property, false),
                             (parameters.clone(), *getter_value),
                         );
                         let setter = parameters.iter().copied().chain([*value]).collect();
-                        signatures.insert(PlanKey::Setter(*property), (setter, Ty::Unit));
+                        signatures.insert(PlanKey::accessor(*property, true), (setter, Ty::Unit));
                     }
                 }
             }
@@ -298,10 +301,13 @@ impl Planner<'_> {
 
     fn table(&mut self, name: TypeName, class: &ModuleClass) -> Result<PlannedTable, Unsupported> {
         let qualified = || name.render().replace('/', ".");
-        let planned_superclass = class
-            .superclass
-            .filter(|&superclass| self.classes.class(superclass).is_some());
+        // A base the target's runtime owns is laid out by the runtime, even where the plan also
+        // holds its dependency declaration.
+        let planned_superclass = class.superclass.filter(|&superclass| {
+            !self.representation.owns_base(superclass) && self.classes.class(superclass).is_some()
+        });
         let parent = match class.superclass {
+            Some(superclass) if self.representation.owns_base(superclass) => None,
             Some(superclass) if self.classes.class(superclass).is_some() => {
                 Some(self.plan(superclass).map_err(|_| {
                     format!(
@@ -310,7 +316,6 @@ impl Planner<'_> {
                     )
                 })?)
             }
-            Some(superclass) if self.representation.owns_base(superclass) => None,
             Some(superclass) => {
                 return Err(format!(
                     "a superclass declared outside this module (`{}` extends `{}`)",
