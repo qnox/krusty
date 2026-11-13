@@ -2,13 +2,57 @@
 
 use crate::backend::CheckedIrFile;
 use crate::fx_hash::{HashMap, HashSet};
-use crate::ir::{Callee, IrCheckedOperation, IrExpr};
+use crate::ir::{Callee, IrCheckedOperation, IrExpr, IrFile};
 use crate::klib_libraries::{KlibDeclarationBodies, KlibIntrinsicFacts};
 use crate::libraries::{
     ExternalCallableKind, ExternalCallableRealization, KlibBodyCallable, KlibDependencyCallable,
     SemanticPlatform,
 };
 use std::collections::VecDeque;
+
+/// The exact external callable declarations reached from emitted expression roots. The frozen
+/// callable inventory includes expression-arena nodes left behind by earlier rewrites; those nodes
+/// are declaration evidence, not executable uses, and must not cause intrinsic support emission.
+pub(super) fn emitted_dependency_targets(
+    ir: &IrFile,
+    mut property_accessor: impl FnMut(
+        crate::fir::ExternalPropertyId,
+        bool,
+    ) -> Result<Option<crate::fir::ExternalCallableId>, String>,
+) -> Result<Vec<(crate::ir::ExprId, crate::fir::ExternalCallableId, bool)>, String> {
+    let mut targets = Vec::new();
+    for expression in crate::ir::emitted_body_roots(ir)
+        .into_iter()
+        .flat_map(|root| crate::ir::value_namespace_expressions(ir, root))
+    {
+        match ir.expr(expression) {
+            IrExpr::Call { callee, .. } => {
+                if let Callee::External { target, .. } = &**callee {
+                    targets.push((expression, *target, false));
+                }
+            }
+            IrExpr::New {
+                external_target: Some(target),
+                ..
+            } => targets.push((expression, *target, true)),
+            IrExpr::Checked(operation) => match &**operation {
+                IrCheckedOperation::ExternalPropertyRead { target, .. } => {
+                    if let Some(callable) = property_accessor(*target, false)? {
+                        targets.push((expression, callable, false));
+                    }
+                }
+                IrCheckedOperation::ExternalPropertyWrite { target, .. } => {
+                    if let Some(callable) = property_accessor(*target, true)? {
+                        targets.push((expression, callable, false));
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    Ok(targets)
+}
 
 /// The declarations a unit's closure freezes, and the call edge facts of its members realized
 /// outside the unit.
@@ -266,38 +310,22 @@ pub(super) fn ordinary_roots<'a>(
 ) -> Result<Vec<KlibBodyCallable<'a>>, String> {
     let mut roots = Vec::new();
     let mut seen = HashSet::default();
-    for expression in crate::ir::emitted_body_roots(&source.ir)
-        .into_iter()
-        .flat_map(|root| crate::ir::value_namespace_expressions(&source.ir, root))
-    {
-        let target = match source.ir.expr(expression) {
-            IrExpr::Call { callee, .. } => match &**callee {
-                // A call leaving arguments out reaches the same body through its default entry.
-                Callee::External { target, .. } => *target,
-                _ => continue,
-            },
-            IrExpr::New {
-                external_target: Some(target),
-                ..
-            } => *target,
-            IrExpr::Checked(operation) => match &**operation {
-                IrCheckedOperation::ExternalPropertyRead { target, .. } => {
-                    source
-                        .callables
-                        .property(*target)
-                        .ok_or("an emitted dependency property has no frozen fact")?
-                        .getter
-                }
-                IrCheckedOperation::ExternalPropertyWrite { target, .. } => source
-                    .callables
-                    .property(*target)
-                    .ok_or("an emitted dependency property has no frozen fact")?
+    for (expression, target, construction) in
+        emitted_dependency_targets(&source.ir, |property, setter| {
+            let property = source
+                .callables
+                .property(property)
+                .ok_or("an emitted dependency property has no frozen fact")?;
+            if setter {
+                property
                     .setter
-                    .ok_or("an emitted dependency property write has no selected setter")?,
-                _ => continue,
-            },
-            _ => continue,
-        };
+                    .map(Some)
+                    .ok_or("an emitted dependency property write has no selected setter".to_owned())
+            } else {
+                Ok(Some(property.getter))
+            }
+        })?
+    {
         let callable = source
             .callables
             .callable(target)
@@ -305,7 +333,6 @@ pub(super) fn ordinary_roots<'a>(
         let Some(selected) = source.callables.klib_body_callable_at(expression, target) else {
             continue;
         };
-        let construction = matches!(source.ir.expr(expression), IrExpr::New { .. });
         if construction != (callable.kind == ExternalCallableKind::Constructor) {
             return Err(
                 "an emitted dependency construction disagrees with its selected callable role"
@@ -505,6 +532,55 @@ fn superclass_realizations(
         constructor = superclass;
     }
     realizations
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{IrFile, IrFunction};
+    use crate::types::Ty;
+
+    #[test]
+    fn intrinsic_scalar_roots_ignore_orphan_external_call_nodes() {
+        let mut ir = IrFile::default();
+        let live_target = crate::fir::ExternalCallableId::from_raw(17);
+        let orphan_target = crate::fir::ExternalCallableId::from_raw(23);
+        let call = |ir: &mut IrFile, target| {
+            ir.add_expr(IrExpr::Call {
+                callee: Box::new(Callee::External {
+                    target,
+                    default_provider: None,
+                    params: Vec::new(),
+                    ret: Ty::Unit,
+                    substitutions: Vec::new(),
+                    defaults: Vec::new(),
+                    extension_receiver_parameter: None,
+                }),
+                dispatch_receiver: None,
+                args: Vec::new(),
+            })
+        };
+        let body = call(&mut ir, live_target);
+        call(&mut ir, orphan_target);
+        ir.add_fun(IrFunction {
+            name: "emitted".to_owned(),
+            params: Vec::new(),
+            ret: Ty::Unit,
+            body: Some(body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+
+        let mut expected = HashSet::default();
+        expected.insert(live_target);
+        let actual = emitted_dependency_targets(&ir, |_, _| Ok(None))
+            .unwrap()
+            .into_iter()
+            .map(|(_, target, _)| target)
+            .collect::<HashSet<_>>();
+        assert_eq!(actual, expected);
+    }
 }
 
 /// `facts` with the declarations of `realizations`.

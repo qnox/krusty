@@ -103,6 +103,39 @@ pub(super) fn emit_dependencies<B: Backend>(
     let bodies = facts.bodies();
     let intrinsics = facts.intrinsics();
     let selected = source.callables.klib_body_callables();
+    let emitted_external_ids =
+        match emitted_roots::emitted_dependency_targets(&source.ir, |property, setter| {
+            let property = source
+                .callables
+                .property(property)
+                .ok_or("an emitted dependency property has no frozen fact")?;
+            if setter {
+                property
+                    .setter
+                    .map(Some)
+                    .ok_or("an emitted dependency property write has no selected setter".to_owned())
+            } else {
+                Ok(Some(property.getter))
+            }
+        }) {
+            Ok(targets) => targets
+                .into_iter()
+                .map(|(_, target, _)| target)
+                .collect::<HashSet<_>>(),
+            Err(error) => {
+                diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                return Vec::new();
+            }
+        };
+    let emitted_dependency_callables = emitted_external_ids
+        .into_iter()
+        .filter_map(|target| {
+            source
+                .callables
+                .callable(target)
+                .and_then(|callable| callable.dependency_callable.clone())
+        })
+        .collect::<HashSet<_>>();
     let type_oracle = crate::symbol_resolver::SourceOracle(platform);
     let target_represents_classifier =
         |classifier| backend.represents_dependency_classifier(classifier);
@@ -111,7 +144,8 @@ pub(super) fn emit_dependencies<B: Backend>(
         .with_target_classifiers(&target_represents_classifier);
     let mut roots: Vec<crate::libraries::KlibBodyCallable<'_>> = Vec::new();
     for callable in selected.iter().copied().filter(|callable| {
-        !support_state.emitted.contains_key(callable.identity())
+        emitted_dependency_callables.contains(callable.identity())
+            && !support_state.emitted.contains_key(callable.identity())
             && !support_state.in_progress.contains_key(callable.identity())
             && platform.is_platform_stdlib_dependency(callable.identity())
             && DependencyBodyUnit::is_scalar_root_candidate(*callable, bodies)
@@ -608,7 +642,7 @@ pub(super) fn emit_dependencies<B: Backend>(
                 super::backend_handoff::prepare_common_ir(&mut support, platform, preparation)
             {
                 release_unit_reservations(support_state, &published, &materialized);
-                diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                backend.report_common_ir_preparation_decline(&error, diags);
                 return Vec::new();
             }
         }

@@ -140,7 +140,7 @@ pub(super) fn prepare_common_ir(
     file: &mut CheckedIrFile<'_>,
     provider: &dyn crate::symbol_source::SymbolSource,
     preparation: crate::backend::CommonIrPreparation,
-) -> Result<(), String> {
+) -> Result<(), crate::backend::CommonIrPreparationDecline> {
     if !file.ir.suspend_funs.is_empty() && file.ir.coroutine_runtime.is_none() {
         file.ir.coroutine_runtime = coroutine_runtime::select(provider);
     }
@@ -150,22 +150,25 @@ pub(super) fn prepare_common_ir(
     crate::backend::default_arguments::realize(&mut file.ir, &mut file.callables, |function| {
         file.dependency_exports.callable(function).is_some()
     });
-    if let Err(declined) = crate::backend::coroutines::add_continuation_parameters(&mut file.ir) {
-        return Err(format!(
-            "common coroutine preparation declined {}",
-            declined.construct()
-        ));
-    }
+    crate::backend::coroutines::add_continuation_parameters(&mut file.ir)
+        .map_err(crate::backend::CommonIrPreparationDecline::Suspend)?;
 
     let plugin_runtime = file.callables.plugin_runtime_bindings();
-    let mut callables = CheckedBackendCallables::freeze(&file.ir, provider)
-        .map_err(|error| format!("cannot freeze prepared dependency declarations: {error:?}"))?;
+    let mut callables = CheckedBackendCallables::freeze(&file.ir, provider).map_err(|error| {
+        crate::backend::CommonIrPreparationDecline::Invariant(format!(
+            "cannot freeze prepared dependency declarations: {error:?}"
+        ))
+    })?;
     super::builtin_implementations::record(&mut callables, provider);
     callables
         .freeze_plugin_runtime_callables(plugin_runtime, |identity| {
             provider.external_callable(identity)
         })
-        .map_err(|error| format!("cannot refreeze plugin runtime declaration facts: {error:?}"))?;
+        .map_err(|error| {
+            crate::backend::CommonIrPreparationDecline::Invariant(format!(
+                "cannot refreeze plugin runtime declaration facts: {error:?}"
+            ))
+        })?;
     file.callables = callables;
     Ok(())
 }

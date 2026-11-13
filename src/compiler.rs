@@ -486,7 +486,7 @@ fn emit_analyzed_into<B: Backend>(
                 symbols.semantic_platform(),
                 preparation,
             ) {
-                diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                backend.report_common_ir_preparation_decline(&error, diags);
                 continue;
             }
         }
