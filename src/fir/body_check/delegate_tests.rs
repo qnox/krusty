@@ -961,3 +961,41 @@ fn provide_read_write_and_lambda_name_one_local_property() {
         "read, write and lambda read must all address the same semantic plan"
     );
 }
+
+#[test]
+fn captured_member_extension_delegate_checks_both_classifier_forms() {
+    assert_production_frontend_accepts(include_str!(
+        "../../../tests/box_regressions/CapturedContextDelegate.kt"
+    ));
+}
+
+#[test]
+fn member_extension_delegate_preserves_enum_entry_instance_owner() {
+    let body = checked_production_function_body(
+        "class Delegate
+         enum class Scope {
+             ENTRY {
+                 override fun read(): String { val value by Delegate(); return value }
+             };
+             operator fun Delegate.getValue(owner: Any?, property: Any?): String = \"OK\"
+             abstract fun read(): String
+         }
+",
+        "read",
+    );
+    let [plan] = body.local_delegate_plans() else {
+        panic!("the entry's local delegated property retains one plan")
+    };
+    assert!(matches!(
+        &plan.get_value_dispatch,
+        Some(crate::fir::FirLocalDelegateDispatchParameter::ImplicitReceiver(
+            crate::fir::FirCapturedReceiver::Enclosing {
+                classifier,
+                owner: Some(crate::fir::EnclosingInstanceOwner {
+                    kind: crate::fir::EnclosingInstanceKind::EnumEntry,
+                    ..
+                }),
+            }
+        )) if *classifier == crate::types::type_name("Scope")
+    ));
+}

@@ -15,8 +15,8 @@ use krusty::fir::{
     ResolvedPropertyOverrideTarget,
 };
 use krusty::ir::{
-    Callee, ClassId, CtorDelegateTarget, FunId, IrLocalPropertyLayout, IrSuperCallKind, IrTypeOp,
-    IrVirtualTarget,
+    Callee, ClassId, CtorDelegateTarget, FunId, IrFile, IrLocalPropertyLayout, IrSuperCallKind,
+    IrTypeOp, IrVirtualTarget,
 };
 use krusty::types::{Ty, TyKind, TypeName};
 
@@ -166,8 +166,22 @@ impl Body<'_> {
         let object = self.local(REFERENCE);
         self.allocate(class)?;
         self.code.local_tee(object);
-        for (arg, param) in args.iter().zip(params) {
-            self.value(*arg, param)?;
+        for (index, (arg, param)) in args.iter().zip(params).enumerate() {
+            let element = self.ir.classes[class as usize]
+                .ctor_args
+                .get(index)
+                .and_then(|argument| argument.field_index)
+                .and_then(|field| {
+                    self.ir
+                        .shared_class_capture_fields
+                        .get(&(class, field))
+                        .copied()
+                });
+            if let Some(element) = element {
+                self.pass_shared_capture(*arg, element)?;
+            } else {
+                self.value(*arg, param)?;
+            }
         }
         self.code.call(constructor).local_get(object);
         Ok(())
@@ -216,8 +230,14 @@ impl Body<'_> {
             }
         }
         for &owner in chain.iter().rev() {
-            for field in &self.ir.classes[owner as usize].fields {
-                let value = carrier(field.ty)?.ok_or("a `Unit`-typed field")?;
+            let count = self.ir.classes[owner as usize].fields.len();
+            for index in 0..count {
+                let value = super::super::classes::field_carrier(
+                    self.module,
+                    self.ir,
+                    owner,
+                    u32::try_from(index).expect("too many fields"),
+                )?;
                 default_value(&mut self.code, value);
             }
         }
@@ -401,6 +421,53 @@ impl Body<'_> {
         self.code
             .ref_cast(false, HeapType::Concrete(table_type))
             .struct_get(table_type, slot_field(slot))
+            .call_ref(ty);
+        Ok(())
+    }
+
+    /// A call of `callable`, a member of `owner`, a class another file of the module declares:
+    /// through the slot the module plan numbers it, in the table type every file reads from the
+    /// plan (`super::super::module_tables`).
+    fn planned_dispatch(
+        &mut self,
+        owner: krusty::types::TypeName,
+        callable: krusty::fir::CallableId,
+        params: &[Ty],
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        let table = self.planned_tables[&owner].clone()?;
+        let slot = self
+            .plan
+            .table(owner)
+            .and_then(Result::ok)
+            .and_then(|planned| {
+                planned
+                    .slots
+                    .get(&krusty::backend::class_tables::module_slots::PlanKey::Callable(callable))
+                    .copied()
+            })
+            .ok_or("a member with no module-wide slot")?;
+        let ty = table
+            .slot_types
+            .get(slot as usize)
+            .copied()
+            .flatten()
+            .ok_or("a call through a slot with no signature")?;
+        if params.len() != args.len() {
+            return Err("a call whose arguments do not match its parameters".into());
+        }
+        let this = self.local(REFERENCE);
+        self.value(receiver, Ty::obj_name(owner))?;
+        self.code.local_tee(this);
+        for (&arg, &param) in args.iter().zip(params) {
+            self.value(arg, param)?;
+        }
+        self.code.local_get(this);
+        self.table_of_object();
+        self.code
+            .ref_cast(false, HeapType::Concrete(table.table_type))
+            .struct_get(table.table_type, slot_field(slot))
             .call_ref(ty);
         Ok(())
     }
@@ -695,6 +762,16 @@ impl Body<'_> {
                 };
                 if let Some(call) = call {
                     return self.interface_call(call, receiver, args);
+                }
+                if let (
+                    None,
+                    IrVirtualTarget::Function(ResolvedFunctionOverrideTarget::Module(callable)),
+                    Some((params, _)),
+                ) = (self.ir.class_id_by_name(*owner), target, params)
+                {
+                    if self.planned_tables.contains_key(owner) {
+                        return self.planned_dispatch(*owner, *callable, params, receiver, args);
+                    }
                 }
                 let class = self
                     .classes
@@ -1236,7 +1313,8 @@ pub(super) fn define_class_functions(
             };
             body.primary_constructor(id)?;
             let lowered = body.finish();
-            define(module, constructor, &parameters, lowered)?;
+            let carriers = constructor_carriers(module, ir, id, &parameters)?;
+            define(module, constructor, &carriers, lowered)?;
         }
         for (ordinal, &constructor) in form.secondaries.iter().enumerate() {
             let secondary = &class.secondary_ctors[ordinal];
@@ -1259,7 +1337,8 @@ pub(super) fn define_class_functions(
             };
             body.secondary_constructor(id, ordinal)?;
             let lowered = body.finish();
-            define(module, constructor, &parameters, lowered)?;
+            let carriers = constructor_carriers(module, ir, id, &parameters)?;
+            define(module, constructor, &carriers, lowered)?;
         }
         if let Some(singleton) = form.singleton {
             let constructor = match (form.constructor, class.ctor_args.is_empty()) {
@@ -1590,18 +1669,40 @@ fn emit_module_property_dispatch(
     Ok(())
 }
 
+/// Wasm carriers of a constructor's parameters. Index 0 is `this`; each later entry is the
+/// constructor argument at that position, a cell when the argument fills a shared capture.
+fn constructor_carriers(
+    module: &mut Module,
+    ir: &IrFile,
+    class: ClassId,
+    parameters: &[Ty],
+) -> Result<Vec<ValType>, Unsupported> {
+    let mut carriers = Vec::with_capacity(parameters.len());
+    for (index, parameter) in parameters.iter().enumerate() {
+        let value = if index == 0 {
+            carrier(*parameter)?.ok_or("a `Unit` constructor parameter")?
+        } else {
+            super::super::classes::constructor_argument_carrier(
+                module,
+                ir,
+                class,
+                index - 1,
+                *parameter,
+            )?
+        };
+        carriers.push(value);
+    }
+    Ok(carriers)
+}
+
 /// Define `function`, taking `parameters` and answering nothing, as `(code, locals)`.
 fn define(
     module: &mut Module,
     function: u32,
-    parameters: &[Ty],
+    parameters: &[ValType],
     (code, locals): (Code, Vec<ValType>),
 ) -> Result<(), Unsupported> {
-    let mut params = Vec::with_capacity(parameters.len());
-    for parameter in parameters {
-        params.push(carrier(*parameter)?.ok_or("a `Unit` constructor parameter")?);
-    }
-    let ty = module.func_type(params, Vec::new());
+    let ty = module.func_type(parameters.to_vec(), Vec::new());
     module.define(function, Function { ty, locals, code });
     Ok(())
 }

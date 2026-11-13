@@ -363,6 +363,14 @@ def summarize(
             return None
         return sum(1 for report in reports if report[key])
 
+    def summed_optional(key):
+        if not reports or any(key not in report for report in reports):
+            return None
+        numbers = [report[key] for report in reports if report[key] is not None]
+        if not numbers:
+            return None
+        return sum(numbers)
+
     return {
         "run": metadata or {},
         "truncated_modules": sum(1 for report in reports if report.get("truncated")),
@@ -381,12 +389,15 @@ def summarize(
         "total_errors": sum(report.get("error_count", 0) for report in reports),
         "open_complete_modules": flagged("open_complete"),
         "missing_classpath_entries": counted("missing_classpath_entries"),
-        # The scan times a whole module analysis. It does not separate parsing from signature
-        # extraction, does not time type checking on its own, and does not issue a definition or
-        # references query. Those latencies stay unset rather than being copied from elapsed_ms.
+        # Parsing and type checking are one analysis. `elapsed_ms` is that combined time.
+        # It is not a parse time, a type-check time, or a navigation query.
         "parse_ms": None,
         "type_info_ms": None,
-        "navigation_ms": None,
+        # Definition and references lookups, in microseconds, summed over modules that issued
+        # them. A missing key means an older record that did not measure the query. JSON null
+        # means this module did not issue one (it never finished analysis). Neither is elapsed_ms.
+        "definition_query_us": summed_optional("definition_query_us"),
+        "references_query_us": summed_optional("references_query_us"),
         "slowest": sorted(
             ((report["elapsed_ms"], report["module"]) for report in reports), reverse=True
         )[:top],
@@ -409,6 +420,17 @@ def summarize(
         ],
         "cluster_total": len(clusters),
     }
+
+
+def navigation_text(summary: dict) -> str:
+    definition = summary.get("definition_query_us")
+    references = summary.get("references_query_us")
+    if definition is None and references is None:
+        return "not measured"
+    return (
+        f"definition {definition} µs, references {references} µs "
+        "(index lookup, not analysis)"
+    )
 
 
 def render_text(summary: dict) -> str:
@@ -435,7 +457,7 @@ def render_text(summary: dict) -> str:
     )
     lines.append("parse        not measured")
     lines.append("type info    not measured")
-    lines.append("navigation   not measured")
+    lines.append("navigation   " + navigation_text(summary))
     lines.append(
         f"  of which   {summary['unseen_declaration_errors']} name a declaration the scan could "
         f"not see (unbuilt dependency module)"
@@ -541,11 +563,14 @@ def render_markdown(summary: dict, root: Path, jsonl: Path) -> str:
         f"| classpath entries missing from disk | {summary['missing_classpath_entries'] if summary['missing_classpath_entries'] is not None else 'not measured'} |",
         "| parse time | not measured |",
         "| type-information latency | not measured |",
-        "| navigation latency | not measured |",
+        f"| go-to-definition and find-references | {navigation_text(summary)} |",
         "",
-        "Parse time, type-information latency, and navigation latency are not measured: one module",
-        "analysis is timed as a whole, and the scan does not issue a go-to-definition or",
-        "find-references query. `elapsed_ms` is that combined analysis, not any of those three.",
+        "Parse time and type-information latency are not measured: one module analysis is timed",
+        "as a whole (`elapsed_ms`), and that figure is not copied into either of them. Go-to-definition",
+        "and find-references are the server's index lookups after that analysis, in microseconds,",
+        "and only for modules that issued the query. Find-references reads the open documents'",
+        "definition indexes. The closed-file index keeps diagnostics and parse-only symbols, not",
+        "those edges, so it is not searched.",
         "",
         "## Module outcomes",
         "",
