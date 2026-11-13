@@ -823,33 +823,6 @@ impl ProductionSignatureSemantics<'_> {
         crate::fir::DiagnosticId::from_raw(diagnostics.len() as u32)
     }
 
-    /// Record `CYCLIC_GENERIC_UPPER_BOUND` at `span`. The declaration stays published, so the
-    /// finding is reported on every exit, once per source occurrence.
-    fn record_cyclic_upper_bound_diagnostic_at(
-        &self,
-        declaration: crate::fir::DeclarationId,
-        source: crate::fir::SourceFileId,
-        span: Span,
-        message: String,
-    ) {
-        let file = source.raw();
-        let identity = crate::diag::DiagnosticIdentity::CyclicUpperBound { reference: span };
-        let mut diagnostics = self.diagnostics.borrow_mut();
-        if diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.file == file && diagnostic.identity == Some(identity))
-        {
-            return;
-        }
-        diagnostics.push(ProductionSignatureDiagnostic::unconditional(
-            declaration,
-            file,
-            span,
-            message,
-            identity,
-        ));
-    }
-
     fn record_classifier_access_diagnostic_at(
         &self,
         declaration: crate::fir::DeclarationId,
@@ -858,11 +831,34 @@ impl ProductionSignatureSemantics<'_> {
         classifier: crate::types::TypeName,
         message: String,
     ) -> crate::fir::DiagnosticId {
-        let file = source.raw();
         let identity = crate::diag::DiagnosticIdentity::ClassifierAccess {
             reference: span,
             classifier,
         };
+        self.record_unconditional_diagnostic_at(declaration, source, span, identity, message)
+    }
+
+    fn record_cyclic_upper_bound(
+        &self,
+        declaration: crate::fir::DeclarationId,
+        source: crate::fir::SourceFileId,
+        span: Span,
+        message: String,
+    ) {
+        let identity = crate::diag::DiagnosticIdentity::CyclicUpperBound { reference: span };
+        self.record_unconditional_diagnostic_at(declaration, source, span, identity, message);
+    }
+
+    /// A finding reported on every exit, once per `identity`.
+    fn record_unconditional_diagnostic_at(
+        &self,
+        declaration: crate::fir::DeclarationId,
+        source: crate::fir::SourceFileId,
+        span: Span,
+        identity: crate::diag::DiagnosticIdentity,
+        message: String,
+    ) -> crate::fir::DiagnosticId {
+        let file = source.raw();
         let mut diagnostics = self.diagnostics.borrow_mut();
         if let Some(index) = diagnostics
             .iter()

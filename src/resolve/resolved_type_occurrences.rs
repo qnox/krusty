@@ -79,37 +79,34 @@ impl Checker<'_> {
         written: &[Ty],
         callable_bounds: bool,
     ) -> Vec<bool> {
-        let written = source_bounds
+        let owner_spans = source_bounds
             .iter()
-            .zip(written)
-            .map(
-                |((owner, reference), resolved)| super::cyclic_upper_bounds::WrittenBound {
-                    owner,
-                    resolved: *resolved,
-                    span: reference.span,
-                    owner_span: self
-                        .file
-                        .type_parameter_bound_owners
-                        .get(&reference.span.lo)
-                        .copied()
-                        .unwrap_or(reference.span),
-                },
-            )
+            .map(|(_, reference)| {
+                self.file
+                    .type_parameter_bound_owners
+                    .get(&reference.span.lo)
+                    .copied()
+                    .unwrap_or(reference.span)
+            })
             .collect::<Vec<_>>();
-        let analysis = super::cyclic_upper_bounds::analyze(
+        let diags = &mut *self.diags;
+        super::cyclic_upper_bounds::report(
             source_names,
-            &written,
-            &|target| identities.iter().position(|identity| *identity == target),
+            source_bounds
+                .iter()
+                .map(|(owner, reference)| (owner.as_str(), reference.span)),
+            &owner_spans,
+            written,
+            identities,
             !callable_bounds,
-        );
-        for (span, message) in analysis.reports {
-            self.diags.error_named(
-                span,
-                crate::diag::names::CYCLIC_GENERIC_UPPER_BOUND,
-                message,
-            );
-        }
-        analysis.cyclic
+            &mut |span, message| {
+                diags.error_named(
+                    span,
+                    crate::diag::names::CYCLIC_GENERIC_UPPER_BOUND,
+                    message,
+                )
+            },
+        )
     }
 
     /// Bind a deferred local declaration's written bounds once, while all of its formal identities

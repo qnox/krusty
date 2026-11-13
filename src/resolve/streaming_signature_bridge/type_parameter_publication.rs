@@ -279,44 +279,36 @@ pub(super) fn symbolic(
         )
     };
     let provisional = declaration_parameters(&semantic_bounds);
-    // `CYCLIC_GENERIC_UPPER_BOUND` by the shared rule, from the bounds as resolved: the bridge only
-    // hands over the facts. Returns, per bound, whether it closes a cycle.
+    // `CYCLIC_GENERIC_UPPER_BOUND` by the shared rule; this hands over the resolved bounds.
     let report_cyclic = |types: &[Ty]| {
-        let written = declared_bounds
-            .iter()
-            .zip(types)
-            .zip(declared.owners)
-            .map(|(((owner, _, reference), resolved), owner_span)| {
-                super::super::cyclic_upper_bounds::WrittenBound {
-                    owner,
-                    resolved: *resolved,
-                    span: reference.span,
-                    owner_span: *owner_span,
-                }
-            })
-            .collect::<Vec<_>>();
-        let at_classifier_bound = semantics
+        let identities = match stable {
+            Some(generic) => generic
+                .formals
+                .iter()
+                .map(|formal| formal.as_str())
+                .collect(),
+            None => declared_names
+                .iter()
+                .filter_map(|name| provisional.bound(name).ty_param_name())
+                .collect::<Vec<_>>(),
+        };
+        let is_classifier = semantics
             .headers
             .stub(declaration)
             .is_some_and(|stub| stub.kind == crate::fir::DeclarationKind::Classifier);
-        let analysis = super::super::cyclic_upper_bounds::analyze(
+        super::super::cyclic_upper_bounds::report(
             declared_names,
-            &written,
-            &|semantic| {
-                stable
-                    .and_then(|generic| generic.formals.iter().position(|f| f.as_str() == semantic))
-                    .or_else(|| {
-                        declared_names.iter().position(|name| {
-                            provisional.bound(name).ty_param_name() == Some(semantic)
-                        })
-                    })
+            declared_bounds
+                .iter()
+                .map(|(owner, _, reference)| (owner.as_str(), reference.span)),
+            declared.owners,
+            types,
+            &identities,
+            is_classifier,
+            &mut |span, message| {
+                semantics.record_cyclic_upper_bound(declaration, source, span, message)
             },
-            at_classifier_bound,
-        );
-        for (span, message) in analysis.reports {
-            semantics.record_cyclic_upper_bound_diagnostic_at(declaration, source, span, message);
-        }
-        analysis.cyclic
+        )
     };
     // Callable collection already owns the stable semantic shape. Re-resolving a successful
     // F-bound through a provisional local parameter unfolds it once more, but skipping the written

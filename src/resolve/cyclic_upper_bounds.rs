@@ -70,32 +70,32 @@ fn find(parameters: &[String], bounds: &[Option<ParameterBound>]) -> CyclicBound
 }
 
 /// One written upper bound of a declaration, with the type it resolved to.
-pub(super) struct WrittenBound<'a> {
+struct WrittenBound<'a> {
     /// The source name of the type parameter that declares the bound.
-    pub(super) owner: &'a str,
-    pub(super) resolved: Ty,
+    owner: &'a str,
+    resolved: Ty,
     /// The bound as written.
-    pub(super) span: Span,
+    span: Span,
     /// The declaring type parameter as its `<…>` list wrote it.
-    pub(super) owner_span: Span,
+    owner_span: Span,
 }
 
 /// What to report for a declaration, and which of its bounds are erroneous.
-pub(super) struct Analysis {
+struct Analysis {
     /// For each bound, in the order given, whether it closes a cycle.
-    pub(super) cyclic: Vec<bool>,
+    cyclic: Vec<bool>,
     /// Where kotlinc reports, with its message: at each cyclic bound for a classifier, at each
     /// type parameter on a cycle for a callable.
-    pub(super) reports: Vec<(Span, String)>,
+    reports: Vec<(Span, String)>,
 }
 
 /// Find the cycles among a declaration's `parameters` formed by its resolved `bounds`.
-/// `parameter_of` maps the identity a bound resolved to onto the declaration's own parameter
-/// ordinal; a bound that resolved to anything else is not an edge.
-pub(super) fn analyze(
+/// `identities` are the declaration's own type-parameter identities in declaration order; a bound
+/// that resolved to anything else is not an edge.
+fn analyze(
     parameters: &[String],
     bounds: &[WrittenBound<'_>],
-    parameter_of: &dyn Fn(&str) -> Option<usize>,
+    identities: &[&str],
     at_classifier_bound: bool,
 ) -> Analysis {
     let edges = bounds
@@ -108,7 +108,7 @@ pub(super) fn analyze(
             };
             Some(ParameterBound {
                 owner: parameters.iter().position(|name| name == bound.owner)?,
-                target: parameter_of(target.as_str())?,
+                target: identities.iter().position(|own| *own == target.as_str())?,
             })
         })
         .collect::<Vec<_>>();
@@ -135,6 +135,36 @@ pub(super) fn analyze(
         cyclic: found.closing.iter().map(Option::is_some).collect(),
         reports,
     }
+}
+
+/// Report the cycles among a declaration's type `parameters`, from its written bounds
+/// (`owner` name and written span) beside the declaring parameter's span and the resolved type of
+/// each bound. `record` receives each report; the result says, per bound, whether it closes a
+/// cycle and so must constrain nothing.
+pub(super) fn report<'a>(
+    parameters: &[String],
+    written: impl Iterator<Item = (&'a str, Span)>,
+    owner_spans: &[Span],
+    resolved: &[Ty],
+    identities: &[&str],
+    at_classifier_bound: bool,
+    record: &mut dyn FnMut(Span, String),
+) -> Vec<bool> {
+    let bounds = written
+        .zip(resolved)
+        .zip(owner_spans)
+        .map(|(((owner, span), resolved), owner_span)| WrittenBound {
+            owner,
+            resolved: *resolved,
+            span,
+            owner_span: *owner_span,
+        })
+        .collect::<Vec<_>>();
+    let analysis = analyze(parameters, &bounds, identities, at_classifier_bound);
+    for (span, message) in analysis.reports {
+        record(span, message);
+    }
+    analysis.cyclic
 }
 
 #[cfg(test)]
