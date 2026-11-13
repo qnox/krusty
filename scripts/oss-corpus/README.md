@@ -34,7 +34,9 @@ fails counts as a miss with the first error it logged. With `$CORPUS_VERIFY_RECO
 and lists the record each writes; `run.sh` names `krustyVerify`, which turns verify mode on, and
 excludes it, so only the listed compilations are verified rather than every module and variant.
 `compare.py` adds each compilation's verify outcome and all of its errors. Android modules take part only in a project
-that names a variant in `projects.tsv`, and then only that variant's compiles.
+that names a variant in `projects.tsv`, and then only that variant's compiles. A comma-separated
+list names, in order, the variant each Android module contributes: the first one it has, so an
+app's flavored variant and the build type of the library modules it consumes are compared together.
 
 After each measured build, an unmeasured test build runs the project's own JVM tests on the classes
 that build compiled. `outputs.py --keep` first snapshots the measured outputs and leaves them in

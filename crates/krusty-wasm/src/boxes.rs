@@ -10,7 +10,8 @@
 //! character. A floating box and an unsigned box have no such printer, so the slot traps and
 //! lowering declines a `toString` that could reach it. A box type and its table are declared the
 //! first time a file boxes a value of that classifier. A box also implements the members of the
-//! library classes above its classifier that a call goes through (`Number.toLong`, see [`members`]).
+//! library classifiers above its classifier that a call goes through (`Number.toLong`, see
+//! `super::builtin_members`).
 //!
 //! The box type is keyed by the classifier's identity, never by the carrier: a `Long` box never
 //! equals an `Int` box holding the same number, a `UInt` box never equals an `Int` box holding the
@@ -24,18 +25,14 @@ use super::interface_dispatch::ClassRef;
 use super::objects::immutable;
 use super::runtime::{Runtime, AND32, EQ32, EQ64, OR32};
 
-mod members;
-
-pub(super) use members::BoxMembers;
-
 /// A scalar type's box struct and the global holding its dispatch table.
 #[derive(Clone, Copy)]
 pub(super) struct BoxForm {
     pub(super) structure: u32,
     pub(super) table: u32,
     /// The boxed type, and the class its box is in the program's dispatch.
-    boxed: Ty,
-    class: ClassRef,
+    pub(super) boxed: Ty,
+    pub(super) class: ClassRef,
     /// The globals holding the only two `Boolean` boxes, `false` then `true`: the JVM's
     /// `Boolean.valueOf` answers one instance per value, which `===` observes.
     pub(super) booleans: Option<[u32; 2]>,
@@ -102,8 +99,6 @@ pub(super) fn box_prints(ty: Ty) -> Option<bool> {
 pub(super) struct Boxes {
     /// By the boxed classifier's identity.
     forms: HashMap<TypeName, BoxForm>,
-    /// The library class members called on a value that may be a box.
-    members: BoxMembers,
     /// The global holding `kotlin.Unit`, once something reads it as a reference.
     unit: Option<u32>,
 }
@@ -182,6 +177,14 @@ impl Runtime {
 }
 
 impl Runtime {
+    /// Every box declared so far, in declaration order, so what is written for them is the same on
+    /// every run.
+    pub(super) fn box_forms(&self) -> Vec<BoxForm> {
+        let mut forms = self.boxes.forms.values().copied().collect::<Vec<_>>();
+        forms.sort_unstable_by_key(|form| form.structure);
+        forms
+    }
+
     /// The global holding `kotlin.Unit`: what a `Unit` expression is where a reference is expected
     /// (a lambda's result, a type parameter's value). `Unit` has no carrier of its own, so it is
     /// boxed like a primitive is, into the one instance it has.

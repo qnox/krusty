@@ -9,6 +9,7 @@ pub mod builder;
 pub mod class_builder;
 pub mod class_declarations;
 pub mod class_id;
+pub mod classifier_applications;
 pub(crate) mod classifier_inventory;
 pub(crate) mod contract_decoder;
 pub mod declaration_approximation;
@@ -19,7 +20,6 @@ pub mod encoding;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fragment_text;
 pub mod id_signature;
-pub mod inner_classifiers;
 pub mod klib_fragment;
 pub mod klib_ir;
 pub mod lambda_function;
@@ -33,7 +33,7 @@ mod value_parameter_flags;
 pub use value_parameter_flags::DeclaredValueParameter;
 pub mod type_encoder;
 pub use type_encoder::MetadataTypeLookups;
-pub use type_encoder::{InnerClassifier, InnerClassifiers};
+pub use type_encoder::{ClassifierApplication, ClassifierApplications, InnerClassifier};
 pub mod version_requirements;
 
 /// Canonical `ProtoBuf.Property.flags` layout shared by metadata readers and writers. Property flags

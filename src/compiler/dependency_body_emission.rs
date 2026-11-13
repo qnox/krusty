@@ -282,9 +282,6 @@ pub(super) fn emit_dependencies<B: Backend>(
             }
         }
         let mut exports = DependencyExportSignatures::default();
-        for class in unit.materialized_enums() {
-            exports.record_enum(class);
-        }
         let closed = unit
             .callable_functions()
             // A reachable bodyless declaration remains an exact provider edge which the target may
@@ -419,7 +416,7 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         };
-        super::primitive_implementations::record(&mut callables, platform);
+        super::builtin_implementations::record(&mut callables, platform);
         let ordinal = support_state.emitted.len();
         let support_module = format!(
             "{}$klib_body${}${ordinal}",
@@ -687,6 +684,15 @@ fn prepare_bodyless_externals(
                 pending.push_back(callee);
                 continue;
             }
+            // An abstract member has no body on any target: a call of it dispatches through its
+            // receiver to the override the receiver's class supplies, as a source call does.
+            if dispatches_to_an_override(platform, &callee) {
+                let Some(external) = provider_external(platform, &callee, diags) else {
+                    return false;
+                };
+                externals.insert(callee, external);
+                continue;
+            }
             if !capabilities.target_realizes_bodyless {
                 diags.error(
                     Span::new(0, 0),
@@ -701,6 +707,24 @@ fn prepare_bodyless_externals(
         }
     }
     true
+}
+
+/// Whether the provider declares `callee` an abstract member that dispatches on its receiver.
+fn dispatches_to_an_override(
+    platform: &dyn crate::libraries::SemanticPlatform,
+    callee: &KlibDependencyCallable,
+) -> bool {
+    platform
+        .external_callable_by_dependency(callee)
+        .is_some_and(|(_, realization)| {
+            realization.kind == crate::libraries::ExternalCallableKind::Member
+                && realization.callable.member_realization
+                    == crate::libraries::MemberRealization::Dispatch
+                && realization.callable.compiler_intrinsic.is_none()
+                && realization
+                    .klib_body_declaration_modifiers
+                    .is_some_and(|modifiers| modifiers.declares_abstract_implementation())
+        })
 }
 
 /// The provider's opaque handle for a reachable declaration support code calls without a body of

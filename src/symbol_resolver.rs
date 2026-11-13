@@ -33,6 +33,7 @@ mod declaration_specificity;
 mod extension_specialization;
 mod generic_inference;
 pub(crate) use generic_inference::{reified_runtime_type, ReifiedDeclarations};
+mod builtin_overrides;
 mod hierarchy_projection;
 mod indexed_convention_selection;
 mod lambda_call_shape;
@@ -41,7 +42,6 @@ mod member_property_selection;
 mod member_specialization;
 mod overload_selection;
 mod postponed_lambda_selection;
-mod primitive_overrides;
 mod property_candidates;
 mod qualified_classifiers;
 mod raw_member_view;
@@ -70,6 +70,7 @@ use argument_compatibility::{arg_fits_platform, arg_fits_source, untyped_lambda_
 pub(crate) use argument_compatibility::{
     function_input_types, resolution_subtype, sam_arg_matches, sam_return_matches,
 };
+pub(crate) use builtin_overrides::{builtin_overrides, BuiltinOverride};
 pub(crate) use call_argument::{
     expected_result_keeps_call_evidence, CallArgKind, ProvisionalResult,
 };
@@ -135,7 +136,6 @@ use overload_selection::{
     unique_most_specific_with_conflicts_and_ties, ExtCtx, IndexedConvention, OverloadCall,
     SelectionMode,
 };
-pub(crate) use primitive_overrides::{primitive_overrides, PrimitiveOverride};
 use property_candidates::{
     generic_property_more_specific, source_property_visible, specialize_property,
 };

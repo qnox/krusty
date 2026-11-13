@@ -7,10 +7,13 @@
 
 use super::super::decline::KlibBodyDeclineReason;
 use super::{mismatch, unsupported, BodyLowering, Lowered};
-use crate::ir::{Callee, ExprId, IrBinOp, IrConst, IrExpr, IrIntrinsic};
+use crate::ir::{
+    Callee, ExprId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrIntrinsic, IrProgressionSource,
+};
 use crate::metadata::klib_ir::tree::{
     KlibIrArguments, KlibIrExprKind, KlibIrLoop, KlibIrStatement, KlibIrVariableId,
 };
+use crate::metadata::klib_ir::KlibIrSignature;
 use crate::types::Ty;
 
 impl BodyLowering<'_> {
@@ -56,9 +59,13 @@ impl BodyLowering<'_> {
         if ty != Ty::Unit {
             return Err(mismatch("a `for` loop is not typed `Unit`"));
         }
-        if let Some(array_loop) = super::super::array_loops::array_for_loop(self.arena, statements)
-        {
+        if let Some(array_loop) = super::super::for_loops::array_for_loop(self.arena, statements) {
             return self.array_loop(array_loop);
+        }
+        if let Some(range_loop) = super::super::for_loops::range_for_loop(self.arena, statements) {
+            if let Some(lowered) = self.range_loop(range_loop)? {
+                return Ok(lowered);
+            }
         }
         let [KlibIrStatement::Variable(iterator), KlibIrStatement::Expression(inner)] = statements
         else {
@@ -107,9 +114,9 @@ impl BodyLowering<'_> {
     /// iteration binds the element at the index before the source body.
     fn array_loop(
         &mut self,
-        array_loop: super::super::array_loops::ArrayForLoop<'_>,
+        array_loop: super::super::for_loops::ArrayForLoop<'_>,
     ) -> Lowered<ExprId> {
-        let super::super::array_loops::ArrayForLoop {
+        let super::super::for_loops::ArrayForLoop {
             array,
             inner: serialized,
             body: statements,
@@ -210,6 +217,92 @@ impl BodyLowering<'_> {
             ],
             value: None,
         }))
+    }
+
+    /// A `for` loop over a range literal, counted as kotlinc's `ForLoopsLowering` and checked FIR
+    /// lowering count one: the bounds are evaluated once, before the loop, and the loop variable
+    /// takes each value from the start towards the end. `None` keeps the iterator protocol, when
+    /// the linker keeps the call building the range.
+    fn range_loop(
+        &mut self,
+        range_loop: super::super::for_loops::RangeForLoop<'_>,
+    ) -> Lowered<Option<ExprId>> {
+        let super::super::for_loops::RangeForLoop {
+            range,
+            start,
+            end,
+            inner: serialized,
+            body: statements,
+            binding,
+        } = range_loop;
+        let KlibIrSignature::Public(callee) = &range.symbol.signature else {
+            return Err(mismatch(
+                "a range loop's range call names a non-public declaration",
+            ));
+        };
+        let Some(operation) = self.linker.range_literal(callee)? else {
+            return Ok(None);
+        };
+        let variable = self.arena.variable(binding);
+        if variable.base.origin != "FOR_LOOP_VARIABLE" {
+            return unsupported("a destructured `for` loop over a range literal");
+        }
+        let bound_ty = |lowering: &Self, bound| {
+            lowering
+                .arena
+                .expr(bound)
+                .ty
+                .ok_or_else(|| mismatch("a range literal bound has no type"))
+                .and_then(|ty| lowering.semantic(ty))
+        };
+        let start_ty = bound_ty(self, start)?;
+        let end_ty = bound_ty(self, end)?;
+        // Mixed bounds widen, and an unsigned counter compares through a provider-selected
+        // operation, which this form does not record.
+        let counter = match Ty::range_counter_type_for(start_ty, end_ty) {
+            Some(counter @ (Ty::Int | Ty::Long | Ty::Char))
+                if start_ty == counter && end_ty == counter =>
+            {
+                counter
+            }
+            _ => return unsupported("a range literal loop over mixed or unsigned bounds"),
+        };
+        if self.semantic(variable.ty)? != counter {
+            return Err(mismatch(
+                "a range loop's variable is not typed as the range's element",
+            ));
+        }
+        if self.loops.iter().any(|(id, _)| *id == serialized.id) {
+            return Err(mismatch("a loop repeats an enclosing loop's identity"));
+        }
+        let start = self.operand(start, counter)?;
+        let end = self.operand(end, counter)?;
+        let symbol = variable.base.symbol.clone();
+        let name = variable.name.clone();
+        let local = self.locals.slot(variable, counter)?;
+        self.locals.declare(&symbol, local)?;
+        self.locals.record_name(&symbol, &name);
+        let label = format!("$klib_loop_{}_{}", self.function.function, serialized.id);
+        self.loops.push((serialized.id, label.clone()));
+        let body = self.block_with_prefix(Vec::new(), &statements[1..]);
+        self.loops.pop();
+        let body = body?;
+        Ok(Some(self.ir.add_expr(IrExpr::Checked(Box::new(
+            IrCheckedOperation::RangeLoop {
+                variable: local.index,
+                variable_name: Some(name.into()),
+                counter,
+                source: IrProgressionSource::Literal {
+                    operation,
+                    start,
+                    end,
+                },
+                unsigned_compare: None,
+                body,
+                label,
+                with_index: None,
+            },
+        )))))
     }
 
     /// The loop variable `binding` (or a destructured loop's element temporary) declared from

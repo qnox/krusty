@@ -136,6 +136,10 @@ impl BodyLowering<'_> {
             IrTypeOp::Cast
         } else if to_non_null {
             IrTypeOp::ImplicitCoercion
+        } else if actual.is_reference() && self.narrows(actual, target) {
+            // A reference narrowed to a value type (an inlined `let`'s `Any?` result read back
+            // as the `Int` it holds), as checked FIR lowers the source `as`.
+            IrTypeOp::CastNonNull
         } else {
             return Err(KlibBodyDeclineReason::ImplicitConversion);
         };
