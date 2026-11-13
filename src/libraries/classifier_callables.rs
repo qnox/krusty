@@ -19,12 +19,24 @@ pub struct BoundInnerConstructor {
     pub outer: TypeName,
 }
 
-/// The constructor facet of a callable candidate: the classifier it constructs and, for an `inner`
-/// classifier's constructor, the classifier that declares the captured outer instance.
+/// The constructor facet of a callable candidate: the classifier it constructs, for an `inner`
+/// classifier's constructor the classifier that declares the captured outer instance, and where
+/// the constructor comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConstructorCandidate {
     pub classifier: TypeName,
     pub outer: Option<TypeName>,
+    pub origin: ConstructorOrigin,
+}
+
+/// Where a constructor candidate comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConstructorOrigin {
+    /// A constructor the classifier declares, which the constructor path materializes.
+    Declared,
+    /// A functional interface's language-level constructor, one operand of its abstract method's
+    /// function type. It has no declaration; its conversion path commits it.
+    FunctionalInterface,
 }
 
 impl ConstructorCandidate {
@@ -250,6 +262,7 @@ impl FunctionInfo {
         internal: TypeName,
         classifier: &LibraryType,
         mut constructor: LibraryMember,
+        origin: ConstructorOrigin,
     ) -> Self {
         constructor.owner.get_or_insert(internal);
         constructor.generic_sig = constructor_generic_signature(internal, classifier, &constructor);
@@ -263,6 +276,7 @@ impl FunctionInfo {
         candidate.constructor = Some(ConstructorCandidate {
             classifier: internal,
             outer: None,
+            origin,
         });
         candidate
     }
@@ -309,6 +323,7 @@ impl FunctionInfo {
         candidate.constructor = Some(ConstructorCandidate {
             classifier: inner,
             outer: Some(outer),
+            origin: ConstructorOrigin::Declared,
         });
         Some(candidate)
     }

@@ -63,12 +63,17 @@ fn scratch_dir() -> Result<ScratchDir, String> {
 }
 
 fn language_args(src: &str) -> Vec<String> {
-    src.lines()
+    let features = crate::features::FeatureTable::for_version(crate::kotlin_version::target())
+        .expect("the configured reference release has a feature table");
+    let mut arguments: Vec<String> = src
+        .lines()
         .filter_map(|line| line.trim_start().strip_prefix("// LANGUAGE:"))
         .flat_map(|payload| payload.split([' ', ',', '\t']))
         .filter(|token| !token.is_empty())
-        .map(|token| format!("-XXLanguage:{token}"))
-        .collect()
+        .map(|token| features.language_argument(token))
+        .collect();
+    arguments.dedup();
+    arguments
 }
 
 fn write_sources(
