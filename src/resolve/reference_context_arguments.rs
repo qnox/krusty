@@ -8,6 +8,61 @@
 use super::*;
 
 impl Checker<'_> {
+    /// Apply an expected callable shape to one generic declaration before reference adaptation.
+    /// An extension contributes its already-selected receiver as inference evidence; references
+    /// hide any leading context parameters selected at this call-reference site.
+    pub(super) fn specialize_callable_ref_candidate(
+        &self,
+        function: &mut crate::libraries::FunctionInfo,
+        extension_receiver: Option<Ty>,
+        expected_params: Option<&[Ty]>,
+        expected_ret: Option<Ty>,
+    ) -> Result<Vec<Ty>, CallableRefSpecialization> {
+        let source = self.fed_source();
+        let bound_contexts = self.reference_bound_context_count(function);
+        callable_reference_selection::specialize_candidate_with_type_arguments(
+            &source,
+            function,
+            bound_contexts,
+            extension_receiver,
+            expected_params,
+            expected_ret,
+            |actual, bound| self.generic_bound_admits(actual, bound),
+        )
+    }
+
+    /// Map an expected function value's parameters onto one declaration. Context inputs are
+    /// supplied at the reference site; remaining parameters use an adapter value, default, or
+    /// collected vararg from the ordinary provider-owned call shape.
+    pub(super) fn callable_ref_argument_plan(
+        &self,
+        function: &crate::libraries::FunctionInfo,
+        expected: &'static crate::types::FnSig,
+    ) -> Option<Vec<AdaptedRefArgument>> {
+        self.callable_ref_parameter_plan(
+            &function.callable.params,
+            &function.call_sig,
+            self.reference_bound_context_count(function),
+            &expected.params,
+        )
+    }
+
+    pub(super) fn callable_ref_parameter_plan(
+        &self,
+        params: &[Ty],
+        call_sig: &crate::libraries::CallSig,
+        context_count: usize,
+        expected_params: &[Ty],
+    ) -> Option<Vec<AdaptedRefArgument>> {
+        extension_reference_selection::checked_parameter_plan(
+            params,
+            call_sig,
+            context_count,
+            expected_params,
+            self,
+        )
+    }
+
     pub(super) fn callable_ref_function_type(
         &mut self,
         scope: &CheckerScope<'_>,
