@@ -1255,7 +1255,6 @@ inlineClasses/contextParameterPropertyDeserialization.kt
 inlineClasses/crossinlineWithInlineClassInParameter.kt
 inlineClasses/crossinlineWithInlineClassInParameterGeneric.kt
 inlineClasses/crossinlineWithInlineClassInParameterGeneric2.kt
-inlineClasses/customIterator.kt
 inlineClasses/defaultParameterValues/kt26554.kt
 inlineClasses/dnnInValue.kt
 inlineClasses/funInterface/argumentResult.kt
