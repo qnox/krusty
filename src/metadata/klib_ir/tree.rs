@@ -236,6 +236,39 @@ fn push_access_arguments(access: &KlibIrMemberAccess, pending: &mut Vec<KlibIrEx
 }
 
 impl KlibIrArena {
+    /// The delegating calls of `class`'s constructors to a superclass constructor other than
+    /// `Any`'s. A constructed object literal passes the calls' arguments where it is constructed,
+    /// so they are emitted with the body that constructs it.
+    pub(crate) fn class_superclass_delegations(&self, class: &KlibIrClass) -> Vec<KlibIrExprId> {
+        let mut roots = Vec::new();
+        for member in &class.members {
+            let KlibIrMember::Function(function) = member else {
+                continue;
+            };
+            let function = self.function(*function);
+            let Some(KlibIrBody::Block(statements)) = &function.body else {
+                continue;
+            };
+            let Some(KlibIrStatement::Expression(first)) = statements.first() else {
+                continue;
+            };
+            let KlibIrExprKind::DelegatingConstructorCall(access) = &self.expr(*first).kind else {
+                continue;
+            };
+            let crate::metadata::klib_ir::KlibIrSignature::Public(callee) = &access.symbol.signature else {
+                continue;
+            };
+            let any = callee.package().segments() == ["kotlin"]
+                && callee.declaration().segments().first().map(String::as_str) == Some("Any");
+            if !any {
+                roots.push(*first);
+            }
+        }
+        roots
+    }
+}
+
+impl KlibIrArena {
     /// The expressions the members of `class` evaluate: member and accessor bodies with their
     /// parameter defaults, field initializers and anonymous initializers. A constructor and a class
     /// nested in `class` are not included.

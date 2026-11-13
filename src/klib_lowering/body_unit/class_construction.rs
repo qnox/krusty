@@ -507,21 +507,7 @@ fn secondary_delegation(
             default_masks: Vec::new(),
         });
     };
-    // A materialized superclass without a primary constructor reaches the secondary one declaring
-    // the selected parameters; Kotlin declares no two constructors of a class with the same ones.
-    let ordinal = match superclass.map(|class| &ir.classes[class as usize]) {
-        Some(parent) if !parent.has_primary_ctor => parent
-            .secondary_ctors
-            .iter()
-            .position(|secondary| secondary.params == call.params)
-            .map(|index| u32::try_from(index + 1).expect("a constructor ordinal fits u32"))
-            .ok_or_else(|| {
-                KlibBodyDeclineReason::SignatureMismatch(
-                    "a superclass has no constructor with the delegation's parameters".to_owned(),
-                )
-            })?,
-        _ => 0,
-    };
+    let ordinal = superclass_constructor_ordinal(superclass.map(|class| &ir.classes[class as usize]), &call.params)?;
     Ok(crate::ir::CtorDelegateTarget::Super {
         owner: call.owner,
         target_params: call.params.clone(),
@@ -572,5 +558,27 @@ fn materialized_secondary(
         vc_params: false,
         param_checks: vec![None; params.len()],
         params,
+    }
+}
+
+/// The ordinal of the constructor a delegation with `params` reaches in a materialized superclass.
+/// A superclass without a primary constructor is reached through the secondary one declaring the
+/// selected parameters; Kotlin declares no two constructors of a class with the same ones.
+pub(in crate::klib_lowering) fn superclass_constructor_ordinal(
+    superclass: Option<&IrClass>,
+    params: &[Ty],
+) -> Result<u32, KlibBodyDeclineReason> {
+    match superclass {
+        Some(parent) if !parent.has_primary_ctor => parent
+            .secondary_ctors
+            .iter()
+            .position(|secondary| secondary.params == params)
+            .map(|index| u32::try_from(index + 1).expect("a constructor ordinal fits u32"))
+            .ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch(
+                    "a superclass has no constructor with the delegation's parameters".to_owned(),
+                )
+            }),
+        _ => Ok(0),
     }
 }
