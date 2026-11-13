@@ -179,17 +179,17 @@ impl Runtime {
         code.local_get(0);
         match (receiver, operation) {
             (Receiver::Box(form), Operation::Compare) => {
-                let carrier = builtin_order::ordered_carrier(form.boxed)
+                let key = builtin_order::order_key(form.boxed)
                     .ok_or_else(|| format!("an order of boxed `{:?}`", form.boxed))?;
-                // The receiver and the argument, each read out of its box, then the scratch.
+                // The receiver's and the argument's keys, each read out of its box.
                 let (left, right) = (2, 3);
                 form.emit_unbox(&mut code);
-                code.local_set(left).local_get(1);
+                builtin_order::store_order_key(&mut code, &self.hashing, form.boxed, left);
+                code.local_get(1);
                 form.emit_unbox(&mut code);
-                code.local_set(right);
-                locals.extend([carrier, carrier]);
-                locals.extend(builtin_order::order_scratch(carrier));
-                builtin_order::emit_order(&mut code, carrier, left, right, 4);
+                builtin_order::store_order_key(&mut code, &self.hashing, form.boxed, right);
+                locals.extend([key, key]);
+                builtin_order::emit_key_order(&mut code, key, left, right);
             }
             (Receiver::String, Operation::StringCompare) => {
                 let compare = self.string_compare(module);
@@ -274,7 +274,7 @@ fn operation(
         (Representation::Box(boxed), Some(BackendCompilerIntrinsic::PrimitiveCompare))
             if *declaration.params == [boxed]
                 && declaration.ret == Ty::Int
-                && builtin_order::ordered_carrier(boxed).is_some()
+                && builtin_order::order_key(boxed).is_some()
                 && params.len() == 2
                 && *results == [ValType::I32] =>
         {
