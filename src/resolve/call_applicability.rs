@@ -135,10 +135,6 @@ pub(super) fn score_with_declaration(
         let contextual_name = checker
             .postponed_context_sensitive_name(scope, argument)
             .is_some_and(|name| checker.context_sensitive_name_matches(name, expected));
-        let contextual_empty_reference_array = checker
-            .postponed_empty_reference_array_factory(scope, argument)
-            && expected.non_null().is_reference_array()
-            && expected.non_null().array_elem().is_some();
         crate::trace_compiler!(
                 "expected_call",
                 "score argument={argument:?} parameter={parameter} expected={expected:?} actual={semantic_actual:?} exact={}",
@@ -198,9 +194,6 @@ pub(super) fn score_with_declaration(
         if contextual_name {
             return Some(2);
         }
-        if contextual_empty_reference_array {
-            return Some(2);
-        }
         // A lambda/function-shaped value is not nominally assignable to its SAM classifier;
         // the conversion is precisely what makes the argument applicable. Evaluate that
         // semantic conversion before the ordinary nominal rejection below. Its score remains
@@ -256,7 +249,13 @@ pub(super) fn score_with_declaration(
             .argument_uses_context_only_result(scope, argument)
             .then_some(1)
             .or_else(|| checker.member_argument_score(expected, semantic_actual))
-            .or_else(|| contextual_call_result.then_some(0))
+            // A nested call re-solved to the parameter's own classifier is an ordinary fit; one
+            // whose result only an expected-type binding could reshape ranks below it.
+            .or_else(|| {
+                contextual_call_result.then(|| {
+                    usize::from(checker.call_result_reapplies_its_classifier(argument, expected))
+                })
+            })
             .or_else(|| {
                 checker
                     .unbound_call_result_signature(argument)

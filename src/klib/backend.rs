@@ -21,7 +21,7 @@ use crate::metadata::id_signature::{
     MetadataAccessor, MetadataClass, MetadataContainer,
 };
 use crate::metadata::klib_fragment::{
-    package_fragment_with_inner_classifiers, KlibClass, KlibFileMembers,
+    package_fragment_with_classifier_applications, KlibClass, KlibFileMembers,
 };
 use crate::metadata::semantic::parse_package_fragment_checked;
 
@@ -225,8 +225,12 @@ impl KlibBackend {
             .iter()
             .map(|record| record.enum_entries())
             .collect::<Vec<_>>();
-        let inner_classifier = |classifier| {
-            crate::metadata::inner_classifiers::inner_classifier(ir, &file.classifiers, classifier)
+        let classifier_application = |classifier| {
+            crate::metadata::classifier_applications::classifier_application(
+                ir,
+                &file.classifiers,
+                classifier,
+            )
         };
         let approximate =
             |ty| crate::metadata::declaration_approximation::approximate(&file.classifiers, ty);
@@ -240,7 +244,7 @@ impl KlibBackend {
                         annotations_in_metadata: self.annotations_in_metadata,
                         compiler_version_requirement: None,
                         intersection: Some(&approximate),
-                        inner_classifiers: &inner_classifier,
+                        classifier_applications: &classifier_application,
                         primary_ctor_annotations: None,
                     },
                     secondary,
@@ -288,12 +292,12 @@ impl KlibBackend {
                 },
             )
             .collect::<Vec<_>>();
-        let fragment = match package_fragment_with_inner_classifiers(
+        let fragment = match package_fragment_with_classifier_applications(
             &segments,
             &members,
             &declarations,
             self.annotations_in_metadata,
-            &inner_classifier,
+            &classifier_application,
             Some(&approximate),
         ) {
             Ok(fragment) => fragment,
@@ -748,14 +752,6 @@ fn record_constructor_exports(
             .class_id_by_name(source.fq_name_id())
             .ok_or_else(|| format!("object {} has no IR identity", source.fq_name()))?;
         exports.record_singleton(id);
-    }
-    // Only the declaring file holds an enum's constants, so another module reads each through
-    // the entry this file exports.
-    if source.is_enum && class.visibility != crate::types::Visibility::Private {
-        let id = ir
-            .class_id_by_name(source.fq_name_id())
-            .ok_or_else(|| format!("enum {} has no IR identity", source.fq_name()))?;
-        exports.record_enum(id);
     }
     if source.is_interface
         || source.is_abstract

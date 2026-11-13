@@ -57,6 +57,7 @@ impl Checker<'_> {
     ) {
         debug_assert_eq!(captures.len(), capture_bindings.len());
         let expressions = self.local_class_dependency_expressions(class);
+        self.extend_selected_context_binding_captures(scope, class, captures, capture_bindings);
         self.extend_selected_callable_captures(scope, &expressions, captures, capture_bindings);
         self.extend_selected_constructor_captures(
             scope,
@@ -78,13 +79,18 @@ impl Checker<'_> {
             .collect()
     }
 
-    pub(super) fn extend_anonymous_superclass_captures(
+    /// The captures an anonymous object needs beyond the names its body spells: the context
+    /// bindings its members pass implicitly, and those its local superclass requires.
+    pub(super) fn extend_anonymous_selected_captures(
         &mut self,
         scope: &CheckerScope<'_>,
         declaration: DeclId,
         captures: &mut Vec<AnonymousObjectCapture>,
     ) {
         let mut bindings = Self::local_capture_binding_identities(captures);
+        if let Decl::Class(class) = self.file.decl(declaration) {
+            self.extend_selected_context_binding_captures(scope, class, captures, &mut bindings);
+        }
         self.extend_superclass_captures(scope, declaration, captures, &mut bindings);
     }
 
@@ -213,6 +219,54 @@ impl Checker<'_> {
         expressions
     }
 
+    /// A member that passes an enclosing binding as an implicit context argument or receiver reads
+    /// that binding without spelling it, so the syntactic inventory misses it. The checker recorded
+    /// the binding it selected; the class carries that exact binding, as kotlinc's
+    /// `context(c: Ctx) fun f() { object { fun g() = read() } }` captures `c`, like a name read.
+    fn extend_selected_context_binding_captures(
+        &self,
+        scope: &CheckerScope<'_>,
+        class: &ClassDecl,
+        captures: &mut Vec<AnonymousObjectCapture>,
+        capture_bindings: &mut Vec<Option<u32>>,
+    ) {
+        for root in local_class_capture_expressions(class) {
+            for (name, local) in self.selected_context_bindings(scope, root) {
+                let Some(identity) = local.lexical_capture_identity else {
+                    continue;
+                };
+                let Some((binding, lexical_shadow_depth)) =
+                    self.lexical_binding_by_identity(scope, &name, identity)
+                else {
+                    continue;
+                };
+                Self::merge_or_push_local_dependency_capture(
+                    captures,
+                    capture_bindings,
+                    AnonymousObjectCapture {
+                        enum_entry_storage: binding.enum_entry_storage(),
+                        name,
+                        ty: binding.ty,
+                        shared_cell: false,
+                        storage_ty: binding.delegate_storage_ty,
+                        source: AnonymousObjectCaptureSource::LexicalValue,
+                        receiver_label: None,
+                        receiver: None,
+                        semantic_receiver: None,
+                        lexical_shadow_depth,
+                        lexical_binding: Some(identity),
+                        lexical_declaration: binding.lexical_declaration,
+                        capture_dependency: None,
+                        constructor_projections: Vec::new(),
+                        receiver_capture: None,
+                        receiver_role: None,
+                    },
+                    Some(identity),
+                );
+            }
+        }
+    }
+
     fn extend_selected_callable_captures(
         &self,
         scope: &CheckerScope<'_>,
@@ -265,6 +319,7 @@ impl Checker<'_> {
                         semantic_receiver: None,
                         lexical_shadow_depth,
                         lexical_binding: required_identity,
+                        lexical_declaration: binding.lexical_declaration,
                         capture_dependency: None,
                         constructor_projections: Vec::new(),
                         receiver_capture: None,
@@ -796,6 +851,7 @@ mod tests {
             semantic_receiver: None,
             lexical_shadow_depth: 0,
             lexical_binding: Some(7),
+            lexical_declaration: None,
             capture_dependency: None,
             constructor_projections: Vec::new(),
             receiver_capture: None,

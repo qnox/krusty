@@ -9,8 +9,9 @@
 //!
 //! A `crossinline` lambda captured by the object is the other reason to copy. kotlinc regenerates
 //! that class at every call, and `typeOf` of the instance names the copy. A capture-free lambda is
-//! inlined into the copy's methods and dropped from its constructor. A lambda that itself captures
-//! values stays a constructor argument of the copy.
+//! inlined into the copy's methods and dropped from its constructor. A zero-argument lambda that
+//! captures values is lifted the same way: its captures become fields of the copy and its body is
+//! spliced at each call. A lambda that takes its own parameters stays a constructor argument.
 
 use crate::fx_hash::{HashMap, HashSet};
 
@@ -312,6 +313,17 @@ fn retarget_caller_property_use(
     Ok(())
 }
 
+/// Concrete arguments may replace a copied member's declared type parameters. An argument that is
+/// still a type parameter is the enclosing inline function's, and the copy's metadata cannot name
+/// a type parameter its declaration table does not contain.
+fn signature_bindings(bindings: &HashMap<String, Ty>) -> HashMap<String, Ty> {
+    bindings
+        .iter()
+        .filter(|(_, replacement)| !replacement.mentions_ty_param())
+        .map(|(name, replacement)| (name.clone(), *replacement))
+        .collect()
+}
+
 fn specialized_class(
     ir: &mut crate::ir::IrFile,
     internal: TypeName,
@@ -345,8 +357,6 @@ fn specialized_class(
     if uses_reified {
         ir.reified_anonymous_declarations.insert(source);
     }
-    let field_count = u32::try_from(ir.classes[source as usize].fields.len())
-        .map_err(|_| malformed(class_name))?;
     let property_count = u32::try_from(ir.classes[source as usize].properties.len())
         .map_err(|_| malformed(class_name))?;
     let placeholder = crate::types::type_name(&format!("specialized-anon#{order}"));
@@ -377,11 +387,14 @@ fn specialized_class(
         // specialized above; substituting the signature would emit a concrete descriptor plus a
         // bridge where kotlinc keeps the erased member.
         shape.dispatch_receiver = Some(placeholder);
+        // A concrete instantiation updates the generic signature so it matches that erased member.
+        // A replacement that is still a type parameter belongs to the enclosing inline function.
+        // It is not in this class's declaration table, so the copy keeps the declared parameter.
         cloned_methods.push(crate::ir::clone_class_method(
             ir,
             method,
             shape,
-            &HashMap::default(),
+            &signature_bindings(expansion.bindings),
         ));
     }
     let cloned = source_methods
@@ -457,6 +470,17 @@ fn specialized_class(
         .collect::<Vec<_>>();
     copy_override_edges(ir, source_name, placeholder, &methods)?;
     remap_owned_class(ir, &owned, source, class_id, internal, placeholder);
+    // Declaration-cloned expressions keep the inline function's source identity, so their lines
+    // stay on the copy's primary file. The caller's lambda, spliced later, has no such frame and
+    // is mapped as the second file.
+    if let (Some(function), Some(source)) = (
+        module_inline_function(ir, expansion.site.inline_callee),
+        ir.source_debug.current(),
+    ) {
+        for copy in &owned {
+            ir.record_inline_copy_owner(*copy, function, None, source);
+        }
+    }
     let omitted_capture_fields = consume_trivially_spliceable_lambdas(
         ir,
         class_id,
@@ -464,7 +488,12 @@ fn specialized_class(
         &property_copies,
         &lambdas,
         class_name,
+        expansion.site.inline_callee_source_name,
     )?;
+    let field_count = u32::try_from(ir.classes[class_id as usize].fields.len())
+        .map_err(|_| malformed(class_name))?
+        .checked_add(omitted_capture_fields)
+        .ok_or_else(|| malformed(class_name))?;
     renames.insert(internal, placeholder);
     ir.specialized_anonymous_classes.insert(
         class_id,
@@ -508,6 +537,35 @@ fn specialized_class(
         retarget(ir, root, &owned, expansion, seen, renames, detached_impls)?;
     }
     Ok(Some(placeholder))
+}
+
+fn module_inline_function(
+    ir: &crate::ir::IrFile,
+    callee: crate::ir::IrInlineCallee,
+) -> Option<crate::ir::FunId> {
+    match callee {
+        crate::ir::IrInlineCallee::Module(callable) => {
+            ir.checked_callable_functions.get(&callable).copied()
+        }
+        crate::ir::IrInlineCallee::Dependency(_) => None,
+    }
+}
+
+/// Mark `root` and its children as copied inline code without giving them the declaration's
+/// source frame. Nested lambdas stay out of the walk: their bodies are separate functions.
+fn mark_inline_copy_tree(ir: &mut crate::ir::IrFile, root: ExprId) {
+    let mut pending = vec![root];
+    let mut seen = HashSet::default();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        ir.mark_inline_copy(expression);
+        if matches!(ir.expr(expression), IrExpr::Lambda { .. }) {
+            continue;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
 }
 
 fn expression_ids(ir: &crate::ir::IrFile, root: ExprId) -> HashSet<ExprId> {
@@ -1593,14 +1651,13 @@ fn inline_lambda(ir: &crate::ir::IrFile, expression: ExprId) -> Option<(u32, Exp
     }
 }
 
-/// Inline a lambda into the copy only when its body needs no operand binding or value rehoming.
+/// Inline a lambda into the copy when every use is a zero-argument call of its capture field.
 ///
-/// Capture freedom alone is not enough: an extension/value parameter still has to be bound, a
-/// suspend lambda carries continuation semantics, and a body-local value has to be moved out of the
-/// lambda's independent value domain. Those shapes keep the lambda as an initialized constructor
-/// capture until the ordinary inline-body splicer can realize them. The narrow shape consumed here
-/// is a parameter-free, non-suspend body with no value slots, used exclusively by zero-argument
-/// invocations of its capture field.
+/// A capture-free, parameter-free, non-suspend body with no value slots is spliced as it is. A
+/// zero-argument lambda that captures values is lifted: each capture becomes a field of the copy,
+/// stored from the caller's capture operand, and each call reads that field instead of invoking
+/// the lambda. A lambda that takes its own parameters, or a suspend lambda, stays a constructor
+/// argument until the ordinary inline-body splicer can realize it.
 fn consume_trivially_spliceable_lambdas(
     ir: &mut crate::ir::IrFile,
     class: ClassId,
@@ -1608,17 +1665,27 @@ fn consume_trivially_spliceable_lambdas(
     pending_property_roots: &[ExprId],
     lambdas: &[InlineLambdaArgument],
     class_name: TypeName,
+    inline_callee: &str,
 ) -> Result<u32, super::super::FirLoweringFailure> {
+    let before = ir.classes[class as usize].fields.len();
     let mut removals = Vec::new();
+    let mut lifts = Vec::new();
     for lambda in lambdas {
         let Some(function) = ir.functions.get(lambda.impl_fn as usize) else {
             return Err(malformed(class_name));
         };
-        if lambda.capture_count != 0
-            || !function.params.is_empty()
-            || ir.suspend_funs.contains(&lambda.impl_fn)
-            || body_uses_values(ir, lambda.inline_body)
-        {
+        if ir.suspend_funs.contains(&lambda.impl_fn) {
+            continue;
+        }
+        let parameters = function.params.len();
+        if lambda.capture_count != 0 {
+            if parameters != lambda.capture_count {
+                continue;
+            }
+            lifts.push(lambda);
+            continue;
+        }
+        if parameters != 0 || body_uses_values(ir, lambda.inline_body) {
             continue;
         }
         if !inline_lambda_into_field_invokes(
@@ -1637,9 +1704,20 @@ fn consume_trivially_spliceable_lambdas(
             .body = None;
         removals.push((lambda.parameter, lambda.field));
     }
+    lifts.sort_by_key(|lambda| lambda.parameter);
+    for lambda in lifts.into_iter().rev() {
+        lift_capturing_lambda(
+            ir,
+            class,
+            construction,
+            pending_property_roots,
+            lambda,
+            class_name,
+            inline_callee,
+        )?;
+    }
     removals.sort_unstable();
     removals.dedup();
-    let omitted = u32::try_from(removals.len()).map_err(|_| malformed(class_name))?;
     for (parameter, field) in removals.into_iter().rev() {
         remove_capture(
             ir,
@@ -1651,7 +1729,418 @@ fn consume_trivially_spliceable_lambdas(
             class_name,
         )?;
     }
-    Ok(omitted)
+    let after = ir.classes[class as usize].fields.len();
+    u32::try_from(before.saturating_sub(after)).map_err(|_| malformed(class_name))
+}
+
+/// Replace one capturing lambda with one stored field per capture, and splice its body at each
+/// zero-argument call of that field. The declaration class keeps the original lambda function.
+fn lift_capturing_lambda(
+    ir: &mut crate::ir::IrFile,
+    class: ClassId,
+    construction: ExprId,
+    pending_property_roots: &[ExprId],
+    lambda: &InlineLambdaArgument,
+    class_name: TypeName,
+    inline_callee: &str,
+) -> Result<(), super::super::FirLoweringFailure> {
+    let IrExpr::Lambda { captures, .. } = ir.expr(lambda.expression).clone() else {
+        return Err(malformed(class_name));
+    };
+    if captures.len() != lambda.capture_count {
+        return Err(malformed(class_name));
+    }
+    let types = ir
+        .functions
+        .get(lambda.impl_fn as usize)
+        .ok_or_else(|| malformed(class_name))?
+        .params
+        .clone();
+    if types.len() != lambda.capture_count {
+        return Err(malformed(class_name));
+    }
+    let identities = ir
+        .function_parameter_identities(lambda.impl_fn)
+        .map(<[crate::ir::IrParameterIdentity]>::to_vec);
+    let mut names = Vec::with_capacity(lambda.capture_count);
+    for index in 0..lambda.capture_count {
+        let Some(name) = identities
+            .as_ref()
+            .and_then(|identities| identities.get(index))
+            .and_then(|identity| identity.source_name.clone())
+        else {
+            return Ok(());
+        };
+        names.push(name);
+    }
+    let Some(invocations) =
+        capturing_field_invocations(ir, class, pending_property_roots, lambda.field)
+    else {
+        return Ok(());
+    };
+    let aligned = ir.classes[class as usize].fields.len() as u32
+        == ir.classes[class as usize].constructor_prefix_count;
+    if !aligned {
+        return Ok(());
+    }
+    remove_capture(
+        ir,
+        class,
+        construction,
+        pending_property_roots,
+        lambda.parameter,
+        lambda.field,
+        class_name,
+    )?;
+    let field_base = append_lifted_captures(
+        ir,
+        class,
+        construction,
+        &captures,
+        &types,
+        &names,
+        class_name,
+    )?;
+    record_lifted_shared_cells(
+        ir,
+        class,
+        lambda.inline_body,
+        field_base,
+        lambda.capture_count,
+    );
+    for invocation in invocations {
+        splice_lifted_body(ir, invocation, lambda, field_base, class, inline_callee)?;
+    }
+    Ok(())
+}
+
+/// Zero-argument calls of capture `field`, each with the receiver of that field read. `None` when
+/// the field is also read some other way, so the lambda has to stay callable.
+fn capturing_field_invocations(
+    ir: &crate::ir::IrFile,
+    class: ClassId,
+    pending_property_roots: &[ExprId],
+    field: u32,
+) -> Option<Vec<(ExprId, ExprId)>> {
+    let mut roots = ir.classes[class as usize]
+        .methods
+        .iter()
+        .filter_map(|method| ir.functions.get(*method as usize)?.body)
+        .collect::<Vec<_>>();
+    roots.extend(ir.classes[class as usize].init_body);
+    roots.extend(pending_property_roots.iter().copied());
+    let mut pending = roots;
+    let mut seen = HashSet::default();
+    let mut invocations = Vec::new();
+    let mut field_reads = HashSet::default();
+    let mut invoked_reads = HashSet::default();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::Lambda { .. } = ir.expr(expression) {
+            continue;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        if let IrExpr::GetField {
+            class: owner,
+            index,
+            ..
+        } = ir.expr(expression)
+        {
+            if *owner == class && *index == field {
+                field_reads.insert(expression);
+            }
+        }
+        if let IrExpr::InvokeFunction { func, args, .. } = ir.expr(expression) {
+            if let Some(read) = capture_field_read(ir, *func, class, field) {
+                if !args.is_empty() {
+                    return None;
+                }
+                let IrExpr::GetField { receiver, .. } = ir.expr(read) else {
+                    return None;
+                };
+                invoked_reads.insert(read);
+                invocations.push((expression, *receiver));
+            }
+        }
+    }
+    (field_reads == invoked_reads && !invocations.is_empty()).then_some(invocations)
+}
+
+/// A mutable capture is a shared cell in the lambda body (`RefGet`/`RefSet` of the capture
+/// parameter). The field keeps the element type here; the JVM realizes the `Ref` holder.
+fn record_lifted_shared_cells(
+    ir: &mut crate::ir::IrFile,
+    class: ClassId,
+    body: ExprId,
+    field_base: u32,
+    capture_count: usize,
+) {
+    let mut pending = vec![body];
+    let mut seen = HashSet::default();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if matches!(ir.expr(expression), IrExpr::Lambda { .. }) {
+            continue;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        let (elem, holder) = match ir.expr(expression) {
+            IrExpr::RefGet { elem, holder } => (*elem, *holder),
+            IrExpr::RefSet { elem, holder, .. } => (*elem, *holder),
+            _ => continue,
+        };
+        let IrExpr::GetValue(slot) = ir.expr(holder) else {
+            continue;
+        };
+        let slot = *slot;
+        if slot as usize >= capture_count {
+            continue;
+        }
+        ir.shared_class_capture_fields
+            .insert((class, field_base + slot), elem);
+    }
+}
+
+fn append_lifted_captures(
+    ir: &mut crate::ir::IrFile,
+    class: ClassId,
+    construction: ExprId,
+    captures: &[ExprId],
+    types: &[Ty],
+    names: &[String],
+    class_name: TypeName,
+) -> Result<u32, super::super::FirLoweringFailure> {
+    let (insert_at, field_base, added) = {
+        let declaration = &mut ir.classes[class as usize];
+        let insert_at = usize::try_from(declaration.constructor_prefix_count)
+            .map_err(|_| malformed(class_name))?;
+        if insert_at > declaration.ctor_args.len() {
+            return Err(malformed(class_name));
+        }
+        let field_base =
+            u32::try_from(declaration.fields.len()).map_err(|_| malformed(class_name))?;
+        let added = u32::try_from(captures.len()).map_err(|_| malformed(class_name))?;
+        for (param, _) in &mut declaration.pre_super_param_fields {
+            if *param >= insert_at as u32 {
+                *param += added;
+            }
+        }
+        for (offset, (ty, name)) in types.iter().zip(names.iter()).enumerate() {
+            let field_index =
+                field_base + u32::try_from(offset).map_err(|_| malformed(class_name))?;
+            declaration
+                .fields
+                .push(crate::ir::IrField::new(format!("${name}$inlined"), *ty).with_is_final(true));
+            declaration.ctor_args.insert(
+                insert_at + offset,
+                crate::ir::IrCtorArg {
+                    name: None,
+                    context_kind: crate::types::ContextParameterKind::None,
+                    ty: *ty,
+                    declared_ty: None,
+                    is_field: true,
+                    field_index: Some(field_index),
+                    has_default: false,
+                    is_vararg: false,
+                    type_param: None,
+                    check: None,
+                    anonymous_super_forward: None,
+                    capture: Some(crate::ir::IrConstructorCapture {
+                        source_name: format!("{name}$inlined").into(),
+                        receiver: None,
+                        crossinline_parameter: None,
+                        inlined: true,
+                    }),
+                    provenance: crate::ir::IrCtorParameterProvenance::Capture,
+                    capture_identity: None,
+                },
+            );
+            if !declaration.ctor_param_annotations.is_empty() {
+                declaration.ctor_param_annotations.insert(
+                    insert_at + offset,
+                    crate::ir::DeclarationAnnotations::default(),
+                );
+            }
+            declaration.pre_super_param_fields.push((
+                u32::try_from(insert_at + offset).map_err(|_| malformed(class_name))?,
+                field_index,
+            ));
+        }
+        declaration.ctor_param_count += added;
+        declaration.constructor_prefix_count += added;
+        (insert_at, field_base, added)
+    };
+    if let Some(order) = ir.class_capture_order.get_mut(&class) {
+        // The recorded order is a permutation of the prefix that existed before these fields. A
+        // shorter order is a partial record; extending it with a later field index would name an
+        // identity past the permutation.
+        if order.len() == field_base as usize {
+            let mut extended = order.to_vec();
+            for offset in 0..captures.len() {
+                extended
+                    .push(field_base + u32::try_from(offset).map_err(|_| malformed(class_name))?);
+            }
+            *order = extended.into_boxed_slice();
+        }
+    }
+    // A lifted capture is the inliner's constructor argument, not a source read at the object
+    // expression. A plain local or field load must not open its own line between `new` and
+    // `invokespecial`; a capture that is itself a call keeps the line of that call.
+    for &capture in captures {
+        if matches!(
+            ir.expr(capture),
+            IrExpr::GetValue(_) | IrExpr::GetField { .. }
+        ) {
+            let _ = ir.take_source_line(capture);
+            ir.mark_positionless(capture);
+        }
+    }
+    let IrExpr::New {
+        args,
+        ctor_params,
+        declared_params,
+        default_prefix_count,
+        ..
+    } = &mut ir.exprs[construction as usize]
+    else {
+        return Err(malformed(class_name));
+    };
+    if insert_at > args.len() {
+        return Err(malformed(class_name));
+    }
+    for (offset, capture) in captures.iter().copied().enumerate() {
+        args.insert(insert_at + offset, capture);
+    }
+    if let Some(parameters) = ctor_params {
+        if insert_at > parameters.len() {
+            return Err(malformed(class_name));
+        }
+        for (offset, ty) in types.iter().cloned().enumerate() {
+            parameters.insert(insert_at + offset, ty);
+        }
+    }
+    if declared_params.is_some() {
+        let mut parameters = declared_params
+            .as_ref()
+            .expect("the option was just tested")
+            .to_vec();
+        if insert_at > parameters.len() {
+            return Err(malformed(class_name));
+        }
+        for (offset, ty) in types.iter().cloned().enumerate() {
+            parameters.insert(insert_at + offset, ty);
+        }
+        *declared_params = Some(parameters.into_boxed_slice());
+    }
+    *default_prefix_count += added;
+    Ok(field_base)
+}
+
+fn splice_lifted_body(
+    ir: &mut crate::ir::IrFile,
+    invocation: (ExprId, ExprId),
+    lambda: &InlineLambdaArgument,
+    field_base: u32,
+    class: ClassId,
+    inline_callee: &str,
+) -> Result<(), super::super::FirLoweringFailure> {
+    let (invocation, receiver) = invocation;
+    let class_name = ir.classes[class as usize].fq_name;
+    let (spliced, _) = crate::ir::clone_expression_dag(ir, lambda.inline_body);
+    let capture_count = u32::try_from(lambda.capture_count).map_err(|_| malformed(class_name))?;
+    let temporary = ir.next_value_slot();
+    let formal_slots = (0..capture_count)
+        .map(|index| temporary + index)
+        .collect::<Vec<_>>();
+    let local_base = temporary + capture_count;
+    super::super::source_calls::rehome_inline_body_values(ir, spliced, &formal_slots, local_base)
+        .ok_or_else(|| malformed(class_name))?;
+    replace_lifted_capture_reads(
+        ir,
+        spliced,
+        temporary,
+        capture_count,
+        receiver,
+        class,
+        field_base,
+    );
+    let marker = ir.add_expr(IrExpr::InlineFrameMarker);
+    ir.value_names.insert(marker, inline_callee.to_owned());
+    ir.set_debug_local_provenance(
+        marker,
+        crate::ir::IrDebugLocalProvenance::LambdaFrameMarker {
+            implementation: lambda.impl_fn,
+            depth: 0,
+        },
+    );
+    // The spliced caller body is copied code: the holder classes it names are not mapped into
+    // this class's `InnerClasses`, and its lines are not the declaration's.
+    mark_inline_copy_tree(ir, spliced);
+    ir.exprs[invocation as usize] = IrExpr::Block {
+        stmts: vec![marker],
+        value: Some(spliced),
+    };
+    ir.suspend_calls.remove(&invocation);
+    ir.suspend_call_overridden_results.remove(&invocation);
+    Ok(())
+}
+
+fn replace_lifted_capture_reads(
+    ir: &mut crate::ir::IrFile,
+    root: ExprId,
+    temporary: u32,
+    capture_count: u32,
+    receiver: ExprId,
+    class: ClassId,
+    field_base: u32,
+) {
+    let mut pending = vec![root];
+    let mut seen = HashSet::default();
+    let mut reads = Vec::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::Lambda { .. } = ir.expr(expression) {
+            continue;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        if let IrExpr::GetValue(index) = ir.expr(expression) {
+            if (temporary..temporary + capture_count).contains(index) {
+                reads.push((expression, *index - temporary));
+            }
+        }
+    }
+    for (expression, offset) in reads {
+        let (receiver, _) = crate::ir::clone_expression_dag(ir, receiver);
+        // The field access keeps the capture use's line and marks before this receiver. The
+        // cloned receiver is the regenerated class's `this`, not a source read, so a line copied
+        // onto it would open a second entry on the same `aload`.
+        clear_capture_receiver_lines(ir, receiver);
+        ir.exprs[expression as usize] = IrExpr::GetField {
+            receiver,
+            class,
+            index: field_base + offset,
+        };
+    }
+}
+
+/// A lifted capture's receiver is storage, not a source expression. Drop every line the clone
+/// carried so only the field access marks.
+fn clear_capture_receiver_lines(ir: &mut crate::ir::IrFile, receiver: ExprId) {
+    let mut pending = vec![receiver];
+    let mut seen = HashSet::default();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        let _ = ir.take_source_line(expression);
+        ir.mark_positionless(expression);
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
 }
 
 fn body_uses_values(ir: &crate::ir::IrFile, root: ExprId) -> bool {
