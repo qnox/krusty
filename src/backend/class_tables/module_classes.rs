@@ -30,6 +30,9 @@ pub struct ModuleClasses {
 pub struct ModuleClass {
     /// The declared superclass, or `None` for `kotlin.Any`.
     pub(crate) superclass: Option<TypeName>,
+    /// A dependency class a module class extends, whose members are its provider's
+    /// ([`super::dependency_classes`]).
+    pub(crate) dependency: bool,
     /// Function types among the declared supertypes, by arity.
     pub(crate) function_type_arities: Box<[usize]>,
     /// Instance members in source order.
@@ -66,18 +69,19 @@ pub(crate) enum ModuleInterfaceMember {
     },
 }
 
-/// An instance member a table can hold.
+/// An instance member a table can hold: a declaration of the module, or of a dependency class a
+/// module class extends ([`super::dependency_classes`]).
 #[derive(Debug)]
 pub(crate) enum ModuleMember {
     Function {
-        callable: CallableId,
+        callable: ResolvedFunctionOverrideTarget,
         parameters: Box<[Ty]>,
         result: Ty,
         /// A `suspend` function, which takes its caller's continuation after `parameters`.
         suspend: bool,
     },
     Property {
-        property: PropertyId,
+        property: ResolvedPropertyOverrideTarget,
         /// What its accessors take after the dispatch receiver: its context parameters, then a
         /// member extension's receiver. A setter takes `value` after them.
         accessor_parameters: Box<[Ty]>,
@@ -96,7 +100,7 @@ pub(crate) enum ModuleMember {
 /// A function override edge of a class's own member.
 #[derive(Debug)]
 pub(crate) struct ModuleFunctionOverride {
-    pub(crate) implementation: CallableId,
+    pub(crate) implementation: ResolvedFunctionOverrideTarget,
     pub(crate) overridden_owner: TypeName,
     pub(crate) overridden: ResolvedFunctionOverrideTarget,
     pub(crate) overridden_is_interface: bool,
@@ -106,7 +110,7 @@ pub(crate) struct ModuleFunctionOverride {
 /// A property override edge of a class's own member.
 #[derive(Debug)]
 pub(crate) struct ModulePropertyOverride {
-    pub(crate) implementation: PropertyId,
+    pub(crate) implementation: ResolvedPropertyOverrideTarget,
     pub(crate) overridden: ResolvedPropertyOverrideTarget,
     pub(crate) overridden_is_interface: bool,
     pub(crate) declared_type: Ty,
@@ -179,6 +183,18 @@ impl ModuleClasses {
         self.classes.get(&classifier)
     }
 
+    /// Whether `classifier` is a dependency class a module class extends, which the support unit
+    /// materializing it lays out for that subclass ([`super::dependency_classes`]).
+    pub fn is_dependency_class(&self, classifier: TypeName) -> bool {
+        self.classes
+            .get(&classifier)
+            .is_some_and(|class| class.dependency)
+    }
+
+    pub(super) fn insert_dependency_class(&mut self, name: TypeName, class: ModuleClass) {
+        self.classes.insert(name, class);
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (TypeName, &ModuleClass)> {
         self.classes.iter().map(|(name, class)| (*name, class))
     }
@@ -244,7 +260,7 @@ impl ModuleClasses {
                     .function_overrides(declaration)
                     .iter()
                     .filter_map(|edge| {
-                        let ResolvedFunctionOverrideTarget::Module(implementation) =
+                        let implementation @ ResolvedFunctionOverrideTarget::Module(_) =
                             edge.implementation
                         else {
                             return None;
@@ -264,7 +280,7 @@ impl ModuleClasses {
                     .property_overrides(declaration)
                     .iter()
                     .filter_map(|edge| {
-                        let ResolvedPropertyOverrideTarget::Module(implementation) =
+                        let implementation @ ResolvedPropertyOverrideTarget::Module(_) =
                             edge.implementation
                         else {
                             return None;
@@ -312,6 +328,7 @@ impl ModuleClasses {
             classes.insert(
                 classifier.classifier,
                 ModuleClass {
+                    dependency: false,
                     superclass: classifier
                         .superclass
                         .and_then(|superclass| superclass.get().non_null().obj_internal())
@@ -418,7 +435,7 @@ fn members(
                 let callable = index.callable_for_declaration(declaration)?;
                 let (parameters, result) = index.callable_carriers(callable.id)?;
                 members.push(ModuleMember::Function {
-                    callable: callable.id,
+                    callable: ResolvedFunctionOverrideTarget::Module(callable.id),
                     parameters: parameters.into_boxed_slice(),
                     result,
                     suspend: flags.has(DeclarationFlags::SUSPEND),
@@ -460,7 +477,7 @@ fn members(
                     _ => value,
                 };
                 members.push(ModuleMember::Property {
-                    property,
+                    property: ResolvedPropertyOverrideTarget::Module(property),
                     accessor_parameters: parameters.into_boxed_slice(),
                     value,
                     getter_value,

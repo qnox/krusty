@@ -39,13 +39,18 @@ impl BodyLowering<'_> {
         let Some(body) = serialized.body else {
             return unsupported("a loop without a body");
         };
-        // A body written without braces is serialized as its one statement.
+        // A body written without braces is serialized as its one statement. A `do`-`while` body
+        // is serialized as a composite, whose declarations its condition reads.
         let single = [KlibIrStatement::Expression(body)];
         let statements = match &self.arena.expr(body).kind {
             KlibIrExprKind::Block {
                 statements,
                 origin: None,
             } => statements.as_slice(),
+            KlibIrExprKind::Composite {
+                statements,
+                origin: None,
+            } if post_test => statements.as_slice(),
             KlibIrExprKind::Block { .. } => {
                 return unsupported("a loop whose body is a block the compiler introduced")
             }
@@ -412,9 +417,8 @@ impl BodyLowering<'_> {
         // A `do`-`while` condition is in the scope of its body, so it may read a variable the
         // body declares: the body is lowered first and declares it.
         let lowered = if post_test {
-            self.loop_body(statements, temporary).and_then(|body| {
-                Ok((self.operand(serialized.condition, Ty::Boolean)?, body))
-            })
+            self.loop_body(statements, temporary)
+                .and_then(|body| Ok((self.operand(serialized.condition, Ty::Boolean)?, body)))
         } else {
             self.operand(serialized.condition, Ty::Boolean)
                 .and_then(|cond| Ok((cond, self.loop_body(statements, temporary)?)))

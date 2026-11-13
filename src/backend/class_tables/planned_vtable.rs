@@ -6,7 +6,7 @@
 //! reads, or the bridge the plan placed. Anything the plan and the IR disagree about declines the
 //! file, because a caller in another file is reading the plan's numbers.
 
-use crate::fx_hash::HashMap;
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::fir::{CallableId, PropertyId, ResolvedPropertyOverrideTarget};
 use crate::ir::{ClassId, FunId, IrClass, IrFile, IrLocalPropertyLayout};
@@ -134,6 +134,27 @@ pub(super) fn planned_class_table(
             }
             PlannedSlot::Member(PlanKey::Getter(property)) => accessor(property, false)?,
             PlannedSlot::Member(PlanKey::Setter(property)) => accessor(property, true)?,
+            // A dependency class's member is a method of the support unit materializing the
+            // class, and is inherited by a class extending it.
+            PlannedSlot::Member(
+                PlanKey::DependencyCallable(member) | PlanKey::DependencyGetter(member),
+            ) => match ir.dependency_methods.get(&member) {
+                Some(&fid) => method(fid),
+                None if elsewhere(slot) => Slot::Inherited { slot: slot as u32 },
+                None => {
+                    return Err(format!(
+                        "a planned dependency member this unit did not lower (`{qualified}`)"
+                    ))
+                }
+            },
+            PlannedSlot::Member(PlanKey::DependencySetter(_)) if elsewhere(slot) => {
+                Slot::Inherited { slot: slot as u32 }
+            }
+            PlannedSlot::Member(PlanKey::DependencySetter(_)) => {
+                return Err(format!(
+                    "a planned setter of a dependency property (`{qualified}`)"
+                ))
+            }
             PlannedSlot::Bridge {
                 declared,
                 target_slot,
@@ -227,10 +248,29 @@ pub(super) fn planned_class_table(
             PlanKey::Setter(property) => {
                 SlotKey::Setter(ResolvedPropertyOverrideTarget::Module(property))
             }
+            PlanKey::DependencyCallable(member) => match ir.dependency_methods.get(&member) {
+                Some(&fid) => SlotKey::Function(fid),
+                // As for a member of a superclass another file laid out.
+                None => continue,
+            },
+            // A support unit emits a dependency property's dispatched accessor as a method.
+            PlanKey::DependencyGetter(property) => match ir.dependency_methods.get(&property) {
+                Some(&fid) => SlotKey::Function(fid),
+                None => SlotKey::Getter(ResolvedPropertyOverrideTarget::External(property)),
+            },
+            PlanKey::DependencySetter(property) => {
+                SlotKey::Setter(ResolvedPropertyOverrideTarget::External(property))
+            }
         };
         slots.insert(key, slot);
     }
     let overridden = overridden_functions(ir, class, numbered, laid_out.is_some())?;
+    let dispatched_dependency_members = ir
+        .dependency_methods
+        .values()
+        .copied()
+        .collect::<HashSet<_>>();
+    let mut direct_methods = HashSet::default();
     for &fid in &class.methods {
         let function = &ir.functions[fid as usize];
         if function.dispatch_receiver.is_none() || function.is_static {
@@ -268,6 +308,13 @@ pub(super) fn planned_class_table(
                 slots.insert(key, slot);
                 slot
             }
+            // A support unit materializing a dependency class emits the members dispatch reaches
+            // as its methods ([`IrFile::dependency_methods`]); its other functions, such as the
+            // constructor's body, are called directly and take no number.
+            None if planned.dependency && !dispatched_dependency_members.contains(&fid) => {
+                direct_methods.insert(fid);
+                continue;
+            }
             None => {
                 return Err(format!(
                     "a member its declaration does not plan (`{qualified}.{}`)",
@@ -296,6 +343,7 @@ pub(super) fn planned_class_table(
         vtable,
         slots,
         interface_bridges,
+        direct_methods,
     })
 }
 

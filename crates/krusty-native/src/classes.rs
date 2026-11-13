@@ -29,7 +29,7 @@
 //! interface reaches the receiver's implementation from any file.
 
 use krusty::backend::value_classes::ValueClassInventory;
-use krusty::fx_hash::HashMap;
+use krusty::fx_hash::{HashMap, HashSet};
 
 use krusty::backend::class_tables::module_interfaces::ModuleInterfaces;
 use krusty::backend::class_tables::module_slots::{ModuleSlotPlan, PlanKey};
@@ -467,6 +467,9 @@ pub(super) struct ClassModel {
     callables: HashMap<FunId, CallableId>,
     /// What a later file extending each class reads of its tables. Indexed by `ClassId`.
     pub laid_out_tables: Vec<LaidOutSuperclass>,
+    /// The methods of a dependency class its table does not dispatch, called directly
+    /// ([`class_tables::ClassTable::direct_methods`]).
+    direct_methods: HashSet<FunId>,
 }
 
 /// Which table a member dispatches through, and at which index.
@@ -479,6 +482,12 @@ pub(super) enum Dispatch {
 }
 
 impl ClassModel {
+    /// Whether `function` is a method its class's table does not dispatch, which a call reaches
+    /// directly.
+    pub(super) fn is_direct(&self, function: FunId) -> bool {
+        self.direct_methods.contains(&function)
+    }
+
     pub(super) fn layout(&self, class: ClassId) -> &ClassLayout {
         &self.layouts[class as usize]
     }
@@ -607,7 +616,13 @@ pub(super) fn build(
             interface_entries: numbered.interface_tables.members[id].clone(),
         })
         .collect();
+    let direct_methods = numbered
+        .tables
+        .iter()
+        .flat_map(|table| table.direct_methods.iter().copied())
+        .collect();
     Ok(ClassModel {
+        direct_methods,
         laid_out_tables,
         layouts,
         order: numbered.order,
