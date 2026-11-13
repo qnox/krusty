@@ -143,6 +143,10 @@ impl BodyLowering<'_> {
                 IrTypeOp::ImplicitCoercion
             }
         } else {
+            crate::trace_compiler!(
+                "lower",
+                "KLIB type operator conversion declined: actual={actual:?} target={target:?}"
+            );
             return Err(KlibBodyDeclineReason::ImplicitConversion);
         };
         let cast = self.ir.add_expr(IrExpr::TypeOp {

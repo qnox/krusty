@@ -229,7 +229,9 @@ impl BodyLowering<'_> {
         if let Some(widened) = self.nullable_widening(lowered, actual, ty) {
             return Ok(widened);
         }
-        self.upcast(lowered, actual, ty)
-            .ok_or(KlibBodyDeclineReason::ImplicitConversion)
+        self.upcast(lowered, actual, ty).ok_or_else(|| {
+            crate::trace_compiler!("lower", "KLIB branch conversion declined: expression={lowered:?} actual={actual:?} target={ty:?}");
+            KlibBodyDeclineReason::ImplicitConversion
+        })
     }
 }

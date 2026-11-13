@@ -786,12 +786,19 @@ impl BodyLowering<'_> {
             .kotlin_class_internal()
             .ok_or_else(|| mismatch("a generic member's receiver is not a class"))?;
         if actual.is_nullable() {
+            crate::trace_compiler!(
+                "lower",
+                "KLIB generic receiver nullable: actual={actual:?} declared={declared:?}"
+            );
             return Err(KlibBodyDeclineReason::ImplicitConversion);
         }
         let applied = self
             .linker
             .applied_supertype(actual, owner)
-            .ok_or(KlibBodyDeclineReason::ImplicitConversion)?;
+            .ok_or_else(|| {
+                crate::trace_compiler!("lower", "KLIB generic receiver hierarchy declined: actual={actual:?} declared={declared:?} owner={owner:?}");
+                KlibBodyDeclineReason::ImplicitConversion
+            })?;
         if applied.type_args().len() != declared.type_args().len() {
             return Err(mismatch(
                 "a generic member's receiver applies another number of type arguments",

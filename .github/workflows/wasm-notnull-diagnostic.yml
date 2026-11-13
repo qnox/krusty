@@ -1,0 +1,73 @@
+name: wasm-notnull-diagnostic
+
+on:
+  push:
+    branches: [ci/wasm-notnull-diagnostic]
+
+permissions:
+  contents: read
+
+jobs:
+  trace:
+    runs-on: [self-hosted, rust-4c-8gb]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: zulu
+          java-version: '17'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - name: find installed just
+        id: just
+        shell: bash
+        run: if command -v just > /dev/null; then echo "found=true" >> "$GITHUB_OUTPUT"; fi
+      - name: install just
+        if: steps.just.outputs.found != 'true'
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: just
+      - name: build traced conformance binary
+        run: |
+          set -uo pipefail
+          mkdir -p evidence
+          scripts/cargo-test-binary.sh conformance -p krusty --test conformance --features trace > evidence/build.log 2>&1
+          build_status=$?
+          cat evidence/build.log
+          if [ "$build_status" -ne 0 ]; then
+            exit "$build_status"
+          fi
+          bin="$(tail -n 1 evidence/build.log)"
+          cp "$bin" conformance-bin
+      - name: trace the unchanged NotNull fixture on both Wasm lanes
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          export KRUSTY_LANGUAGE_VERSION=2.4.21
+          export KRUSTY_KOTLINC="$(just kotlinc 2.4.21)"
+          export KRUSTY_KOTLIN_BOX_DIR="$(just box-corpus 2.4.21)"
+          export KRUSTY_DEPS_CACHE="$PWD/target/cache/krusty-deps"
+          export KRUSTY_TRACE=lower
+          export KRUSTY_TEST_THREADS=1
+          set +e
+          KRUSTY_WASM_JS_BOX_ONLY=libraryObjectValues.kt KRUSTY_REQUIRE_WASM_JS_CONFORMANCE=1 \
+            ./conformance-bin kotlin_codegen_box_wasm_js_conformance --nocapture > evidence/wasm-js.log 2>&1
+          js_status=$?
+          KRUSTY_WASM_WASI_BOX_ONLY=libraryObjectValues.kt KRUSTY_REQUIRE_WASM_WASI_CONFORMANCE=1 \
+            ./conformance-bin kotlin_codegen_box_wasm_wasi_conformance --nocapture > evidence/wasm-wasi.log 2>&1
+          wasi_status=$?
+          printf 'wasm-js exit=%s\nwasm-wasi exit=%s\n' "$js_status" "$wasi_status" | tee evidence/status.txt
+          cat evidence/wasm-js.log
+          cat evidence/wasm-wasi.log
+      - name: upload trace logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wasm-notnull-traces
+          path: evidence/
+          if-no-files-found: error

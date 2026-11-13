@@ -794,8 +794,10 @@ impl<'a> BodyLowering<'a> {
         if let Some(widened) = self.nullable_widening(lowered, actual, expected) {
             return Ok(widened);
         }
-        self.upcast(lowered, actual, expected)
-            .ok_or(KlibBodyDeclineReason::ImplicitConversion)
+        self.upcast(lowered, actual, expected).ok_or_else(|| {
+            crate::trace_compiler!("lower", "KLIB operand implicit conversion declined: expression={id:?} actual={actual:?} expected={expected:?}");
+            KlibBodyDeclineReason::ImplicitConversion
+        })
     }
 
     /// `value`, of the type `actual`, as a value of its supertype `expected`: the value itself, or
@@ -981,6 +983,7 @@ impl<'a> BodyLowering<'a> {
                 .linker
                 .is_subtype(self.header.type_parameters(), declared, actual)
         {
+            crate::trace_compiler!("lower", "KLIB declared operand conversion declined: expression={lowered:?} actual={actual:?} declared={declared:?}");
             return Err(KlibBodyDeclineReason::ImplicitConversion);
         }
         Ok(self.declared_value(lowered, declared))

@@ -182,6 +182,7 @@ impl BodyLowering<'_> {
                 .linker
                 .is_subtype(self.header.type_parameters(), proven, target)
         {
+            crate::trace_compiler!("lower", "KLIB Elvis conversion declined: expression={value:?} proven={proven:?} target={target:?}");
             return Err(super::KlibBodyDeclineReason::ImplicitConversion);
         }
         let coerced = if target == Ty::Unit {
