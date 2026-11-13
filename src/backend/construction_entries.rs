@@ -14,12 +14,65 @@ use super::DependencyExportSignatures;
 use crate::ir::{ExprId, FunId, IrExpr, IrFile, IrFunction};
 use crate::types::Ty;
 
+/// Build the entry of every constructor of `ir` that `module` certifies another file may build an
+/// instance through, and record it as that constructor's instance (see `super::instance_links`).
+/// [`realize`] later exports the same entry under a KLIB identity, when the constructor has one.
+pub fn publish_constructors(
+    ir: &mut IrFile,
+    (module_name, module): (&str, &super::BackendModuleFacts),
+    exports: &mut DependencyExportSignatures,
+) {
+    let mut declared: Vec<_> = ir
+        .checked_constructor_bodies
+        .iter()
+        .map(|(&declaration, body)| (declaration, body.class, body.ordinal))
+        .collect();
+    declared.sort_unstable_by_key(|&(declaration, _, _)| declaration.raw());
+    for (declaration, class, ordinal) in declared {
+        let instance = super::instance_links::InstanceEntry::Constructor {
+            module: module_name.into(),
+            declaration,
+        };
+        if !module.declares_instance(&instance) {
+            continue;
+        }
+        let constructor = super::ExportedConstructor {
+            class,
+            secondary: ordinal.checked_sub(1).map(|index| index as usize),
+        };
+        if let Some(entry) = build(ir, constructor) {
+            ir.construction_entries.insert(entry, class);
+            exports.record_instance_entry(instance, entry);
+        }
+    }
+}
+
 /// Build the entry of every constructor `exports` publishes from `ir` and export it as an ordinary
-/// callable under that constructor's identity.
+/// callable under that constructor's identity, reusing the entry [`publish_constructors`] built
+/// for the same constructor.
 pub fn realize(ir: &mut IrFile, exports: &mut DependencyExportSignatures) {
+    let mut published: crate::fx_hash::HashMap<super::ExportedConstructor, FunId> =
+        crate::fx_hash::HashMap::default();
+    for (instance, entry) in exports.instance_entries() {
+        if let super::instance_links::InstanceEntry::Constructor { declaration, .. } = instance {
+            if let Some(body) = ir.checked_constructor_bodies.get(declaration) {
+                published.insert(
+                    super::ExportedConstructor {
+                        class: body.class,
+                        secondary: body.ordinal.checked_sub(1).map(|index| index as usize),
+                    },
+                    *entry,
+                );
+            }
+        }
+    }
     let constructors = exports.constructors().to_vec();
     for (constructor, identity) in constructors {
-        if let Some(entry) = build(ir, constructor) {
+        let entry = match published.get(&constructor) {
+            Some(&entry) => Some(entry),
+            None => build(ir, constructor),
+        };
+        if let Some(entry) = entry {
             ir.construction_entries.insert(entry, constructor.class);
             exports.record_callable(entry, identity);
         }

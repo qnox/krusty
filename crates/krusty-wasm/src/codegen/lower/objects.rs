@@ -124,6 +124,9 @@ impl Body<'_> {
             if let Some(constructed) = self.scalar_value_construction(internal, args, selected) {
                 return constructed;
             }
+            if let Some(constructed) = self.cross_file_construction(site, internal, args) {
+                return constructed;
+            }
             // Boundary conversion for a diagnostic.
             return Err(format!(
                 "construction of the library class `{}`",
@@ -185,6 +188,46 @@ impl Body<'_> {
         }
         self.code.call(constructor).local_get(object);
         Ok(())
+    }
+
+    /// `C(args)` of a class another file of the module declares: a call of the entry that file
+    /// realizes for the constructor the checker selected, which allocates and initializes the
+    /// instance. `None` when `internal` has no such constructor, so the library-class decline
+    /// applies.
+    fn cross_file_construction(
+        &mut self,
+        site: u32,
+        internal: krusty::types::TypeName,
+        args: &[u32],
+    ) -> Option<Result<(), Unsupported>> {
+        let constructor = *self.ir.module_constructions.selected.get(&site)?;
+        let function = self.calls.instance(
+            &krusty::backend::instance_links::InstanceEntry::Constructor {
+                module: self.module_name.into(),
+                declaration: constructor,
+            },
+        )?;
+        let parameters = &self
+            .ir
+            .module_constructions
+            .records
+            .get(&constructor)?
+            .parameters;
+        let parameters = parameters.clone();
+        Some((|| {
+            if parameters.len() != args.len() {
+                // Boundary conversion for a diagnostic.
+                return Err(format!(
+                    "a constructor call with omitted arguments (`{}`)",
+                    internal.render().replace('/', ".")
+                ));
+            }
+            for (argument, parameter) in args.iter().zip(parameters.iter()) {
+                self.value(*argument, *parameter)?;
+            }
+            self.code.call(function);
+            Ok(())
+        })())
     }
 
     /// Push a new instance of `class`: its identity hash, and every field at its default value.
