@@ -1,0 +1,330 @@
+//! The common-IR operations a continuation object realizes with its own fields.
+
+use crate::fx_hash::{HashMap, HashSet};
+use crate::ir::{
+    for_each_child, Callee, ClassId, ExprId, IrCheckedOperation, IrExpr, IrField, IrFile,
+    IrPropertyDispatch,
+};
+use crate::types::{continuation_passing, wk, Ty};
+
+use super::label_reentry::{MachineStorage, ReentryDecline};
+use super::suspension_points::{recorded_suspension_result, suspend_call_fid};
+
+/// Put the value namespace of one suspend function in the generated machine's fields and rewrite
+/// its body to use those fields. A resume re-enters the body in a new activation, so even a value
+/// declared before the suspension must be read from the same machine field afterward.
+///
+/// Catch parameters and lambda implementation frames have their own binding rules. A suspension
+/// inside a `try` is declined by the shared splitter; catch parameters therefore remain ordinary
+/// locals, and a lambda's captures are rewritten in this frame while its body is not.
+pub(super) struct FrameValues {
+    pub(super) slots: HashMap<u32, u32>,
+    original_expressions: Vec<ExprId>,
+}
+
+/// Reserve frame fields from the source body's original value namespace without changing its
+/// statement forms. The splitter needs to see `Variable`/`SetValue` leaves before they become
+/// field stores.
+pub(super) fn plan_frame_values(
+    ir: &mut IrFile,
+    function: u32,
+    body: ExprId,
+    class: ClassId,
+) -> FrameValues {
+    let mut expressions = Vec::new();
+    collect_frame_expressions(ir, body, &mut HashSet::default(), &mut expressions);
+    let catch_values = expressions
+        .iter()
+        .filter_map(|&expression| match ir.expr(expression) {
+            IrExpr::Try { catches, .. } => Some(catches.iter().map(|catch| catch.var)),
+            _ => None,
+        })
+        .flatten()
+        .collect::<HashSet<_>>();
+    let mut value_types = super::value_namespace::function_value_types(ir, function, body)
+        .into_iter()
+        .filter(|(value, _)| !catch_values.contains(value))
+        .collect::<Vec<_>>();
+    value_types.sort_unstable_by_key(|(value, _)| *value);
+
+    let mut slots = HashMap::default();
+    for (value, ty) in value_types {
+        let field = u32::try_from(ir.classes[class as usize].fields.len())
+            .expect("a continuation frame has fewer than u32::MAX fields");
+        let field_ty = if ty == Ty::Unit {
+            Ty::obj_name(wk::unit())
+        } else {
+            crate::types::stored_value_ty(ty)
+        };
+        ir.classes[class as usize]
+            .fields
+            .push(IrField::new(format!("$frame${value}"), field_ty));
+        slots.insert(value, field);
+    }
+
+    FrameValues {
+        slots,
+        original_expressions: expressions,
+    }
+}
+
+/// Rewrite only the source expression IDs collected before splitting. Newly generated machine
+/// receivers and temporaries share the same arena but belong to a different value namespace.
+pub(super) fn realize_frame_values(ir: &mut IrFile, frame: &FrameValues, class: ClassId) {
+    let owner_ty = Ty::obj_name(ir.classes[class as usize].fq_name_id());
+    for &expression in &frame.original_expressions {
+        match ir.expr(expression).clone() {
+            IrExpr::CurrentContinuation => {
+                let Some(ty) = ir.checked_type(expression) else {
+                    continue;
+                };
+                let current = ir.add_expr(IrExpr::GetValue(0));
+                ir.set_logical_type(current, ty);
+                ir.exprs[expression as usize] = ir.expr(current).clone();
+            }
+            IrExpr::GetValue(value) => {
+                let Some(&index) = frame.slots.get(&value) else {
+                    continue;
+                };
+                let receiver = ir.add_expr(IrExpr::GetValue(0));
+                ir.set_logical_type(receiver, owner_ty);
+                ir.exprs[expression as usize] = IrExpr::GetField {
+                    receiver,
+                    class,
+                    index,
+                };
+            }
+            IrExpr::SetValue { var, value } => {
+                let Some(&index) = frame.slots.get(&var) else {
+                    continue;
+                };
+                let receiver = ir.add_expr(IrExpr::GetValue(0));
+                ir.set_logical_type(receiver, owner_ty);
+                let store = ir.add_expr(IrExpr::SetField {
+                    receiver,
+                    class,
+                    index,
+                    value,
+                });
+                ir.exprs[expression as usize] = IrExpr::Block {
+                    stmts: vec![store],
+                    value: None,
+                };
+                ir.set_logical_type(expression, Ty::Unit);
+            }
+            IrExpr::Variable {
+                index: value, init, ..
+            } => {
+                let Some(&index) = frame.slots.get(&value) else {
+                    continue;
+                };
+                let stmts = init
+                    .map(|value| {
+                        let receiver = ir.add_expr(IrExpr::GetValue(0));
+                        ir.set_logical_type(receiver, owner_ty);
+                        vec![ir.add_expr(IrExpr::SetField {
+                            receiver,
+                            class,
+                            index,
+                            value,
+                        })]
+                    })
+                    .unwrap_or_default();
+                ir.exprs[expression as usize] = IrExpr::Block { stmts, value: None };
+                ir.set_logical_type(expression, Ty::Unit);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_frame_expressions(
+    ir: &IrFile,
+    expression: ExprId,
+    seen: &mut HashSet<ExprId>,
+    out: &mut Vec<ExprId>,
+) {
+    if !seen.insert(expression) {
+        return;
+    }
+    out.push(expression);
+    if let IrExpr::Lambda { captures, .. } = ir.expr(expression) {
+        for &capture in captures {
+            collect_frame_expressions(ir, capture, seen, out);
+        }
+        return;
+    }
+    let mut children = Vec::new();
+    for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
+    for child in children {
+        collect_frame_expressions(ir, child, seen, out);
+    }
+}
+
+/// Field coordinates owned by a generated continuation class.
+pub(super) struct ContinuationFields {
+    pub(super) class: crate::ir::ClassId,
+    pub(super) label: u32,
+    pub(super) result: u32,
+    pub(super) runtime: crate::ir::IrCoroutineRuntime,
+    pub(super) suspend_functions: HashSet<u32>,
+}
+
+impl ContinuationFields {
+    fn this(&self, ir: &mut IrFile) -> ExprId {
+        let receiver = ir.add_expr(IrExpr::GetValue(0));
+        ir.set_logical_type(
+            receiver,
+            Ty::obj_name(ir.classes[self.class as usize].fq_name_id()),
+        );
+        receiver
+    }
+
+    fn read(&self, ir: &mut IrFile, field: u32) -> ExprId {
+        let receiver = self.this(ir);
+        ir.add_expr(IrExpr::GetField {
+            receiver,
+            class: self.class,
+            index: field,
+        })
+    }
+
+    fn write(&self, ir: &mut IrFile, field: u32, value: ExprId) -> ExprId {
+        let receiver = self.this(ir);
+        ir.add_expr(IrExpr::SetField {
+            receiver,
+            class: self.class,
+            index: field,
+            value,
+        })
+    }
+}
+
+impl MachineStorage for ContinuationFields {
+    fn read_label(&self, ir: &mut IrFile) -> ExprId {
+        self.read(ir, self.label)
+    }
+
+    fn write_label(&self, ir: &mut IrFile, label: ExprId) -> ExprId {
+        self.write(ir, self.label, label)
+    }
+
+    fn resumed_value(&self, ir: &mut IrFile) -> ExprId {
+        let result = self.read(ir, self.result);
+        let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+        let result_ty = Ty::obj_args(crate::types::type_name("kotlin/Result"), &[any]);
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Box::new(Callee::External {
+                target: self.runtime.get_or_throw,
+                default_provider: None,
+                params: vec![result_ty],
+                ret: any,
+                substitutions: vec![external_type_substitution(self.runtime.get_or_throw, any)],
+                defaults: Vec::new(),
+                // `getOrThrow` is a top-level extension on `Result<T>`.  Its receiver is
+                // represented as argument zero in an external dependency call.
+                extension_receiver_parameter: Some(0),
+            }),
+            dispatch_receiver: None,
+            args: vec![result],
+        });
+        ir.call_declared_ret.insert(call, any);
+        call
+    }
+
+    fn suspended_marker(&self, ir: &mut IrFile) -> ExprId {
+        let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+        ir.add_expr(IrExpr::Checked(Box::new(
+            IrCheckedOperation::ExternalPropertyRead {
+                target: self.runtime.suspended,
+                dispatch: IrPropertyDispatch::Ordinary,
+                receiver: None,
+                arguments: Vec::new(),
+                parameters: Vec::new(),
+                result: any,
+                source_receiver: None,
+            },
+        )))
+    }
+
+    fn call_with_continuation(
+        &self,
+        ir: &mut IrFile,
+        call: ExprId,
+    ) -> Result<ExprId, ReentryDecline> {
+        if ir.intrinsic_suspension_points.contains_key(&call) {
+            return Ok(call);
+        }
+        let Some(logical_result) =
+            recorded_suspension_result(ir, call).or_else(|| ir.checked_type(call))
+        else {
+            return Err(ReentryDecline::UnsupportedCallShape);
+        };
+        let continuation_ty = continuation_passing(logical_result).0;
+        let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+        let completion = self.this(ir);
+        ir.set_logical_type(completion, continuation_ty);
+        let expression = match ir.expr(call).clone() {
+            IrExpr::Call {
+                callee,
+                dispatch_receiver,
+                mut args,
+            } => {
+                let mut callee = *callee;
+                match &mut callee {
+                    Callee::Local(function) | Callee::ClassStatic { function, .. }
+                        if self.suspend_functions.contains(function) => {}
+                    Callee::External { params, ret, .. } => {
+                        params.push(continuation_ty);
+                        *ret = any;
+                    }
+                    Callee::Module { params, ret, .. } | Callee::CrossFile { params, ret, .. } => {
+                        params.push(continuation_ty);
+                        *ret = any;
+                    }
+                    _ => return Err(ReentryDecline::UnsupportedCallShape),
+                }
+                args.push(completion);
+                IrExpr::Call {
+                    callee: Box::new(callee),
+                    dispatch_receiver,
+                    args,
+                }
+            }
+            IrExpr::MethodCall {
+                class,
+                index,
+                receiver,
+                mut args,
+            } if suspend_call_fid(ir, call, &self.suspend_functions).is_some() => {
+                args.push(Some(completion));
+                IrExpr::MethodCall {
+                    class,
+                    index,
+                    receiver,
+                    args,
+                }
+            }
+            _ => return Err(ReentryDecline::UnsupportedCallShape),
+        };
+        let call = ir.add_expr(expression);
+        ir.call_declared_ret.insert(call, any);
+        Ok(call)
+    }
+}
+
+pub(super) fn external_type_substitution(
+    target: crate::fir::ExternalCallableId,
+    value: Ty,
+) -> crate::ir::IrCheckedSubstitution {
+    crate::ir::IrCheckedSubstitution {
+        parameter: crate::fir::FirTypeParameterRef::External {
+            callable: target,
+            ordinal: 0,
+        },
+        reified: false,
+        value,
+        reified_runtime: value,
+        additional_bounds: Vec::new(),
+    }
+}

@@ -74,6 +74,22 @@ fn assert_selected_runtime(provider: &KlibLibraries) {
     );
     assert_eq!(resume_with.callable.ret, Ty::Unit);
 
+    let context = provider.external_property(runtime.context).unwrap();
+    assert_eq!(context.name, "context");
+    assert_eq!(context.getter, runtime.context_getter);
+    let context_getter = provider.external_callable(runtime.context_getter).unwrap();
+    assert_eq!(
+        context_getter.callable.ret.non_null().obj_internal(),
+        Some(type_name("kotlin/coroutines/CoroutineContext"))
+    );
+    assert_provider_identity(provider, runtime.context_getter);
+    assert_eq!(context_getter.kind, ExternalCallableKind::Member);
+    assert_eq!(runtime.context_ty, context_getter.callable.ret);
+    assert_eq!(
+        runtime.context_receiver_ty.non_null().obj_internal(),
+        Some(type_name("kotlin/coroutines/Continuation"))
+    );
+
     let failure = provider.external_callable(runtime.result_failure).unwrap();
     let failure_identity = assert_provider_identity(provider, runtime.result_failure);
     assert_eq!(failure.kind, ExternalCallableKind::Member);
@@ -99,6 +115,14 @@ fn assert_selected_runtime(provider: &KlibLibraries) {
         failure.callable.ret.non_null().obj_internal(),
         Some(type_name("kotlin/Result"))
     );
+    let success = provider.external_callable(runtime.result_success).unwrap();
+    assert_provider_identity(provider, runtime.result_success);
+    assert_eq!(success.kind, ExternalCallableKind::Member);
+    assert_eq!(success.callable.name, "success");
+    assert_eq!(
+        success.callable.declaration_owner,
+        Some(SemanticCallableOwner::Classifier(companion))
+    );
     assert_ne!(get_or_throw_identity, failure_identity);
     assert_ne!(resume_with_identity, failure_identity);
 
@@ -118,9 +142,12 @@ fn assert_only_generated_uses_are_frozen(provider: &KlibLibraries, runtime: IrCo
     };
     let frozen = CheckedBackendCallables::freeze(&ir, provider).unwrap();
     assert!(frozen.property(runtime.suspended).is_none());
+    assert!(frozen.property(runtime.context).is_none());
     for target in [
         runtime.get_or_throw,
         runtime.resume_with,
+        runtime.context_getter,
+        runtime.result_success,
         runtime.result_failure,
     ] {
         assert!(frozen.callable(target).is_none());
@@ -164,6 +191,8 @@ fn assert_only_generated_uses_are_frozen(provider: &KlibLibraries, runtime: IrCo
     for target in [
         runtime.get_or_throw,
         runtime.resume_with,
+        runtime.context_getter,
+        runtime.result_success,
         runtime.result_failure,
     ] {
         assert!(frozen.callable(target).is_none());
