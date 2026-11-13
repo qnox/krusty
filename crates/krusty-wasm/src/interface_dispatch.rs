@@ -146,6 +146,11 @@ impl InterfaceDispatch {
         identity: &[u8],
         (params, results): (Vec<ValType>, Vec<ValType>),
     ) -> Result<MemberRef, String> {
+        // A member a source module published is that module's: its classes implement it by
+        // number, so a call through it must not name a second member for the same identity.
+        if let Some(&member) = self.identities.get(identity) {
+            return Ok(member);
+        }
         if let Some(&member) = self.library.get(identity) {
             let known = &self.members[member.0 as usize];
             if known.params != params || known.results != results {

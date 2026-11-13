@@ -969,7 +969,6 @@ extensionFunctions/suspendConversionForExtensionFunAsASuperType.kt
 extensionProperties/contextPropertyInInterface.kt
 extensionProperties/extensionPropertyDifferentReceiver.kt
 extensionProperties/genericContextOverride.kt
-fakeOverride/fakeOverrideWithMissingClassInSignature.kt
 fakeOverride/internalFromFriendModule.kt
 fakeOverride/intersectionInLocal.kt
 fakeOverride/privateFakeOverrides0.kt
@@ -1379,7 +1378,6 @@ ir/enumClass2.kt
 ir/enumClass3.kt
 ir/fileClassInitializers.kt
 ir/kt41765.kt
-ir/privateSignatures/enumEntryArguments.kt
 ir/serializationRegressions/anonFakeOverride.kt
 ir/serializationRegressions/innerClassInEnumEntryClass.kt
 ir/serializationRegressions/useImportedMember.kt
@@ -1529,7 +1527,6 @@ objects/companionObjectAccess/multipleCompanionsWithAccessors/fromAnonymousObjec
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlock.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlockOfNestedClass.kt
 objects/interfaceCompanionObjectReference.kt
-objects/kt52540.kt
 operatorConventions/compareTo/comparable.kt
 operatorConventions/kt20387.kt
 operatorConventions/kt44647.kt
@@ -2351,8 +2348,6 @@ sam/funInterfaceExtendsSuspendFunction.kt
 sam/funInterfaceExtendsSuspendFunction2.kt
 sam/kt59858.kt
 sam/kt64116.kt
-sealed/kt54028.kt
-sealed/kt54028_cursed.kt
 secondaryConstructors/enums.kt
 secondaryConstructors/innerClassesInheritance.kt
 secondaryConstructors/localClasses.kt

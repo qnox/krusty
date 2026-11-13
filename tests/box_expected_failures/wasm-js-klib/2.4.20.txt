@@ -2439,7 +2439,6 @@ ir/primitiveNumberComparisons/comparableToDouble.kt
 ir/primitiveNumberComparisons/doubleEqeq.kt
 ir/primitiveNumberComparisons/floatEqeq.kt
 ir/primitiveNumberComparisons/mixedNumberTypes.kt
-ir/privateSignatures/enumEntryArguments.kt
 ir/privateSignatures/privateLeakThroughInline.kt
 ir/recursiveGeneric.kt
 ir/recursiveGeneric2.kt
@@ -2692,7 +2691,6 @@ objects/interfaceCompanionObjectReference.kt
 objects/kt11117.kt
 objects/kt32351.kt
 objects/kt32749.kt
-objects/kt52540.kt
 objects/localFunctionInObjectInitializer_kt4516.kt
 objects/objectInLocalAnonymousObject.kt
 objects/objectVsClassInitialization_kt5291.kt
@@ -3788,8 +3786,6 @@ sam/samWithAbstractToString.kt
 sam/samWithAbstractToString2.kt
 sam/samWithAbstractToString3.kt
 sam/topLevelConversions.kt
-sealed/kt54028.kt
-sealed/kt54028_cursed.kt
 sealed/multipleFiles_enabled.kt
 secondaryConstructors/clashingDefaultConstructors.kt
 secondaryConstructors/defaultArgs.kt
