@@ -75,10 +75,10 @@ pub(super) fn inline_into(
             .map_err(inlining)?;
     let invokes = functional_arguments::mark_places(&mut node, &parameters).map_err(inlining)?;
     if !for_inline
-        && invokes
-            .iter()
-            .flatten()
-            .any(|&lambda| lambdas.get(lambda).is_some_and(|it| it.lambda.suspend))
+        && invokes.iter().any(|invoke| {
+            matches!(invoke, functional_arguments::InvokeTarget::Lambda(lambda)
+                if lambdas.get(*lambda).is_some_and(|it| it.lambda.suspend))
+        })
     {
         return Err(RegenerationError::Unsupported(
             "a suspend lambda invoked in a method without a $$forInline copy",
