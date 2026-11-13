@@ -13,6 +13,7 @@ mod overridden_declaration;
 mod qualified_name;
 mod semantic_call_role;
 mod semantic_callable_owner;
+mod suspension;
 pub use classifier_declarations::{
     ClassifierDeclarationFacts, ClassifierDeclarationKind, ClassifierDeclarationName,
     DeclaredValueClass, GeneratedClassifierFact, GeneratedClassifierKind,
@@ -26,6 +27,7 @@ pub use deprecation::{
 pub use overridden_declaration::OverriddenDeclaration;
 pub use semantic_call_role::{ConstNumericOperation, SemanticCallRole};
 pub use semantic_callable_owner::SemanticCallableOwner;
+pub use suspension::continuation_passing;
 mod annotation_targets;
 mod interning;
 mod spelling;

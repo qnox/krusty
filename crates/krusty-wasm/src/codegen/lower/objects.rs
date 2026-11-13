@@ -405,6 +405,53 @@ impl Body<'_> {
         Ok(())
     }
 
+    /// A call of `callable`, a member of `owner`, a class another file of the module declares:
+    /// through the slot the module plan numbers it, in the table type every file reads from the
+    /// plan (`super::super::module_tables`).
+    fn planned_dispatch(
+        &mut self,
+        owner: krusty::types::TypeName,
+        callable: krusty::fir::CallableId,
+        params: &[Ty],
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        let table = self.planned_tables[&owner].clone()?;
+        let slot = self
+            .plan
+            .table(owner)
+            .and_then(Result::ok)
+            .and_then(|planned| {
+                planned
+                    .slots
+                    .get(&krusty::backend::class_tables::module_slots::PlanKey::Callable(callable))
+                    .copied()
+            })
+            .ok_or("a member with no module-wide slot")?;
+        let ty = table
+            .slot_types
+            .get(slot as usize)
+            .copied()
+            .flatten()
+            .ok_or("a call through a slot with no signature")?;
+        if params.len() != args.len() {
+            return Err("a call whose arguments do not match its parameters".into());
+        }
+        let this = self.local(REFERENCE);
+        self.value(receiver, Ty::obj_name(owner))?;
+        self.code.local_tee(this);
+        for (&arg, &param) in args.iter().zip(params) {
+            self.value(arg, param)?;
+        }
+        self.code.local_get(this);
+        self.table_of_object();
+        self.code
+            .ref_cast(false, HeapType::Concrete(table.table_type))
+            .struct_get(table.table_type, slot_field(slot))
+            .call_ref(ty);
+        Ok(())
+    }
+
     /// The member of this module's interfaces numbered `number`, taking `params` after its
     /// receiver and answering `result`.
     fn numbered_member(
@@ -695,6 +742,16 @@ impl Body<'_> {
                 };
                 if let Some(call) = call {
                     return self.interface_call(call, receiver, args);
+                }
+                if let (
+                    None,
+                    IrVirtualTarget::Function(ResolvedFunctionOverrideTarget::Module(callable)),
+                    Some((params, _)),
+                ) = (self.ir.class_id_by_name(*owner), target, params)
+                {
+                    if self.planned_tables.contains_key(owner) {
+                        return self.planned_dispatch(*owner, *callable, params, receiver, args);
+                    }
                 }
                 let class = self
                     .classes

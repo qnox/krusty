@@ -11,6 +11,7 @@ mod classes;
 mod interface_members;
 mod laid_out_classes;
 mod lower;
+mod module_tables;
 mod property_registry;
 
 use krusty::backend::{Artifact, Backend, CheckedIrFile, Entry, BOX_RESULT_FRAME};
@@ -90,6 +91,7 @@ struct Started {
     callables: callable_registry::CallableRegistry,
     properties: property_registry::PropertyRegistry,
     classes: laid_out_classes::LaidOutClasses,
+    tables: module_tables::ModuleTables,
 }
 
 impl Started {
@@ -107,6 +109,7 @@ impl Started {
             callables: Default::default(),
             properties: Default::default(),
             classes: Default::default(),
+            tables: Default::default(),
         }
     }
 }
@@ -213,6 +216,8 @@ impl Backend for WasmBackend {
         {
             let plan = classes::module_plan(file.classifiers.module().classes(), &file.classifiers);
             state.slot_plan = Some((file.module_name.to_owned(), plan));
+            // The table types are built from the plan, so they are that module's too.
+            started.tables = Default::default();
         }
         let plan = &state.slot_plan.as_ref().expect("planned just above").1;
         let lowered = match lower::lower_file(
@@ -233,6 +238,7 @@ impl Backend for WasmBackend {
                 callables: &mut started.callables,
                 properties: &mut started.properties,
                 classes: &mut started.classes,
+                tables: &mut started.tables,
             },
         ) {
             Ok(lowered) => lowered,
