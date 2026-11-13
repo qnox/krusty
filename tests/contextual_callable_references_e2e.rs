@@ -8,7 +8,7 @@ use crate::common;
 /// diagnostics.
 #[test]
 fn function_references_with_context_parameters_are_accepted_with_the_feature() {
-    let source = include_str!("box_regressions/contextParameters/contextualFunctionReferences.kt");
+    let source = include_str!("contextual_references/contextualFunctionReferences.kt");
     let diagnostics = common::front_end_diagnostics(
         source,
         &[common::stdlib_jar()],
