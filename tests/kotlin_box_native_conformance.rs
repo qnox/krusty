@@ -292,8 +292,22 @@ fn native_dependency_interface_aliases_join_by_identity() {
 #[test]
 fn native_library_object_values_preserve_identity() {
     let source = include_str!("box_regressions/libraryObjectValues.kt");
-    super::common::expect_box_ok_with_stdlib(source, "nativeLibraryObjectValuesOracle");
-    super::common::expect_native_box(source, "nativeLibraryObjectValues", "OK");
+    expect_native_klib_box(source, "nativeLibraryObjectValues");
+}
+
+fn expect_native_klib_box(source: &str, stem: &str) {
+    super::common::expect_box_ok_with_stdlib(source, &format!("{stem}Oracle"));
+    let target = host().expect("Native KLIB/runtime is required for this test");
+    let lane = NativeLane {
+        target: Some(target),
+    };
+    let outcome = lane.compile_and_run(
+        &std::env::temp_dir(),
+        stem,
+        &[(format!("{stem}.kt"), source.to_string())],
+        source,
+    );
+    assert_eq!(outcome, Outcome::Pass, "{stem}");
 }
 fn run_native_abi_case(source: &str, stem: &str) -> Outcome {
     if let Some(reason) = not_applicable(source) {
