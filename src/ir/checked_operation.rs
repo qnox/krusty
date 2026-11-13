@@ -86,6 +86,9 @@ pub enum IrCheckedOperation {
         end: ExprId,
         end_type: Ty,
         result: Ty,
+        /// The selected dependency declaration building the range (`Int.rangeTo`). A target that
+        /// does not lay out `result`'s class realizes the construction as a call of it.
+        declaration: Option<crate::fir::ExternalCallableId>,
     },
     RangeContains {
         operation: crate::fir::FirRangeOperation,

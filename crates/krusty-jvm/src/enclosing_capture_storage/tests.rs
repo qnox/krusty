@@ -21,6 +21,7 @@ fn capture(entry: u32, field_index: Option<u32>) -> IrCtorArg {
         capture: Some(IrConstructorCapture {
             source_name: "".into(),
             crossinline_parameter: None,
+            inlined: false,
             receiver: Some(IrCapturedReceiver::Enclosing {
                 classifier: type_name("Choice"),
                 owner: Some(EnclosingInstanceOwner {
