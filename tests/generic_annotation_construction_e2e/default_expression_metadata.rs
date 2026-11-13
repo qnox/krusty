@@ -84,10 +84,11 @@ fn annotation_defaults_precede_parameter_annotations_in_metadata_order() {
     assert_eq!(classes.differences(), Vec::<String>::new());
 }
 
-// PLATFORM-SPECIFIC: JVM metadata field 8 for a default whose nested annotation arguments are
-// rearranged (KT-73845), compared with kotlinc's complete class artifacts.
+// The shared portable KT-73845 program. The JVM metadata comparison below is the platform-specific
+// part: field 8 of a default whose nested annotation arguments are rearranged, compared with
+// kotlinc's complete class artifacts.
 const REARRANGED_DEFAULT: &str =
-    include_str!("../fixtures/annotation_default_metadata/RearrangedDefault.kt");
+    include_str!("../box_regressions/annotationRearrangedDefaultArguments.kt");
 
 #[test]
 fn a_rearranged_annotation_default_matches_complete_artifacts_and_execution() {
