@@ -131,14 +131,7 @@ pub(super) fn compact_classifier_parents(
         .and_then(|(base, _)| *base)
         .or_else(|| base.and_then(|syntax| semantics.resolve_compact_header_type(scope, syntax)))
         // A written supertype that does not resolve (already reported) is an error edge.
-        .or_else(|| (base.is_some() && resolved_local.is_none()).then_some(Ty::Error));
-    if base.is_some() && explicit_base.is_none() {
-        crate::trace_compiler!(
-            "signature",
-            "classifier parent resolution declaration={declaration:?} failed explicit base resolved_local={resolved_local:?}",
-        );
-        return None;
-    }
+        .or_else(|| base.map(|_| Ty::Error));
     if let (Some(callee), Some(superclass)) = (
         base_callee,
         explicit_base.and_then(|base| base.non_null().kotlin_class_internal()),
@@ -162,9 +155,9 @@ pub(super) fn compact_classifier_parents(
             resolved_local
                 .and_then(|(_, parents)| parents.get(ordinal).copied())
                 .or_else(|| semantics.resolve_compact_header_type(scope, *syntax))
-                .or_else(|| resolved_local.is_none().then_some(Ty::Error))
+                .unwrap_or(Ty::Error)
         })
-        .collect::<Option<Vec<_>>>()?;
+        .collect::<Vec<_>>();
 
     let parent_is_interface = |parent: Ty| {
         if parent.non_null().is_fun() {
