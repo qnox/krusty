@@ -46,6 +46,14 @@ public interface JAttrs {\n\
 }\n";
 
 #[test]
+fn a_java_collection_constructor_completes_a_nested_generic_producer() {
+    common::expect_box_same_as_kotlinc(
+        include_str!("box_regressions/arrayListCollectionConstructor.kt"),
+        "ArrayListCollectionConstructor",
+    );
+}
+
+#[test]
 fn a_java_map_expectation_binds_a_read_only_generic_result() {
     // `Stub<T>.returns(value: T)` with `T := MutableMap<String!, Any!>!` from the Java getter.
     let use_src = "class Stub<T> { infix fun returns(value: T): Stub<T> = this }\n\
