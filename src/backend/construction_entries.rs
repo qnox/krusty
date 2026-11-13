@@ -170,14 +170,11 @@ fn build(ir: &mut IrFile, constructor: super::ExportedConstructor) -> Option<Fun
         ),
         Some(ordinal) => {
             let secondary = class.secondary_ctors.get(ordinal)?;
-            if !secondary.prefix_params.is_empty() {
-                return None;
-            }
-            (
-                secondary.params.clone(),
-                Some(secondary.params.clone()),
-                secondary.params.clone(),
-            )
+            // An inner class's constructors lead with the enclosing instance, as its primary's
+            // `ctor_args` do; the selection spells the whole list.
+            let mut all = secondary.prefix_params.clone();
+            all.extend(secondary.params.iter().copied());
+            (all.clone(), Some(all.clone()), all)
         }
     };
     let arguments = parameters
