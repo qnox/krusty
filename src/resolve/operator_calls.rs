@@ -1171,12 +1171,18 @@ struct InRangeOperands {
     value_ty: Ty,
 }
 
-/// Whether the resolved `contains` takes its element as an unbounded type parameter
-/// (`Iterable<T>.contains(element: T)`), as opposed to a precise overload of the range.
+/// Whether the resolved `contains` is the declaration whose element parameter is the callable's own
+/// type parameter (`fun <T> Iterable<T>.contains(element: T)`), as opposed to a precise overload of
+/// the range. Decided from the declared generic signature, never from the erased representation.
 fn selects_generic_element_contains(selected: &Option<(Ty, ResolvedCall)>) -> bool {
-    matches!(
-        selected,
-        Some((Ty::Boolean, ResolvedCall::Extension(extension)))
-            if extension.callable.physical_params.first().is_some_and(|element| element.is_erased_top())
-    )
+    let Some((Ty::Boolean, ResolvedCall::Extension(extension))) = selected else {
+        return false;
+    };
+    extension.callable.generic_sig.as_ref().is_some_and(|sig| {
+        sig.params.first().is_some_and(|element| {
+            element
+                .ty_param_name()
+                .is_some_and(|name| sig.formals.iter().any(|formal| formal.as_str() == name))
+        })
+    })
 }
