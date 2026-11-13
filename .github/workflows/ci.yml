@@ -470,7 +470,9 @@ jobs:
       env:
         TARGET: ${{ matrix.target }}
         VERSION: ${{ matrix.version }}
-      run: 'set -euo pipefail
+      run: '
+
+        set -euo pipefail
 
         python3 - <<''CHECK''
 
@@ -484,20 +486,12 @@ jobs:
 
         label=os.environ[''TARGET'']+''-klib''
 
-        summary=re.findall(re.escape(label)+r'' conformance: scanned (\d+),[^
-
-        ]*compiler-panics (\d+),[^
-
-        ]*failed (\d+),[^
-
-        ]*'',text)
+        summary=re.findall(re.escape(label)+r'' conformance: scanned (\d+),[^\n]*compiler-panics (\d+),[^\n]*failed (\d+),[^\n]*'',text)
 
         assert len(summary)==1 and int(summary[0][0])>1000 and summary[0][1]==''0'', ''missing complete corpus summary or
         compiler panic''
 
-        changes=re.findall(r''^\s+([^
-
-        ]+): expected ([a-z-]+), got ([a-z-]+)\s*$'',text,re.M)
+        changes=re.findall(r''^\s+([^\n]+): expected ([a-z-]+), got ([a-z-]+)\s*$'',text,re.M)
 
         assert all(old==''fail'' and new==''pass'' for _,old,new in changes), ''negative or applicability outcome change''
 
@@ -525,13 +519,9 @@ jobs:
 
         commit=subprocess.check_output([''git'',''rev-parse'',''HEAD''],text=True).strip()
 
-        Path(''evidence-commit.txt'').write_text(commit+''
+        Path(''evidence-commit.txt'').write_text(commit+''\n'')
 
-        '')
-
-        Path(''positive-outcomes.json'').write_text(json.dumps({''runner_commit'':commit,''target'':os.environ[''TARGET''],''version'':os.environ[''VERSION''],''scanned'':int(summary[0][0]),''strict_exit'':status,''removed'':sorted(removed)},indent=2)+''
-
-        '')
+        Path(''positive-outcomes.json'').write_text(json.dumps({''runner_commit'':commit,''target'':os.environ[''TARGET''],''version'':os.environ[''VERSION''],''scanned'':int(summary[0][0]),''strict_exit'':status,''removed'':sorted(removed)},indent=2)+''\n'')
 
         CHECK
 
