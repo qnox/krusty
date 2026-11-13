@@ -9,11 +9,13 @@
 use super::{mismatch, unsupported, BodyLowering, KlibBodyDeclineReason, Lowered};
 use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{
-    ClassId, ExprId, FunId, IrClass, IrConstructorCapture, IrConstructorTarget, IrCtorArg, IrCtorParameterProvenance,
-    IrExpr, IrField, IrFunction, IrFunctionOverride, IrProperty, IrPropertyOverride,
+    ClassId, ExprId, FunId, IrClass, IrConstructorCapture, IrConstructorTarget, IrCtorArg,
+    IrCtorParameterProvenance, IrExpr, IrField, IrFunction, IrFunctionOverride, IrProperty,
+    IrPropertyOverride,
 };
 use crate::metadata::klib_ir::tree::{
-    KlibIrClass, KlibIrExprKind, KlibIrField, KlibIrFunction, KlibIrMember, KlibIrMemberAccess, KlibIrStatement,
+    KlibIrClass, KlibIrExprKind, KlibIrField, KlibIrFunction, KlibIrMember, KlibIrMemberAccess,
+    KlibIrStatement,
 };
 use crate::metadata::klib_ir::KlibIrSymbol;
 use crate::types::{ContextParameterKind, Ty, TypeName};
@@ -385,7 +387,10 @@ impl<'a> BodyLowering<'a> {
                     .map(crate::ir::IrExternalConstructorTarget::unresolved),
             ),
         };
-        let pairs = operands.args.into_iter().zip(operands.params.iter().copied());
+        let pairs = operands
+            .args
+            .into_iter()
+            .zip(operands.params.iter().copied());
         Ok(SuperclassForwards {
             operands: pairs.collect(),
             params: operands.params,
@@ -408,13 +413,18 @@ impl<'a> BodyLowering<'a> {
                 }
                 KlibIrMember::Property(property) => {
                     // The stored value is read through its initializer, as the getter reads it.
-                    if let Some(initializer) =
-                        property.backing_field.as_ref().and_then(|field| field.initializer)
+                    if let Some(initializer) = property
+                        .backing_field
+                        .as_ref()
+                        .and_then(|field| field.initializer)
                     {
                         symbols.extend(self.arena.lexical_value_symbols_of_expression(initializer));
                     }
                     for accessor in property.getter.iter().chain(&property.setter) {
-                        symbols.extend(self.arena.lexical_value_symbols(self.arena.function(*accessor)));
+                        symbols.extend(
+                            self.arena
+                                .lexical_value_symbols(self.arena.function(*accessor)),
+                        );
                     }
                 }
                 _ => {}
@@ -438,22 +448,21 @@ impl<'a> BodyLowering<'a> {
             // spells it.
             let receiver = match identity.source_name {
                 Some(_) => None,
-                None => {
-                    self.header
-                        .capture_parameter(
-                            symbol,
-                            0,
-                            crate::ir::IrCapturingCallable::LocalFunction,
-                            &self
-                                .ir
-                                .fn_params
-                                .get(&self.function.function)
-                                .expect("a body publishes its parameters")
-                                .captured_receivers,
-                            false,
-                        )?
-                        .and_then(|parameter| parameter.receiver)
-                }
+                None => self
+                    .header
+                    .capture_parameter(
+                        symbol,
+                        0,
+                        crate::ir::IrCapturingCallable::LocalFunction,
+                        &self
+                            .ir
+                            .fn_params
+                            .get(&self.function.function)
+                            .expect("a body publishes its parameters")
+                            .captured_receivers,
+                        false,
+                    )?
+                    .and_then(|parameter| parameter.receiver),
             };
             let name = match (&identity.source_name, &receiver) {
                 (Some(name), _) => name.clone(),
@@ -543,9 +552,12 @@ impl<'a> BodyLowering<'a> {
         for member in &class.members {
             let functions: Vec<_> = match member {
                 KlibIrMember::Function(id) if !self.arena.function(*id).constructor => vec![*id],
-                KlibIrMember::Property(property) => {
-                    property.getter.iter().chain(&property.setter).copied().collect()
-                }
+                KlibIrMember::Property(property) => property
+                    .getter
+                    .iter()
+                    .chain(&property.setter)
+                    .copied()
+                    .collect(),
                 _ => Vec::new(),
             };
             for id in functions {

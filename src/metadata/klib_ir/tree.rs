@@ -255,7 +255,9 @@ impl KlibIrArena {
             let KlibIrExprKind::DelegatingConstructorCall(access) = &self.expr(*first).kind else {
                 continue;
             };
-            let crate::metadata::klib_ir::KlibIrSignature::Public(callee) = &access.symbol.signature else {
+            let crate::metadata::klib_ir::KlibIrSignature::Public(callee) =
+                &access.symbol.signature
+            else {
                 continue;
             };
             let any = callee.package().segments() == ["kotlin"]

@@ -507,7 +507,10 @@ fn secondary_delegation(
             default_masks: Vec::new(),
         });
     };
-    let ordinal = superclass_constructor_ordinal(superclass.map(|class| &ir.classes[class as usize]), &call.params)?;
+    let ordinal = superclass_constructor_ordinal(
+        superclass.map(|class| &ir.classes[class as usize]),
+        &call.params,
+    )?;
     Ok(crate::ir::CtorDelegateTarget::Super {
         owner: call.owner,
         target_params: call.params.clone(),

@@ -169,11 +169,9 @@ impl<'a> KlibCalleeFacts<'a> {
         owner: crate::types::TypeName,
     ) -> Option<crate::types::Ty> {
         match self.class_type_oracle {
-            Some(oracle) => crate::assignable::applied_supertype(
-                oracle,
-                sub,
-                crate::types::Ty::obj_name(owner),
-            ),
+            Some(oracle) => {
+                crate::assignable::applied_supertype(oracle, sub, crate::types::Ty::obj_name(owner))
+            }
             None => (sub.kotlin_class_internal() == Some(owner)).then_some(sub),
         }
     }
