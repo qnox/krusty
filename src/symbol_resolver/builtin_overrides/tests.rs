@@ -104,7 +104,7 @@ fn every_primitive_compares_through_its_own_comparable_override() {
             .iter()
             .map(|implementation| implementation.receiver)
             .collect::<Vec<_>>();
-        assert_eq!(receivers, BUILTIN_TYPES);
+        assert_eq!(receivers, REPRESENTED_BUILTINS);
         for implementation in &overrides {
             let declaration = implementation
                 .declaration
@@ -200,7 +200,7 @@ fn the_builtin_subtypes_of_a_classifier_are_the_builtin_classes_below_it() {
     for libraries in wasm_stdlibs() {
         assert_eq!(
             builtin_subtypes(&libraries, type_name("kotlin/Comparable")),
-            BUILTIN_TYPES
+            REPRESENTED_BUILTINS
         );
         assert_eq!(
             builtin_subtypes(&libraries, type_name("kotlin/CharSequence")),

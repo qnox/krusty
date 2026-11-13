@@ -10,30 +10,12 @@
 use crate::fir::ExternalCallableId;
 use crate::libraries::LibraryCallable;
 use crate::symbol_source::SymbolSource;
-use crate::types::{OverriddenDeclaration, Ty, TypeName};
+use crate::types::{OverriddenDeclaration, Ty, TypeName, REPRESENTED_BUILTINS};
 
 use super::{
     declared_member_declarations, function_declaration_identity, member_declarations_in_hierarchy,
     property_declaration_identity, supertype_preorder,
 };
-
-/// Every builtin class a target carries in a representation of its own: `String`, the primitives
-/// and the unsigned integers, each the only instance type of its own final classifier.
-const BUILTIN_TYPES: [Ty; 13] = [
-    Ty::String,
-    Ty::Boolean,
-    Ty::Byte,
-    Ty::Short,
-    Ty::Char,
-    Ty::Int,
-    Ty::Long,
-    Ty::Float,
-    Ty::Double,
-    Ty::UByte,
-    Ty::UShort,
-    Ty::UInt,
-    Ty::ULong,
-];
 
 /// Whether a member is a function or a property, which decides the declarations overriding it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,7 +119,7 @@ pub(crate) fn builtin_overrides(
 /// instance of `owner` can be, which a target carrying them in representations of its own must
 /// answer a call of `owner`'s member or a type test against `owner` for.
 pub(crate) fn builtin_subtypes(source: &dyn SymbolSource, owner: TypeName) -> Vec<Ty> {
-    BUILTIN_TYPES
+    REPRESENTED_BUILTINS
         .into_iter()
         .filter(|builtin| {
             builtin.kotlin_class_internal().is_some_and(|classifier| {

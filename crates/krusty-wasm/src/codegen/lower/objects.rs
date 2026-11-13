@@ -1117,7 +1117,7 @@ impl Body<'_> {
         };
         self.classifiers
             .classifier(name)
-            .is_some_and(|fact| !fact.source && fact.kind == krusty::libraries::TypeKind::Interface)
+            .is_some_and(|fact| !fact.source && fact.is_interface() && !fact.is_annotation())
             .then_some(name)
     }
 
