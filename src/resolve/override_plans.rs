@@ -496,14 +496,18 @@ fn inherited_superclass_interfaces(
     source: &dyn SymbolSource,
     classifier: crate::fir::DeclarationId,
 ) -> Vec<TypeName> {
-    let Some(superclass) = index
+    index
         .classifier_header(classifier)
         .and_then(|header| header.superclass)
-    else {
-        return Vec::new();
-    };
+        .map_or_else(Vec::new, |superclass| {
+            superclass_interfaces(source, superclass.get())
+        })
+}
+
+/// The interfaces the applied superclass `superclass` reaches, each once.
+fn superclass_interfaces(source: &dyn SymbolSource, superclass: Ty) -> Vec<TypeName> {
     let mut seen = HashSet::default();
-    crate::symbol_resolver::applied_hierarchy(source, superclass.get())
+    crate::symbol_resolver::applied_hierarchy(source, superclass)
         .into_iter()
         .filter_map(|(candidate, _, _)| {
             (source
@@ -529,11 +533,26 @@ fn classifier_inherited_defaults(
         index.classifier_hierarchy(classifier).unwrap_or_default(),
     );
     let superclass_interfaces = inherited_superclass_interfaces(index, source, classifier);
+    let Some(header) = index.classifier_header(classifier) else {
+        return (classifier, Vec::new());
+    };
+    let interfaces = header
+        .interfaces
+        .iter()
+        .filter_map(|interface| interface.get().non_null().obj_internal())
+        .collect::<Vec<_>>();
+    let delegations = header
+        .interface_delegations
+        .iter()
+        .filter_map(|delegation| delegation.interface.get().non_null().obj_internal())
+        .collect::<Vec<_>>();
     let defaults = inherited_defaults::inherited_defaults(
         index,
         source,
         &inherited_defaults::ClassifierPlan {
-            classifier,
+            classifier: header.classifier,
+            interfaces: &interfaces,
+            delegations: &delegations,
             hierarchy: &hierarchy,
             superclass_interfaces: &superclass_interfaces,
             functions,

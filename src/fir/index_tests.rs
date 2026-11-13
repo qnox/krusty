@@ -1238,4 +1238,27 @@ fn dependency_superclass_publishes_its_dispatch_shape() {
             true,
         )]
     );
+    // The defaults it inherits from `Element` and `CoroutineContext` without overriding, which a
+    // target laying the class out implements those members with.
+    let defaults = superclass
+        .inherited_defaults
+        .iter()
+        .map(|default| {
+            let crate::fir::InheritedMemberName::Function(name) = &default.name else {
+                panic!("an inherited accessor: {default:?}");
+            };
+            (name.to_string(), default.declaring_interface)
+        })
+        .collect::<Vec<_>>();
+    let context = crate::types::type_name("kotlin/coroutines/CoroutineContext");
+    let element = context.nested_child("Element");
+    assert_eq!(
+        defaults,
+        vec![
+            ("get".to_string(), element),
+            ("fold".to_string(), element),
+            ("minusKey".to_string(), element),
+            ("plus".to_string(), context),
+        ]
+    );
 }

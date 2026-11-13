@@ -60,3 +60,13 @@ fn identity_string(bytes: &mut Vec<u8>, text: &str) {
     bytes.extend_from_slice(&(text.len() as u32).to_le_bytes());
     bytes.extend_from_slice(text.as_bytes());
 }
+
+/// The bytes that identify the interface member the dependency callable `fact` declares: a
+/// function's own, or an accessor's property in its role.
+pub fn overridden_member_identity(fact: &super::BackendCallableFact) -> Option<Vec<u8>> {
+    let identity = fact.dependency_callable.as_ref()?;
+    match &fact.klib_body_accessor {
+        Some(accessor) => property_member_identity(identity, accessor.is_setter()),
+        None => Some(member_identity(identity)),
+    }
+}

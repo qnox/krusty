@@ -711,12 +711,12 @@ fn header(
                 Some(serialized)
             }
             (Some(receiver), Some(selected))
-                if selected.class_contract().is_some_and(
-                    crate::libraries::KlibBodyClassContract::emits_receiver_members,
-                ) =>
+                if selected.class_contract().is_some_and(|class| {
+                    class.emits_receiver_members() || class.emits_default_members()
+                }) =>
             {
-                // A builtin type's member is a function of its receiver value, which its body
-                // reads as the value the target carries.
+                // A builtin type's member, or an interface's default, is a function of its
+                // receiver value, which its body reads as the value the target carries.
                 let serialized = semantic_type(arena, types, receiver.ty)?;
                 if selected.declaration_owner()
                     != serialized
