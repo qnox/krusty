@@ -852,6 +852,15 @@ impl<'a> Checker<'a> {
                 } else if prim(&range_st)
                     && range_st == range_et
                     && self.in_range_widened_value(vt, range_st)
+                    && {
+                        // Resolve `contains` as for any other receiver; the widened form is only
+                        // the lowering of the generic `Iterable<T>.contains`. A precise overload
+                        // (`IntRange.contains(Int?)`) stays an ordinary call.
+                        let selected = self.range_contains_call(scope, e, range_ty, vt, value);
+                        let generic = selects_generic_element_contains(&selected);
+                        ordinary_contains = Some(selected);
+                        generic
+                    }
                 {
                     // A WIDENED value over a primitive range: `when (x: Any) { in 4..10 -> … }`. kotlinc
                     // lowers it to `CollectionsKt.contains(4..10, x)`, which is true exactly when `x` is a
@@ -1160,4 +1169,14 @@ struct InRangeOperands {
     expression: ExprId,
     kind: crate::ast::RangeKind,
     value_ty: Ty,
+}
+
+/// Whether the resolved `contains` takes its element as an unbounded type parameter
+/// (`Iterable<T>.contains(element: T)`), as opposed to a precise overload of the range.
+fn selects_generic_element_contains(selected: &Option<(Ty, ResolvedCall)>) -> bool {
+    matches!(
+        selected,
+        Some((Ty::Boolean, ResolvedCall::Extension(extension)))
+            if extension.callable.physical_params.first().is_some_and(|element| element.is_erased_top())
+    )
 }
