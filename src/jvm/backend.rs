@@ -85,8 +85,7 @@ pub fn run_backend_passes_with_checked_metadata(
     run_backend_passes_after_plugins(
         ir,
         facade,
-        classifiers.module().source_value_classes(),
-        classifiers.module().metadata_readable_value_classes(),
+        classifiers,
         classpath,
         continuation_metadata,
         Some(stems),
@@ -96,8 +95,7 @@ pub fn run_backend_passes_with_checked_metadata(
 fn run_backend_passes_after_plugins(
     ir: &mut crate::ir::IrFile,
     facade: &str,
-    module_value_classes: &std::collections::HashMap<crate::types::TypeName, Ty>,
-    module_readable_value_classes: &std::collections::HashSet<crate::types::TypeName>,
+    classifiers: &CheckedBackendClassifiers<'_>,
     classpath: &crate::jvm::classpath::Classpath,
     continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
     stems: Option<&[String]>,
@@ -129,17 +127,10 @@ fn run_backend_passes_after_plugins(
     // before the value-class pass (which retargets them once mangled names are known).
     crate::jvm::bridges::derive_bridges(ir, classpath)?;
     apply_collection_bridge_barriers(ir);
-    // Same-module SOURCE value classes (internal name → sole-field underlying) for the value-class pass's
-    // erasure/mangle map — a value class declared in ANOTHER file of this module. Read from the frontend
-    // symbols directly, NOT surfaced through the resolver's library view (which would change the checker's
-    // construction/member resolution for source value classes).
+    // Same-module SOURCE value classes (internal name → sole-field underlying) are read from the checked
+    // module snapshot by the representation pass, keeping sibling declarations out of resolver lookup.
     crate::jvm::value_classes::apply_override_final_drop(ir);
-    if !crate::jvm::value_classes::lower_value_classes(
-        ir,
-        classpath,
-        module_value_classes,
-        module_readable_value_classes,
-    ) {
+    if !crate::jvm::value_classes::lower_value_classes(ir, classifiers) {
         return Err(SkipReason::ValueClasses);
     }
     if let Some(stems) = stems {

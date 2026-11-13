@@ -394,6 +394,21 @@ mod tests {
     }
 
     #[test]
+    fn jvm_value_class_lowering_consumes_checked_classifier_facts() {
+        let value_classes = fs::read_to_string(source_path("src/jvm/value_classes.rs"))
+            .expect("read value classes");
+        assert!(value_classes.contains("CheckedBackendClassifiers"));
+        assert!(
+            !value_classes.contains("value_class_declaration"),
+            "JVM value-class lowering must consume frozen classifier facts, not query classpath metadata"
+        );
+        assert!(
+            !value_classes.contains("jvm::classpath::Classpath"),
+            "JVM value-class lowering must not receive a classpath lookup capability"
+        );
+    }
+
+    #[test]
     fn js_facade_has_no_crate_dependencies() {
         assert_allowed_crate_modules("src/js/mod.rs", &[]);
     }

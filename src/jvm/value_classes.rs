@@ -16,6 +16,7 @@
 //! NOTE: box/unbox insertion at representation boundaries (a value flowing to `Any`/generic, or back) is
 //! the next increment; this pass currently lowers the unboxed core (construction, access, erasure).
 
+use crate::backend::BackendClassifierSource;
 use crate::ir::{value_tails, Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::ir_emit::{ir_ty_to_jvm, jvm_tys};
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
@@ -300,16 +301,7 @@ pub(crate) fn apply_override_final_drop(ir: &mut IrFile) {
 #[must_use]
 pub fn lower_value_classes(
     ir: &mut IrFile,
-    classpath: &crate::jvm::classpath::Classpath,
-    // Same-module SOURCE value classes (internal name → sole-field underlying), collected from the
-    // frontend symbols. A value class declared in ANOTHER file of this module is neither in `ir.classes`
-    // (a different file) nor reported by the resolver (whose `value_underlying` only decodes classpath
-    // `@Metadata`), so its erasure/mangle map entry comes from here — without leaking value-class-ness
-    // into the CHECKER's library view (which drives construction/member resolution).
-    module_value_classes: &std::collections::HashMap<TypeName, Ty>,
-    // Subset whose stable declaration headers describe a value-class shape supported by metadata
-    // emission. This is frozen before Pass 2; no sibling body or source coordinate is retained.
-    module_readable_value_classes: &std::collections::HashSet<TypeName>,
+    classifiers: &crate::backend::CheckedBackendClassifiers<'_>,
 ) -> bool {
     crate::trace_compiler!(
         "value_classes",
@@ -365,43 +357,36 @@ pub fn lower_value_classes(
             })
         })
         .collect();
-    // Merge classpath `@JvmInline value class`es referenced by this file (`Result` → `Object`). They are
-    // NOT in `ir.classes` (no synthesized members — their `-impl`/`box-impl` live on the classpath), so
-    // they only contribute to the erasure map: every occurrence of their type erases to the underlying.
-    // Value-class-ness is resolved through the federated `SymbolSource` (`is_value`), NOT a side map built
-    // in the lowerer — the lowerer carries no value-class knowledge. Every referenced class name in the IR
-    // is probed; a classpath value class contributes its `value_underlying`.
+    // Merge referenced value classes absent from this file's IR from the checked classifier facts.
+    // Their semantic underlying type and source property name were frozen at the frontend/backend
+    // boundary, so this JVM representation pass does not re-read classpath metadata.
     let mut under = under;
     let mut external_underlying_properties = HashMap::new();
     for fq in referenced_class_names(ir) {
         if under.contains_key(&fq) || is_native_unsigned(fq) {
             continue;
         }
-        let rendered = fq.render();
-        if crate::types::prim_array_element(&rendered).is_some() {
+        if crate::types::prim_array_element(fq).is_some() {
             continue;
         }
-        let dependency = classpath.value_class_declaration(fq);
-        if let Some(property) = dependency
-            .as_ref()
-            .and_then(|declaration| declaration.property.clone())
-        {
+        let Some(classifier) = classifiers.classifier(fq) else {
+            continue;
+        };
+        if let Some(property) = classifier.value_underlying_property.as_deref() {
             crate::trace_compiler!(
                 "value_classes",
                 "external value class {} underlying property {}",
                 fq,
                 property
             );
-            external_underlying_properties.insert(fq, property);
+            external_underlying_properties.insert(fq, property.to_owned());
         }
-        if let Some(u) = dependency
-            .map(|declaration| declaration.underlying)
-            .or_else(|| module_value_classes.get(&fq).copied())
-        {
+        if let Some(u) = classifier.value_underlying {
             // The underlying carries its own declared nullability — trust it: a NON-NULL reference
             // underlying (`ItemId(val value: String)`) means `ItemId?` stays UNBOXED (null carried by
-            // the reference), exactly like a same-file value class. Classpath VCs come from the resolver
-            // (decoded from `@Metadata`); same-module source VCs from `module_value_classes`.
+            // the reference), exactly like a same-file value class. Dependency metadata was decoded
+            // before it crossed the checked backend boundary; same-module source facts came from the
+            // stable module snapshot.
             let u = u.canonical_semantic();
             let ir_under = u.scalar_value_repr().unwrap_or(u);
             under.insert(fq, ir_under);
@@ -434,14 +419,20 @@ pub fn lower_value_classes(
         .keys()
         .copied()
         .filter(|fq_name| {
-            module_value_classes.contains_key(fq_name)
+            classifiers
+                .module()
+                .source_value_classes()
+                .contains_key(fq_name)
                 || ir
                     .classes
                     .iter()
                     .any(|c| c.is_value && c.fq_name == *fq_name)
         })
         .collect();
-    ir.module_readable_value_classes = module_readable_value_classes.clone();
+    ir.module_readable_value_classes = classifiers
+        .module()
+        .metadata_readable_value_classes()
+        .clone();
 
     // A semantic property operation deliberately keeps the Kotlin property name. For an owner compiled
     // from another source file there is no classfile for the emitter to inspect, so record the JVM
