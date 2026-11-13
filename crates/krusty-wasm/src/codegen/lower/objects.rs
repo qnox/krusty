@@ -1115,6 +1115,26 @@ impl Body<'_> {
         interface.then_some(name)
     }
 
+    /// The library interface `ty` names, which no file of the program declares.
+    fn library_interface_of_type(&self, ty: Ty) -> Option<TypeName> {
+        let TyKind::Obj(name, _) = ty.non_null().kind() else {
+            return None;
+        };
+        self.classifiers
+            .classifier(name)
+            .is_some_and(|fact| !fact.source && fact.is_interface() && !fact.is_annotation())
+            .then_some(name)
+    }
+
+    /// Replace the reference on the stack with whether it is an instance of the library interface
+    /// `interface` — or null, when `nullable`. Its instances are the program's classes below it and
+    /// the builtin values its builtin subclasses carry (`crate::builtin_instances`).
+    fn library_interface_test(&mut self, interface: TypeName, nullable: bool) {
+        let subtypes = self.classifiers.builtin_subtypes(interface);
+        self.runtime.builtin_instances(interface, subtypes);
+        self.interface_test(interface, nullable);
+    }
+
     /// Replace the reference on the stack with whether it is an instance of `interface` — or
     /// null, when `nullable`.
     fn interface_test(&mut self, interface: TypeName, nullable: bool) {
@@ -1192,9 +1212,12 @@ impl Body<'_> {
             _ => match (self.interface_of_type(tested), self.class_of_type(tested)) {
                 (Some(interface), _) => self.interface_test(interface, nullable),
                 (None, Some(class)) => self.instance_test(class, nullable)?,
-                (None, None) => {
-                    return Err(format!("a type test against `{}`", super::describe(tested)));
-                }
+                (None, None) => match self.library_interface_of_type(tested) {
+                    Some(interface) => self.library_interface_test(interface, nullable),
+                    None => {
+                        return Err(format!("a type test against `{}`", super::describe(tested)));
+                    }
+                },
             },
         }
         match op {

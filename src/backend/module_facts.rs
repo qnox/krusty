@@ -50,6 +50,42 @@ pub trait BackendClassifierSource {
             crate::libraries::ClassifierDeclarationKey::TypeAlias(_) => None,
         }
     }
+
+    /// Every builtin class (`String`, a primitive, an unsigned integer) whose classifier is a
+    /// proper subtype of `classifier`, through the supertypes the classifier facts publish: the
+    /// builtin values a target carrying them in representations of its own must count as
+    /// instances of `classifier`.
+    fn builtin_subtypes(&self, classifier: TypeName) -> Vec<crate::types::Ty> {
+        crate::types::REPRESENTED_BUILTINS
+            .into_iter()
+            .filter(|builtin| {
+                builtin
+                    .kotlin_class_internal()
+                    .is_some_and(|own| own != classifier && is_subclassifier(self, own, classifier))
+            })
+            .collect()
+    }
+}
+
+/// Whether `ancestor` is `classifier` or one of the supertypes its facts publish, transitively.
+fn is_subclassifier(
+    source: &(impl BackendClassifierSource + ?Sized),
+    classifier: TypeName,
+    ancestor: TypeName,
+) -> bool {
+    let mut pending = vec![classifier];
+    let mut seen = crate::fx_hash::HashSet::default();
+    while let Some(next) = pending.pop() {
+        if next == ancestor {
+            return true;
+        }
+        if seen.insert(next) {
+            if let Some(fact) = source.classifier(next) {
+                pending.extend(fact.supertypes.iter().copied());
+            }
+        }
+    }
+    false
 }
 
 /// The exact classifier information representation backends may inspect after semantic checking.
