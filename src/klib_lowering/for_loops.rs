@@ -263,7 +263,7 @@ fn indices_call(
     let KlibIrSignature::Accessor(getter) = &access.symbol.signature else {
         return None;
     };
-    if !access.type_arguments.is_empty() || !is_progression_type(arena, expression.ty?) {
+    if !is_progression_type(arena, expression.ty?) {
         return None;
     }
     let receiver = match &access.arguments {
