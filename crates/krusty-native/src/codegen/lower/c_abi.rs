@@ -44,6 +44,14 @@ impl<'a> FileLowering<'a> {
             &export.symbol,
             export.signature.parameters().to_vec(),
         )?;
+        for alias in &export.aliases {
+            self.define_export_with_params(
+                file_init,
+                function,
+                alias,
+                export.signature.parameters().to_vec(),
+            )?;
+        }
         if let Some(symbol) = &export.dispatch_entry {
             // An ordinary call from another module runs the receiver's override.
             let Some(entry) = self

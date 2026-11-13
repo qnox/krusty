@@ -207,13 +207,14 @@ impl Body<'_> {
                 declaration: constructor,
             },
         )?;
-        let parameters = &self
-            .ir
-            .module_constructions
-            .records
-            .get(&constructor)?
-            .parameters;
-        let parameters = parameters.clone();
+        // What the entry takes: an inner class's enclosing instance, then the declared parameters.
+        let record = self.ir.module_constructions.records.get(&constructor)?;
+        let parameters: Vec<Ty> = record
+            .outer
+            .map(Ty::obj_name)
+            .into_iter()
+            .chain(record.parameters.iter().copied())
+            .collect();
         Some((|| {
             if parameters.len() != args.len() {
                 // Boundary conversion for a diagnostic.

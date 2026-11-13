@@ -10,7 +10,6 @@
 //! A plan that is not supported is a decline in the using file and no export in the defining one,
 //! for the same reason in both.
 
-mod constructors;
 mod extended_classes;
 mod properties;
 mod value_boxes;

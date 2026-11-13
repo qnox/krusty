@@ -108,10 +108,6 @@ pub fn link_reads<V: Clone>(
 /// reserved or found like [`link_reads`] does for the instances it reads. A construction the
 /// checker selected a module constructor for whose class `ir` does not declare, and that `module`
 /// does not certify, has no link, and the target declines it.
-///
-/// Native still builds a cross-file construction through its own module ABI
-/// (`module_abi/constructors.rs`), which also covers inner, value and generic classes whose
-/// entries `construction_entries` does not build yet, and does not call this.
 pub fn link_constructor_reads<V: Clone>(
     ir: &IrFile,
     module_name: &str,
