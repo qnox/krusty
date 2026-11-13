@@ -21,4 +21,4 @@
 2	src/resolve/streaming_signature_bridge/operator_conventions.rs	this function has too many arguments (8/7)
 2	src/resolve/streaming_signature_bridge/semantics.rs	this function has too many arguments (8/7)
 3	src/resolve/streaming_signature_bridge/rejected_member_call.rs	this function has too many arguments (8/7)
-3	src/resolve/streaming_signature_bridge/type_parameter_publication.rs	this function has too many arguments (8/7)
+2	src/resolve/streaming_signature_bridge/type_parameter_publication.rs	this function has too many arguments (8/7)

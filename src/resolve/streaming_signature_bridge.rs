@@ -823,6 +823,33 @@ impl ProductionSignatureSemantics<'_> {
         crate::fir::DiagnosticId::from_raw(diagnostics.len() as u32)
     }
 
+    /// Record `CYCLIC_GENERIC_UPPER_BOUND` at `span`. The declaration stays published, so the
+    /// finding is reported on every exit, once per source occurrence.
+    fn record_cyclic_upper_bound_diagnostic_at(
+        &self,
+        declaration: crate::fir::DeclarationId,
+        source: crate::fir::SourceFileId,
+        span: Span,
+        message: String,
+    ) {
+        let file = source.raw();
+        let identity = crate::diag::DiagnosticIdentity::CyclicUpperBound { reference: span };
+        let mut diagnostics = self.diagnostics.borrow_mut();
+        if diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.file == file && diagnostic.identity == Some(identity))
+        {
+            return;
+        }
+        diagnostics.push(ProductionSignatureDiagnostic::unconditional(
+            declaration,
+            file,
+            span,
+            message,
+            identity,
+        ));
+    }
+
     fn record_classifier_access_diagnostic_at(
         &self,
         declaration: crate::fir::DeclarationId,

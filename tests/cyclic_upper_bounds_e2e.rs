@@ -93,3 +93,44 @@ fun <X : Comparable<X>> legal(x: X) {}
     let expected = expected.iter().map(String::as_str).collect::<Vec<_>>();
     assert_matches_kotlinc(source, &expected);
 }
+
+#[test]
+fn local_declarations_report_the_same_cycles() {
+    let source = "\
+fun main() {
+    class Loc<B : B>
+    class Loc2<X : Y, Y : X>
+    fun <T : U, U : T> inner(t: T) {}
+    val a: Loc<Int>? = null
+    println(listOf(a, null))
+}
+";
+    let expected = [
+        cyclic("2:19", "B"),
+        cyclic("3:20", "X, Y"),
+        cyclic("3:27", "X, Y"),
+        cyclic("4:10", "T, U"),
+        cyclic("4:17", "T, U"),
+    ];
+    let expected = expected.iter().map(String::as_str).collect::<Vec<_>>();
+    assert_matches_kotlinc(source, &expected);
+}
+
+#[test]
+fn a_cyclic_bound_does_not_loop_when_types_are_joined() {
+    let source = "\
+class Bar<B : B>
+class Pair2<X : Y, Y : X>
+fun join(a: Bar<Int>, b: Bar<String>) = listOf(a, b)
+fun joinPairs(a: Pair2<Int, Int>, b: Pair2<String, String>) = listOf(a, b)
+fun <T : T> joinCallable(t: T, s: String) = listOf(t, s)
+";
+    let expected = [
+        cyclic("1:15", "B"),
+        cyclic("2:17", "X, Y"),
+        cyclic("2:24", "X, Y"),
+        cyclic("5:6", "T"),
+    ];
+    let expected = expected.iter().map(String::as_str).collect::<Vec<_>>();
+    assert_matches_kotlinc(source, &expected);
+}

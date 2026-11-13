@@ -228,17 +228,25 @@ pub(super) fn enclosing(
     visible
 }
 
+/// The type parameters one declaration wrote and the bounds that constrain them.
+pub(super) struct DeclaredBounds<'a> {
+    pub(super) names: &'a [String],
+    pub(super) bounds: &'a [(String, crate::fir::HeaderTypeId, TypeRef)],
+    /// The declaring type parameter of each bound, as its `<…>` list wrote it.
+    pub(super) owners: &'a [crate::diag::Span],
+}
+
 pub(super) fn symbolic(
     index: &crate::fir::ResolvedModuleIndex,
     declaration: crate::fir::DeclarationId,
-    declared_names: &[String],
-    declared_bounds: &[(String, crate::fir::HeaderTypeId, TypeRef)],
-    reuse_callable_contract: bool,
+    declared: &DeclaredBounds<'_>,
+    stable: Option<&GenericSig>,
     semantics: &super::ProductionSignatureSemantics<'_>,
     source: crate::fir::SourceFileId,
     declaration_start: u32,
 ) -> Result<super::super::TParams, crate::fir::DiagnosticId> {
     let table = semantics.table;
+    let (declared_names, declared_bounds) = (declared.names, declared.bounds);
     let enclosing = enclosing(index, declaration);
     // A bound is resolved through the declaration's own scope tower: its lexical classifiers,
     // their inherited nested classifiers and the file's package and imports. A classifier's bound
@@ -251,36 +259,62 @@ pub(super) fn symbolic(
         .iter()
         .map(|(owner, _, bound)| (owner.clone(), bound.clone()))
         .collect::<Vec<_>>();
-    let provisional = super::super::TParams::symbolic_from_decl_enclosing(
-        declared_names,
-        &semantic_bounds,
-        &|name| semantics.qualified_type_classifier(scope, name),
-        &|name| {
-            // This declaration's own parameter shadows an enclosing parameter with the same name.
-            (!declared_names.iter().any(|declared| declared == name))
-                .then(|| enclosing.get(name).copied())
-                .flatten()
-        },
-    )
-    .alpha_renamed_declaration(
-        declared_names,
-        table.compilation_id,
-        source.raw(),
-        declaration_start,
-    );
+    let declaration_parameters = |semantic_bounds: &[(String, TypeRef)]| {
+        super::super::TParams::symbolic_from_decl_enclosing(
+            declared_names,
+            semantic_bounds,
+            &|name| semantics.qualified_type_classifier(scope, name),
+            &|name| {
+                // This declaration's own parameter shadows an enclosing parameter with the same name.
+                (!declared_names.iter().any(|declared| declared == name))
+                    .then(|| enclosing.get(name).copied())
+                    .flatten()
+            },
+        )
+        .alpha_renamed_declaration(
+            declared_names,
+            table.compilation_id,
+            source.raw(),
+            declaration_start,
+        )
+    };
+    let provisional = declaration_parameters(&semantic_bounds);
     // Callable collection already owns the stable semantic shape. Re-resolving a successful
     // F-bound through a provisional local parameter unfolds it once more, but skipping the written
     // bounds entirely also skips their diagnostics. Validate each source reference through the
     // ordinary header path, retain every diagnostic, and keep the authoritative callable shape.
-    if reuse_callable_contract {
+    if stable.is_some() {
         let mut first_failure = None;
+        let mut resolved = Vec::with_capacity(declared_bounds.len());
         for (_, syntax, bound) in declared_bounds {
-            if let Err(diagnostic) = semantics.resolve_callable_header_bound(scope, *syntax, bound)
-            {
-                first_failure.get_or_insert(diagnostic);
+            match semantics.resolve_callable_header_bound(scope, *syntax, bound) {
+                Ok(bound) => resolved.push(bound),
+                Err(diagnostic) => {
+                    first_failure.get_or_insert(diagnostic);
+                }
             }
         }
-        return first_failure.map_or(Ok(provisional), Err);
+        if let Some(failure) = first_failure {
+            return Err(failure);
+        }
+        let bounds = ResolvedBounds {
+            declared,
+            types: &resolved,
+            parameter_of: &|name| parameter_ordinal(name, stable, &provisional, declared_names),
+        };
+        let cyclic = report_cyclic_bounds(semantics, scope, &bounds);
+        if !cyclic.contains(&true) {
+            return Ok(provisional);
+        }
+        // The callable's contract is authoritative, but the declaration's own view of its
+        // parameters must not carry the erroneous bounds either.
+        let acyclic = semantic_bounds
+            .iter()
+            .zip(&cyclic)
+            .filter(|(_, cyclic)| !**cyclic)
+            .map(|(bound, _)| bound.clone())
+            .collect::<Vec<_>>();
+        return Ok(declaration_parameters(&acyclic));
     }
     let resolved_bounds =
         with_classifier_bound_scope(semantics, scope, &provisional, declared_names, |lexical| {
@@ -296,12 +330,128 @@ pub(super) fn symbolic(
             }
             first_failure.map_or(Ok(resolved), Err)
         })??;
+    let types = resolved_bounds
+        .iter()
+        .map(|(_, bound)| *bound)
+        .collect::<Vec<_>>();
+    let bounds = ResolvedBounds {
+        declared,
+        types: &types,
+        parameter_of: &|name| parameter_ordinal(name, stable, &provisional, declared_names),
+    };
+    // A cyclic bound is erroneous: it constrains nothing, as kotlinc's error-typed bound does.
+    let cyclic = report_cyclic_bounds(semantics, scope, &bounds);
+    let implicit = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+    let resolved_bounds = resolved_bounds
+        .into_iter()
+        .zip(cyclic)
+        .map(|((owner, bound), cyclic)| (owner, if cyclic { implicit } else { bound }))
+        .collect::<Vec<_>>();
 
     Ok(symbolic_from_resolved_bounds(
         declared_names,
         &provisional,
         &resolved_bounds,
     ))
+}
+
+/// One declaration's bounds as the signature resolved them, beside their written declarations.
+struct ResolvedBounds<'a> {
+    declared: &'a DeclaredBounds<'a>,
+    /// The resolved type of each bound, in `declared_bounds` order.
+    types: &'a [Ty],
+    /// The declaration ordinal of a type parameter identity, if the declaration owns it.
+    parameter_of: &'a dyn Fn(&str) -> Option<usize>,
+}
+
+fn parameter_ordinal(
+    semantic: &str,
+    stable: Option<&GenericSig>,
+    provisional: &super::super::TParams,
+    declared_names: &[String],
+) -> Option<usize> {
+    stable
+        .and_then(|generic| {
+            generic
+                .formals
+                .iter()
+                .position(|formal| formal.as_str() == semantic)
+        })
+        .or_else(|| {
+            declared_names.iter().position(|name| {
+                provisional
+                    .bound(name)
+                    .ty_param_name()
+                    .is_some_and(|own| own == semantic)
+            })
+        })
+}
+
+/// Report `CYCLIC_GENERIC_UPPER_BOUND` for the type parameters whose resolved bounds name one
+/// another. A classifier reports each bound that closes a cycle and a callable each parameter on
+/// one. Returns, per bound, whether it closes a cycle.
+fn report_cyclic_bounds(
+    semantics: &super::ProductionSignatureSemantics<'_>,
+    scope: crate::fir::SignatureScope,
+    bounds: &ResolvedBounds<'_>,
+) -> Vec<bool> {
+    let edges = bounds
+        .declared
+        .bounds
+        .iter()
+        .zip(bounds.types)
+        .map(|((owner, _, _), bound)| {
+            let (TyKind::TyParam(target, _) | TyKind::Var(target, _)) =
+                bound.non_null_keeping_mutability().kind()
+            else {
+                return None;
+            };
+            Some(super::super::cyclic_upper_bounds::ParameterBound {
+                owner: bounds
+                    .declared
+                    .names
+                    .iter()
+                    .position(|name| name == owner)?,
+                target: (bounds.parameter_of)(target.as_str())?,
+            })
+        })
+        .collect::<Vec<_>>();
+    let cycles = super::super::cyclic_upper_bounds::find(bounds.declared.names, &edges);
+    if cycles.is_empty() {
+        return vec![false; edges.len()];
+    }
+    let at_classifier_bound = semantics
+        .headers
+        .stub(scope.owner)
+        .is_some_and(|stub| stub.kind == crate::fir::DeclarationKind::Classifier);
+    let mut reports: Vec<(crate::diag::Span, &str)> = Vec::new();
+    if at_classifier_bound {
+        for (ordinal, names) in cycles.closing.iter().enumerate() {
+            if let Some(names) = names {
+                reports.push((bounds.declared.bounds[ordinal].2.span, names));
+            }
+        }
+    } else {
+        for (parameter, names) in cycles.members.iter().enumerate() {
+            let Some(names) = names else { continue };
+            let owner = edges
+                .iter()
+                .position(|edge| edge.is_some_and(|edge| edge.owner == parameter))
+                .map(|bound| bounds.declared.owners[bound]);
+            if let Some(owner) = owner {
+                reports.push((owner, names));
+            }
+        }
+    }
+    for (span, names) in reports {
+        semantics.record_cyclic_upper_bound_diagnostic_at(
+            scope.owner,
+            scope.source,
+            span,
+            super::super::cyclic_upper_bounds::message(names),
+        );
+    }
+    cycles.closing.iter().map(Option::is_some).collect()
 }
 
 pub(super) fn semantic_name<'a>(
@@ -544,12 +694,21 @@ pub(super) fn publish_source_declarations(
         .then(|| semantics.callable_signature(stub.id))
         .flatten()
         .and_then(|signature| signature.generic_sig.as_ref());
+        let bound_owners = bounds
+            .map(|bounds| headers.syntax.bounds(bounds))
+            .unwrap_or_default()
+            .iter()
+            .map(|bound| bound.owner)
+            .collect::<Vec<_>>();
         let symbolic = match symbolic(
             index,
             stub.id,
-            &declared_names,
-            &declared_bounds,
-            stable_generic.is_some(),
+            &DeclaredBounds {
+                names: &declared_names,
+                bounds: &declared_bounds,
+                owners: &bound_owners,
+            },
+            stable_generic,
             semantics,
             stub.source,
             declaration_start,

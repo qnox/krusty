@@ -51,6 +51,9 @@ pub enum DiagnosticIdentity {
     /// declaration group; the source occurrence, not its rendered message, identifies the one
     /// file-level diagnostic those entries share.
     ImportResolution { reference: Span },
+    /// A type parameter whose upper bounds name one another. The source occurrence identifies the
+    /// report however many times the declaration's bounds are resolved.
+    CyclicUpperBound { reference: Span },
 }
 
 #[derive(Clone, Debug)]
