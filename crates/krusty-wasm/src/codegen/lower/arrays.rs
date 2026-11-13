@@ -21,6 +21,24 @@ const I32_ADD: u8 = 0x6a;
 const I32_GE_U: u8 = 0x4f;
 const I32_LT_S: u8 = 0x48;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArrayViewConversion {
+    Wrap,
+    Unwrap,
+}
+
+fn array_view_conversion(from: ArrayForm, to: ArrayForm) -> Option<ArrayViewConversion> {
+    match (from.view, to.view) {
+        (None, Some((signed, table))) if (signed, table) == (from.object, from.table) => {
+            Some(ArrayViewConversion::Wrap)
+        }
+        (Some((signed, table)), None) if (signed, table) == (to.object, to.table) => {
+            Some(ArrayViewConversion::Unwrap)
+        }
+        _ => None,
+    }
+}
+
 /// The complete selected getter frame, before any receiver is evaluated.
 /// The source type is the array the length is read from.
 fn array_size_receiver(operation: &IrCheckedOperation) -> Result<(u32, Ty), Unsupported> {
@@ -283,6 +301,20 @@ impl Body<'_> {
         }
     }
 
+    /// Authenticate the runtime-owned view and its declared backing before evaluating operands.
+    pub(super) fn require_array_view(
+        &mut self,
+        owner: Ty,
+        underlying: Ty,
+    ) -> Result<(), Unsupported> {
+        let (owner, _) = self.array_form(owner)?;
+        let (underlying, _) = self.array_form(underlying)?;
+        if array_view_conversion(owner, underlying) != Some(ArrayViewConversion::Unwrap) {
+            return Err("an array view apart from its declared signed backing".into());
+        }
+        Ok(())
+    }
+
     /// Replace the `from` array object on the stack by a `to` object over the same backing
     /// storage: how a value class over a signed array (`UIntArray`) and that array alias each
     /// other, each with its own class identity. The unsigned object holds the signed object it
@@ -290,8 +322,8 @@ impl Body<'_> {
     pub(super) fn rewrap_array(&mut self, from: Ty, to: Ty) -> Result<(), Unsupported> {
         let (from, _) = self.array_form(from)?;
         let (to, _) = self.array_form(to)?;
-        match (from.view, to.view) {
-            (None, Some(_)) => {
+        match array_view_conversion(from, to) {
+            Some(ArrayViewConversion::Wrap) => {
                 let signed = self.local(REFERENCE);
                 self.code.local_set(signed).local_get(signed);
                 self.array_storage(from);
@@ -305,7 +337,7 @@ impl Body<'_> {
                     .ref_cast(false, HeapType::Concrete(from.object))
                     .struct_new(to.object);
             }
-            (Some(_), None) => {
+            Some(ArrayViewConversion::Unwrap) => {
                 self.code
                     .ref_cast(false, HeapType::Concrete(from.object))
                     .struct_get(from.object, VIEW_FIELD);

@@ -76,6 +76,9 @@ impl Body<'_> {
         class: ClassId,
         index: u32,
     ) -> Result<(), Unsupported> {
+        if let Some(read) = self.materialized_value_storage_read(receiver, class, index) {
+            return read;
+        }
         let structure = self.object(receiver, class)?;
         let field = self.file_classes()?.field(class, index);
         self.code.struct_get(structure, field);
@@ -120,10 +123,10 @@ impl Body<'_> {
         args: &[u32],
         selected: Option<&[Ty]>,
     ) -> Result<(), Unsupported> {
+        if let Some(constructed) = self.scalar_value_construction(internal, args, selected) {
+            return constructed;
+        }
         let Some(class) = self.classes.and(self.ir.class_id_by_name(internal)) else {
-            if let Some(constructed) = self.scalar_value_construction(internal, args, selected) {
-                return constructed;
-            }
             // Boundary conversion for a diagnostic.
             return Err(format!(
                 "construction of the library class `{}`",
