@@ -595,9 +595,7 @@ pub(super) fn realize(
         .iter()
         .filter_map(|expression| match expression {
             IrExpr::Lambda { impl_fn, sam, .. }
-                if sam
-                    .as_deref()
-                    .is_none_or(factory_adaptation::sam_candidate) =>
+                if sam.as_deref().is_none_or(factory_adaptation::sam_candidate) =>
             {
                 Some(*impl_fn)
             }
