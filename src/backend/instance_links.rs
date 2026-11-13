@@ -26,6 +26,16 @@ pub enum InstanceEntry {
     EnumConstant(EnumConstant),
 }
 
+impl InstanceEntry {
+    /// The enum constant this entry reads, or `None` for an object's single instance.
+    pub fn enum_constant(&self) -> Option<&EnumConstant> {
+        match self {
+            Self::EnumConstant(constant) => Some(constant),
+            Self::Object(_) => None,
+        }
+    }
+}
+
 /// Define the link of every instance entry this file realized, each by its instance: the link a
 /// read in an earlier file reserved, or a fresh one from `allocate`.
 pub fn link_entries<V: Clone>(

@@ -520,13 +520,11 @@ fn an_enum_publishes_an_entry_answering_each_constant() {
     let published = exports
         .instance_entries()
         .iter()
-        .map(|(instance, entry)| match instance {
-            crate::backend::instance_links::InstanceEntry::EnumConstant(constant) => {
-                (constant.classifier, &*constant.name, *entry)
-            }
-            crate::backend::instance_links::InstanceEntry::Object(_) => {
-                panic!("an enum publishes no object entry")
-            }
+        .map(|(instance, entry)| {
+            let constant = instance
+                .enum_constant()
+                .expect("an enum publishes no object entry");
+            (constant.classifier, &*constant.name, *entry)
         })
         .collect::<Vec<_>>();
     let [(light_owner, "LIGHT", light), (dark_owner, "DARK", dark)] = published.as_slice() else {
