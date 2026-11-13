@@ -16566,26 +16566,12 @@ impl<'a> Checker<'a> {
                         !self.receiver_member_level_owns_constructors(receiver.ty, &fname, internal)
                     })
                 });
-                // With no same-named receiver-less function, the classifier's constructors are the
-                // bare call's candidate family, and they shape its lambdas through the same
-                // operation a function family uses, and the constructor path commits the one
-                // shared selection chooses among them.
-                let receiverless_family = {
-                    let functions = self.resolver().top_level_candidates(&fname);
-                    match bare_constructor_classifier {
-                        Some(internal)
-                            if functions.is_empty()
-                                && !self.lexical_value_declares(scope, &fname) =>
-                        {
-                            (
-                                functions,
-                                self.scope_constructor_candidates(scope, internal, call),
-                            )
-                        }
-                        _ => (functions, Vec::new()),
-                    }
-                };
-                let (receiverless_functions, scope_constructors) = receiverless_family;
+                // The classifier's constructors join the call's candidates on their own rung.
+                let scope_constructor_candidates::ReceiverlessCallFamily {
+                    functions: receiverless_functions,
+                    scope_constructors,
+                    competing_constructors,
+                } = self.receiverless_call_family(scope, call, &fname, bare_constructor_classifier);
                 let eager_family = |checker: &mut Self, family| match toplevel_partial.as_deref() {
                     Some(partial) if has_lambda_argument && known_sig.is_none() => checker
                         .eager_lambda_family(
@@ -18158,7 +18144,10 @@ impl<'a> Checker<'a> {
                 // selection chooses among them, and the provider path materializes only the
                 // declaration it chose. A low-priority winner keeps its place after the implicit
                 // receiver rungs.
-                let scope_constructor_decision = self.scope_constructor_choice(
+                let scope_constructor_selection::ScopeCallDecision {
+                    constructor: scope_constructor_decision,
+                    function: competing_function,
+                } = self.scope_call_decision(
                     scope,
                     CallArgs {
                         call,
@@ -18170,13 +18159,23 @@ impl<'a> Checker<'a> {
                         alias_target: bare_alias_target,
                         expected,
                     },
+                    (
+                        &top_level_family,
+                        &scope_constructors,
+                        &competing_constructors,
+                    ),
+                );
+                let constructor_family = scope_constructor_candidates::constructors(
                     &scope_constructors,
+                    &competing_constructors,
                 );
                 let deferred_scope_constructor = scope_constructor_decision
                     .as_ref()
                     .and_then(scope_constructor_selection::ScopeConstructorSelection::selected)
                     .filter(|selected| self.is_low_priority_constructor(selected));
-                if let Some(scoped_internal) = bare_constructor_classifier {
+                if let Some(scoped_internal) =
+                    bare_constructor_classifier.filter(|_| competing_function.is_none())
+                {
                     let (inherited, inherited_owner) =
                         self.inherited_nested_type_with_owner(&fname);
                     let inherited_shape = (inherited.found() == Some(scoped_internal))
@@ -18233,7 +18232,7 @@ impl<'a> Checker<'a> {
                                         ConstructorPriorityTier::All
                                     },
                                     selection: scope_constructor_decision.as_ref(),
-                                    candidates: &scope_constructors,
+                                    candidates: constructor_family,
                                 },
                             ) {
                                 Ok(LibraryConstructorSelection::Selected) => {
@@ -18405,7 +18404,7 @@ impl<'a> Checker<'a> {
                                         ConstructorPriorityTier::All
                                     },
                                     selection: scope_constructor_decision.as_ref(),
-                                    candidates: &scope_constructors,
+                                    candidates: constructor_family,
                                 },
                             ) {
                                 Ok(LibraryConstructorSelection::Selected) => {
@@ -18735,6 +18734,7 @@ impl<'a> Checker<'a> {
                             candidate_index: None,
                         }))
                     })
+                    .or(competing_function)
                     .or_else(|| {
                         self.select_callable_candidate(
                             scope,
