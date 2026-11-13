@@ -245,7 +245,7 @@ pub(super) fn lower_file(
             &mut classes,
             &mut super::interface_members::Destination {
                 module: &mut *module,
-                objects: &mut runtime.objects,
+                runtime: &mut *runtime,
                 callables: &mut *callable_registry,
             },
         )?;

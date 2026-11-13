@@ -65,6 +65,15 @@ pub(crate) enum DependencyImplementation {
     Interface(u32),
     /// A function no table of the class holds: a dependency interface's default.
     Function(ObjectFunction),
+    /// The member at this vtable slot, carried differently from how the interface declares it
+    /// (`next(): Int` implementing `Iterator<T>.next(): T`): a bridge converting between the
+    /// member's parameter and result types, `declared`, and the override's, `implemented`, and
+    /// dispatching through the slot, which a subclass overriding it fills in turn.
+    Bridge {
+        slot: u32,
+        declared: (Vec<Ty>, Ty),
+        implemented: (Vec<Ty>, Ty),
+    },
 }
 
 /// The classes laid out so far in the current source module, by identity.
