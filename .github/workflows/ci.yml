@@ -1,6 +1,6 @@
 name: Kotlin 2.5.0-RC source validation
 
-# Manual-only validation of the exact source commit after the RC tables and pins are imported.
+# Manual-only rerun of the RC source checks that failed for harness/setup reasons.
 on:
   workflow_dispatch:
 
@@ -13,6 +13,7 @@ jobs:
     timeout-minutes: 360
     env:
       KOTLIN_VERSION: 2.5.0-RC
+      KRUSTY_LANGUAGE_VERSION: 2.5.0-RC
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -27,83 +28,34 @@ jobs:
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: just
-      - name: Prepare evidence and verify source base
+      - name: Verify exact source and provision exact RC JVM and Native inputs
         id: prepare
         run: |
           set -euo pipefail
-          EVIDENCE="$RUNNER_TEMP/kotlin-2.5.0-RC-validation"
-          echo "EVIDENCE=$EVIDENCE" >> "$GITHUB_ENV"
-          mkdir -p "$EVIDENCE"
-          source_commit=508017992e2b1bd4812248d834ff0d7e5aca0563
+          evidence="$RUNNER_TEMP/kotlin-2.5.0-RC-validation"
+          mkdir -p "$evidence"
+          echo "EVIDENCE=$evidence" >> "$GITHUB_ENV"
+          source_commit=68bb99dc6006aea849b85b3f9e12c6a497dd8882
           git merge-base --is-ancestor "$source_commit" HEAD
-          printf '%s\n' "$source_commit" > "$EVIDENCE/source-base.txt"
           git diff --quiet "$source_commit" HEAD -- . \
             ':(exclude).github/workflows/ci.yml' \
             ':(exclude)scripts/rc-klib-stamp-probe.sh'
-          git rev-parse HEAD > "$EVIDENCE/workflow-commit.txt"
-          git status --short --branch > "$EVIDENCE/checkout-status.txt"
-      - name: Check all four RC release tables against kotlinc
+          kotlinc="$(just kotlinc "$KOTLIN_VERSION")"
+          kotlin_native="$(just kotlin-native "$KOTLIN_VERSION")"
+          echo "KRUSTY_KOTLINC=$kotlinc" >> "$GITHUB_ENV"
+          echo "KRUSTY_KOTLIN_NATIVE=$kotlin_native" >> "$GITHUB_ENV"
+          printf '%s\n' "$source_commit" > "$evidence/source-base.txt"
+          printf '%s\n' "$kotlinc" > "$evidence/kotlinc-path.txt"
+          printf '%s\n' "$kotlin_native" > "$evidence/kotlin-native-path.txt"
+          git rev-parse HEAD > "$evidence/workflow-commit.txt"
+          git status --short --branch > "$evidence/checkout-status.txt"
+      - name: Check all four RC release tables against exact RC kotlinc
         if: ${{ always() && steps.prepare.outcome == 'success' }}
-        env:
-          KRUSTY_LANGUAGE_VERSION: 2.5.0-RC
         run: |
           set -euo pipefail
           ./run-tests.sh --test conformance kotlinc_argument_conformance -- --nocapture \
             2>&1 | tee "$EVIDENCE/four-table-oracle.log"
-      - name: Run plugin host suite and exact RC host smoke test
-        if: ${{ always() && steps.prepare.outcome == 'success' }}
-        run: |
-          set -euo pipefail
-          cargo test --profile gate -p krusty-plugin-host -- --include-ignored \
-            2>&1 | tee "$EVIDENCE/plugin-host-suite.log"
-      - name: Start the plugin host on the exact RC compiler
-        if: ${{ always() && steps.prepare.outcome == 'success' }}
-        run: |
-          set -euo pipefail
-          smoke="$RUNNER_TEMP/rc-plugin-host-smoke"
-          mkdir -p "$smoke/src"
-          cat > "$smoke/Cargo.toml" <<EOF
-          [package]
-          name = "krusty-rc-plugin-host-smoke"
-          version = "0.0.0"
-          edition = "2021"
-          [workspace]
-          [dependencies]
-          krusty-plugin-host = { path = "$GITHUB_WORKSPACE/crates/krusty-plugin-host" }
-          EOF
-          cat > "$smoke/src/main.rs" <<'EOF'
-          use std::io;
-          use krusty_plugin_host::{provision, Curl, Environment, Host, Pins, Request};
-          fn main() {
-              let env = Environment::from_process().expect("host environment");
-              let request = Request {
-                  kotlin_version: "2.5.0-RC",
-                  reason: "the Kotlin 2.5.0-RC validation",
-                  min_java: 17,
-              };
-              let pins = Pins::builtin(&env.platform);
-              let runtime = provision(&request, &env, &pins, &Curl, &mut io::stderr())
-                  .expect("verified RC compiler runtime");
-              let mut host = Host::start(&runtime, &env, &mut io::stderr())
-                  .expect("RC adapter compiles and exact-version host starts");
-              assert!(host.load(&[], &[]).expect("empty RC plugin load").is_empty());
-              host.unload().expect("unload empty RC plugin set");
-          }
-          EOF
-          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/rc-plugin-host-smoke" \
-            cargo run --manifest-path "$smoke/Cargo.toml" \
-            2>&1 | tee "$EVIDENCE/plugin-host-rc-smoke.log"
-      - name: Validate the RC plugin API surface jar
-        if: ${{ always() && steps.prepare.outcome == 'success' }}
-        run: |
-          set -euo pipefail
-          cd tools/kotlin-plugin-api
-          ./gradlew test -PkotlinVersion=2.5.0-RC \
-            2>&1 | tee "$EVIDENCE/plugin-api-surface.log"
-          cp build/reports/kotlin-plugin-api-surface-2.5.0-RC.md "$EVIDENCE/"
-          sha256sum build/libs/kotlin-plugin-api-surface-2.5.0-RC.jar \
-            > "$EVIDENCE/plugin-api-surface.sha256"
-      - name: Build the compiler unit test binary
+      - name: Build compiler unit test binary
         id: compiler-unit
         if: ${{ always() && steps.prepare.outcome == 'success' }}
         run: |
@@ -115,7 +67,7 @@ jobs:
         if: ${{ always() && steps.prepare.outcome == 'success' }}
         run: |
           set -euo pipefail
-          scripts/rc-klib-stamp-probe.sh "$EVIDENCE/klib-stamps" \
+          bash scripts/rc-klib-stamp-probe.sh "$EVIDENCE/klib-stamps" \
             2>&1 | tee "$EVIDENCE/klib-stamp-probe.log"
       - name: Census RC stdlib implementations on Native and both Wasm targets
         if: ${{ always() && steps.prepare.outcome == 'success' && steps.compiler-unit.outcome == 'success' }}
@@ -125,28 +77,25 @@ jobs:
           set -euo pipefail
           just klib-implementation-coverage "$PWD/compiler-unit-tests" "$KOTLIN_VERSION" \
             2>&1 | tee "$EVIDENCE/implementation-census.log"
-      - name: Verify the Native friend-linker precedence oracle
+      - name: Verify Native friend-linker precedence oracle
         if: ${{ always() && steps.prepare.outcome == 'success' }}
-        env:
-          KRUSTY_LANGUAGE_VERSION: 2.5.0-RC
         run: |
           set -euo pipefail
           ./run-tests.sh --test conformance friend_library_precedence_follows_the_native_linker_version -- --nocapture \
             2>&1 | tee "$EVIDENCE/native-friend-precedence-unit.log"
-      - name: Run the whole Native friend dependency box fixture
+      - name: Run whole Native friend dependency box fixture
         if: ${{ always() && steps.prepare.outcome == 'success' }}
         env:
-          KRUSTY_LANGUAGE_VERSION: 2.5.0-RC
           KRUSTY_REQUIRE_NATIVE_CONFORMANCE: "1"
           KRUSTY_NATIVE_BOX_ONLY: multimoduleFriendDependency
         run: |
           set -euo pipefail
           ./run-tests.sh --test conformance kotlin_codegen_box_native_conformance -- --nocapture \
             2>&1 | tee "$EVIDENCE/native-friend-dependency-box.log"
-      - name: Upload exact RC source validation logs and reports
+      - name: Upload exact RC validation logs and reports
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: kotlin-2.5.0-RC-source-validation
+          name: kotlin-2.5.0-RC-source-validation-retry
           path: ${{ runner.temp }}/kotlin-2.5.0-RC-validation
           if-no-files-found: warn
