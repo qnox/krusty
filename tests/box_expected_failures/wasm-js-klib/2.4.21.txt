@@ -3607,7 +3607,6 @@ regressions/multimodule/inlineAssertFailsWithCompletedBlock.kt
 regressions/multimodule/inlineBuiltString.kt
 regressions/multimodule/inlineNarrowElementInRange.kt
 regressions/multimodule/inlineNullCheckReturnTargets.kt
-regressions/multimodule/inlineStdlibRepeat.kt
 regressions/multimodule/inlineTextTrim.kt
 regressions/multimodule/inlineTodoDefaultMessage.kt
 regressions/multimodule/multimoduleDependencyFunctionImplementationMarkers.kt
