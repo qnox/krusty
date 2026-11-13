@@ -293,8 +293,7 @@ pub(super) fn specialize_generic_signature(
         // The expected array is the whole vararg only where it is the declared array's own kind: a
         // reference array for `vararg xs: E` (`Array<out E>`), the same primitive array for
         // `vararg xs: Int`, and a shorter function type still supplies it. Releases before 2.5.0
-        // (KT-90169) take an array argument of an equally long function type as the whole vararg only
-        // for a callable whose result mentions a type variable.
+        // (KT-90169) take any array argument of an equally long function type as the whole vararg.
         let binds_array_by_kind =
             crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_5_0);
         let whole_vararg = vararg.is_some_and(|index| {
@@ -304,9 +303,7 @@ pub(super) fn specialize_generic_signature(
                     let actual = actual.non_null();
                     let declared = generic.params[index].non_null();
                     if !binds_array_by_kind {
-                        // The result's own type variables are what the expected result fixes, so
-                        // the array supplies the whole vararg only for a generic result.
-                        generic.ret.mentions_ty_param() && actual.array_elem().is_some()
+                        actual.array_elem().is_some()
                     } else if declared.is_reference_array() {
                         actual.is_reference_array()
                     } else {
