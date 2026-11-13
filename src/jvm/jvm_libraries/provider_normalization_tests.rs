@@ -2,6 +2,68 @@ use super::JvmLibraries;
 use crate::symbol_source::SymbolNamespace;
 use crate::types::{type_name, Ty};
 
+#[test]
+fn stdlib_kclass_name_getters_carry_the_class_name_operation() {
+    use crate::libraries::{ClassNameKind, CompilerIntrinsic};
+    let stdlib = crate::toolchain::stdlib_jar().expect("selected reference stdlib");
+    let libraries = initialized_libraries(std::rc::Rc::new(super::Classpath::new(vec![stdlib])));
+    for (name, kind) in [
+        ("simpleName", ClassNameKind::Simple),
+        ("qualifiedName", ClassNameKind::Qualified),
+    ] {
+        let properties = crate::symbol_resolver::declared_member_callables(
+            &libraries,
+            Ty::obj("kotlin/reflect/KClass"),
+            name,
+        )
+        .properties()
+        .to_vec();
+        assert_eq!(properties.len(), 1, "{name}");
+        let property = &properties[0];
+        assert_eq!(
+            property.getter.compiler_intrinsic,
+            Some(CompilerIntrinsic::ClassName(kind)),
+            "{name}: kind={:?} receiver={:?} formals={} ctx={} setter={} const={} ty={:?} \
+             getter_params={} getter_ctx={} gsig_formals={:?} gsig_params={:?} gsig_ret={:?} \
+             gsig_recv={:?} source_recv={:?} iface={} abs={} ret={:?} suspend={}",
+            property.kind,
+            property.receiver,
+            property.formals.len(),
+            property.context_count,
+            property.setter.is_some(),
+            property.is_const,
+            property.ty,
+            property.getter.params.len(),
+            property.getter.context_count,
+            property
+                .getter
+                .generic_sig
+                .as_ref()
+                .map(|signature| signature.formals.len()),
+            property
+                .getter
+                .generic_sig
+                .as_ref()
+                .map(|signature| signature.params.len()),
+            property
+                .getter
+                .generic_sig
+                .as_ref()
+                .map(|signature| signature.ret),
+            property
+                .getter
+                .generic_sig
+                .as_ref()
+                .and_then(|signature| signature.receiver),
+            property.getter.source_receiver,
+            property.getter.owner_is_interface,
+            property.getter.is_abstract,
+            property.getter.ret,
+            property.getter.suspend,
+        );
+    }
+}
+
 fn initialized_libraries(classpath: std::rc::Rc<super::Classpath>) -> JvmLibraries {
     JvmLibraries::new(classpath).expect("JVM provider initialization")
 }

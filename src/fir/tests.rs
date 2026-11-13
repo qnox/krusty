@@ -2859,7 +2859,7 @@ fn compact_graph_walker_delegates_every_semantic_operation() {
     });
     let nullable = graph.add_expr(SigExpr::Nullable(invoke));
     let substitutions = graph.add_substitutions([SigSubstitution {
-        parameter: TypeParameterId::from_raw(0).into(),
+        parameter: TypeParameterId::from_raw(0),
         value: string,
     }]);
     let substituted = graph.add_expr(SigExpr::Substitute {

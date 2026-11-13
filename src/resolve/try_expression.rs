@@ -266,6 +266,11 @@ impl Checker<'_> {
         let (ty, writes) = self.try_body_written_bindings(|checker| {
             let catch_scope = scope.child(ScopeKind::Block);
             checker.declare(&catch_scope, &c.name, caught, false);
+            checker.record_lexical_declaration(
+                &catch_scope,
+                &c.name,
+                super::lexical_bindings::LexicalValueRole::Catch(c.param_span),
+            );
             check_body(checker, &catch_scope)
         });
         let exit = self

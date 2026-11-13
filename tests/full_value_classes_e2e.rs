@@ -13,14 +13,13 @@ const ACC_PUBLIC: u16 = 0x0001;
 fn compile(src: &str, stem: &str) -> Vec<(String, Vec<u8>)> {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    common::compile_in_process(src, stem, &[stdlib.clone()], Some(jdk.as_path())).unwrap_or_else(
-        || {
-            panic!(
-                "{stem}: {:?}",
-                common::compile_in_process_diagnostics(src, stem, &[stdlib], Some(jdk.as_path()),)
-            )
-        },
-    )
+    let classpath = std::slice::from_ref(&stdlib);
+    common::compile_in_process(src, stem, classpath, Some(jdk.as_path())).unwrap_or_else(|| {
+        panic!(
+            "{stem}: {:?}",
+            common::compile_in_process_diagnostics(src, stem, classpath, Some(jdk.as_path()))
+        )
+    })
 }
 
 fn class_bytes<'a>(classes: &'a [(String, Vec<u8>)], name: &str) -> &'a [u8] {

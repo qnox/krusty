@@ -347,7 +347,7 @@ pub(super) fn libraries(
 ) -> KlibLibraries {
     let bodies = super::super::KlibDeclarationBodies::from_libraries(bodies)
         .expect("the fixture body modules have unique exact identities");
-    KlibLibraries::over_with_bodies(Rc::new(inventory), Rc::new(bodies))
+    KlibLibraries::over_with_bodies(Rc::new(inventory), bodies)
 }
 
 pub(super) fn declaration_tree(
@@ -377,6 +377,9 @@ pub(super) fn declaration_ir_tree_kind(
         KlibDeclarationSignature::Public(signature) => KlibIrSignature::Public(signature.clone()),
         KlibDeclarationSignature::Accessor(signature) => {
             KlibIrSignature::Accessor(signature.clone())
+        }
+        &KlibDeclarationSignature::FileLocal { file, slot } => {
+            KlibIrSignature::FileLocal { file, slot }
         }
     };
     let mut arena = KlibIrArena::default();

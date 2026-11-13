@@ -48,6 +48,15 @@ pub use value_namespace::{
 pub use value_try::desugar_value_try;
 pub use value_when::desugar_value_when;
 
+/// The private normalization entry for compiler-owned checked-source integration controls.
+#[cfg(test)]
+pub(crate) fn normalize_value_when_for_test(
+    ir: &mut crate::ir::IrFile,
+    expression: crate::ir::ExprId,
+) -> Option<crate::ir::ExprId> {
+    value_when::normalize_value_when(ir, expression)
+}
+
 pub use crate::ir::IrConst;
 use crate::types::Ty;
 

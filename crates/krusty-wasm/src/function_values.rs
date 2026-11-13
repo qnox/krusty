@@ -13,11 +13,12 @@
 use krusty::fx_hash::HashMap;
 
 use super::encode::{CompositeType, Module, SubType, ValType};
-use super::objects::{immutable, ITABLE_FIELD, REFERENCE};
+use super::objects::{immutable, REFERENCE, TYPE_INFO_FIELD};
 use super::runtime::Runtime;
 
-/// The dispatch table field holding a function value's entry: after the interface table.
-pub(super) const INVOKE_FIELD: u32 = ITABLE_FIELD + 1;
+/// The dispatch table field holding a function value's entry: after the interface table and the
+/// type information, which a function value has none of.
+pub(super) const INVOKE_FIELD: u32 = TYPE_INFO_FIELD + 1;
 
 /// The table type of every function value of one arity, and the type of its entry.
 #[derive(Clone, Copy)]
@@ -47,6 +48,7 @@ impl Runtime {
             .map(|ty| immutable(ValType::reference(*ty)))
             .chain([
                 immutable(ValType::nullable(objects.itable)),
+                immutable(ValType::nullable(objects.type_infos.ty)),
                 immutable(ValType::reference(invoke)),
             ])
             .collect();

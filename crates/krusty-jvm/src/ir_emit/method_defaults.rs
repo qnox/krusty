@@ -477,7 +477,7 @@ pub(super) fn mark_default_fill(
     default: ExprId,
     code: &mut CodeBuilder,
 ) {
-    emitter.mark_kept_start_line(default, code);
+    emitter.mark_line_before_operands(default, code);
 }
 
 pub(crate) fn body_has_reified_markers(ir: &IrFile, expression: krusty::ir::ExprId) -> bool {

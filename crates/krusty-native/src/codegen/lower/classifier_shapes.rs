@@ -150,10 +150,21 @@ pub(super) fn is_string_builder(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/text/StringBuilder"])
 }
 
+/// The classes the runtime makes whose members runtime functions realize, each with the descriptor
+/// its instances carry. An instance stands behind every interface its class implements, where no
+/// class of the program recorded an implementation for a call through that interface to reach.
+pub(super) fn runtime_member_classes() -> [(TypeName, &'static str); 1] {
+    [(
+        krusty::types::type_name("kotlin/text/StringBuilder"),
+        "kt_type_string_builder",
+    )]
+}
+
 /// Whether the runtime, not a library class body, lays out `internal`: the root class, `Unit`, the
-/// companions of the built-in types, the shared empty set, text, the arrays, the throwables and builder it
-/// constructs, and the standard collection implementations. A dependency body's call of such a
-/// member, or read of such an object, is lowered here as a source one is.
+/// companions of the built-in types, the shared empty set, text, the arrays, the unsigned integers
+/// (carried as the value they wrap), the throwables and builder it constructs, the integral ranges
+/// and progressions, and the standard collection implementations. A dependency body's call of such
+/// a member, or read of such an object, is lowered here as a source one is.
 pub(in super::super) fn represents_dependency_classifier(internal: TypeName) -> bool {
     super::super::super::intrinsics::is_any(internal)
         || internal == krusty::types::wk::unit()
@@ -163,9 +174,11 @@ pub(in super::super) fn represents_dependency_classifier(internal: TypeName) -> 
         || is_char_sequence(internal)
         || is_string_builder(internal)
         || Ty::obj_name(internal).is_array()
+        || Ty::obj_name(internal).is_unsigned()
         || super::super::super::intrinsics::throwable_descriptor(internal).is_some()
         || is_pair(internal)
         || is_indexed_value(internal)
+        || integral_range_element(internal).is_some()
         || standard_collection_implementation(internal).is_some()
 }
 
@@ -612,6 +625,25 @@ impl<'a> FileLowering<'a> {
                         .any(|named| named == internal)
             })
             .collect()
+    }
+
+    /// Whether the classifier `class` is `of` or has it among its supertypes, by the hierarchy
+    /// the declarations froze.
+    pub(super) fn is_subclassifier(&self, class: TypeName, of: TypeName) -> bool {
+        let mut pending = vec![class];
+        let mut visited = krusty::fx_hash::HashSet::default();
+        while let Some(classifier) = pending.pop() {
+            if classifier == of {
+                return true;
+            }
+            if !visited.insert(classifier) {
+                continue;
+            }
+            if let Some(fact) = self.classifiers.classifier(classifier) {
+                pending.extend(fact.supertypes.iter().copied());
+            }
+        }
+        false
     }
 
     pub(super) fn implements_dependency(&self, internal: TypeName) -> bool {

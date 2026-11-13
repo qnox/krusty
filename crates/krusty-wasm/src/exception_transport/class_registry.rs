@@ -5,7 +5,7 @@ use krusty::fx_hash::{HashMap, HashSet};
 use krusty::libraries::{RuntimeExceptionKind, RuntimeExceptionLayout};
 use krusty::types::TypeName;
 
-use super::{immutable, CompositeType, Module, SubType, ValType};
+use super::{CompositeType, Module, SubType, ValType};
 
 #[cfg(test)]
 mod tests;
@@ -15,6 +15,8 @@ pub(super) struct RuntimeClasses {
     table: u32,
     string: ValType,
     declared: HashMap<TypeName, (RuntimeExceptionLayout, u32)>,
+    /// The classes declared since [`Self::take_declared`] last ran, with their structs.
+    fresh: Vec<(TypeName, u32)>,
 }
 
 impl RuntimeClasses {
@@ -24,6 +26,7 @@ impl RuntimeClasses {
             table,
             string,
             declared: HashMap::default(),
+            fresh: Vec::new(),
         }
     }
 
@@ -71,20 +74,30 @@ impl RuntimeClasses {
         for (name, layout) in chain.into_iter().rev() {
             let structure = match self.declared.get(&name) {
                 Some((_, structure)) => *structure,
-                None if layout.kind == RuntimeExceptionKind::Throwable => self.base,
-                None => module.subtype(SubType {
-                    composite: CompositeType::Struct(
-                        std::iter::once(immutable(ValType::reference(self.table)))
-                            .chain(super::ExceptionTransport::base_fields(self.string))
-                            .collect(),
-                    ),
-                    supertype: Some(parent),
-                    open: true,
-                }),
+                None if layout.kind == RuntimeExceptionKind::Throwable => {
+                    self.fresh.push((name, self.base));
+                    self.base
+                }
+                None => {
+                    let structure = module.subtype(SubType {
+                        composite: CompositeType::Struct(super::ExceptionTransport::fields(
+                            self.table,
+                            self.string,
+                        )),
+                        supertype: Some(parent),
+                        open: true,
+                    });
+                    self.fresh.push((name, structure));
+                    structure
+                }
             };
             self.declared.insert(name, (layout, structure));
             parent = structure;
         }
         Ok(parent)
+    }
+
+    pub(super) fn take_declared(&mut self) -> Vec<(TypeName, u32)> {
+        std::mem::take(&mut self.fresh)
     }
 }

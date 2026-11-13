@@ -711,18 +711,27 @@ fn external_property_function_reference_is_materialized_without_lookup() {
 
     let mut ir = IrFile::default();
     let lowered = lower_body(body, &ResolvedModuleIndex::default(), &mut ir).unwrap();
-    let IrExpr::Lambda {
-        captures, arity, ..
-    } = ir.expr(lowered.roots[0])
-    else {
-        panic!("function-typed external property reference must become a lambda")
+    let IrExpr::CallableReference(reference) = ir.expr(lowered.roots[0]) else {
+        panic!("function-typed external property reference must become a callable reference")
     };
-    assert_eq!(*arity, 0);
-    assert_eq!(captures.len(), 1);
+    let crate::ir::IrCallableReferenceTarget::Property(property_reference) = &reference.target
+    else {
+        panic!("the reference must keep its checked property target")
+    };
     assert!(matches!(
-        ir.expr(captures[0]),
-        IrExpr::Const(IrConst::String(_))
+        &property_reference.target,
+        FirPropertyReferenceTarget::External { getter, .. }
+            if matches!(**getter, FirPropertyTarget::External { property: selected, .. } if selected == property)
     ));
+    assert!(!property_reference.bound_extension_receiver);
+    assert!(reference.captures.is_empty());
+    assert!(matches!(
+        reference.bound_receiver.map(|receiver| ir.expr(receiver)),
+        Some(IrExpr::Const(IrConst::String(_)))
+    ));
+    assert!(ir
+        .callable_reference_inline_template(lowered.roots[0])
+        .is_some());
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::Checked(checked_op)
@@ -2866,15 +2875,13 @@ fn common_ir_sink_prepares_inline_bodies_before_ordinary_callers() {
     let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
     let ordinary =
         streamed.ordinary_body_work(&analysis.files[0], crate::fir::SourceFileId::from_raw(0));
-    let (index, mut inline_bodies, mut default_arguments, mut sources) =
-        streamed.module.into_parts();
+    let (index, inline_bodies, mut default_arguments, mut sources) = streamed.module.into_parts();
     assert_eq!(inline_bodies.len(), 1);
     let mut ir = IrFile::default();
     let mut sink =
         super::CommonIrBodySink::new(&index, crate::fir::SourceFileId::from_raw(0), &mut ir)
             .unwrap();
-    sink.accept_inline_bodies(&index, &mut inline_bodies)
-        .unwrap();
+    sink.accept_inline_bodies(&index, &inline_bodies).unwrap();
     sink.accept_default_arguments(&index, &inline_bodies, &mut default_arguments)
         .unwrap();
     assert_eq!(inline_bodies.len(), 1);

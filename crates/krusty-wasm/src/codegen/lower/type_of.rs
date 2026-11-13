@@ -1,14 +1,15 @@
 //! `typeOf<T>()`: a new `KType` object describing the checked type argument
 //! (the Wasm runtime's `type_objects`).
 //!
-//! The described classifier is named by its Kotlin qualified name, which is what Kotlin/Wasm
-//! prints and what makes two descriptions of one type equal. A local class or an anonymous object
+//! The described classifier is its identity: a declared classifier's name, or the arity of a
+//! `FunctionN`, which a function type and its `FunctionN` spelling share. Its Kotlin qualified
+//! name is only what Kotlin/Wasm prints. A local class or an anonymous object
 //! has none, and a type parameter's classifier is a `KTypeParameter`, which this target does not
 //! build; each declines, as does a suspend function type.
 
-use super::super::super::type_objects::{Projection, TypeDescription};
+use super::super::super::type_objects::{Classifier, Projection, TypeDescription};
 use super::*;
-use krusty::backend::class_tables::{AnyMember, Slot};
+use krusty::backend::class_tables::AnyMember;
 use krusty::ir::ClassId;
 
 impl Body<'_> {
@@ -39,10 +40,12 @@ impl Body<'_> {
     }
 
     /// Replace the `KType` reference on the stack, statically of type `ty`, with its `toString()`.
+    /// The same reach analysis as a template `toString` of an erased reference: a slot with no
+    /// body declines, and a realized `kotlin.Any.toString` does not.
     pub(super) fn type_object_to_string(&mut self, ty: Ty) -> Result<(), Unsupported> {
-        if self.may_reach_any_default(ty, AnyMember::ToString)? {
+        if self.may_reach_unrealized(ty, AnyMember::ToString)? {
             return Err(format!(
-                "a string of `{}` where this file implements `KType` with `kotlin.Any.toString`",
+                "a `toString` of `{}` reaching a runtime object this target cannot print",
                 describe(ty)
             ));
         }
@@ -50,21 +53,16 @@ impl Body<'_> {
         Ok(())
     }
 
-    /// Whether a `KType` value can be an instance of a class of this file reaching `kotlin.Any`'s
-    /// own `member`. Every object this target makes as a `KType` answers all three members, so
-    /// only this file's classes implementing `KType` can.
-    pub(super) fn ktype_may_reach_any_default(
-        &self,
-        member: AnyMember,
-    ) -> Result<bool, Unsupported> {
+    /// Whether a class of this file implements `KType` and has no body for `member`. The runtime's
+    /// own `KType` object answers every member, so only those classes can.
+    pub(super) fn ktype_reaches_unrealized(&self, member: AnyMember) -> Result<bool, Unsupported> {
         let Some(classes) = self.classes else {
             return Ok(false);
         };
         Ok(self.ir.classes.iter().enumerate().any(|(id, class)| {
             !class.is_interface
                 && self.is_ktype_subtype(class.fq_name, &mut Vec::new())
-                && classes.tables.table(id as ClassId).vtable[member.slot() as usize]
-                    == Slot::AnyMember(member)
+                && !classes.realizes(id as ClassId, member)
         }))
     }
 
@@ -115,14 +113,11 @@ impl Body<'_> {
                     .iter()
                     .map(|argument| self.type_projection(*argument))
                     .collect::<Result<Vec<_>, _>>()?;
-                (name.kotlin_qualified_name(), arguments)
+                (self.described_classifier(name), arguments)
             }
-            TyKind::Unit => (
-                krusty::types::wk::unit().kotlin_qualified_name(),
-                Vec::new(),
-            ),
+            TyKind::Unit => (Classifier::Declared(krusty::types::wk::unit()), Vec::new()),
             TyKind::Nothing => (
-                krusty::types::wk::nothing().kotlin_qualified_name(),
+                Classifier::Declared(krusty::types::wk::nothing()),
                 Vec::new(),
             ),
             TyKind::Fun(signature) => {
@@ -138,10 +133,9 @@ impl Body<'_> {
                     .chain(std::iter::once(&signature.ret))
                     .map(|argument| self.type_description(*argument).map(Projection::Invariant))
                     .collect::<Result<Vec<_>, _>>()?;
-                (
-                    format!("kotlin.Function{}", signature.params.len()),
-                    arguments,
-                )
+                let arity = u8::try_from(signature.params.len())
+                    .map_err(|_| format!("`typeOf` of the function type `{}`", describe(ty)))?;
+                (Classifier::Function(arity), arguments)
             }
             _ => return Err(format!("`typeOf` of `{}`", describe(ty))),
         };
@@ -150,6 +144,17 @@ impl Body<'_> {
             arguments,
             nullable,
         })
+    }
+
+    /// The classifier `name` describes: a `FunctionN` by the arity its provider published for it,
+    /// so `Function1<A, B>` and `(A) -> B` describe one classifier.
+    fn described_classifier(&self, name: krusty::types::TypeName) -> Classifier {
+        match self.classifiers.classifier(name).and_then(|fact| fact.role) {
+            Some(krusty::types::ClassifierRole::FunctionOfArity(arity)) => {
+                Classifier::Function(arity)
+            }
+            _ => Classifier::Declared(name),
+        }
     }
 
     fn type_projection(&self, argument: Ty) -> Result<Projection, Unsupported> {

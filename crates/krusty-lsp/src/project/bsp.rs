@@ -371,6 +371,7 @@ fn model_from_responses(
         kind: ProviderKind::Bsp,
         jdk_home,
         modules,
+        repository_libraries: Vec::new(),
     }
 }
 

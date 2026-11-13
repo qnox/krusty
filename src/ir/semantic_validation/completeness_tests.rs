@@ -359,3 +359,25 @@ fn a_callable_reference_capture_obliges_the_adapter_parameter() {
     ir.shared_capture_parameters.insert((adapter, 0), Ty::Int);
     assert_eq!(ir.validate_complete_facts(HERE), Ok(()));
 }
+
+#[test]
+fn a_value_when_without_a_recorded_result_is_an_incomplete_fact() {
+    let mut ir = IrFile::default();
+    let condition = ir.add_expr(IrExpr::GetValue(0));
+    let one = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(1)));
+    let two = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(2)));
+    // A statement `when` without an `else` yields nothing to record.
+    ir.add_when(vec![(Some(condition), one)], Ty::Unit);
+    let recorded = ir.add_when(vec![(Some(condition), one), (None, two)], Ty::Int);
+    assert_eq!(ir.when_result_type(recorded), Some(Ty::Int));
+    assert_eq!(ir.unrecorded_when_result(), None);
+    assert_eq!(ir.validate_complete_facts(HERE), Ok(()));
+    let unrecorded = ir.add_expr(IrExpr::When {
+        branches: vec![(Some(condition), one), (None, two)],
+    });
+    assert_eq!(ir.unrecorded_when_result(), Some(unrecorded));
+    assert_eq!(
+        ir.validate_complete_facts(HERE),
+        Err(IncompleteIrFact::WhenResult(unrecorded))
+    );
+}

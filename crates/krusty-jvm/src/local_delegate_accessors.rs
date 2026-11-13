@@ -340,8 +340,9 @@ fn realize_accessor(
         return Err(());
     }
     if accessor.line != 0 {
-        ir.expr_lines.insert(accessor.body, accessor.line);
+        ir.set_statement_line(accessor.body, accessor.line);
         ir.set_source_line(accessor.body, accessor.line);
+        ir.position_generated_tree(accessor.body, accessor.line);
     }
     let returned = if accessor.result == krusty::types::Ty::Unit {
         let returned = ir.add_expr(IrExpr::Return(None));
