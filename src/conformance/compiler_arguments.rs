@@ -134,11 +134,14 @@ fn case_cli_arguments(src: &str, compiler: KotlinVersion) -> Result<Vec<String>,
             "box directive `{directive}` names no code-generation mode"
         ));
     }
+    let features = crate::features::FeatureTable::for_version(compiler)
+        .ok_or_else(|| format!("kotlinc {compiler} has no language feature table"))?;
     let mut arguments: Vec<String> = values(src, "LANGUAGE")
         .flat_map(|payload| payload.split([' ', ',', '\t']))
         .filter(|token| !token.is_empty())
-        .map(|token| format!("-XXLanguage:{token}"))
+        .map(|token| features.language_argument(token))
         .collect();
+    arguments.dedup();
     if let Some(version) = exact_version(src, "API_VERSION", compiler)?.filter(|v| v.major >= 2) {
         arguments.extend(["-api-version".to_string(), version.to_string()]);
     }
