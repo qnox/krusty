@@ -16,7 +16,6 @@ mod bound_local_alias_templates;
 mod call_argument_kinds;
 mod callable_references;
 mod classifier_associated;
-mod classifier_capture_types;
 mod classifier_identities;
 mod classifier_parents;
 mod constructor_results;
@@ -66,8 +65,10 @@ mod value_parameter_publication;
 mod value_selection;
 mod vararg_constructor_property;
 
+use super::classifier_capture_types::{
+    semantic_classifier_self, semantic_type_with_classifier_captures,
+};
 use bound_local_alias_templates::BoundLocalAliasTemplates;
-use classifier_capture_types::{semantic_classifier_self, semantic_type_with_classifier_captures};
 use implicit_context_candidates::SignatureImplicitReceiver;
 use value_selection::{SelectedEnumEntry, SelectedValue};
 

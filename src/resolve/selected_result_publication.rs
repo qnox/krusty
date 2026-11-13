@@ -295,6 +295,49 @@ impl CompactSelectedResultPublication {
         }
     }
 
+    /// The publication of an extension selected through a receiver: `parameters` are the value
+    /// parameters selection instantiated, `result` the result it produced.
+    pub(super) fn extension(
+        selected: &FunctionInfo,
+        result: Ty,
+        parameters: &[Ty],
+        parameter_by_argument: Box<[Option<u32>]>,
+        whole_array_arguments: Box<[bool]>,
+        explicit_type_arguments: Box<[Ty]>,
+    ) -> Self {
+        let mut callable = selected.callable.clone();
+        callable.ret = result;
+        Self::callable(
+            &callable,
+            SelectedSignature::with_supplied_context(selected, parameters),
+            parameter_by_argument,
+            whole_array_arguments,
+            explicit_type_arguments,
+        )
+    }
+
+    /// A member selected through a receiver as the selection instantiated it, with its
+    /// publication: `parameters` are its instantiated value parameters, `result` its result.
+    pub(super) fn member_call(
+        selected: &FunctionInfo,
+        result: Ty,
+        parameters: Vec<Ty>,
+        parameter_by_argument: Box<[Option<u32>]>,
+        whole_array_arguments: Box<[bool]>,
+        explicit_type_arguments: Box<[Ty]>,
+    ) -> (LibraryMember, Self) {
+        let mut member = selected.member_with_return(result);
+        member.params = parameters;
+        let publication = Self::member(
+            &member,
+            selected.receiver,
+            parameter_by_argument,
+            whole_array_arguments,
+            explicit_type_arguments,
+        );
+        (member, publication)
+    }
+
     pub(super) fn member(
         member: &LibraryMember,
         receiver: Option<Ty>,

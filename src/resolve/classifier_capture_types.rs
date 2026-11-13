@@ -5,7 +5,7 @@ use crate::resolve::{ClassSig, SymbolTable};
 use crate::types::{Ty, TyKind};
 
 /// The classifier applied to its own type parameters followed by those it captures.
-pub(super) fn semantic_classifier_self(signature: &ClassSig) -> Ty {
+pub(in crate::resolve) fn semantic_classifier_self(signature: &ClassSig) -> Ty {
     let own = signature
         .type_params
         .iter()
@@ -45,7 +45,10 @@ pub(super) fn semantic_classifier_self(signature: &ClassSig) -> Ty {
 /// carries captured declaration arguments after them. Compact explicit-header resolution will
 /// eventually be the sole producer, but every signature crossing this bridge must already obey the
 /// final representation invariant.
-pub(super) fn semantic_type_with_classifier_captures(table: &SymbolTable, ty: Ty) -> Ty {
+pub(in crate::resolve) fn semantic_type_with_classifier_captures(
+    table: &SymbolTable,
+    ty: Ty,
+) -> Ty {
     match ty.kind() {
         TyKind::Obj(owner, arguments) => {
             let mut arguments = arguments
@@ -106,5 +109,30 @@ pub(super) fn semantic_type_with_classifier_captures(table: &SymbolTable, ty: Ty
             Ty::star_projection(semantic_type_with_classifier_captures(table, inner))
         }
         _ => ty,
+    }
+}
+
+impl SymbolTable {
+    /// The classifier `owner` applied to its own type parameters, as its members' declared
+    /// signatures mention them.
+    pub(in crate::resolve) fn declaring_self(&self, owner: crate::types::TypeName) -> Option<Ty> {
+        if let Some(class) = self.class_by_type_name(owner) {
+            return Some(semantic_classifier_self(class));
+        }
+        let classifier = crate::symbol_source::SymbolSource::classifier(&*self.libraries, owner)?;
+        let arguments = classifier
+            .type_params()
+            .iter()
+            .enumerate()
+            .map(|(ordinal, parameter)| {
+                let bound = classifier
+                    .type_param_bounds()
+                    .get(ordinal)
+                    .and_then(|bounds| bounds.first().copied())
+                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+                Ty::ty_param(parameter, bound)
+            })
+            .collect::<Vec<_>>();
+        Some(Ty::obj_args_name(owner, &arguments))
     }
 }

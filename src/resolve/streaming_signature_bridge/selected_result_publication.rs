@@ -18,7 +18,9 @@ pub(super) struct SelectionInputs<'a> {
     pub(super) arguments: &'a [Ty],
 }
 
-fn whole_array_arguments(arguments: &[crate::fir::ResolvedSigCallArgument<'_>]) -> Box<[bool]> {
+pub(super) fn whole_array_arguments(
+    arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
+) -> Box<[bool]> {
     arguments
         .iter()
         .map(|argument| argument.spread || argument.name.is_some())
@@ -41,49 +43,6 @@ impl ProductionSignatureSemantics<'_> {
         ))
     }
 
-    /// The classifier `owner` applied to its own type parameters, as its members' declared
-    /// signatures mention them.
-    fn declaring_self(&self, owner: crate::types::TypeName) -> Option<Ty> {
-        if let Some(class) = self.table.class_by_type_name(owner) {
-            return Some(super::semantic_classifier_self(class));
-        }
-        let classifier =
-            crate::symbol_source::SymbolSource::classifier(&*self.table.libraries, owner)?;
-        let arguments = classifier
-            .type_params()
-            .iter()
-            .enumerate()
-            .map(|(ordinal, parameter)| {
-                let bound = classifier
-                    .type_param_bounds()
-                    .get(ordinal)
-                    .and_then(|bounds| bounds.first().copied())
-                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-                Ty::ty_param(parameter, bound)
-            })
-            .collect::<Vec<_>>();
-        Some(Ty::obj_args_name(owner, &arguments))
-    }
-
-    /// The applied supertype of `actual` declared by `owner`, with its arguments: the hierarchy
-    /// view publication binds declared parameters through.
-    fn applied_supertype(
-        &self,
-        actual: Ty,
-        owner: crate::types::TypeName,
-    ) -> Option<(Ty, Vec<Ty>)> {
-        let applied = self
-            .table
-            .applied_hierarchy(actual)
-            .into_iter()
-            .find(|(candidate, _, _)| *candidate == owner)
-            .map(|(_, applied, _)| applied)?;
-        let TyKind::Obj(applied_owner, arguments) = applied.non_null().kind() else {
-            return None;
-        };
-        (applied_owner == owner).then(|| (applied, arguments.to_vec()))
-    }
-
     pub(super) fn forget_selected_result_publication(&self, origin: crate::fir::OriginId) {
         self.selected_calls.forget_publication(origin);
     }
@@ -97,8 +56,8 @@ impl ProductionSignatureSemantics<'_> {
         let alias = publication.applied_result_alias(
             inputs.receiver,
             inputs.arguments,
-            |owner| self.declaring_self(owner),
-            |actual, owner| self.applied_supertype(actual, owner),
+            |owner| self.table.declaring_self(owner),
+            |actual, owner| self.table.applied_supertype(actual, owner),
         );
         self.selected_calls.record_result_alias(origin, alias);
         self.selected_calls.record_publication(origin, publication);
@@ -119,63 +78,6 @@ impl ProductionSignatureSemantics<'_> {
             whole_array_arguments(arguments),
             explicit_type_arguments.into(),
         )
-    }
-
-    /// A selected top-level declaration's signature with the parameters `callable`, its
-    /// instantiation at this call, gives it.
-    pub(super) fn selected_signature(
-        selected: &crate::libraries::FunctionInfo,
-        callable: &crate::libraries::LibraryCallable,
-    ) -> Box<SelectedSignature> {
-        Box::new(SelectedSignature::of_call(selected, callable))
-    }
-
-    /// The publication of an extension selected through a receiver: `parameters` are the value
-    /// parameters selection instantiated, `result` the result it produced.
-    pub(super) fn selected_extension_publication(
-        &self,
-        selected: &crate::libraries::FunctionInfo,
-        result: Ty,
-        parameters: &[Ty],
-        parameter_by_argument: Box<[Option<u32>]>,
-        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
-        explicit_type_arguments: &[Ty],
-    ) -> CompactSelectedResultPublication {
-        let mut callable = selected.callable.clone();
-        callable.ret = result;
-        self.selected_callable_publication(
-            &callable,
-            SelectedSignature::with_supplied_context(selected, parameters),
-            parameter_by_argument,
-            arguments,
-            explicit_type_arguments,
-        )
-    }
-
-    /// A member selected through a receiver as the selection instantiated it, with its
-    /// publication: `parameters` are its instantiated value parameters, `result` its result.
-    pub(super) fn selected_member_call_publication(
-        &self,
-        selected: &crate::libraries::FunctionInfo,
-        result: Ty,
-        parameters: Vec<Ty>,
-        parameter_by_argument: Box<[Option<u32>]>,
-        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
-        explicit_type_arguments: &[Ty],
-    ) -> (
-        crate::libraries::LibraryMember,
-        CompactSelectedResultPublication,
-    ) {
-        let mut member = selected.member_with_return(result);
-        member.params = parameters;
-        let publication = self.selected_member_publication(
-            &member,
-            selected.receiver,
-            parameter_by_argument,
-            arguments,
-            explicit_type_arguments,
-        );
-        (member, publication)
     }
 
     pub(super) fn selected_member_publication(

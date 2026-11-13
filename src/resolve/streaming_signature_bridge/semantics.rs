@@ -3,10 +3,13 @@
 use super::super::callable_reference_selection as reference_selection;
 use super::callable_references::AppliedSourceAlias;
 use super::constructor_results::selected_sam_constructor_result;
-use super::selected_result_publication::SelectionInputs;
+use super::selected_result_publication::{whole_array_arguments, SelectionInputs};
 use super::top_level_call::SelectedTopLevelCall;
 use super::*;
 use crate::resolve::implicit_rungs::ImplicitRung;
+use crate::resolve::selected_result_publication::{
+    CompactSelectedResultPublication, SelectedSignature,
+};
 
 mod cast_narrowing;
 mod classifier_calls;
@@ -1547,7 +1550,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             arguments,
                             trailing_lambda,
                         ),
-                        selection: Self::selected_signature(&selected, &callable),
+                        selection: Box::new(SelectedSignature::of_call(&selected, &callable)),
                         callable: Box::new(callable),
                         source: selected.source_key,
                         declaration: selected.stable_declaration,
@@ -1630,7 +1633,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             ),
                             source: selected.source_key,
                             declaration: selected.stable_declaration,
-                            selection: Self::selected_signature(&selected, &callable),
+                            selection: Box::new(SelectedSignature::of_call(&selected, &callable)),
                             callable: Box::new(callable),
                         },
                         selected_types,
@@ -3643,13 +3646,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 *selected_alias.borrow_mut() = selected.constructor_alias().cloned();
             }
             if selected.kind == crate::libraries::FnKind::Member || selected_constructor.get() {
-                let (member, publication) = self.selected_member_call_publication(
+                let (member, publication) = CompactSelectedResultPublication::member_call(
                     &selected,
                     result,
                     parameters,
                     parameter_by_argument,
-                    arguments,
-                    &type_arguments,
+                    whole_array_arguments(arguments),
+                    type_arguments.as_slice().into(),
                 );
                 return Some((
                     result,
@@ -3662,13 +3665,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     publication,
                 ));
             }
-            let publication = self.selected_extension_publication(
+            let publication = CompactSelectedResultPublication::extension(
                 &selected,
                 result,
                 &parameters,
                 parameter_by_argument,
-                arguments,
-                &type_arguments,
+                whole_array_arguments(arguments),
+                type_arguments.as_slice().into(),
             );
             Some((
                 result,

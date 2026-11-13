@@ -120,6 +120,7 @@ mod checker_symbol_queries;
 mod class_body_bindings;
 mod classifier_associated;
 mod classifier_binding;
+mod classifier_capture_types;
 mod collection_literals;
 mod common_classifier_views;
 #[cfg(test)]
