@@ -23,7 +23,7 @@ jobs:
     - name: check exact machine source and test compilation
       run: |
         set -euo pipefail
-        git diff --exit-code 55b64b6c408bda5853210b9e7fba15a6d46d94a4 HEAD -- . ':!.github/workflows/ci.yml'
+        git diff --exit-code 4be083f18ed2ba85a2e6db7fef315a039f91cd79 HEAD -- . ':!.github/workflows/ci.yml'
         git rev-parse HEAD > compiler-source.txt
         cargo check --profile gate -p krusty --lib --tests 2>&1 | tee machine-check.log
     - name: upload compiler diagnostics
