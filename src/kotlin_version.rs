@@ -384,7 +384,7 @@ mod tests {
         assert!(supported.contains(&KotlinVersion::V2_4_10));
         assert!(supported.contains(&KotlinVersion::V2_4_20));
         assert!(supported.contains(&KotlinVersion::V2_5_0_RC));
-        assert!(!supported.contains(&version("2.5.0-Beta2")));
+        assert!(!supported.contains(&KotlinVersion::parse("2.5.0-Beta2").unwrap()));
         assert_eq!(supported.last().copied(), Some(KotlinVersion::V2_5_0_RC));
         assert_eq!(KotlinVersion::newest(), KotlinVersion::V2_4_21);
         assert_eq!(
