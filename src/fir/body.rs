@@ -1241,7 +1241,9 @@ pub enum FirExprKind {
         comparison: ResolvedTy,
     },
     /// `ends_inlined_call`: the selected range declaration is an inline function (`UInt.rangeTo`)
-    /// that this construction realizes in place of the body kotlinc inlines.
+    /// that this construction realizes in place of the body kotlinc inlines. `declaration` is that
+    /// selected dependency declaration, which a target that does not lay out the range class
+    /// calls to build it.
     Range {
         operation: FirRangeOperation,
         start: FirExprId,
@@ -1249,6 +1251,7 @@ pub enum FirExprKind {
         end: FirExprId,
         end_type: ResolvedTy,
         ends_inlined_call: bool,
+        declaration: Option<crate::fir::ExternalCallableId>,
     },
     InRange {
         operation: FirRangeOperation,
