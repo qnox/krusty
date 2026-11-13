@@ -14,6 +14,7 @@ jobs:
     env:
       KOTLIN_VERSION: 2.5.0-RC
       KRUSTY_LANGUAGE_VERSION: 2.5.0-RC
+      CARGO_BUILD_JOBS: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -42,11 +43,19 @@ jobs:
             ':(exclude)scripts/rc-klib-stamp-probe.sh'
           kotlinc="$(just kotlinc "$KOTLIN_VERSION")"
           kotlin_native="$(just kotlin-native "$KOTLIN_VERSION")"
+          box_corpus="$(just box-corpus "$KOTLIN_VERSION")"
+          runtime_cc="$(command -v clang || true)"
           echo "KRUSTY_KOTLINC=$kotlinc" >> "$GITHUB_ENV"
           echo "KRUSTY_KOTLIN_NATIVE=$kotlin_native" >> "$GITHUB_ENV"
+          echo "KRUSTY_KOTLIN_BOX_DIR=$box_corpus" >> "$GITHUB_ENV"
+          if [ -n "$runtime_cc" ]; then echo "KRUSTY_RUNTIME_CC=$runtime_cc" >> "$GITHUB_ENV"; fi
           printf '%s\n' "$source_commit" > "$evidence/source-base.txt"
           printf '%s\n' "$kotlinc" > "$evidence/kotlinc-path.txt"
           printf '%s\n' "$kotlin_native" > "$evidence/kotlin-native-path.txt"
+          printf '%s\n' "$box_corpus" > "$evidence/box-corpus-path.txt"
+          uname -a > "$evidence/runner-uname.txt"
+          printf '%s\n' "$runtime_cc" > "$evidence/runtime-compiler-path.txt"
+          clang --version > "$evidence/runtime-compiler-version.txt" 2>&1 || true
           git rev-parse HEAD > "$evidence/workflow-commit.txt"
           git status --short --branch > "$evidence/checkout-status.txt"
       - name: Check all four RC release tables against exact RC kotlinc
@@ -59,8 +68,43 @@ jobs:
         id: compiler-unit
         if: ${{ always() && steps.prepare.outcome == 'success' }}
         run: |
-          set -euo pipefail
-          bin="$(just compiler-unit-tests)"
+          set -uo pipefail
+          snapshot() {
+            {
+              date -Is
+              free -h
+              for path in /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.peak /sys/fs/cgroup/memory.events; do
+                if [ -r "$path" ]; then
+                  printf '\n--- %s ---\n' "$path"
+                  cat "$path"
+                fi
+              done
+              printf '\n--- top resident processes ---\n'
+              ps -eo pid,ppid,rss,etime,comm,args --sort=-rss | head -n 12
+            } >> "$EVIDENCE/compiler-unit-memory.log" 2>&1
+          }
+          snapshot
+          just compiler-unit-tests > "$EVIDENCE/compiler-unit-build.log" 2>&1 &
+          build_pid=$!
+          (
+            while kill -0 "$build_pid" 2>/dev/null; do
+              snapshot
+              sleep 5
+            done
+          ) &
+          monitor_pid=$!
+          set +e
+          wait "$build_pid"
+          status=$?
+          set -e
+          kill "$monitor_pid" 2>/dev/null || true
+          wait "$monitor_pid" 2>/dev/null || true
+          snapshot
+          cat "$EVIDENCE/compiler-unit-build.log"
+          printf '%s\n' "$status" > "$EVIDENCE/compiler-unit-build.exit-code"
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          bin="$(tail -n 1 "$EVIDENCE/compiler-unit-build.log")"
+          if [ ! -x "$bin" ]; then bin="$(just compiler-unit-tests)"; fi
           cp "$bin" compiler-unit-tests
           printf '%s\n' "$bin" > "$EVIDENCE/compiler-unit-binary.txt"
       - name: Probe Native KLIB stamps at language levels 2.0 through 2.7
