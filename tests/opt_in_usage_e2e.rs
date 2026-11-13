@@ -498,6 +498,10 @@ fun other() = 2
 ";
 
 /// `+CollectionLiterals` accepts `kotlin.ExperimentalCollectionLiteralsApi` and no other marker.
+///
+/// kotlinc 2.5 accepts the marker under the feature (`FirOptInUsageBaseChecker`); the 2.4.x
+/// checker has no such exemption, so this expectation is krusty's own ledger and the kotlinc
+/// comparison for it runs on the 2.5 lane (the feature-off case below compares on every release).
 #[test]
 fn collection_literals_feature_accepts_only_its_own_marker() {
     let allow_kotlin_package = vec![
@@ -510,12 +514,15 @@ fun use() {
     kotlin.other()
 }
 ";
-    common::assert_errors_match_kotlinc(
-        &[
-            ("marker.kt", COLLECTION_LITERALS_MARKER),
-            ("main.kt", enabled),
-        ],
-        &allow_kotlin_package,
+    assert_eq!(
+        common::krusty_error_ledger_with_args(
+            &[
+                ("marker.kt", COLLECTION_LITERALS_MARKER),
+                ("main.kt", enabled),
+            ],
+            &allow_kotlin_package,
+        ),
+        ["main.kt:4:12: this declaration needs opt-in. Its usage must be marked with '@kotlin.OtherMarker' or '@OptIn(kotlin.OtherMarker::class)'"]
     );
 }
 
