@@ -1713,7 +1713,7 @@ fn an_annotated_value_class_in_another_file_uses_its_own_default_mode() {
     let stdlib = common::stdlib_jar();
     let ours_box = common::find_box_class(&ours).expect("krusty box class");
     let reference_box = common::find_box_class(&reference).expect("kotlinc box class");
-    let ours_result = common::run_box(&ours, &ours_box, &[stdlib.clone()])
+    let ours_result = common::run_box(&ours, &ours_box, std::slice::from_ref(&stdlib))
         .expect("JVM unavailable for krusty output");
     let reference_result = common::run_box(&reference, &reference_box, &[stdlib])
         .expect("JVM unavailable for kotlinc output");
