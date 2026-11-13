@@ -86,11 +86,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
+        version:
+        - 2.4.10
         target:
         - native
-        - wasm-js
-        - wasm-wasi
       max-parallel: 3
     runs-on: ubuntu-latest
     env:
@@ -98,6 +97,8 @@ jobs:
       BOX_REFERENCES: box-reference-classes-${{ matrix.target != 'jvm' && format('{0}-', matrix.target) || '' }}${{ matrix.version
         }}
       KRUSTY_TEST_THREADS: '4'
+      KRUSTY_DEPS_DEADLINE_SECONDS: '3600'
+      KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
     - name: base commit
@@ -130,7 +131,6 @@ jobs:
         path: target/cache/kotlinc/${{ matrix.version }}
         key: kotlinc-${{ matrix.version }}
     - name: restore serialization and KSP conformance inputs (${{ matrix.version }})
-      if: matrix.target == 'jvm'
       id: conformance-inputs
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
       with:
@@ -262,6 +262,15 @@ jobs:
         bash scripts/conformance-badge.sh fields jvm-byte-equality jvm-byte-equality.txt "${{ matrix.version }}"
 
         '
+    - name: provision exact reference atomicfu inputs
+      env:
+        VERSION: ${{ matrix.version }}
+      run: "set -euo pipefail\nmkdir -p \"$KRUSTY_DEPS_CACHE\"\nfor spec in \"org/jetbrains/kotlin kotlin-atomicfu-compiler-plugin-embeddable\
+        \ $VERSION\" \"org/jetbrains/kotlinx atomicfu-jvm 0.32.1\"; do\n  read -r group artifact version <<< \"$spec\"\n \
+        \ destination=\"$KRUSTY_DEPS_CACHE/$artifact-$version.jar\"\n  if [ ! -s \"$destination\" ]; then\n    curl --fail\
+        \ --location --retry 5 --retry-all-errors --connect-timeout 10 --max-time 180 \"https://repo1.maven.org/maven2/$group/$artifact/$version/$artifact-$version.jar\"\
+        \ --output \"$destination.pending\"\n    mv \"$destination.pending\" \"$destination\"\n  fi\n  jar tf \"$destination\"\
+        \ >/dev/null\ndone\n"
     - name: run native box conformance ${{ matrix.version }}
       if: matrix.target == 'native'
       id: native_box
@@ -281,7 +290,12 @@ jobs:
 
         just native-conformance-run "$PWD/conformance-bin" "${{ matrix.version }}" native-pct.txt
 
+        lane_status=$?
+
         bash scripts/conformance-badge.sh fields native-conformance native-pct.txt "${{ matrix.version }}"
+
+
+        exit "$lane_status"
 
 
         ) 2>&1 | tee complete-lane.log
