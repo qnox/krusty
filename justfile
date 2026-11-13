@@ -125,8 +125,7 @@ clippy-baseline-check:
     fail=0
     while IFS=$'\t' read -r cnt file msg; do
         [ -z "${file:-}" ] && continue
-        # A merge that lowered one row on both sides keeps both rows: the lower count holds.
-        b=$(awk -F'\t' -v f="$file" -v m="$msg" '$2==f && $3==m && (b=="" || $1<b) {b=$1} END {print b}' "$base")
+        b=$(awk -F'\t' -v f="$file" -v m="$msg" '$2==f && $3==m {print $1}' "$base")
         b=${b:-0}
         if [ "$cnt" -gt "$b" ]; then
             echo "NEW clippy finding ($cnt > $b allowed) — $file: $msg" >&2
