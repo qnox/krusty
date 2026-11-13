@@ -692,3 +692,12 @@ fn native_virtual_explicit_getter_exports_run_the_override() {
         "an open explicit getter must run the override"
     );
 }
+
+#[test]
+fn native_generic_elvis_preserves_its_non_null_type_parameter() {
+    let source = include_str!("box_regressions/multimodule/genericElvisNullProof.kt");
+    let stem = "genericElvisNullProof";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the whole generic Elvis module graph");
+    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
+}
