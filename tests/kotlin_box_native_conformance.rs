@@ -295,6 +295,18 @@ fn native_library_object_values_preserve_identity() {
     expect_native_klib_box(source, "nativeLibraryObjectValues");
 }
 
+#[test]
+fn native_library_generic_any_override_uses_the_canonical_vtable_slot() {
+    let source = include_str!("box_regressions/multimodule/libraryGenericAnyOverride.kt");
+    super::box_reference_classes::checked_box(source, "libraryGenericAnyOverride")
+        .expect("pinned kotlinc must run the exact KLIB module graph");
+    assert_eq!(
+        run_native_abi_case(source, "libraryGenericAnyOverride"),
+        Outcome::Pass,
+        "generic KLIB implementation must dispatch its Any.toString override"
+    );
+}
+
 fn expect_native_klib_box(source: &str, stem: &str) {
     super::common::expect_box_ok_with_stdlib(source, &format!("{stem}Oracle"));
     let target = host().expect("Native KLIB/runtime is required for this test");

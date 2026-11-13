@@ -19,6 +19,9 @@ fun box(): String {
     var delegated by Delegates.notNull<String>()
     delegated = "delegated"
     if (delegated != "delegated") return "delegatesNotNull"
+    val delegatedObject = Delegates.notNull<String>()
+    val delegatedText = delegatedObject.toString()
+    if (delegatedText != "NotNullProperty(value not initialized yet)") return "delegatesToString"
     if (runCatching { "runCatching" }.getOrThrow() != "runCatching") return "runCatching"
 
     val a: Any = EmptyCoroutineContext

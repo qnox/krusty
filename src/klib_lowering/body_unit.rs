@@ -1058,6 +1058,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
         match super::same_library_class::link(
             super::same_library_class::LocalClassSource {
                 bodies,
+                declarations: self.sources.declarations,
                 module: &module,
                 validate_root: &|root| callees.validate_root_constructor(&module, root, bodies),
             },
