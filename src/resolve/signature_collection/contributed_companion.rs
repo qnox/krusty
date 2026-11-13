@@ -79,6 +79,7 @@ fn synthesized_companion(contribution: ContributedCompanion) -> ClassSig {
         declared_callable_order: contribution.order,
         source_methods: Vec::new(),
         flags: ClassFlags::default().with_final(true).with_object(true),
+        enum_entries: Vec::new(),
         inner_of: None,
         companion_internal: None,
         lateinit_props: Default::default(),
