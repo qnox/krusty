@@ -1913,6 +1913,10 @@ pub enum PropertyReadStability {
     Stable,
     /// An open default-getter `val`, stable only through a statically final receiver classifier.
     StableOnFinalReceiver,
+    /// A final default-getter `val` that is a component of a value class declared in another
+    /// module. kotlinc smart-casts it only under `AllowSmartCastsOnValueClassUnderlyingProperties`;
+    /// any other property of another module is unstable.
+    ValueClassComponentOfOtherModule,
 }
 
 impl PropertyReadStability {
@@ -1931,9 +1935,15 @@ impl PropertyReadStability {
         }
     }
 
-    pub(crate) fn permits(self, receiver_is_final: bool) -> bool {
+    pub(crate) fn permits(
+        self,
+        receiver_is_final: bool,
+        smart_cast_value_class_components: bool,
+    ) -> bool {
         matches!(self, Self::Stable)
             || (receiver_is_final && matches!(self, Self::StableOnFinalReceiver))
+            || (smart_cast_value_class_components
+                && matches!(self, Self::ValueClassComponentOfOtherModule))
     }
 }
 
