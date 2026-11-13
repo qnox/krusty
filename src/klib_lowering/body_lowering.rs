@@ -219,8 +219,9 @@ pub(super) trait CallLinker {
         callee: &KlibAccessorIdSignature,
     ) -> Lowered<LinkedAccessor>;
 
-    /// Proves that `classifier` is a dependency object, whose value a body may read.
-    fn singleton(&self, classifier: TypeName) -> Lowered<()>;
+    /// Proves that `classifier` is a dependency object, whose value a body may read, and
+    /// materializes it in `ir` when its instance is the linker's to create.
+    fn singleton(&mut self, ir: &mut IrFile, classifier: TypeName) -> Lowered<()>;
 
     /// The dependency enum class whose constant `entry` a body reads, with that constant's name.
     /// A linker that materializes no class declines the read.

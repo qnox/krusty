@@ -98,6 +98,7 @@ pub(super) enum LocalBody<'a> {
 /// The prepared class borrows only the library; the module name and the root check do not.
 pub(super) struct LocalClassSource<'bodies, 'call> {
     pub(super) bodies: &'bodies KlibDeclarationBodies,
+    pub(super) declarations: &'bodies dyn crate::symbol_source::SymbolSource,
     pub(super) module: &'call str,
     pub(super) validate_root:
         &'call dyn Fn(&KlibPublicIdSignature) -> Result<(), KlibBodyDeclineReason>,
@@ -135,6 +136,8 @@ pub(super) struct MemberOverride {
     pub(super) declared_result: Ty,
     pub(super) applied_parameters: Vec<Ty>,
     pub(super) applied_result: Ty,
+    pub(super) semantic_role: Option<crate::types::SemanticCallRole>,
+    pub(super) is_interface: bool,
 }
 
 /// `parameters` and `result` after substituting each declaring type parameter in `formals` with
@@ -264,6 +267,11 @@ pub(super) fn realized_member_override(
         declared_result,
         applied_parameters,
         applied_result,
+        semantic_role: realization.callable.semantic_role,
+        is_interface: realization
+            .klib_body_class_contract
+            .as_ref()
+            .is_some_and(|contract| contract.kind == TypeKind::Interface),
     })
 }
 
@@ -690,6 +698,7 @@ fn prepare_class<'a>(
         resolve: &resolve,
         self_type,
         bodies: source.bodies,
+        declarations: source.declarations,
         module: source.module,
         interfaces: &interfaces,
     };
@@ -811,6 +820,7 @@ struct MemberScope<'a> {
     resolve: &'a dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
     self_type: Ty,
     bodies: &'a KlibDeclarationBodies,
+    declarations: &'a dyn crate::symbol_source::SymbolSource,
     module: &'a str,
     interfaces: &'a [AdmittedInterface],
 }
@@ -929,39 +939,76 @@ fn member_overrides(
                 return Err(mismatch("two libraries serialize one overridden function"))
             }
         };
-        let (owner_arena, owner, declared) =
-            match scope.bodies.function_owner(scope.module, &symbol.signature) {
-                LocatedMember::One {
-                    module: owner_module,
-                    arena,
-                    class,
-                    function,
-                } => {
-                    if owner_module != identity.module {
-                        return Err(mismatch("an overridden function is not in its class"));
-                    }
-                    (arena, class, function)
-                }
-                LocatedMember::Several => {
-                    return Err(mismatch("two classes serialize one overridden function"))
-                }
-                LocatedMember::Missing => {
-                    return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-                        "an override this library does not authenticate",
-                    ))
-                }
-            };
-        if class_kind(owner.base.flags) != TypeKind::Interface {
-            return Err(unsupported("an override of a class member"));
-        }
-        let Some(interface) = scope
-            .interfaces
-            .iter()
-            .find(|interface| interface.signature == owner.base.symbol.signature)
+        let Some((_, realization)) = scope
+            .declarations
+            .external_callable_by_dependency(&identity)
         else {
             return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-                "an override of a supertype this library does not authenticate",
+                "an override this library does not authenticate",
             ));
+        };
+        let KlibDeclarationSignature::Public(owner_signature) = &identity.declaration else {
+            return Err(unsupported("an override of a non-public declaration"));
+        };
+        let (owner_arena, owner, declared) = match scope.bodies.function_owner(
+            &identity.module,
+            &KlibIrSignature::Public(owner_signature.clone()),
+        ) {
+            LocatedMember::One {
+                module: owner_module,
+                arena,
+                class,
+                function,
+            } => {
+                if owner_module != identity.module {
+                    return Err(mismatch("an overridden function is not in its class"));
+                }
+                (arena, class, function)
+            }
+            LocatedMember::Several => {
+                return Err(mismatch("two classes serialize one overridden function"))
+            }
+            LocatedMember::Missing => {
+                return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                    "an override this library does not authenticate",
+                ))
+            }
+        };
+        let is_interface = class_kind(owner.base.flags) == TypeKind::Interface;
+        let metadata_owner = match realization.declaration_owner {
+            Some(crate::types::SemanticCallableOwner::Classifier(owner)) => owner,
+            _ => return Err(unsupported("an override without a classifier owner")),
+        };
+        if realization
+            .klib_body_class_contract
+            .as_ref()
+            .is_none_or(|contract| {
+                contract.classifier != metadata_owner
+                    || contract.kind != class_kind(owner.base.flags)
+                    || contract.module != identity.module
+                    || KlibIrSignature::Public(contract.signature.clone())
+                        != owner.base.symbol.signature
+            })
+        {
+            return Err(mismatch(
+                "an override owner disagrees with its provider contract",
+            ));
+        }
+        let (owner_name, arguments) = if is_interface {
+            let Some(interface) = scope
+                .interfaces
+                .iter()
+                .find(|interface| interface.signature == owner.base.symbol.signature)
+            else {
+                return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                    "an override of a supertype this library does not authenticate",
+                ));
+            };
+            (interface.name, interface.arguments.as_slice())
+        } else if metadata_owner == crate::types::wk::any() {
+            (metadata_owner, &[][..])
+        } else {
+            return Err(unsupported("an override of a class member"));
         };
         if !declared.type_parameters.is_empty() || declared.constructor {
             return Err(unsupported(
@@ -988,15 +1035,17 @@ fn member_overrides(
             &declared_signature.parameters,
             declared_signature.result,
             &formals,
-            &interface.arguments,
+            arguments,
         )?;
         overrides.push(MemberOverride {
             identity,
-            owner: interface.name,
+            owner: owner_name,
             declared_parameters: declared_signature.parameters,
             declared_result: declared_signature.result,
             applied_parameters,
             applied_result,
+            semantic_role: realization.callable.semantic_role,
+            is_interface,
         });
     }
     Ok(overrides)

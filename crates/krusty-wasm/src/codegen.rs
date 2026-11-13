@@ -143,7 +143,9 @@ impl Backend for WasmBackend {
         &self,
         classifier: krusty::backend::DependencyClassifier,
     ) -> bool {
+        // `Unit`'s value is the runtime's own, as a source reference of it is.
         classifier == krusty::types::wk::string()
+            || classifier == krusty::types::wk::unit()
             || lower::is_string_builder(classifier)
             || lower::runtime_lays_out(classifier)
     }
