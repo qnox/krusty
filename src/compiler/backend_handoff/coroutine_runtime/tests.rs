@@ -147,7 +147,7 @@ fn assert_selected_runtime(provider: &KlibLibraries) {
 
 fn assert_relocated_companion_call_freezes(provider: &KlibLibraries, runtime: IrCoroutineRuntime) {
     let mut ir = IrFile::default();
-    let argument = ir.add_expr(IrExpr::Const(IrConst::String("value".to_owned())));
+    let argument = ir.add_expr(IrExpr::Const(IrConst::String("value".to_owned().into())));
     let result_ty = Ty::obj_args_name(type_name("kotlin/Result"), &[Ty::String]);
     let source = ir.add_expr(IrExpr::Call {
         callee: Box::new(Callee::External {
