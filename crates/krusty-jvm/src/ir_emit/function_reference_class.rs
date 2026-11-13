@@ -192,7 +192,7 @@ pub(super) fn emit_func_ref_class(
         d
     };
 
-    if !field_capture_tys.is_empty() {
+    if fr.bound_contexts == 0 && !field_capture_tys.is_empty() {
         let descriptor = capture_constructor;
         let capture_words: u16 = field_capture_tys.iter().map(|ty| slot_words(*ty)).sum();
         let ctor_locals = 1 + capture_words + u16::from(fr.bound);
@@ -275,6 +275,48 @@ pub(super) fn emit_func_ref_class(
         if let Some(locals) = locals {
             cw.set_method_debug("<init>", &descriptor, None, &locals);
         }
+    } else if fr.bound_contexts > 0 {
+        // `<init>(Object[] [, Object])V`: super(arity, boundContextArguments [, receiver],
+        // owner.class, name, sig, flags). The runtime base class keeps the bound context values.
+        let descriptor = if fr.bound {
+            "([Ljava/lang/Object;Ljava/lang/Object;)V"
+        } else {
+            "([Ljava/lang/Object;)V"
+        };
+        let locals_count = 2 + u16::from(fr.bound);
+        cw.seed_utf8("<init>");
+        cw.seed_utf8(descriptor);
+        let mut ctor = CodeBuilder::new(locals_count);
+        ctor.aload(0);
+        ctor.push_int(physical_arity as i32, &mut cw);
+        ctor.aload(1);
+        if fr.bound {
+            ctor.aload(2);
+        }
+        push_reflection_owner(&mut ctor, &mut cw, fr.owner_class, &owner_class);
+        ctor.push_string(&fr.fn_name, &mut cw);
+        ctor.push_string(&signature, &mut cw);
+        ctor.push_int(fr.flags, &mut cw);
+        let super_descriptor = if fr.bound {
+            "(I[Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V"
+        } else {
+            "(I[Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V"
+        };
+        let sup = cw.methodref(&superclass, "<init>", super_descriptor);
+        ctor.invokespecial(sup, if fr.bound { 7 } else { 6 }, 0);
+        ctor.ret_void();
+        let mut parameters = vec![("boundContextArguments", "[Ljava/lang/Object;")];
+        if fr.bound {
+            parameters.push(("receiver0", "Ljava/lang/Object;"));
+        }
+        let locals =
+            function_reference_invoke::reference_constructor_locals(&mut cw, &fq, &parameters);
+        if cross_package || inline_reachable {
+            finish_code::<0x0001>(&mut cw, "<init>", descriptor, &mut ctor, locals_count);
+        } else {
+            finish_code::<0x0000>(&mut cw, "<init>", descriptor, &mut ctor, locals_count);
+        }
+        cw.set_method_debug("<init>", descriptor, None, &locals);
     } else if fr.bound {
         // `<init>(Object)V`: super(arity, receiver, owner.class, name, sig, flags).
         cw.seed_utf8("<init>");
@@ -351,7 +393,7 @@ pub(super) fn emit_func_ref_class(
         cw.set_method_debug("<init>", "()V", None, &locals);
     }
     // A singleton carrier's `<clinit>` follows its methods, as kotlinc orders them.
-    let singleton = field_capture_tys.is_empty() && !fr.bound;
+    let singleton = field_capture_tys.is_empty() && !fr.bound && fr.bound_contexts == 0;
     if let Some(invoke) = fr.invoke {
         emit_method(
             ir,
@@ -388,9 +430,30 @@ pub(super) fn emit_func_ref_class(
     let invoke_desc = jvm_function_invoke_descriptor(physical_arity);
     let invoke_locals = if high_arity { 2 } else { 1 + arity };
     let mut inv = CodeBuilder::new(invoke_locals);
+    let bound_contexts = fr.bound_contexts as usize;
     for (index, ty) in field_capture_tys.iter().copied().enumerate() {
         inv.aload(0);
-        let field = cw.fieldref(&fq, &fr.capture_fields[index], &field_capture_descs[index]);
+        if index < bound_contexts {
+            // `(T) this.boundContextArguments[index]`: the runtime base class keeps the values the
+            // reference site bound for the declaration's context parameters.
+            let array = cw.fieldref(&superclass, "boundContextArguments", "[Ljava/lang/Object;");
+            inv.getfield(array, 1);
+            inv.push_int(index as i32, &mut cw);
+            inv.array_load(0x32, 1);
+            let declared = jvm_declared_ty(&ty);
+            if declared.is_jvm_scalar() {
+                unbox_prim_from(&mut cw, &mut inv, Ty::obj("java/lang/Object"), declared);
+            } else if let Some(internal) = checkcast_internal(declared) {
+                let class = cw.class_ref(&internal);
+                inv.checkcast(class);
+            }
+            continue;
+        }
+        let field = cw.fieldref(
+            &fq,
+            &fr.capture_fields[index - bound_contexts],
+            &field_capture_descs[index],
+        );
         inv.getfield(field, slot_words(ty) as i32);
     }
     // Push the receiver for a member dispatch (`first_arg`, computed above, skips it in the arg loop).

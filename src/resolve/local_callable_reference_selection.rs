@@ -72,7 +72,7 @@ impl Checker<'_> {
                     ..crate::libraries::CallSig::default()
                 };
                 let plan =
-                    self.callable_ref_parameter_plan(&params, &call_sig, &expected.params)?;
+                    self.callable_ref_parameter_plan(&params, &call_sig, 0, &expected.params)?;
                 if !self.callable_ref_is_compatible(
                     &expected.params,
                     ret,

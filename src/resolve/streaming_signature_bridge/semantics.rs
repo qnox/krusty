@@ -2748,6 +2748,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             super::super::callable_reference_selection::parameter_plan(
                                 &constructor.params,
                                 &constructor.call_sig,
+                                0,
                                 &constructor_arguments,
                                 |actual, target| {
                                     crate::assignable::is_subtype(&context, &oracle, actual, target)
@@ -3050,6 +3051,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 super::super::callable_reference_selection::select_adapted_instance_candidate(
                     &source,
                     &members,
+                    self.headers.scopes.binds_reference_contexts(scope.source),
                     unbound.then(|| receiver.get()),
                     expected_function,
                     |actual, target| {

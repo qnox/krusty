@@ -262,6 +262,7 @@ impl Checker<'_> {
                 let plan = self.callable_ref_parameter_plan(
                     &constructor.params,
                     &constructor.call_sig,
+                    0,
                     parameters,
                 )?;
                 Self::adapted_ref_plan_is_identity(&plan).then_some((constructor, None))
@@ -275,6 +276,7 @@ impl Checker<'_> {
                         let plan = self.callable_ref_parameter_plan(
                             &constructor.params,
                             &constructor.call_sig,
+                            0,
                             parameters,
                         )?;
                         Some((constructor.clone(), plan))
