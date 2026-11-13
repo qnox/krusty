@@ -2070,6 +2070,9 @@ impl<'s> Linker<'_, 's> {
     ) -> Result<FunId, KlibBodyDeclineReason> {
         let statements = block_statements(function)?;
         let declared = declare_function(ir, &header);
+        if let Some(member) = &value_member {
+            class_construction::attach_materialized_member(ir, member.class, declared);
+        }
         self.functions.insert(identity.clone(), declared);
         if let Some(receiver) = header.value_receiver() {
             self.member_receivers.insert(identity.clone(), receiver);

@@ -344,7 +344,7 @@ fn klib_constructor_requires_exact_provider_evidence_and_a_constructor_handle() 
 }
 
 #[test]
-fn klib_generic_constructor_ordinary_body_retains_class_formals() {
+fn klib_generic_constructor_target_owned_body_retains_class_formals() {
     let Some(root) = distribution_root() else {
         return;
     };
@@ -399,7 +399,10 @@ fn klib_generic_constructor_ordinary_body_retains_class_formals() {
         .unwrap()
         .klib_body_callable()
         .unwrap();
-    let facts = KlibCalleeFacts::new([selected, constructor]);
+    // The Native target owns Pair's two-field carrier. This test checks the generic call
+    // signature and exact external constructor; ordinary class layout has its own module fixture.
+    let represents = |classifier| classifier == type_name("kotlin/Pair");
+    let facts = KlibCalleeFacts::new([selected, constructor]).with_target_classifiers(&represents);
     let externals = crate::fx_hash::HashMap::from_iter([(
         constructor.identity().clone(),
         super::super::EmittedDependencyCallable::constructor(constructor_target),
