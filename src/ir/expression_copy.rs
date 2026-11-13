@@ -71,6 +71,7 @@ fn expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId, relocating:
         callable_reference_provenance,
         callable_reference_enclosures,
         expression_owners,
+        module_constructions,
         generated_secondary_constructor_calls,
         fir_origins,
         checked_return_depths,
@@ -517,7 +518,7 @@ mod tests {
     use super::super::{Callee, IrConst, IrExpr, IrFile};
     use super::{copy_expression_facts, relocate_expression_facts};
     use crate::fir::SourceFileId;
-    use crate::types::{type_name, Ty};
+    use crate::types::{Ty, type_name};
 
     #[test]
     fn a_copy_inherits_the_facts_its_owning_modules_record() {
