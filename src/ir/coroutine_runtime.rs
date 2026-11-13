@@ -17,6 +17,10 @@ pub struct IrCoroutineRuntime {
     pub get_or_throw: ExternalCallableId,
     /// `kotlin.coroutines.Continuation.resumeWith(Result<Any?>)`.
     pub resume_with: ExternalCallableId,
+    /// The provider declaration's un-applied `resumeWith` parameter type.
+    pub resume_with_declared_parameter: crate::types::Ty,
+    /// The provider declaration's un-applied `resumeWith` result type.
+    pub resume_with_declared_result: crate::types::Ty,
     /// The exact `kotlin.coroutines.Continuation.context` property.
     pub context: ExternalPropertyId,
     /// The exact getter callable used by the Continuation property override contract.
@@ -27,6 +31,8 @@ pub struct IrCoroutineRuntime {
     pub context_receiver_ty: crate::types::Ty,
     /// `kotlin.Result.Companion.success(T)`, used to complete the source continuation.
     pub result_success: ExternalCallableId,
+    /// The provider-authenticated `Result.Companion` classifier owning success and failure.
+    pub result_companion: crate::types::TypeName,
     /// `kotlin.Result.failure(Throwable)`, used to deliver an exception from a resumed body.
     pub result_failure: ExternalCallableId,
 }
