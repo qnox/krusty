@@ -85,41 +85,6 @@ impl Checker<'_> {
         ))
     }
 
-    /// The scope constructor that the shared callable selection chooses for a bare call. Only
-    /// a declared constructor is returned: the functional-interface constructor has no
-    /// declaration to materialize, and its own conversion path commits it.
-    pub(super) fn scope_constructor_choice(
-        &self,
-        scope: &CheckerScope<'_>,
-        call_args: CallArgs<'_>,
-        type_args: &[Ty],
-        expected: Option<Ty>,
-        candidates: &[crate::libraries::FunctionInfo],
-    ) -> Option<crate::libraries::FunctionInfo> {
-        if candidates.is_empty() {
-            return None;
-        }
-        match self.select_callable_candidate(
-            scope,
-            call_args,
-            type_args,
-            None,
-            CallResultConstraint::direct(expected),
-            candidates.to_vec(),
-        )? {
-            CallableCandidateSelection::Selected(selected)
-                if selected
-                    .info
-                    .constructor
-                    .map(|constructor| constructor.origin)
-                    == Some(crate::libraries::ConstructorOrigin::Declared) =>
-            {
-                Some(selected.info)
-            }
-            _ => None,
-        }
-    }
-
     /// Whether this provider family contains the annotation-defined fallback constructor tier.
     pub(super) fn has_low_priority_constructor(
         &self,
