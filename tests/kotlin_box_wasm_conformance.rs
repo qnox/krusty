@@ -1184,6 +1184,14 @@ fn wasm_library_suspend_coroutine_runs() {
 }
 
 #[test]
+fn wasm_library_inherited_interface_defaults_run() {
+    expect_wasm_box(
+        include_str!("box_regressions/libraryClassInheritedDefaults.kt"),
+        "wasmLibraryInheritedDefaults",
+    );
+}
+
+#[test]
 fn wasm_class_equality_and_rendering_use_the_class_own_members() {
     expect_wasm_box(
         r#"
