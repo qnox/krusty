@@ -41,9 +41,11 @@ use krusty::ir::{ExprId, IrExpr, IrFile, IrNodeOrigin, IrTypeOp, NullCheck};
 /// that marks one, as kotlinc's visitor does.
 pub(crate) fn marks_line_at_start(ir: &IrFile, expression: ExprId) -> bool {
     // An inline call marks its line before the inliner copies the callee's body (kotlinc's
-    // `visitCall` mark ahead of `IrInlineCodegen.genCall`): the block realizing it in place starts
-    // with that mark.
-    if realizes_inlined_call(ir, expression) {
+    // `visitCall` mark ahead of `IrInlineCodegen.genCall`), after the operands are generated. A
+    // block that binds those operands first does not mark where the block starts: that instruction
+    // is an operand, and a positionless context load must not take the call's line. The operand
+    // or the copied body marks the line.
+    if realizes_inlined_call(ir, expression) && inlined_call_marks_where_it_starts(ir, expression) {
         return true;
     }
     // `suspendCoroutineUninterceptedOrReturn` realized in place is a suspend call, which kotlinc
@@ -82,7 +84,10 @@ pub(crate) fn marks_line_at_start(ir: &IrFile, expression: ExprId) -> bool {
         | IrExpr::ReifiedTypeOp { .. }
         | IrExpr::While { .. }
         | IrExpr::BottomValue { .. }
-        | IrExpr::InlineFrameMarker => false,
+        | IrExpr::InlineFrameMarker
+        // An `invokedynamic` concatenation has no constructor to mark. The `StringBuilder` form
+        // marks its own `new`; the first operand marks an indy concatenation.
+        | IrExpr::StringConcat(_) => false,
         _ => true,
     }
 }
@@ -141,6 +146,22 @@ pub(crate) fn marks_value_line_at_start(
 pub(crate) fn is_copied_inline_line(ir: &IrFile, expression: ExprId) -> bool {
     ir.external_frame_lines.contains_key(&expression)
         || ir.inline_synthetic_lines.contains(&expression)
+}
+
+/// Whether an inlined call's line is the first instruction of `expression`.
+///
+/// A block that opens on its frame marker has no operand prefix, so the mark is where the block
+/// starts. A block that stores operands first leaves the line to those operands and to the copied
+/// body: the frame marker carries the callee's line, and a positionless operand load must not
+/// take the caller's.
+fn inlined_call_marks_where_it_starts(ir: &IrFile, expression: ExprId) -> bool {
+    match ir.expr(expression) {
+        IrExpr::Block { stmts, value } => match stmts.first() {
+            Some(&first) => matches!(ir.expr(first), IrExpr::InlineFrameMarker),
+            None => value.is_some_and(|value| opens_inline_frame(ir, value)),
+        },
+        _ => true,
+    }
 }
 
 /// Whether `expression` realizes an inlined call in place (`SyntheticOriginKind::InlinedCall`) or

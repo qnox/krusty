@@ -898,20 +898,29 @@ impl Emitter<'_> {
             })
     }
 
-    /// The spliced lambda's closing brace, while its locals are still open.
-    fn emit_spliced_lambda_brace(&mut self, block: u32, code: &mut CodeBuilder) {
-        let Some(line) = self.ir.end_line(block).filter(|line| *line != 0) else {
-            return;
-        };
-        if self
-            .ir
-            .inline_copy_provenance(block)
-            .is_some_and(|frames| frames.len() > 1)
+    /// Mark a spliced lambda's `}`. A same-file copy keeps the raw line unless a containing frame
+    /// maps it. A class regenerated from the inline declaration files the caller as its second
+    /// source, so the brace maps with the body; a raw caller line would keep a `nop` the sweep
+    /// drops when the brace and the body share a mapped line.
+    fn mark_spliced_lambda_brace(&mut self, block: u32, line: u32, code: &mut CodeBuilder) {
+        if self.regenerated_inline_template().is_some()
+            || self
+                .ir
+                .inline_copy_provenance(block)
+                .is_some_and(|frames| frames.len() > 1)
         {
             self.mark_expression_line(block, line, code);
         } else {
             code.mark_line(line);
         }
+    }
+
+    /// The spliced lambda's closing brace, while its locals are still open.
+    fn emit_spliced_lambda_brace(&mut self, block: u32, code: &mut CodeBuilder) {
+        let Some(line) = self.ir.end_line(block).filter(|line| *line != 0) else {
+            return;
+        };
+        self.mark_spliced_lambda_brace(block, line, code);
         code.nop();
     }
 
@@ -1304,15 +1313,7 @@ impl Emitter<'_> {
                 // The brace belongs to the lambda supplied by the inner frame's caller. It is a
                 // raw source line there, but maps through the containing frame when that caller is
                 // itself copied into another inline call.
-                if self
-                    .ir
-                    .inline_copy_provenance(block)
-                    .is_some_and(|frames| frames.len() > 1)
-                {
-                    self.mark_expression_line(block, line, code);
-                } else {
-                    code.mark_line(line);
-                }
+                self.mark_spliced_lambda_brace(block, line, code);
             } else if let Some(line) = self.ir.source_line(block) {
                 code.forget_line();
                 self.mark_expression_line(block, line, code);

@@ -289,29 +289,19 @@ fn atomicfu_plugins(
     native
 }
 
-/// The atomicfu runtime KLIB a `// WITH_ATOMICFU` native or wasm case resolves `kotlinx.atomicfu`
-/// against. The JVM lane compiles that directive with the compiler plugin and the JVM jar.
-fn atomicfu_runtime_dependencies(
+/// Directive-selected KLIBs for a native or wasm case, the same libraries the KLIB reference
+/// compiles that case against. The JVM lane uses the jars from `classpath_jars_for` instead.
+fn directive_klib_dependencies(
     directive_source: &str,
     target: krusty::compilation_target::CompilationTarget,
 ) -> Vec<PathBuf> {
-    if !krusty::conformance::directive(directive_source, "WITH_ATOMICFU") {
-        return Vec::new();
-    }
-    if matches!(
-        target,
-        krusty::compilation_target::CompilationTarget::Jvm
-            | krusty::compilation_target::CompilationTarget::Js
-    ) {
-        return Vec::new();
-    }
-    vec![krusty::toolchain::atomicfu_klib(target)
-        .unwrap_or_else(|| panic!("cannot provision the atomicfu runtime KLIB for {target:?}"))]
+    krusty::toolchain::klib_libraries_for(directive_source, target)
+        .unwrap_or_else(|error| panic!("{error}"))
 }
 
 /// Wasm publishes kotlin-test separately from its stdlib. Retain it as an ordinary dependency:
 /// these coordinates select the exact target/version but confer no compiler intrinsic authority.
-fn wasm_test_library(
+pub(super) fn wasm_test_library(
     target: krusty::compilation_target::CompilationTarget,
 ) -> Option<krusty::klib_libraries::KlibLibraryInput> {
     use krusty::compilation_target::CompilationTarget;
@@ -409,7 +399,7 @@ pub fn compile<B: Backend>(
             "the {target:?} corpus lane received a {compilation_target:?} backend"
         )));
     }
-    let dependencies = atomicfu_runtime_dependencies(directive_source, compilation_target);
+    let dependencies = directive_klib_dependencies(directive_source, compilation_target);
     let PlatformLibraries {
         semantics,
         native_imports,
@@ -424,8 +414,24 @@ pub fn compile<B: Backend>(
     if let Some(first) = first_error(&diags, 0) {
         return Err(Outcome::Frontend(first.msg.clone()));
     }
-    let artifacts =
-        krusty::compiler::emit_analyzed(analysis, &stems, backend, module_name, &mut diags);
+    let artifacts = if super::box_klib_bytes::capturing() {
+        let metadata = super::box_klib_bytes::metadata_backend(target, directive_source)
+            .map_err(Outcome::Harness)?;
+        let observer = super::box_klib_bytes::MetadataObserver(metadata);
+        let mut session = krusty::compiler::EmissionSession::new(backend);
+        if session
+            .emit_module(analysis, &stems, &observer, module_name, &mut diags)
+            .is_none()
+            && !diags.has_errors()
+        {
+            return Err(Outcome::Harness(
+                "source emission failed without a diagnostic".into(),
+            ));
+        }
+        session.finish(module_name, &mut diags)
+    } else {
+        krusty::compiler::emit_analyzed(analysis, &stems, backend, module_name, &mut diags)
+    };
     if let Some(decline) = diags
         .diags
         .iter()
@@ -504,7 +510,7 @@ pub fn analyze_module(
         .map(|(stem, _)| stem.clone())
         .collect::<Vec<_>>();
     let mut dependencies = module_dependencies.klibs.to_vec();
-    dependencies.extend(atomicfu_runtime_dependencies(
+    dependencies.extend(directive_klib_dependencies(
         directive_source,
         backend_target,
     ));
@@ -673,6 +679,7 @@ pub fn compile_modules<B: Backend, M: krusty::backend::DependencyMetadata>(
             });
             return Err(outcome);
         };
+        super::box_klib_bytes::capture_artifacts(&unit.name, dependency.artifacts());
         let archive = write_dependency_archive(&generated_root.0, ordinal, dependency.artifacts())?;
         generated.insert(
             unit.name.clone(),
@@ -1032,11 +1039,8 @@ fn owned_fatal_outcomes_cannot_be_blessed_as_box_failures() {
     );
 }
 
-fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
-    let source = match std::fs::read_to_string(file) {
-        Ok(source) => source,
-        Err(error) => return Outcome::Harness(format!("reading case: {error}")),
-    };
+fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path, source: &str) -> Outcome {
+    let source = source.to_owned();
     let stem = file
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -1167,7 +1171,8 @@ pub fn run(lane: &dyn Lane) {
     super::box_inventory::require_setup(unavailable.as_deref(), provisioned)
         .unwrap_or_else(|error| panic!("{label}: {error}"));
     let corpus = krusty::toolchain::box_corpus_dir().expect("validated corpus setup");
-    let files = super::box_inventory::discover(&corpus).unwrap_or_else(|error| panic!("{error}"));
+    let files = super::box_inventory::discover(&corpus, lane.test_target())
+        .unwrap_or_else(|error| panic!("{error}"));
     let relative = |file: &Path| box_ratchet::corpus_key(&corpus, file);
     let platform = lane.platform();
     let version = krusty::kotlin_version::target();
@@ -1220,6 +1225,7 @@ pub fn run(lane: &dyn Lane) {
     }
     let pool = pool.build().expect("build the worker pool");
 
+    let bytes = super::box_klib_bytes::ByteRun::new(lane);
     let started = Instant::now();
     let timed_outcomes: Vec<((&PathBuf, Outcome), Duration)> = pool.install(|| {
         files
@@ -1229,21 +1235,32 @@ pub fn run(lane: &dyn Lane) {
                 // A panic inside the compiler is a failure of THAT case, recorded like any other
                 // so one bug does not hide the picture for the rest of the corpus; the test still
                 // fails.
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    outcome(lane, &scratch.0, file)
-                }))
-                .unwrap_or_else(|panic| {
-                    let message = panic
-                        .downcast_ref::<String>()
-                        .cloned()
-                        .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
-                        .unwrap_or_else(|| "panic".to_string());
-                    let origin = LAST_PANIC_FILE.with(|last| last.borrow_mut().take());
-                    Outcome::CompilerPanic(match origin {
-                        Some(origin) => format!("{message} ({origin})"),
-                        None => message,
-                    })
-                });
+                let capture = bytes.capture();
+                let source = std::fs::read_to_string(file);
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &source {
+                        Ok(source) => outcome(lane, &scratch.0, file, source),
+                        Err(error) => Outcome::Harness(format!("reading case: {error}")),
+                    }))
+                    .unwrap_or_else(|panic| {
+                        let message = panic
+                            .downcast_ref::<String>()
+                            .cloned()
+                            .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                            .unwrap_or_else(|| "panic".to_string());
+                        let origin = LAST_PANIC_FILE.with(|last| last.borrow_mut().take());
+                        Outcome::CompilerPanic(match origin {
+                            Some(origin) => format!("{message} ({origin})"),
+                            None => message,
+                        })
+                    });
+                bytes.record(
+                    lane,
+                    file,
+                    source.as_ref().map(String::as_str),
+                    &result,
+                    capture,
+                );
                 ((file, result), case_started.elapsed())
             })
             .collect()
@@ -1437,11 +1454,21 @@ pub fn run(lane: &dyn Lane) {
     for (file, reason) in &failed {
         eprintln!("FAILED {}: {reason}", file.display());
     }
+    let byte_reference_failures = bytes.finish();
+    for failure in &byte_reference_failures {
+        eprintln!("KLIB byte reference failure {failure}");
+    }
     assert!(
         failed.is_empty(),
         "{} {label} conformance failure(s): every applicable non-pass must match the committed \
          expected-failure inventory, and compiler panics are never expected",
         failed.len()
+    );
+    assert!(
+        byte_reference_failures.is_empty(),
+        "{} {label} KLIB byte reference failure(s): the byte score is withheld rather than \
+         computed over fewer cases",
+        byte_reference_failures.len()
     );
 }
 

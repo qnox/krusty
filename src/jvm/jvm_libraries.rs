@@ -593,11 +593,14 @@ impl JvmLibraries {
                 builtin.param_defaults,
                 builtin.vararg,
             );
-            for ordinal in 0..builtin.context_count {
-                function.call_sig.parameter_identities[ordinal] =
-                    crate::fir::ResolvedParameterIdentity::LegacyContextReceiver {
-                        ordinal: ordinal as u32,
-                    };
+            for (ordinal, identity) in function.call_sig.parameter_identities
+                [..builtin.context_count]
+                .iter_mut()
+                .enumerate()
+            {
+                *identity = crate::fir::ResolvedParameterIdentity::LegacyContextReceiver {
+                    ordinal: ordinal as u32,
+                };
             }
             function.call_sig.only_input_type_formals = builtin.only_input_type_formals;
             function.call_sig.reified_type_parameter_ordinals =

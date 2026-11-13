@@ -66,10 +66,16 @@ pub(crate) enum PlannedSlot {
 /// One class's planned table.
 #[derive(Clone, Debug)]
 pub struct PlannedTable {
+    /// The superclass whose planned table this one extends; `None` for one extending
+    /// `kotlin.Any` or a base no file declares.
+    pub superclass: Option<TypeName>,
     /// How many of `entries` the superclass's planned table holds.
     pub(crate) inherited: u32,
     pub(crate) entries: Vec<PlannedSlot>,
     pub slots: HashMap<PlanKey, u32>,
+    /// Whether the declaring file appends interface-delegation forwarders after `entries`, which
+    /// the plan does not number yet.
+    pub appends_forwarders: bool,
 }
 
 /// Every named class's planned table, or why it has none. A class without one is numbered by its
@@ -77,7 +83,23 @@ pub struct PlannedTable {
 #[derive(Debug, Default)]
 pub struct ModuleSlotPlan {
     tables: HashMap<TypeName, Result<PlannedTable, Unsupported>>,
+    /// What each planned member takes after its dispatch receiver and answers.
+    signatures: HashMap<PlanKey, (Box<[Ty]>, Ty)>,
     interfaces: ModuleInterfaces,
+}
+
+/// What a planned slot's entry takes after the dispatch receiver and answers, as every file reads
+/// it from the plan: the type a target gives the slot.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PlannedSignature<'p> {
+    /// `kotlin.Any`'s own member at its fixed slot.
+    Any(AnyMember),
+    /// The reserved function slot, or one holding a function-type bridge: no file types it.
+    Untyped,
+    Member {
+        parameters: &'p [Ty],
+        result: Ty,
+    },
 }
 
 impl ModuleSlotPlan {
@@ -97,6 +119,7 @@ impl ModuleSlotPlan {
                     callable,
                     parameters,
                     result,
+                    ..
                 } => Some((*callable, (&parameters[..], *result))),
                 ModuleMember::Property { .. } => None,
             })
@@ -112,15 +135,102 @@ impl ModuleSlotPlan {
         for (name, _) in classes.iter() {
             let _ = planner.plan(name);
         }
+        let mut signatures: HashMap<PlanKey, (Box<[Ty]>, Ty)> = HashMap::default();
+        for (_, class) in classes.iter() {
+            for member in class.members.iter() {
+                match member {
+                    ModuleMember::Function {
+                        callable,
+                        parameters,
+                        result,
+                        suspend,
+                    } => {
+                        let signature = if *suspend {
+                            // The slot holds the function in the form every target that lowers
+                            // coroutines on common IR gives it.
+                            let (continuation, completed) =
+                                crate::types::continuation_passing(*result);
+                            (
+                                parameters.iter().copied().chain([continuation]).collect(),
+                                completed,
+                            )
+                        } else {
+                            (parameters.clone(), *result)
+                        };
+                        signatures.insert(PlanKey::Callable(*callable), signature);
+                    }
+                    ModuleMember::Property {
+                        property,
+                        accessor_parameters: parameters,
+                        value,
+                        getter_value,
+                        ..
+                    } => {
+                        signatures.insert(
+                            PlanKey::Getter(*property),
+                            (parameters.clone(), *getter_value),
+                        );
+                        let setter = parameters.iter().copied().chain([*value]).collect();
+                        signatures.insert(PlanKey::Setter(*property), (setter, Ty::Unit));
+                    }
+                }
+            }
+        }
         Self {
             tables: planner.tables,
+            signatures,
             interfaces: ModuleInterfaces::build(classes, representation),
+        }
+    }
+
+    /// The signature of slot `slot` of `table`, one of this plan's tables; `None` when the slot is
+    /// outside the table or names a member the plan has no signature for.
+    pub fn slot_signature<'p>(
+        &'p self,
+        table: &'p PlannedTable,
+        slot: u32,
+    ) -> Option<PlannedSignature<'p>> {
+        let member = |key: &PlanKey| {
+            self.signatures
+                .get(key)
+                .map(|(parameters, result)| PlannedSignature::Member {
+                    parameters,
+                    result: *result,
+                })
+        };
+        match table.entries.get(slot as usize)? {
+            PlannedSlot::Any(any) => Some(PlannedSignature::Any(*any)),
+            PlannedSlot::Reserved | PlannedSlot::FunctionBridge { .. } => {
+                Some(PlannedSignature::Untyped)
+            }
+            PlannedSlot::Member(key) => member(key),
+            PlannedSlot::Bridge { declared, .. } => member(&PlanKey::Callable(*declared)),
+            PlannedSlot::AccessorBridge {
+                declared, setter, ..
+            } => Some(if *setter {
+                PlannedSignature::Member {
+                    parameters: std::slice::from_ref(declared),
+                    result: Ty::Unit,
+                }
+            } else {
+                PlannedSignature::Member {
+                    parameters: &[],
+                    result: *declared,
+                }
+            }),
         }
     }
 
     /// The module-wide numbers of interface members.
     pub fn interfaces(&self) -> &ModuleInterfaces {
         &self.interfaces
+    }
+
+    /// Every class the plan covers, with its planned table or why it has none.
+    pub fn tables(&self) -> impl Iterator<Item = (TypeName, Result<&PlannedTable, &str>)> {
+        self.tables
+            .iter()
+            .map(|(name, table)| (*name, table.as_ref().map_err(String::as_str)))
     }
 
     /// The planned table of `classifier`, `None` when the plan does not cover it at all.
@@ -154,6 +264,9 @@ impl Planner<'_> {
 
     fn table(&mut self, name: TypeName, class: &ModuleClass) -> Result<PlannedTable, Unsupported> {
         let qualified = || name.render().replace('/', ".");
+        let planned_superclass = class
+            .superclass
+            .filter(|&superclass| self.classes.class(superclass).is_some());
         let parent = match class.superclass {
             Some(superclass) if self.classes.class(superclass).is_some() => {
                 Some(self.plan(superclass).map_err(|_| {
@@ -214,6 +327,7 @@ impl Planner<'_> {
                     callable,
                     parameters,
                     result,
+                    ..
                 } => self.function(
                     class,
                     *callable,
@@ -225,6 +339,7 @@ impl Planner<'_> {
                     property,
                     getter,
                     setter,
+                    ..
                 } => {
                     for (is_setter, needed) in [(false, *getter), (true, *setter)] {
                         if needed {
@@ -236,9 +351,11 @@ impl Planner<'_> {
             }
         }
         Ok(PlannedTable {
+            superclass: planned_superclass,
             inherited,
             entries,
             slots,
+            appends_forwarders: class.delegates_interfaces,
         })
     }
 
@@ -385,6 +502,17 @@ impl Planner<'_> {
                 .zip(declared.0)
                 .all(|(a, b)| self.representation.same(*a, *b))
             && self.representation.same(implementation.1, declared.1)
+    }
+}
+
+impl PlannedTable {
+    /// How many slots the table has.
+    pub fn len(&self) -> u32 {
+        u32::try_from(self.entries.len()).expect("too many slots")
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 
