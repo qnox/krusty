@@ -5,7 +5,6 @@
 //! numbered suffix whose own spelling is checked in turn.
 
 use krusty::fx_hash::HashSet;
-use krusty::types::TyKind;
 
 use krusty::ir::IrFile;
 
@@ -59,30 +58,6 @@ pub(super) fn module_property_setter_symbol(
         module_namespace(module_name),
         property.raw()
     )
-}
-
-/// Symbol of the allocating entry point of a module constructor.
-///
-/// The symbol spells the source module plus the constructor's stable identity: the qualified name
-/// of the class it constructs and its complete parameter list, in an injective encoding. It
-/// depends neither on interning order nor on where the constructor sits among its class's
-/// constructors, so files of one module agree while equal internal classes in unrelated modules
-/// cannot collide. `None` for a parameter type that a checked signature never carries.
-pub(super) fn module_constructor_symbol(
-    module_name: &str,
-    constructor: &krusty::ir::IrModuleConstructor,
-) -> Option<String> {
-    let mut symbol = format!("kt_modctor_{}_", module_namespace(module_name));
-    mangle_name(&mut symbol, &constructor.owner.render());
-    symbol.push_str("__");
-    if let Some(outer) = constructor.outer {
-        symbol.push('X');
-        mangle_ty(&mut symbol, krusty::types::Ty::obj_name(outer))?;
-    }
-    for parameter in &constructor.parameters {
-        mangle_ty(&mut symbol, *parameter)?;
-    }
-    Some(symbol)
 }
 
 /// The declaration identity every reference to a module property shares, whichever of the
@@ -148,65 +123,6 @@ fn mangle_name(out: &mut String, text: &str) {
             out.push_str(&format!("_{:x}_", character as u32));
         }
     }
-}
-
-/// One type in a prefix code: each form opens with its own tag, and a name or a list is length-
-/// or terminator-delimited, so two different parameter lists never spell alike.
-fn mangle_ty(out: &mut String, ty: krusty::types::Ty) -> Option<()> {
-    use krusty::types::Ty;
-    let nested = |out: &mut String, tag: char, inner: Ty| {
-        out.push(tag);
-        mangle_ty(out, inner)
-    };
-    match ty.kind() {
-        TyKind::Unit => out.push('U'),
-        TyKind::Null => out.push('Z'),
-        TyKind::Nothing => out.push('W'),
-        TyKind::Obj(name, arguments) => {
-            let mut spelled = String::new();
-            mangle_name(&mut spelled, &name.render());
-            out.push_str(&format!("L{}_{spelled}", spelled.len()));
-            for argument in arguments {
-                mangle_ty(out, *argument)?;
-            }
-            out.push('E');
-        }
-        TyKind::TyParam(name, _) => {
-            let mut spelled = String::new();
-            mangle_name(&mut spelled, name.as_str());
-            out.push_str(&format!("P{}_{spelled}", spelled.len()));
-        }
-        TyKind::Fun(signature) => {
-            out.push_str(&format!(
-                "F{}_{}_{}_",
-                signature.context_count,
-                u8::from(signature.has_receiver),
-                u8::from(signature.suspend),
-            ));
-            for parameter in &signature.params {
-                mangle_ty(out, *parameter)?;
-            }
-            out.push('R');
-            mangle_ty(out, signature.ret)?;
-        }
-        TyKind::Intersection(components) => {
-            out.push('I');
-            for component in components {
-                mangle_ty(out, *component)?;
-            }
-            out.push('E');
-        }
-        TyKind::Nullable(inner) => nested(out, 'N', inner)?,
-        TyKind::PlatformNullable(inner) => nested(out, 'Q', inner)?,
-        TyKind::MutabilityFlexible(inner) => nested(out, 'V', inner)?,
-        TyKind::InProjection(inner) => nested(out, 'M', inner)?,
-        TyKind::OutProjection(inner) => nested(out, 'O', inner)?,
-        TyKind::StarProjection(bound) => nested(out, 'S', bound)?,
-        TyKind::RawProjection(erased) => nested(out, 'J', erased)?,
-        TyKind::DefinitelyNotNull(inner) => nested(out, 'D', inner)?,
-        TyKind::Error | TyKind::Pending | TyKind::Var(..) => return None,
-    }
-    Some(())
 }
 
 /// Symbol of the default-argument entry another file calls when it leaves arguments of a
@@ -348,12 +264,6 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
         taken.insert(module_property_getter_symbol(module_name, *property));
         taken.insert(module_property_setter_symbol(module_name, *property));
     }
-    taken.extend(
-        ir.module_constructions
-            .records
-            .values()
-            .filter_map(|constructor| module_constructor_symbol(module_name, constructor)),
-    );
     let mut unique = |base: String, family: &dyn Fn(&str) -> Vec<String>| -> String {
         let mut candidate = base.clone();
         let mut ordinal = 0;

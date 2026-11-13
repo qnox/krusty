@@ -1229,10 +1229,9 @@ fn visit_inline_plan(plan: &InlineBodyPlan, visit: &mut impl FnMut(Ty)) {
 }
 
 /// Whether `constructor` is a constructor of an ordinary class that another file builds an
-/// instance through its declaring file's entry: a non-private constructor of a class that is
-/// neither generic, `inner`, abstract, `sealed`, `enum`, `value`, an object, an annotation nor an
-/// interface. The entry takes only the declared parameters; each excluded class needs more of the
-/// declaring file's layout than that.
+/// instance through its declaring file's entry: a non-private constructor without context
+/// parameters of a class that is not abstract, `sealed`, an `enum`, an object, an annotation or an
+/// interface. An `inner` class's entry takes its enclosing instance first.
 fn constructible_from_another_file(
     index: &crate::fir::ResolvedModuleIndex,
     constructor: crate::fir::DeclarationId,
@@ -1269,14 +1268,12 @@ fn constructible_from_another_file(
         Flag::LOCAL_CLASS,
         Flag::ANONYMOUS_OBJECT,
         Flag::EXPECT,
-        Flag::INNER,
-        Flag::VALUE,
     ]
     .iter()
     .any(|flag| owner_header.flags.has(*flag))
         && index
-            .classifier_type_arguments(owner)
-            .is_none_or(<[_]>::is_empty)
+            .callable_for_declaration(constructor)
+            .is_some_and(|callable| callable.shape.context_parameter_count == 0)
         && !index.is_body_local_declaration(owner)
 }
 
