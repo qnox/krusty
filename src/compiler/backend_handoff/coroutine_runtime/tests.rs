@@ -222,10 +222,8 @@ fn assert_only_generated_uses_are_frozen(provider: &KlibLibraries, runtime: IrCo
 
     // Selection supplies declaration evidence. It does not make a marker read, completion call,
     // or failure delivery executable, and must not add any of them to the frozen IR inventory.
-    let mut ir = IrFile {
-        coroutine_runtime: Some(runtime),
-        ..IrFile::default()
-    };
+    let mut ir = IrFile::default();
+    ir.coroutine_runtime = Some(runtime);
     let frozen = CheckedBackendCallables::freeze(&ir, provider).unwrap();
     assert!(frozen.property(runtime.suspended).is_none());
     assert!(frozen.property(runtime.context).is_none());
