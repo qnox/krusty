@@ -56,7 +56,8 @@ fn over_budget(sample: ResidentSample, limit_bytes: u64) -> bool {
     }
 }
 
-pub(crate) fn parse_vm_rss_bytes(status: &str) -> Option<u64> {
+#[cfg(any(target_os = "linux", test))]
+fn parse_vm_rss_bytes(status: &str) -> Option<u64> {
     status.lines().find_map(|line| {
         let rest = line.strip_prefix("VmRSS:")?;
         let mut parts = rest.split_whitespace();
