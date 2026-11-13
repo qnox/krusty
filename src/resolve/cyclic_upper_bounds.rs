@@ -7,36 +7,33 @@
 //! cycle when its edges lead back to it; the cycle is the parameters that reach one another, listed
 //! in declaration order.
 
+use crate::diag::Span;
+use crate::types::{Ty, TyKind};
+
 /// Resolved bound `bound` of the declaration, which `owner` declares and which resolved to the
 /// declaration's own parameter `target`; both are declaration ordinals.
 #[derive(Clone, Copy)]
-pub(super) struct ParameterBound {
-    pub(super) owner: usize,
-    pub(super) target: usize,
+struct ParameterBound {
+    owner: usize,
+    target: usize,
 }
 
 /// What kotlinc reports for one declaration's bounds.
-pub(super) struct CyclicBounds {
+struct CyclicBounds {
     /// For each bound, in the order given, the cycle it closes rendered as kotlinc names it.
-    pub(super) closing: Vec<Option<String>>,
+    closing: Vec<Option<String>>,
     /// For each type parameter, the cycle it sits on.
-    pub(super) members: Vec<Option<String>>,
-}
-
-impl CyclicBounds {
-    pub(super) fn is_empty(&self) -> bool {
-        self.closing.iter().all(Option::is_none)
-    }
+    members: Vec<Option<String>>,
 }
 
 /// The message kotlinc prints for a cycle of `names`.
-pub(super) fn message(names: &str) -> String {
+fn message(names: &str) -> String {
     format!("type parameter has cyclic upper bounds: {names}.")
 }
 
 /// Find the cycles among `parameters` formed by `bounds`, where `bounds[i]` is `None` for a bound
 /// that is not another parameter of the declaration.
-pub(super) fn find(parameters: &[String], bounds: &[Option<ParameterBound>]) -> CyclicBounds {
+fn find(parameters: &[String], bounds: &[Option<ParameterBound>]) -> CyclicBounds {
     let count = parameters.len();
     let mut reach = vec![vec![false; count]; count];
     for edge in bounds.iter().flatten() {
@@ -69,6 +66,74 @@ pub(super) fn find(parameters: &[String], bounds: &[Option<ParameterBound>]) -> 
             })
             .collect(),
         members: (0..count).map(cycle_of).collect(),
+    }
+}
+
+/// One written upper bound of a declaration, with the type it resolved to.
+pub(super) struct WrittenBound<'a> {
+    /// The source name of the type parameter that declares the bound.
+    pub(super) owner: &'a str,
+    pub(super) resolved: Ty,
+    /// The bound as written.
+    pub(super) span: Span,
+    /// The declaring type parameter as its `<…>` list wrote it.
+    pub(super) owner_span: Span,
+}
+
+/// What to report for a declaration, and which of its bounds are erroneous.
+pub(super) struct Analysis {
+    /// For each bound, in the order given, whether it closes a cycle.
+    pub(super) cyclic: Vec<bool>,
+    /// Where kotlinc reports, with its message: at each cyclic bound for a classifier, at each
+    /// type parameter on a cycle for a callable.
+    pub(super) reports: Vec<(Span, String)>,
+}
+
+/// Find the cycles among a declaration's `parameters` formed by its resolved `bounds`.
+/// `parameter_of` maps the identity a bound resolved to onto the declaration's own parameter
+/// ordinal; a bound that resolved to anything else is not an edge.
+pub(super) fn analyze(
+    parameters: &[String],
+    bounds: &[WrittenBound<'_>],
+    parameter_of: &dyn Fn(&str) -> Option<usize>,
+    at_classifier_bound: bool,
+) -> Analysis {
+    let edges = bounds
+        .iter()
+        .map(|bound| {
+            let (TyKind::TyParam(target, _) | TyKind::Var(target, _)) =
+                bound.resolved.non_null_keeping_mutability().kind()
+            else {
+                return None;
+            };
+            Some(ParameterBound {
+                owner: parameters.iter().position(|name| name == bound.owner)?,
+                target: parameter_of(target.as_str())?,
+            })
+        })
+        .collect::<Vec<_>>();
+    let found = find(parameters, &edges);
+    let mut reports = Vec::new();
+    if at_classifier_bound {
+        for (bound, names) in bounds.iter().zip(&found.closing) {
+            if let Some(names) = names {
+                reports.push((bound.span, message(names)));
+            }
+        }
+    } else {
+        for (parameter, names) in found.members.iter().enumerate() {
+            let Some(names) = names else { continue };
+            let declared = edges
+                .iter()
+                .position(|edge| edge.is_some_and(|edge| edge.owner == parameter));
+            if let Some(declared) = declared {
+                reports.push((bounds[declared].owner_span, message(names)));
+            }
+        }
+    }
+    Analysis {
+        cyclic: found.closing.iter().map(Option::is_some).collect(),
+        reports,
     }
 }
 
@@ -110,7 +175,7 @@ mod tests {
     #[test]
     fn a_chain_of_bounds_is_not_a_cycle() {
         let found = find(&names(&["T", "U"]), &[edge(0, 1)]);
-        assert!(found.is_empty());
+        assert!(found.closing.iter().all(Option::is_none));
         assert_eq!(found.members, [None, None]);
     }
 }

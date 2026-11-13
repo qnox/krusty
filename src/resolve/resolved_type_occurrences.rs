@@ -79,62 +79,37 @@ impl Checker<'_> {
         written: &[Ty],
         callable_bounds: bool,
     ) -> Vec<bool> {
-        use super::cyclic_upper_bounds as cycles;
-        let edges = source_bounds
+        let written = source_bounds
             .iter()
             .zip(written)
-            .map(|((owner, _), bound)| {
-                let (crate::types::TyKind::TyParam(target, _)
-                | crate::types::TyKind::Var(target, _)) =
-                    bound.non_null_keeping_mutability().kind()
-                else {
-                    return None;
-                };
-                Some(cycles::ParameterBound {
-                    owner: source_names.iter().position(|name| name == owner)?,
-                    target: identities
-                        .iter()
-                        .position(|identity| *identity == target.as_str())?,
-                })
-            })
-            .collect::<Vec<_>>();
-        let found = cycles::find(source_names, &edges);
-        if found.is_empty() {
-            return vec![false; edges.len()];
-        }
-        let anchors = if callable_bounds {
-            found
-                .members
-                .iter()
-                .enumerate()
-                .filter_map(|(parameter, names)| {
-                    let bound = edges
-                        .iter()
-                        .position(|edge| edge.is_some_and(|edge| edge.owner == parameter))?;
-                    let owner = self
+            .map(
+                |((owner, reference), resolved)| super::cyclic_upper_bounds::WrittenBound {
+                    owner,
+                    resolved: *resolved,
+                    span: reference.span,
+                    owner_span: self
                         .file
                         .type_parameter_bound_owners
-                        .get(&source_bounds[bound].1.span.lo)
-                        .copied()?;
-                    Some((owner, names.clone()?))
-                })
-                .collect::<Vec<_>>()
-        } else {
-            found
-                .closing
-                .iter()
-                .zip(source_bounds)
-                .filter_map(|(names, (_, bound))| Some((bound.span, names.clone()?)))
-                .collect::<Vec<_>>()
-        };
-        for (span, names) in anchors {
+                        .get(&reference.span.lo)
+                        .copied()
+                        .unwrap_or(reference.span),
+                },
+            )
+            .collect::<Vec<_>>();
+        let analysis = super::cyclic_upper_bounds::analyze(
+            source_names,
+            &written,
+            &|target| identities.iter().position(|identity| *identity == target),
+            !callable_bounds,
+        );
+        for (span, message) in analysis.reports {
             self.diags.error_named(
                 span,
                 crate::diag::names::CYCLIC_GENERIC_UPPER_BOUND,
-                cycles::message(&names),
+                message,
             );
         }
-        found.closing.iter().map(Option::is_some).collect()
+        analysis.cyclic
     }
 
     /// Bind a deferred local declaration's written bounds once, while all of its formal identities

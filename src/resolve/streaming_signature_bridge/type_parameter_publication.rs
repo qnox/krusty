@@ -279,6 +279,45 @@ pub(super) fn symbolic(
         )
     };
     let provisional = declaration_parameters(&semantic_bounds);
+    // `CYCLIC_GENERIC_UPPER_BOUND` by the shared rule, from the bounds as resolved: the bridge only
+    // hands over the facts. Returns, per bound, whether it closes a cycle.
+    let report_cyclic = |types: &[Ty]| {
+        let written = declared_bounds
+            .iter()
+            .zip(types)
+            .zip(declared.owners)
+            .map(|(((owner, _, reference), resolved), owner_span)| {
+                super::super::cyclic_upper_bounds::WrittenBound {
+                    owner,
+                    resolved: *resolved,
+                    span: reference.span,
+                    owner_span: *owner_span,
+                }
+            })
+            .collect::<Vec<_>>();
+        let at_classifier_bound = semantics
+            .headers
+            .stub(declaration)
+            .is_some_and(|stub| stub.kind == crate::fir::DeclarationKind::Classifier);
+        let analysis = super::super::cyclic_upper_bounds::analyze(
+            declared_names,
+            &written,
+            &|semantic| {
+                stable
+                    .and_then(|generic| generic.formals.iter().position(|f| f.as_str() == semantic))
+                    .or_else(|| {
+                        declared_names.iter().position(|name| {
+                            provisional.bound(name).ty_param_name() == Some(semantic)
+                        })
+                    })
+            },
+            at_classifier_bound,
+        );
+        for (span, message) in analysis.reports {
+            semantics.record_cyclic_upper_bound_diagnostic_at(declaration, source, span, message);
+        }
+        analysis.cyclic
+    };
     // Callable collection already owns the stable semantic shape. Re-resolving a successful
     // F-bound through a provisional local parameter unfolds it once more, but skipping the written
     // bounds entirely also skips their diagnostics. Validate each source reference through the
@@ -297,12 +336,7 @@ pub(super) fn symbolic(
         if let Some(failure) = first_failure {
             return Err(failure);
         }
-        let bounds = ResolvedBounds {
-            declared,
-            types: &resolved,
-            parameter_of: &|name| parameter_ordinal(name, stable, &provisional, declared_names),
-        };
-        let cyclic = report_cyclic_bounds(semantics, scope, &bounds);
+        let cyclic = report_cyclic(&resolved);
         if !cyclic.contains(&true) {
             return Ok(provisional);
         }
@@ -334,13 +368,8 @@ pub(super) fn symbolic(
         .iter()
         .map(|(_, bound)| *bound)
         .collect::<Vec<_>>();
-    let bounds = ResolvedBounds {
-        declared,
-        types: &types,
-        parameter_of: &|name| parameter_ordinal(name, stable, &provisional, declared_names),
-    };
     // A cyclic bound is erroneous: it constrains nothing, as kotlinc's error-typed bound does.
-    let cyclic = report_cyclic_bounds(semantics, scope, &bounds);
+    let cyclic = report_cyclic(&types);
     let implicit = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
     let resolved_bounds = resolved_bounds
         .into_iter()
@@ -353,105 +382,6 @@ pub(super) fn symbolic(
         &provisional,
         &resolved_bounds,
     ))
-}
-
-/// One declaration's bounds as the signature resolved them, beside their written declarations.
-struct ResolvedBounds<'a> {
-    declared: &'a DeclaredBounds<'a>,
-    /// The resolved type of each bound, in `declared_bounds` order.
-    types: &'a [Ty],
-    /// The declaration ordinal of a type parameter identity, if the declaration owns it.
-    parameter_of: &'a dyn Fn(&str) -> Option<usize>,
-}
-
-fn parameter_ordinal(
-    semantic: &str,
-    stable: Option<&GenericSig>,
-    provisional: &super::super::TParams,
-    declared_names: &[String],
-) -> Option<usize> {
-    stable
-        .and_then(|generic| {
-            generic
-                .formals
-                .iter()
-                .position(|formal| formal.as_str() == semantic)
-        })
-        .or_else(|| {
-            declared_names.iter().position(|name| {
-                provisional
-                    .bound(name)
-                    .ty_param_name()
-                    .is_some_and(|own| own == semantic)
-            })
-        })
-}
-
-/// Report `CYCLIC_GENERIC_UPPER_BOUND` for the type parameters whose resolved bounds name one
-/// another. A classifier reports each bound that closes a cycle and a callable each parameter on
-/// one. Returns, per bound, whether it closes a cycle.
-fn report_cyclic_bounds(
-    semantics: &super::ProductionSignatureSemantics<'_>,
-    scope: crate::fir::SignatureScope,
-    bounds: &ResolvedBounds<'_>,
-) -> Vec<bool> {
-    let edges = bounds
-        .declared
-        .bounds
-        .iter()
-        .zip(bounds.types)
-        .map(|((owner, _, _), bound)| {
-            let (TyKind::TyParam(target, _) | TyKind::Var(target, _)) =
-                bound.non_null_keeping_mutability().kind()
-            else {
-                return None;
-            };
-            Some(super::super::cyclic_upper_bounds::ParameterBound {
-                owner: bounds
-                    .declared
-                    .names
-                    .iter()
-                    .position(|name| name == owner)?,
-                target: (bounds.parameter_of)(target.as_str())?,
-            })
-        })
-        .collect::<Vec<_>>();
-    let cycles = super::super::cyclic_upper_bounds::find(bounds.declared.names, &edges);
-    if cycles.is_empty() {
-        return vec![false; edges.len()];
-    }
-    let at_classifier_bound = semantics
-        .headers
-        .stub(scope.owner)
-        .is_some_and(|stub| stub.kind == crate::fir::DeclarationKind::Classifier);
-    let mut reports: Vec<(crate::diag::Span, &str)> = Vec::new();
-    if at_classifier_bound {
-        for (ordinal, names) in cycles.closing.iter().enumerate() {
-            if let Some(names) = names {
-                reports.push((bounds.declared.bounds[ordinal].2.span, names));
-            }
-        }
-    } else {
-        for (parameter, names) in cycles.members.iter().enumerate() {
-            let Some(names) = names else { continue };
-            let owner = edges
-                .iter()
-                .position(|edge| edge.is_some_and(|edge| edge.owner == parameter))
-                .map(|bound| bounds.declared.owners[bound]);
-            if let Some(owner) = owner {
-                reports.push((owner, names));
-            }
-        }
-    }
-    for (span, names) in reports {
-        semantics.record_cyclic_upper_bound_diagnostic_at(
-            scope.owner,
-            scope.source,
-            span,
-            super::super::cyclic_upper_bounds::message(names),
-        );
-    }
-    cycles.closing.iter().map(Option::is_some).collect()
 }
 
 pub(super) fn semantic_name<'a>(
