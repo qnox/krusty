@@ -1101,6 +1101,7 @@ jobs:
           path: &gradle-home-paths |
             ${{ runner.temp }}/krusty-gradle-user-home/caches/modules-2
             ${{ runner.temp }}/krusty-gradle-user-home/caches/transforms-*
+            ${{ runner.temp }}/krusty-gradle-user-home/caches/*/transforms
             ${{ runner.temp }}/krusty-gradle-user-home/caches/jars-*
             ${{ runner.temp }}/krusty-gradle-user-home/caches/*/generated-gradle-jars
             ${{ runner.temp }}/krusty-gradle-user-home/wrapper/dists
