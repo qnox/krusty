@@ -48,6 +48,20 @@ pub(super) fn plan_frame_values(
     value_types.sort_unstable_by_key(|(value, _)| *value);
 
     let mut shared_cell_elements = HashMap::default();
+    let declaration = &ir.functions[function as usize];
+    let receiver_offset =
+        u32::from(declaration.dispatch_receiver.is_some() && !declaration.is_static);
+    shared_cell_elements.extend(ir.shared_capture_parameters.iter().filter_map(
+        |(&(owner, parameter), &element)| {
+            (owner == function)
+                .then(|| {
+                    receiver_offset
+                        .checked_add(parameter)
+                        .map(|slot| (slot, element))
+                })
+                .flatten()
+        },
+    ));
     for &expression in &expressions {
         let IrExpr::Variable {
             index,
