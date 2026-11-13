@@ -64,6 +64,16 @@ private suspend fun resumeCapturedCell(): Int {
     return total
 }
 
+private suspend fun resumeCapturedParameter(): Int {
+    var total = 3
+    suspend fun increment(): Int {
+        pause()
+        total += 4
+        return total
+    }
+    return increment()
+}
+
 fun box(): String {
     var completed: Result<Int>? = null
     ::resumeThroughBranchAndLoop.startCoroutine(
@@ -115,5 +125,14 @@ fun box(): String {
     parked = null
     capturedContinuation.resume(0)
     if (capturedCompleted?.getOrNull() != 7) return "captured mutable local"
+
+    var parameterCompleted: Result<Int>? = null
+    ::resumeCapturedParameter.startCoroutine(
+        Continuation(EmptyCoroutineContext) { parameterCompleted = it },
+    )
+    val parameterContinuation = parked ?: return "missing captured parameter continuation"
+    parked = null
+    parameterContinuation.resume(0)
+    if (parameterCompleted?.getOrNull() != 7) return "captured mutable parameter"
     return "OK"
 }

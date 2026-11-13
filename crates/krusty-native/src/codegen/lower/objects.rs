@@ -117,7 +117,9 @@ pub(super) fn constructor_parameters(ir: &IrFile, class: ClassId) -> Vec<Ty> {
         .ctor_args
         .iter()
         .enumerate()
-        .map(|(index, argument)| captures::prefix_physical_ty(ir, class, index, argument.ty))
+        .map(|(index, argument)| {
+            captures::constructor_argument_physical_ty(ir, class, index, argument.ty)
+        })
         .collect()
 }
 
@@ -1702,8 +1704,12 @@ impl<'a> FileLowering<'a> {
                     next_field = field + 1;
                     let field_type =
                         model::field_storage_ty(body.file.values, body.file.ir, class, field)?;
-                    let argument_type =
-                        captures::prefix_physical_ty(body.file.ir, class, index, argument.ty);
+                    let argument_type = captures::constructor_argument_physical_ty(
+                        body.file.ir,
+                        class,
+                        index,
+                        argument.ty,
+                    );
                     let Some(value) =
                         body.convert(params[index + 1], Some(argument_type), field_type)?
                     else {

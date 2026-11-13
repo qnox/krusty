@@ -64,20 +64,27 @@ pub(super) fn realize(
     if has_unowned_type_parameter {
         return Err(ReentryDecline::UnsupportedCallShape);
     }
-    if ir
-        .shared_capture_parameters
-        .keys()
-        .any(|(owner, _)| *owner == function)
-        || body_contains_unplanned_shared_cell(ir, body)
-    {
-        // A shared parameter or a cell operation outside a local variable initializer needs a
-        // separate constructor/holder proof. Local `var` cells use the existing
-        // `shared_class_capture_fields` contract.
-        return Err(ReentryDecline::UnsupportedCallShape);
-    }
-    let receiver = ir.functions[function as usize]
+    let source_receiver = ir.functions[function as usize]
         .dispatch_receiver
         .filter(|_| !ir.functions[function as usize].is_static);
+    let receiver_offset = u32::from(source_receiver.is_some());
+    let has_unplanned_shared_parameter =
+        ir.shared_capture_parameters
+            .iter()
+            .any(|(&(owner, parameter), &element)| {
+                owner == function
+                    && receiver_offset
+                        .checked_add(parameter)
+                        .and_then(|slot| source_values.get(&slot))
+                        != Some(&element)
+            });
+    if has_unplanned_shared_parameter || body_contains_unplanned_shared_cell(ir, body) {
+        // Every shared capture parameter must have the matching semantic element type in the
+        // source value namespace. Its frame field is then emitted as the existing target-owned
+        // shared-cell carrier.
+        return Err(ReentryDecline::UnsupportedCallShape);
+    }
+    let receiver = source_receiver;
     let receiver_slots = u32::from(receiver.is_some());
     let completion_slot = receiver_slots + ir.functions[function as usize].params.len() as u32 - 1;
     let any = Ty::nullable(Ty::obj_name(wk::any()));
@@ -106,7 +113,7 @@ pub(super) fn realize(
         machine.supertypes = vec![Ty::obj_args_name(wk::continuation(), &[any])];
     }
     if !type_parameters.is_empty() {
-        ir.class_signatures.insert(
+        ir.insert_class_signature_name(
             class_name,
             IrGenericSig {
                 type_params: type_parameters.clone(),
@@ -374,9 +381,10 @@ fn body_contains_unplanned_shared_cell(ir: &IrFile, body: ExprId) -> bool {
             init: Some(initializer),
             ..
         } = ir.expr(expression)
-            && matches!(ir.expr(*initializer), IrExpr::RefNew { .. })
         {
-            planned.insert(*initializer);
+            if matches!(ir.expr(*initializer), IrExpr::RefNew { .. }) {
+                planned.insert(*initializer);
+            }
         }
         match ir.expr(expression) {
             IrExpr::Lambda { captures, .. } => pending.extend(captures.iter().copied()),
@@ -396,10 +404,10 @@ fn body_contains_unplanned_shared_cell(ir: &IrFile, body: ExprId) -> bool {
 /// original semantic names and bounds.
 fn machine_type_parameters(ir: &IrFile, function: u32) -> Vec<IrTypeParameter> {
     let mut candidates = Vec::new();
-    if let Some(owner) = ir.functions[function as usize].dispatch_receiver
-        && let Some(signature) = ir.class_signatures.get(&owner)
-    {
-        candidates.extend(signature.type_params.iter().cloned());
+    if let Some(owner) = ir.functions[function as usize].dispatch_receiver {
+        if let Some(signature) = ir.class_signature_name(owner) {
+            candidates.extend(signature.type_params.iter().cloned());
+        }
     }
     if let Some(signature) = ir.signatures.get(&function) {
         candidates.extend(signature.type_params.iter().cloned());
