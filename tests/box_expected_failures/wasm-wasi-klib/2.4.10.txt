@@ -162,7 +162,6 @@ binaryOp/kt11163_properIeee754comparisons.kt
 binaryOp/kt23030_properIeee754comparisons.kt
 binaryOp/kt44402.kt
 boxing/boxBoolean.kt
-boxing/box_cache0.kt
 boxing/boxing1.kt
 boxing/boxing11.kt
 boxing/boxing12.kt
@@ -573,7 +572,6 @@ controlStructures/emptyFor.kt
 controlStructures/factorialTest.kt
 controlStructures/forArrayList.kt
 controlStructures/forArrayListMultiDecl.kt
-controlStructures/forInArray/forInArraySpecializedToUntil.kt
 controlStructures/forInArray/forInDelegatedPropertyUpdatedInLoopBody.kt
 controlStructures/forInArray/forInDoubleArrayWithUpcast.kt
 controlStructures/forInArray/forInFieldUpdatedInLoopBody.kt
@@ -653,7 +651,6 @@ controlStructures/kt513.kt
 controlStructures/kt628.kt
 controlStructures/kt910.kt
 controlStructures/longRange.kt
-controlStructures/quicksort.kt
 controlStructures/slowDsl/slowHtmlLikeDsl.kt
 controlStructures/tryCatchInExpressions/differentTypes.kt
 controlStructures/tryCatchInExpressions/kt8608.kt
@@ -1457,7 +1454,6 @@ extensionFunctions/suspendConversionForExtensionFunAsAFunType.kt
 extensionFunctions/suspendConversionForExtensionFunAsAPropertyType.kt
 extensionFunctions/suspendConversionForExtensionFunAsASuperType.kt
 extensionFunctions/thisMethodInObjectLiteral.kt
-extensionFunctions/virtual.kt
 extensionProperties/contextPropertyInInterface.kt
 extensionProperties/extensionPropertyDelegated.kt
 extensionProperties/extensionPropertyDifferentReceiver.kt
@@ -2971,8 +2967,6 @@ ranges/forInCharSequenceWithMultipleGetFunctions.kt
 ranges/forInCustomCharSequence.kt
 ranges/forInCustomIterable.kt
 ranges/forInDoubleRangeWithCustomIterator.kt
-ranges/forInDownTo/forInDownToWithPossibleUnderflow.kt
-ranges/forInDownTo/forInSumDownToSum.kt
 ranges/forInDownTo/forIntInDownTo.kt
 ranges/forInDownTo/forIntInDownToWithNonConstBounds.kt
 ranges/forInDownTo/forIntInNonOptimizedDownTo.kt
@@ -3013,7 +3007,6 @@ ranges/forInProgressionWithIndex/forInWithIndexReversed.kt
 ranges/forInProgressionWithIndex/forInWithIndexWithDestructuringInLoop.kt
 ranges/forInProgressionWithIndex/forInWithIndexWithIndex.kt
 ranges/forInProgressionWithIndex/kt42909.kt
-ranges/forInRangeLiteralWithMixedTypeBounds.kt
 ranges/forInRangeWithImplicitReceiver.kt
 ranges/forInReversed/ForInReversedReversedRange.kt
 ranges/forInReversed/forInReversedArrayIndices.kt
@@ -3062,11 +3055,8 @@ ranges/forWithPossibleOverflow/forInRangeToIntMaxValueReversed.kt
 ranges/forWithPossibleOverflow/forInRangeToLongMaxValue.kt
 ranges/forWithPossibleOverflow/forInRangeToLongMaxValueReversed.kt
 ranges/forWithPossibleOverflow/forInUntilIntMinValueReversed.kt
-ranges/kt37370.kt
 ranges/kt37370a.kt
 ranges/kt47492.kt
-ranges/kt47492a.kt
-ranges/kt47492b.kt
 ranges/literal/emptyDownto.kt
 ranges/literal/emptyRange.kt
 ranges/literal/inexactDownToMinValue.kt
@@ -3857,9 +3847,7 @@ strings/kt13213a.kt
 strings/kt3571.kt
 strings/kt5389_stringBuilderGet.kt
 strings/kt5956.kt
-strings/kt894.kt
 strings/nestedConcat.kt
-strings/rawStringsWithManyQuotes.kt
 strings/stringPlusOnlyWorksOnString.kt
 strings/trimOptimization.kt
 super/basicproperty.kt
