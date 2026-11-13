@@ -11,8 +11,9 @@
 //!
 //! A member's builtin implementations are recorded the first time a call goes through it, and a
 //! box the first time a value of its classifier is boxed; whichever comes second writes the box's
-//! implementation. The call declines when a builtin class runs something this generator cannot
-//! write, so no stub ever reaches a builtin value it has no implementation for.
+//! implementation. Frozen declarations for other boxes stay as evidence until their representation
+//! is materialized. An actual representation declines when its override cannot be emitted, so no
+//! stub reaches a builtin value without its implementation.
 
 use krusty::backend::{BackendCompilerIntrinsic, BuiltinImplementation};
 use krusty::types::{Ty, TypeName};
@@ -36,7 +37,26 @@ pub(super) struct BuiltinMembers {
 struct Member {
     member: MemberRef,
     /// What the box of each builtin classifier runs for the member, by the classifier's identity.
-    boxes: Vec<(TypeName, Operation)>,
+    boxes: BoxImplementations,
+}
+
+/// Frozen declarations are evidence; only an actual box requests an executable implementation.
+struct BoxImplementations {
+    signature: Signature,
+    declarations: Vec<(TypeName, BuiltinImplementation)>,
+}
+
+impl BoxImplementations {
+    fn operation(&self, boxed: Ty) -> Result<Option<Operation>, String> {
+        let identity = boxed.obj_internal();
+        self.declarations
+            .iter()
+            .find(|(known, _)| Some(*known) == identity)
+            .map(|(_, declaration)| {
+                operation(Representation::Box(boxed), declaration, &self.signature)
+            })
+            .transpose()
+    }
 }
 
 /// The runtime representation a builtin class's values are carried in.
@@ -102,14 +122,15 @@ impl Runtime {
             } else {
                 Representation::Box(receiver)
             };
-            let operation = operation(representation, implementation, signature)?;
             match representation {
-                Representation::String => string = Some(operation),
+                Representation::String => {
+                    string = Some(operation(representation, implementation, signature)?);
+                }
                 Representation::Box(boxed) => {
                     let identity = boxed
                         .obj_internal()
                         .ok_or_else(|| format!("a library member implemented by `{boxed:?}`"))?;
-                    boxes.push((identity, operation));
+                    boxes.push((identity, implementation.clone()));
                 }
             }
         }
@@ -121,7 +142,13 @@ impl Runtime {
                 .implement_representation(member, self.string, function)?;
         }
         let index = self.builtin_members.members.len();
-        self.builtin_members.members.push(Member { member, boxes });
+        self.builtin_members.members.push(Member {
+            member,
+            boxes: BoxImplementations {
+                signature: signature.clone(),
+                declarations: boxes,
+            },
+        });
         for form in self.box_forms() {
             self.implement_box_member(module, index, form)?;
         }
@@ -149,13 +176,8 @@ impl Runtime {
     ) -> Result<(), String> {
         let recorded = &self.builtin_members.members[index];
         let member = recorded.member;
-        let identity = form.boxed.obj_internal();
-        let Some(&(_, operation)) = recorded
-            .boxes
-            .iter()
-            .find(|(known, _)| Some(*known) == identity)
-        else {
-            // The boxed classifier is not below the member's: no value of it reaches it.
+        let Some(operation) = recorded.boxes.operation(form.boxed)? else {
+            // No value of this boxed classifier reaches the member.
             return Ok(());
         };
         let function =
@@ -296,5 +318,55 @@ fn operation(
             "a library member {} overrides with a body",
             representation.describe()
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use krusty::backend::BuiltinOverrideDeclaration;
+
+    #[test]
+    fn only_an_actual_box_requires_its_frozen_override_to_be_executable() {
+        let integer = Ty::Int;
+        let unsigned = Ty::UByte;
+        let implementations = BoxImplementations {
+            signature: (vec![crate::objects::REFERENCE; 2], vec![ValType::I32]),
+            declarations: vec![
+                (
+                    integer.obj_internal().expect("boxed Int identity"),
+                    BuiltinImplementation {
+                        receiver: integer,
+                        declaration: Some(BuiltinOverrideDeclaration {
+                            operation: Some(BackendCompilerIntrinsic::PrimitiveCompare),
+                            params: vec![integer].into_boxed_slice(),
+                            ret: Ty::Int,
+                        }),
+                    },
+                ),
+                (
+                    unsigned.obj_internal().expect("boxed UByte identity"),
+                    BuiltinImplementation {
+                        receiver: unsigned,
+                        declaration: Some(BuiltinOverrideDeclaration {
+                            operation: None,
+                            params: vec![unsigned].into_boxed_slice(),
+                            ret: Ty::Int,
+                        }),
+                    },
+                ),
+            ],
+        };
+        assert!(matches!(
+            implementations.operation(integer),
+            Ok(Some(Operation::Compare))
+        ));
+        assert!(matches!(implementations.operation(Ty::Long), Ok(None)));
+        assert_eq!(
+            implementations.operation(unsigned).map(|_| ()),
+            Err(format!(
+                "a library member a boxed `{unsigned:?}` overrides with a body"
+            )),
+        );
     }
 }

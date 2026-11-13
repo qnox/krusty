@@ -30,6 +30,23 @@ pub(super) fn operation_plan(operation: CompilerIntrinsic) -> Option<DependencyO
     }
 }
 
+/// The operation of a selected dependency declaration. Platform providers can preserve an
+/// ordinary physical call while publishing its language role for targets with their own values.
+pub(super) fn declaration_operation(
+    intrinsic: Option<CompilerIntrinsic>,
+    role: Option<krusty::types::SemanticCallRole>,
+) -> Option<DependencyOperation> {
+    match intrinsic {
+        Some(intrinsic) => operation_plan(intrinsic),
+        None => match role {
+            Some(krusty::types::SemanticCallRole::KotlinStringCompareTo) => {
+                Some(DependencyOperation::StringCompare)
+            }
+            _ => None,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,6 +67,21 @@ mod tests {
             assert!(CraneliftBackend::new(target)
                 .realizes_dependency_intrinsic(CompilerIntrinsic::StringCompare));
         }
+    }
+
+    #[test]
+    fn a_platform_string_comparison_role_selects_the_same_native_operation() {
+        use krusty::types::SemanticCallRole;
+        assert_eq!(
+            declaration_operation(None, Some(SemanticCallRole::KotlinStringCompareTo)),
+            operation_plan(CompilerIntrinsic::StringCompare)
+        );
+        assert_eq!(
+            declaration_operation(None, Some(SemanticCallRole::KotlinComparableCompareTo)),
+            None,
+            "an arbitrary Comparable implementation is not string comparison"
+        );
+        assert_eq!(declaration_operation(None, None), None);
     }
 
     #[test]
