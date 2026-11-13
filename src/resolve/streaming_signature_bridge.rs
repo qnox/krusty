@@ -65,9 +65,7 @@ mod value_parameter_publication;
 mod value_selection;
 mod vararg_constructor_property;
 
-use super::classifier_capture_types::{
-    semantic_classifier_self, semantic_type_with_classifier_captures,
-};
+use super::classifier_capture_types::*;
 use bound_local_alias_templates::BoundLocalAliasTemplates;
 use implicit_context_candidates::SignatureImplicitReceiver;
 use value_selection::{SelectedEnumEntry, SelectedValue};
@@ -110,6 +108,7 @@ struct ProductionSignatureSemantics<'a> {
     /// What each selected top-level call recorded, by call origin: its contract and the typealias
     /// it constructed through.
     selected_calls: selected_call_facts::SelectedCallFacts,
+    selected_aliases: super::selected_result_aliases::SelectedResultAliases,
     /// Typealias provenance recorded by the compact type-resolution operation that selected it.
     selected_types: selected_type_facts::SelectedTypeFacts,
     bound_local_alias_templates: BoundLocalAliasTemplates,
@@ -3190,6 +3189,7 @@ pub(crate) fn finalized_streamed_signature_index(
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_calls: selected_call_facts::SelectedCallFacts::default(),
+        selected_aliases: Default::default(),
         selected_types: selected_types.clone(),
         bound_local_alias_templates: bound_local_alias_templates.clone(),
         source_contracts: RefCell::new(HashMap::default()),
@@ -3844,7 +3844,9 @@ pub(crate) fn finalized_streamed_signature_index(
                 continue;
             };
             signature.declared_result_alias = result_type.and_then(|syntax| {
-                (explicit_type_semantics.selected_types).alias_application(&headers.syntax, syntax)
+                super::type_spellings::written_alias_application(&headers.syntax, syntax, |ty| {
+                    explicit_type_semantics.selected_types.spelling(ty)
+                })
             });
             inferred_parameters.insert(stub.id, signature.parameters.clone());
             explicit.push((stub.id, signature));
@@ -3967,6 +3969,7 @@ pub(crate) fn finalized_streamed_signature_index(
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_calls: selected_call_facts::SelectedCallFacts::default(),
+        selected_aliases: Default::default(),
         selected_types,
         bound_local_alias_templates,
         source_contracts: RefCell::new(HashMap::default()),

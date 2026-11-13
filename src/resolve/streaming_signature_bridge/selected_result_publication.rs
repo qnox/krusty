@@ -5,18 +5,9 @@
 //! projects the declaration interval without lookup or overload reselection.
 
 use super::ProductionSignatureSemantics;
-use crate::resolve::selected_result_publication::{
-    CompactSelectedResultPublication, SelectedSignature,
-};
+use crate::resolve::selected_result_aliases::SelectionInputs;
+use crate::resolve::selected_result_publication::CompactSelectedResultPublication;
 use crate::types::{Ty, TyKind};
-
-/// What a selection applied its declaration to: the receiver it was selected on and its argument
-/// types in source order.
-#[derive(Clone, Copy, Default)]
-pub(super) struct SelectionInputs<'a> {
-    pub(super) receiver: Option<Ty>,
-    pub(super) arguments: &'a [Ty],
-}
 
 pub(super) fn whole_array_arguments(
     arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
@@ -28,23 +19,9 @@ pub(super) fn whole_array_arguments(
 }
 
 impl ProductionSignatureSemantics<'_> {
-    /// The abbreviation a call or read's result carries because its selected declaration spelled
-    /// the result through a typealias (`fun names(): Names`, `val foo: Foo<T>?`): the alias
-    /// application selection recorded, its arguments bound as the selection bound them.
-    fn declared_result_abbreviation(
-        &self,
-        origin: crate::fir::OriginId,
-    ) -> Option<crate::fir::ResolvedTypeAbbreviation> {
-        let alias = self.selected_calls.result_alias(origin)?;
-        Some(crate::fir::ResolvedTypeAbbreviation::root(
-            alias.alias(),
-            alias.arguments(),
-            alias.marked_nullable(),
-        ))
-    }
-
     pub(super) fn forget_selected_result_publication(&self, origin: crate::fir::OriginId) {
         self.selected_calls.forget_publication(origin);
+        self.selected_aliases.record(origin, None);
     }
 
     pub(super) fn record_selected_result_publication(
@@ -53,48 +30,9 @@ impl ProductionSignatureSemantics<'_> {
         publication: CompactSelectedResultPublication,
         inputs: SelectionInputs<'_>,
     ) {
-        let alias = publication.applied_result_alias(
-            inputs.receiver,
-            inputs.arguments,
-            |owner| self.table.declaring_self(owner),
-            |actual, owner| self.table.applied_supertype(actual, owner),
-        );
-        self.selected_calls.record_result_alias(origin, alias);
+        self.selected_aliases
+            .record_applied(origin, &publication, inputs, self.table);
         self.selected_calls.record_publication(origin, publication);
-    }
-
-    pub(super) fn selected_callable_publication(
-        &self,
-        callable: &crate::libraries::LibraryCallable,
-        selection: SelectedSignature,
-        parameter_by_argument: Box<[Option<u32>]>,
-        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
-        explicit_type_arguments: &[Ty],
-    ) -> CompactSelectedResultPublication {
-        CompactSelectedResultPublication::callable(
-            callable,
-            selection,
-            parameter_by_argument,
-            whole_array_arguments(arguments),
-            explicit_type_arguments.into(),
-        )
-    }
-
-    pub(super) fn selected_member_publication(
-        &self,
-        member: &crate::libraries::LibraryMember,
-        receiver: Option<Ty>,
-        parameter_by_argument: Box<[Option<u32>]>,
-        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
-        explicit_type_arguments: &[Ty],
-    ) -> CompactSelectedResultPublication {
-        CompactSelectedResultPublication::member(
-            member,
-            receiver,
-            parameter_by_argument,
-            whole_array_arguments(arguments),
-            explicit_type_arguments.into(),
-        )
     }
 
     pub(super) fn record_selected_constructor_publication(
@@ -140,8 +78,6 @@ impl ProductionSignatureSemantics<'_> {
         );
     }
 
-    /// [`Self::record_final_selected_publication`] for a selection of a source declaration, whose
-    /// result alias its published signature carries.
     pub(super) fn record_source_selected_publication(
         &self,
         origin: crate::fir::OriginId,
@@ -183,10 +119,7 @@ impl ProductionSignatureSemantics<'_> {
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<crate::fir::ResolvedMemberCall, crate::fir::DiagnosticId> {
-        let inputs = SelectionInputs {
-            receiver: Some(receiver.get()),
-            arguments: &argument_types,
-        };
+        let inputs = SelectionInputs::new(Some(receiver.get()), &argument_types);
         if let Some(member) = member.as_ref() {
             if let Some(declaration) = member.stable_declaration {
                 if self
@@ -319,7 +252,7 @@ impl crate::fir::SelectedResultPublicationSemantics for ProductionSignatureSeman
     ) -> Option<crate::fir::ResolvedTypeAbbreviation> {
         self.selected_calls
             .abbreviation(origin)
-            .or_else(|| self.declared_result_abbreviation(origin))
+            .or_else(|| self.selected_aliases.abbreviation(origin))
     }
 
     fn published_call_result_abbreviation(
@@ -328,7 +261,7 @@ impl crate::fir::SelectedResultPublicationSemantics for ProductionSignatureSeman
         published: crate::fir::ResolvedTy,
     ) -> Option<crate::fir::ResolvedTypeAbbreviation> {
         let Some(abbreviation) = self.selected_calls.abbreviation(origin) else {
-            return self.declared_result_abbreviation(origin);
+            return self.selected_aliases.abbreviation(origin);
         };
         let Some(inferred) = self.selected_calls.inferred_abbreviation(origin) else {
             return Some(abbreviation);

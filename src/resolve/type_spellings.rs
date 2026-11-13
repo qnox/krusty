@@ -483,6 +483,45 @@ fn substitute_expansion_spelling(
     }
 }
 
+/// The typealias application the written type `syntax` selected: its alias applied to the resolved
+/// types of its written arguments, marked nullable as written. `spelling` answers the resolved
+/// spelling of each written node.
+pub(in crate::resolve) fn written_alias_application(
+    arena: &crate::fir::HeaderSyntaxArena,
+    syntax: crate::fir::HeaderTypeId,
+    spelling: impl Fn(crate::fir::HeaderTypeId) -> Option<ResolvedTypeSpelling>,
+) -> Option<crate::libraries::DeclaredResultAlias> {
+    let alias = spelling(syntax)?.alias?;
+    let node = arena.ty(syntax)?;
+    let crate::fir::HeaderTypeKind::Classifier { detail, .. } = node.kind else {
+        return None;
+    };
+    let arguments = arena
+        .type_operands(arena.classifier_type(detail)?.arguments)
+        .iter()
+        .map(|&argument| {
+            let flags = arena.ty(argument)?.flags;
+            if flags.star_projection() {
+                let bound = Ty::nullable(Ty::obj("kotlin/Any"));
+                return Some(Ty::star_projection(bound));
+            }
+            let resolved = spelling(argument)?.resolved?;
+            Some(if flags.in_projection() {
+                Ty::in_projection(resolved)
+            } else if flags.out_projection() {
+                Ty::out_projection(resolved)
+            } else {
+                resolved
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(crate::libraries::DeclaredResultAlias::new(
+        alias,
+        &arguments,
+        node.flags.nullable(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,43 +564,4 @@ mod tests {
         assert!(from_argument[0].definitely_non_null);
         assert!(from_argument[0].use_site_definitely_non_null);
     }
-}
-
-/// The typealias application the written type `syntax` selected: its alias applied to the resolved
-/// types of its written arguments, marked nullable as written. `spelling` answers the resolved
-/// spelling of each written node.
-pub(in crate::resolve) fn written_alias_application(
-    arena: &crate::fir::HeaderSyntaxArena,
-    syntax: crate::fir::HeaderTypeId,
-    spelling: impl Fn(crate::fir::HeaderTypeId) -> Option<ResolvedTypeSpelling>,
-) -> Option<crate::libraries::DeclaredResultAlias> {
-    let alias = spelling(syntax)?.alias?;
-    let node = arena.ty(syntax)?;
-    let crate::fir::HeaderTypeKind::Classifier { detail, .. } = node.kind else {
-        return None;
-    };
-    let arguments = arena
-        .type_operands(arena.classifier_type(detail)?.arguments)
-        .iter()
-        .map(|&argument| {
-            let flags = arena.ty(argument)?.flags;
-            if flags.star_projection() {
-                let bound = Ty::nullable(Ty::obj("kotlin/Any"));
-                return Some(Ty::star_projection(bound));
-            }
-            let resolved = spelling(argument)?.resolved?;
-            Some(if flags.in_projection() {
-                Ty::in_projection(resolved)
-            } else if flags.out_projection() {
-                Ty::out_projection(resolved)
-            } else {
-                resolved
-            })
-        })
-        .collect::<Option<Vec<_>>>()?;
-    Some(crate::libraries::DeclaredResultAlias::new(
-        alias,
-        &arguments,
-        node.flags.nullable(),
-    ))
 }
