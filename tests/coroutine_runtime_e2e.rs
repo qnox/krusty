@@ -15,26 +15,18 @@ const TARGETS: [(CompilationTarget, KlibStdlibSemantics); 3] = [
     (CompilationTarget::Native, KlibStdlibSemantics::Native),
 ];
 
-/// What one file's handoff selected: whether it holds the runtime, and whether the frozen
-/// facts answer for both of its identities.
+/// Whether one file's handoff selected the runtime.
 #[derive(Debug, Eq, PartialEq)]
 struct Selected {
     runtime: bool,
-    facts: bool,
 }
 
-const SELECTED: Selected = Selected {
-    runtime: true,
-    facts: true,
-};
+const SELECTED: Selected = Selected { runtime: true };
 
-const NONE: Selected = Selected {
-    runtime: false,
-    facts: false,
-};
+const NONE: Selected = Selected { runtime: false };
 
 #[test]
-fn a_suspending_file_selects_and_freezes_the_coroutine_runtime_on_every_klib_target() {
+fn a_suspending_file_selects_the_coroutine_runtime_on_every_klib_target() {
     assert_on_provisioned_targets(SUSPENDING, true, SELECTED);
 }
 
@@ -110,13 +102,8 @@ fn handoff(
             _state: &mut Self::State,
             _diags: &mut DiagSink,
         ) -> Vec<krusty::compiler::Artifact> {
-            let runtime = file.ir.coroutine_runtime;
             self.seen.borrow_mut().push(Selected {
-                runtime: runtime.is_some(),
-                facts: runtime.is_some_and(|runtime| {
-                    file.callables.property(runtime.suspended).is_some()
-                        && file.callables.callable(runtime.get_or_throw).is_some()
-                }),
+                runtime: file.ir.coroutine_runtime.is_some(),
             });
             Vec::new()
         }

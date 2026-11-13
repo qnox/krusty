@@ -32,10 +32,6 @@ pub fn referenced_dependencies(ir: &IrFile) -> ReferencedDependencies {
             .chain(ir.external_secondary_super_constructors.values())
             .map(|target| target.declaration),
     );
-    if let Some(runtime) = ir.coroutine_runtime {
-        referenced.properties.insert(runtime.suspended);
-        referenced.callables.insert(runtime.get_or_throw);
-    }
     for edge in ir.function_overrides.values().flatten() {
         referenced.function_override(edge.implementation);
         referenced.function_override(edge.overridden);
