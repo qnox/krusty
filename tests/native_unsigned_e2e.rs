@@ -7,7 +7,9 @@
 //! each would pass by accident if the value were simply carried as the signed number — and each was
 //! why the whole family was declined until it could be answered.
 
-use super::common::{expect_box_ok_with_stdlib, expect_native_box, expect_native_decline};
+use super::common::{
+    expect_box_ok_with_stdlib, expect_native_box, expect_native_decline, kotlinc_box_result,
+};
 
 #[test]
 fn an_unsigned_value_renders_as_the_value_and_not_as_its_bits() {
@@ -416,4 +418,25 @@ fn a_float_converted_to_an_unsigned_type_is_declined() {
         "FloatToUnsigned",
         "toUInt",
     );
+}
+
+/// An unsigned array renders as the value class it is: `UIntArray(storage=[…])`, the storage being
+/// the SIGNED array it wraps, so an element past the signed maximum renders as its negative bits.
+/// Its `equals` is the storage's, which for an array is identity, so two arrays with the same
+/// elements are distinct and one array is equal to itself. Its `hashCode` is NOT identity under
+/// kotlinc: `UIntArray.hashCode-impl` is `java.util.Arrays.hashCode` of the storage, a contents
+/// hash. Native still hashes an unsigned array by identity, an existing gap this fixture does not
+/// detect: it only checks that the hash is stable.
+///
+/// The program is the shared box fixture, which every conformance lane also runs. The oracle is
+/// kotlinc itself, compiling and running that same `box()`.
+#[test]
+fn an_unsigned_array_renders_as_a_value_class_over_its_signed_storage() {
+    let source = include_str!("box_regressions/unsignedArrayRendering.kt");
+    assert_eq!(
+        kotlinc_box_result(source),
+        "OK",
+        "UnsignedArrayRendering: kotlinc"
+    );
+    expect_native_box(source, "UnsignedArrayRendering", "OK");
 }

@@ -147,6 +147,11 @@ static inline kt_int kt_length_of(KRef array) { return ((const KArray *)array)->
 /* `kotlin.Any`'s three members, the table of every runtime type that overrides none of them. */
 extern const kt_fn kt_any_vtable[3];
 
+/* An unsigned array's three members: the storage's identity `equals`, `kotlin.Any`'s identity
+   `hashCode` (an existing gap: kotlinc hashes the storage by contents), and the value class's
+   `UIntArray(storage=[…])` rendering. */
+extern const kt_fn kt_unsigned_array_vtable[3];
+
 /* A UTF-16 walk over UTF-8 storage, which is what every question Kotlin asks about a string's
    CONTENT needs: the unit is the unit Kotlin counts, and a character above U+FFFF is two of them.
    `pending` holds the trailing surrogate of a pair whose leading half has already been handed out;

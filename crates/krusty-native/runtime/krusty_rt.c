@@ -147,35 +147,37 @@ static const KType *const kt_char_sequence_interfaces[] = {&kt_type_char_sequenc
                               .vtable_length = 3};
 
 /* An array type. Its members are compared by IDENTITY, which is what Kotlin's `==` on arrays means,
-   so it takes `kotlin.Any`'s vtable rather than the built-in value one. */
-#define KT_ARRAY_TYPE(identifier, package, simple, stride, references)                             \
+   so `members` is `kotlin.Any`'s vtable or one sharing its identity `equals` and its `hashCode`.
+   For an unsigned array that identity `hashCode` is an existing gap: kotlinc hashes its storage by
+   contents. */
+#define KT_ARRAY_TYPE(identifier, package, simple, stride, references, members)                    \
     const KType identifier = {KT_NAMED(package, simple),                                           \
                               .instance_size = sizeof(KArray),                                     \
                               .element_size = stride,                                              \
                               .super = &kt_type_any,                                               \
-                              .vtable = kt_any_vtable,                                             \
+                              .vtable = members,                                                   \
                               .vtable_length = 3,                                                  \
                               .element_references = references};
 
 /* Every array, including the raw bytes behind a string's text. `KArray` says where the elements
    begin; the type says how wide they are and whether the collector looks inside. */
-KT_ARRAY_TYPE(kt_type_array, "kotlin.", "Array", sizeof(void *), 1)
-KT_ARRAY_TYPE(kt_type_byte_array, "kotlin.", "ByteArray", 1, 0)
-KT_ARRAY_TYPE(kt_type_short_array, "kotlin.", "ShortArray", 2, 0)
-KT_ARRAY_TYPE(kt_type_int_array, "kotlin.", "IntArray", 4, 0)
-KT_ARRAY_TYPE(kt_type_long_array, "kotlin.", "LongArray", 8, 0)
-KT_ARRAY_TYPE(kt_type_char_array, "kotlin.", "CharArray", 2, 0)
-KT_ARRAY_TYPE(kt_type_boolean_array, "kotlin.", "BooleanArray", 1, 0)
-KT_ARRAY_TYPE(kt_type_float_array, "kotlin.", "FloatArray", 4, 0)
-KT_ARRAY_TYPE(kt_type_double_array, "kotlin.", "DoubleArray", 8, 0)
+KT_ARRAY_TYPE(kt_type_array, "kotlin.", "Array", sizeof(void *), 1, kt_any_vtable)
+KT_ARRAY_TYPE(kt_type_byte_array, "kotlin.", "ByteArray", 1, 0, kt_any_vtable)
+KT_ARRAY_TYPE(kt_type_short_array, "kotlin.", "ShortArray", 2, 0, kt_any_vtable)
+KT_ARRAY_TYPE(kt_type_int_array, "kotlin.", "IntArray", 4, 0, kt_any_vtable)
+KT_ARRAY_TYPE(kt_type_long_array, "kotlin.", "LongArray", 8, 0, kt_any_vtable)
+KT_ARRAY_TYPE(kt_type_char_array, "kotlin.", "CharArray", 2, 0, kt_any_vtable)
+KT_ARRAY_TYPE(kt_type_boolean_array, "kotlin.", "BooleanArray", 1, 0, kt_any_vtable)
+KT_ARRAY_TYPE(kt_type_float_array, "kotlin.", "FloatArray", 4, 0, kt_any_vtable)
+KT_ARRAY_TYPE(kt_type_double_array, "kotlin.", "DoubleArray", 8, 0, kt_any_vtable)
 
 /* An unsigned array is a value class over the signed array of the same width, so it takes that
    array's STRIDE and its own NAME. Sharing the signed descriptor would read and write the same
    bytes correctly and answer `is IntArray` with `true`, where the two are distinct classes. */
-KT_ARRAY_TYPE(kt_type_ubyte_array, "kotlin.", "UByteArray", 1, 0)
-KT_ARRAY_TYPE(kt_type_ushort_array, "kotlin.", "UShortArray", 2, 0)
-KT_ARRAY_TYPE(kt_type_uint_array, "kotlin.", "UIntArray", 4, 0)
-KT_ARRAY_TYPE(kt_type_ulong_array, "kotlin.", "ULongArray", 8, 0)
+KT_ARRAY_TYPE(kt_type_ubyte_array, "kotlin.", "UByteArray", 1, 0, kt_unsigned_array_vtable)
+KT_ARRAY_TYPE(kt_type_ushort_array, "kotlin.", "UShortArray", 2, 0, kt_unsigned_array_vtable)
+KT_ARRAY_TYPE(kt_type_uint_array, "kotlin.", "UIntArray", 4, 0, kt_unsigned_array_vtable)
+KT_ARRAY_TYPE(kt_type_ulong_array, "kotlin.", "ULongArray", 8, 0, kt_unsigned_array_vtable)
 
 /* A NEGATIVE length is `IllegalArgumentException`, which a program may catch, with the JVM's
    message, the length; no array is made and the NULL answered is never read, the caller checking

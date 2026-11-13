@@ -1025,28 +1025,75 @@ kt_int kt_array_content_hash_code(KRef array) {
     return (kt_int)result;
 }
 
-/* `Arrays.toString`: `[a, b]`, and the text `null` for a null array. */
-KRef kt_array_content_to_string(KRef array) {
-    if (array == NULL) {
-        return kt_string_utf8("null", 4);
-    }
-    KRef builder = kt_string_builder_new();
+/* `[a, b]` appended to `builder`, each element read by `element`. Answers whether every element
+   rendered: the append leaves the builder alone when an element's `toString` throws, but the walk
+   has to end there too, or the elements after it are rendered. */
+static kt_boolean kt_array_append_contents(KRef builder, KRef array,
+                                           KRef (*element)(KRef array, kt_int at)) {
     kt_string_builder_append(builder, kt_string_utf8("[", 1));
     kt_int length = ((const KArray *)array)->length;
     for (kt_int index = 0; index < length; index++) {
         if (index != 0) {
             kt_string_builder_append(builder, kt_string_utf8(", ", 2));
         }
-        kt_string_builder_append(builder, kt_array_element(array, index));
-        /* The append leaves the builder alone when the element's `toString` throws, but the walk
-           has to end there too, or the elements after it are rendered. */
+        kt_string_builder_append(builder, element(array, index));
         if (kt_raised()) {
-            return NULL;
+            return false;
         }
     }
     kt_string_builder_append(builder, kt_string_utf8("]", 1));
+    return true;
+}
+
+/* `Arrays.toString`: `[a, b]`, and the text `null` for a null array. */
+KRef kt_array_content_to_string(KRef array) {
+    if (array == NULL) {
+        return kt_string_utf8("null", 4);
+    }
+    KRef builder = kt_string_builder_new();
+    return kt_array_append_contents(builder, array, kt_array_element) ? kt_to_string(builder) : NULL;
+}
+
+/* One element of an unsigned array read as its STORAGE holds it: the signed number of those bits.
+   An unsigned array is laid out as the signed array of its own width, so the stride alone says
+   which signed type that is. */
+static KRef kt_storage_element(KRef array, kt_int at) {
+    const void *elements = (const void *)((const KArray *)array + 1);
+    switch (array->header.type->element_size) {
+    case 1:
+        return kt_box_byte(((const kt_byte *)elements)[at]);
+    case 2:
+        return kt_box_short(((const kt_short *)elements)[at]);
+    case 4:
+        return kt_box_int(((const kt_int *)elements)[at]);
+    case 8:
+        return kt_box_long(((const kt_long *)elements)[at]);
+    default:
+        KT_FAIL("krusty: an unsigned array has no signed storage of this width\n");
+        return NULL;
+    }
+}
+
+/* An unsigned array is a value class over the signed array of its width, so its `toString` is the
+   value class's own, `UIntArray(storage=[1, -1])`: its simple name and the storage's `toString`,
+   which kotlinc renders by content. Its `equals` is the storage's, an array's identity, which this
+   object's own identity is. Its `hashCode` is still `kotlin.Any`'s identity hash, an existing gap:
+   kotlinc hashes the storage by CONTENTS (`Arrays.hashCode` on the JVM). */
+static KRef kt_unsigned_array_to_string(KRef self) {
+    const KType *type = self->header.type;
+    KRef builder = kt_string_builder_new();
+    kt_string_builder_append(builder,
+                             kt_string_utf8(type->simple_name, (kt_int)type->simple_name_length));
+    kt_string_builder_append(builder, kt_string_utf8("(storage=", 9));
+    if (!kt_array_append_contents(builder, self, kt_storage_element)) {
+        return NULL;
+    }
+    kt_string_builder_append(builder, kt_string_utf8(")", 1));
     return kt_to_string(builder);
 }
+
+const kt_fn kt_unsigned_array_vtable[3] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,
+                                           (kt_fn)kt_unsigned_array_to_string};
 
 /* Whether a walk reads a `CharSequence` the PROGRAM implements. Such a walk steps the way Kotlin's
    own `CharIterator` does: `hasNext` asks `length`, and `next` is `get(index++)` and nothing more,
