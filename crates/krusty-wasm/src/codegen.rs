@@ -232,7 +232,7 @@ impl Backend for WasmBackend {
             .as_ref()
             .is_none_or(|(module, _)| module != file.module_name)
         {
-            let plan = classes::module_plan(file.classifiers.module().classes(), &file.classifiers);
+            let plan = classes::module_plan(file.classifiers.classes(), &file.classifiers);
             state.slot_plan = Some((file.module_name.to_owned(), plan));
             // The table types are built from the plan, so they are that module's too.
             started.tables = Default::default();

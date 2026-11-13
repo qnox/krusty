@@ -18,7 +18,7 @@ use crate::fir::{
 use crate::types::{SemanticCallRole, Ty, TypeName};
 
 /// The named classes of one module, by identity.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ModuleClasses {
     classes: HashMap<TypeName, ModuleClass>,
     /// In declaration order, so numbering them visits them the same way in every process.
@@ -26,7 +26,7 @@ pub struct ModuleClasses {
 }
 
 /// One named class: what its dispatch table is built from.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ModuleClass {
     /// The declared superclass, or `None` for `kotlin.Any`.
     pub(crate) superclass: Option<TypeName>,
@@ -45,7 +45,7 @@ pub struct ModuleClass {
 }
 
 /// One named interface: what its member numbers are computed from.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct ModuleInterface {
     /// The interfaces it extends, in source order.
     pub(crate) interfaces: Box<[TypeName]>,
@@ -56,7 +56,7 @@ pub(crate) struct ModuleInterface {
 }
 
 /// A member an interface declares or redeclares.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum ModuleInterfaceMember {
     Function {
         callable: CallableId,
@@ -71,7 +71,7 @@ pub(crate) enum ModuleInterfaceMember {
 
 /// An instance member a table can hold: a declaration of the module, or of a dependency class a
 /// module class extends ([`crate::fir::ResolvedDependencySuperclass`]).
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum ModuleMember {
     Function {
         callable: ResolvedFunctionOverrideTarget,
@@ -98,7 +98,7 @@ pub(crate) enum ModuleMember {
 }
 
 /// A function override edge of a class's own member.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct ModuleFunctionOverride {
     pub(crate) implementation: ResolvedFunctionOverrideTarget,
     pub(crate) overridden_owner: TypeName,
@@ -108,7 +108,7 @@ pub(crate) struct ModuleFunctionOverride {
 }
 
 /// A property override edge of a class's own member.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct ModulePropertyOverride {
     pub(crate) implementation: ResolvedPropertyOverrideTarget,
     pub(crate) overridden: ResolvedPropertyOverrideTarget,
@@ -179,6 +179,48 @@ impl ModuleInterface {
 }
 
 impl ModuleClasses {
+    /// Build a provider-free dispatch snapshot from class records already authenticated by the
+    /// compiler. This boundary intentionally accepts no libraries, providers, or semantic lookups.
+    pub(crate) fn from_support_classes(
+        support: impl IntoIterator<Item = (TypeName, ModuleClass)>,
+    ) -> Result<Self, TypeName> {
+        let mut classes = HashMap::default();
+        for (classifier, class) in support {
+            if classes.insert(classifier, class).is_some() {
+                return Err(classifier);
+            }
+        }
+        Ok(Self {
+            classes,
+            interfaces: Vec::new(),
+        })
+    }
+
+    /// Merge compiler-owned additions for one checked support unit before slot planning.
+    /// Existing current-module declaration facts always win; duplicate dependency shapes are
+    /// stable provider facts and need only one module-wide copy.
+    pub(crate) fn merge_support_classes(&mut self, support: Self) -> Result<(), TypeName> {
+        for (classifier, class) in support.classes {
+            match self.classes.get(&classifier) {
+                Some(existing) if existing.dependency && class.dependency => {}
+                Some(_) => return Err(classifier),
+                None => {
+                    self.classes.insert(classifier, class);
+                }
+            }
+        }
+        for (classifier, interface) in support.interfaces {
+            if !self
+                .interfaces
+                .iter()
+                .any(|(known, _)| *known == classifier)
+            {
+                self.interfaces.push((classifier, interface));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn class(&self, classifier: TypeName) -> Option<&ModuleClass> {
         self.classes.get(&classifier)
     }

@@ -270,7 +270,7 @@ pub fn lower_file(
         laid_out,
     } = input;
     let class_model = model::build(ir, value_classes, slot_plan, laid_out)?;
-    let extended = extended_elsewhere(ir, unit_kind, module_facts);
+    let extended = extended_elsewhere(ir, unit_kind, classifiers.classes());
     let exported = module_abi::exported_classes(&class_model, &extended);
     // Another file calls a default-argument entry by the one symbol its identity names.
     if let Some(declaration) = ir.default_entries.keys().find(|&&declaration| {
@@ -452,10 +452,9 @@ pub fn lower_file(
 fn extended_elsewhere(
     ir: &IrFile,
     unit_kind: krusty::backend::CheckedIrUnitKind,
-    module_facts: &krusty::backend::BackendModuleFacts,
+    classes: &krusty::backend::class_tables::module_classes::ModuleClasses,
 ) -> krusty::fx_hash::HashSet<krusty::ir::ClassId> {
     let mut extended = krusty::fx_hash::HashSet::default();
-    let classes = module_facts.classes();
     let support = unit_kind != krusty::backend::CheckedIrUnitKind::Source;
     for (id, class) in ir.classes.iter().enumerate() {
         if class.is_interface || ir.local_class_name_provenance.contains_key(&(id as u32)) {

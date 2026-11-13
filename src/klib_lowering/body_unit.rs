@@ -173,6 +173,8 @@ pub struct DependencyBodyUnit {
     ir: IrFile,
     functions: HashMap<KlibDependencyCallable, FunId>,
     classes: HashMap<KlibDependencyCallable, crate::ir::ClassId>,
+    /// Authenticated dispatch members of ordinary classes materialized by this unit.
+    materialized_class_members: Vec<MaterializedClassMember>,
     /// The initialization each materialized constructor of an ordinary class runs.
     constructors: HashMap<KlibDependencyCallable, MaterializedConstructor>,
     /// Enum classes whose constants this unit's bodies read, keyed by their constructor. Their
@@ -195,6 +197,33 @@ pub struct DependencyBodyUnit {
     /// Member functions of those classes, keyed by the same library and their file-local signature.
     local_functions: HashMap<super::same_library_class::LocalIdentity, LocalFunction>,
     builtins: IrBuiltinOperators,
+}
+
+#[derive(Clone)]
+pub(crate) struct MaterializedClassMember {
+    pub(crate) owner: TypeName,
+    pub(crate) target: KlibDependencyCallable,
+    pub(crate) accessor: Option<crate::libraries::KlibAccessorRole>,
+    pub(crate) property_getter: Option<KlibDependencyCallable>,
+    pub(crate) property_setter: Option<KlibDependencyCallable>,
+    pub(crate) function_overrides: Vec<MaterializedClassFunctionOverride>,
+    pub(crate) property_overrides: Vec<MaterializedClassPropertyOverride>,
+}
+
+#[derive(Clone)]
+pub(crate) struct MaterializedClassFunctionOverride {
+    pub(crate) implementation: KlibDependencyCallable,
+    pub(crate) overridden: KlibDependencyCallable,
+    pub(crate) overridden_owner: TypeName,
+    pub(crate) overridden_is_interface: bool,
+    pub(crate) overridden_role: Option<crate::types::SemanticCallRole>,
+}
+
+#[derive(Clone)]
+pub(crate) struct MaterializedClassPropertyOverride {
+    pub(crate) overridden: KlibDependencyCallable,
+    pub(crate) overridden_owner: TypeName,
+    pub(crate) overridden_is_interface: bool,
 }
 
 /// The allocation a materialized class's constructor exports: the class, and the index of the
@@ -227,6 +256,7 @@ impl Default for DependencyBodyUnit {
             ir: IrFile::default(),
             functions: HashMap::default(),
             classes: HashMap::default(),
+            materialized_class_members: Vec::new(),
             constructors: HashMap::default(),
             enum_classes: HashMap::default(),
             realized_enums: HashSet::default(),
@@ -296,6 +326,34 @@ struct MemberClass<'a> {
 }
 
 impl DependencyBodyUnit {
+    pub(crate) fn materialized_ordinary_classes(
+        &self,
+    ) -> Vec<(TypeName, crate::ir::ClassId, KlibDependencyCallable)> {
+        let mut classes = self
+            .constructors
+            .keys()
+            .filter_map(|identity| {
+                let class = *self.classes.get(identity)?;
+                let record = &self.ir.classes[class as usize];
+                (!record.is_value && !record.is_local_class && !record.is_anonymous_object)
+                    .then_some((record.fq_name, class, identity.clone()))
+            })
+            .collect::<Vec<_>>();
+        classes.sort_unstable_by_key(|(name, _, identity)| {
+            (
+                name.render(),
+                identity.module.clone(),
+                format!("{:?}", identity.declaration),
+            )
+        });
+        classes.dedup_by_key(|(name, _, _)| *name);
+        classes
+    }
+
+    pub(crate) fn materialized_class_members(&self) -> &[MaterializedClassMember] {
+        &self.materialized_class_members
+    }
+
     /// A positive capability for graph preparation, using the same classification as lowering.
     /// Provider header evidence is not a source selection. Ambiguity, selected roots (including
     /// recursive calls), and non-public declarations never authorize folding a declaration edge.
@@ -706,6 +764,7 @@ impl DependencyBodyUnit {
         let mut linker = Linker {
             functions: &mut self.functions,
             classes: &mut self.classes,
+            materialized_class_members: &mut self.materialized_class_members,
             constructors: &mut self.constructors,
             enum_classes: &mut self.enum_classes,
             realized_enums: &self.realized_enums,
@@ -819,6 +878,7 @@ impl DependencyBodyUnit {
 struct Linker<'u, 's> {
     functions: &'u mut HashMap<KlibDependencyCallable, FunId>,
     classes: &'u mut HashMap<KlibDependencyCallable, crate::ir::ClassId>,
+    materialized_class_members: &'u mut Vec<MaterializedClassMember>,
     constructors: &'u mut HashMap<KlibDependencyCallable, MaterializedConstructor>,
     enum_classes: &'u mut HashMap<KlibDependencyCallable, crate::ir::ClassId>,
     realized_enums: &'u HashSet<TypeName>,
@@ -1732,10 +1792,7 @@ impl<'s> Linker<'_, 's> {
         if is_receiver_member(candidate, self.sources.bodies, self.sources.callees) {
             return Ok(true);
         }
-        let Some(class) = candidate
-            .class_contract()
-            .filter(|class| class.emits_members())
-        else {
+        let Some(class) = candidate.class_contract() else {
             return Ok(false);
         };
         if class.is_value {
@@ -2213,15 +2270,23 @@ fn selected_callable_for_header_purpose<'callable>(
 
 /// What a unit held before a lowering began: its IR ([`LoweringCheckpoint`]) and the identities
 /// joined to the functions that IR declares.
-struct UnitCheckpoint(LoweringCheckpoint);
+struct UnitCheckpoint {
+    lowering: LoweringCheckpoint,
+    materialized_class_members: usize,
+}
 
 impl UnitCheckpoint {
     fn of(unit: &DependencyBodyUnit) -> Self {
-        Self(LoweringCheckpoint::of(&unit.ir))
+        Self {
+            lowering: LoweringCheckpoint::of(&unit.ir),
+            materialized_class_members: unit.materialized_class_members.len(),
+        }
     }
 
     fn restore(self, unit: &mut DependencyBodyUnit) {
-        let first = self.0.restore(&mut unit.ir);
+        let first = self.lowering.restore(&mut unit.ir);
+        unit.materialized_class_members
+            .truncate(self.materialized_class_members);
         unit.functions.retain(|_, function| *function < first);
         unit.classes
             .retain(|_, class| (*class as usize) < unit.ir.classes.len());
