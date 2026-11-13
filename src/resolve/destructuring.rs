@@ -81,6 +81,14 @@ impl Checker<'_> {
                             .insert((s, idx), target);
                         if !entry.ignored {
                             self.declare_local_property(scope, name, t, is_var);
+                            self.record_lexical_declaration(
+                                scope,
+                                name,
+                                super::lexical_bindings::LexicalValueRole::Statement {
+                                    declaration: span,
+                                    slot: idx as u32,
+                                },
+                            );
                         }
                     }
                     None => {
@@ -92,6 +100,14 @@ impl Checker<'_> {
                         );
                         if !entry.ignored {
                             self.declare_local_property(scope, name, Ty::Error, is_var);
+                            self.record_lexical_declaration(
+                                scope,
+                                name,
+                                super::lexical_bindings::LexicalValueRole::Statement {
+                                    declaration: span,
+                                    slot: idx as u32,
+                                },
+                            );
                         }
                     }
                 }
@@ -113,6 +129,14 @@ impl Checker<'_> {
                 Ok(target) => target,
                 Err(()) => {
                     self.declare_local_property(scope, name, Ty::Error, is_var);
+                    self.record_lexical_declaration(
+                        scope,
+                        name,
+                        super::lexical_bindings::LexicalValueRole::Statement {
+                            declaration: span,
+                            slot: idx as u32,
+                        },
+                    );
                     continue;
                 }
             };
@@ -137,6 +161,14 @@ impl Checker<'_> {
                     self.resolved_destructure_components
                         .insert((s, idx), target);
                     self.declare_local_property(scope, name, t, is_var);
+                    self.record_lexical_declaration(
+                        scope,
+                        name,
+                        super::lexical_bindings::LexicalValueRole::Statement {
+                            declaration: span,
+                            slot: idx as u32,
+                        },
+                    );
                 }
                 None => {
                     self.diags.error(
@@ -144,6 +176,14 @@ impl Checker<'_> {
                         format!("krusty: cannot destructure this type (no operator '{comp}')"),
                     );
                     self.declare_local_property(scope, name, Ty::Error, is_var);
+                    self.record_lexical_declaration(
+                        scope,
+                        name,
+                        super::lexical_bindings::LexicalValueRole::Statement {
+                            declaration: span,
+                            slot: idx as u32,
+                        },
+                    );
                 }
             }
         }

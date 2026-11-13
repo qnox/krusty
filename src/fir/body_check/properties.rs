@@ -24,6 +24,17 @@ type SelectedPropertyRead = (
     Box<[FirTypeSubstitution]>,
 );
 
+/// The getter, receivers, context arguments, and substitutions of one selected property read.
+/// A prefix increment publishes this same access twice.
+#[derive(Clone, Copy)]
+struct PropertyReadAccess<'a> {
+    target: &'a FirPropertyTarget,
+    dispatch_receiver: Option<FirReceiver>,
+    extension_receiver: Option<FirReceiver>,
+    context_arguments: &'a [FirReceiver],
+    substitutions: &'a [FirTypeSubstitution],
+}
+
 /// The property an increment reads and writes, once resolution has chosen it.
 struct PropertyIncDecTarget<'a> {
     declaration: Option<DeclarationId>,
@@ -644,6 +655,16 @@ impl BodyFirChecker<'_> {
         );
         let selected_ty = ResolvedTy::new(selected.ty)
             .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))?;
+        if let Some(binding) = selected.context_binding.as_ref() {
+            if matches!(
+                binding.source,
+                crate::resolve::ContextBindingSource::RequiredClassCapture { .. }
+            ) {
+                return self
+                    .materialize_context_binding(span, cause, origin, &binding.name, binding.source)
+                    .map(Some);
+            }
+        }
         if let Some((owner, field)) = self.class_context_storage(selected) {
             if let Some(receiver) = self.script_statement_receiver(cause, field) {
                 return Ok(Some(receiver));
@@ -670,38 +691,14 @@ impl BodyFirChecker<'_> {
                 conversion: None,
             }));
         }
-        if let Some(crate::resolve::ContextBinding {
-            name, shadow_depth, ..
-        }) = selected
+        if let Some(crate::resolve::ContextBinding { name, source, .. }) = selected
             .context_binding
             .as_ref()
             .filter(|binding| binding.name != "this")
         {
-            if let Some((owner, parameter, ty)) = self
-                .current_named_context_parameter(name)
-                .filter(|(_, _, ty)| *ty == selected_ty)
-            {
-                let value = self.body.add_expr(FirExpr {
-                    origin,
-                    ty,
-                    kind: if self.constructor_prefix_capture_access {
-                        FirExprKind::ConstructorContextRead { owner, parameter }
-                    } else {
-                        FirExprKind::ClassStorageRead {
-                            owner,
-                            field: parameter,
-                        }
-                    },
-                });
-                return Ok(Some(FirReceiver {
-                    value,
-                    conversion: None,
-                }));
-            }
-            let (enclosing_depth, binding) = self
-                .binding_source_at_shadow_depth(name, *shadow_depth)
-                .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnknownLocal))?;
-            return Ok(Some(self.bound_receiver(origin, enclosing_depth, binding)));
+            return self
+                .materialize_context_binding(span, origin, origin, name, *source)
+                .map(Some);
         }
         if let Some(singleton) = selected.singleton.as_ref() {
             let ty = ResolvedTy::new(selected.ty).map_err(|error| {
@@ -1872,15 +1869,14 @@ impl BodyFirChecker<'_> {
             span.ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
         let receiver_ty = self.resolved_type(span, resolution.receiver_ty)?;
         let substitutions: Box<[FirTypeSubstitution]> = Box::new([]);
-        let read = self.selected_property_read(
-            origin,
-            receiver_ty,
-            &read_target,
+        let property_read = PropertyReadAccess {
+            target: &read_target,
             dispatch_receiver,
             extension_receiver,
-            &context_arguments,
-            &substitutions,
-        );
+            context_arguments: &context_arguments,
+            substitutions: &substitutions,
+        };
+        let read = self.selected_property_read(origin, receiver_ty, property_read);
         // A postfix statement keeps kotlinc's shape `{ val t = read; write(t.inc()); t }`: the old
         // value is stored in a temporary before the write, even though the value is discarded.
         let mut statements = Vec::new();
@@ -1991,15 +1987,7 @@ impl BodyFirChecker<'_> {
             origin,
             kind: FirStatementKind::Expression(write),
         })]);
-        let reread = self.selected_property_read(
-            origin,
-            updated_ty,
-            &read_target,
-            dispatch_receiver,
-            extension_receiver,
-            &context_arguments,
-            &substitutions,
-        );
+        let reread = self.selected_property_read(origin, updated_ty, property_read);
         Ok(Some(FirExprKind::Block {
             statements,
             result: Some(reread),
@@ -2017,12 +2005,15 @@ impl BodyFirChecker<'_> {
         &mut self,
         origin: OriginId,
         ty: ResolvedTy,
-        target: &FirPropertyTarget,
-        dispatch_receiver: Option<FirReceiver>,
-        extension_receiver: Option<FirReceiver>,
-        context_arguments: &[FirReceiver],
-        substitutions: &[FirTypeSubstitution],
+        access: PropertyReadAccess<'_>,
     ) -> FirExprId {
+        let PropertyReadAccess {
+            target,
+            dispatch_receiver,
+            extension_receiver,
+            context_arguments,
+            substitutions,
+        } = access;
         self.body.add_expr(FirExpr {
             origin,
             ty,
@@ -2250,15 +2241,14 @@ impl BodyFirChecker<'_> {
         let read_ty = self.resolved_type(span, resolution.receiver_ty)?;
         let updated_ty = self.resolved_type(span, resolution.updated_ty)?;
         let substitutions: Box<[FirTypeSubstitution]> = Box::new([]);
-        let read = self.selected_property_read(
-            cause,
-            read_ty,
-            &read_target,
+        let property_read = PropertyReadAccess {
+            target: &read_target,
             dispatch_receiver,
             extension_receiver,
-            &context_arguments,
-            &substitutions,
-        );
+            context_arguments: &context_arguments,
+            substitutions: &substitutions,
+        };
+        let read = self.selected_property_read(cause, read_ty, property_read);
         let convention = if decrement { "dec" } else { "inc" };
         let increment = |checker: &mut Self, operand| -> Result<FirExprId, BodyCheckFailure> {
             let kind = if checker.selected_operator(expression, convention) {
@@ -2348,15 +2338,7 @@ impl BodyFirChecker<'_> {
             }),
             // Prefix re-reads the property after the write, exactly as kotlinc does — the same
             // selected access as the first read, context arguments included.
-            None => self.selected_property_read(
-                cause,
-                result_ty,
-                &read_target,
-                dispatch_receiver,
-                extension_receiver,
-                &context_arguments,
-                &substitutions,
-            ),
+            None => self.selected_property_read(cause, result_ty, property_read),
         };
         Ok(Some(FirExprKind::Block {
             statements: statements.into_boxed_slice(),
@@ -2824,7 +2806,7 @@ impl BodyFirChecker<'_> {
             })?;
         let selected = self.selected_call_target(span, Some(&selected))?;
         if !selected.context_arguments.is_empty()
-            || selected.vararg_index.is_some()
+            || selected.vararg.is_some()
             || !selected.value_parameters.is_empty()
         {
             return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));

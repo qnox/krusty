@@ -69,6 +69,7 @@ pub(super) struct MaterializedLocalClass {
 pub(super) struct LocalStoredField<'a> {
     pub(super) symbol: &'a KlibIrSymbol,
     pub(super) ty: Ty,
+    pub(super) final_: bool,
 }
 
 /// The initializer frame queued for a file-local class.
@@ -117,6 +118,9 @@ pub(super) struct PreparedMember<'a> {
     pub(super) header: FunctionHeader,
     /// Interface members this function overrides, authenticated against the admitted supertypes.
     pub(super) overrides: Vec<MemberOverride>,
+    pub(super) visibility: Visibility,
+    /// Whether the function is its property's setter.
+    pub(super) setter: bool,
 }
 
 /// An overridden member, joined by its checked dependency identity.
@@ -366,6 +370,8 @@ pub(super) struct PreparedLocalClass<'a> {
     pub(super) access: IrConstructorAccess,
     pub(super) formals: Vec<Ty>,
     pub(super) class_type_parameters: Vec<String>,
+    /// The declared bounds of each class type parameter, in its order.
+    pub(super) class_type_parameter_bounds: Vec<Vec<Ty>>,
     pub(super) constructor_symbol: &'a KlibIrSymbol,
     pub(super) arena: &'a KlibIrArena,
     pub(super) receiver_symbol: &'a KlibIrSymbol,
@@ -496,6 +502,7 @@ pub(super) fn linked_member(
         type_parameter_bounds: Some(Vec::new()),
         class_type_parameters: class.class_type_parameters.clone(),
         parameter_defaults: defaults,
+        edge: super::CallEdge::default(),
     }
 }
 
@@ -588,6 +595,44 @@ fn prepare<'a>(
 ) -> Result<PreparedLocalClass<'a>, KlibBodyDeclineReason> {
     let class_name = classifier(source.bodies, source.module, &class.base.symbol.signature)?
         .ok_or_else(non_public_type)?;
+    let resolve = |signature: &KlibIrSignature| classifier(source.bodies, source.module, signature);
+    let formals = class_formals(arena, class, &resolve)?;
+    prepare_class(
+        source,
+        signature,
+        ClassDeclaration {
+            arena,
+            class,
+            function,
+            key,
+            class_name,
+        },
+        formals,
+    )
+}
+
+/// One class declaration and the constructor that builds it, with the identity it is cached by.
+struct ClassDeclaration<'a> {
+    arena: &'a KlibIrArena,
+    class: &'a KlibIrClass,
+    function: &'a KlibIrFunction,
+    key: LocalIdentity,
+    class_name: TypeName,
+}
+
+fn prepare_class<'a>(
+    source: LocalClassSource<'a, '_>,
+    signature: &KlibIrSignature,
+    declaration: ClassDeclaration<'a>,
+    formals: ClassFormals,
+) -> Result<PreparedLocalClass<'a>, KlibBodyDeclineReason> {
+    let ClassDeclaration {
+        arena,
+        class,
+        function,
+        key,
+        class_name,
+    } = declaration;
     if declaration_modality(class.base.flags).is_abstract() {
         return Err(unsupported("a non-public abstract class"));
     }
@@ -622,7 +667,7 @@ fn prepare<'a>(
         formals,
         variances,
         bounds,
-    } = class_formals(arena, class, &resolve)?;
+    } = formals;
     let (supertypes, interfaces) =
         authenticate_supertypes(source.bodies, source.module, arena, class, &types, &resolve)?;
     let self_type = Ty::obj_args_name(class_name, &formals);
@@ -668,6 +713,7 @@ fn prepare<'a>(
         .collect::<Result<Vec<_>, _>>()?;
     let init_header =
         local_initializer_header(function, receiver, self_type, arena, &types, &resolve)?;
+    let class_type_parameter_bounds = bounds.clone();
     Ok(PreparedLocalClass {
         key,
         classifier: class_name,
@@ -694,6 +740,7 @@ fn prepare<'a>(
         },
         formals,
         class_type_parameters,
+        class_type_parameter_bounds,
         constructor_symbol: &function.base.symbol,
         arena,
         receiver_symbol: &receiver.base.symbol,
@@ -792,6 +839,7 @@ fn members_and_storage<'a>(
             stored.push(LocalStoredField {
                 symbol: &field.base.symbol,
                 ty: authenticated.ty,
+                final_: authenticated.final_,
             });
             Some((index, field))
         } else {
@@ -802,12 +850,15 @@ fn members_and_storage<'a>(
             KlibIrMember::Function(id) => {
                 let function = arena.function(*id);
                 if !function.constructor {
-                    members.push(prepare_member(arena, function, scope)?);
+                    members.push(prepare_member(arena, function, scope, false)?);
                 }
             }
             KlibIrMember::Property(property) => {
-                for id in [property.getter, property.setter].into_iter().flatten() {
-                    members.push(prepare_member(arena, arena.function(id), scope)?);
+                if let Some(id) = property.getter {
+                    members.push(prepare_member(arena, arena.function(id), scope, false)?);
+                }
+                if let Some(id) = property.setter {
+                    members.push(prepare_member(arena, arena.function(id), scope, true)?);
                 }
             }
             KlibIrMember::Field(_) | KlibIrMember::AnonymousInitializer { .. } => {}
@@ -832,6 +883,7 @@ fn prepare_member<'a>(
     arena: &'a KlibIrArena,
     function: &'a KlibIrFunction,
     scope: &MemberScope<'_>,
+    setter: bool,
 ) -> Result<PreparedMember<'a>, KlibBodyDeclineReason> {
     let statements = match &function.body {
         Some(KlibIrBody::Block(statements)) => statements.as_slice(),
@@ -846,6 +898,8 @@ fn prepare_member<'a>(
         statements,
         header: local_member_header(function, arena, scope.types, scope.self_type, scope.resolve)?,
         overrides: member_overrides(function, scope)?,
+        visibility: declaration_visibility(function.base.flags),
+        setter,
     })
 }
 
@@ -864,7 +918,7 @@ fn member_overrides(
             return Err(unsupported("an override of a non-public declaration"));
         };
         let declaration = KlibDeclarationSignature::Public(signature.clone());
-        let identity = match scope.bodies.callee_origin(scope.module, &declaration) {
+        let identity = match scope.bodies.linked_origin(scope.module, &declaration) {
             KlibCalleeOrigin::Exact(identity) => identity,
             KlibCalleeOrigin::Missing => {
                 return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
@@ -1163,6 +1217,17 @@ pub(super) fn installed_class(prepared: &PreparedLocalClass<'_>) -> IrClass {
     class.supertypes = prepared.supertypes.clone();
     for interface in &prepared.interfaces {
         class.interfaces.push_name(*interface);
+    }
+    // A generic class keeps its declared formals and their bounds.
+    for (identity, bounds) in prepared
+        .class_type_parameters
+        .iter()
+        .zip(&prepared.class_type_parameter_bounds)
+    {
+        class.type_params.push(identity.clone());
+        class
+            .type_param_bounds
+            .extend(bounds.iter().map(|bound| (identity.clone(), *bound)));
     }
     class.fields = prepared.fields.clone();
     class.ctor_args = prepared.ctor_args.clone();

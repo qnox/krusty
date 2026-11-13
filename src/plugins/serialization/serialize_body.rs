@@ -21,7 +21,7 @@ fn record_serialize_lines(
         (class.decl_start_line, class.decl_line)
     };
     if start_line != 0 {
-        ir.expr_lines.insert(opening_expression, start_line);
+        ir.set_statement_line(opening_expression, start_line);
     }
     if header_line != 0 {
         ir.function_position_mut(function).close_line = Some(header_line);
@@ -528,9 +528,10 @@ impl SerializeBody<'_> {
                 // in a temp and combines with `ior`, which is a different method body from
                 // kotlinc's for every defaulted property in the class.
                 let encode_anyway = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
-                let cond = ir.add_expr(IrExpr::When {
-                    branches: vec![(Some(should), encode_anyway), (None, neq)],
-                });
+                let cond = ir.add_when(
+                    vec![(Some(should), encode_anyway), (None, neq)],
+                    Ty::Boolean,
+                );
                 let guard = ir.add_expr(IrExpr::When {
                     branches: vec![(Some(cond), enc_stmt)],
                 });
@@ -578,7 +579,7 @@ impl SerializeBody<'_> {
             let start_line = ir.classes[foo_id as usize].decl_start_line;
             if start_line != 0 {
                 for &statement in &stmts {
-                    ir.expr_lines.insert(statement, start_line);
+                    ir.set_statement_line(statement, start_line);
                 }
             }
             let ws_ret = ir.add_expr(IrExpr::Return(None));

@@ -241,6 +241,9 @@ impl Emitter<'_> {
         };
         let takes_receiver = accessor_takes_receiver(&access);
         let receiver_ty = accessor_receiver_ty(&access, access_owner);
+        if exact_field {
+            self.mark_expression_start(operation.expression, code);
+        }
         if let Some(receiver) = receiver.filter(|_| !receiver_is_static_field_qualifier) {
             self.emit_property_receiver(
                 receiver,

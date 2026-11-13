@@ -2,7 +2,7 @@
 //! every path reaching the boundary arrives in the representation the destination takes.
 
 use super::{erase, is_ref, target, BoxOp, Repr, ReprCtx, Target, Under};
-use krusty::ir::{value_tails, Callee, ExprId, IrExpr};
+use krusty::ir::{value_tails, Callee, ExprId, IrExpr, IrFile};
 use krusty::types::Ty;
 
 /// The receiver of a property access `id` crosses into its selected accessor. A value-class
@@ -72,12 +72,7 @@ pub(super) fn record_value_boundary(
             && is_ref(&parameter)
             && match representation {
                 Repr::Unboxed(value_class) | Repr::Boxed(value_class) => {
-                    let underlying = under
-                        .get(&value_class)
-                        .map(|underlying| erase(underlying, under).non_null());
-                    let own_underlying = underlying
-                        .is_some_and(|ty| ty == parameter.non_null() && !ty.is_erased_top());
-                    parameter.non_null().obj_internal() != Some(value_class) && !own_underlying
+                    parameter.non_null().obj_internal() != Some(value_class)
                 }
                 Repr::NotVc => false,
             });
@@ -212,4 +207,26 @@ pub(super) fn record_reference_array_element_boundary(
             ops.push((tail, repr_ctx.box_op(tail, value_class)));
         }
     }
+}
+
+/// A value `when` materializes every branch at its checked result, as kotlinc does even when the
+/// `when` is discarded. Where that result is a reference supertype of a value class (a sealed
+/// interface over value-class cases), each branch is a boundary into it, so a value-class branch
+/// is boxed rather than merged as its carrier.
+pub(super) fn when_merge_pairs(
+    ir: &IrFile,
+    id: ExprId,
+    under: &Under,
+) -> Option<Vec<(ExprId, Ty)>> {
+    let IrExpr::When { branches } = ir.expr(id) else {
+        return None;
+    };
+    if !branches.iter().any(|(condition, _)| condition.is_none()) {
+        return None;
+    }
+    let result = ir.logical_type(id)?;
+    if !is_ref(&result) || !matches!(target(&result, under), Target::Other) {
+        return None;
+    }
+    Some(branches.iter().map(|&(_, value)| (value, result)).collect())
 }

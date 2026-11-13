@@ -745,7 +745,7 @@ mod tests {
                 TyKind::Obj(owner, arguments)
                     if owner.matches("kotlin/collections/MutableList") =>
                 {
-                    Ty::obj_args("kotlin/collections/List", &arguments)
+                    Ty::obj_args("kotlin/collections/List", arguments.as_slice())
                 }
                 _ => lower,
             }

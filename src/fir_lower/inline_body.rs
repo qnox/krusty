@@ -6,7 +6,7 @@ use crate::types::{Ty, TyKind};
 
 use super::source_calls::{
     inline_argument_template, rehome_inline_body_values, SelectedDefaultMode, SelectedOperandMode,
-    SelectedOperandRequest,
+    SelectedOperandRequest, SelectedSemanticOperands,
 };
 use super::BodyLowering;
 
@@ -20,7 +20,7 @@ use super::BodyLowering;
 fn first_body_line(ir: &crate::ir::IrFile, body: ExprId) -> Option<u32> {
     let mut expression = body;
     loop {
-        if let Some(&line) = ir.expr_lines.get(&expression) {
+        if let Some(line) = ir.statement_line(expression) {
             return (line != 0).then_some(line);
         }
         expression = match ir.expr(expression).clone() {
@@ -109,6 +109,22 @@ pub(super) struct ExternalCollectionTransformPlan<'a> {
     pub(super) accumulator_ty: ResolvedTy,
 }
 
+/// The lambda argument an external inline call has already lowered, with its parameter slot.
+struct ExternalInlineLambdaArgument<'a> {
+    arguments: &'a [ExprId],
+    parameter: usize,
+    ty: Ty,
+}
+
+/// Where an external inline lambda's receiver and its preamble sit in the caller's frame.
+struct ExternalInlineLambdaLayout {
+    /// A `finally` keeps the lambda parameters inside the protected region.
+    preamble_in_body: bool,
+    /// `apply` returns the callee receiver, and a `finally` keeps that local outside the
+    /// protected region, so those expansions store it separately from the lambda `$this$`.
+    distinct_callee_receiver: bool,
+}
+
 impl BodyLowering<'_> {
     pub(super) fn external_inline_call(
         &mut self,
@@ -137,29 +153,32 @@ impl BodyLowering<'_> {
             if result.get() != Ty::Boolean {
                 return None;
             }
-            let runtime = substitutions.iter().find_map(|substitution| {
+            let runtime = substitutions.iter().find(|substitution| {
                 matches!(
                     substitution.parameter,
                     crate::fir::FirTypeParameterRef::External { callable, ordinal }
                         if callable == target && ordinal == *type_parameter
                 )
-                .then_some(substitution)
             })?;
             if !runtime.reified {
                 return None;
             }
-            let (statements, receiver, mut arguments, defaults) =
-                self.selected_semantic_operands(SelectedOperandRequest {
-                    receiver_ty,
-                    parameter_types,
-                    dispatch_receiver,
-                    extension_receiver,
-                    arguments,
-                    defaults: SelectedDefaultMode::Materialize,
-                    preserve_inline_lambdas: false,
-                    extension_receiver_parameter,
-                    mode: SelectedOperandMode::Materialized,
-                })?;
+            let SelectedSemanticOperands {
+                statements,
+                receiver,
+                args: mut arguments,
+                defaults,
+            } = self.selected_semantic_operands(SelectedOperandRequest {
+                receiver_ty,
+                parameter_types,
+                dispatch_receiver,
+                extension_receiver,
+                arguments,
+                defaults: SelectedDefaultMode::Materialize,
+                preserve_inline_lambdas: false,
+                extension_receiver_parameter,
+                mode: SelectedOperandMode::Materialized,
+            })?;
             for omitted in &defaults {
                 let default = plan_defaults
                     .iter()
@@ -284,18 +303,22 @@ impl BodyLowering<'_> {
             ),
         };
         let lambda_parameter = lambda_parameter as usize;
-        let (mut statements, receiver, mut args, defaults) =
-            self.selected_semantic_operands(SelectedOperandRequest {
-                receiver_ty,
-                parameter_types,
-                dispatch_receiver,
-                extension_receiver,
-                arguments,
-                defaults: SelectedDefaultMode::Materialize,
-                preserve_inline_lambdas: false,
-                extension_receiver_parameter: None,
-                mode: SelectedOperandMode::Materialized,
-            })?;
+        let SelectedSemanticOperands {
+            mut statements,
+            receiver,
+            mut args,
+            defaults,
+        } = self.selected_semantic_operands(SelectedOperandRequest {
+            receiver_ty,
+            parameter_types,
+            dispatch_receiver,
+            extension_receiver,
+            arguments,
+            defaults: SelectedDefaultMode::Materialize,
+            preserve_inline_lambdas: false,
+            extension_receiver_parameter: None,
+            mode: SelectedOperandMode::Materialized,
+        })?;
         self.record_inlined_type_parameter_receiver(&statements, receiver, declared_receiver);
         self.reuse_plain_function_argument(&mut statements, &mut args, lambda_parameter);
         for omitted in &defaults {
@@ -345,16 +368,30 @@ impl BodyLowering<'_> {
             .collect::<Option<Vec<_>>>()?;
         let (inline_body, callee_receiver) = self.materialize_external_inline_lambda(
             &mut statements,
-            &args,
-            lambda_parameter,
-            *parameter_types.get(lambda_parameter)?,
+            ExternalInlineLambdaArgument {
+                arguments: &args,
+                parameter: lambda_parameter,
+                ty: *parameter_types.get(lambda_parameter)?,
+            },
             &invocation_operands,
             frame,
             source_line,
-            !cleanup.is_empty(),
+            ExternalInlineLambdaLayout {
+                preamble_in_body: !cleanup.is_empty(),
+                // `apply` returns the callee receiver, so that local stays distinct from the
+                // extension lambda's `$this$`. Every other expansion uses one local: a copy
+                // would take a slot the next source local reuses, and the lambda receiver
+                // would land one slot above kotlinc.
+                distinct_callee_receiver: matches!(
+                    returned_value,
+                    Some(crate::fir::FirInlineValue::Receiver)
+                ) || !cleanup.is_empty(),
+            },
         )?;
-        // An extension lambda's receiver is a separate local; the callee's own receiver
-        // parameter is the frame local that holds the declaration's type-parameter value.
+        // The distinct callee receiver holds the declaration's type-parameter value.
+        // The lambda `$this$` keeps the call-site type: an unconstrained `T` erases to
+        // `Object`, and recording that on the lambda receiver publishes a local kotlinc
+        // types as the argument.
         if let (Some(slot), Some(declared)) = (
             callee_receiver,
             declared_receiver
@@ -477,18 +514,22 @@ impl BodyLowering<'_> {
             traversal,
             source_line: call_line,
         } = plan;
-        let (mut statements, receiver, args, defaults) =
-            self.selected_semantic_operands(SelectedOperandRequest {
-                receiver_ty,
-                parameter_types,
-                dispatch_receiver,
-                extension_receiver,
-                arguments,
-                defaults: SelectedDefaultMode::Reject,
-                preserve_inline_lambdas: false,
-                extension_receiver_parameter: None,
-                mode: SelectedOperandMode::Materialized,
-            })?;
+        let SelectedSemanticOperands {
+            mut statements,
+            receiver,
+            args,
+            defaults,
+        } = self.selected_semantic_operands(SelectedOperandRequest {
+            receiver_ty,
+            parameter_types,
+            dispatch_receiver,
+            extension_receiver,
+            arguments,
+            defaults: SelectedDefaultMode::Reject,
+            preserve_inline_lambdas: false,
+            extension_receiver_parameter: None,
+            mode: SelectedOperandMode::Materialized,
+        })?;
         debug_assert!(defaults.is_empty());
         let mut iterable = receiver?;
         let lambda_slot = match self.ir.expr(*args.get(lambda_parameter as usize)?) {
@@ -670,7 +711,7 @@ impl BodyLowering<'_> {
                     // The frame's first body statement marks the body's invocation line, mapped
                     // under the call; the rest of the prelude inherits it until the lambda runs.
                     let line = u32::from(source.invoke_line);
-                    self.ir.expr_lines.insert(iterator_declaration, line);
+                    self.ir.set_statement_line(iterator_declaration, line);
                     self.ir.external_frame_lines.insert(
                         iterator_declaration,
                         external_frame_line(source, line, call_line),
@@ -737,7 +778,7 @@ impl BodyLowering<'_> {
                         // The cursor is the frame's first body statement, as an iterator's
                         // declaration is: it marks the body's invocation line.
                         let line = u32::from(source.invoke_line);
-                        self.ir.expr_lines.insert(cursor_declaration, line);
+                        self.ir.set_statement_line(cursor_declaration, line);
                         self.ir.external_frame_lines.insert(
                             cursor_declaration,
                             external_frame_line(source, line, call_line),
@@ -1355,14 +1396,17 @@ impl BodyLowering<'_> {
     fn materialize_external_inline_lambda(
         &mut self,
         statements: &mut Vec<ExprId>,
-        args: &[ExprId],
-        lambda_parameter: usize,
-        lambda_ty: Ty,
+        lambda: ExternalInlineLambdaArgument<'_>,
         invocation_operands: &[(ExprId, Ty)],
         frame: &crate::fir::FirInlineBodyFrame,
         call_line: Option<u32>,
-        preamble_in_body: bool,
+        layout: ExternalInlineLambdaLayout,
     ) -> Option<(ExprId, Option<u32>)> {
+        let ExternalInlineLambdaArgument {
+            arguments: args,
+            parameter: lambda_parameter,
+            ty: lambda_ty,
+        } = lambda;
         let function = *args.get(lambda_parameter)?;
         let invoke_function = |lowering: &mut Self| {
             lowering
@@ -1479,22 +1523,28 @@ impl BodyLowering<'_> {
         for (operand, &(value, ty)) in invocation_operands.iter().enumerate() {
             let parameter = capture_count + u32::try_from(operand).ok()?;
             if receiver_parameter == Some(parameter) {
-                // The inlined callee's receiver and the invoked extension lambda's receiver are
-                // distinct semantic parameters, even though both receive the same value.
-                let callee_slot = self.allocate_temporary();
-                statements.push(self.ir.add_expr(IrExpr::Variable {
-                    index: callee_slot,
-                    ty,
-                    init: Some(value),
-                    named: false,
-                }));
-                callee_receiver = Some(callee_slot);
+                // `apply` returns the callee's receiver, and a `finally` keeps that local
+                // outside the protected region, so those expansions store it separately and
+                // copy it into the extension lambda's `$this$`. Otherwise kotlinc has only
+                // the lambda receiver: the value is stored there directly.
+                let init = if layout.distinct_callee_receiver {
+                    let callee_slot = self.allocate_temporary();
+                    statements.push(self.ir.add_expr(IrExpr::Variable {
+                        index: callee_slot,
+                        ty,
+                        init: Some(value),
+                        named: false,
+                    }));
+                    callee_receiver = Some(callee_slot);
+                    self.ir.add_expr(IrExpr::GetValue(callee_slot))
+                } else {
+                    value
+                };
                 let slot = self.allocate_temporary();
-                let read = self.ir.add_expr(IrExpr::GetValue(callee_slot));
                 let declaration = self.ir.add_expr(IrExpr::Variable {
                     index: slot,
                     ty,
-                    init: Some(read),
+                    init: Some(init),
                     named: true,
                 });
                 self.ir.call_operand_bindings.insert(declaration);
@@ -1554,7 +1604,7 @@ impl BodyLowering<'_> {
             },
         );
         if let Some(line) = call_line {
-            self.ir.expr_lines.insert(marker, line);
+            self.ir.set_statement_line(marker, line);
             if frame.inline_only
                 && (callable_reference || first_body_line(self.ir, template) == Some(line))
             {
@@ -1586,7 +1636,7 @@ impl BodyLowering<'_> {
         // A `finally` protects the lambda parameters and its inline-frame marker, so they open the
         // spliced body. A call without one keeps them as statements ahead of the body; that is
         // where an inlined `return this` closes the frame before the read.
-        let inline_body = if preamble_in_body {
+        let inline_body = if layout.preamble_in_body {
             self.prepend_lambda_preamble(inline_body, preamble)
         } else {
             statements.extend(preamble);

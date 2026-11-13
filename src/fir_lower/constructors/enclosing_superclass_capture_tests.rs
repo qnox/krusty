@@ -44,6 +44,7 @@ fn capture(field: u32, identity: ClassCaptureIdentity) -> IrCtorArg {
                 owner: crate::fir::CapturedCallableOwner::Declaration,
             }),
             crossinline_parameter: None,
+            inlined: false,
         }),
         Some(identity),
     )

@@ -23,6 +23,7 @@ mod closure_forms;
 mod constructor_calls;
 mod decline;
 mod enum_classes;
+mod for_loops;
 mod function_lowering;
 mod inline_templates;
 mod ir_builtins;
@@ -38,8 +39,12 @@ mod type_evidence;
 
 pub use crate::libraries::KlibBodyCallable as KlibCallable;
 pub use body_unit::DependencyBodyUnit;
-pub(crate) use body_unit::{is_private_value_member, EmittedDependencyCallable};
+pub(crate) use body_unit::{
+    is_private_class_member, is_receiver_member, EmittedDependencyCallable,
+};
+pub(crate) use callee_facts::CallEdge;
 pub use callee_facts::KlibCalleeFacts;
+pub(crate) use class_initialization::delegated_superclass_constructor;
 pub(crate) use closure_forms::emitted_closure_function;
 
 /// The serialized forms common body lowering realizes without the declaration edges they name.
@@ -47,6 +52,7 @@ pub(crate) const EMITTED_CALL_FORMS: crate::metadata::klib_ir::tree::EmittedCall
     crate::metadata::klib_ir::tree::EmittedCallForms {
         closure: emitted_closure_function,
         folded_call: range_membership::folds_range_literal_membership,
+        folded_calls: for_loops::folded_loop_calls,
     };
 pub use decline::{KlibBodyDecline, KlibBodyDeclineReason};
 pub use inline_templates::{lower_inline_template, KlibInlineTemplate, TemplateCallees};

@@ -905,6 +905,12 @@ KRef kt_string_builder_append(KRef self, KRef value);
 KRef kt_string_builder_append_line(KRef self, KRef value);
 KRef kt_string_builder_append_new_line(KRef self);
 
+/* `sb.append(value, startIndex, endIndex)`: the UTF-16 units of `value ?: "null"` in that range,
+   bounds-checked as Kotlin/Native's builder checks them, answering the receiver. The bounds arrive
+   boxed. When a bound is refused, or the value's own `length` or `get` throws, the exception is
+   pending and the builder holds what it held. */
+KRef kt_string_builder_append_range(KRef self, KRef value, KRef start_index, KRef end_index);
+
 /* `sb.setLength(n)`, by UTF-16 unit as Kotlin counts: shorter truncates, longer pads with NUL. */
 void kt_string_builder_set_length(KRef self, kt_int length);
 

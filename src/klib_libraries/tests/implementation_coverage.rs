@@ -75,6 +75,9 @@ fn exact_identity(identity: &KlibDependencyCallable) -> String {
                 signature.mask()
             );
         }
+        KlibDeclarationSignature::FileLocal { file, slot } => {
+            let _ = write!(output, " file-local file={file} slot={slot}");
+        }
     }
     output
 }

@@ -1,7 +1,7 @@
 //! Declaration identities shared by source references and independently checked KLIB references.
 
 use krusty::backend::{DependencyExportSignatures, KlibDependencyCallable};
-use krusty::fir::CallableId;
+use krusty::fir::{CallableId, PropertyId};
 use krusty::fx_hash::HashMap;
 use krusty::ir::{FunId, IrFile};
 use krusty::types::{Ty, TypeName};
@@ -16,6 +16,11 @@ pub(crate) enum Declaration {
     Local {
         file: u32,
         function: FunId,
+    },
+    /// A source-module property, read as a function value.
+    Property {
+        module: String,
+        property: PropertyId,
     },
     Constructor {
         classifier: TypeName,
@@ -103,6 +108,17 @@ impl Declarations {
                 aliases.push(Declaration::Dependency(dependency.clone()));
             }
             self.aliases(&aliases)?;
+        }
+        // Another module names a property by its getter's published identity, the key its
+        // references to the property carry there.
+        for (property, identity) in exports.property_declarations() {
+            self.aliases(&[
+                Declaration::Property {
+                    module: module.to_owned(),
+                    property,
+                },
+                Declaration::Dependency(identity.clone()),
+            ])?;
         }
         Ok(file)
     }

@@ -5,8 +5,12 @@
 //! beside the backend, keyed by the stable call expression. Suspend lowering also records the exact
 //! operand position into which it inserts a CPS continuation. Emission therefore never guesses
 //! provenance from a zero/null constant, a type or name, and common IR never carries JVM ABI facts.
+//!
+//! The same realization records which calls kotlinc's JVM code generator implements with an
+//! intrinsic method of its own (`IntrinsicMethods`) rather than as a call of their declaration:
+//! common IR keeps an ordinary call, and only JVM emission marks its line as an intrinsic's.
 
-use krusty::fx_hash::HashMap;
+use krusty::fx_hash::{HashMap, HashSet};
 
 use krusty::ir::ExprId;
 
@@ -92,6 +96,8 @@ pub(crate) struct DefaultCallOperands {
     /// backend representation fact: emission must not rediscover it from the argument's type,
     /// spelling, or position relative to a descriptor suffix.
     continuation_positions: HashMap<ExprId, usize>,
+    /// The calls JVM realization made with one of kotlinc's intrinsic methods.
+    intrinsic_calls: HashSet<ExprId>,
 }
 
 impl DefaultCallOperands {
@@ -142,6 +148,16 @@ impl DefaultCallOperands {
             }
             None => Ok(None),
         }
+    }
+
+    /// Record that JVM realization implemented `call` with one of kotlinc's intrinsic methods.
+    pub(super) fn record_intrinsic_call(&mut self, call: ExprId) {
+        self.intrinsic_calls.insert(call);
+    }
+
+    /// Whether JVM realization implemented `call` with one of kotlinc's intrinsic methods.
+    pub(crate) fn is_intrinsic_call(&self, call: ExprId) -> bool {
+        self.intrinsic_calls.contains(&call)
     }
 
     pub(super) fn contains(&self, call: ExprId) -> bool {
@@ -256,6 +272,9 @@ impl DefaultCallOperands {
         let source_plan = self.entries.get(&source).cloned();
         let continuation_position = self.continuation_positions.get(&source).copied();
         let declaration = self.declarations.get(&source).cloned();
+        if self.intrinsic_calls.contains(&source) {
+            self.intrinsic_calls.insert(target);
+        }
         if source_plan.is_none() && continuation_position.is_none() {
             return true;
         }

@@ -79,6 +79,7 @@ pub(crate) mod lambda_exits;
 mod lifting_sequences;
 mod local_class_names;
 mod local_delegates;
+mod loop_exits;
 pub use local_delegates::IrLocalDelegateAccess;
 pub use local_delegates::{IrInlineDeclaration, IrLocalDelegateAccessorPlan, IrLocalDelegatePlan};
 mod declared_parameters;
@@ -105,6 +106,8 @@ mod references;
 mod reified_markers;
 mod reified_templates;
 mod sam_target;
+mod type_tests;
+pub(crate) use type_tests::{admits_null_at_runtime, settled_instance_answer};
 mod source_debug;
 pub(crate) use source_debug::SourceDebug;
 mod static_properties;
@@ -154,7 +157,7 @@ pub use constructors::{
 };
 pub use enums::{EnumSwitchRegistration, IrCheckedEnumEntryBody, IrEnumEntry};
 pub use expression_provenance::{
-    EnumValueOfDeclaration, IrBuiltinCall, IrBuiltinCallKind, IrSafeCallRead, IrShortCircuitKind,
+    EnumValueOfDeclaration, IrBuiltinCall, IrBuiltinCallKind, IrShortCircuitKind,
 };
 pub use field_flags::IrfFlags;
 pub use fields::IrField;
@@ -187,7 +190,8 @@ pub use properties::{
 pub use property_layouts::IrLocalPropertyLayout;
 pub use references::{
     FuncRef, IrCallableReference, IrCallableReferenceTarget, IrClassifierCallable,
-    IrConstructorReferenceDeclaration, PropRef, ReflectedCallable,
+    IrConstructorReferenceDeclaration, IrPropertyFunctionReference, IrReferencedProperty, PropRef,
+    ReflectedCallable,
 };
 pub use sam_target::{IrSamMethod, IrSamTarget, IrSamTypeParameter};
 pub use static_properties::{IrStatic, IrStaticAccessor, IrStaticAccessors};
@@ -1299,6 +1303,15 @@ pub struct IrValueClassTypeOperation {
     pub role: IrValueClassTypeRole,
 }
 
+/// The inline function whose body an expansion copied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum IrInlineCallee {
+    /// A same-module inline callable, by its stable checked identity.
+    Module(crate::fir::CallableId),
+    /// An inline dependency function, expanded from its template in this file.
+    Dependency(crate::fir::ExternalCallableId),
+}
+
 /// A call-site copy of a lambda implementation.
 ///
 /// The record keeps the checked declaration identities and lexical containment that caused the
@@ -1319,8 +1332,8 @@ pub struct IrSpecializedFunction {
     /// Source spelling of that declaration, or the deliberately empty spelling of a constructor or
     /// unnamed initializer. This is rendering provenance, never the expansion identity.
     pub caller_source_name: String,
-    /// Stable checked identity of the same-module inline callable that was expanded.
-    pub inline_callee: crate::fir::CallableId,
+    /// The inline callable that was expanded.
+    pub inline_callee: IrInlineCallee,
     /// Source spelling retained for target-specific debug/artifact rendering.
     pub inline_callee_source_name: String,
     /// Specialized implementation lexically containing this one. Nested copies retain containment
@@ -1347,7 +1360,7 @@ pub struct IrSpecializedAnonymousClass {
     pub caller: Option<IrEnclosure>,
     pub caller_is_default: bool,
     pub caller_source_name: String,
-    pub inline_callee: crate::fir::CallableId,
+    pub inline_callee: IrInlineCallee,
     pub inline_callee_source_name: String,
     /// For each of the callee's operands, by its value slot: the caller's `crossinline` parameter
     /// the expansion binds it to, when it is one. A copy remaps its captures' provenance through
@@ -1709,6 +1722,8 @@ pub struct IrFile {
     /// What the atomicfu plugin recorded from this file's source at the handoff, for its body
     /// transform. `None` unless the plugin is active and the file declares an atomic it lowers.
     pub atomicfu: Option<Box<crate::plugins::atomicfu::AtomicfuFileFacts>>,
+    /// The Parcelize plugin's handoff facts; `None` unless the file declares a parcelized class.
+    pub parcelize: Option<Box<crate::plugins::parcelize::ParcelizeFileFacts>>,
     /// Package functions a compiler plugin gave physical parameters their declaration does not
     /// have (Compose's `$composer` and `$changed`). Metadata records their realized signature.
     pub plugin_extended_signatures: crate::fx_hash::HashSet<FunId>,
@@ -1766,10 +1781,6 @@ pub struct IrFile {
     /// initializer. A later assignment can target the same field with the same value, so backend
     /// storage passes must consume this linkage instead of recognizing stores by shape or spelling.
     pub property_initializer_stores: crate::fx_hash::HashSet<ExprId>,
-    /// Sparse `ExprId` → 1-based source line for the `LineNumberTable`: statement roots, loop
-    /// updates, and the implicit `Unit` return (the block's closing-brace line, kotlinc's mapping).
-    /// Absent = no line mark starts at that expression.
-    pub expr_lines: crate::fx_hash::HashMap<u32, u32>,
     /// The source position of every expression node; see `node_positions`.
     positions: node_positions::IrNodePositions,
     /// Lines generated expressions map to at one physical point; see `debug_lines`.
@@ -1997,18 +2008,12 @@ pub struct IrFile {
     /// Anonymous initializer (`init { … }`) bodies. kotlinc gives such a block's opening and
     /// closing lines entries of their own, even where no instruction of the block sits on them.
     pub initializer_blocks: crate::fx_hash::HashSet<ExprId>,
-    /// Expressions whose own line keeps its entry when an operand marks another line at the same
-    /// offset, as kotlinc's line table does. A serializable property's default copied into a
-    /// generated method starts with a property read the plugin attributes to the class's line.
-    pub kept_start_lines: crate::fx_hash::HashSet<ExprId>,
     /// Source operator, conversion, indexing and member calls realized as builtin operations, on
     /// the node that realizes each.
     pub builtin_calls: crate::fx_hash::HashMap<ExprId, IrBuiltinCall>,
     /// Blocks that realize a source safe call `receiver?.selector`: a receiver temporary and a
     /// null-guarded selector.
     pub safe_calls: crate::fx_hash::HashSet<ExprId>,
-    /// Reads of a safe call's receiver temporary, by their role and source line.
-    pub safe_call_reads: crate::fx_hash::HashMap<ExprId, IrSafeCallRead>,
     /// Temporaries that hold an elvis's left value, by the line the elvis starts on.
     pub elvis_temporaries: crate::fx_hash::HashMap<ExprId, u32>,
     /// Compiler-generated `Variable` declarations whose semantic role is holding a call operand:
@@ -2151,8 +2156,8 @@ pub struct IrFile {
     synthetic_classes: crate::fx_hash::HashSet<TypeName>,
     /// Internal names of classes a compiler plugin generates with no Kotlin declaration behind
     /// them, such as Compose's `ComposableSingletons$<File>Kt`. No declaration record describes
-    /// them, and kotlinc writes them a synthetic-class `@Metadata`.
-    declarationless_classes: crate::fx_hash::HashSet<TypeName>,
+    /// them, and kotlinc writes them a synthetic-class `@Metadata` recording their visibility.
+    declarationless_classes: crate::fx_hash::HashMap<TypeName, IrDeclarationlessVisibility>,
     /// Provenance and initialization placement for statics generated without a Kotlin declaration.
     generated_static_facts: crate::fx_hash::HashMap<u32, generated_members::GeneratedStaticFacts>,
     /// `FunId`s of methods carrying a `Deprecated` classfile attribute (from `@Deprecated`) — e.g. a
@@ -2409,6 +2414,9 @@ pub struct IrFile {
     pub semantic_call_roles: crate::fx_hash::HashMap<ExprId, crate::types::SemanticCallRole>,
     /// See [`external_overrides::ExternalOverriddenDeclarations`].
     pub external_overridden_declarations: external_overrides::ExternalOverriddenDeclarations,
+    /// The dependency member declarations this file emits as methods of a class it materializes,
+    /// so an override edge naming one is an override of a method of this file.
+    pub dependency_methods: crate::fx_hash::HashMap<crate::fir::ExternalCallableId, FunId>,
     /// Current-module functions that play a language role through the declaration they override
     /// (an override of `Any.toString`), as the frontend's override resolution published them.
     pub callable_semantic_roles:
@@ -2828,6 +2836,7 @@ impl IrFile {
 }
 
 mod class_declaration_facts;
+pub use class_declaration_facts::IrDeclarationlessVisibility;
 mod class_skeletons;
 mod data_class_members;
 mod debug_lines;

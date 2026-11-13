@@ -36,6 +36,9 @@ pub struct ModuleClass {
     pub(crate) members: Box<[ModuleMember]>,
     pub(crate) function_overrides: Box<[ModuleFunctionOverride]>,
     pub(crate) property_overrides: Box<[ModulePropertyOverride]>,
+    /// Whether it implements an interface `by` a delegate, which the declaring file realizes
+    /// with forwarders after the members numbered here.
+    pub(crate) delegates_interfaces: bool,
 }
 
 /// One named interface: what its member numbers are computed from.
@@ -70,9 +73,18 @@ pub(crate) enum ModuleMember {
         callable: CallableId,
         parameters: Box<[Ty]>,
         result: Ty,
+        /// A `suspend` function, which takes its caller's continuation after `parameters`.
+        suspend: bool,
     },
     Property {
         property: PropertyId,
+        /// What its accessors take after the dispatch receiver: its context parameters, then a
+        /// member extension's receiver. A setter takes `value` after them.
+        accessor_parameters: Box<[Ty]>,
+        value: Ty,
+        /// What its getter answers: `value`, or the field's type when the getter reads an
+        /// explicit backing field.
+        getter_value: Ty,
         /// Whether the member is reached through its getter (and setter) rather than its field
         /// alone: it is open, abstract or an override, an interface member is implemented by it,
         /// or the declaration has an accessor body of its own.
@@ -169,6 +181,14 @@ impl ModuleClasses {
 
     pub fn iter(&self) -> impl Iterator<Item = (TypeName, &ModuleClass)> {
         self.classes.iter().map(|(name, class)| (*name, class))
+    }
+
+    /// The named classes of the module whose declared superclass is `superclass`.
+    pub fn subclasses_of(&self, superclass: TypeName) -> impl Iterator<Item = TypeName> + '_ {
+        self.classes
+            .iter()
+            .filter(move |(_, class)| class.superclass == Some(superclass))
+            .map(|(name, _)| *name)
     }
 
     /// The named interfaces, in declaration order.
@@ -300,6 +320,7 @@ impl ModuleClasses {
                     members,
                     function_overrides: function_overrides(),
                     property_overrides: property_overrides(),
+                    delegates_interfaces: !classifier.interface_delegations.is_empty(),
                 },
             );
         }
@@ -400,6 +421,7 @@ fn members(
                     callable: callable.id,
                     parameters: parameters.into_boxed_slice(),
                     result,
+                    suspend: flags.has(DeclarationFlags::SUSPEND),
                 });
             }
             DeclarationKind::Property => {
@@ -414,8 +436,34 @@ fn members(
                 let accessors =
                     flags.has(DeclarationFlags::DELEGATED) || shape.extension_receiver.is_some();
                 let mutable = flags.has(DeclarationFlags::MUTABLE);
+                let signature = index.signature(declaration)?;
+                let value = signature.result.get();
+                // An accessor takes the property's context parameters, then a member extension's
+                // receiver, as a callable does.
+                let mut parameters = signature
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.get())
+                    .collect::<Vec<_>>();
+                if let Some(receiver) = shape.extension_receiver {
+                    let position = shape.context_parameter_count as usize;
+                    if position > parameters.len() {
+                        return None;
+                    }
+                    parameters.insert(position, receiver.get());
+                }
+                // A getter with no function of its own reads the field, so it answers what an
+                // explicit backing field stores.
+                let reads_field = !accessors && !flags.has(DeclarationFlags::CUSTOM_GETTER);
+                let getter_value = match shape.storage_type {
+                    Some(storage) if reads_field => storage.get(),
+                    _ => value,
+                };
                 members.push(ModuleMember::Property {
                     property,
+                    accessor_parameters: parameters.into_boxed_slice(),
+                    value,
+                    getter_value,
                     getter: dispatched || accessors || flags.has(DeclarationFlags::CUSTOM_GETTER),
                     setter: mutable
                         && (dispatched

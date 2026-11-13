@@ -19,6 +19,8 @@ mod declaration_names;
 
 #[cfg(test)]
 mod declaration_name_tests;
+#[cfg(test)]
+mod unfinalized_classifier_tests;
 
 /// Pass-2 current-module provider. Its type deliberately cannot retain the Pass-1 symbol table.
 pub(crate) struct StreamedModuleSymbols<'a> {
@@ -60,6 +62,13 @@ impl StreamedModuleProjectionCache {
         self.classifiers.borrow_mut().clear();
         self.declaration_count.set(declaration_count);
     }
+}
+
+/// Receiver and context shape of a property whose signature could not be published.
+struct PropertyProjectionShape {
+    receiver: Option<Ty>,
+    context_count: usize,
+    mutable: bool,
 }
 
 impl<'a> StreamedModuleSymbols<'a> {
@@ -288,8 +297,11 @@ impl<'a> StreamedModuleSymbols<'a> {
         let declaration_header = self.index.declaration_header(owner)?;
         // A declaration identity alone is sufficient for lexical binding, but hierarchy and member
         // projection require the complete semantic classifier header. Deferred body-local shapes
-        // stay on the checker-owned overlay until that contract is available.
+        // stay on the checker-owned overlay until that contract is available. A header without
+        // its type-parameter layout did not finalize: projecting it would publish an empty
+        // type-parameter list.
         let classifier_header = self.index.classifier_header(owner)?;
+        self.index.classifier_type_arguments(owner)?;
         let anchor = self.index.declaration_anchor(owner)?;
         let flags = declaration_header.flags;
         let mut projected = crate::libraries::LibraryType::declaration_header();
@@ -431,10 +443,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             }
         }
 
-        let parameters = self
-            .index
-            .classifier_type_arguments(owner)
-            .unwrap_or_default();
+        let parameters = self.index.classifier_type_arguments(owner)?;
         let parameter_names = parameters
             .iter()
             .map(|parameter| {
@@ -598,17 +607,16 @@ impl<'a> StreamedModuleSymbols<'a> {
                 flags.has(DeclarationFlags::INTERFACE),
                 name,
             );
-            let stable_properties = direct_property_names
-                .contains(name)
-                .then(|| {
-                    self.member_properties(
-                        owner,
-                        internal,
-                        flags.has(DeclarationFlags::INTERFACE),
-                        name,
-                    )
-                })
-                .unwrap_or_default();
+            let stable_properties = if direct_property_names.contains(name) {
+                self.member_properties(
+                    owner,
+                    internal,
+                    flags.has(DeclarationFlags::INTERFACE),
+                    name,
+                )
+            } else {
+                Default::default()
+            };
             if stable_functions
                 .iter()
                 .any(|function| function.flags.deprecated_hidden)
@@ -624,10 +632,11 @@ impl<'a> StreamedModuleSymbols<'a> {
                     .filter(|member| !member.deprecated_hidden()),
             );
             let functions = FunctionSet {
-                overloads: direct_function_names
-                    .contains(name)
-                    .then_some(stable_functions)
-                    .unwrap_or_default(),
+                overloads: if direct_function_names.contains(name) {
+                    stable_functions
+                } else {
+                    Default::default()
+                },
             };
             let properties = PropertySet {
                 overloads: stable_properties,
@@ -755,10 +764,13 @@ impl<'a> StreamedModuleSymbols<'a> {
         name: &str,
         kind: PropKind,
         owner: TypeName,
-        receiver: Option<Ty>,
-        context_count: usize,
-        mutable: bool,
+        shape: PropertyProjectionShape,
     ) -> PropertyInfo {
+        let PropertyProjectionShape {
+            receiver,
+            context_count,
+            mutable,
+        } = shape;
         let mut parameters = vec![Ty::Error; context_count];
         if receiver.is_some() {
             let receiver_index = if matches!(kind, PropKind::MemberExtension) {
@@ -1287,19 +1299,24 @@ impl<'a> StreamedModuleSymbols<'a> {
                 let receiver = property
                     .and_then(|property| property.extension_receiver)
                     .map(|receiver| receiver.get());
-                properties.push(self.failed_property_projection(
-                    declaration,
-                    name,
-                    if receiver.is_some() {
-                        PropKind::MemberExtension
-                    } else {
-                        PropKind::Member
-                    },
-                    internal,
-                    receiver,
-                    property.map_or(0, |property| property.context_parameter_count as usize),
-                    property.is_some_and(|property| property.mutable),
-                ));
+                properties.push(
+                    self.failed_property_projection(
+                        declaration,
+                        name,
+                        if receiver.is_some() {
+                            PropKind::MemberExtension
+                        } else {
+                            PropKind::Member
+                        },
+                        internal,
+                        PropertyProjectionShape {
+                            receiver,
+                            context_count: property
+                                .map_or(0, |property| property.context_parameter_count as usize),
+                            mutable: property.is_some_and(|property| property.mutable),
+                        },
+                    ),
+                );
                 continue;
             };
             let Some(property) = property else {
@@ -1738,9 +1755,12 @@ impl<'a> StreamedModuleSymbols<'a> {
                     name,
                     kind,
                     TypeName::ROOT,
-                    receiver,
-                    property.map_or(0, |property| property.context_parameter_count as usize),
-                    property.is_some_and(|property| property.mutable),
+                    PropertyProjectionShape {
+                        receiver,
+                        context_count: property
+                            .map_or(0, |property| property.context_parameter_count as usize),
+                        mutable: property.is_some_and(|property| property.mutable),
+                    },
                 );
                 failed.associated_classifier = associated_classifier;
                 failed.companion_associated = associated_classifier.is_some();

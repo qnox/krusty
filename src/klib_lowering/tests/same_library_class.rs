@@ -1159,6 +1159,34 @@ fn a_colliding_file_local_symbol_of_another_component_contributes_nothing() {
     );
 }
 
+/// The prepared-inline component and the ordinary IR number their file-local symbols with
+/// different signature tables, and the file index of a prepared table can equal an ordinary
+/// file's. The two are never decoded into one set of trees (`read_declaration_trees_from` takes
+/// one component per archive), and a library set refuses a second library for one module (and a
+/// second owner of a declaration), so a file-local
+/// symbol is resolved against the single table kind that numbered it.
+#[test]
+fn one_module_cannot_hold_the_ordinary_and_the_prepared_component_together() {
+    let build = |name: &str, body: &mut super::demo_package::Body| match name {
+        "make" => {
+            let constructed = counted_construction(body);
+            Some(vec![body.ret(constructed)])
+        }
+        _ => None,
+    };
+    let shapes = [EMPTY_MAKE];
+    let (_, ordinary) = module_trees("demo", &shapes, vec![counted_class(3)], build);
+    let (_, prepared) = module_trees("demo", &shapes, Vec::new(), build);
+    let error = match KlibDeclarationBodies::from_libraries(vec![
+        ("demo".to_owned(), ordinary),
+        ("demo".to_owned(), prepared),
+    ]) {
+        Ok(_) => panic!("two components of one module are refused"),
+        Err(error) => error,
+    };
+    assert_eq!(error.libraries(), [0, 1]);
+}
+
 /// A private class whose member `read` calls the public function `helper`.
 fn helper_calling_class(helper: KlibPublicIdSignature) -> KlibIrDeclarationTree {
     counted_class_with(3, |arena, class_ty| {

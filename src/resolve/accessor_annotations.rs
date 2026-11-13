@@ -65,18 +65,11 @@ impl Checker<'_> {
             if targets.allows(target) || self.suppresses_diagnostic("WRONG_ANNOTATION_TARGET") {
                 continue;
             }
-            let applicable = targets
-                .applicable()
-                .iter()
-                .map(|target| target.description())
-                .collect::<Vec<_>>()
-                .join(", ");
             self.diags.error(
                 Span::new(entry.at, entry.annotation.span.hi),
-                format!(
-                    "this annotation is not applicable to target '{}'. Applicable targets: \
-                     {applicable}",
-                    target.description()
+                super::annotation_applications::wrong_annotation_target_message(
+                    target.description(),
+                    targets,
                 ),
             );
         }

@@ -40,15 +40,14 @@ impl Checker<'_> {
         // Base class constructor args are evaluated before the body and may reference ctor params.
         // A LAMBDA or callable reference arg is typed against the selected super ctor's parameter
         // type (a receiver lambda's `this` scope and a reference's function shape come from that
-        // expected type), so it is postponed here and checked below once the ctor is resolved.
-        // An empty `arrayOf()` is postponed for the same reason: only the selected parameter
-        // supplies its element type. Anything else is typed up front.
+        // expected type), so it is postponed here and checked below once the ctor is resolved;
+        // anything else is typed up front.
         let file = self.file;
-        let is_postponed = |checker: &Self, scope: &CheckerScope<'_>, arg: ExprId| {
+        let is_postponed = |arg: ExprId| {
             matches!(
                 file.expr(arg),
                 Expr::Lambda { .. } | Expr::CallableRef { .. }
-            ) || checker.postponed_empty_reference_array_factory(scope, arg)
+            )
         };
         let static_this = current_owner
             .and_then(|owner| self.applied_declared_supertype(owner))
@@ -103,7 +102,7 @@ impl Checker<'_> {
                 let previous_capture_accounting = c.suppress_receiver_capture_accounting;
                 c.suppress_receiver_capture_accounting = is_anonymous_object;
                 for &arg in &cl.base_args {
-                    if !is_postponed(c, header_scope, arg) {
+                    if !is_postponed(arg) {
                         c.expr(header_scope, arg);
                     }
                 }
@@ -145,6 +144,7 @@ impl Checker<'_> {
                         c.select_source_constructor(header_scope, &arguments, &candidates);
                     if let SourceConstructorSelection::NoMatch { rejected, .. } = &selection {
                         c.report_single_constructor_argument_mismatches(
+                            header_scope,
                             &arguments,
                             &candidates,
                             rejected,
@@ -205,8 +205,7 @@ impl Checker<'_> {
                             };
                             c.expect_call_arg_labeled(
                                 header_scope,
-                                expected,
-                                declared,
+                                ParameterTypeExpectation { expected, declared },
                                 arg,
                                 actual,
                                 has_receiver,
@@ -226,7 +225,7 @@ impl Checker<'_> {
                         // No unique ctor match: type the deferred lambda args without an expected type.
                         c.suppress_receiver_capture_accounting = is_anonymous_object;
                         for &arg in &cl.base_args {
-                            if is_postponed(c, header_scope, arg) {
+                            if is_postponed(arg) {
                                 c.expr(header_scope, arg);
                             }
                         }

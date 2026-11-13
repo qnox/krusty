@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 pub enum Stage {
     /// The JVM reference compile and `box()` run an owned fixture needs first.
     JvmOracle,
-    /// The target's own reference compiler, where the lane requires one.
+    /// The target's own reference compiler: the oracle a lane requires, and the reference KLIB
+    /// a scored case's bytes are compared with.
     TargetOracle,
     /// The lane's compile, link and run of the case.
     Lane,

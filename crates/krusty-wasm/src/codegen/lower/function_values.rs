@@ -21,13 +21,14 @@ pub(super) enum FunctionEquality {
 
 impl Body<'_> {
     /// A new function value whose body is `function`, carrying `captures` as its leading
-    /// arguments. With `sam`, the value is also an instance of that `fun interface`, whose member
-    /// it implements.
+    /// arguments, of the checked type `instance`. With `sam`, the value is also an instance of that
+    /// `fun interface`, whose member it implements.
     pub(super) fn function_value(
         &mut self,
         function: FunId,
         captures: &[u32],
         equality: FunctionEquality,
+        instance: Option<Ty>,
         sam: Option<&krusty::ir::IrSamTarget>,
     ) -> Result<(), Unsupported> {
         let declaration = self
@@ -124,12 +125,22 @@ impl Body<'_> {
         };
         let to_string = self.runtime.objects.trap(self.module, to_string_ty);
         let objects = &mut self.runtime.objects;
-        let (record, itable) =
+        let (class, itable) =
             objects
                 .interfaces
                 .class(self.module, objects.itable, vec![structure]);
+        // A value of a classifier type (`KProperty0<Int>`) is an instance of every classifier
+        // above it, whose members it implements with nothing yet.
+        if let Some(TyKind::Obj(classifier, _)) = instance.map(|ty| ty.non_null().kind()) {
+            for supertype in classifier_and_supertypes(self.classifiers, classifier) {
+                self.runtime
+                    .objects
+                    .interfaces
+                    .instance_of(class, supertype);
+            }
+        }
         if let Some(target) = sam {
-            self.implement_sam(record, invoke, target)?;
+            self.implement_sam(class, invoke, target)?;
         }
         let mut init = Code::default();
         for function in [equals, hash_code, to_string] {
@@ -137,9 +148,10 @@ impl Body<'_> {
             init.ref_func(function);
         }
         self.module.reference_function(invoke);
-        init.global_get(itable)
-            .ref_func(invoke)
-            .struct_new(shape.table);
+        init.global_get(itable);
+        // A function value is no class a literal names: reading its class traps.
+        self.runtime.objects.push_type_info(&mut init, None);
+        init.ref_func(invoke).struct_new(shape.table);
         let table = self
             .module
             .constant_global(ValType::reference(shape.table), init);
@@ -178,10 +190,11 @@ impl Body<'_> {
         Ok(())
     }
 
-    /// A new function value for a callable reference. Its adapter takes the referenced
+    /// A new function value for the callable reference `id`. Its adapter takes the referenced
     /// declaration's captures, then the bound receiver, then the caller's arguments.
     pub(super) fn callable_reference(
         &mut self,
+        id: u32,
         reference: &krusty::ir::IrCallableReference,
     ) -> Result<(), Unsupported> {
         let captures: Vec<u32> = reference
@@ -198,6 +211,7 @@ impl Body<'_> {
                 kind,
                 receiver: reference.bound_receiver.map(|_| reference.captures.len()),
             },
+            self.type_of(id)?,
             None,
         )
     }
@@ -353,7 +367,7 @@ impl Body<'_> {
             Some(value) => {
                 let form = self
                     .runtime
-                    .box_form(self.module, ty, value)
+                    .box_form(self.module, ty, value)?
                     .ok_or_else(|| format!("a function value taking a `{}` value", describe(ty)))?;
                 form.emit_unbox(code);
                 Ok(())
@@ -379,7 +393,7 @@ impl Body<'_> {
             Some(value) => {
                 let form = self
                     .runtime
-                    .box_form(self.module, ty, value)
+                    .box_form(self.module, ty, value)?
                     .ok_or_else(|| {
                         format!("a function value answering a `{}` value", describe(ty))
                     })?;
@@ -392,4 +406,25 @@ impl Body<'_> {
         }
         Ok(())
     }
+}
+
+/// `classifier` and every classifier above it, each once.
+fn classifier_and_supertypes(
+    classifiers: &dyn krusty::backend::BackendClassifierSource,
+    classifier: krusty::types::TypeName,
+) -> Vec<krusty::types::TypeName> {
+    let mut found = vec![classifier];
+    let mut next = 0;
+    while let Some(&current) = found.get(next) {
+        next += 1;
+        let Some(fact) = classifiers.classifier(current) else {
+            continue;
+        };
+        for &supertype in &fact.supertypes {
+            if !found.contains(&supertype) {
+                found.push(supertype);
+            }
+        }
+    }
+    found
 }
