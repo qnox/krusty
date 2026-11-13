@@ -211,7 +211,7 @@ pub fn prepare_test_source(src: &str, target: TestTarget) -> String {
 /// 2.5 renamed the `JVM_IR` entry to `JVM` (keeping `JVM_IR` only as a deprecated alias), so a corpus
 /// compares against the spelling of the release it was written for.
 fn jvm_backend_under_test(release: crate::kotlin_version::KotlinVersion) -> &'static str {
-    if release >= crate::kotlin_version::KotlinVersion::V2_5_0_BETA2 {
+    if release >= crate::kotlin_version::KotlinVersion::V2_5_0_RC {
         "\"JVM\""
     } else {
         "\"JVM_IR\""
@@ -1082,7 +1082,7 @@ mod tests {
     fn backend_under_test_spells_the_jvm_backend_as_the_release_runner_does() {
         let source = "val here = BACKEND_UNDER_TEST";
         assert_eq!(
-            prepare_test_source_for(source, TestTarget::Jvm, KotlinVersion::V2_5_0_BETA2),
+            prepare_test_source_for(source, TestTarget::Jvm, KotlinVersion::V2_5_0_RC),
             "val here = \"JVM\""
         );
         assert_eq!(
@@ -1090,7 +1090,7 @@ mod tests {
             "val here = \"JVM_IR\""
         );
         assert_eq!(
-            prepare_test_source_for(source, TestTarget::Native, KotlinVersion::V2_5_0_BETA2),
+            prepare_test_source_for(source, TestTarget::Native, KotlinVersion::V2_5_0_RC),
             "val here = \"NATIVE\""
         );
     }
