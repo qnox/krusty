@@ -421,7 +421,7 @@ fun box(): String {
     );
 
     let stdlib = common::stdlib_jar();
-    let ours_result = common::run_box(&ours, "LKt", &[stdlib.clone()]);
+    let ours_result = common::run_box(&ours, "LKt", std::slice::from_ref(&stdlib));
     let reference_result = common::run_box(&reference, "LKt", &[stdlib]);
     assert_eq!(ours_result.as_deref(), Some("OK"));
     assert_eq!(reference_result.as_deref(), Some("OK"));
