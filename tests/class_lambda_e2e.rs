@@ -322,38 +322,63 @@ fn class_lambdas_run() {
     );
 }
 
-/// Compile `source` under `-Xlambdas=class -Xsam-conversions=class` and run its `box`.
-fn run_box_with_class_modes(source: &str) -> Option<String> {
-    let work = common::scratch_dir().expect("allocate class-mode box fixture");
+/// Compile `source` under `-Xlambdas=class -Xsam-conversions=class` with either compiler.
+fn compile_source_with_class_modes(source: &str, reference: bool) -> Vec<(String, Vec<u8>)> {
+    let work = common::scratch_dir().expect("allocate class-mode fixture");
     let file = work.join("L.kt");
     let output = work.join("out");
     std::fs::create_dir_all(&output).expect("create output");
     std::fs::write(&file, source).expect("write fixture");
-    let stdlib = common::stdlib_jar();
-    let result = std::process::Command::new(common::krusty_binary())
-        .args(["-d", output.to_str().expect("UTF-8 output"), "-no-reflect"])
-        .args(["-Xlambdas=class", "-Xsam-conversions=class"])
-        .args(["-classpath", stdlib.to_str().expect("UTF-8 stdlib")])
-        .arg(&file)
-        .output()
-        .expect("run krusty CLI");
-    assert!(
-        result.status.success(),
-        "krusty rejected the class-mode fixture: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
+    if reference {
+        let args = vec![
+            "-d".to_string(),
+            output.to_string_lossy().into_owned(),
+            "-nowarn".to_string(),
+            "-Xlambdas=class".to_string(),
+            "-Xsam-conversions=class".to_string(),
+            file.to_string_lossy().into_owned(),
+        ];
+        let (code, stderr) =
+            common::kotlinc_compile(&args).expect("reference compiler unavailable");
+        assert_eq!(code, 0, "kotlinc rejected the class-mode fixture: {stderr}");
+    } else {
+        let stdlib = common::stdlib_jar();
+        let result = std::process::Command::new(common::krusty_binary())
+            .args(["-d", output.to_str().expect("UTF-8 output"), "-no-reflect"])
+            .args(["-Xlambdas=class", "-Xsam-conversions=class"])
+            .args(["-classpath", stdlib.to_str().expect("UTF-8 stdlib")])
+            .arg(&file)
+            .output()
+            .expect("run krusty CLI");
+        assert!(
+            result.status.success(),
+            "krusty rejected the class-mode fixture: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
     let mut names = Vec::new();
     collect_classes(&output, &output, &mut names);
-    let classes: Vec<(String, Vec<u8>)> = names
+    let classes = names
         .iter()
         .map(|name| {
             let bytes = std::fs::read(output.join(format!("{name}.class"))).expect("read class");
             (name.clone(), bytes)
         })
         .collect();
-    let outcome = common::run_box(&classes, "LKt", &[stdlib]);
     let _ = std::fs::remove_dir_all(work);
-    outcome
+    classes
+}
+
+fn generic_sam_class_name(classes: &[(String, Vec<u8>)]) -> &str {
+    let mut matches = classes
+        .iter()
+        .filter(|(name, _)| name.contains("$genericSam$"));
+    let name = matches
+        .next()
+        .map(|(name, _)| name.as_str())
+        .expect("genericSam emits its SAM class");
+    assert!(matches.next().is_none(), "genericSam emits one SAM class");
+    name
 }
 
 /// A lambda converted to a SAM under `-Xsam-conversions=class` is a class whose method IS the
@@ -381,7 +406,26 @@ fun box(): String {
     return if (sam.get() == "x") "OK" else "wrong value"
 }
 "#;
-    assert_eq!(run_box_with_class_modes(source).as_deref(), Some("OK"));
+    let ours = compile_source_with_class_modes(source, false);
+    let reference = compile_source_with_class_modes(source, true);
+    let sam_class = generic_sam_class_name(&ours);
+    assert_eq!(sam_class, generic_sam_class_name(&reference));
+    let class_sets = common::ClassSets {
+        reference: reference.iter().cloned().collect(),
+        krusty: ours.iter().cloned().collect(),
+    };
+    let (reference_listing, krusty_listing) = class_sets.class_listing(sam_class);
+    assert_eq!(
+        krusty_listing, reference_listing,
+        "generic SAM class ABI differs from kotlinc"
+    );
+
+    let stdlib = common::stdlib_jar();
+    let ours_result = common::run_box(&ours, "LKt", &[stdlib.clone()]);
+    let reference_result = common::run_box(&reference, "LKt", &[stdlib]);
+    assert_eq!(ours_result.as_deref(), Some("OK"));
+    assert_eq!(reference_result.as_deref(), Some("OK"));
+    assert_eq!(ours_result, reference_result);
 }
 
 /// A DELEGATED property's initializer lambda (`val z by lazy { 7 }`) carries the property name, so
