@@ -117,3 +117,32 @@ fn classpath_object_jvmfield_and_java_static_field_read() {
         "OK"
     );
 }
+
+#[test]
+fn star_import_of_a_class_brings_in_its_companion_block_members() {
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            (
+                "Counter.kt",
+                "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+                 package a\n\
+                 class Counter {\n\
+                 \x20   companion {\n\
+                 \x20       fun start(): Int = 40\n\
+                 \x20       fun plus(left: Int, right: Int): Int = left + right\n\
+                 \x20   }\n\
+                 }\n",
+            ),
+            (
+                "main.kt",
+                "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+                 import a.Counter.*\n\
+                 fun box(): String {\n\
+                 \x20   val total = plus(start(), 2)\n\
+                 \x20   return if (total == 42) \"OK\" else \"Fail: $total\"\n\
+                 }\n",
+            ),
+        ],
+        "StarImportCompanionBlock",
+    );
+}
