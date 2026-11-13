@@ -35601,6 +35601,14 @@ impl<'a> Checker<'a> {
                     ),
                     candidate.call_sig.vararg_index,
                 );
+            let expected_literal_targets = expected.and_then(|expected| {
+                crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
+                    &source,
+                    &signature,
+                    expected,
+                    |actual, bound| self.receiver_is_assignable(actual, bound),
+                )
+            });
             let adapted_inference_actuals = inference_actuals
                 .iter()
                 .filter_map(|&(argument, parameter, actual, whole_array)| {
@@ -35624,16 +35632,34 @@ impl<'a> Checker<'a> {
                             [actual],
                             candidate.call_sig.vararg_index,
                         );
+                    let adapts_to = |target: Ty| {
+                        kind.adapts_integer_literal_to(self.integer_literal_semantic_type(target))
+                    };
                     let adapts_to_existing = !literal.bindings.is_empty()
                         && literal.bindings.keys().all(|formal| {
-                            preliminary.bindings.get(formal).is_some_and(|&target| {
-                                kind.adapts_integer_literal_to(
-                                    self.integer_literal_semantic_type(target),
-                                )
-                            })
+                            preliminary
+                                .bindings
+                                .get(formal)
+                                .is_some_and(|&target| adapts_to(target))
                         });
                     if adapts_to_existing {
                         return None;
+                    }
+                    // The literal is an adaptable lower bound, not a fixed `Int`/`UInt`: when the
+                    // result expectation bounds its formal by a type the literal adapts to
+                    // (`List<UShort?>`, `Array<Short?>`), it constrains the formal as that type,
+                    // joining the other evidence (`null`) under the same expected upper bound.
+                    if let Some(target) = literal.bindings.keys().find_map(|formal| {
+                        expected_literal_targets
+                            .as_ref()
+                            .and_then(|targets| targets.get(formal))
+                            .copied()
+                            .filter(|&target| adapts_to(target.non_null()))
+                    }) {
+                        if literal.bindings.len() == 1 {
+                            actual.1 = self.integer_literal_semantic_type(target.non_null());
+                            return Some(actual);
+                        }
                     }
                     // When a literal is the only evidence for a directly declared type
                     // parameter, its scalar upper bound is its contextual type. This keeps
