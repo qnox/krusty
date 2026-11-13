@@ -305,6 +305,7 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         foreign_inline_templates: _,
         top_level_inline_functions: _,
         suspend_funs: _,
+        coroutine_runtime: _,
         interface_delegation_forwarders: _,
         unlooped_tailrec: _,
         fresh_method_decls: _,

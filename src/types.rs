@@ -3,7 +3,9 @@
 
 mod annotation_values;
 pub use annotation_values::AnnotationValue;
+mod builtin_classes;
 pub(crate) use annotation_values::ExactFloat;
+pub use builtin_classes::REPRESENTED_BUILTINS;
 mod classifier_declarations;
 mod deprecation;
 mod diagnostic_rendering;
@@ -1927,6 +1929,11 @@ impl Ty {
     /// True for the unsigned integer types (inline classes over a signed primitive).
     pub fn is_unsigned(self) -> bool {
         matches!(self, Ty::UByte | Ty::UShort | Ty::UInt | Ty::ULong)
+    }
+
+    /// True for a builtin scalar classifier: a signed number, `Char`, `Boolean`, or unsigned.
+    pub fn is_builtin_scalar(self) -> bool {
+        self.is_numeric_or_char() || self == Ty::Boolean || self.is_unsigned()
     }
 
     /// Whether a property of this type may carry metadata `HAS_CONSTANT`.

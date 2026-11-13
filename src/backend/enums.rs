@@ -40,9 +40,8 @@
 //! holds the constants' storage, so every read of a constant, in any file, finds the one object.
 //!
 //! A file may read a constant before the file declaring its enum is lowered. Both files link the
-//! read by the constant's identity ([`link_constant_entries`], [`link_constant_reads`]), which
-//! Pass 1's module facts certify for every enum of the module, so the order of files does not
-//! matter (see [`super::module_links`]).
+//! read by the constant's identity, as they link an object's instance (see
+//! [`super::instance_links`]), so the order of files does not matter.
 //!
 //! A target runs this before the shared default-argument lowering, which then realizes a
 //! constant that leaves constructor arguments out like any other construction. The JVM keeps
@@ -123,64 +122,15 @@ pub fn publish_constants(ir: &mut IrFile, exports: &mut super::DependencyExportS
                 value,
             );
             ir.construction_entries.insert(entry, class);
-            exports.record_enum_constant_entry(super::EnumConstant { classifier, name }, entry);
+            exports.record_instance_entry(
+                super::instance_links::InstanceEntry::EnumConstant(super::EnumConstant {
+                    classifier,
+                    name,
+                }),
+                entry,
+            );
         }
     }
-}
-
-/// Define the link of every constant entry [`publish_constants`] built for this file, each by its
-/// constant: the link a read in an earlier file reserved, or a fresh one from `allocate`.
-pub fn link_constant_entries<V: Clone>(
-    exports: &super::DependencyExportSignatures,
-    links: &mut super::module_links::ModuleLinks<super::EnumConstant, V>,
-    mut allocate: impl FnMut() -> V,
-) -> Result<Vec<(FunId, V)>, &'static str> {
-    exports
-        .enum_constant_entries()
-        .iter()
-        .map(|(constant, entry)| {
-            links
-                .define(constant.clone(), &mut allocate)
-                .map(|link| (*entry, link))
-                .map_err(|_| "two files export one enum constant")
-        })
-        .collect()
-}
-
-/// The link of each constant of another file's enum that `ir` reads, after [`realize`] rewrote the
-/// reads of this file's own enums: the declaring file's defined link, or, for an enum of this
-/// module whose file comes later, a link reserved from `allocate` for that file to define. A
-/// constant of neither kind has no link, and the target declines its read.
-pub fn link_constant_reads<V: Clone>(
-    ir: &IrFile,
-    module: &super::BackendModuleFacts,
-    links: &mut super::module_links::ModuleLinks<super::EnumConstant, V>,
-    mut allocate: impl FnMut() -> V,
-) -> HashMap<super::EnumConstant, V> {
-    let mut reads = HashMap::default();
-    for expression in crate::ir::emitted_body_roots(ir)
-        .into_iter()
-        .flat_map(|root| crate::ir::value_namespace_expressions(ir, root))
-    {
-        let crate::ir::IrExpr::EnumEntry { classifier, name } = ir.expr(expression) else {
-            continue;
-        };
-        if ir.class_id_by_name(*classifier).is_some() {
-            continue;
-        }
-        let constant = super::EnumConstant {
-            classifier: *classifier,
-            name: name.clone(),
-        };
-        if reads.contains_key(&constant) {
-            continue;
-        }
-        let declared = module.declares_enum_constant(&constant);
-        if let Some(link) = links.read(constant.clone(), declared, &mut allocate) {
-            reads.insert(constant, link);
-        }
-    }
-    reads
 }
 
 /// Realize every enum class `ir` declares and rewrite every emitted use of one.

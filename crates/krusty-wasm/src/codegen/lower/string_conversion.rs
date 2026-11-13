@@ -73,6 +73,11 @@ impl Body<'_> {
             ty if self.scalar_string_function(ty).is_some() => {
                 self.scalar_string_function(ty).expect("checked above")
             }
+            // A builder's table answers its contents, and a `null` one renders as `"null"`.
+            ty if super::string_builders::is_string_builder_type(ty) => {
+                self.dispatch_to_string();
+                return Ok(());
+            }
             // A `KType` object prints through its own slot. Every other reference, including a
             // class and an erased `Any`, prints through the shared runtime `toString`.
             ty if ty.non_null().obj_internal()

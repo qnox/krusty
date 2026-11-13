@@ -182,6 +182,11 @@ impl Body<'_> {
                 _ => None,
             })
         else {
+            if let Some(target) =
+                external.filter(|_| super::string_builders::is_string_builder(internal))
+            {
+                return self.string_builder_construction(target, args);
+            }
             if let Some(constructed) =
                 external.and_then(|target| self.dependency_construction(target, internal, args))
             {

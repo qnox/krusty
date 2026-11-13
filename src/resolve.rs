@@ -1128,6 +1128,7 @@ impl ClassFlags {
     const HAS_ABSTRACT_MEMBERS: u16 = 1 << 6;
     const ANNOTATION: u16 = 1 << 7;
     const DATA: u16 = 1 << 8;
+    const ENUM: u16 = 1 << 9;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -1179,6 +1180,10 @@ impl ClassFlags {
     pub const fn with_data(self, on: bool) -> Self {
         self.with(Self::DATA, on)
     }
+    #[inline]
+    pub const fn with_enum(self, on: bool) -> Self {
+        self.with(Self::ENUM, on)
+    }
 }
 
 /// The compiler-built array operation a call checks as, and the label of its initializer lambda
@@ -1228,6 +1233,7 @@ fn source_class_flags(class: &ClassDecl) -> ClassFlags {
         )
         .with_annotation(class.is_annotation())
         .with_data(class.is_data)
+        .with_enum(class.is_enum())
 }
 
 /// Classifier flags read from the compact Pass-1 declaration inventory.
@@ -1263,6 +1269,7 @@ fn streamed_source_class_flags(
         .with_has_abstract_members(has_abstract_members)
         .with_annotation(flags.has(crate::fir::DeclarationFlags::ANNOTATION_CLASS))
         .with_data(flags.has(crate::fir::DeclarationFlags::DATA))
+        .with_enum(flags.has(crate::fir::DeclarationFlags::ENUM))
 }
 
 /// Capture the source-level callable inventory before functions and properties are normalized into
@@ -1483,6 +1490,10 @@ pub struct ClassSig {
     /// `final`, `has_abstract_members`, `annotation`). Read via the `is_*`/`has_*` accessors; the
     /// `annotation` bit lives here too (its doc stays at the former field position below).
     pub flags: ClassFlags,
+    /// Declared enum entry names in source order. Non-empty only for an `enum class` (the
+    /// [`ClassFlags::ENUM`] kind); an enum is an ordinary classifier of that kind, not a separate
+    /// table.
+    pub enum_entries: Vec<String>,
     /// `Some(outer_internal)` for an `inner class` — it captures the enclosing instance (a `this$0`
     /// field of the outer type); constructed as `outerInstance.Inner(...)`.
     pub inner_of: Option<TypeName>,
@@ -1662,6 +1673,7 @@ impl ClassSig {
             declared_callable_order,
             source_methods: Vec::new(),
             flags,
+            enum_entries: Vec::new(),
             inner_of: None,
             companion_internal,
             lateinit_props: Default::default(),
@@ -1825,6 +1837,17 @@ impl ClassSig {
     #[inline]
     pub fn is_interface(&self) -> bool {
         self.flags.has(ClassFlags::INTERFACE)
+    }
+    /// True for an `enum class`.
+    #[inline]
+    pub fn is_enum(&self) -> bool {
+        self.flags.has(ClassFlags::ENUM)
+    }
+    /// Record a declared enum entry once, keeping source order.
+    pub(crate) fn declare_enum_entry(&mut self, name: &str) {
+        if !self.enum_entries.iter().any(|entry| entry == name) {
+            self.enum_entries.push(name.to_owned());
+        }
     }
     /// True if declared `object` (a singleton).
     #[inline]
@@ -2729,10 +2752,6 @@ pub struct SymbolTable {
     /// name but must emit the annotated one, and the callee's AST is out of its reach — so the name
     /// is recorded here, where the collect pass can see every file. Absent = the two agree.
     pub toplevel_jvm_names: HashMap<(u32, u32), String>,
-    /// Declared enum entries by classifier identity, accessed via `Name.ENTRY`. Object identity is
-    /// already carried by `ClassSig::is_object`; duplicating it in a simple-name set made the two
-    /// sources disagree for cross-package homonyms.
-    pub enums: HashMap<TypeName, Vec<String>>,
     /// The target's compiled library set — a JVM classpath or a klib (empty unless the driver
     /// supplies one). The front end resolves external references only through this abstraction.
     pub libraries: Box<dyn SemanticPlatform>,
@@ -2871,7 +2890,6 @@ impl Default for SymbolTable {
             context_prop_names: crate::fx_hash::HashSet::default(),
             property_inference_failures: HashMap::default(),
             toplevel_jvm_names: HashMap::default(),
-            enums: HashMap::default(),
             libraries: Box::new(EmptySymbolSource),
             native_plugins: Default::default(),
             annotation_conventions: Default::default(),
@@ -3520,7 +3538,10 @@ impl SymbolTable {
 
     /// The source enum entry names for this classifier identity.
     pub fn enum_entries_of(&self, internal: TypeName) -> Option<&Vec<String>> {
-        self.enums.get(&internal)
+        self.classes
+            .get(&internal)
+            .filter(|class| class.is_enum())
+            .map(|class| &class.enum_entries)
     }
 
     /// The source spelling (`Wrapper`, `Outer.Inner` for a nested class) of a MODULE class's internal
@@ -7191,6 +7212,10 @@ pub struct TypeInfo {
     /// span. The public property result remains in `property_decl_types`/the stable signature;
     /// checked FIR consumes this distinct owner-local storage boundary directly.
     pub(crate) explicit_backing_field_types: HashMap<(u32, u32), Ty>,
+    /// The `@EqualityBound` classifier, declared or inherited from the overridden `equals`, under
+    /// which a function body read its parameter, keyed by that parameter's type-reference span.
+    /// Checked FIR publishes it as the body's guard; lowering realizes the guard ahead of the body.
+    pub(crate) equality_bound_parameters: HashMap<(u32, u32), Ty>,
     /// Final results for source members checked inside the active body unit. Local and anonymous
     /// classifiers can mention enclosing classifiers, values, and type parameters that the module
     /// header table deliberately cannot finalize in Pass 1. This includes both expression-inferred
@@ -19743,8 +19768,9 @@ impl<'a> Checker<'a> {
         // Legal *nested* shadowing (`val x` inside a block, shadowing an outer `val x`) lowers
         // fine — each declaration gets a fresh slot and the lowering's scope is truncated at block
         // exit, restoring the outer mapping (verified). Only a same-scope *redeclaration* is
-        // rejected (kotlinc errors on it too — conflicting declarations).
-        if self.declared_in_current_scope(scope, &name) {
+        // rejected (kotlinc errors on it too — conflicting declarations). An unnamed local
+        // (`val _ = ...`) binds no name, so it can neither conflict nor be conflicted with.
+        if name != "_" && self.declared_in_current_scope(scope, &name) {
             self.diags.error(
                 self.file.stmt_spans[s.0 as usize],
                 format!("krusty: conflicting local declaration '{name}'"),
@@ -21627,7 +21653,7 @@ mod tests {
         assert!(class.value_field.is_none());
         assert!(!class.methods.contains_key("component1"));
         assert!(!class.methods.contains_key("copy"));
-        assert!(!symbols.enums.contains_key(&type_name("Box")));
+        assert!(symbols.enum_entries_of(type_name("Box")).is_none());
         assert_eq!(class.ctor_params, [Ty::Int]);
         let value = &class.declared_props["value"];
         assert_eq!(value.visibility, Visibility::Public);
@@ -30262,6 +30288,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         local_decl_types: HashMap::default(),
         property_decl_types: HashMap::default(),
         explicit_backing_field_types: HashMap::default(),
+        equality_bound_parameters: HashMap::default(),
         contextual_constructor_signatures: HashMap::default(),
         selected_generic_calls: HashMap::default(),
         inferred_expression_intersections: HashMap::default(),
@@ -31742,6 +31769,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         local_decl_types,
         property_decl_types,
         explicit_backing_field_types,
+        equality_bound_parameters,
         selected_generic_calls,
         selected_value_smartcasts,
         selected_numeric_conversions,
@@ -32042,6 +32070,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         local_decl_types,
         property_decl_types,
         explicit_backing_field_types,
+        equality_bound_parameters,
         checked_source_member_results: inferred_source_member_rets,
         checked_declaration_results: inferred_stable_declaration_rets,
         inferred_declaration_publications,
@@ -32784,6 +32813,7 @@ struct Checker<'a> {
     local_decl_types: HashMap<StmtId, Ty>,
     property_decl_types: HashMap<(u32, u32), Ty>,
     explicit_backing_field_types: HashMap<(u32, u32), Ty>,
+    equality_bound_parameters: HashMap<(u32, u32), Ty>,
     /// Generic result templates for constructor spellings whose selected classifier does not carry
     /// the complete source-level substitution. The important case is an omitted generic typealias
     /// application (`Alias()`, `Alias<Y> = Box<Y>`): contextual argument inference must constrain
@@ -35593,6 +35623,14 @@ impl<'a> Checker<'a> {
                     ),
                     candidate.call_sig.vararg_index,
                 );
+            let expected_literal_targets = expected.and_then(|expected| {
+                crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
+                    &source,
+                    &signature,
+                    expected,
+                    |actual, bound| self.receiver_is_assignable(actual, bound),
+                )
+            });
             let adapted_inference_actuals = inference_actuals
                 .iter()
                 .filter_map(|&(argument, parameter, actual, whole_array)| {
@@ -35616,16 +35654,34 @@ impl<'a> Checker<'a> {
                             [actual],
                             candidate.call_sig.vararg_index,
                         );
+                    let adapts_to = |target: Ty| {
+                        kind.adapts_integer_literal_to(self.integer_literal_semantic_type(target))
+                    };
                     let adapts_to_existing = !literal.bindings.is_empty()
                         && literal.bindings.keys().all(|formal| {
-                            preliminary.bindings.get(formal).is_some_and(|&target| {
-                                kind.adapts_integer_literal_to(
-                                    self.integer_literal_semantic_type(target),
-                                )
-                            })
+                            preliminary
+                                .bindings
+                                .get(formal)
+                                .is_some_and(|&target| adapts_to(target))
                         });
                     if adapts_to_existing {
                         return None;
+                    }
+                    // The literal is an adaptable lower bound, not a fixed `Int`/`UInt`: when the
+                    // result expectation bounds its formal by a type the literal adapts to
+                    // (`List<UShort?>`, `Array<Short?>`), it constrains the formal as that type,
+                    // joining the other evidence (`null`) under the same expected upper bound.
+                    if let Some(target) = literal.bindings.keys().find_map(|formal| {
+                        expected_literal_targets
+                            .as_ref()
+                            .and_then(|targets| targets.get(formal))
+                            .copied()
+                            .filter(|&target| adapts_to(target.non_null()))
+                    }) {
+                        if literal.bindings.len() == 1 {
+                            actual.1 = self.integer_literal_semantic_type(target.non_null());
+                            return Some(actual);
+                        }
                     }
                     // When a literal is the only evidence for a directly declared type
                     // parameter, its scalar upper bound is its contextual type. This keeps
@@ -54960,13 +55016,13 @@ impl<'a> Checker<'a> {
                 }
                 let mut bound_represented = None;
                 if unbound.is_none() {
-                    // Bound: a reference receiver, or a boxable primitive (boxed then `getClass`).
+                    // Bound: a reference receiver, or a builtin signed or unsigned scalar value
+                    // (its runtime class is that classifier).
                     let rt = self.expr(scope, recv);
                     if rt == Ty::Error {
                         return self.set(e, Ty::Error);
                     }
-                    let boxable = rt.jvm_boxed_ref().is_some();
-                    if !rt.is_reference() && !boxable {
+                    if !rt.is_reference() && !rt.is_builtin_scalar() {
                         return unsupported(self);
                     }
                     // The runtime class of a VALUE may be a proper subtype of its static type.

@@ -14,6 +14,7 @@
 mod array_access;
 mod array_objects;
 mod boxes;
+mod builtin_instances;
 mod builtin_members;
 mod builtin_order;
 mod callable_references;
@@ -29,6 +30,7 @@ mod interface_dispatch;
 mod numeric_conversions;
 mod objects;
 mod runtime;
+mod string_builders;
 mod target;
 mod type_objects;
 

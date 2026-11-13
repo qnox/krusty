@@ -332,25 +332,7 @@ impl Checker<'_> {
         let resolver = self.resolver();
         let root = resolver.classifier(owner).map_or_else(
             || Ty::obj_name(owner),
-            |classifier| {
-                let arguments = classifier
-                    .type_params
-                    .iter()
-                    .enumerate()
-                    .map(|(index, parameter)| {
-                        Ty::ty_param(
-                            parameter,
-                            classifier
-                                .type_param_bounds
-                                .get(index)
-                                .and_then(|bounds| bounds.first())
-                                .copied()
-                                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                Ty::obj_args_name(owner, &arguments)
-            },
+            |classifier| classifier.declared_self_type(owner),
         );
         let source = self.fed_source();
         let hierarchy = crate::symbol_resolver::applied_hierarchy(&source, root);

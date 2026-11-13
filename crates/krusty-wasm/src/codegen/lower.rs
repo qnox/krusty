@@ -36,7 +36,9 @@ mod objects;
 mod scalar_instructions;
 mod scalar_value_classes;
 mod shared_cells;
+mod string_builders;
 pub(super) use shared_cells::cell_reference;
+pub(super) use string_builders::{declared_by_string_builder, is_string_builder};
 mod string_conversion;
 mod type_of;
 
@@ -189,9 +191,8 @@ pub(super) fn lower_file(
         let results = carrier(function.ret)?.into_iter().collect::<Vec<_>>();
         signatures.push(Some(module.func_type(params, results)));
     }
-    let enum_constant_entries =
-        callable_registry.link_enum_constants(dependency_exports, module)?;
-    let indices = callable_registry.declare_file(ir, module, &enum_constant_entries)?;
+    let instance_entries = callable_registry.link_instances(dependency_exports, module)?;
+    let indices = callable_registry.declare_file(ir, module, &instance_entries)?;
     let reference_file =
         runtime
             .callable_references
@@ -908,11 +909,18 @@ impl<'a> Body<'a> {
         numeric_conversions::convert(&mut self.code, source_ty, target_ty)
     }
 
-    /// Whether a cast of `arg` to `target` reads a scalar out of a reference: the operand is
-    /// carried as a reference and the target as a scalar.
-    fn is_unboxing_cast(&self, arg: u32, target: Ty) -> bool {
+    /// Whether a cast of `arg` to `target` checks a reference against a scalar's box: the operand
+    /// is carried as a reference and the target is a scalar-carried type or its nullable form.
+    /// Every such scalar's box is keyed by its own classifier, so `UInt?` checks against the
+    /// `UInt` box, never the `Int` one.
+    fn is_primitive_cast(&self, arg: u32, target: Ty) -> bool {
+        let scalar =
+            |ty: Ty| matches!(carrier(ty), Ok(Some(ty)) if !matches!(ty, ValType::Ref { .. }));
         matches!(self.carrier_of(arg), Ok(Some(ValType::Ref { .. })))
-            && matches!(carrier(target), Ok(Some(target)) if !matches!(target, ValType::Ref { .. }))
+            && match target.kind() {
+                TyKind::Nullable(inner) => scalar(inner),
+                _ => scalar(target),
+            }
     }
 
     fn carrier_of(&self, id: u32) -> Result<Option<ValType>, Unsupported> {
@@ -1334,6 +1342,21 @@ impl<'a> Body<'a> {
             }
             IrExpr::Call {
                 callee: ref call_callee,
+                dispatch_receiver: Some(receiver),
+                args,
+            } if let Callee::External {
+                target, defaults, ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self
+                    .callables
+                    .callable(*target)
+                    .is_some_and(string_builders::declared_by_string_builder) =>
+            {
+                self.string_builder_call(*target, receiver, &args)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
                 dispatch_receiver,
                 args,
             } if let Callee::External {
@@ -1365,13 +1388,13 @@ impl<'a> Body<'a> {
             {
                 self.cast(arg, type_operand, op == IrTypeOp::CastNonNull)?
             }
-            // `as Int` on a reference reads the value out of its box once the cast has checked it.
+            // `as Int` and `as Int?` on a reference check it against the primitive's box.
             IrExpr::TypeOp {
                 op: IrTypeOp::Cast | IrTypeOp::CastNonNull,
                 arg,
                 type_operand,
-            } if self.is_unboxing_cast(arg, type_operand) => {
-                self.checked_unbox_cast(arg, type_operand)?
+            } if self.is_primitive_cast(arg, type_operand) => {
+                self.checked_primitive_cast(arg, type_operand)?
             }
             IrExpr::TypeOp {
                 op: op @ (IrTypeOp::Cast | IrTypeOp::CastNonNull),
@@ -1531,7 +1554,11 @@ impl<'a> Body<'a> {
             IrExpr::EnumEntry { classifier, name } => {
                 let entry = self
                     .calls
-                    .dependency_enum_constant(classifier, &name)
+                    .instance(
+                        &krusty::backend::instance_links::InstanceEntry::EnumConstant(
+                            krusty::backend::EnumConstant { classifier, name },
+                        ),
+                    )
                     .ok_or_else(|| {
                         // Boundary conversion for a diagnostic.
                         format!(
@@ -1650,6 +1677,21 @@ impl<'a> Body<'a> {
                     && self.is_string_length_property(*target) =>
             {
                 self.intrinsic(IrIntrinsic::StringLength, Some(*receiver), &[])?;
+            }
+            IrExpr::Checked(ref checked_op)
+                if let krusty::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch: krusty::ir::IrPropertyDispatch::Ordinary,
+                    receiver: Some(receiver),
+                    arguments,
+                    parameters,
+                    ..
+                } = &**checked_op
+                    && parameters.is_empty()
+                    && arguments.is_empty()
+                    && self.is_string_builder_property(*target) =>
+            {
+                self.string_builder_property(*target, *receiver)?;
             }
             IrExpr::Checked(ref checked_op)
                 if let krusty::ir::IrCheckedOperation::PropertyWrite {

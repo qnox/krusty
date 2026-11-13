@@ -193,6 +193,7 @@ struct CtorShape<'a> {
     slot: ConstructorSlot,
     flags: u64,
     param_defaults: &'a [bool],
+    annotation_param_defaults: Option<&'a [Option<crate::ir::AnnoValue>]>,
     param_tparams: &'a [Option<u32>],
     /// User annotations on each parameter, parallel to `params` (a short list ⇒ the rest carry none).
     param_annotations: &'a [crate::metadata::MetadataAnnotations],
@@ -279,6 +280,13 @@ fn build_ctor(
                 st.put_type(&mut vp, 4, 6, &et); // ValueParameter.vararg_element_type(_id) = 4 / 6
             }
         }
+        // FIR visits the closed default before parameter annotations, but protobuf writes
+        // annotations (field 7) before the default (field 8).
+        let default_value = shape
+            .annotation_param_defaults
+            .and_then(|values| values.get(i))
+            .and_then(Option::as_ref)
+            .map(|value| crate::metadata::builder::annotation_value_pb(st, value));
         append_param_annotations(
             st,
             &mut vp,
@@ -286,6 +294,9 @@ fn build_ctor(
             shape.annotations_in_metadata,
             carrier.annotation_field(AnnotationSite::ValueParameter),
         );
+        if let Some(value) = default_value {
+            vp.field_message(8, &value);
+        }
         ctor.repeated_message(2, &vp); // Constructor.value_parameter = 2
     }
     // The carrier's extensions INTERN first (kotlinc's serializer writes the JVM signature before
@@ -525,6 +536,7 @@ pub(crate) fn class_message(
                 slot: ConstructorSlot::Primary,
                 flags: tail.primary_ctor_flags,
                 param_defaults: tail.ctor_param_defaults,
+                annotation_param_defaults: tail.annotation_param_defaults,
                 param_tparams: &ctor_param_tparams,
                 param_annotations: tail.ctor_param_annotations,
                 vararg_index: tail.ctor_vararg_index,
@@ -547,6 +559,7 @@ pub(crate) fn class_message(
                 slot: ConstructorSlot::Secondary(index),
                 flags: sc.flags,
                 param_defaults: sc.param_defaults,
+                annotation_param_defaults: None,
                 param_tparams: &[],
                 param_annotations: &[],
                 vararg_index: sc.vararg_index,

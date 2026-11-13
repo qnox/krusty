@@ -322,6 +322,11 @@ impl Filler<'_> {
                     Some(_) => unreachable!("a function is bridged from a function"),
                 }
             }
+            PlanKey::DependencyCallable(_)
+            | PlanKey::DependencyGetter(_)
+            | PlanKey::DependencySetter(_) => {
+                Err("a dependency member numbered as a member of a module interface".to_owned())
+            }
             PlanKey::Getter(property) | PlanKey::Setter(property) => {
                 let setter = matches!(declaration.member, PlanKey::Setter(_));
                 let accessor = match ir.local_property_layouts.get(&property) {
