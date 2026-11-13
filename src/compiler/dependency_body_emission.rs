@@ -642,7 +642,7 @@ pub(super) fn emit_dependencies<B: Backend>(
                 super::backend_handoff::prepare_common_ir(&mut support, platform, preparation)
             {
                 release_unit_reservations(support_state, &published, &materialized);
-                backend.report_common_ir_preparation_decline(&error, diags);
+                backend.report_common_ir_preparation_error(&error, diags);
                 return Vec::new();
             }
         }

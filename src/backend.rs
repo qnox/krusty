@@ -123,12 +123,10 @@ pub struct CommonIrPreparation {
     pub enums: crate::backend::enums::Contract,
 }
 
-/// A checked file shape a target's selected common-IR preparation cannot realize.
-///
-/// This is a capability decline, not an internal compiler error. Backends may preserve their
-/// diagnostic wording while the compiler still carries the reason as a typed value.
+/// An unsupported checked shape or a failed invariant during common-IR preparation.
+/// Capability declines and compiler inconsistencies retain distinct diagnostic channels.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CommonIrPreparationDecline {
+pub enum CommonIrPreparationError {
     Suspend(crate::backend::coroutines::ContinuationDecline),
     /// A compiler-owned preparation invariant failed after source-shape validation.
     Invariant(String),
@@ -153,18 +151,18 @@ pub trait Backend {
         None
     }
 
-    /// Report a checked shape unsupported by the target's common-IR preparations.
-    fn report_common_ir_preparation_decline(
+    /// Report a capability decline or invariant failure from common-IR preparation.
+    fn report_common_ir_preparation_error(
         &self,
-        decline: &CommonIrPreparationDecline,
+        decline: &CommonIrPreparationError,
         diags: &mut DiagSink,
     ) {
         match decline {
-            CommonIrPreparationDecline::Suspend(_) => diags.error(
+            CommonIrPreparationError::Suspend(_) => diags.error(
                 crate::diag::Span::new(0, 0),
                 "krusty: this suspend-function shape is not yet supported by the IR backend",
             ),
-            CommonIrPreparationDecline::Invariant(error) => diags.error(
+            CommonIrPreparationError::Invariant(error) => diags.error(
                 crate::diag::Span::new(0, 0),
                 format!("internal error: {error}"),
             ),

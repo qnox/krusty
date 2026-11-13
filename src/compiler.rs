@@ -486,7 +486,7 @@ fn emit_analyzed_into<B: Backend>(
                 symbols.semantic_platform(),
                 preparation,
             ) {
-                backend.report_common_ir_preparation_decline(&error, diags);
+                backend.report_common_ir_preparation_error(&error, diags);
                 continue;
             }
         }

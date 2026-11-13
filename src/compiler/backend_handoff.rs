@@ -140,7 +140,7 @@ pub(super) fn prepare_common_ir(
     file: &mut CheckedIrFile<'_>,
     provider: &dyn crate::symbol_source::SymbolSource,
     preparation: crate::backend::CommonIrPreparation,
-) -> Result<(), crate::backend::CommonIrPreparationDecline> {
+) -> Result<(), crate::backend::CommonIrPreparationError> {
     if !file.ir.suspend_funs.is_empty() && file.ir.coroutine_runtime.is_none() {
         file.ir.coroutine_runtime = coroutine_runtime::select(provider);
     }
@@ -151,11 +151,11 @@ pub(super) fn prepare_common_ir(
         file.dependency_exports.callable(function).is_some()
     });
     crate::backend::coroutines::add_continuation_parameters(&mut file.ir)
-        .map_err(crate::backend::CommonIrPreparationDecline::Suspend)?;
+        .map_err(crate::backend::CommonIrPreparationError::Suspend)?;
 
     let plugin_runtime = file.callables.plugin_runtime_bindings();
     let mut callables = CheckedBackendCallables::freeze(&file.ir, provider).map_err(|error| {
-        crate::backend::CommonIrPreparationDecline::Invariant(format!(
+        crate::backend::CommonIrPreparationError::Invariant(format!(
             "cannot freeze prepared dependency declarations: {error:?}"
         ))
     })?;
@@ -165,7 +165,7 @@ pub(super) fn prepare_common_ir(
             provider.external_callable(identity)
         })
         .map_err(|error| {
-            crate::backend::CommonIrPreparationDecline::Invariant(format!(
+            crate::backend::CommonIrPreparationError::Invariant(format!(
                 "cannot refreeze plugin runtime declaration facts: {error:?}"
             ))
         })?;
