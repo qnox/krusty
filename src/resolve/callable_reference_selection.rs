@@ -292,13 +292,19 @@ pub(super) fn specialize_generic_signature(
         let vararg = call_sig.vararg_index;
         // The expected array is the whole vararg only where it is the declared array's own kind: a
         // reference array for `vararg xs: E` (`Array<out E>`), the same primitive array for
-        // `vararg xs: Int`. Any other argument, a primitive array against `E`, is one element.
+        // `vararg xs: Int`, and a shorter function type still supplies it. Releases before 2.5.0
+        // (KT-90169) take any array argument of an equally long function type as the whole vararg.
+        let binds_array_by_kind =
+            crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_5_0);
         let whole_vararg = vararg.is_some_and(|index| {
-            (expected.len() == generic.params.len() || expected.len() == index + 1)
+            (expected.len() == generic.params.len()
+                || (binds_array_by_kind && expected.len() == index + 1))
                 && expected.get(index).is_some_and(|actual| {
                     let actual = actual.non_null();
                     let declared = generic.params[index].non_null();
-                    if declared.is_reference_array() {
+                    if !binds_array_by_kind {
+                        actual.array_elem().is_some()
+                    } else if declared.is_reference_array() {
                         actual.is_reference_array()
                     } else {
                         actual.array_elem().is_some() && actual == declared

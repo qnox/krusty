@@ -79,27 +79,31 @@ pub(super) fn score_with_declaration(
         *sam_signatures.borrow_mut().get_mut(source)? = Some(signature);
         Some(())
     };
-    // Candidate scoring receives the expression as well as its runtime type so every module
-    // call shape (positional, named, defaulted, and vararg) consults the same literal adaptation
-    // carried by `CallArgKind`.
-    let score = |parameter: usize, expected: Ty, actual: Ty, argument: ExprId, source: usize| {
-        let expected = checker.declared_function_semantic_type(expected);
-        // The result a receiver-less reference produces is candidate evidence even when its
-        // probe type is already known: a candidate whose function result it cannot satisfy is a
-        // misfit for an `OverloadResolutionByLambdaReturnType` tie to drop.
+    // The result a receiver-less reference produces is candidate evidence for a function-typed
+    // parameter: a candidate whose function result the named callable cannot produce is a misfit
+    // for an `OverloadResolutionByLambdaReturnType` tie to drop. One check serves every point at
+    // which the candidate's function type becomes known.
+    let note_reference_result = |argument: ExprId, function_ty: Ty| {
         if let (
             Expr::CallableRef {
                 receiver: None,
                 name,
             },
-            TyKind::Fun(expected_function),
-        ) = (checker.file.expr(argument), expected.non_null().kind())
+            TyKind::Fun(function),
+        ) = (checker.file.expr(argument), function_ty.non_null().kind())
         {
             let fits = checker
-                .unqualified_callable_reference_result_fits(scope, name, expected_function)
+                .unqualified_callable_reference_result_fits(scope, name, function)
                 .unwrap_or(true);
             lambda_result_mismatch.set(lambda_result_mismatch.get() || !fits);
         }
+    };
+    // Candidate scoring receives the expression as well as its runtime type so every module
+    // call shape (positional, named, defaulted, and vararg) consults the same literal adaptation
+    // carried by `CallArgKind`.
+    let score = |parameter: usize, expected: Ty, actual: Ty, argument: ExprId, source: usize| {
+        let expected = checker.declared_function_semantic_type(expected);
+        note_reference_result(argument, expected);
         let semantic_actual = checker.argument_type_for_expected(scope, argument, actual, expected);
         let semantic_actual = checker
             .unit_coerced_lambda_type(argument, expected, semantic_actual)
@@ -132,19 +136,7 @@ pub(super) fn score_with_declaration(
             );
             // The candidate's own function parameter, with the bindings its receiver and
             // earlier arguments already fixed, is what the reference's result is measured by.
-            if let (
-                Expr::CallableRef {
-                    receiver: None,
-                    name,
-                },
-                TyKind::Fun(input_function),
-            ) = (checker.file.expr(argument), input.non_null().kind())
-            {
-                let fits = checker
-                    .unqualified_callable_reference_result_fits(scope, name, input_function)
-                    .unwrap_or(true);
-                lambda_result_mismatch.set(lambda_result_mismatch.get() || !fits);
-            }
+            note_reference_result(argument, input);
             if projection.is_some()
                 && !checker.receiver_is_assignable(semantic_actual, input)
                 && !checker.call_result_can_bind_expected(argument, input)
@@ -361,19 +353,9 @@ pub(super) fn score_with_declaration(
                     }
                 }
                 // A receiver-less reference supplies a result classifier before any lambda body
-                // would: a candidate whose function result the named callable cannot produce is
-                // marked a misfit, which an `OverloadResolutionByLambdaReturnType` tie then drops.
-                Expr::CallableRef {
-                    receiver: None,
-                    name,
-                } if expected.non_null().is_fun() => {
-                    let TyKind::Fun(expected_function) = expected.non_null().kind() else {
-                        unreachable!("guarded function expectation")
-                    };
-                    let fits = checker
-                        .unqualified_callable_reference_result_fits(scope, name, expected_function)
-                        .unwrap_or(true);
-                    lambda_result_mismatch.set(lambda_result_mismatch.get() || !fits);
+                // would.
+                Expr::CallableRef { receiver: None, .. } if expected.non_null().is_fun() => {
+                    note_reference_result(argument, expected);
                     Some(2)
                 }
                 _ => Some(0),
