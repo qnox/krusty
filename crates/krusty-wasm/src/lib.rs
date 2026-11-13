@@ -29,6 +29,7 @@ mod interface_dispatch;
 mod numeric_conversions;
 mod objects;
 mod runtime;
+mod string_builders;
 mod target;
 mod type_objects;
 
