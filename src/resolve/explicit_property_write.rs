@@ -23,6 +23,7 @@ struct ExplicitWriteSite<'n> {
     value_ty: Ty,
 }
 
+#[derive(Clone, Copy)]
 struct SourcePropertyWrite {
     owner: TypeName,
     ty: Ty,
@@ -64,25 +65,15 @@ impl ExplicitPropertyWrite {
 }
 
 impl Checker<'_> {
-    fn lookup_property_for_write(
-        &self,
-        receiver: Ty,
-        name: &str,
-    ) -> Option<(
-        TypeName,
-        Ty,
-        bool,
-        Option<Visibility>,
-        Option<crate::fir::DeclarationId>,
-    )> {
+    fn lookup_property_for_write(&self, receiver: Ty, name: &str) -> Option<SourcePropertyWrite> {
         if let Some(property) = self.checked_body_local_property_for_write(receiver, name) {
-            return Some((
-                property.owner,
-                property.ty,
-                property.mutable,
-                property.mutable.then_some(property.visibility),
-                property.stable_declaration,
-            ));
+            return Some(SourcePropertyWrite {
+                owner: property.owner,
+                ty: property.ty,
+                is_var: property.mutable,
+                setter_visibility: property.mutable.then_some(property.visibility),
+                stable_declaration: property.stable_declaration,
+            });
         }
         let selected = self
             .resolver()
@@ -90,13 +81,13 @@ impl Checker<'_> {
                 Some((true, 0))
             })?;
         let property = selected.property?;
-        Some((
-            selected.owner,
-            selected.ty,
-            property.setter.is_some(),
-            property.setter.as_ref().map(|_| property.setter_visibility),
-            property.stable_declaration,
-        ))
+        Some(SourcePropertyWrite {
+            owner: selected.owner,
+            ty: selected.ty,
+            is_var: property.setter.is_some(),
+            setter_visibility: property.setter.as_ref().map(|_| property.setter_visibility),
+            stable_declaration: property.stable_declaration,
+        })
     }
 
     /// Select the write target of `receiver.name` on the non-accessor member rungs, in priority
@@ -120,21 +111,15 @@ impl Checker<'_> {
         let setter = member_rungs
             .then(|| self.select_property_setter(rt, name))
             .flatten();
-        if let Some((owner, ty, is_var, setter_visibility, stable_declaration)) = source_property {
-            if is_var || setter.is_none() {
-                return ExplicitPropertyWrite::Source(SourcePropertyWrite {
-                    owner,
-                    ty,
-                    is_var,
-                    setter_visibility,
-                    stable_declaration,
-                });
+        if let Some(property) = source_property {
+            if property.is_var || setter.is_none() {
+                return ExplicitPropertyWrite::Source(property);
             }
         }
         if let Some(setter) = setter {
             return ExplicitPropertyWrite::Setter {
                 setter: Box::new(setter),
-                declared_ty: source_property.map(|(_, ty, _, _, _)| ty),
+                declared_ty: source_property.map(|property| property.ty),
             };
         }
         if let Some(property) = member_rungs

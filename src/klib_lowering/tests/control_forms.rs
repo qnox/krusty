@@ -941,6 +941,20 @@ fn type_checks_and_casts_lower_as_the_source_operators_do() {
             "a as String?",
         ),
         (KlibIrTypeOperator::Cast, T::Int, T::Int, "Int", "a as Int"),
+        (
+            KlibIrTypeOperator::InstanceOf,
+            T::NullableString,
+            T::Boolean,
+            "Boolean",
+            "a is String?",
+        ),
+        (
+            KlibIrTypeOperator::NotInstanceOf,
+            T::NullableString,
+            T::Boolean,
+            "Boolean",
+            "a !is String?",
+        ),
     ];
     for (operator, target, result, result_source, expression) in cases {
         let source = format!("fun f(a: Any?): {result_source} {{\n return {expression}\n}}\n");
@@ -965,12 +979,6 @@ fn type_operators_checked_fir_expands_decline_by_name() {
             T::NullableString,
             T::NullableString,
             "a safe cast",
-        ),
-        (
-            KlibIrTypeOperator::InstanceOf,
-            T::NullableString,
-            T::Boolean,
-            "an `is` check of a nullable type",
         ),
         (
             KlibIrTypeOperator::ImplicitNotNull,
@@ -1019,6 +1027,66 @@ fn a_nullability_smart_cast_lowers_as_the_source_smart_cast_does() {
             "{source_type}"
         );
     }
+}
+
+/// `kotlin.text.appendElement` narrows its `element: T` by `is` checks to `CharSequence?` and to
+/// `Char`: a value of a type parameter narrows to any type it is checked against. A smart cast to
+/// a non-null reference type is a cast, and one to a nullable or primitive type a coercion.
+#[test]
+fn a_type_parameter_smart_cast_lowers_as_the_source_smart_cast_does() {
+    let cases: [(T, &str, &str); 3] = [
+        (T::String, "String", "\"\""),
+        (T::NullableString, "String?", "null"),
+        (T::Int, "Int", "0"),
+    ];
+    for (value, source_type, fallback) in cases {
+        let demo = demo(&[("f", &[T::P], value)], move |_, body| {
+            let a = body.param(0);
+            let operand = body.ty(value);
+            let checked = body.expr(
+                T::Boolean,
+                KlibIrExprKind::TypeOperator {
+                    operator: KlibIrTypeOperator::InstanceOf,
+                    operand,
+                    argument: a,
+                },
+            );
+            let a = body.param(0);
+            let narrowed = body.type_operator(KlibIrTypeOperator::ImplicitCast, a, value);
+            let returned = body.return_(narrowed);
+            let guard = body.branches("IF", vec![(checked, returned)], T::Unit);
+            let fallback = match value {
+                T::String => body.string(""),
+                T::NullableString => body.constant(T::NullableNothing, KlibIrConstant::Null),
+                _ => body.int(0),
+            };
+            Some(vec![KlibIrStatement::Expression(guard), body.ret(fallback)])
+        });
+        let source = format!(
+            "fun <P> f(a: P): {source_type} {{\n if (a is {source_type}) return a\n \
+             return {fallback}\n}}\n"
+        );
+        assert_eq!(
+            with_parameter_identities_erased(&lowered_f(&demo)),
+            with_parameter_identities_erased(&source_body(&source, "f", 1)),
+            "{source_type}"
+        );
+    }
+}
+
+/// `rendered` with each type parameter identity spelled `<P>`: a KLIB body names its function's
+/// type parameter by metadata identity, the source by its declaration, and both are `P`.
+fn with_parameter_identities_erased(rendered: &str) -> String {
+    let mut erased = String::new();
+    let mut rest = rendered;
+    while let Some(start) = rest.find("<\"\\0") {
+        erased.push_str(&rest[..start]);
+        let end = rest[start..].find("\">").expect("a closed identity") + start + 2;
+        erased.push_str("<P>");
+        rest = &rest[end..];
+    }
+    erased.push_str(rest);
+    erased
 }
 
 // --- The Kotlin/Native stdlib -------------------------------------------------------------------

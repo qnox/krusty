@@ -54,18 +54,11 @@ impl Emitter<'_> {
                 Some(binding)
             }
         };
-        // The block ran as an inlined body, after which kotlinc writes the call's line afresh.
+        // The block ran as an inlined body, after which the mapper forgot its line: the call's
+        // line is written afresh at the probe.
         if let Some(line) = self.ir.source_line(point) {
             if line != 0 {
-                // Closing the spliced lambda may already have put the call line on a trailing
-                // `nop`. The probe's first real instruction shares that line, so do not split the
-                // two into separate debug ranges: kotlinc's redundant-nop pass then removes the
-                // anchor. Without such an anchor the ordinary post-inline reset still forces the
-                // call line to be written at the probe.
-                if !code.line_is_anchored_by_trailing_nop(line) {
-                    code.forget_line();
-                    code.mark_line(line);
-                }
+                code.mark_line(line);
             }
         }
         let resumed = code.new_label();

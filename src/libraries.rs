@@ -10,6 +10,7 @@ mod call_arg_mapping_failure;
 mod call_realization;
 mod call_sig;
 mod callable_scope_rung;
+mod class_name_property;
 mod classifier_callables;
 mod classifier_declaration;
 mod classifier_kind;
@@ -65,7 +66,7 @@ pub use callable_scope_rung::CallableScopeRung;
 pub(crate) use classifier_callables::{
     constructor_declaration_signature, constructor_generic_signature, ConstructorAlias,
 };
-pub use classifier_callables::{BoundInnerConstructor, ConstructorCandidate};
+pub use classifier_callables::{BoundInnerConstructor, ConstructorCandidate, ConstructorOrigin};
 pub(crate) use classifier_declaration::type_alias_target_classifier;
 pub use classifier_declaration::{
     AliasExpansion, ClassifierDeclaration, ClassifierDeclarationKey, TypeAliasTemplate,
@@ -108,8 +109,10 @@ use crate::types::InlineParameterModifier;
 pub use crate::types::Visibility;
 use crate::types::{SemanticCallRole, SemanticCallableOwner, Ty, TyKind, TypeName, TypeNameList};
 pub(crate) use array_factories::kotlin_array_factory_kind;
+pub(crate) use class_name_property::realize_class_name_property;
 pub use compiler_intrinsic::{
-    CompilerIntrinsic, IndicesReceiver, ListStorageConstruction, ResultFailureIntrinsic,
+    ClassNameKind, CompilerIntrinsic, IndicesReceiver, ListStorageConstruction,
+    ResultFailureIntrinsic,
 };
 pub(crate) use core_builtins::add_core_builtin_declarations;
 pub use generic_signature::{GenericReturnPolicy, GenericSig};
@@ -121,7 +124,9 @@ pub use inline_body::{
 };
 #[cfg(test)]
 pub(crate) use klib_body_class::test_fixture as klib_body_class_fixture;
-pub(crate) use klib_body_class::{KlibBodyClassContract, KlibBodyClassParameters, KlibStoredField};
+pub(crate) use klib_body_class::{
+    KlibBodyClassContract, KlibBodyClassParameters, KlibClassStorage, KlibStoredField,
+};
 pub use member_flags::LmFlags;
 pub(crate) use metadata_normalization::{
     associated_function_parameter_identities, associated_property_parameter_identities,
@@ -561,6 +566,12 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// means this provider takes no part in source-set diagnostics, and a check that needs the
     /// name reports an internal error rather than inventing one.
     fn diagnostic_target_name(&self) -> Option<&str> {
+        None
+    }
+
+    /// The error this platform reports for a value of type `Array<Nothing?>`, which it cannot
+    /// represent. `None` where such an array is an ordinary value.
+    fn array_of_nullable_nothing_error(&self) -> Option<&'static str> {
         None
     }
 
@@ -1578,9 +1589,11 @@ impl FunctionInfo {
                             merge_method_arguments(declared, selected, formals)
                         })
                         .collect::<Vec<_>>();
-                    (merged.as_slice() != arguments)
-                        .then(|| Ty::obj_args_name(name, &merged))
-                        .unwrap_or(declared)
+                    if merged.as_slice() != arguments {
+                        Ty::obj_args_name(name, &merged)
+                    } else {
+                        declared
+                    }
                 }
                 (TyKind::Fun(function), TyKind::Fun(selected_function))
                     if function.params.len() == selected_function.params.len()
@@ -1598,17 +1611,17 @@ impl FunctionInfo {
                         })
                         .collect::<Vec<_>>();
                     let ret = merge_method_arguments(function.ret, selected_function.ret, formals);
-                    (params.as_slice() != function.params || ret != function.ret)
-                        .then(|| {
-                            Ty::fun_with_shape(
-                                params,
-                                ret,
-                                function.context_count,
-                                function.has_receiver,
-                                function.suspend,
-                            )
-                        })
-                        .unwrap_or(declared)
+                    if params.as_slice() != function.params || ret != function.ret {
+                        Ty::fun_with_shape(
+                            params,
+                            ret,
+                            function.context_count,
+                            function.has_receiver,
+                            function.suspend,
+                        )
+                    } else {
+                        declared
+                    }
                 }
                 (TyKind::Nullable(inner), TyKind::Nullable(selected_inner)) => {
                     Ty::nullable(merge_method_arguments(inner, selected_inner, formals))
@@ -1902,6 +1915,10 @@ pub enum PropertyReadStability {
     Stable,
     /// An open default-getter `val`, stable only through a statically final receiver classifier.
     StableOnFinalReceiver,
+    /// A final default-getter `val` that is a component of a value class declared in another
+    /// module. kotlinc smart-casts it only under `AllowSmartCastsOnValueClassUnderlyingProperties`;
+    /// any other property of another module is unstable.
+    ValueClassComponentOfOtherModule,
 }
 
 impl PropertyReadStability {
@@ -1920,9 +1937,15 @@ impl PropertyReadStability {
         }
     }
 
-    pub(crate) fn permits(self, receiver_is_final: bool) -> bool {
+    pub(crate) fn permits(
+        self,
+        receiver_is_final: bool,
+        smart_cast_value_class_components: bool,
+    ) -> bool {
         matches!(self, Self::Stable)
             || (receiver_is_final && matches!(self, Self::StableOnFinalReceiver))
+            || (smart_cast_value_class_components
+                && matches!(self, Self::ValueClassComponentOfOtherModule))
     }
 }
 

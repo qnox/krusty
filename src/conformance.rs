@@ -15,7 +15,8 @@ pub use wasm_options::WasmCompilerOptions;
 pub use box_jdk::{box_jdk_kind, BoxJdk, BoxJdkKind, BoxJdkRoots};
 pub use codegen_modes::{unsupported_codegen_mode_directive, UnitCodegenModes};
 pub use compiler_arguments::{
-    case_kotlinc_arguments, reference_only_kotlinc_arguments, unit_compiler_configuration,
+    case_kotlinc_arguments, platform_compiler_configuration, reference_only_kotlinc_arguments,
+    reference_only_kotlinc_arguments_for_target, unit_compiler_configuration,
     unit_kotlinc_arguments, UnitCompilerConfiguration,
 };
 pub use reference_jvm::{
@@ -229,6 +230,7 @@ pub fn prepare_test_source(src: &str, target: TestTarget) -> String {
 /// - `// DONT_TARGET_EXACT_BACKEND:` the test doesn't target that backend → exclude.
 /// - `// IGNORE_BACKEND_K1:` mutes it under the OLD K1 frontend ONLY → krusty is NOT K1, so this must
 ///   NOT exclude (excluding it under-counts: the test is valid for krusty's K2 semantics).
+///
 /// Whether a box test's SOURCE targets a backend krusty's front end can even read. Unlike the
 /// `IGNORE_BACKEND` family — which mutes a test because of a BACKEND defect and therefore says
 /// nothing about the front end — `// TARGET_BACKEND: JS_IR` / `NATIVE` marks a test whose source

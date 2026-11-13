@@ -92,6 +92,39 @@ pub(super) fn boxed_scalar_slot(ir: &IrFile, declaration: ExprId, semantic: Ty) 
     .then_some(primitive)
 }
 
+/// Whether `initializer` is the parser's synthetic default of a declaration written without one.
+/// Only that default is replaced. A captured deferred local's holder (`RefNew`) is real storage:
+/// substituting `null` makes the later `element` write throw.
+fn is_deferred_zero(ir: &IrFile, declaration: ExprId, initializer: ExprId) -> bool {
+    ir.deferred_local_types.contains_key(&declaration)
+        && matches!(ir.expr(initializer), IrExpr::Const(_))
+}
+
+/// Whether `root` constructs an anonymous object regenerated into this caller. Its captured
+/// locals are emitted while the initializer runs, above the variable that receives the object.
+pub(super) fn initializer_constructs_regenerated_anonymous(ir: &IrFile, root: ExprId) -> bool {
+    let mut pending = vec![root];
+    let mut seen = krusty::fx_hash::HashSet::default();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::New { internal, .. } = ir.expr(expression) {
+            let regenerated = ir.class_id_by_name(*internal).is_some_and(|class| {
+                let class = &ir.classes[class as usize];
+                class.is_anonymous_object && !class.is_source_declared
+            });
+            if regenerated {
+                return true;
+            }
+        }
+        if !matches!(ir.expr(expression), IrExpr::Lambda { .. }) {
+            krusty::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        }
+    }
+    false
+}
+
 fn emit_deferred_zero(
     ir: &IrFile,
     declaration: ExprId,
@@ -100,11 +133,7 @@ fn emit_deferred_zero(
     code: &mut CodeBuilder,
     classes: &mut ClassWriter,
 ) -> bool {
-    // Only the parser's synthetic default is replaced. A captured deferred local's holder
-    // (`RefNew`) is real storage: substituting `null` makes the later `element` write throw.
-    if !ir.deferred_local_types.contains_key(&declaration)
-        || !matches!(ir.expr(initializer), IrExpr::Const(_))
-    {
+    if !is_deferred_zero(ir, declaration, initializer) {
         return false;
     }
     push_zero(slot, code, classes);
@@ -156,9 +185,10 @@ impl Emitter<'_> {
             })
             .map(|(slot, _)| slot);
         // Reserve source declarations and argument-order holders before evaluating the initializer.
-        // An expanded callable's formal binding instead starts after its operand is evaluated.
-        // A pending argument-order holder has no semantic binding until its store, so initialization
-        // still sees the previous value map.
+        // kotlinc's frame does the same, so an initializer's temporary occupies the next slot
+        // rather than the variable's. An expanded callable's formal binding instead starts after
+        // its operand is evaluated. A pending argument-order holder has no semantic binding until
+        // its store, so initialization still sees the previous value map.
         let holds_operand = self.ir.call_operand_bindings.contains(&declaration);
         let holds_evaluation = self.ir.argument_evaluation_bindings.contains(&declaration);
         // The receiver temporary of a folded safe-call chain (`a?.b?.c`) is also delayed: the chain
@@ -330,6 +360,12 @@ impl Emitter<'_> {
         slot_ty: Ty,
         code: &mut CodeBuilder,
     ) {
+        // A declaration without a source initializer holds the parser's zero placeholder. kotlinc's
+        // `visitVariable` marks such a declaration before it pushes the default value.
+        let default_value = is_deferred_zero(self.ir, declaration, initializer);
+        if default_value {
+            self.mark_declared_initializer_line(declaration, initializer, code);
+        }
         let source =
             if emit_deferred_zero(self.ir, declaration, initializer, slot_ty, code, self.cw) {
                 slot_ty
@@ -342,8 +378,6 @@ impl Emitter<'_> {
                     let declared_try = matches!(self.ir.expr(initializer), IrExpr::Try { .. })
                         .then_some(initializer);
                     let outer_try = std::mem::replace(&mut self.declared_try, declared_try);
-                    // `visitVariable` marks the declaration once its value is on the stack.
-                    code.mark_value_boundary(initializer);
                     let source = self.emit_consumed_operand(initializer, code);
                     self.declared_try = outer_try;
                     self.leave_declared_initializer(previous);
@@ -364,52 +398,43 @@ impl Emitter<'_> {
                 }
             };
         let semantic = self.ir.logical_type(initializer).unwrap_or(source);
-        // An inlined body forgets the caller's line. kotlinc's `visitVariable` marks the
-        // declaration before it narrows the erased result, so the `checkcast` — not the store
-        // after it — starts that line (`val value = fetch(slot)`). An unsigned
-        // bitwise result still forgets after its carrier conversion, and the store is the mark
-        // that follows.
-        // A same-module inline call's operand is stored into its parameter slot as kotlinc's
-        // `genValueAndPut` does, with no line of the declaration's.
-        let marks_line = self.copied_operand_binding != Some(declaration);
-        let restore_inlined_line = marks_line
-            && code.line_forgotten()
-            && !self.completes_unsigned_bitwise_value(initializer);
-        if restore_inlined_line {
-            self.mark_declared_initializer_line(declaration, initializer, code);
+        // kotlinc's `visitVariable`: once the value is on the stack it marks the initializer's
+        // start, narrows the value to the slot (`checkcast` of an erased result), and marks the
+        // declaration before the store. A same-module inline call's operand is stored into its
+        // parameter slot as kotlinc's `genValueAndPut` does, with no line of the declaration's.
+        let marks_line = self.copied_operand_binding != Some(declaration) && !default_value;
+        if marks_line {
+            self.mark_expression_start(initializer, code);
         }
         self.adapt_physical_operand(source, semantic, Some(semantic_ty), slot_ty, code);
-        if self.completes_unsigned_bitwise_value(initializer) {
-            code.forget_line();
-        }
-        if marks_line && !restore_inlined_line {
-            self.mark_declared_initializer_line(declaration, initializer, code);
+        if marks_line {
+            self.mark_declaration_line(declaration, code);
         }
     }
 
-    /// The declaration's line, after the initializer's own start when that start is a different
-    /// expression. A declaration inside an external inline body maps through the class source map.
+    /// The initializer's start and the declaration's own line, as kotlinc's `visitVariable` marks
+    /// a declaration without an initializer before its default value.
     fn mark_declared_initializer_line(
         &mut self,
         declaration: ExprId,
         initializer: ExprId,
         code: &mut CodeBuilder,
     ) {
-        self.mark_initializer_end(initializer, code);
+        self.mark_expression_start(initializer, code);
+        self.mark_declaration_line(declaration, code);
+    }
+
+    /// The declaration's own line, kotlinc's `declaration.markLineNumber(startOffset = true)`: the
+    /// line of its source position, which for a temporary is that of the value it was built for.
+    /// A declaration inside an external inline body maps through the class source map.
+    fn mark_declaration_line(&mut self, declaration: ExprId, code: &mut CodeBuilder) {
         match self.ir.external_frame_lines.get(&declaration).cloned() {
             Some(frame) => {
                 let line = self.map_external_frame_line(&frame);
                 code.mark_line(line);
             }
             None => {
-                // An elvis's temporary marks the line the elvis starts on where it stores the left
-                // value, after a multi-line left side has marked its own.
-                if let Some(&line) = self
-                    .ir
-                    .expr_lines
-                    .get(&declaration)
-                    .or_else(|| self.ir.elvis_temporaries.get(&declaration))
-                {
+                if let Some(line) = self.ir.source_line(declaration) {
                     self.mark_expression_line(declaration, line, code);
                 }
             }

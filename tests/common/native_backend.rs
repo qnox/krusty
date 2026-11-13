@@ -9,20 +9,6 @@
 
 use super::jdk_modules;
 
-const NATIVE_SYS_HEADER: &str = include_str!("../../crates/krusty-native/runtime/krusty_sys.h");
-const NATIVE_RUNTIME_HEADER: &str = include_str!("../../crates/krusty-native/runtime/krusty_rt.h");
-
-/// The runtime's syscall surface, for tests that pin the native concurrency contract.
-pub fn native_sys_header() -> &'static str {
-    NATIVE_SYS_HEADER
-}
-
-/// Materialize the two public runtime headers beside a C integration-test driver.
-pub fn write_native_runtime_headers(directory: &std::path::Path) -> std::io::Result<()> {
-    std::fs::write(directory.join("krusty_sys.h"), NATIVE_SYS_HEADER)?;
-    std::fs::write(directory.join("krusty_rt.h"), NATIVE_RUNTIME_HEADER)
-}
-
 /// The prefix every native decline carries, so a decline can be told from a wrong answer.
 const NATIVE_DECLINE: &str = "krusty: the native backend does not support ";
 
@@ -224,17 +210,7 @@ pub fn native_analysis(
     analyze_natively(sources, &[], false, diags)
 }
 
-/// [`native_analysis`] of a build applying every compiler plugin krusty ships, with their
-/// `libraries` (the plugins' runtimes) on the classpath after the stdlib and `kotlin-test`.
-pub fn native_analysis_with_plugins(
-    sources: &[(&str, &str)],
-    libraries: &[std::path::PathBuf],
-    diags: &mut krusty::diag::DiagSink,
-) -> Option<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>)> {
-    analyze_natively(sources, libraries, true, diags)
-}
-
-fn analyze_natively(
+pub(crate) fn analyze_natively(
     sources: &[(&str, &str)],
     libraries: &[std::path::PathBuf],
     plugins: bool,

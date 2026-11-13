@@ -5,11 +5,15 @@
 //! loop's file-unique identity; the label lowering gives a loop is built from that identity and
 //! the unit function, so it is unique in the unit and names nothing else.
 
+use super::super::decline::KlibBodyDeclineReason;
 use super::{mismatch, unsupported, BodyLowering, Lowered};
-use crate::ir::{ExprId, IrExpr};
+use crate::ir::{
+    Callee, ExprId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrIntrinsic, IrProgressionSource,
+};
 use crate::metadata::klib_ir::tree::{
     KlibIrArguments, KlibIrExprKind, KlibIrLoop, KlibIrStatement, KlibIrVariableId,
 };
+use crate::metadata::klib_ir::KlibIrSignature;
 use crate::types::Ty;
 
 impl BodyLowering<'_> {
@@ -55,6 +59,14 @@ impl BodyLowering<'_> {
         if ty != Ty::Unit {
             return Err(mismatch("a `for` loop is not typed `Unit`"));
         }
+        if let Some(array_loop) = super::super::for_loops::array_for_loop(self.arena, statements) {
+            return self.array_loop(array_loop);
+        }
+        if let Some(range_loop) = super::super::for_loops::range_for_loop(self.arena, statements) {
+            if let Some(lowered) = self.range_loop(range_loop)? {
+                return Ok(lowered);
+            }
+        }
         let [KlibIrStatement::Variable(iterator), KlibIrStatement::Expression(inner)] = statements
         else {
             return unsupported("a `for` loop of another shape than an iterator and its loop");
@@ -94,6 +106,241 @@ impl BodyLowering<'_> {
         Ok(self.ir.add_expr(IrExpr::Block {
             stmts: vec![iterator, lowered],
             value: None,
+        }))
+    }
+
+    /// A `for` loop over an array, by index as kotlinc's `ForLoopsLowering` and checked
+    /// FIR lowering loop over one: the array is evaluated once, its size is read once, and each
+    /// iteration binds the element at the index before the source body.
+    fn array_loop(
+        &mut self,
+        array_loop: super::super::for_loops::ArrayForLoop<'_>,
+    ) -> Lowered<ExprId> {
+        let super::super::for_loops::ArrayForLoop {
+            array,
+            inner: serialized,
+            body: statements,
+            binding,
+            ..
+        } = array_loop;
+        let destructured = self.arena.variable(binding).base.origin == "IR_TEMPORARY_VARIABLE";
+        if self.loops.iter().any(|(id, _)| *id == serialized.id) {
+            return Err(mismatch("a loop repeats an enclosing loop's identity"));
+        }
+        let array_value = self.expression(array)?;
+        let array_ty = self.lowered_type(array_value);
+        let element_ty = array_ty
+            .non_null()
+            .array_read_elem()
+            .ok_or_else(|| mismatch("an iterated array has no element type"))?;
+        let array_slot = self.locals.anonymous_slot();
+        let array_declaration = self.ir.add_expr(IrExpr::Variable {
+            index: array_slot,
+            ty: array_ty,
+            init: Some(array_value),
+            named: false,
+        });
+        let index_slot = self.locals.anonymous_slot();
+        let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+        let index_declaration = self.ir.add_expr(IrExpr::Variable {
+            index: index_slot,
+            ty: Ty::Int,
+            init: Some(zero),
+            named: false,
+        });
+        let array_read = self.ir.add_expr(IrExpr::GetValue(array_slot));
+        let size = self.ir.add_expr(IrExpr::Call {
+            callee: Box::new(Callee::Intrinsic {
+                operation: IrIntrinsic::ArraySize,
+                ret: Ty::Int,
+            }),
+            dispatch_receiver: Some(array_read),
+            args: Vec::new(),
+        });
+        let size = self.typed(size, Ty::Int);
+        let size_slot = self.locals.anonymous_slot();
+        let size_declaration = self.ir.add_expr(IrExpr::Variable {
+            index: size_slot,
+            ty: Ty::Int,
+            init: Some(size),
+            named: false,
+        });
+        let index_read = self.ir.add_expr(IrExpr::GetValue(index_slot));
+        let size_read = self.ir.add_expr(IrExpr::GetValue(size_slot));
+        let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: IrBinOp::Lt,
+            lhs: index_read,
+            rhs: size_read,
+        });
+        let condition = self.typed(condition, Ty::Boolean);
+        let label = format!("$klib_loop_{}_{}", self.function.function, serialized.id);
+        self.loops.push((serialized.id, label.clone()));
+        let body = (|| {
+            let array_read = self.ir.add_expr(IrExpr::GetValue(array_slot));
+            let index_read = self.ir.add_expr(IrExpr::GetValue(index_slot));
+            let element = self.ir.add_expr(IrExpr::Call {
+                callee: Box::new(Callee::Intrinsic {
+                    operation: IrIntrinsic::ArrayGet,
+                    ret: element_ty,
+                }),
+                dispatch_receiver: Some(array_read),
+                args: vec![index_read],
+            });
+            let element = self.typed(element, element_ty);
+            let element_binding = self.element_binding(binding, element, destructured)?;
+            self.block_with_prefix(vec![element_binding], &statements[1..])
+        })();
+        self.loops.pop();
+        let body = body?;
+        let index_read = self.ir.add_expr(IrExpr::GetValue(index_slot));
+        let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+        let next_index = self
+            .ir
+            .add_arithmetic(IrBinOp::Add, index_read, one, Ty::Int);
+        let update = self.ir.add_expr(IrExpr::SetValue {
+            var: index_slot,
+            value: next_index,
+        });
+        let lowered = self.ir.add_expr(IrExpr::While {
+            cond: condition,
+            body,
+            update: Some(update),
+            post_test: false,
+            label: Some(label),
+        });
+        Ok(self.ir.add_expr(IrExpr::Block {
+            stmts: vec![
+                array_declaration,
+                index_declaration,
+                size_declaration,
+                lowered,
+            ],
+            value: None,
+        }))
+    }
+
+    /// A `for` loop over a range literal, counted as kotlinc's `ForLoopsLowering` and checked FIR
+    /// lowering count one: the bounds are evaluated once, before the loop, and the loop variable
+    /// takes each value from the start towards the end. `None` keeps the iterator protocol, when
+    /// the linker keeps the call building the range.
+    fn range_loop(
+        &mut self,
+        range_loop: super::super::for_loops::RangeForLoop<'_>,
+    ) -> Lowered<Option<ExprId>> {
+        let super::super::for_loops::RangeForLoop {
+            range,
+            start,
+            end,
+            inner: serialized,
+            body: statements,
+            binding,
+        } = range_loop;
+        let KlibIrSignature::Public(callee) = &range.symbol.signature else {
+            return Err(mismatch(
+                "a range loop's range call names a non-public declaration",
+            ));
+        };
+        let Some(operation) = self.linker.range_literal(callee)? else {
+            return Ok(None);
+        };
+        let variable = self.arena.variable(binding);
+        if variable.base.origin != "FOR_LOOP_VARIABLE" {
+            return unsupported("a destructured `for` loop over a range literal");
+        }
+        let bound_ty = |lowering: &Self, bound| {
+            lowering
+                .arena
+                .expr(bound)
+                .ty
+                .ok_or_else(|| mismatch("a range literal bound has no type"))
+                .and_then(|ty| lowering.semantic(ty))
+        };
+        let start_ty = bound_ty(self, start)?;
+        let end_ty = bound_ty(self, end)?;
+        // Mixed bounds widen, and an unsigned counter compares through a provider-selected
+        // operation, which this form does not record.
+        let counter = match Ty::range_counter_type_for(start_ty, end_ty) {
+            Some(counter @ (Ty::Int | Ty::Long | Ty::Char))
+                if start_ty == counter && end_ty == counter =>
+            {
+                counter
+            }
+            _ => return unsupported("a range literal loop over mixed or unsigned bounds"),
+        };
+        if self.semantic(variable.ty)? != counter {
+            return Err(mismatch(
+                "a range loop's variable is not typed as the range's element",
+            ));
+        }
+        if self.loops.iter().any(|(id, _)| *id == serialized.id) {
+            return Err(mismatch("a loop repeats an enclosing loop's identity"));
+        }
+        let start = self.operand(start, counter)?;
+        let end = self.operand(end, counter)?;
+        let symbol = variable.base.symbol.clone();
+        let name = variable.name.clone();
+        let local = self.locals.slot(variable, counter)?;
+        self.locals.declare(&symbol, local)?;
+        self.locals.record_name(&symbol, &name);
+        let label = format!("$klib_loop_{}_{}", self.function.function, serialized.id);
+        self.loops.push((serialized.id, label.clone()));
+        let body = self.block_with_prefix(Vec::new(), &statements[1..]);
+        self.loops.pop();
+        let body = body?;
+        Ok(Some(self.ir.add_expr(IrExpr::Checked(Box::new(
+            IrCheckedOperation::RangeLoop {
+                variable: local.index,
+                variable_name: Some(name.into()),
+                counter,
+                source: IrProgressionSource::Literal {
+                    operation,
+                    start,
+                    end,
+                },
+                unsigned_compare: None,
+                body,
+                label,
+                with_index: None,
+            },
+        )))))
+    }
+
+    /// The loop variable `binding` (or a destructured loop's element temporary) declared from
+    /// the element an array loop reads, in place of the iterator's `next()` it is serialized with.
+    fn element_binding(
+        &mut self,
+        binding: KlibIrVariableId,
+        element: ExprId,
+        destructured: bool,
+    ) -> Lowered<ExprId> {
+        let variable = self.arena.variable(binding);
+        let ty = self.semantic(variable.ty)?;
+        let element_ty = self.lowered_type(element);
+        let init = if super::is_value_of(element_ty, ty) {
+            element
+        } else {
+            self.upcast(element, element_ty, ty)
+                .ok_or(KlibBodyDeclineReason::ImplicitConversion)?
+        };
+        let symbol = variable.base.symbol.clone();
+        if destructured {
+            let local = self.locals.temporary(&symbol, ty)?;
+            return Ok(self.ir.add_expr(IrExpr::Variable {
+                index: local.index,
+                ty,
+                init: Some(init),
+                named: false,
+            }));
+        }
+        let name = variable.name.clone();
+        let local = self.locals.slot(variable, ty)?;
+        self.locals.declare(&symbol, local)?;
+        self.locals.record_name(&symbol, &name);
+        Ok(self.ir.add_expr(IrExpr::Variable {
+            index: local.index,
+            ty,
+            init: Some(init),
+            named: true,
         }))
     }
 

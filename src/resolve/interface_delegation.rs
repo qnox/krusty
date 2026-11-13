@@ -338,11 +338,7 @@ fn function_call(
                 extension_receiver,
             );
         }
-        let mut declared_parameters = signature
-            .parameters
-            .iter()
-            .map(|parameter| *parameter)
-            .collect::<Vec<_>>();
+        let mut declared_parameters = signature.parameters.to_vec();
         if let Some(extension_receiver) = callable.shape.extension_receiver {
             declared_parameters.insert(
                 callable
@@ -523,7 +519,7 @@ fn property_call(
     if setter {
         parameters.push(property_type);
     }
-    let result = setter.then_some(Ty::Unit).unwrap_or(property_type);
+    let result = if setter { Ty::Unit } else { property_type };
     let callable = if setter {
         property.setter.as_ref()?
     } else {
@@ -841,7 +837,7 @@ fn delegation_members(
             if function.flags.inherited_by_delegation {
                 continue;
             }
-            let call = function_call(source, index, interface, function)?;
+            let mut call = function_call(source, index, interface, function)?;
             let primary = delegated_function_declaration(source, index, interface, function)?;
             let parameter_identities =
                 delegated_forwarder_parameter_identities(&primary.parameter_identities);
@@ -885,12 +881,34 @@ fn delegation_members(
                     overridden.push(obligation);
                 }
             }
+            // The declarations a forwarder overrides agree on each parameter up to flexibility. A
+            // Java `T!` that a Kotlin declaration fixes not-null is enhanced to that rigid `T`, as
+            // kotlinc's signature enhancement does, so the forwarder checks it for null.
+            let mut parameter_enhancements =
+                vec![crate::libraries::TypeEnhancement::NONE; call.parameters.len()];
+            for declaration in &overridden {
+                for ((parameter, enhancement), declared) in call
+                    .parameters
+                    .iter_mut()
+                    .zip(&mut parameter_enhancements)
+                    .zip(declaration.applied_parameters.iter())
+                {
+                    let (enhanced, marks) =
+                        crate::libraries::enhance_from_overridden(parameter.get(), declared.get());
+                    if marks.is_none() {
+                        continue;
+                    }
+                    *parameter = ResolvedTy::new(enhanced).ok()?;
+                    *enhancement = enhancement.union(&marks);
+                }
+            }
             members.push(ResolvedDelegatedMember::Function(
                 ResolvedDelegatedFunction {
                     name: function.callable.name.clone().into_boxed_str(),
                     parameter_identities,
                     type_parameters,
                     overridden: overridden.into_boxed_slice(),
+                    parameter_enhancements: parameter_enhancements.into_boxed_slice(),
                     call,
                 },
             ));

@@ -75,6 +75,9 @@ pub(super) fn local_variable(
             IrGeneratedParameterRole::ReferenceInvokeValue { ordinal } => {
                 Some(format!("p{ordinal}"))
             }
+            IrGeneratedParameterRole::PropertyReferenceGetReceiver { ordinal } => {
+                Some(format!("receiver{ordinal}"))
+            }
             IrGeneratedParameterRole::ReferenceBoundReceiver => None,
             // kotlinc's built-in `FunctionN.invoke` numbers its parameters from one.
             IrGeneratedParameterRole::FunctionInvokeValue { ordinal } => {
@@ -538,6 +541,15 @@ pub(super) fn constructor_local_variables(
         .zip(arguments)
         .zip(super::capture_names::class_captures(ir, class))
         .map(|(((identity, anonymous), argument), capture)| {
+            // A capture lifted from an inlined lambda is stored, and kotlinc leaves it out of the
+            // constructor's local-variable table. The slot still advances for the parameters after it.
+            if argument
+                .capture
+                .as_ref()
+                .is_some_and(|capture| capture.inlined)
+            {
+                return None;
+            }
             capture
                 .map(|capture| capture.parameter)
                 .or(anonymous)

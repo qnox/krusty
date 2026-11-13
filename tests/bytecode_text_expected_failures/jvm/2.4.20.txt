@@ -20,7 +20,6 @@ companion/inlineFunctionObjectCompanionPropertyAccess.kt
 constants/inlineUnsignedIntConstant.kt
 constructors/localPrimaryDefaults.kt
 coroutines/crossinlineSuspendContinuation_1_3.kt
-coroutines/inlineClasses/noInlineClassBoxingInSuspendFunReturn_SameJvmType.kt
 coroutines/nonLocalReturn.kt
 coroutines/stateMachine/kt25893.kt
 coroutines/stateMachine/withTypeParameter.kt
@@ -95,7 +94,6 @@ intrinsicsCompare/intSmartCast.kt
 intrinsicsCompare/longSmartCast.kt
 intrinsicsTrim/trimIndentPositive.kt
 intrinsicsTrim/trimMarginPositive.kt
-invokedynamic/functionRefToJavaInterface.kt
 invokedynamic/streamApi.kt
 isArrayOf.kt
 javaFields.kt
