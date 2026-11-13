@@ -26,11 +26,11 @@ impl KlibIrArena {
         self.lexical_values_from(vec![initializer], HashSet::default())
     }
 
-    fn lexical_values_from<'a>(
-        &'a self,
+    fn lexical_values_from(
+        &self,
         mut pending: Vec<KlibIrExprId>,
         mut functions: HashSet<KlibIrSymbol>,
-    ) -> Vec<&'a KlibIrSymbol> {
+    ) -> Vec<&KlibIrSymbol> {
         let mut expressions = HashSet::default();
         let mut values = Vec::new();
         while let Some(id) = pending.pop() {
