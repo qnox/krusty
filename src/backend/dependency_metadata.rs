@@ -212,13 +212,9 @@ pub struct DependencyExportSignatures {
     constructors: Vec<(ExportedConstructor, KlibDependencyCallable)>,
     /// Concrete default property accessors whose checked operations a target exports as bodies.
     property_accessors: Vec<(ExportedPropertyAccessor, KlibDependencyCallable)>,
-    /// Every object declaration of this file another module may read as a value, and, once a
-    /// target realized it, the entry answering its instance (see `super::construction_entries`).
-    singletons: Vec<crate::ir::ClassId>,
-    singleton_entries: Vec<(crate::types::TypeName, FunId)>,
-    /// The entry a target realized answering each constant of every enum of this file (see
-    /// `super::enums`).
-    enum_constant_entries: Vec<(EnumConstant, FunId)>,
+    /// The entry a target realized answering each object instance and enum constant of this
+    /// file (see `super::instance_links`).
+    instance_entries: Vec<(super::instance_links::InstanceEntry, FunId)>,
 }
 
 /// One constant of an enum class, as a read of it names it: the enum and the constant's name.
@@ -347,38 +343,18 @@ impl DependencyExportSignatures {
         &self.constructors
     }
 
-    /// Record an object declaration another module may read as a value.
-    pub(crate) fn record_singleton(&mut self, class: crate::ir::ClassId) {
-        self.singletons.push(class);
-    }
-
-    /// Every object declaration this file publishes, in record order.
-    pub(crate) fn singletons(&self) -> &[crate::ir::ClassId] {
-        &self.singletons
-    }
-
-    /// Record the target-realized entry answering the instance of the object `classifier`.
-    pub(crate) fn record_singleton_entry(
+    /// Record the target-realized entry answering an object's instance or an enum constant.
+    pub(crate) fn record_instance_entry(
         &mut self,
-        classifier: crate::types::TypeName,
+        instance: super::instance_links::InstanceEntry,
         entry: FunId,
     ) {
-        self.singleton_entries.push((classifier, entry));
+        self.instance_entries.push((instance, entry));
     }
 
-    /// Every object instance entry a target realized, by the object's classifier.
-    pub fn singleton_entries(&self) -> &[(crate::types::TypeName, FunId)] {
-        &self.singleton_entries
-    }
-
-    /// Record the target-realized entry answering one constant of a published enum.
-    pub(crate) fn record_enum_constant_entry(&mut self, constant: EnumConstant, entry: FunId) {
-        self.enum_constant_entries.push((constant, entry));
-    }
-
-    /// Every enum constant entry a target realized.
-    pub fn enum_constant_entries(&self) -> &[(EnumConstant, FunId)] {
-        &self.enum_constant_entries
+    /// Every instance entry a target realized for this file.
+    pub fn instance_entries(&self) -> &[(super::instance_links::InstanceEntry, FunId)] {
+        &self.instance_entries
     }
 
     /// Record one declaration at the metadata owner that computed its exact identity.

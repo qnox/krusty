@@ -413,6 +413,8 @@ impl Checker<'_> {
             // `declare_narrowing_shadow` retains the original declared/storage type for writes and
             // checked-FIR smart-cast materialization.
             self.declare_narrowing_shadow(scope, &parameter.name, bound);
+            self.equality_bound_parameters
+                .insert((parameter.ty.span.lo, parameter.ty.span.hi), bound);
         }
     }
 }

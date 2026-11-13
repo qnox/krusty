@@ -223,10 +223,9 @@ pub struct FileInput<'a> {
     /// KLIB identity the dependency provider attaches to `Callee::External`.
     pub dependency_symbols:
         &'a HashMap<krusty::backend::KlibDependencyCallable, super::DependencyExport>,
-    /// The exported instance entry of each preceding source module's object, by its classifier.
-    pub dependency_singletons: &'a HashMap<krusty::types::TypeName, String>,
-    /// The exported entry answering each constant of a preceding file's enum.
-    pub dependency_enum_constants: &'a HashMap<krusty::backend::EnumConstant, String>,
+    /// The exported entry answering each object instance and enum constant another file
+    /// realizes.
+    pub dependency_instances: &'a HashMap<krusty::backend::instance_links::InstanceEntry, String>,
     /// The accessors synthesized for each reference to a dependency property, by site; see
     /// [`crate::dependency_references`].
     pub dependency_properties:
@@ -264,8 +263,7 @@ pub fn lower_file(
         dependency_exports,
         dependency_signatures,
         dependency_symbols,
-        dependency_singletons,
-        dependency_enum_constants,
+        dependency_instances,
         value_classes,
         slot_plan,
         module_facts,
@@ -363,9 +361,8 @@ pub fn lower_file(
         unit_kind,
         dependency_signatures,
         dependency_symbols,
-        dependency_singletons,
         dependency_interface_calls: Vec::new(),
-        dependency_enum_constants,
+        dependency_instances,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
     // receivers have a runtime-walkable representation and which shapes still decline; both are read while
@@ -409,7 +406,6 @@ pub fn lower_file(
     }
     lowering.define_property_entry_points(file_init)?;
     lowering.define_constructor_entry_points(file_init)?;
-    lowering.define_singleton_entry_points(file_init)?;
     lowering.define_value_box_entry_points()?;
     lowering.define_extension_entries(file_init)?;
     let defines_entry = selected.is_some();
@@ -592,10 +588,9 @@ struct FileLowering<'a> {
     /// Dependency interface members this file calls, numbered after the module's own interfaces.
     /// The identity bytes are what a dependent implementation records itself under.
     dependency_interface_calls: Vec<(u32, Vec<u8>)>,
-    /// The exported instance entry of each preceding source module's object, by its classifier.
-    dependency_singletons: &'a HashMap<krusty::types::TypeName, String>,
-    /// The exported entry answering each constant of a preceding file's enum.
-    dependency_enum_constants: &'a HashMap<krusty::backend::EnumConstant, String>,
+    /// The exported entry answering each object instance and enum constant another file
+    /// realizes.
+    dependency_instances: &'a HashMap<krusty::backend::instance_links::InstanceEntry, String>,
 }
 
 impl<'a> FileLowering<'a> {

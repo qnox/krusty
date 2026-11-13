@@ -2587,12 +2587,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if super::super::super::intrinsics::is_stateless_runtime_object(classifier) {
             return Ok(Some(self.builder.ins().iconst(types::I64, 0)));
         }
-        if let Some(instance) = self.module_singleton(classifier)? {
-            return Ok(Some(instance));
-        }
-        // Another module's object is read through the entry its module exports.
+        // Another file's object is read through the entry its file exports.
         if self.file.ir.class_id_by_name(classifier).is_none() {
-            if let Some(symbol) = self.file.dependency_singletons.get(&classifier) {
+            let instance = krusty::backend::instance_links::InstanceEntry::Object(classifier);
+            if let Some(symbol) = self.file.dependency_instances.get(&instance) {
                 let id = self.file.import(symbol, &[], Ty::obj_name(classifier))?;
                 let func_ref = self.func_ref(id);
                 let call = self.emit_call(func_ref, &[])?;

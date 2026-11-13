@@ -593,6 +593,13 @@ impl Checker<'_> {
         (bound, unresolved)
     }
 
+    /// kotlinc accepts `kotlin.ExperimentalCollectionLiteralsApi` wherever `+CollectionLiterals` is
+    /// enabled: the feature's own stdlib factories carry that marker.
+    fn accepted_by_enabled_feature(&self, marker: TypeName) -> bool {
+        self.file.collection_literals_enabled
+            && marker == type_name("kotlin/ExperimentalCollectionLiteralsApi")
+    }
+
     fn report_opt_in_requirements(&mut self, span: Span, requirements: &[OptInRequirement]) {
         for requirement in requirements {
             // kotlinc's factories: `OPT_IN_USAGE` warns and `OPT_IN_USAGE_ERROR` rejects.
@@ -602,6 +609,7 @@ impl Checker<'_> {
                 crate::diag::names::OPT_IN_USAGE_ERROR
             };
             if self.lexically_opted_in(requirement.marker)
+                || self.accepted_by_enabled_feature(requirement.marker)
                 || self.command_line_opt_ins().contains(&requirement.marker)
                 || self.suppresses_diagnostic(name.as_str())
             {

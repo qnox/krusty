@@ -469,6 +469,7 @@ fn emit_analyzed_into<B: Backend>(
                 text: source.text(),
                 stems,
                 origins: source_map.origins(),
+                common_ir_coroutines: backend.lowers_coroutines_on_common_ir(),
             },
             diags,
         ) else {

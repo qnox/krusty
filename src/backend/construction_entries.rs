@@ -7,8 +7,8 @@
 //! identity, so another module's construction is an ordinary call to it.
 //!
 //! An object declaration's instance is the same: only its file knows how it is laid out and
-//! initialized, so each object the KLIB publishes gets an entry answering it, which a target
-//! publishes by the object's classifier.
+//! initialized, so every object gets an entry answering it, which other files and modules link
+//! to by the object (see `super::instance_links`).
 
 use super::DependencyExportSignatures;
 use crate::ir::{ExprId, FunId, IrExpr, IrFile, IrFunction};
@@ -24,12 +24,25 @@ pub fn realize(ir: &mut IrFile, exports: &mut DependencyExportSignatures) {
             exports.record_callable(entry, identity);
         }
     }
-    let singletons = exports.singletons().to_vec();
-    for class in singletons {
+    // Every object gets its instance entry, whether its module is a library or the program:
+    // another file of the module, as much as another module, may read it.
+    let objects: Vec<crate::ir::ClassId> = (0..ir.classes.len())
+        .map(|class| crate::ir::ClassId::try_from(class).expect("too many classes"))
+        .filter(|&class| {
+            let class = &ir.classes[class as usize];
+            (class.is_object || class.is_companion)
+                && !class.is_anonymous_object
+                && !class.is_local_class
+        })
+        .collect();
+    for class in objects {
         let classifier = ir.classes[class as usize].fq_name;
         if let Some(entry) = instance(ir, classifier) {
             ir.construction_entries.insert(entry, class);
-            exports.record_singleton_entry(classifier, entry);
+            exports.record_instance_entry(
+                super::instance_links::InstanceEntry::Object(classifier),
+                entry,
+            );
         }
     }
 }

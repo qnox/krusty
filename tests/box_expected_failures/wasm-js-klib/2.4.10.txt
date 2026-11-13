@@ -1511,7 +1511,6 @@ function/eqeq.kt
 function/extension.kt
 function/intrinsic.kt
 function/localFunction.kt
-function/manglingImportedFromObjectWithNI.kt
 function/minus_eq.kt
 function/named.kt
 function/plus_eq.kt
@@ -1537,7 +1536,6 @@ functions/kt1199.kt
 functions/kt1413.kt
 functions/kt2929.kt
 functions/kt395.kt
-functions/kt47449.kt
 functions/kt58825_arrayOverloads.kt
 functions/localFunction.kt
 functions/localFunctions/callInlineLocalInLambda.kt
@@ -2594,8 +2592,6 @@ objects/companionObjectAccess/multipleCompanionsWithAccessors/inheritedProtected
 objects/companionObjectAccess/multipleCompanionsWithAccessors/inheritedProtectedCompanionsReferencedByName.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/lambdaInPropertyInitializer.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/twoInheritedProtectedCompanions.kt
-objects/companionObjectAccess/multipleCompanionsWithAccessors/withCompanionObjectBase.kt
-objects/companionObjectAccess/multipleCompanionsWithAccessors/withMultipleNestedCompanionObjectBases.kt
 objects/companionObjectAccess/primitiveCompanion/byteCompanionObject.kt
 objects/companionObjectAccess/primitiveCompanion/charCompanionObject.kt
 objects/companionObjectAccess/primitiveCompanion/doubleCompanionObject.kt

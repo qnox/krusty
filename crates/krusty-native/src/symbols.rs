@@ -139,18 +139,6 @@ pub(super) fn module_descriptor_symbol(
     symbol
 }
 
-/// Symbol of the getter of an `object` declaration's instance, which the declaring file defines
-/// and every other file of the module calls to reach the object. Named from the exact source
-/// module and the object's qualified name, which every file holds.
-pub(super) fn module_singleton_symbol(
-    module_name: &str,
-    classifier: krusty::types::TypeName,
-) -> String {
-    let mut symbol = format!("kt_modobj_{}_", module_namespace(module_name));
-    mangle_name(&mut symbol, &classifier.render());
-    symbol
-}
-
 /// Letters and digits stand for themselves; every other character, `_` included, is `_<hex>_`.
 fn mangle_name(out: &mut String, text: &str) {
     for character in text.chars() {
