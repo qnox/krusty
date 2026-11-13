@@ -212,7 +212,7 @@ pub(super) fn authenticate_root_header(
             &crate::metadata::id_signature::KlibPublicIdSignature::classifier(
                 crate::types::wk::any(),
             ),
-            crate::libraries::KlibAccessorRole::Getter,
+            Some(crate::libraries::KlibAccessorRole::Getter),
         )
         .map_err(mismatch)?
         .ok_or_else(|| mismatch("a known root constructor is not its class's member"))?;

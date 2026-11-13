@@ -125,6 +125,21 @@ fn bind_import_path(
             }
         }
     }
+    if import.wildcard {
+        if let (ResolvedQualifier::Classifier(owner), Some((segment, span))) =
+            (prefix, import.segments.last())
+        {
+            if source
+                .classifier(owner)
+                .is_some_and(|classifier| classifier.is_object())
+            {
+                return Err((
+                    *span,
+                    format!("cannot import on demand from object '{segment}'."),
+                ));
+            }
+        }
+    }
     let span = match (import.segments.first(), import.segments.last()) {
         (Some((_, first)), Some((_, last))) => Span::new(first.lo, last.hi),
         _ => Span::new(0, 0),
