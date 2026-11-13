@@ -505,6 +505,17 @@ mod tests {
     }
 
     #[test]
+    fn a_published_inline_reader_compiles_with_its_shared_capture() {
+        let source =
+            include_str!("../../../tests/box_regressions/PublishedInlineCaptureBindings.kt");
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(target, source);
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(outputs.len(), 2);
+        }
+    }
+
+    #[test]
     fn shared_mutable_cells_reach_nested_escaping_function_bodies() {
         let source = include_str!(
             "../../../tests/box_regressions/regressions/sharedMutableCaptureTransport.kt"

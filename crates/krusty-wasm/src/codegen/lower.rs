@@ -31,10 +31,12 @@ mod function_values;
 mod generated_members;
 mod intrinsic_operations;
 pub(super) mod library_members;
+mod local_delegates;
 mod objects;
 mod scalar_instructions;
 mod scalar_value_classes;
 mod shared_cells;
+pub(super) use shared_cells::cell_reference;
 mod string_conversion;
 mod type_of;
 
@@ -250,6 +252,7 @@ pub(super) fn lower_file(
     };
     let planned_tables = planned_tables(ir, plan, module_tables, module, &runtime.objects);
     let reach = std::cell::RefCell::new(FileReach::default());
+    let delegates = local_delegates::prepare(ir, module, runtime);
     let context = FileContext {
         array_range_checks,
         classifiers,
@@ -267,7 +270,9 @@ pub(super) fn lower_file(
         inert_singleton_bindings: &inert_singleton_bindings,
         properties: property_registry,
         reach: &reach,
+        delegates: &delegates,
     };
+    local_delegates::define(&context, module, runtime)?;
     for (id, function) in ir.functions.iter().enumerate() {
         let (Some(index), Some(signature)) = (indices[id], signatures[id]) else {
             if !ir.inline_only_fns.contains(&(id as FunId)) {
@@ -360,7 +365,7 @@ pub(super) fn lower_file(
             module,
             runtime,
         )?;
-        for (name, record) in classes.records(ir, &indices, &signatures) {
+        for (name, record) in classes.records(module, ir, &indices, &signatures) {
             laid_out_classes.insert(name, record);
         }
     } else if !member_property_definitions.is_empty() {
@@ -475,6 +480,8 @@ struct FileContext<'a> {
     properties: &'a PropertyRegistry,
     /// What the file's bodies record for the module about calls through `kotlin.Any`'s slots.
     reach: &'a std::cell::RefCell<FileReach>,
+    /// Local delegated-property accessors and the one object each property's convention receives.
+    delegates: &'a local_delegates::Prepared,
 }
 
 /// The wasm value a Kotlin type is carried as; `None` for a type with no value (`Unit`,
@@ -619,6 +626,23 @@ fn expression_type(
             let function = ir.classes[*class as usize].methods[*index as usize];
             ir.functions[function as usize].ret
         }
+        // The accessor template is the value of a read and `Unit` for a write. A synthesized
+        // property argument has no checked type of its own; it is the reference the convention
+        // receives, so it is carried as one.
+        IrExpr::LocalDelegateAccess(access) if ir.checked_type(id).is_none() => {
+            let plan = ir
+                .local_delegate_plans
+                .get(access.plan as usize)
+                .ok_or_else(|| {
+                    "a local delegated-property access without its checked plan".to_string()
+                })?;
+            if access.value.is_some() {
+                Ty::Unit
+            } else {
+                plan.getter.result
+            }
+        }
+        IrExpr::LocalPropertyReference(_) if ir.checked_type(id).is_none() => Ty::obj("kotlin/Any"),
         IrExpr::PropertyRead { ty, .. } if ir.checked_type(id).is_none() => *ty,
         // A `when` without an `else` branch, such as a guard a counted loop's lowering adds, is a
         // statement: no branch's value can be its own.
@@ -713,6 +737,7 @@ struct Body<'a> {
     properties: &'a PropertyRegistry,
     /// What this file's bodies record for the module about calls through `kotlin.Any`'s slots.
     reach: &'a std::cell::RefCell<FileReach>,
+    delegates: &'a local_delegates::Prepared,
     code: Code,
     /// Locals beyond the parameters, in index order.
     locals: Vec<ValType>,
@@ -780,6 +805,7 @@ impl<'a> Body<'a> {
             inert_singleton_bindings: context.inert_singleton_bindings,
             properties: context.properties,
             reach: context.reach,
+            delegates: context.delegates,
             code: Code::default(),
             locals: Vec::new(),
             next_local: parameters.len() as u32,
@@ -1658,6 +1684,10 @@ impl<'a> Body<'a> {
             IrExpr::KClassLiteral {
                 classifier, value, ..
             } => self.class_literal(id, classifier, value)?,
+            IrExpr::LocalDelegateAccess(access) => self.local_delegate_access(access)?,
+            IrExpr::LocalPropertyReference(reference) => {
+                self.local_property_reference(&reference)?
+            }
             IrExpr::Call { callee, .. } => {
                 return Err(format!("a call to {}", callee_kind(&callee)));
             }

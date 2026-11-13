@@ -105,6 +105,7 @@ impl BodyLowering<'_> {
                     source_name: capture.name.clone().into_boxed_str(),
                     receiver: None,
                     crossinline_parameter: capture.crossinline,
+                    inlined: false,
                 }),
                 provenance: IrCtorParameterProvenance::Capture,
                 capture_identity: None,
