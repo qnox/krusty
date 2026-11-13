@@ -73,7 +73,11 @@ impl StringBuilders {
             module.reference_function(function);
             init.ref_func(function);
         }
-        init.global_get(itable).struct_new(objects.any_table);
+        init.global_get(itable);
+        // No type information describes the runtime's builder yet: the field is null, as for any
+        // runtime object no classifier record covers.
+        objects.push_type_info(&mut init, None);
+        init.struct_new(objects.any_table);
         let table = module.constant_global(ValType::reference(objects.any_table), init);
         let builders = Self {
             table,
