@@ -240,6 +240,8 @@ pub(super) fn closure_type_arity(arena: &KlibIrArena, id: KlibIrTypeId) -> Optio
     }
     let (name, _) = class_head(classifier, annotations, &|_| Ok(None)).ok()?;
     let function = function_shape(name, arguments.len()).ok()??;
+    // A suspend lambda's implementation also takes the continuation, which closure planning does
+    // not model yet.
     (!function.is_reflective() && !function.is_suspend()).then(|| function.arity())
 }
 
