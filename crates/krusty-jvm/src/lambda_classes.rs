@@ -597,7 +597,7 @@ pub(super) fn realize(
             IrExpr::Lambda { impl_fn, sam, .. }
                 if sam
                     .as_deref()
-                    .is_none_or(|target| factory_adaptation::sam_candidate(target, modes)) =>
+                    .is_none_or(factory_adaptation::sam_candidate) =>
             {
                 Some(*impl_fn)
             }
@@ -653,7 +653,8 @@ pub(super) fn realize(
                 || runtime_reified
                 || inline_anonymous
                 || !ir.lambda_origins.contains_key(&fid)
-                || !factory_adaptation::sam_conflict(ir, classifiers, &target)
+                || (modes.sam_conversions == crate::ir_emit::LambdaMode::Indy
+                    && !factory_adaptation::sam_conflict(ir, classifiers, &target))
             {
                 continue;
             }
@@ -1150,7 +1151,9 @@ fn realize_class(
         .as_deref()
         .map_or_else(|| "invoke".to_string(), |target| target.method.clone());
     become_invoke(ir, fid, class, captures.len(), result, method);
-    if (inline_default.is_some() || kotlin_lambda) && site.function_type.mentions_ty_param() {
+    if (inline_default.is_some() || kotlin_lambda || sam.is_some())
+        && site.function_type.mentions_ty_param()
+    {
         // The class captures the enclosing declaration's type parameters; its specialized
         // `invoke` does not redeclare them, but its method Signature still names those exact
         // identities.
