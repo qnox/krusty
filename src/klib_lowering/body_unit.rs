@@ -1765,7 +1765,14 @@ impl<'s> Linker<'_, 's> {
         candidate: KlibBodyCallable<'s>,
     ) -> Result<bool, KlibBodyDeclineReason> {
         if is_receiver_member(candidate, self.sources.bodies, self.sources.callees) {
-            return Ok(true);
+            // A builtin value's member is emitted with the unit, except one of `kotlin.Any`'s
+            // members: the dependency closure froze that as the target's own, with the call edge
+            // the member hierarchy gives it, and walked no body behind it.
+            return Ok(self
+                .sources
+                .callees
+                .member_edge(&candidate.identity())
+                .is_none());
         }
         let Some(class) = candidate
             .class_contract()

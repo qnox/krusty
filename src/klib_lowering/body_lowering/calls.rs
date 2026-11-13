@@ -597,6 +597,9 @@ impl BodyLowering<'_> {
         // value is that result at the call's type arguments.
         Ok(match declared_ret {
             Some(declared) if declared != operands.ret => {
+                // The inner call stays at its declaration's result; the coercion records the
+                // selected one, as checked FIR lowering does for a generic source call.
+                self.ir.call_declared_ret.insert(call, declared);
                 let coerced = self.coercion(call, operands.ret);
                 self.ir.set_logical_type(coerced, operands.ret);
                 coerced
