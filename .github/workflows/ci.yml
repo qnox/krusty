@@ -13,7 +13,6 @@ jobs:
     timeout-minutes: 360
     env:
       KOTLIN_VERSION: 2.5.0-RC
-      EVIDENCE: ${{ runner.temp }}/kotlin-2.5.0-RC-validation
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -32,6 +31,8 @@ jobs:
         id: prepare
         run: |
           set -euo pipefail
+          EVIDENCE="$RUNNER_TEMP/kotlin-2.5.0-RC-validation"
+          echo "EVIDENCE=$EVIDENCE" >> "$GITHUB_ENV"
           mkdir -p "$EVIDENCE"
           git rev-parse HEAD^ > "$EVIDENCE/source-base.txt"
           test "$(cat "$EVIDENCE/source-base.txt")" = 508017992e2b1bd4812248d834ff0d7e5aca0563
