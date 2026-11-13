@@ -129,6 +129,13 @@ pub trait Backend {
         false
     }
 
+    /// Whether this backend lowers suspend functions on common IR with the shared coroutine
+    /// passes, and so calls the stdlib declarations the handoff selects for them
+    /// ([`crate::ir::IrCoroutineRuntime`]). A backend with its own coroutine pass leaves this off.
+    fn lowers_coroutines_on_common_ir(&self) -> bool {
+        false
+    }
+
     /// Whether this backend numbers the dispatch slots of the module's classes itself, so a file
     /// needs the module's class shapes ([`BackendModuleFacts::with_classes`]) to dispatch through
     /// a class another file declares.
