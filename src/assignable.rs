@@ -77,7 +77,47 @@ fn variable_bound_assignable(
     let upper = cx
         .lookup(name)
         .unwrap_or_else(|| declared_upper_bound(oracle, name, bound, |bound| bound));
-    upper != sub && assignable_inner(cx, oracle, upper, sup)
+    if upper == sub {
+        return false;
+    }
+    // A cyclic bound (`B : B`) leads back to the variable being expanded; that expansion adds
+    // nothing, so the walk stops there instead of recursing forever.
+    let Some(_expansion) = BoundExpansion::enter(name, upper) else {
+        return false;
+    };
+    assignable_inner(cx, oracle, upper, sup)
+}
+
+thread_local! {
+    /// Type variables, with the bound each is being expanded through, innermost last.
+    static EXPANDING_BOUNDS: std::cell::RefCell<Vec<(String, Ty)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Marks a type variable's bound as being expanded until dropped.
+struct BoundExpansion;
+
+impl BoundExpansion {
+    fn enter(name: &str, upper: Ty) -> Option<Self> {
+        EXPANDING_BOUNDS.with(|expanding| {
+            let mut expanding = expanding.borrow_mut();
+            if expanding
+                .iter()
+                .any(|(open, bound)| open == name && *bound == upper)
+            {
+                return None;
+            }
+            expanding.push((name.to_string(), upper));
+            Some(Self)
+        })
+    }
+}
+
+impl Drop for BoundExpansion {
+    fn drop(&mut self) {
+        EXPANDING_BOUNDS.with(|expanding| {
+            expanding.borrow_mut().pop();
+        });
+    }
 }
 
 /// The intersection of type variable `name`'s bounds: `bound`, which `Ty::TyParam` carries, and

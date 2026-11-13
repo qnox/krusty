@@ -647,6 +647,7 @@ compiler/testData/diagnostics/tests/inference/capturedTypes/overApproximationFor
 compiler/testData/diagnostics/tests/inference/coerceFunctionLiteralToSuspend.kt
 compiler/testData/diagnostics/tests/inference/coercionToUnit/coercionToUnitWithNothingType.kt
 compiler/testData/diagnostics/tests/inference/coercionToUnit/coercionWithoutExpectedType.kt
+compiler/testData/diagnostics/tests/inference/commonSuperTypeOfTypesWithErrorSupertypes.kt
 compiler/testData/diagnostics/tests/inference/commonSystem/kt3372toCollection.kt
 compiler/testData/diagnostics/tests/inference/commonSystem/nestedLambdas.kt
 compiler/testData/diagnostics/tests/inference/commonSystem/theSameFunctionInArgs.kt
