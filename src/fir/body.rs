@@ -637,6 +637,9 @@ pub struct FirAnonymousSuperArgument {
 pub struct FirAnonymousObject {
     pub declaration: DeclarationId,
     pub captures: Box<[FirLocalClassCapture]>,
+    /// `order[position]` is the capture field at that constructor position. The same first-use
+    /// permutation a local class records on its declaration.
+    pub capture_order: Box<[u32]>,
     pub delegate_arguments: Box<[FirInterfaceDelegateArgument]>,
     pub super_arguments: Box<[FirAnonymousSuperArgument]>,
 }
@@ -1463,6 +1466,7 @@ impl FirExprKind {
                         .iter()
                         .map(FirLocalClassCapture::storage_payload_bytes)
                         .sum::<usize>()
+                    + std::mem::size_of_val(object.capture_order.as_ref())
                     + object.delegate_arguments.len()
                         * std::mem::size_of::<FirInterfaceDelegateArgument>()
                     + object.super_arguments.len()

@@ -212,6 +212,43 @@ pub(super) fn build_class_metadata_with_facts(
     })
 }
 
+/// `@Metadata` of an anonymous object regenerated at an inline call. kotlinc keeps the declaration
+/// class's record and appends the origin extension; the copy's own `xi` follows the caller.
+pub(super) fn regenerated_anonymous_metadata(
+    ir: &IrFile,
+    class_id: krusty::ir::ClassId,
+    copy: &krusty::ir::IrClass,
+    opts: &EmitOptions,
+    env: &EmitEnv<'_>,
+) -> Option<KotlinMetadata> {
+    let specialization = ir.specialized_anonymous_classes.get(&class_id)?;
+    let source = ir.classes.get(specialization.source as usize)?;
+    let mut metadata = build_class_metadata(ir, source, opts, env)?;
+    let origin = source.fq_name();
+    let recorded = krusty::jvm::metadata::anonymous_origin::record_origin_name(
+        metadata.k,
+        &krusty::jvm::metadata::anonymous_origin::MetadataStrings {
+            d1: metadata.d1,
+            d2: metadata.d2,
+        },
+        &origin,
+    );
+    let recorded = match recorded {
+        Ok(Some(recorded)) => recorded,
+        Ok(None) => return None,
+        Err(error) => {
+            env.run.set_emit_error(format!(
+                "cannot record an anonymous object's origin: {error:?}"
+            ));
+            return None;
+        }
+    };
+    metadata.d1 = recorded.d1;
+    metadata.d2 = recorded.d2;
+    metadata.xi = super::metadata_policy::class_xi(ir, copy);
+    Some(metadata)
+}
+
 /// Whether a member of `c` would describe itself in terms of a value class a downstream
 /// compilation cannot READ as one (`value_class_is_readable`): it would see an ordinary class, cast
 /// the carrier to the box and bind an instance accessor where kotlinc emits the static `-impl` — a

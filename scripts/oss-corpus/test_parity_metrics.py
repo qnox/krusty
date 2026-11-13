@@ -36,7 +36,8 @@ class ParityMetrics(unittest.TestCase):
         summary = SCAN.summarize([report()], top=5)
         self.assertIsNone(summary["parse_ms"])
         self.assertIsNone(summary["type_info_ms"])
-        self.assertIsNone(summary["navigation_ms"])
+        self.assertIsNone(summary["definition_query_us"])
+        self.assertIsNone(summary["references_query_us"])
         self.assertIsNone(summary["open_complete_modules"])
         self.assertIsNone(summary["missing_classpath_entries"])
         text = SCAN.render_text(summary)
@@ -55,6 +56,29 @@ class ParityMetrics(unittest.TestCase):
         self.assertEqual(summary["open_complete_modules"], 1)
         self.assertEqual(summary["missing_classpath_entries"], 3)
         self.assertEqual(summary["total_errors"], 2)
+
+    def test_navigation_queries_are_not_copied_from_the_analysis_time(self):
+        summary = SCAN.summarize(
+            [
+                report(elapsed_ms=4000, definition_query_us=12, references_query_us=40),
+                report(
+                    module="lib",
+                    elapsed_ms=9,
+                    definition_query_us=None,
+                    references_query_us=None,
+                ),
+            ],
+            top=5,
+        )
+        self.assertIsNone(summary["parse_ms"])
+        self.assertIsNone(summary["type_info_ms"])
+        self.assertEqual(summary["definition_query_us"], 12)
+        self.assertEqual(summary["references_query_us"], 40)
+        text = SCAN.render_text(summary)
+        navigation = next(line for line in text.splitlines() if line.startswith("navigation"))
+        self.assertIn("parse        not measured", text)
+        self.assertIn("definition 12 µs, references 40 µs", navigation)
+        self.assertNotIn("4000", navigation)
 
 
 if __name__ == "__main__":
