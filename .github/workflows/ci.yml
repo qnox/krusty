@@ -21,9 +21,26 @@ jobs:
         with:
           distribution: zulu
           java-version: "17"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: just
+      - name: Prepare Native runtime compiler and exact KLIB inputs
+        run: |
+          set -euo pipefail
+          if ! command -v clang >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y clang
+          fi
+          clang_path="$(command -v clang)"
+          "$clang_path" --version
+          version="$(just max-version)"
+          echo "KRUSTY_RUNTIME_CC=$clang_path" >> "$GITHUB_ENV"
+          echo "KRUSTY_LANGUAGE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "KRUSTY_KOTLINC=$(just kotlinc "$version")" >> "$GITHUB_ENV"
+          echo "KRUSTY_KOTLIN_NATIVE=$(just kotlin-native "$version")" >> "$GITHUB_ENV"
       - name: Verify source identity and prepare logs
         id: prepare
         run: |
