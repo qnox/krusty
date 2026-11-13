@@ -56,6 +56,22 @@ pub fn find_build_root(start: &Path) -> Option<(PathBuf, ProviderKind)> {
 /// BSP connection file, which the user set up deliberately and which is the richest, most current
 /// source; then the Gradle and Maven probes; then a JPS model; then nothing.
 pub fn detect(root: &Path, explicit_classpath: &[PathBuf]) -> Box<dyn ProjectProvider> {
+    detect_with(root, explicit_classpath, false)
+}
+
+/// Discovery for the offline `model` and `parity` commands.
+///
+/// A Gradle probe uses the long ceiling. The editor must call [`detect`]: its probe runs on the
+/// analysis thread and keeps the short ceiling.
+pub fn detect_for_scan(root: &Path, explicit_classpath: &[PathBuf]) -> Box<dyn ProjectProvider> {
+    detect_with(root, explicit_classpath, true)
+}
+
+fn detect_with(
+    root: &Path,
+    explicit_classpath: &[PathBuf],
+    scan: bool,
+) -> Box<dyn ProjectProvider> {
     if !explicit_classpath.is_empty() {
         return Box::new(ExplicitProvider::new(root, explicit_classpath.to_vec()));
     }
@@ -63,7 +79,14 @@ pub fn detect(root: &Path, explicit_classpath: &[PathBuf]) -> Box<dyn ProjectPro
         return Box::new(BspProvider::new(root, connection));
     }
     match find_build_root(root) {
-        Some((build_root, ProviderKind::Gradle)) => Box::new(GradleProvider::new(build_root)),
+        Some((build_root, ProviderKind::Gradle)) => {
+            let provider = if scan {
+                GradleProvider::for_scan(build_root)
+            } else {
+                GradleProvider::new(build_root)
+            };
+            Box::new(provider)
+        }
         Some((build_root, ProviderKind::Maven)) => Box::new(MavenProvider::new(build_root)),
         Some((build_root, ProviderKind::Jps)) => Box::new(JpsProvider::new(build_root)),
         _ => Box::new(NoBuildSystemProvider::new(root)),
@@ -196,5 +219,51 @@ mod tests {
         tree.write(".idea/workspace.xml", "<project/>");
         tree.write("src/main/kotlin/App.kt", "fun main() {}");
         assert_eq!(detect(tree.root(), &[]).kind(), ProviderKind::None);
+    }
+
+    #[test]
+    fn the_editor_refresh_keeps_the_short_gradle_ceiling() {
+        let tree = TempTree::new("detect-editor-ceiling");
+        tree.write("settings.gradle.kts", "");
+        let mut sync = crate::project::sync::ProjectSync::new(detect(tree.root(), &[]));
+        let runner = crate::project::runner::testing::FakeRunner::new(vec![
+            crate::project::runner::testing::FakeRunner::stdout(""),
+        ]);
+
+        let _ = sync.refresh(&runner);
+
+        assert_eq!(runner.command_count(), 1);
+        assert_eq!(
+            runner.command(0).timeout,
+            crate::project::runner::BUILD_TOOL_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn the_scan_gradle_probe_uses_the_long_ceiling() {
+        let tree = TempTree::new("detect-scan-ceiling");
+        tree.write("settings.gradle.kts", "");
+        let provider = detect_for_scan(tree.root(), &[]);
+        let runner = crate::project::runner::testing::FakeRunner::new(vec![
+            crate::project::runner::testing::FakeRunner::stdout(""),
+        ]);
+
+        let _ = provider.probe(&runner);
+
+        assert_eq!(runner.command_count(), 1);
+        assert_eq!(
+            runner.command(0).timeout,
+            crate::project::gradle::PROBE_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn a_scan_still_recognises_a_non_gradle_build() {
+        let maven = TempTree::new("detect-scan-maven");
+        maven.write("pom.xml", "<project/>");
+        assert_eq!(
+            detect_for_scan(maven.root(), &[]).kind(),
+            ProviderKind::Maven
+        );
     }
 }

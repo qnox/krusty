@@ -478,6 +478,18 @@ fn emit_analyzed_into<B: Backend>(
         if diags.has_errors() {
             continue;
         }
+        // A target emitting library bodies builds a range class it does not lay out through the
+        // library's own declaration, which support emission below then selects.
+        if backend.emits_dependency_support() {
+            if let Err(error) = crate::backend::range_constructions::realize(
+                &mut file.ir,
+                &file.callables,
+                &|classifier| backend.represents_dependency_classifier(classifier),
+            ) {
+                diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                continue;
+            }
+        }
         dependency_body_emission::emit_dependencies(
             &file,
             &symbols,

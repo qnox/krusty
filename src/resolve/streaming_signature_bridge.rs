@@ -4450,6 +4450,7 @@ pub(crate) fn finalized_streamed_signature_index(
             .syntax
             .interface_delegations(delegations)
             .iter()
+            .filter(|d| source_supertypes.get(d.supertype as usize) != Some(&Ty::Error))
             .map(|delegation| {
                 let interface = *source_supertypes.get(delegation.supertype as usize)?;
                 let source = match delegation.source {

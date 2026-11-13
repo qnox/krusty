@@ -209,6 +209,9 @@ impl BodyLowering<'_> {
                         end,
                         end_type,
                         result: primitive.ret,
+                        // A support body builds a range this way only on a target laying out
+                        // the range class itself: no declaration is called to build it.
+                        declaration: None,
                     },
                 )))
             }
@@ -545,11 +548,46 @@ impl BodyLowering<'_> {
         }
         let (dispatch_receiver, args) = (operands.receiver, operands.args);
         let singleton_dispatch = linked.singleton_dispatch;
-        let call = self.ir.add_expr(IrExpr::Call {
-            callee: Box::new(callee),
-            dispatch_receiver,
-            args,
-        });
+        let external = match &callee {
+            Callee::External { target, .. } => Some(*target),
+            _ => None,
+        };
+        // A member dispatch reaches on an instance of a class this unit materializes, which a
+        // subclass may override, is called through the class's dispatch table.
+        let overridable = match (&callee, dispatch_receiver) {
+            (Callee::Local(function), Some(receiver)) => self
+                .ir
+                .overridable_method(*function)
+                .map(|slot| (slot, receiver)),
+            (Callee::LocalWithDefaults { function, .. }, Some(_))
+                if self.ir.overridable_method(*function).is_some() =>
+            {
+                return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                    "a dispatched call leaving arguments to their defaults",
+                ));
+            }
+            _ => None,
+        };
+        let call = match overridable {
+            Some(((class, index), receiver)) => self.ir.add_expr(IrExpr::MethodCall {
+                class,
+                index,
+                receiver,
+                args: args.into_iter().map(Some).collect(),
+            }),
+            None => self.ir.add_expr(IrExpr::Call {
+                callee: Box::new(callee),
+                dispatch_receiver,
+                args,
+            }),
+        };
+        if let Some(role) = linked.edge.semantic_role {
+            self.ir.semantic_call_roles.insert(call, role);
+        }
+        if let Some(target) = external {
+            self.ir
+                .record_external_overridden_declarations(target, &linked.edge.overridden);
+        }
         if let Some(classifier) = singleton_dispatch {
             self.ir
                 .external_singleton_dispatches

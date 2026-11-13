@@ -110,6 +110,40 @@ fun useText(): Int = text.value.length
     );
 }
 
+/// A class literal of the class being declared (generic or not), written inside the arguments of its own
+/// unresolved superclass constructor call, names a class whose signature never finalized. The
+/// literal cannot be star-projected without the class's signature, and the unresolved reference is
+/// the whole report; the analysis worker used to die with a panic (exit 101) on this shape.
+#[test]
+fn a_class_literal_of_a_class_with_an_unresolved_supertype_is_reported_once() {
+    let source = r#"
+package sample
+
+import kotlin.reflect.KClass
+
+fun use(type: KClass<*>, label: String) {}
+
+class Foo : Missing(
+    {
+        use(Foo::class, "x")
+    }
+)
+
+class Generic<T> : AlsoMissing(
+    {
+        use(Generic::class, "y")
+    }
+)
+"#;
+    assert_eq!(
+        editor_diagnostics(source),
+        vec![
+            "unresolved reference 'Missing'.".to_string(),
+            "unresolved reference 'AlsoMissing'.".to_string(),
+        ],
+    );
+}
+
 /// `Child::class` names a classifier whose signature did not finalize. kotlinc reports the
 /// unresolved supertype and keeps the literal. The editor path must report those messages and
 /// must not abort the module.

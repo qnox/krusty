@@ -112,6 +112,13 @@ pub struct ModuleReport {
     /// this: a fully opened module can still fail to check.
     #[serde(default)]
     pub open_complete: bool,
+    /// Microseconds for the definition lookup the server runs once the index exists.
+    /// `None` when this record did not issue that query. Never copied from `elapsed_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_query_us: Option<u64>,
+    /// Microseconds for the references scan the server runs over the indexes it already has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub references_query_us: Option<u64>,
     pub error_count: usize,
     pub warning_count: usize,
     pub diagnostics: Vec<DiagnosticRecord>,
@@ -450,13 +457,28 @@ pub fn run_plan(plan: &ModulePlan) -> ModuleReport {
             }
         }
     }
+    // Stop the analysis clock before building navigation indexes. The query times below are only
+    // the lookups, so they must not absorb parsing, type checking, or index construction.
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let source_refs = checked
+        .iter()
+        .chain(inferred.iter())
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let indexes = crate::analysis::checked_definition_indexes(
+        &source_refs,
+        &analysis.files,
+        &analysis.symbols,
+        plan.checked.len(),
+    );
+    let queries = crate::analysis::measure_navigation_queries(&indexes);
     ModuleReport {
         module: plan.module.clone(),
         checked_files: plan.checked.len(),
         inferred_files: plan.inferred.len(),
         java_files: plan.java.len(),
         classpath_entries: plan.classpath.len(),
-        elapsed_ms: started.elapsed().as_millis() as u64,
+        elapsed_ms,
         status: module_status(error_count, plan.truncated, unreadable, java_stub_failed)
             .to_string(),
         truncated: plan.truncated,
@@ -469,6 +491,8 @@ pub fn run_plan(plan: &ModulePlan) -> ModuleReport {
             && !java_stub_failed
             && !plan.truncated
             && missing_classpath_entries == 0,
+        definition_query_us: Some(queries.definition_us),
+        references_query_us: Some(queries.references_us),
         error_count,
         warning_count,
         diagnostics,
@@ -565,6 +589,7 @@ mod tests {
             kind: ProviderKind::Jps,
             jdk_home: None,
             modules,
+            repository_libraries: Vec::new(),
         }
     }
 
@@ -982,6 +1007,10 @@ mod tests {
             "errors do not mean the module failed to open"
         );
         assert_eq!(report.missing_classpath_entries, 0);
+        assert!(
+            report.definition_query_us.is_some() && report.references_query_us.is_some(),
+            "definition and references lookups are timed on their own"
+        );
     }
 
     #[test]
@@ -998,6 +1027,8 @@ mod tests {
         assert_eq!(report.missing_classpath_entries, 1);
         assert!(!report.open_complete);
         assert_eq!(report.unreadable_files, 0);
+        assert!(report.definition_query_us.is_some());
+        assert!(report.references_query_us.is_some());
     }
 
     #[test]

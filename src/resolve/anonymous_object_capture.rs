@@ -6,10 +6,10 @@ use super::capture_storage::{
     anonymous_descendants, enclosing_value_visible_beside_member, ConstructorArgumentUses,
 };
 use super::receiver_uses::{ReceiverUseSite, ReceiverUseSites};
-use super::scope::ContextReceiverKind;
+use super::scope::{ContextReceiverKind, NarrowPath, Ns, PathRoot};
 use super::{
     capture_field_order, AnonymousLexicalClassScope, Checker, CheckerScope, ExprLowering,
-    ResolvedCall, StmtLowering,
+    ReceiverFnValueOrigin, ResolvedCall, StmtLowering,
 };
 use crate::ast::{DeclId, ExprId, File, StmtId};
 use crate::diag::Span;
@@ -34,7 +34,7 @@ pub(super) fn published_captures(
         .values()
         .copied()
         .filter_map(|declaration| {
-            let original = match active {
+            let (original, first_owner) = match active {
                 Some(active) => {
                     let stable = active.canonical_classifier_declaration(
                         declaration,
@@ -44,16 +44,30 @@ pub(super) fn published_captures(
                     if class.source_file != file_index {
                         return None;
                     }
-                    class.source_decl?
+                    (class.source_decl?, class.internal)
                 }
                 // Annotation-only legacy fragments still hold the same Pass-1 parser arena.
-                None => declaration,
+                None => {
+                    let class = pass_one.classes.values().find(|class| {
+                        class.source_file == file_index && class.source_decl == Some(declaration)
+                    })?;
+                    (declaration, class.internal)
+                }
             };
             pass_one
                 .anonymous_object_captures
                 .get(&(file_index, original))
                 .cloned()
-                .map(|captures| (declaration, captures))
+                .map(|mut captures| {
+                    for capture in &mut captures {
+                        if matches!(capture.source, AnonymousObjectCaptureSource::LexicalValue)
+                            && capture.lexical_binding.is_some()
+                        {
+                            capture.capture_dependency = capture.logical_identity(first_owner);
+                        }
+                    }
+                    (declaration, captures)
+                })
         })
         .collect()
 }
@@ -106,6 +120,7 @@ pub struct AnonymousObjectCapture {
     /// and the context value it hides) are two captures with distinct identities. Absent for a
     /// receiver, and for a value that is not a function-local binding.
     pub(crate) lexical_binding: Option<u32>,
+    pub(crate) lexical_declaration: Option<super::lexical_bindings::LexicalValueDeclaration>,
     /// Required constructor-transport family retained by a transitive capture. Its selected
     /// operand can belong to another family; direct captures establish their own identity.
     pub(crate) capture_dependency: Option<crate::fir::ClassCaptureIdentity>,
@@ -355,6 +370,7 @@ pub(super) struct AnonymousCaptureCandidate {
     pub(super) semantic_receiver: Option<AnonymousObjectReceiverSource>,
     /// Lexical identity of a function-local value's binding.
     pub(super) lexical_binding: Option<u32>,
+    pub(super) lexical_declaration: Option<super::lexical_bindings::LexicalValueDeclaration>,
     /// Exact live checker-scope identity when this candidate is a receiver. It exists only long
     /// enough to project a direct nested anonymous object's use onto this class's capture field.
     pub(super) receiver_identity: Option<(usize, usize)>,
@@ -378,6 +394,104 @@ fn receiver_capture_source(
         AnonymousObjectCaptureSource::EnclosingInstance { current, depth }
     } else {
         AnonymousObjectCaptureSource::ImplicitReceiver { current, depth }
+    }
+}
+
+impl Checker<'_> {
+    /// Pass-1 binding ids belong to its bounded checker. A retained declaration role is the only
+    /// authority for selecting that value in this checker; the refreshed id/depth are live operands.
+    /// The original logical capture family was anchored at publication and must not be retagged.
+    pub(super) fn refresh_published_lexical_captures(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        captures: &mut [AnonymousObjectCapture],
+        span: Span,
+    ) -> bool {
+        for capture in captures {
+            let Some(published) = capture.lexical_binding else {
+                continue;
+            };
+            // A forwarded class-storage capture embeds the same published value id. Retarget
+            // that id with the declaration; leave receiver and entry storage on their own paths.
+            if !matches!(
+                capture.source,
+                AnonymousObjectCaptureSource::LexicalValue
+                    | AnonymousObjectCaptureSource::ClassStorage(_)
+            ) {
+                continue;
+            }
+            // A binding recorded in this checker already carries the live id. Refreshing it
+            // would replace a proven type with whatever this visit currently knows. A published
+            // id from another checker is not that binding, even when the number collides.
+            if let Some((local, _)) =
+                self.lexical_binding_by_identity(scope, &capture.name, published)
+            {
+                if capture.lexical_declaration.is_none()
+                    || local.lexical_declaration == capture.lexical_declaration
+                {
+                    continue;
+                }
+            }
+            let selected = capture
+                .lexical_declaration
+                .and_then(|declaration| self.lexical_binding_by_declaration(scope, declaration));
+            let Some((name, local, depth)) = selected else {
+                self.diags.error(
+                    span,
+                    "published anonymous object capture has no matching value declaration",
+                );
+                return false;
+            };
+            let Some(identity) = local.lexical_capture_identity else {
+                self.diags.error(
+                    span,
+                    "published anonymous object value declaration has no current binding",
+                );
+                return false;
+            };
+            capture.name = name;
+            capture.lexical_binding = Some(identity);
+            capture.lexical_shadow_depth = depth;
+            capture.ty =
+                if local.is_var && (capture.shared_cell || local.delegate_storage_ty.is_some()) {
+                    local.ty
+                } else {
+                    self.lookup_path_narrowing(
+                        scope,
+                        &NarrowPath::root_only(PathRoot::Value(local.flow_identity)),
+                    )
+                    .unwrap_or(local.ty)
+                };
+            capture.storage_ty = local.delegate_storage_ty;
+            // The published class-storage owner stays. Only its value binding is from the
+            // other checker; replacing the source with this scope's local would drop the field.
+            if let AnonymousObjectCaptureSource::ClassStorage(storage) = &mut capture.source {
+                if let crate::fir::ClassCaptureIdentity::Value { binding, .. } =
+                    &mut storage.identity
+                {
+                    *binding = identity;
+                }
+                continue;
+            }
+            capture.source = match local.origin {
+                ReceiverFnValueOrigin::ClassStorage(storage) => {
+                    AnonymousObjectCaptureSource::ClassStorage(storage)
+                }
+                ReceiverFnValueOrigin::EnumEntryPropertyStorage { owner, field, .. } => {
+                    AnonymousObjectCaptureSource::EnumEntryPropertyStorage { owner, field }
+                }
+                ReceiverFnValueOrigin::Local => AnonymousObjectCaptureSource::LexicalValue,
+                ReceiverFnValueOrigin::DispatchProperty { .. }
+                | ReceiverFnValueOrigin::TopLevelProperty => {
+                    self.diags.error(
+                        span,
+                        "published lexical capture selected nonlexical declaration storage",
+                    );
+                    return false;
+                }
+            };
+        }
+        true
     }
 }
 
@@ -568,6 +682,7 @@ impl Checker<'_> {
                     ),
                     lexical_shadow_depth: 0,
                     lexical_binding: None,
+                    lexical_declaration: None,
                     capture_dependency: None,
                     constructor_projections: Vec::new(),
                     receiver_capture,
@@ -997,6 +1112,7 @@ mod receiver_remap_tests {
             }),
             lexical_shadow_depth: 0,
             lexical_binding: None,
+            lexical_declaration: None,
             capture_dependency: None,
             constructor_projections: Vec::new(),
             receiver_capture: Some(identity),
@@ -1407,6 +1523,7 @@ pub(super) fn record_anonymous_construction_captures(
             semantic_receiver: candidate.semantic_receiver,
             lexical_shadow_depth: 0,
             lexical_binding: candidate.lexical_binding,
+            lexical_declaration: candidate.lexical_declaration,
             capture_dependency: None,
             constructor_projections: Vec::new(),
             receiver_capture: candidate.receiver_capture,
@@ -1439,5 +1556,81 @@ pub(super) fn enclosing_instance(ty: Ty) -> FirCapturedReceiver {
             .non_null()
             .kotlin_class_internal()
             .expect("an enclosing class receiver is an instance of that class"),
+    }
+}
+
+impl Checker<'_> {
+    /// Validate the constructor operands against the exact published capture sources.
+    /// A retained lexical identity cannot be replaced by a nearer same-named binding.
+    pub(super) fn check_anonymous_capture_arguments(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        captures: &[AnonymousObjectCapture],
+        span: Span,
+    ) -> bool {
+        for capture in captures {
+            let actual = match capture.source {
+                AnonymousObjectCaptureSource::EnclosingInstance { depth, .. } => {
+                    // The outer-instance capture is not a scope local; the construction site's
+                    // exact selected class-receiver rung supplies it.
+                    self.implicit_receivers(scope)
+                        .into_iter()
+                        .find(|receiver| receiver.receiver_depth == depth as usize)
+                        .map(|receiver| receiver.ty)
+                        .unwrap_or(Ty::Error)
+                }
+                AnonymousObjectCaptureSource::ImplicitReceiver { depth, .. } => self
+                    .implicit_receivers(scope)
+                    .into_iter()
+                    .find(|receiver| receiver.receiver_depth == depth as usize)
+                    .map(|receiver| receiver.ty)
+                    .unwrap_or(Ty::Error),
+                AnonymousObjectCaptureSource::ClassStorage(_)
+                | AnonymousObjectCaptureSource::EnumEntryPropertyStorage { .. } => capture.ty,
+                AnonymousObjectCaptureSource::LexicalValue => {
+                    let selected = match capture.lexical_binding {
+                        Some(identity) => self
+                            .lexical_binding_by_identity(scope, &capture.name, identity)
+                            .map(|(local, _)| local),
+                        // Non-local property candidates retain their certified construction-site
+                        // coordinate rather than a function-local binding identity.
+                        None => scope
+                            .shadowed_binding(
+                                Ns::Value,
+                                &capture.name,
+                                capture.lexical_shadow_depth as usize,
+                            )
+                            .and_then(|binding| binding.value())
+                            .filter(|local| {
+                                matches!(local.origin, ReceiverFnValueOrigin::TopLevelProperty)
+                            }),
+                    };
+                    let Some(local) = selected else {
+                        self.diags.error(
+                            span,
+                            "anonymous object capture has no selected value binding",
+                        );
+                        return false;
+                    };
+                    local.delegate_storage_ty.unwrap_or_else(|| {
+                        self.lookup_path_narrowing(
+                            scope,
+                            &NarrowPath::root_only(PathRoot::Value(local.flow_identity)),
+                        )
+                        .unwrap_or(local.ty)
+                    })
+                }
+            };
+            let expected = self.apply_postponed_call_bindings(capture.stored_ty());
+            let expected = if expected.mentions_ty_param() {
+                let mut bindings = crate::symbol_resolver::GSigBinds::default();
+                crate::symbol_resolver::unify_ty(expected, actual, &mut bindings);
+                crate::symbol_resolver::ty_subst_keep_unbound(expected, &bindings)
+            } else {
+                expected
+            };
+            self.expect_assignable(expected, actual, span, "anonymous object capture");
+        }
+        true
     }
 }
