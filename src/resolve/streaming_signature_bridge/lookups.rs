@@ -268,11 +268,11 @@ impl ProductionSignatureSemantics<'_> {
                 internal,
             );
             if let Some(access) = access {
-                self.record_classifier_access_diagnostic_at(
+                self.record_unconditional_diagnostic_at(
                     scope.owner,
                     scope.source,
                     reference.span,
-                    internal,
+                    crate::diag::DiagnosticIdentity::classifier_access(reference.span, internal),
                     super::super::inaccessible_classifier_message(&reference.name, access),
                 );
             }
