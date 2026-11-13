@@ -116,6 +116,13 @@ impl CheckedIrFile<'_> {
 /// One emitted artifact: a target-relative path and its bytes (e.g. `Foo.class`, a `.wasm` module).
 pub type Artifact = (String, Vec<u8>);
 
+/// Target-owned policy for common IR lowerings which run before emission closure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommonIrPreparation {
+    pub counted_loops: crate::backend::counted_loops::CountedLoopPolicy,
+    pub enums: crate::backend::enums::Contract,
+}
+
 pub trait Backend {
     /// Cross-file state accumulated while lowering.
     type State: Default;
@@ -130,11 +137,9 @@ pub trait Backend {
         false
     }
 
-    /// Whether this backend lowers suspend functions on common IR with the shared coroutine
-    /// passes, and so calls the stdlib declarations the handoff selects for them
-    /// ([`crate::ir::IrCoroutineRuntime`]). A backend with its own coroutine pass leaves this off.
-    fn lowers_coroutines_on_common_ir(&self) -> bool {
-        false
+    /// Target-specific pieces of the common lowering sequence, applied before emission closure.
+    fn common_ir_preparation(&self) -> Option<CommonIrPreparation> {
+        None
     }
 
     /// Whether this backend numbers the dispatch slots of the module's classes itself, so a file

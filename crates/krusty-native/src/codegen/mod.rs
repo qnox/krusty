@@ -191,8 +191,11 @@ impl Backend for CraneliftBackend {
         true
     }
 
-    fn lowers_coroutines_on_common_ir(&self) -> bool {
-        true
+    fn common_ir_preparation(&self) -> Option<krusty::backend::CommonIrPreparation> {
+        Some(krusty::backend::CommonIrPreparation {
+            counted_loops: COUNTED_LOOPS,
+            enums: krusty::backend::enums::Contract::KotlinNative,
+        })
     }
 
     fn numbers_slots(&self) -> bool {
@@ -239,33 +242,6 @@ impl Backend for CraneliftBackend {
                 state.dependency_support_stem(file.stems)
             }
         };
-        krusty::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
-        // Before default arguments: a constant leaving constructor arguments out is then an
-        // ordinary construction for that lowering.
-        krusty::backend::enums::publish_constants(&mut file.ir, &mut file.dependency_exports);
-        krusty::backend::enums::realize(
-            &mut file.ir,
-            krusty::backend::enums::Contract::KotlinNative,
-        );
-        krusty::backend::default_arguments::realize(
-            &mut file.ir,
-            &mut file.callables,
-            |function| file.dependency_exports.callable(function).is_some(),
-        );
-        // After default arguments, so a `$default` entry's call of the declaration is the one
-        // that gains the continuation, and before dispatch entries, which copy the signature.
-        if let Err(declined) =
-            krusty::backend::coroutines::add_continuation_parameters(&mut file.ir)
-        {
-            diags.error(
-                krusty::diag::Span::new(0, 0),
-                format!(
-                    "krusty: the native backend does not support {} yet",
-                    declined.construct()
-                ),
-            );
-            return Vec::new();
-        }
         krusty::backend::construction_entries::realize(&mut file.ir, &mut file.dependency_exports);
         if let Err(error) =
             krusty::backend::property_entries::realize(&mut file.ir, &mut file.dependency_exports)

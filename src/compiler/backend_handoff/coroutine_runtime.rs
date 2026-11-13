@@ -4,10 +4,10 @@
 use crate::ir::IrCoroutineRuntime;
 use crate::libraries::{FnKind, PropKind};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
-use crate::types::type_name;
+use crate::types::{type_name, SemanticCallableOwner};
 
-/// The runtime of a file that declares a suspend function, or `None` when the classpath declares
-/// no single `COROUTINE_SUSPENDED` property or no single `Result.getOrThrow` extension.
+/// The runtime of a file that declares a suspend function, or `None` when the classpath does not
+/// publish the exact marker, completion, and continuation method declarations this lowering uses.
 pub(super) fn select(source: &dyn SymbolSource) -> Option<IrCoroutineRuntime> {
     let intrinsics = source.symbols(
         SymbolNamespace::Package(type_name("kotlin/coroutines/intrinsics")),
@@ -33,8 +33,51 @@ pub(super) fn select(source: &dyn SymbolSource) -> Option<IrCoroutineRuntime> {
     let (Some(get_or_throw), None) = (get_or_throw.next(), get_or_throw.next()) else {
         return None;
     };
+
+    let companion = crate::types::type_name_nested_child(result, "Companion");
+    let throwable = type_name("kotlin/Throwable");
+    let failures = source.symbols(SymbolNamespace::Package(type_name("kotlin")), "failure");
+    let mut result_failure = failures.callables.functions().iter().filter(|function| {
+        function.kind == FnKind::Extension
+            && function
+                .semantic_receiver()
+                .and_then(|ty| ty.non_null().obj_internal())
+                == Some(companion)
+            && function.semantic_params().len() == 1
+            && function.semantic_params()[0].non_null().obj_internal() == Some(throwable)
+            && function
+                .ret
+                .apply(function.callable.ret)
+                .non_null()
+                .obj_internal()
+                == Some(result)
+    });
+    let (Some(result_failure), None) = (result_failure.next(), result_failure.next()) else {
+        return None;
+    };
+
+    let continuation = type_name("kotlin/coroutines/Continuation");
+    let resume_with = source.symbols(SymbolNamespace::Classifier(continuation), "resumeWith");
+    let mut declarations = resume_with.callables.functions().iter().filter(|function| {
+        function.kind == FnKind::Member
+            && function
+                .semantic_receiver()
+                .and_then(|ty| ty.non_null().obj_internal())
+                == Some(continuation)
+            && function.callable.declaration_owner
+                == Some(SemanticCallableOwner::Classifier(continuation))
+            && function.semantic_params().len() == 1
+            && function.semantic_params()[0].non_null().obj_internal() == Some(result)
+            && function.ret.apply(function.callable.ret).non_null() == crate::types::Ty::Unit
+    });
+    let (Some(resume_with), None) = (declarations.next(), declarations.next()) else {
+        return None;
+    };
+
     Some(IrCoroutineRuntime {
         suspended: suspended.getter.external_property_identity?,
         get_or_throw: get_or_throw.callable.external_identity?,
+        resume_with: resume_with.callable.external_identity?,
+        result_failure: result_failure.callable.external_identity?,
     })
 }

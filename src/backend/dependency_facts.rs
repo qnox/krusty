@@ -657,6 +657,15 @@ pub struct CheckedBackendCallables {
 }
 
 impl CheckedBackendCallables {
+    /// The runtime declarations native plugins selected, to reapply their ABI annotations after a
+    /// common lowering rewrites IR and the checked dependency view is rebuilt.
+    pub(crate) fn plugin_runtime_bindings(&self) -> Vec<(ExternalCallableId, Box<[Ty]>)> {
+        self.plugin_runtime
+            .iter()
+            .map(|(&identity, appended)| (identity, appended.clone()))
+            .collect()
+    }
+
     /// Whether native plugins selected `identity` at the handoff for the code they generate.
     pub fn is_plugin_runtime_callable(&self, identity: ExternalCallableId) -> bool {
         self.plugin_runtime.contains_key(&identity)

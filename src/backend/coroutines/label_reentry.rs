@@ -39,7 +39,11 @@ pub trait MachineStorage {
     fn suspended_marker(&self, ir: &mut IrFile) -> ExprId;
     /// `call`, a suspension point, made with the machine's continuation. Its result is `Any?`: the
     /// value it completed with, or the marker.
-    fn call_with_continuation(&self, ir: &mut IrFile, call: ExprId) -> ExprId;
+    fn call_with_continuation(
+        &self,
+        ir: &mut IrFile,
+        call: ExprId,
+    ) -> Result<ExprId, ReentryDecline>;
 }
 
 /// Why a body cannot take this machine.
@@ -47,6 +51,8 @@ pub trait MachineStorage {
 pub enum ReentryDecline {
     /// A suspension in a position no statement form above holds.
     UnsupportedSuspension,
+    /// The target has no checked call shape for a suspension node.
+    UnsupportedCallShape,
 }
 
 /// Rewrite the statements of `body` (a `Block` without a value) into the machine. `next_value` is
@@ -181,7 +187,7 @@ impl Split<'_> {
 
     fn stmt(&mut self, ir: &mut IrFile, stmt: ExprId) -> Result<ExprId, ReentryDecline> {
         if let Some(leaf) = self.leaf(ir, stmt) {
-            return Ok(self.suspension(ir, leaf));
+            return self.suspension(ir, leaf);
         }
         match ir.exprs[stmt as usize].clone() {
             IrExpr::Block { stmts, value: None } => {
@@ -270,7 +276,7 @@ impl Split<'_> {
 
     /// Suspension `k`: run the call on label 0, take the resumed value on label `k`, then complete
     /// the statement with the value either way, on label 0.
-    fn suspension(&mut self, ir: &mut IrFile, leaf: Leaf) -> ExprId {
+    fn suspension(&mut self, ir: &mut IrFile, leaf: Leaf) -> Result<ExprId, ReentryDecline> {
         let label = self.next_label;
         self.next_label += 1;
         let any = Ty::nullable(Ty::obj_name(wk::any()));
@@ -283,7 +289,7 @@ impl Split<'_> {
         });
 
         let logical = ir.checked_type(leaf.call).unwrap_or(any);
-        let call = self.storage.call_with_continuation(ir, leaf.call);
+        let call = self.storage.call_with_continuation(ir, leaf.call)?;
         let k = int_const(ir, label as i32);
         let store_label = self.storage.write_label(ir, k);
         let store_result = ir.add_expr(IrExpr::SetValue {
@@ -334,10 +340,10 @@ impl Split<'_> {
         };
         let completes = self.label_is(ir, 0);
         let complete = when(ir, vec![(Some(completes), leaf.stmt)]);
-        ir.add_expr(IrExpr::Block {
+        Ok(ir.add_expr(IrExpr::Block {
             stmts: vec![declared, step, complete],
             value: None,
-        })
+        }))
     }
 
     fn fresh_value(&mut self) -> u32 {
