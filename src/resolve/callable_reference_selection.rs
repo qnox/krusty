@@ -263,6 +263,28 @@ fn receiver_validated_projected_formals(
     validated
 }
 
+/// Whether an expected input can supply a whole vararg array: it must be the declared array's own
+/// classifier (`Array<out E>` takes an `Array<…>`; `IntArray` takes an `IntArray`). Any other
+/// input, including a primitive array against `Array<out E>`, is one collected vararg element.
+fn same_array_classifier(actual: Ty, declared: Ty) -> bool {
+    fn array_classifier(ty: Ty) -> Option<Ty> {
+        match ty.non_null().kind() {
+            TyKind::TyParam(_, bound) | TyKind::Var(_, bound) | TyKind::PlatformNullable(bound) => {
+                array_classifier(bound)
+            }
+            TyKind::Obj(..) if ty.non_null().is_array() => Some(ty.non_null()),
+            _ => None,
+        }
+    }
+    match (array_classifier(actual), array_classifier(declared)) {
+        (Some(actual), Some(declared)) => match (actual.kind(), declared.kind()) {
+            (TyKind::Obj(actual, _), TyKind::Obj(declared, _)) => actual == declared,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 pub(super) fn specialize_generic_signature(
     source: &dyn SymbolSource,
     generic: &crate::libraries::GenericSig,
@@ -280,11 +302,14 @@ pub(super) fn specialize_generic_signature(
     }
     if let Some(expected) = expected_params {
         let vararg = call_sig.vararg_index;
+        // A whole array is the vararg's single input. When it is the last expected input, any
+        // parameters after the vararg take their defaults (`vararg xs: E, k: Int = 0`).
         let whole_vararg = vararg.is_some_and(|index| {
-            expected.len() == generic.params.len()
+            expected.len() == index + 1
                 && expected
                     .get(index)
-                    .is_some_and(|parameter| parameter.array_elem().is_some())
+                    .zip(generic.params.get(index))
+                    .is_some_and(|(&actual, &declared)| same_array_classifier(actual, declared))
         });
         let actuals = expected
             .iter()
