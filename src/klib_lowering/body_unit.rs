@@ -673,18 +673,6 @@ impl DependencyBodyUnit {
             })
     }
 
-    /// Objects owned by this closed unit, whose instance it publishes as their own file would.
-    pub(crate) fn materialized_objects(&self) -> impl Iterator<Item = crate::ir::ClassId> + '_ {
-        let mut objects = self
-            .classes
-            .values()
-            .copied()
-            .filter(|&class| self.ir.classes[class as usize].is_object)
-            .collect::<Vec<_>>();
-        objects.sort_unstable();
-        objects.into_iter()
-    }
-
     /// A unit that reads the constants of `enums`, which earlier units materialized, through
     /// their exports.
     pub(crate) fn reading_realized_enums(enums: impl IntoIterator<Item = TypeName>) -> Self {
