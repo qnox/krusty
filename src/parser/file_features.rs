@@ -18,6 +18,7 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.forbid_array_of_nothing_in_lhs_of_class_literal =
         features.has("ForbidArrayOfNothingInLhsOfClassLiteral");
     file.enum_entries_enabled = features.has("EnumEntries");
+    file.collection_literals_enabled = features.has("CollectionLiterals");
     file.prioritized_enum_entries = features.has("PrioritizedEnumEntries");
     file.implicit_signed_to_unsigned_integer_conversion =
         features.has("ImplicitSignedToUnsignedIntegerConversion");
@@ -53,6 +54,7 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
         "'operator' modifier is not applicable to function: must override 'equals()' in Any.",
     );
     file.custom_equals_in_value_classes = features.has("CustomEqualsInValueClasses");
+    file.normalize_nan_in_const_context = features.has("NormalizeNaNValuesInConstContext");
     file.forbid_upper_bounds_violation_on_type_operator_and_parameter_bounds =
         features.has("ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds");
     file.forbid_useless_type_arguments = features.has("ForbidUselessTypeArgumentsIn25");

@@ -300,6 +300,8 @@ mod resolved_type_occurrences;
 mod safe_call_flow;
 mod safe_index;
 mod sam_constructors;
+mod scope_constructor_selection;
+use provider_constructor_selection::ConstructorPreselection;
 mod sam_conversion_recording;
 mod serialization_generated_members;
 mod source_constructor_type_oracle;
@@ -380,6 +382,8 @@ pub use super_calls::ResolvedSuperCall;
 mod superclass_validation;
 mod type_parameter_owners;
 use type_parameter_owners::ty_param_names_into;
+mod cyclic_upper_bounds;
+mod resolved_bound_view;
 mod uninferred_call_results;
 mod upper_bound_violations;
 mod value_class_parameters;
@@ -1126,6 +1130,7 @@ impl ClassFlags {
     const HAS_ABSTRACT_MEMBERS: u16 = 1 << 6;
     const ANNOTATION: u16 = 1 << 7;
     const DATA: u16 = 1 << 8;
+    const ENUM: u16 = 1 << 9;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -1177,6 +1182,10 @@ impl ClassFlags {
     pub const fn with_data(self, on: bool) -> Self {
         self.with(Self::DATA, on)
     }
+    #[inline]
+    pub const fn with_enum(self, on: bool) -> Self {
+        self.with(Self::ENUM, on)
+    }
 }
 
 /// The compiler-built array operation a call checks as, and the label of its initializer lambda
@@ -1226,6 +1235,7 @@ fn source_class_flags(class: &ClassDecl) -> ClassFlags {
         )
         .with_annotation(class.is_annotation())
         .with_data(class.is_data)
+        .with_enum(class.is_enum())
 }
 
 /// Classifier flags read from the compact Pass-1 declaration inventory.
@@ -1261,6 +1271,7 @@ fn streamed_source_class_flags(
         .with_has_abstract_members(has_abstract_members)
         .with_annotation(flags.has(crate::fir::DeclarationFlags::ANNOTATION_CLASS))
         .with_data(flags.has(crate::fir::DeclarationFlags::DATA))
+        .with_enum(flags.has(crate::fir::DeclarationFlags::ENUM))
 }
 
 /// Capture the source-level callable inventory before functions and properties are normalized into
@@ -1481,6 +1492,10 @@ pub struct ClassSig {
     /// `final`, `has_abstract_members`, `annotation`). Read via the `is_*`/`has_*` accessors; the
     /// `annotation` bit lives here too (its doc stays at the former field position below).
     pub flags: ClassFlags,
+    /// Declared enum entry names in source order. Non-empty only for an `enum class` (the
+    /// [`ClassFlags::ENUM`] kind); an enum is an ordinary classifier of that kind, not a separate
+    /// table.
+    pub enum_entries: Vec<String>,
     /// `Some(outer_internal)` for an `inner class` — it captures the enclosing instance (a `this$0`
     /// field of the outer type); constructed as `outerInstance.Inner(...)`.
     pub inner_of: Option<TypeName>,
@@ -1660,6 +1675,7 @@ impl ClassSig {
             declared_callable_order,
             source_methods: Vec::new(),
             flags,
+            enum_entries: Vec::new(),
             inner_of: None,
             companion_internal,
             lateinit_props: Default::default(),
@@ -1823,6 +1839,17 @@ impl ClassSig {
     #[inline]
     pub fn is_interface(&self) -> bool {
         self.flags.has(ClassFlags::INTERFACE)
+    }
+    /// True for an `enum class`.
+    #[inline]
+    pub fn is_enum(&self) -> bool {
+        self.flags.has(ClassFlags::ENUM)
+    }
+    /// Record a declared enum entry once, keeping source order.
+    pub(crate) fn declare_enum_entry(&mut self, name: &str) {
+        if !self.enum_entries.iter().any(|entry| entry == name) {
+            self.enum_entries.push(name.to_owned());
+        }
     }
     /// True if declared `object` (a singleton).
     #[inline]
@@ -2727,10 +2754,6 @@ pub struct SymbolTable {
     /// name but must emit the annotated one, and the callee's AST is out of its reach — so the name
     /// is recorded here, where the collect pass can see every file. Absent = the two agree.
     pub toplevel_jvm_names: HashMap<(u32, u32), String>,
-    /// Declared enum entries by classifier identity, accessed via `Name.ENTRY`. Object identity is
-    /// already carried by `ClassSig::is_object`; duplicating it in a simple-name set made the two
-    /// sources disagree for cross-package homonyms.
-    pub enums: HashMap<TypeName, Vec<String>>,
     /// The target's compiled library set — a JVM classpath or a klib (empty unless the driver
     /// supplies one). The front end resolves external references only through this abstraction.
     pub libraries: Box<dyn SemanticPlatform>,
@@ -2869,7 +2892,6 @@ impl Default for SymbolTable {
             context_prop_names: crate::fx_hash::HashSet::default(),
             property_inference_failures: HashMap::default(),
             toplevel_jvm_names: HashMap::default(),
-            enums: HashMap::default(),
             libraries: Box::new(EmptySymbolSource),
             native_plugins: Default::default(),
             annotation_conventions: Default::default(),
@@ -3518,7 +3540,10 @@ impl SymbolTable {
 
     /// The source enum entry names for this classifier identity.
     pub fn enum_entries_of(&self, internal: TypeName) -> Option<&Vec<String>> {
-        self.enums.get(&internal)
+        self.classes
+            .get(&internal)
+            .filter(|class| class.is_enum())
+            .map(|class| &class.enum_entries)
     }
 
     /// The source spelling (`Wrapper`, `Outer.Inner` for a nested class) of a MODULE class's internal
@@ -7189,6 +7214,10 @@ pub struct TypeInfo {
     /// span. The public property result remains in `property_decl_types`/the stable signature;
     /// checked FIR consumes this distinct owner-local storage boundary directly.
     pub(crate) explicit_backing_field_types: HashMap<(u32, u32), Ty>,
+    /// The `@EqualityBound` classifier, declared or inherited from the overridden `equals`, under
+    /// which a function body read its parameter, keyed by that parameter's type-reference span.
+    /// Checked FIR publishes it as the body's guard; lowering realizes the guard ahead of the body.
+    pub(crate) equality_bound_parameters: HashMap<(u32, u32), Ty>,
     /// Final results for source members checked inside the active body unit. Local and anonymous
     /// classifiers can mention enclosing classifiers, values, and type parameters that the module
     /// header table deliberately cannot finalize in Pass 1. This includes both expression-inferred
@@ -7806,9 +7835,9 @@ struct LibraryConstructorOptions<'a> {
     bound_outer: Option<Ty>,
     expected: Option<Ty>,
     priority: ConstructorPriorityTier,
-    /// A constructor already chosen by a selection that ran over a wider candidate family (the
-    /// receiver member level of `outer.Inner(args)`). Only that declaration is materialized.
-    selected: Option<&'a crate::libraries::FunctionInfo>,
+    /// What a selection that ran over a wider candidate family (the receiver member level of
+    /// `outer.Inner(args)`, or the shared bare-call selector) already decided.
+    selected: ConstructorPreselection<'a>,
 }
 
 fn constructor_delegation_cycles(edges: &[Option<usize>]) -> Vec<Vec<usize>> {
@@ -14079,7 +14108,7 @@ impl<'a> Checker<'a> {
                                 bound_outer: None,
                                 expected,
                                 priority: ConstructorPriorityTier::All,
-                                selected: None,
+                                selected: ConstructorPreselection::Open,
                             },
                         ) {
                             Ok(LibraryConstructorSelection::Selected) => {
@@ -14096,7 +14125,7 @@ impl<'a> Checker<'a> {
                                     qualified_alias_target,
                                 );
                             }
-                            Ok(LibraryConstructorSelection::Rejected) => return Ty::Error,
+                            Ok(LibraryConstructorSelection::Rejected(result)) => return result,
                             Ok(LibraryConstructorSelection::Invisible(invisible)) => {
                                 self.report_invisible_constructor(call, &invisible);
                                 return Ty::Error;
@@ -18152,19 +18181,23 @@ impl<'a> Checker<'a> {
                 // selection chooses among them, and the provider path materializes only the
                 // declaration it chose. A low-priority winner keeps its place after the implicit
                 // receiver rungs.
-                let selected_scope_constructor = self.scope_constructor_choice(
+                let scope_constructor_decision = self.scope_constructor_choice(
                     scope,
                     CallArgs {
                         call,
                         args,
                         arg_tys: &arg_tys,
                     },
-                    &explicit_type_args,
-                    expected,
+                    scope_constructor_selection::ScopeConstructorChoiceCall {
+                        explicit_type_args: &explicit_type_args,
+                        alias_target: bare_alias_target,
+                        expected,
+                    },
                     &scope_constructors,
                 );
-                let deferred_scope_constructor = selected_scope_constructor
+                let deferred_scope_constructor = scope_constructor_decision
                     .as_ref()
+                    .and_then(scope_constructor_selection::ScopeConstructorSelection::selected)
                     .filter(|selected| self.is_low_priority_constructor(selected));
                 if let Some(scoped_internal) = bare_constructor_classifier {
                     let (inherited, inherited_owner) =
@@ -18193,22 +18226,27 @@ impl<'a> Checker<'a> {
                             .or_else(|| self.resolved_type_name(scoped_internal));
                         if let Some(classifier) = argument_classifier.as_deref() {
                             let requires_outer = classifier.outer_instance.is_some();
-                            let has_low_priority = selected_scope_constructor.is_none()
+                            let has_low_priority = scope_constructor_decision
+                                    .as_ref()
+                                    .and_then(scope_constructor_selection::ScopeConstructorSelection::selected)
+                                    .is_none()
                                 && self.has_low_priority_constructor(scoped_internal, classifier);
                             if has_low_priority || deferred_scope_constructor.is_some() {
                                 low_priority_provider_constructor =
                                     Some((scoped_internal, classifier.clone(), requires_outer));
                             }
-                            match self.record_library_constructor(
+                            match self.record_scope_constructor(
                                 scope,
-                                call,
-                                scoped_internal,
-                                classifier,
-                                args,
-                                LibraryConstructorOptions {
+                                CallArgs {
+                                    call,
+                                    args,
+                                    arg_tys: &arg_tys,
+                                },
+                                (scoped_internal, classifier),
+                                scope_constructor_selection::ScopeConstructorCall {
                                     arg_names: arg_names.as_deref(),
-                                    applied_classifier: bare_alias_target,
-                                    bound_outer: None,
+                                    explicit_type_args: &explicit_type_args,
+                                    alias_target: bare_alias_target,
                                     expected,
                                     priority: if has_low_priority
                                         || deferred_scope_constructor.is_some()
@@ -18217,7 +18255,8 @@ impl<'a> Checker<'a> {
                                     } else {
                                         ConstructorPriorityTier::All
                                     },
-                                    selected: selected_scope_constructor.as_ref(),
+                                    selection: scope_constructor_decision.as_ref(),
+                                    candidates: &scope_constructors,
                                 },
                             ) {
                                 Ok(LibraryConstructorSelection::Selected) => {
@@ -18234,7 +18273,7 @@ impl<'a> Checker<'a> {
                                         bare_alias_target,
                                     );
                                 }
-                                Ok(LibraryConstructorSelection::Rejected) => return Ty::Error,
+                                Ok(LibraryConstructorSelection::Rejected(result)) => return result,
                                 Ok(LibraryConstructorSelection::Invisible(invisible)) => {
                                     invisible_constructor.get_or_insert(invisible);
                                 }
@@ -18359,22 +18398,27 @@ impl<'a> Checker<'a> {
                             .or_else(|| self.resolved_type_name(scoped_internal));
                         if let Some(classifier) = argument_classifier.as_deref() {
                             let requires_outer = classifier.outer_instance.is_some();
-                            let has_low_priority = selected_scope_constructor.is_none()
+                            let has_low_priority = scope_constructor_decision
+                                    .as_ref()
+                                    .and_then(scope_constructor_selection::ScopeConstructorSelection::selected)
+                                    .is_none()
                                 && self.has_low_priority_constructor(scoped_internal, classifier);
                             if has_low_priority || deferred_scope_constructor.is_some() {
                                 low_priority_provider_constructor =
                                     Some((scoped_internal, classifier.clone(), requires_outer));
                             }
-                            match self.record_library_constructor(
+                            match self.record_scope_constructor(
                                 scope,
-                                call,
-                                scoped_internal,
-                                classifier,
-                                args,
-                                LibraryConstructorOptions {
+                                CallArgs {
+                                    call,
+                                    args,
+                                    arg_tys: &arg_tys,
+                                },
+                                (scoped_internal, classifier),
+                                scope_constructor_selection::ScopeConstructorCall {
                                     arg_names: arg_names.as_deref(),
-                                    applied_classifier: bare_alias_target,
-                                    bound_outer: None,
+                                    explicit_type_args: &explicit_type_args,
+                                    alias_target: bare_alias_target,
                                     expected,
                                     priority: if has_low_priority
                                         || deferred_scope_constructor.is_some()
@@ -18383,7 +18427,8 @@ impl<'a> Checker<'a> {
                                     } else {
                                         ConstructorPriorityTier::All
                                     },
-                                    selected: selected_scope_constructor.as_ref(),
+                                    selection: scope_constructor_decision.as_ref(),
+                                    candidates: &scope_constructors,
                                 },
                             ) {
                                 Ok(LibraryConstructorSelection::Selected) => {
@@ -18400,7 +18445,7 @@ impl<'a> Checker<'a> {
                                         bare_alias_target,
                                     );
                                 }
-                                Ok(LibraryConstructorSelection::Rejected) => return Ty::Error,
+                                Ok(LibraryConstructorSelection::Rejected(result)) => return result,
                                 Ok(LibraryConstructorSelection::Invisible(invisible)) => {
                                     invisible_constructor.get_or_insert(invisible);
                                 }
@@ -19056,7 +19101,10 @@ impl<'a> Checker<'a> {
                             } else {
                                 ConstructorPriorityTier::Low
                             },
-                            selected: deferred_scope_constructor,
+                            selected: deferred_scope_constructor.map_or(
+                                ConstructorPreselection::Open,
+                                ConstructorPreselection::Selected,
+                            ),
                         },
                     ) {
                         Ok(LibraryConstructorSelection::Selected) => {
@@ -19073,7 +19121,7 @@ impl<'a> Checker<'a> {
                                 bare_alias_target,
                             );
                         }
-                        Ok(LibraryConstructorSelection::Rejected) => return Ty::Error,
+                        Ok(LibraryConstructorSelection::Rejected(result)) => return result,
                         Ok(LibraryConstructorSelection::Invisible(invisible)) => {
                             invisible_constructor.get_or_insert(invisible);
                         }
@@ -19722,8 +19770,9 @@ impl<'a> Checker<'a> {
         // Legal *nested* shadowing (`val x` inside a block, shadowing an outer `val x`) lowers
         // fine — each declaration gets a fresh slot and the lowering's scope is truncated at block
         // exit, restoring the outer mapping (verified). Only a same-scope *redeclaration* is
-        // rejected (kotlinc errors on it too — conflicting declarations).
-        if self.declared_in_current_scope(scope, &name) {
+        // rejected (kotlinc errors on it too — conflicting declarations). An unnamed local
+        // (`val _ = ...`) binds no name, so it can neither conflict nor be conflicted with.
+        if name != "_" && self.declared_in_current_scope(scope, &name) {
             self.diags.error(
                 self.file.stmt_spans[s.0 as usize],
                 format!("krusty: conflicting local declaration '{name}'"),
@@ -21084,6 +21133,27 @@ impl<'a> Checker<'a> {
                         .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>();
+            let written = f
+                .type_param_bounds
+                .iter()
+                .map(|(_, bound)| {
+                    self.resolved_type_bounds
+                        .get(&(bound.span.lo, bound.span.hi))
+                        .map_or(Ty::Error, |resolved| resolved.0)
+                })
+                .collect::<Vec<_>>();
+            let identities = f
+                .type_params
+                .iter()
+                .map(|name| semantic_tparams.bound(name).ty_param_name().unwrap_or(name))
+                .collect::<Vec<_>>();
+            self.report_cyclic_type_parameter_bounds(
+                &f.type_params,
+                &identities,
+                &f.type_param_bounds,
+                &written,
+                true,
+            );
             source_generic_signature_from_tparams(
                 f,
                 &semantic_tparams,
@@ -21606,7 +21676,7 @@ mod tests {
         assert!(class.value_field.is_none());
         assert!(!class.methods.contains_key("component1"));
         assert!(!class.methods.contains_key("copy"));
-        assert!(!symbols.enums.contains_key(&type_name("Box")));
+        assert!(symbols.enum_entries_of(type_name("Box")).is_none());
         assert_eq!(class.ctor_params, [Ty::Int]);
         let value = &class.declared_props["value"];
         assert_eq!(value.visibility, Visibility::Public);
@@ -30241,6 +30311,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         local_decl_types: HashMap::default(),
         property_decl_types: HashMap::default(),
         explicit_backing_field_types: HashMap::default(),
+        equality_bound_parameters: HashMap::default(),
         contextual_constructor_signatures: HashMap::default(),
         selected_generic_calls: HashMap::default(),
         inferred_expression_intersections: HashMap::default(),
@@ -31721,6 +31792,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         local_decl_types,
         property_decl_types,
         explicit_backing_field_types,
+        equality_bound_parameters,
         selected_generic_calls,
         selected_value_smartcasts,
         selected_numeric_conversions,
@@ -32021,6 +32093,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         local_decl_types,
         property_decl_types,
         explicit_backing_field_types,
+        equality_bound_parameters,
         checked_source_member_results: inferred_source_member_rets,
         checked_declaration_results: inferred_stable_declaration_rets,
         inferred_declaration_publications,
@@ -32763,6 +32836,7 @@ struct Checker<'a> {
     local_decl_types: HashMap<StmtId, Ty>,
     property_decl_types: HashMap<(u32, u32), Ty>,
     explicit_backing_field_types: HashMap<(u32, u32), Ty>,
+    equality_bound_parameters: HashMap<(u32, u32), Ty>,
     /// Generic result templates for constructor spellings whose selected classifier does not carry
     /// the complete source-level substitution. The important case is an omitted generic typealias
     /// application (`Alias()`, `Alias<Y> = Box<Y>`): contextual argument inference must constrain
@@ -33904,46 +33978,6 @@ impl<'a> Checker<'a> {
     /// its own assignability oracle.
     fn semantic_common_supertype(&self, a: Ty, b: Ty) -> Option<Ty> {
         semantic_common_supertype(&self.fed_source(), self, a, b)
-    }
-
-    /// Exact branch lower bounds for a conditional used as a generic-call argument. The ordinary
-    /// expression slot keeps Kotlin's denotable common-type approximation, while inference consumes
-    /// the branch constraints that produced it. Nested conditionals flatten into the same
-    /// source-argument ordinal so a later bound failure is still reported on that argument.
-    fn conditional_inference_inputs(&self, expression: ExprId) -> Vec<Ty> {
-        let Expr::If {
-            then_branch,
-            else_branch: Some(else_branch),
-            ..
-        } = self.file.expr(expression)
-        else {
-            return self
-                .expr_types
-                .get(expression.0 as usize)
-                .copied()
-                .into_iter()
-                .collect();
-        };
-        [*then_branch, *else_branch]
-            .into_iter()
-            .flat_map(|branch| self.conditional_inference_inputs(branch))
-            .collect()
-    }
-
-    fn conditional_branches_admit_expected(&self, expression: ExprId, expected: Ty) -> bool {
-        matches!(
-            self.file.expr(expression),
-            Expr::If {
-                else_branch: Some(_),
-                ..
-            }
-        ) && self
-            .conditional_inference_inputs(expression)
-            .into_iter()
-            .all(|branch| {
-                branch == Ty::Nothing
-                    || (branch != Ty::Error && self.receiver_is_assignable(branch, expected))
-            })
     }
 
     /// The checker's own binary-operator result: shared algebra, the checker's lookup context, and
@@ -35504,7 +35538,7 @@ impl<'a> Checker<'a> {
                 .zip(&argument_kinds)
                 .zip(&whole_arrays)
                 .enumerate()
-                .filter_map(
+                .flat_map(
                     |(argument, (((parameter, _raw_actual), kind), named_whole_array))| {
                         if self
                             .unbound_contextual_result_signature(args[argument])
@@ -35563,9 +35597,27 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         }
-                        Some((argument, declaration_parameter, actual, whole_array))
+                        // Each conditional branch passes through the same argument view as a
+                        // whole argument: integer-literal adaptation, SAM/function shape.
+                        let branches = match conditional_branch::conditional_argument_branches(
+                            self.file,
+                            args[argument],
+                        ) {
+                            Some(branches) if !whole_array => branches
+                                .into_iter()
+                                .map(|branch| {
+                                    self.call_arg_kind(scope, branch)
+                                        .inference_type(&source, declared)
+                                })
+                                .collect(),
+                            _ => vec![actual],
+                        };
+                        Some(branches.into_iter().map(move |actual| {
+                            (argument, declaration_parameter, actual, whole_array)
+                        }))
                     },
                 )
+                .flatten()
                 .collect::<Vec<_>>();
             // Kotlin integer literals are adaptable constraints, not fixed primitive types. Let
             // non-literal arguments solve first; when they already fix every formal touched by a
@@ -35594,6 +35646,14 @@ impl<'a> Checker<'a> {
                     ),
                     candidate.call_sig.vararg_index,
                 );
+            let expected_literal_targets = expected.and_then(|expected| {
+                crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
+                    &source,
+                    &signature,
+                    expected,
+                    |actual, bound| self.receiver_is_assignable(actual, bound),
+                )
+            });
             let adapted_inference_actuals = inference_actuals
                 .iter()
                 .filter_map(|&(argument, parameter, actual, whole_array)| {
@@ -35617,16 +35677,34 @@ impl<'a> Checker<'a> {
                             [actual],
                             candidate.call_sig.vararg_index,
                         );
+                    let adapts_to = |target: Ty| {
+                        kind.adapts_integer_literal_to(self.integer_literal_semantic_type(target))
+                    };
                     let adapts_to_existing = !literal.bindings.is_empty()
                         && literal.bindings.keys().all(|formal| {
-                            preliminary.bindings.get(formal).is_some_and(|&target| {
-                                kind.adapts_integer_literal_to(
-                                    self.integer_literal_semantic_type(target),
-                                )
-                            })
+                            preliminary
+                                .bindings
+                                .get(formal)
+                                .is_some_and(|&target| adapts_to(target))
                         });
                     if adapts_to_existing {
                         return None;
+                    }
+                    // The literal is an adaptable lower bound, not a fixed `Int`/`UInt`: when the
+                    // result expectation bounds its formal by a type the literal adapts to
+                    // (`List<UShort?>`, `Array<Short?>`), it constrains the formal as that type,
+                    // joining the other evidence (`null`) under the same expected upper bound.
+                    if let Some(target) = literal.bindings.keys().find_map(|formal| {
+                        expected_literal_targets
+                            .as_ref()
+                            .and_then(|targets| targets.get(formal))
+                            .copied()
+                            .filter(|&target| adapts_to(target.non_null()))
+                    }) {
+                        if literal.bindings.len() == 1 {
+                            actual.1 = self.integer_literal_semantic_type(target.non_null());
+                            return Some(actual);
+                        }
                     }
                     // When a literal is the only evidence for a directly declared type
                     // parameter, its scalar upper bound is its contextual type. This keeps
@@ -54961,13 +55039,13 @@ impl<'a> Checker<'a> {
                 }
                 let mut bound_represented = None;
                 if unbound.is_none() {
-                    // Bound: a reference receiver, or a boxable primitive (boxed then `getClass`).
+                    // Bound: a reference receiver, or a builtin signed or unsigned scalar value
+                    // (its runtime class is that classifier).
                     let rt = self.expr(scope, recv);
                     if rt == Ty::Error {
                         return self.set(e, Ty::Error);
                     }
-                    let boxable = rt.jvm_boxed_ref().is_some();
-                    if !rt.is_reference() && !boxable {
+                    if !rt.is_reference() && !rt.is_builtin_scalar() {
                         return unsupported(self);
                     }
                     // The runtime class of a VALUE may be a proper subtype of its static type.

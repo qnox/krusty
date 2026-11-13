@@ -8,7 +8,10 @@
 //! here, by the class's identity, under the symbols its object defines for that purpose; the later
 //! file of the same source module reads the record ([`krusty::backend::class_tables::LaidOutSuperclass`]
 //! is the part the shared tables read). A record does not outlive its source module: the slot plan
-//! numbering the vtable and the callable identities naming its methods are that module's.
+//! numbering the vtable and the callable identities naming its methods are that module's. A
+//! dependency class a support unit materializes is the exception: the plan numbers it from its
+//! provider's declarations alike in every module, by provider identities, so its record serves the
+//! rest of the program.
 
 use cranelift_codegen::ir::Signature;
 use krusty::backend::class_tables::LaidOutSuperclass;
@@ -33,6 +36,8 @@ pub(crate) enum ObjectFunction {
 pub(crate) struct LaidOutClass {
     /// What the shared class tables read of it.
     pub(crate) table: LaidOutSuperclass,
+    /// The symbol of its descriptor, which a subclass's descriptor points at.
+    pub(crate) descriptor: String,
     /// The first byte after its last field, where a subclass's own fields begin.
     pub(crate) fields_end: u32,
     /// Every reference field of it, inherited ones first: what the collector traces.
@@ -76,28 +81,43 @@ pub(crate) enum DependencyImplementation {
     },
 }
 
-/// The classes laid out so far in the current source module, by identity.
+/// The classes laid out so far in the current source module, and the dependency classes support
+/// units materialized for the whole program, by identity.
 #[derive(Debug, Default)]
 pub(crate) struct LaidOutClasses {
     source_module: Option<String>,
     classes: HashMap<TypeName, LaidOutClass>,
+    /// A dependency class is materialized once for the program, by provider identities, so its
+    /// record outlives the source module whose file selected its support unit.
+    dependencies: HashMap<TypeName, LaidOutClass>,
+    /// Whether the file being laid out is a dependency support unit.
+    support: bool,
 }
 
 impl LaidOutClasses {
-    /// Begin (or continue) one source module, forgetting another module's classes.
-    pub(crate) fn enter_source_module(&mut self, module_name: &str) {
+    /// Begin (or continue) one source module's file, or with `support` a dependency support unit
+    /// it selected, forgetting another module's classes.
+    pub(crate) fn enter_source_module(&mut self, module_name: &str, support: bool) {
+        self.support = support;
         if self.source_module.as_deref() != Some(module_name) {
             self.source_module = Some(module_name.to_owned());
             self.classes.clear();
         }
     }
 
+    /// The record of `class`: a class of the current source module, or a dependency class.
     pub(crate) fn get(&self, class: TypeName) -> Option<&LaidOutClass> {
-        self.classes.get(&class)
+        self.classes
+            .get(&class)
+            .or_else(|| self.dependencies.get(&class))
     }
 
     /// Record `class` as its declaring file laid it out.
     pub(crate) fn insert(&mut self, class: TypeName, laid_out: LaidOutClass) {
-        self.classes.insert(class, laid_out);
+        if self.support {
+            self.dependencies.insert(class, laid_out);
+        } else {
+            self.classes.insert(class, laid_out);
+        }
     }
 }

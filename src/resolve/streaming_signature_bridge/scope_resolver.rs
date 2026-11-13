@@ -89,11 +89,11 @@ impl ProductionSignatureSemantics<'_> {
         );
         if let Some(access) = access {
             let display = superclass.render().replace(['/', '$'], ".");
-            self.record_classifier_access_diagnostic_at(
+            self.record_unconditional_diagnostic_at(
                 scope.owner,
                 scope.source,
                 callee,
-                superclass,
+                crate::diag::DiagnosticIdentity::classifier_access(callee, superclass),
                 super::super::inaccessible_classifier_message(&display, access),
             );
         }

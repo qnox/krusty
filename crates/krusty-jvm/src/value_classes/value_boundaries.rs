@@ -11,13 +11,25 @@ use krusty::types::Ty;
 /// identity, and every remaining read keeps the carrier its accessor expects. Any other owner's
 /// accessor — an interface property a value class inherits, read or written through the value
 /// class — dispatches on the box.
-pub(super) fn record_property_receiver_boundary(
+///
+/// The receiver of a bound class literal (`value::class`) asks for the runtime class of that
+/// value, which for a value class is its box: an unboxed carrier is boxed first.
+pub(super) fn record_receiver_boundary(
     ops: &mut Vec<(ExprId, BoxOp)>,
     exprs: &[IrExpr],
     repr_ctx: &ReprCtx<'_>,
     id: ExprId,
     under: &Under,
 ) {
+    if let IrExpr::KClassLiteral {
+        value: Some(value), ..
+    } = &exprs[id as usize]
+    {
+        if let Repr::Unboxed(value_class) = repr_ctx.repr(*value) {
+            ops.push((*value, repr_ctx.box_op(*value, value_class)));
+        }
+        return;
+    }
     let (receiver, owner, read) = match &exprs[id as usize] {
         IrExpr::PropertyRead {
             receiver: Some(receiver),

@@ -88,6 +88,9 @@ pub struct FnMeta {
     /// Index into `params` of a `vararg` parameter — emits `ValueParameter.vararg_element_type`
     /// (f4), the only place vararg-ness survives into metadata.
     pub vararg_index: Option<usize>,
+    /// The parameter a strict-equality `equals` reads as its bound — emits
+    /// `ValueParameter.equality_bound_type` (f9), which a consuming module's override inherits.
+    pub equality_bound: Option<crate::ir::IrEqualityBoundParameter>,
     /// How SOURCE spelled this member's declared types, so a `typealias` becomes
     /// `Type.abbreviated_type` (see [`crate::spelling`]). Default for a SYNTHESIZED member
     /// (`componentN`, `copy`, `equals`), which has no source spelling at all.
@@ -131,6 +134,7 @@ impl FnMeta {
             receiver: None,
             param_modifiers: Vec::new(),
             vararg_index: None,
+            equality_bound: None,
             spellings: crate::spelling::DeclaredSpellings::default(),
             annotations: Default::default(),
             param_annotations: Vec::new(),
@@ -245,6 +249,9 @@ pub struct ClassTail<'a> {
     /// with a default (`routes: List<String> = emptyList()`) gets the flag, as kotlinc emits. Empty ⇒
     /// no param has a default.
     pub ctor_param_defaults: &'a [bool],
+    /// Closed defaults of annotation constructor parameters, when the carrier's format supports
+    /// `ValueParameter.annotation_parameter_default_value`. Ordinary constructors carry none.
+    pub annotation_param_defaults: Option<&'a [Option<crate::ir::AnnoValue>]>,
     /// Per-primary-constructor-parameter class type-parameter index, for a parameter declared as a
     /// bare type parameter (`class C<T>(val a: T)` → `[Some(0)]`).
     pub ctor_param_tparams: &'a [Option<u32>],
@@ -329,6 +336,7 @@ impl Default for ClassTail<'_> {
             type_aliases: &[],
             secondary_ctors: &[],
             ctor_param_defaults: &[],
+            annotation_param_defaults: None,
             ctor_param_tparams: &[],
             ctor_param_annotations: &[],
             inline_underlying: None,

@@ -18,7 +18,8 @@ use crate::fx_hash::{HashMap, HashSet};
 use super::module_classes::{ModuleClass, ModuleClasses, ModuleMember};
 use super::module_interfaces::ModuleInterfaces;
 use crate::fir::{
-    CallableId, PropertyId, ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget,
+    CallableId, ExternalCallableId, PropertyId, ResolvedFunctionOverrideTarget,
+    ResolvedPropertyOverrideTarget,
 };
 use crate::types::{SemanticCallRole, Ty, TypeName};
 
@@ -31,6 +32,37 @@ pub enum PlanKey {
     Callable(CallableId),
     Getter(PropertyId),
     Setter(PropertyId),
+    /// A member of a dependency class a module class extends, by its provider identity. A
+    /// dependency property is keyed by its getter's identity.
+    DependencyCallable(ExternalCallableId),
+    DependencyGetter(ExternalCallableId),
+    DependencySetter(ExternalCallableId),
+}
+
+impl PlanKey {
+    /// The key of the function `callable`.
+    pub(crate) fn function(callable: ResolvedFunctionOverrideTarget) -> Self {
+        match callable {
+            ResolvedFunctionOverrideTarget::Module(callable) => Self::Callable(callable),
+            ResolvedFunctionOverrideTarget::External(callable) => {
+                Self::DependencyCallable(callable)
+            }
+        }
+    }
+
+    /// The key of the getter, or with `setter` the setter, of `property`.
+    pub(crate) fn accessor(property: ResolvedPropertyOverrideTarget, setter: bool) -> Self {
+        match (property, setter) {
+            (ResolvedPropertyOverrideTarget::Module(property), false) => Self::Getter(property),
+            (ResolvedPropertyOverrideTarget::Module(property), true) => Self::Setter(property),
+            (ResolvedPropertyOverrideTarget::External(property), false) => {
+                Self::DependencyGetter(property)
+            }
+            (ResolvedPropertyOverrideTarget::External(property), true) => {
+                Self::DependencySetter(property)
+            }
+        }
+    }
 }
 
 /// What a planned slot holds, by identity; the declaring file realizes each from its IR.
@@ -71,6 +103,8 @@ pub struct PlannedTable {
     pub superclass: Option<TypeName>,
     /// How many of `entries` the superclass's planned table holds.
     pub(crate) inherited: u32,
+    /// Whether the class is a dependency class, planned from its provider's declarations.
+    pub(crate) dependency: bool,
     pub(crate) entries: Vec<PlannedSlot>,
     pub slots: HashMap<PlanKey, u32>,
     /// Whether the declaring file appends interface-delegation forwarders after `entries`, which
@@ -111,7 +145,7 @@ impl ModuleSlotPlan {
 
     /// Plan every class of `classes`, superclasses first.
     pub fn build(classes: &ModuleClasses, representation: &dyn Representation) -> Self {
-        let carriers: HashMap<CallableId, (&[Ty], Ty)> = classes
+        let carriers: HashMap<ResolvedFunctionOverrideTarget, (&[Ty], Ty)> = classes
             .iter()
             .flat_map(|(_, class)| class.members.iter())
             .filter_map(|member| match member {
@@ -132,7 +166,10 @@ impl ModuleSlotPlan {
         };
         // Planning is a pure function of each class, so the order classes are visited in only
         // decides which table is computed first.
-        for (name, _) in classes.iter() {
+        for (name, class) in classes.iter() {
+            if class.dependency && representation.owns_base(name) {
+                continue;
+            }
             let _ = planner.plan(name);
         }
         let mut signatures: HashMap<PlanKey, (Box<[Ty]>, Ty)> = HashMap::default();
@@ -157,7 +194,7 @@ impl ModuleSlotPlan {
                         } else {
                             (parameters.clone(), *result)
                         };
-                        signatures.insert(PlanKey::Callable(*callable), signature);
+                        signatures.insert(PlanKey::function(*callable), signature);
                     }
                     ModuleMember::Property {
                         property,
@@ -167,11 +204,11 @@ impl ModuleSlotPlan {
                         ..
                     } => {
                         signatures.insert(
-                            PlanKey::Getter(*property),
+                            PlanKey::accessor(*property, false),
                             (parameters.clone(), *getter_value),
                         );
                         let setter = parameters.iter().copied().chain([*value]).collect();
-                        signatures.insert(PlanKey::Setter(*property), (setter, Ty::Unit));
+                        signatures.insert(PlanKey::accessor(*property, true), (setter, Ty::Unit));
                     }
                 }
             }
@@ -244,7 +281,7 @@ impl ModuleSlotPlan {
 struct Planner<'c> {
     classes: &'c ModuleClasses,
     representation: &'c dyn Representation,
-    carriers: HashMap<CallableId, (&'c [Ty], Ty)>,
+    carriers: HashMap<ResolvedFunctionOverrideTarget, (&'c [Ty], Ty)>,
     tables: HashMap<TypeName, Result<PlannedTable, Unsupported>>,
 }
 
@@ -264,10 +301,13 @@ impl Planner<'_> {
 
     fn table(&mut self, name: TypeName, class: &ModuleClass) -> Result<PlannedTable, Unsupported> {
         let qualified = || name.render().replace('/', ".");
-        let planned_superclass = class
-            .superclass
-            .filter(|&superclass| self.classes.class(superclass).is_some());
+        // A base the target's runtime owns is laid out by the runtime, even where the plan also
+        // holds its dependency declaration.
+        let planned_superclass = class.superclass.filter(|&superclass| {
+            !self.representation.owns_base(superclass) && self.classes.class(superclass).is_some()
+        });
         let parent = match class.superclass {
+            Some(superclass) if self.representation.owns_base(superclass) => None,
             Some(superclass) if self.classes.class(superclass).is_some() => {
                 Some(self.plan(superclass).map_err(|_| {
                     format!(
@@ -276,7 +316,6 @@ impl Planner<'_> {
                     )
                 })?)
             }
-            Some(superclass) if self.representation.owns_base(superclass) => None,
             Some(superclass) => {
                 return Err(format!(
                     "a superclass declared outside this module (`{}` extends `{}`)",
@@ -353,6 +392,7 @@ impl Planner<'_> {
         Ok(PlannedTable {
             superclass: planned_superclass,
             inherited,
+            dependency: class.dependency,
             entries,
             slots,
             appends_forwarders: class.delegates_interfaces,
@@ -362,7 +402,7 @@ impl Planner<'_> {
     fn function(
         &self,
         class: &ModuleClass,
-        callable: CallableId,
+        callable: ResolvedFunctionOverrideTarget,
         carriers: (&[Ty], Ty),
         entries: &mut Vec<PlannedSlot>,
         slots: &mut HashMap<PlanKey, u32>,
@@ -387,16 +427,19 @@ impl Planner<'_> {
         let mut class_replaces = None;
         let mut bridged = Vec::new();
         for edge in &edges {
-            let ResolvedFunctionOverrideTarget::Module(overridden) = edge.overridden else {
-                continue;
-            };
             if edge.overridden_is_interface {
                 continue;
             }
-            let slot = slots
-                .get(&PlanKey::Callable(overridden))
-                .copied()
-                .ok_or("an override with no slot to replace")?;
+            let overridden = edge.overridden;
+            let slot = match (slots.get(&PlanKey::function(overridden)), overridden) {
+                (Some(&slot), _) => slot,
+                // A dependency member no planned class declares is a dependency class's member
+                // that is no table's: one of `kotlin.Any`'s, numbered by its role above.
+                (None, ResolvedFunctionOverrideTarget::External(_)) => continue,
+                (None, ResolvedFunctionOverrideTarget::Module(_)) => {
+                    return Err("an override with no slot to replace".into())
+                }
+            };
             let declared = self
                 .carriers
                 .get(&overridden)
@@ -411,21 +454,33 @@ impl Planner<'_> {
         let slot = place(
             entries,
             fixed.or(class_replaces),
-            PlannedSlot::Member(PlanKey::Callable(callable)),
+            PlannedSlot::Member(PlanKey::function(callable)),
         );
-        slots.insert(PlanKey::Callable(callable), slot);
+        slots.insert(PlanKey::function(callable), slot);
+        if function_bridge.is_none() && bridged.is_empty() {
+            return Ok(());
+        }
+        // A bridge is a function of the declaring file, converting to and forwarding from module
+        // declarations; a dependency class's own overrides are carried as they are declared.
+        let module_callable = |callable| match callable {
+            ResolvedFunctionOverrideTarget::Module(callable) => Ok(callable),
+            ResolvedFunctionOverrideTarget::External(_) => {
+                Err("an override carried differently from the dependency member it overrides")
+            }
+        };
+        let target = module_callable(callable)?;
         if let Some(arity) = function_bridge {
             entries[FUNCTION_SLOT as usize] = PlannedSlot::FunctionBridge {
                 arity,
                 target_slot: slot,
-                target: callable,
+                target,
             };
         }
         for (base_slot, declared) in bridged {
             entries[base_slot as usize] = PlannedSlot::Bridge {
-                declared,
+                declared: module_callable(declared)?,
                 target_slot: slot,
-                target: callable,
+                target,
             };
         }
         Ok(())
@@ -434,41 +489,36 @@ impl Planner<'_> {
     fn accessor(
         &self,
         class: &ModuleClass,
-        property: PropertyId,
+        property: ResolvedPropertyOverrideTarget,
         setter: bool,
         entries: &mut Vec<PlannedSlot>,
         slots: &mut HashMap<PlanKey, u32>,
     ) -> Result<(), Unsupported> {
-        // The direct base's edge is the one whose slot is replaced, so it is preferred.
+        let key = |property| PlanKey::accessor(property, setter);
+        // The direct base's edge is the one whose slot is replaced, so it is preferred. A
+        // dependency property no planned class declares is not a table's.
         let mut edges = class
             .property_overrides
             .iter()
             .filter(|edge| {
                 edge.implementation == property
                     && !edge.overridden_is_interface
-                    && matches!(edge.overridden, ResolvedPropertyOverrideTarget::Module(_))
+                    && match edge.overridden {
+                        ResolvedPropertyOverrideTarget::Module(_) => true,
+                        ResolvedPropertyOverrideTarget::External(_) => {
+                            slots.contains_key(&PlanKey::accessor(edge.overridden, false))
+                        }
+                    }
             })
             .collect::<Vec<_>>();
         edges.sort_by_key(|edge| edge.depth != 1);
-        let key = |property| {
-            if setter {
-                PlanKey::Setter(property)
-            } else {
-                PlanKey::Getter(property)
-            }
-        };
         let replaced = match edges.first() {
-            Some(edge) => {
-                let ResolvedPropertyOverrideTarget::Module(overridden) = edge.overridden else {
-                    unreachable!("filtered to module properties above");
-                };
-                match slots.get(&key(overridden)) {
-                    Some(&slot) => Some((slot, edge.declared_type, edge.implementation_type)),
-                    // A `val` overridden by a `var` adds a setter the base never had.
-                    None if setter => None,
-                    None => return Err("a property override with no slot to replace".into()),
-                }
-            }
+            Some(edge) => match slots.get(&key(edge.overridden)) {
+                Some(&slot) => Some((slot, edge.declared_type, edge.implementation_type)),
+                // A `val` overridden by a `var` adds a setter the base never had.
+                None if setter => None,
+                None => return Err("a property override with no slot to replace".into()),
+            },
             None => None,
         };
         let entry = PlannedSlot::Member(key(property));

@@ -39,6 +39,7 @@ use super::hashing::Hashing;
 use super::host::Host;
 use super::identity::IdentityObjects;
 use super::objects::ObjectRoot;
+use super::string_builders::StringBuilders;
 use super::type_objects::{TypeDescription, TypeObject, TypeObjects};
 
 /// Where a host write's bytes are staged in linear memory. The first 16 bytes are left for the
@@ -71,6 +72,8 @@ pub(super) struct Runtime {
     /// The object model's root types and `kotlin.Any`'s members.
     pub(super) objects: ObjectRoot,
     pub(super) identity: IdentityObjects,
+    /// `kotlin.text.StringBuilder`, which the runtime lays out.
+    pub(super) string_builders: StringBuilders,
     /// Kotlin's `hashCode()` rules.
     pub(super) hashing: Hashing,
     pub(super) exceptions: ExceptionTransport,
@@ -137,6 +140,8 @@ impl Runtime {
         let array_to_string = module.declare();
         let arrays =
             ArrayObjects::declare(module, &mut objects, &identity, references, array_to_string);
+        let string_builders =
+            StringBuilders::declare(module, &mut objects, &identity, chars, string);
         let object_equals = module.declare();
         let callable_references = CallableReferences::declare(module, &objects, object_equals);
         let string_concat = module.declare();
@@ -170,6 +175,7 @@ impl Runtime {
             i64_div: module.declare(),
             objects,
             identity,
+            string_builders,
             hashing,
             class_tokens,
             exceptions,

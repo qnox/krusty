@@ -128,18 +128,24 @@ impl Backend for WasmBackend {
         true
     }
 
+    fn lowers_coroutines_on_common_ir(&self) -> bool {
+        true
+    }
+
     fn numbers_slots(&self) -> bool {
         true
     }
 
-    /// The runtime lays out text and its exception classes itself: a library body of one of
-    /// their members reads a layout this target does not have, and a library class extending
-    /// one of the exceptions delegates to the runtime's constructor.
+    /// The runtime lays out text, its builders and its exception classes itself: a library
+    /// body of one of their members reads a layout this target does not have, and a library
+    /// class extending one of the exceptions delegates to the runtime's constructor.
     fn represents_dependency_classifier(
         &self,
         classifier: krusty::backend::DependencyClassifier,
     ) -> bool {
-        classifier == krusty::types::wk::string() || lower::runtime_lays_out(classifier)
+        classifier == krusty::types::wk::string()
+            || lower::is_string_builder(classifier)
+            || lower::runtime_lays_out(classifier)
     }
 
     fn realizes_dependency_intrinsic(
@@ -218,6 +224,8 @@ impl Backend for WasmBackend {
             started.callables.enter_source_module(file.module_name);
             started.properties.enter_source_module(file.module_name);
             started.classes.enter_source_module(file.module_name);
+        } else {
+            started.classes.enter_dependency_support();
         }
         if state
             .slot_plan

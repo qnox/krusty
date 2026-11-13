@@ -32,7 +32,7 @@ use super::super::property_registry::{MemberProperty, MemberPropertyDefinition, 
 use super::{carrier, Body, FileContext, Unsupported, STRING};
 
 /// The heap type of the runtime's `String`, type 1 (see `STRING`).
-const STRING_HEAP: HeapType = HeapType::Concrete(1);
+pub(super) const STRING_HEAP: HeapType = HeapType::Concrete(1);
 
 mod override_bridges;
 mod unrealized_members;
@@ -251,7 +251,12 @@ impl Body<'_> {
         classifier: krusty::types::TypeName,
     ) -> Result<(), Unsupported> {
         if self.ir.class_id_by_name(classifier).is_none() {
-            if let Some(entry) = self.calls.dependency_singleton(classifier) {
+            if let Some(entry) =
+                self.calls
+                    .instance(&krusty::backend::instance_links::InstanceEntry::Object(
+                        classifier,
+                    ))
+            {
                 self.code.call(entry);
                 return Ok(());
             }
@@ -296,8 +301,12 @@ impl Body<'_> {
         receiver: u32,
         args: &[u32],
     ) -> Result<(), Unsupported> {
+        let tables = &self.file_classes()?.tables;
+        if tables.table(class).direct_methods.contains(&function) {
+            return self.direct_method_call(class, function, receiver, args);
+        }
         let key = function_key(self.ir, class, function);
-        let slot = self.file_classes()?.tables.slot(class, &key);
+        let slot = tables.slot(class, &key);
         if slot.is_none() && self.ir.classes[class as usize].is_interface {
             let call = self
                 .ir
@@ -328,6 +337,27 @@ impl Body<'_> {
             return Err("a call whose arguments do not match its parameters".into());
         }
         self.dispatch(class, slot, receiver, args, &params, Some(function))
+    }
+
+    /// Call a method its class's table does not dispatch: a member of a dependency class that no
+    /// subclass can override, such as its constructor initializer or a final member.
+    fn direct_method_call(
+        &mut self,
+        class: ClassId,
+        function: FunId,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        if self.ir.functions[function as usize].params.len() != args.len() {
+            return Err("a call whose arguments do not match its parameters".into());
+        }
+        self.value(receiver, self.object_type(class))?;
+        for (parameter, &arg) in args.iter().enumerate() {
+            self.function_argument(function, parameter as u32, arg)?;
+        }
+        let function = self.emitted_function(function)?;
+        self.code.call(function);
+        Ok(())
     }
 
     /// Dispatch a member-extension property's recorded accessor. Its extension receiver and any

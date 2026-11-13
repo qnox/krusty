@@ -1085,12 +1085,14 @@ jobs:
         run: |
           echo "GRADLE_USER_HOME=$RUNNER_TEMP/krusty-gradle-user-home" >> "$GITHUB_ENV"
           echo "version=$(sed -n 's/^distributionUrl=.*gradle-\(.*\)-bin\.zip$/\1/p' tools/krusty-gradle/gradle/wrapper/gradle-wrapper.properties)" >> "$GITHUB_OUTPUT"
-      # One dependency cache per Gradle version, shared by every job that runs that Gradle: the
-      # resolved artifacts and the wrapper distribution only. Transforms, instrumented jars and the
-      # Kotlin DSL workspace are rebuilt, since the plugin under test changes them every run. A job
-      # saves a new generation only when it downloaded files the restored one lacked, so the
-      # entry stops changing once it holds what every job on that Gradle reads; restore takes the
-      # newest generation and the older ones are never read again.
+      # One cache per Gradle version, shared by every job that runs that Gradle: the resolved
+      # artifacts, the wrapper distribution, and the transforms, instrumented jars and generated API
+      # jars built from them (without these a full lane's tests ran about 150 s longer on the slower
+      # pool). The Kotlin DSL workspace is rebuilt. A job saves a new generation only when it
+      # downloaded artifacts the restored one lacked: the transforms of the plugin under test change
+      # every run and never cause a save on their own. The entry stops changing once it holds what
+      # every job on that Gradle reads; restore takes the newest generation and the older ones are
+      # never read again.
       - &restore-gradle-home
         name: restore Gradle ${{ steps.gradle-home.outputs.version }} dependencies
         id: gradle-deps
@@ -1098,8 +1100,12 @@ jobs:
         with:
           path: &gradle-home-paths |
             ${{ runner.temp }}/krusty-gradle-user-home/caches/modules-2
+            ${{ runner.temp }}/krusty-gradle-user-home/caches/transforms-*
+            ${{ runner.temp }}/krusty-gradle-user-home/caches/*/transforms
+            ${{ runner.temp }}/krusty-gradle-user-home/caches/jars-*
+            ${{ runner.temp }}/krusty-gradle-user-home/caches/*/generated-gradle-jars
             ${{ runner.temp }}/krusty-gradle-user-home/wrapper/dists
-            !${{ runner.temp }}/krusty-gradle-user-home/caches/modules-2/*.lock
+            !${{ runner.temp }}/krusty-gradle-user-home/caches/**/*.lock
             !${{ runner.temp }}/krusty-gradle-user-home/caches/modules-2/gc.properties
           key: gradle-${{ steps.gradle-home.outputs.version }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}
           restore-keys: |

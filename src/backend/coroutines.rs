@@ -24,6 +24,7 @@ mod bottom_completion;
 mod continuation_parameters;
 mod control_flow;
 mod hoisting;
+mod label_reentry;
 mod statement_normalization;
 mod suspension_points;
 mod value_namespace;
@@ -35,6 +36,7 @@ pub use bottom_completion::{suspension_completion, unwrap_suspend_cast, Suspensi
 pub use continuation_parameters::add_continuation_parameters;
 pub use control_flow::{expr_contains_owned_loop_jump, expr_has_return, stmt_diverges};
 pub use hoisting::{hoist_spliced_inline_bodies, hoist_suspensions};
+pub use label_reentry::{split_at_suspensions, MachineStorage, ReentryDecline};
 pub use statement_normalization::{
     normalize_block_inits, normalize_statement_try_results, split_unit_conditional_returns,
 };
