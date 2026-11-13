@@ -647,13 +647,6 @@ impl DependencyBodyUnit {
         }
     }
 
-    /// The enum classes this unit materialized, whose constants it exports.
-    pub(crate) fn materialized_enums(&self) -> impl Iterator<Item = crate::ir::ClassId> + '_ {
-        let mut classes = self.enum_classes.values().copied().collect::<Vec<_>>();
-        classes.sort_unstable();
-        classes.into_iter()
-    }
-
     /// Classes owned by this closed unit, keyed by their authenticated constructor.
     pub(crate) fn materialized_classes(
         &self,
@@ -915,6 +908,56 @@ impl CallLinker for Linker<'_, '_> {
             params: params.to_vec(),
             ret,
         }))
+    }
+
+    fn range_literal(
+        &self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<Option<crate::fir::FirRangeOperation>, KlibBodyDeclineReason> {
+        let signature = KlibDeclarationSignature::Public(callee.clone());
+        let identity = match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, &signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => identity,
+            // Dependency preparation omitted this call's edge and the loop's protocol edges, so a
+            // loop this unit does not count has nothing to call: the body declines.
+            KlibCalleeOrigin::Missing => {
+                return Err(KlibBodyDeclineReason::UnsupportedCallee(Box::new(
+                    callee.clone(),
+                )))
+            }
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
+                    callee.clone(),
+                )))
+            }
+        };
+        let operation = self
+            .sources
+            .declarations
+            .external_callable_by_dependency(&identity)
+            .and_then(|(_, realization)| {
+                let callable = realization.klib_body_callable()?;
+                callable
+                    .range_construction()
+                    .or(match callable.compiler_intrinsic() {
+                        Some(crate::libraries::CompilerIntrinsic::RangeUntil) => {
+                            Some(crate::fir::FirRangeOperation::Until)
+                        }
+                        Some(crate::libraries::CompilerIntrinsic::RangeDownTo) => {
+                            Some(crate::fir::FirRangeOperation::DownTo)
+                        }
+                        _ => None,
+                    })
+            });
+        match operation {
+            Some(operation) => Ok(Some(operation)),
+            None => Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a `for` loop over a progression that is not a range literal",
+            )),
+        }
     }
 
     fn local_class(

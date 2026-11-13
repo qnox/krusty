@@ -16,13 +16,16 @@ pub(super) struct PrimaryConstructorParameters {
 
 impl Parser<'_> {
     /// Parse `(params)` positioned on the `(`.
-    pub(super) fn parse_primary_constructor_parameters(&mut self) -> PrimaryConstructorParameters {
+    pub(super) fn parse_primary_constructor_parameters(
+        &mut self,
+        annotation_class: bool,
+    ) -> PrimaryConstructorParameters {
         let open = self.tok().span.lo;
         self.bump(); // '('
         let mut parameters = Vec::new();
         self.skip_semicolons();
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-            parameters.push(self.parse_primary_constructor_parameter());
+            parameters.push(self.parse_primary_constructor_parameter(annotation_class));
             self.skip_semicolons();
             if !self.eat(TokenKind::Comma) {
                 break;
@@ -40,7 +43,7 @@ impl Parser<'_> {
         }
     }
 
-    fn parse_primary_constructor_parameter(&mut self) -> PropParam {
+    fn parse_primary_constructor_parameter(&mut self, annotation_class: bool) -> PropParam {
         let declaration_start = self.tok().span.lo;
         let mut annotations = Vec::new();
         let mut annotation_args = Vec::new();
@@ -74,12 +77,7 @@ impl Parser<'_> {
         self.expect(TokenKind::Colon, "':'");
         self.skip_semicolons(); // a wrapped declaration puts the type on the next line (`val x:\n  T`)
         let ty = self.parse_vararg_aware_type(is_vararg);
-        let default = if self.eat(TokenKind::Eq) {
-            self.skip_semicolons();
-            Some(self.parse_expr())
-        } else {
-            None
-        };
+        let default = self.primary_parameter_default(annotation_class);
         let declaration_end = self.t[self.i.saturating_sub(1)].span.hi;
         let has = |modifier: &str| modifiers.iter().any(|m| m == modifier);
         PropParam {

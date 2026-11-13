@@ -108,8 +108,9 @@ impl BodyLowering<'_> {
     /// the calling compilation's subtyping) is the value itself, as in the source. An implicit
     /// cast of a reference to a subtype, or to another parameterization of its classifier, is a
     /// smart cast the declaring compilation proved, which checked FIR lowering lowers as a cast
-    /// to a non-null reference type and as a coercion to a nullable or primitive one. One of a primitive value from its
-    /// nullable type is a coercion. Any other implicit cast declines.
+    /// to a non-null reference type and as a coercion to a nullable or primitive one: a counted
+    /// loop's inlined `Any?` element read back as `Int` is such a coercion. One of a primitive
+    /// value from its nullable type is a coercion. Any other implicit cast declines.
     fn implicit_cast(&mut self, target: Ty, argument: KlibIrExprId, ty: Ty) -> Lowered<ExprId> {
         if target != ty {
             return Err(mismatch("an implicit cast is typed apart from its target"));

@@ -377,12 +377,16 @@ impl<'a> JvmSignatureFormatter<'a> {
         })
     }
 
-    /// Checked inner-class application split consumed by Kotlin metadata emission.
-    pub(super) fn inner_classifier(
+    /// Checked declaration-owned application split consumed by Kotlin metadata emission.
+    pub(super) fn classifier_application(
         &self,
         classifier: TypeName,
-    ) -> Result<Option<krusty::metadata::InnerClassifier>, TypeName> {
-        krusty::metadata::inner_classifiers::inner_classifier(self.ir, self.symbols, classifier)
+    ) -> Result<krusty::metadata::ClassifierApplication, TypeName> {
+        krusty::metadata::classifier_applications::classifier_application(
+            self.ir,
+            self.symbols,
+            classifier,
+        )
     }
 
     /// kotlinc's `isFinalClass`: a final classifier that is not an enum class. An enum is never

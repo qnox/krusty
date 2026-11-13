@@ -11,7 +11,8 @@ use super::{
 };
 use crate::fir::FirTypeParameterRef;
 use crate::ir::{
-    Callee, ExprId, IrBinOp, IrCheckedOperation, IrCheckedSubstitution, IrExpr, IrPropertyDispatch,
+    Callee, ExprId, IrBinOp, IrCheckedOperation, IrCheckedSubstitution, IrExpr, IrIntrinsic,
+    IrPropertyDispatch,
 };
 use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::klib_ir::tree::{
@@ -148,6 +149,48 @@ impl BodyLowering<'_> {
                         source_receiver: operands.receiver_type,
                     },
                 )))
+            }
+            // A numeric conversion, as checked FIR lowers the source conversion.
+            CommonPrimitive::Conversion => self.ir.add_expr(IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::ImplicitCoercion,
+                arg: receiver,
+                type_operand: primitive.ret,
+            }),
+            // `compareTo` of a builtin scalar, as checked FIR lowers a call of it: the comparison
+            // at the provider's common carrier, the operands promoted to a numeric carrier first.
+            CommonPrimitive::Compare { operand } => {
+                let (&[other], &[other_type]) =
+                    (operands.args.as_slice(), operands.params.as_slice())
+                else {
+                    return Err(mismatch(
+                        "a comparison is called with another shape than its declaration's",
+                    ));
+                };
+                let promote = |lowering: &mut Self, value, ty: Ty| {
+                    if ty == operand || matches!(ty, Ty::Char | Ty::Boolean) {
+                        value
+                    } else {
+                        lowering.coercion(value, operand)
+                    }
+                };
+                let receiver = promote(self, receiver, primitive.receiver);
+                let other = promote(self, other, other_type);
+                let relational_operator = matches!(
+                    access.origin.as_deref(),
+                    Some("LT" | "GT" | "LTEQ" | "GTEQ")
+                );
+                let compare = self.ir.add_expr(IrExpr::Call {
+                    callee: Box::new(Callee::Intrinsic {
+                        operation: IrIntrinsic::PrimitiveCompare {
+                            operand,
+                            relational_operator,
+                        },
+                        ret: Ty::Int,
+                    }),
+                    dispatch_receiver: Some(receiver),
+                    args: vec![other],
+                });
+                self.typed(compare, Ty::Int)
             }
             // The source range operator over the receiver and the end bound, as checked FIR
             // lowers `start..end` once the provider's declaration fixed the range it builds.
@@ -670,9 +713,14 @@ impl BodyLowering<'_> {
             .collect::<Vec<_>>();
         let mut args = Vec::with_capacity(params.len());
         let mut omitted = Vec::new();
-        for (index, (argument, &parameter)) in arguments.zip(&params).enumerate() {
+        for (index, (argument, (&declared, &parameter))) in
+            arguments.zip(callee.params.iter().zip(&params)).enumerate()
+        {
             match argument {
-                Some(argument) => args.push(self.operand(argument, parameter)?),
+                Some(argument) => {
+                    let accepted = argument_expectation(declared, parameter, &bindings);
+                    args.push(self.operand(argument, accepted)?);
+                }
                 // A serialized call leaves out exactly the arguments the callee's defaults supply.
                 None if callee.parameter_defaults.get(index).copied() == Some(true) => {
                     omitted.push(u32::try_from(index).expect("a parameter list fits u32"));
@@ -1028,4 +1076,32 @@ fn binary_operands(access: &KlibIrMemberAccess, ty: Ty) -> Lowered<(KlibIrExprId
             "a built-in operator is called with another shape than its declaration's",
         )),
     }
+}
+
+/// The type an argument for the parameter `declared` is checked against, where `parameter` is
+/// `declared` at the call's receiver, which binds the class's type parameters to `bindings`. A
+/// class type parameter the receiver reads through an `in` projection (`E` on a
+/// `MutableCollection<in T>`) has a captured type. kotlinc approximates every occurrence of that
+/// captured type in the parameter to the type parameter's bound when it places the argument's
+/// implicit casts: at the top (`add(element: E)` takes an `Any?`) and inside the parameter type
+/// (`addAll(elements: Collection<E>)` takes a `Collection<Any?>`).
+fn argument_expectation(
+    declared: Ty,
+    parameter: Ty,
+    bindings: &crate::fx_hash::HashMap<String, Ty>,
+) -> Ty {
+    let approximations = bindings
+        .iter()
+        .filter(|(_, binding)| matches!(binding.kind(), crate::types::TyKind::InProjection(_)))
+        .filter_map(|(name, _)| {
+            let bound = declared.type_parameter_occurrence_bound(name)?;
+            Some((name.clone(), bound.substitute_erased(bindings)))
+        })
+        .collect::<Vec<_>>();
+    if approximations.is_empty() {
+        return parameter;
+    }
+    let mut approximated = bindings.clone();
+    approximated.extend(approximations);
+    declared.substitute_erased(&approximated)
 }
