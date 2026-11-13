@@ -959,6 +959,41 @@ impl CallLinker for Linker<'_, '_> {
         }
     }
 
+    fn indices_receiver(
+        &self,
+        getter: &KlibAccessorIdSignature,
+    ) -> Result<Option<crate::libraries::IndicesReceiver>, KlibBodyDeclineReason> {
+        let signature = KlibDeclarationSignature::Accessor(getter.clone());
+        let identity = match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, &signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => identity,
+            // Dependency preparation omitted this getter's edge: the loop is not one this unit counts.
+            KlibCalleeOrigin::Missing => {
+                return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                    "a `for` loop over an `indices` getter without a provider declaration",
+                ))
+            }
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
+                    getter.property().clone(),
+                )))
+            }
+        };
+        Ok(self
+            .sources
+            .declarations
+            .external_callable_by_dependency(&identity)
+            .and_then(|(_, realization)| {
+                match realization.klib_body_callable()?.compiler_intrinsic()? {
+                    crate::libraries::CompilerIntrinsic::Indices(kind) => Some(kind),
+                    _ => None,
+                }
+            }))
+    }
+
     fn local_class(
         &self,
         signature: &KlibIrSignature,
