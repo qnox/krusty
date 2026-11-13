@@ -11,7 +11,8 @@ use super::{
 };
 use crate::fir::FirTypeParameterRef;
 use crate::ir::{
-    Callee, ExprId, IrBinOp, IrCheckedOperation, IrCheckedSubstitution, IrExpr, IrPropertyDispatch,
+    Callee, ExprId, IrBinOp, IrCheckedOperation, IrCheckedSubstitution, IrExpr, IrIntrinsic,
+    IrPropertyDispatch,
 };
 use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::klib_ir::tree::{
@@ -148,6 +149,48 @@ impl BodyLowering<'_> {
                         source_receiver: operands.receiver_type,
                     },
                 )))
+            }
+            // A numeric conversion, as checked FIR lowers the source conversion.
+            CommonPrimitive::Conversion => self.ir.add_expr(IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::ImplicitCoercion,
+                arg: receiver,
+                type_operand: primitive.ret,
+            }),
+            // `compareTo` of a builtin scalar, as checked FIR lowers a call of it: the comparison
+            // at the provider's common carrier, the operands promoted to a numeric carrier first.
+            CommonPrimitive::Compare { operand } => {
+                let (&[other], &[other_type]) =
+                    (operands.args.as_slice(), operands.params.as_slice())
+                else {
+                    return Err(mismatch(
+                        "a comparison is called with another shape than its declaration's",
+                    ));
+                };
+                let promote = |lowering: &mut Self, value, ty: Ty| {
+                    if ty == operand || matches!(ty, Ty::Char | Ty::Boolean) {
+                        value
+                    } else {
+                        lowering.coercion(value, operand)
+                    }
+                };
+                let receiver = promote(self, receiver, primitive.receiver);
+                let other = promote(self, other, other_type);
+                let relational_operator = matches!(
+                    access.origin.as_deref(),
+                    Some("LT" | "GT" | "LTEQ" | "GTEQ")
+                );
+                let compare = self.ir.add_expr(IrExpr::Call {
+                    callee: Box::new(Callee::Intrinsic {
+                        operation: IrIntrinsic::PrimitiveCompare {
+                            operand,
+                            relational_operator,
+                        },
+                        ret: Ty::Int,
+                    }),
+                    dispatch_receiver: Some(receiver),
+                    args: vec![other],
+                });
+                self.typed(compare, Ty::Int)
             }
             // The source range operator over the receiver and the end bound, as checked FIR
             // lowers `start..end` once the provider's declaration fixed the range it builds.

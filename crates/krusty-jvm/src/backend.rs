@@ -1790,8 +1790,9 @@ pub fn facade_package_metadata_from_ir(
         .map(krusty::metadata::declaration_records::package_alias)
         .collect::<Vec<_>>();
     let approximate = |ty| krusty::metadata::declaration_approximation::approximate(symbols, ty);
-    let inner_classifier =
-        |classifier| krusty::metadata::inner_classifiers::inner_classifier(ir, symbols, classifier);
+    let classifier_application = |classifier| {
+        krusty::metadata::classifier_applications::classifier_application(ir, symbols, classifier)
+    };
     build_facade_metadata(
         FacadeMembers {
             functions,
@@ -1802,7 +1803,7 @@ pub fn facade_package_metadata_from_ir(
         param_assertions,
         krusty::metadata::MetadataTypeLookups {
             intersection_approximation: Some(&approximate),
-            inner_classifiers: &inner_classifier,
+            classifier_applications: &classifier_application,
             local_classifiers,
             enum_entry_bodies,
             anonymous_classifiers,

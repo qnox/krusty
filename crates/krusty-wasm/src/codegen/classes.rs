@@ -55,7 +55,7 @@ use krusty::backend::class_tables::{
 use krusty::backend::local_properties::RealizedLocalPropertyAccess;
 use krusty::backend::BackendClassifierSource;
 use krusty::fir::{CallableId, PropertyId, ResolvedPropertyOverrideTarget};
-use krusty::ir::{ClassId, FunId, IrClass, IrExpr, IrFile, IrLocalPropertyLayout};
+use krusty::ir::{ClassId, FunId, IrClass, IrFile, IrLocalPropertyLayout};
 use krusty::types::{Ty, TypeName};
 
 use super::super::encode::{
@@ -530,14 +530,10 @@ pub(super) fn module_plan(
 fn check_supported(ir: &IrFile, id: ClassId) -> Result<(), Unsupported> {
     let class = &ir.classes[id as usize];
     let name = class.fq_name();
-    // An annotation class that is only applied needs nothing at run time beyond an ordinary
-    // layout. An annotation INSTANCE compares, hashes, and prints by its members, which this
-    // object form does not provide, so a file constructing one is still declined.
-    let construct = if class.annotation_impl_of.is_some()
-        || (class.is_annotation && constructs(ir, class.fq_name))
-    {
-        "an annotation instance"
-    } else if class.prop_ref.is_some() || class.func_ref.is_some() {
+    // An annotation class, applied or constructed, is an ordinary layout. An annotation instance
+    // compares, hashes and prints by its members, which this object form does not provide: those
+    // three slots stay unrealized, so a use of one declines at the call.
+    let construct = if class.prop_ref.is_some() || class.func_ref.is_some() {
         "a callable reference"
     } else if class.lambda.is_some() || class.sam_wrapper.is_some() {
         "a function value's class"
@@ -587,24 +583,14 @@ fn check_exception_storage(
     Ok(())
 }
 
-/// Whether a body `ir` emits constructs the class named `name`. Orphan expressions and
-/// cloning-only inline templates are not emitted, so a construction there is no obligation.
-fn constructs(ir: &IrFile, name: TypeName) -> bool {
-    krusty::ir::emitted_body_roots(ir)
-        .into_iter()
-        .flat_map(|root| krusty::ir::value_namespace_expressions(ir, root))
-        .any(|expression| {
-            matches!(ir.expr(expression), IrExpr::New { internal, .. } if *internal == name)
-        })
-}
-
 /// Lay out every class of `ir` in `module`: types, constructors' and accessors' indices, and the
 /// dispatch tables, whose entries name `functions` (the file's function indices, by `FunId`). A
 /// superclass no class of `ir` declares is read from `laid_out`, the classes earlier files of the
 /// source module laid out.
 /// What the source module says about classes beyond the file being declared.
-#[derive(Clone, Copy)]
 pub(super) struct BeyondFile<'a> {
+    /// The table types of the classes the module plan covers, which this file's classes take.
+    pub(super) module_tables: &'a mut super::module_tables::ModuleTables,
     pub(super) classifiers: &'a dyn BackendClassifierSource,
     /// The module-wide numbering of every class's table and every interface member.
     pub(super) plan: &'a ModuleSlotPlan,
@@ -621,6 +607,7 @@ pub(super) fn declare(
     beyond: BeyondFile<'_>,
 ) -> Result<FileClasses, Unsupported> {
     let BeyondFile {
+        module_tables,
         classifiers,
         plan,
         laid_out,
@@ -717,19 +704,32 @@ pub(super) fn declare(
             }),
             open: true,
         });
-        let table_type = module.subtype(SubType {
-            composite: table_struct(
-                &slot_types[id as usize],
-                objects.itable,
-                objects.type_infos.ty,
-            ),
-            supertype: Some(match (parent, laid_out_parent) {
-                (Some(parent), _) => parent.table_type.expect("a superclass has a table type"),
-                (None, Some(superclass)) => superclass.table_type,
-                (None, None) => objects.any_table,
+        // A class the module plan covers takes the table type every file reads from the plan,
+        // so a file dispatching through it from elsewhere casts to this one type.
+        let table_type = match module_tables.table(plan, class.fq_name, module, objects) {
+            Some(Ok(planned)) if planned.slot_types == slot_types[id as usize] => {
+                planned.table_type
+            }
+            Some(Ok(_)) => {
+                return Err(format!(
+                    "a class whose table differs from its module-wide plan (`{}`)",
+                    class.fq_name()
+                ))
+            }
+            Some(Err(_)) | None => module.subtype(SubType {
+                composite: table_struct(
+                    &slot_types[id as usize],
+                    objects.itable,
+                    objects.type_infos.ty,
+                ),
+                supertype: Some(match (parent, laid_out_parent) {
+                    (Some(parent), _) => parent.table_type.expect("a superclass has a table type"),
+                    (None, Some(superclass)) => superclass.table_type,
+                    (None, None) => objects.any_table,
+                }),
+                open: true,
             }),
-            open: true,
-        });
+        };
         let form = &mut forms[id as usize];
         form.structure = Some(structure);
         form.table_type = Some(table_type);
@@ -1024,6 +1024,9 @@ fn inherited_any_member(
     member: AnyMember,
     base: OwnedBase,
 ) -> Option<u32> {
+    if ir.classes[class as usize].annotation_impl_of.is_some() {
+        return None;
+    }
     Some(match (member, base) {
         (AnyMember::Equals, _) => runtime.objects.identity_equals,
         (AnyMember::HashCode, _) => runtime.identity.hash_code,
@@ -1059,7 +1062,7 @@ pub(super) fn accessor_function(
 
 /// A table struct: one immutable typed function reference per typed slot, `funcref` elsewhere,
 /// and the interface table and the type information after `kotlin.Any`'s slots.
-fn table_struct(slots: &[Option<u32>], itable: u32, type_info: u32) -> CompositeType {
+pub(super) fn table_struct(slots: &[Option<u32>], itable: u32, type_info: u32) -> CompositeType {
     let mut fields = Vec::with_capacity(slots.len() + 2);
     for (slot, ty) in slots.iter().enumerate() {
         if slot as u32 == ITABLE_FIELD {

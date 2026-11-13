@@ -66,7 +66,7 @@ use krusty::backend::class_tables::module_slots::ModuleSlotPlan;
 use krusty::backend::class_tables::AnyMember;
 use krusty::backend::{CheckedBackendCallables, DependencyExportSignatures};
 use krusty::ir::{Callee, ClassId, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp};
-use krusty::types::{EqualityMode, Ty, TyKind};
+use krusty::types::{EqualityMode, Ty, TyKind, TypeName};
 
 use super::super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
 use super::super::numeric_conversions;
@@ -95,6 +95,8 @@ pub(super) struct LoweredFile {
 
 /// One file's checked IR and the facts frozen beside it.
 pub(super) struct FileInput<'a> {
+    /// The module's Pass-1 facts, which certify a declaration another file of it realizes.
+    pub(super) module_facts: &'a krusty::backend::BackendModuleFacts,
     pub(super) array_range_checks: bool,
     pub(super) classifiers: &'a dyn krusty::backend::BackendClassifierSource,
     pub(super) ir: &'a IrFile,
@@ -114,6 +116,8 @@ pub(super) struct ModuleState<'a> {
     pub(super) properties: &'a mut PropertyRegistry,
     /// The classes earlier files of the source module laid out; this file's join them.
     pub(super) classes: &'a mut LaidOutClasses,
+    /// The table types of the classes the module plan covers.
+    pub(super) tables: &'a mut super::module_tables::ModuleTables,
 }
 
 /// Lower every function and class of `file` into the program.
@@ -122,6 +126,7 @@ pub(super) fn lower_file(
     state: ModuleState<'_>,
 ) -> Result<LoweredFile, Unsupported> {
     let FileInput {
+        module_facts,
         array_range_checks,
         classifiers,
         ir,
@@ -137,6 +142,7 @@ pub(super) fn lower_file(
         callables: callable_registry,
         properties: property_registry,
         classes: laid_out_classes,
+        tables: module_tables,
     } = state;
     for property in &ir.statics {
         if property.owner.is_some() {
@@ -181,12 +187,14 @@ pub(super) fn lower_file(
         let results = carrier(function.ret)?.into_iter().collect::<Vec<_>>();
         signatures.push(Some(module.func_type(params, results)));
     }
-    let indices = callable_registry.declare_file(ir, module)?;
+    let enum_constant_entries =
+        callable_registry.link_enum_constants(dependency_exports, module)?;
+    let indices = callable_registry.declare_file(ir, module, &enum_constant_entries)?;
     let reference_file =
         runtime
             .callable_references
             .begin_file(module_name, ir, dependency_exports)?;
-    let call_targets = callable_registry.file_calls(ir, callables, module)?;
+    let call_targets = callable_registry.file_calls(ir, callables, module_facts, module)?;
     let inert_singleton_bindings = krusty::backend::inert_staged_singleton_bindings(
         ir,
         |expression| {
@@ -218,6 +226,7 @@ pub(super) fn lower_file(
             &indices,
             properties,
             super::classes::BeyondFile {
+                module_tables: &mut *module_tables,
                 classifiers,
                 plan,
                 laid_out: laid_out_classes,
@@ -241,6 +250,7 @@ pub(super) fn lower_file(
         )?;
         Some(classes)
     };
+    let planned_tables = planned_tables(ir, plan, module_tables, module, &runtime.objects);
     let reach = std::cell::RefCell::new(FileReach::default());
     let delegates = local_delegates::prepare(ir, module, runtime);
     let context = FileContext {
@@ -249,6 +259,8 @@ pub(super) fn lower_file(
         module_name,
         reference_file,
         numbers: plan.interfaces(),
+        plan,
+        planned_tables: &planned_tables,
         ir,
         functions: &indices,
         globals: &globals,
@@ -408,6 +420,36 @@ pub(super) fn lower_file(
     })
 }
 
+/// The module table of every class another file declares whose member a body of `ir` calls
+/// virtually, built before any body is emitted.
+fn planned_tables(
+    ir: &IrFile,
+    plan: &ModuleSlotPlan,
+    tables: &mut super::module_tables::ModuleTables,
+    module: &mut Module,
+    objects: &super::super::objects::ObjectRoot,
+) -> HashMap<TypeName, Result<super::module_tables::ModuleTable, Unsupported>> {
+    let mut planned = HashMap::default();
+    for expression in krusty::ir::emitted_body_roots(ir)
+        .into_iter()
+        .flat_map(|root| krusty::ir::value_namespace_expressions(ir, root))
+    {
+        let IrExpr::Call { callee, .. } = ir.expr(expression) else {
+            continue;
+        };
+        let Callee::Virtual { owner, .. } = &**callee else {
+            continue;
+        };
+        if ir.class_id_by_name(*owner).is_some() || planned.contains_key(owner) {
+            continue;
+        }
+        if let Some(table) = tables.table(plan, *owner, module, objects) {
+            planned.insert(*owner, table);
+        }
+    }
+    planned
+}
+
 /// What every body of one file reads: the file, and where its functions, properties and classes
 /// went in the module.
 struct FileContext<'a> {
@@ -418,6 +460,11 @@ struct FileContext<'a> {
     reference_file: u32,
     /// The module-wide numbers of the module's interface members.
     numbers: &'a ModuleInterfaces,
+    /// The module-wide numbering of the module's class tables.
+    plan: &'a ModuleSlotPlan,
+    /// The table of each class another file declares that a body of this file calls a member
+    /// of, or why it has none.
+    planned_tables: &'a HashMap<TypeName, Result<super::module_tables::ModuleTable, Unsupported>>,
     ir: &'a IrFile,
     /// The Wasm function of each emitted function, by `FunId`.
     functions: &'a [Option<u32>],
@@ -597,6 +644,14 @@ fn expression_type(
         }
         IrExpr::LocalPropertyReference(_) if ir.checked_type(id).is_none() => Ty::obj("kotlin/Any"),
         IrExpr::PropertyRead { ty, .. } if ir.checked_type(id).is_none() => *ty,
+        // A `when` without an `else` branch, such as a guard a counted loop's lowering adds, is a
+        // statement: no branch's value can be its own.
+        IrExpr::When { branches }
+            if ir.checked_type(id).is_none()
+                && branches.iter().all(|(condition, _)| condition.is_some()) =>
+        {
+            Ty::Unit
+        }
         // A top-level property read has its storage's declared type.
         IrExpr::GetStatic(index) if ir.checked_type(id).is_none() => ir.statics[*index as usize].ty,
         // A shared cell's element is read, and a write evaluates to what it stored, at the
@@ -665,6 +720,8 @@ struct Body<'a> {
     module_name: &'a str,
     reference_file: u32,
     numbers: &'a ModuleInterfaces,
+    plan: &'a ModuleSlotPlan,
+    planned_tables: &'a HashMap<TypeName, Result<super::module_tables::ModuleTable, Unsupported>>,
     ir: &'a IrFile,
     module: &'a mut Module,
     runtime: &'a mut Runtime,
@@ -735,6 +792,8 @@ impl<'a> Body<'a> {
             array_range_checks: context.array_range_checks,
             classifiers: context.classifiers,
             numbers: context.numbers,
+            plan: context.plan,
+            planned_tables: context.planned_tables,
             ir: context.ir,
             module,
             runtime,
@@ -1769,12 +1828,24 @@ impl<'a> Body<'a> {
         }
         self.code.block(BlockType::Empty);
         let next = self.open();
-        self.loops.push(Loop { label, exit, next });
+        self.loops.push(Loop {
+            label: label.clone(),
+            exit,
+            next,
+        });
         self.statement(body)?;
         self.loops.pop();
         self.close();
         if let Some(update) = update {
+            // The update is still the loop's own code: a counted loop over an inclusive bound
+            // leaves from it before stepping past the last value.
+            self.loops.push(Loop {
+                label,
+                exit,
+                next: top,
+            });
             self.statement(update)?;
+            self.loops.pop();
         }
         if post_test {
             self.value(cond, Ty::Boolean)?;
@@ -2144,6 +2215,7 @@ mod tests {
         );
         lower_file(
             FileInput {
+                module_facts: &module_facts,
                 array_range_checks: super::super::super::array_access::default_range_checks(),
                 classifiers: &classifiers,
                 ir,
@@ -2159,6 +2231,7 @@ mod tests {
                 callables: &mut started.callables,
                 properties: &mut started.properties,
                 classes: &mut started.classes,
+                tables: &mut started.tables,
             },
         )
     }

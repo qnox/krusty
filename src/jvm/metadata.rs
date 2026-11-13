@@ -1281,7 +1281,13 @@ pub fn decode_metadata_within(
     let class_flags = (k == Some(1)).then(|| class_identity::class_flags(&ctx));
     let scope =
         enclosing_type_parameters::class_scope(enclosing, &class_tparams, &class_type_param_bounds);
-    let members = LazyMembers::new(bytes.clone(), d2.to_vec(), k == Some(1), enclosing);
+    let members = LazyMembers::new(
+        bytes.clone(),
+        d2.to_vec(),
+        k == Some(1),
+        class_flags.is_some_and(crate::metadata::semantic::class_is_value),
+        enclosing,
+    );
     Ok(KotlinMeta {
         class_visibility: class_flags
             .map(flags_visibility)
