@@ -128,9 +128,19 @@ fun box(): String {
 
 #[test]
 fn a_library_equality_bound_reaches_a_consuming_override() {
+    // The library is built by krusty and consumed by krusty alone: the default library
+    // cross-check would compile it with kotlinc 2.4, which rejects `@EqualityBound`.
+    let library = common::compile_libs_build("LibraryBound", &[("Lib.kt", LIBRARY_BOUND)])
+        .expect("krusty builds the library module");
+    let jdk = common::jdk_modules();
     assert_eq!(
-        common::expect_box_run_against("LibraryBound", LIBRARY_BOUND, CONSUMER_OVERRIDE)
-            .as_deref(),
+        common::compile_and_run_box(
+            CONSUMER_OVERRIDE,
+            "Consumer",
+            &[library.krusty_out().to_path_buf(), common::stdlib_jar()],
+            Some(jdk.as_path()),
+        )
+        .as_deref(),
         Some("OK"),
         "krusty reads the bound from its own metadata",
     );
