@@ -86,9 +86,9 @@ struct Carried {
     /// The class slot `placed` was read from, which a subclass reads its own implementation from.
     slot: Option<u32>,
     /// The member's parameters and result.
-    declared: (Vec<Ty>, Ty),
+    declared: Signature,
     /// The implementation's parameters and result.
-    implemented: (Vec<Ty>, Ty),
+    implemented: Signature,
 }
 
 /// A member of a dependency's interface a class implements.
@@ -269,6 +269,21 @@ impl FileRecorder<'_, '_, '_> {
                     .interfaces
                     .implement(record, member, function)?;
             }
+            if !self.implemented.iter().any(|(known, _)| *known == member) {
+                let how = match self.classes.tables.interface_tables.members[self.id as usize]
+                    .get(&(number as u32))
+                    .copied()
+                    .flatten()
+                {
+                    Some(slot) => DependencyImplementation::Slot {
+                        slot,
+                        declared: signature.clone(),
+                        implemented: signature.clone(),
+                    },
+                    None => DependencyImplementation::Function(function),
+                };
+                self.implemented.push((member, how));
+            }
             placed.insert(number as u32, (function, signature));
         }
         Ok(placed)
@@ -431,6 +446,17 @@ impl FileRecorder<'_, '_, '_> {
         (function, carried): Placed,
     ) -> Result<Placed, Unsupported> {
         let signature = member_signature(declared.0, declared.1)?;
+        let implemented = member_signature(implemented.0, implemented.1)?;
+        self.thunk_signatures(signature, implemented, (function, carried))
+    }
+
+    /// Bridge already lowered signatures without retaining source-analysis type handles.
+    fn thunk_signatures(
+        &mut self,
+        signature: Signature,
+        implemented: Signature,
+        (function, carried): Placed,
+    ) -> Result<Placed, Unsupported> {
         if signature == carried {
             return Ok((function, carried));
         }
@@ -440,9 +466,7 @@ impl FileRecorder<'_, '_, '_> {
                 self.recording.ir.classes[self.id as usize].fq_name()
             )
         };
-        if signature.0.len() != carried.0.len()
-            || member_signature(implemented.0, implemented.1)? != carried
-        {
+        if signature.0.len() != carried.0.len() || implemented != carried {
             return Err(unboxed());
         }
         let mut code = Code::default();
@@ -628,11 +652,11 @@ impl FileRecorder<'_, '_, '_> {
         Ok(Carried {
             placed,
             slot,
-            declared: (edge.declared_parameters.clone(), edge.declared_result),
-            implemented: (
-                edge.implementation_parameters.clone(),
+            declared: member_signature(&edge.declared_parameters, edge.declared_result)?,
+            implemented: member_signature(
+                &edge.implementation_parameters,
                 edge.implementation_result,
-            ),
+            )?,
         })
     }
 
@@ -711,8 +735,14 @@ impl FileRecorder<'_, '_, '_> {
             placed: placed
                 .ok_or_else(|| self.declined("a dependency's interface property with no slot"))?,
             slot,
-            declared: accessor_types(edge.declared_type, setter),
-            implemented: accessor_types(edge.implementation_type, setter),
+            declared: {
+                let (params, result) = accessor_types(edge.declared_type, setter);
+                member_signature(&params, result)?
+            },
+            implemented: {
+                let (params, result) = accessor_types(edge.implementation_type, setter);
+                member_signature(&params, result)?
+            },
         })
     }
 
@@ -788,11 +818,8 @@ impl FileRecorder<'_, '_, '_> {
         if self.implements(member) {
             return Ok(());
         }
-        let (function, signature) = self.thunk(
-            (&declared.0, declared.1),
-            (&implemented.0, implemented.1),
-            placed,
-        )?;
+        let (function, signature) =
+            self.thunk_signatures(declared.clone(), implemented.clone(), placed)?;
         let ty = self
             .program
             .module
