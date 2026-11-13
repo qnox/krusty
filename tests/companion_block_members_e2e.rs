@@ -1303,7 +1303,7 @@ fn hoisted_companion_delegate_initializes_with_its_companion_on_2_5() {
     let build = ReleaseBuild::new(
         "HoistedDelegate",
         SRC,
-        "2.5.0-Beta2",
+        "2.5.0-RC",
         &["+CompanionBlocks", "+CompanionExtensions"],
     );
     let (expected, actual) = build.box_results();
