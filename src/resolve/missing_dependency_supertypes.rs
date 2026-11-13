@@ -9,7 +9,7 @@
 //! reported, is the eager form: `MISSING_DEPENDENCY_SUPERCLASS_WARNING` unless
 //! `AllowEagerSupertypeAccessibilityChecks` makes it the error.
 //!
-//! From 2.5.0-Beta2, a SAM constructor call and a SAM conversion report that diagnostic for the
+//! From 2.5.0-RC, a SAM constructor call and a SAM conversion report that diagnostic for the
 //! interface itself. `ForbidSamConstructorCallsWithMissingDependencySupertype` makes it an error;
 //! while the feature is off it is the warning. A release without the feature does not report it.
 //!

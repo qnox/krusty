@@ -50,7 +50,7 @@ impl KlibStamp {
     /// Read off `kotlinc-native -p library -Xmetadata-klib -language-version <language>`: 2.4.0 and
     /// 2.4.10 stamp `1.4.1` below language 2.3 and the language level from 2.3, measured at 2.0
     /// through 2.5. 2.4.20 stamps the language level itself, measured at 2.0 through 2.6.
-    /// 2.5.0-Beta2 writes `abi_version` 2.5.0 and that same language-level `metadata_version`,
+    /// 2.5.0-RC writes `abi_version` 2.5.0 and that same language-level `metadata_version`,
     /// measured at 2.2, 2.3, 2.4, 2.5, 2.6 and 2.7. It rejects 2.0 and 2.1 before writing a
     /// library. Keyed by exact releases, as the supported language levels are.
     pub fn new(compiler: KotlinVersion, language: LanguageVersion) -> Self {
@@ -419,8 +419,8 @@ mod tests {
         let releases = KotlinVersion::supported();
         // Measured with kotlinc-native, recorded at the release where they change; a later release
         // writes the stamps of the newest record at or below it. 2.4.0 was measured at 2.0 through
-        // 2.5, 2.4.20 at 2.0 through 2.6, and 2.5.0-Beta2 at 2.2, 2.3, 2.4, 2.5, 2.6 and 2.7.
-        // Beta2 rejects 2.0 and 2.1, so those levels are not rows.
+        // 2.5, 2.4.20 at 2.0 through 2.6, and 2.5.0-RC at 2.2, 2.3, 2.4, 2.5, 2.6 and 2.7.
+        // RC rejects 2.0 and 2.1, so those levels are not rows.
         let recorded: &[(KotlinVersion, &[(&str, &str)])] = &[
             (
                 KotlinVersion::V2_4_0,
@@ -446,7 +446,7 @@ mod tests {
                 ],
             ),
             (
-                KotlinVersion::V2_5_0_BETA2,
+                KotlinVersion::V2_5_0_RC,
                 &[
                     ("2.2", "abi_version=2.5.0 metadata_version=2.2.0"),
                     ("2.3", "abi_version=2.5.0 metadata_version=2.3.0"),

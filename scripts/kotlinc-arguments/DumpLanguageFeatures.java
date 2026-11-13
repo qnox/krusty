@@ -30,7 +30,7 @@ public class DumpLanguageFeatures {
 
     /**
      * The compiler's map from a feature to the argument that enables it. 2.4 reads
-     * `RuntimeFeatureToFlagMapKt.buildRuntimeFeatureToFlagMap`; 2.5.0-Beta2 publishes
+     * `RuntimeFeatureToFlagMapKt.buildRuntimeFeatureToFlagMap`; 2.5.0-RC publishes
      * `FeatureToFlagMapGeneratedKt.getFeatureToEnablingFlagMap` instead.
      */
     private static Map<?, ?> featureFlags(ClassLoader loader) throws Exception {

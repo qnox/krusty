@@ -692,12 +692,12 @@ fn reference_version_selection_is_semantic_and_order_independent() {
     let manifest = "2.10.0 newer\n# ignored\n2.9.9 older\n";
     assert_eq!(reference_kotlin_version_from(manifest), "2.10.0");
     assert_eq!(
-        reference_kotlin_version_from("2.5.0 stable\n2.5.0-Beta2 beta\n2.4.21 older\n"),
+        reference_kotlin_version_from("2.5.0 stable\n2.5.0-RC beta\n2.4.21 older\n"),
         "2.5.0"
     );
     assert_eq!(
-        reference_kotlin_version_from("2.5.0-Beta2 beta\n2.4.21 older\n"),
-        "2.5.0-Beta2"
+        reference_kotlin_version_from("2.5.0-RC beta\n2.4.21 older\n"),
+        "2.5.0-RC"
     );
 }
 

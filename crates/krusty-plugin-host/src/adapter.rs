@@ -43,7 +43,7 @@ const COMPAT: [Compat; 2] = [
         )],
     },
     Compat {
-        versions: &["2.4.20", "2.4.21", "2.5.0-Beta2"],
+        versions: &["2.4.20", "2.4.21", "2.5.0-RC"],
         sources: &[(
             "IrFiles.kt",
             include_str!("../adapter/compat/2.4.20/IrFiles.kt"),

@@ -29,7 +29,7 @@ enum PreRelease {
 
 /// A Kotlin release identity, `major.minor.patch` with an optional `-BetaN`, `-RC`, or `-RCN`.
 ///
-/// The qualifier is part of the identity: `2.5.0-Beta2` is not `2.5.0`. A pre-release precedes the
+/// The qualifier is part of the identity: `2.5.0-RC` is not `2.5.0`. A pre-release precedes the
 /// stable release of the same numbers, and the numbers themselves order numerically, so `2.4.21` is
 /// older than `2.5.0-Beta1` and `2.10.0` is newer than `2.9.9`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -45,11 +45,11 @@ impl KotlinVersion {
     pub const V2_4_10: Self = Self::new(2, 4, 10);
     pub const V2_4_20: Self = Self::new(2, 4, 20);
     pub const V2_4_21: Self = Self::new(2, 4, 21);
-    pub const V2_5_0_BETA2: Self = Self {
+    pub const V2_5_0_RC: Self = Self {
         major: 2,
         minor: 5,
         patch: 0,
-        pre: PreRelease::Beta(2),
+        pre: PreRelease::Rc(0),
     };
 
     pub const fn new(major: u16, minor: u16, patch: u16) -> Self {
@@ -98,7 +98,7 @@ impl KotlinVersion {
     /// reference a compilation uses when nothing pins one.
     ///
     /// A pre-release sorts after every older stable release, so it can be last in [`Self::supported`]
-    /// without becoming this version. `2.5.0-Beta2` stays supported and does not replace `2.4.21`.
+    /// without becoming this version. `2.5.0-RC` stays supported and does not replace `2.4.21`.
     pub fn newest() -> Self {
         Self::supported()
             .into_iter()
@@ -349,8 +349,7 @@ mod tests {
         assert!(version("2.5.0-Beta2") < version("2.5.0-RC"));
         assert!(version("2.5.0-RC") < version("2.5.0-RC2"));
         assert!(version("2.5.0-RC2") < version("2.5.0"));
-        assert_eq!(version("2.5.0-Beta2"), KotlinVersion::V2_5_0_BETA2);
-        assert_eq!(version("2.5.0-Beta2").to_string(), "2.5.0-Beta2");
+        assert_eq!(version("2.5.0-RC"), KotlinVersion::V2_5_0_RC);
         assert_eq!(version("2.5.0-RC").to_string(), "2.5.0-RC");
         assert_eq!(version("2.5.0-RC2").to_string(), "2.5.0-RC2");
     }
@@ -369,7 +368,7 @@ mod tests {
             "2.4.20-Beta01",
             "2.4.20-RC0",
             "2.4.20-release-123",
-            "2.5.0-Beta2-1",
+            "2.5.0-RC-1",
         ] {
             assert_eq!(KotlinVersion::parse(text), None, "{text:?}");
         }
@@ -384,8 +383,9 @@ mod tests {
         let supported = KotlinVersion::supported();
         assert!(supported.contains(&KotlinVersion::V2_4_10));
         assert!(supported.contains(&KotlinVersion::V2_4_20));
-        assert!(supported.contains(&KotlinVersion::V2_5_0_BETA2));
-        assert_eq!(supported.last().copied(), Some(KotlinVersion::V2_5_0_BETA2));
+        assert!(supported.contains(&KotlinVersion::V2_5_0_RC));
+        assert!(!supported.contains(&version("2.5.0-Beta2")));
+        assert_eq!(supported.last().copied(), Some(KotlinVersion::V2_5_0_RC));
         assert_eq!(KotlinVersion::newest(), KotlinVersion::V2_4_21);
         assert_eq!(
             manifest_versions("# c\n2.4.0 a\n\n2.4.10 b # note\n"),
@@ -421,10 +421,11 @@ mod tests {
         assert_eq!(target_from(None), Ok(KotlinVersion::V2_4_21));
         assert_eq!(target_from(None), Ok(KotlinVersion::newest()));
         assert_eq!(
-            target_from(Some("2.5.0-Beta2".into())),
-            Ok(KotlinVersion::V2_5_0_BETA2)
+            target_from(Some("2.5.0-RC".into())),
+            Ok(KotlinVersion::V2_5_0_RC)
         );
         assert!(target_from(Some(String::new())).is_err());
         assert!(target_from(Some("2.4.99".into())).is_err());
+        assert!(target_from(Some("2.5.0-Beta2".into())).is_err());
     }
 }
