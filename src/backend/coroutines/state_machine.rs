@@ -4,14 +4,15 @@ use crate::fx_hash::HashSet;
 use crate::ir::{
     Callee, ClassId, ExprId, IrCatch, IrClass, IrCtorArg, IrCtorParameterProvenance, IrEnclosure,
     IrExpr, IrField, IrFile, IrFunction, IrFunctionOverride, IrGeneratedParameterRole,
-    IrLocalClassNameProvenance, IrModuleSource, IrParameterIdentity, IrPropertyOverride, IrTypeOp,
+    IrGenericSig, IrLocalClassNameProvenance, IrModuleSource, IrParameterIdentity,
+    IrPropertyOverride, IrTypeOp, IrTypeParameter,
 };
-use crate::types::{type_name, wk, Ty, TypeName};
+use crate::types::{Ty, TypeName, type_name, wk};
 
 use super::class_storage::{
-    external_type_substitution, plan_frame_values, realize_frame_values, ContinuationFields,
+    ContinuationFields, external_type_substitution, plan_frame_values, realize_frame_values,
 };
-use super::label_reentry::{split_at_suspensions, ReentryDecline};
+use super::label_reentry::{ReentryDecline, split_at_suspensions};
 use super::value_namespace::max_value_index;
 
 #[derive(Clone, Copy)]
@@ -43,27 +44,35 @@ pub(super) fn realize(
         .get(&function)
         .cloned()
         .ok_or(ReentryDecline::UnsupportedCallShape)?;
-    // A local machine is currently monomorphic. Function- or enclosing-class type parameters
-    // cannot be captured by its generated fields/overrides without an explicit class signature
-    // and constructor substitution plan; do not emit erased fields that pretend otherwise.
     let source_values = super::value_namespace::function_value_types(ir, function, body);
-    if source_parameters
+    let type_parameters = machine_type_parameters(ir, function);
+    let parameter_names = type_parameters
+        .iter()
+        .map(|parameter| parameter.semantic_name.clone())
+        .collect::<Vec<_>>();
+    let has_unowned_type_parameter = source_parameters
         .iter()
         .copied()
         .chain(std::iter::once(function_result))
         .chain(source_values.values().copied())
-        .any(Ty::mentions_ty_param)
-    {
+        .any(|ty| crate::types::ty_mentions_undeclared_param(ty, &parameter_names))
+        || type_parameters.iter().any(|parameter| {
+            parameter.bounds.iter().any(|(bound, _)| {
+                crate::types::ty_mentions_undeclared_param(*bound, &parameter_names)
+            })
+        });
+    if has_unowned_type_parameter {
         return Err(ReentryDecline::UnsupportedCallShape);
     }
     if ir
         .shared_capture_parameters
         .keys()
         .any(|(owner, _)| *owner == function)
-        || body_contains_ref_new(ir, body)
+        || body_contains_unplanned_shared_cell(ir, body)
     {
-        // A shared source local/parameter is a holder cell, while ordinary frame fields carry
-        // the source value. This builder has no authenticated holder-field contract yet.
+        // A shared parameter or a cell operation outside a local variable initializer needs a
+        // separate constructor/holder proof. Local `var` cells use the existing
+        // `shared_class_capture_fields` contract.
         return Err(ReentryDecline::UnsupportedCallShape);
     }
     let receiver = ir.functions[function as usize]
@@ -75,6 +84,15 @@ pub(super) fn realize(
     let machine_result_ty = Ty::obj_args_name(type_name("kotlin/Result"), &[any]);
     let completion_result_ty = Ty::obj_args_name(type_name("kotlin/Result"), &[function_result]);
     let class_name = machine_name(ir, function)?;
+    let type_arguments = type_parameters
+        .iter()
+        .map(IrTypeParameter::ty)
+        .collect::<Vec<_>>();
+    let machine_ty = if type_arguments.is_empty() {
+        Ty::obj_name(class_name)
+    } else {
+        Ty::obj_args_name(class_name, &type_arguments)
+    };
     let class = ir.add_class(IrClass::synthetic(class_name));
     {
         let machine = &mut ir.classes[class as usize];
@@ -86,6 +104,17 @@ pub(super) fn realize(
         machine.superclass = wk::any();
         machine.interfaces = vec![wk::continuation()].into();
         machine.supertypes = vec![Ty::obj_args_name(wk::continuation(), &[any])];
+    }
+    if !type_parameters.is_empty() {
+        ir.class_signatures.insert(
+            class_name,
+            IrGenericSig {
+                type_params: type_parameters.clone(),
+                params: Vec::new(),
+                ret: None,
+                supers: vec![Ty::obj_args_name(wk::continuation(), &[any])],
+            },
+        );
     }
 
     let frame = plan_frame_values(ir, function, body, class);
@@ -106,6 +135,7 @@ pub(super) fn realize(
         .ok_or(ReentryDecline::UnsupportedCallShape)?;
     let storage = ContinuationFields {
         class,
+        machine_ty,
         label: label_field,
         result: result_field,
         runtime,
@@ -116,7 +146,7 @@ pub(super) fn realize(
     if labels == 0 {
         return Err(ReentryDecline::UnsupportedCallShape);
     }
-    realize_frame_values(ir, &frame, class);
+    realize_frame_values(ir, &frame, class, machine_ty);
 
     let run = ir.add_fun(IrFunction {
         name: "invokeSuspend".to_string(),
@@ -231,7 +261,6 @@ pub(super) fn realize(
         defaults: Box::default(),
         default_prefix_count: 0,
     });
-    let machine_ty = Ty::obj_name(class_name);
     ir.set_logical_type(construct, machine_ty);
     let invoke = ir.add_expr(IrExpr::MethodCall {
         class,
@@ -333,26 +362,61 @@ fn publish_context_override(
         });
 }
 
-fn body_contains_ref_new(ir: &IrFile, body: ExprId) -> bool {
-    fn walk(ir: &IrFile, expression: ExprId, seen: &mut HashSet<ExprId>) -> bool {
+fn body_contains_unplanned_shared_cell(ir: &IrFile, body: ExprId) -> bool {
+    let mut pending = vec![body];
+    let mut seen = HashSet::default();
+    let mut planned = HashSet::default();
+    while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
-            return false;
+            continue;
+        }
+        if let IrExpr::Variable {
+            init: Some(initializer),
+            ..
+        } = ir.expr(expression)
+            && matches!(ir.expr(*initializer), IrExpr::RefNew { .. })
+        {
+            planned.insert(*initializer);
         }
         match ir.expr(expression) {
-            IrExpr::RefNew { .. } => return true,
-            IrExpr::Lambda { captures, .. } => {
-                return captures
-                    .iter()
-                    .copied()
-                    .any(|capture| walk(ir, capture, seen));
+            IrExpr::Lambda { captures, .. } => pending.extend(captures.iter().copied()),
+            _ => {
+                crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
             }
-            _ => {}
         }
-        let mut children = Vec::new();
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
-        children.into_iter().any(|child| walk(ir, child, seen))
     }
-    walk(ir, body, &mut HashSet::default())
+    seen.into_iter().any(|expression| {
+        matches!(ir.expr(expression), IrExpr::RefNew { .. }) && !planned.contains(&expression)
+    })
+}
+
+/// Type parameters a generated machine must carry to keep its spilled fields exact. A local
+/// continuation class is its own generic declaration, so parameters captured from the source
+/// callable or enclosing class become parameters of this generated class while keeping their
+/// original semantic names and bounds.
+fn machine_type_parameters(ir: &IrFile, function: u32) -> Vec<IrTypeParameter> {
+    let mut candidates = Vec::new();
+    if let Some(owner) = ir.functions[function as usize].dispatch_receiver
+        && let Some(signature) = ir.class_signatures.get(&owner)
+    {
+        candidates.extend(signature.type_params.iter().cloned());
+    }
+    if let Some(signature) = ir.signatures.get(&function) {
+        candidates.extend(signature.type_params.iter().cloned());
+    }
+    candidates.extend(ir.lambda_type_parameters(function).iter().cloned());
+
+    let mut names = HashSet::default();
+    candidates
+        .into_iter()
+        .filter_map(|mut parameter| {
+            if !names.insert(parameter.semantic_name.clone()) {
+                return None;
+            }
+            parameter.captured_from_enclosing = false;
+            Some(parameter)
+        })
+        .collect()
 }
 
 fn machine_name(ir: &IrFile, function: u32) -> Result<TypeName, ReentryDecline> {

@@ -48,6 +48,22 @@ private suspend fun resumeFailure(): Int {
     return 99
 }
 
+private suspend fun <T> resumeGeneric(value: T): T {
+    val saved = value
+    pause()
+    return saved
+}
+
+private suspend fun resumeGenericString(): String = resumeGeneric("generic")
+
+private suspend fun resumeCapturedCell(): Int {
+    var total = 2
+    val increment = { total += 5 }
+    pause()
+    increment()
+    return total
+}
+
 fun box(): String {
     var completed: Result<Int>? = null
     ::resumeThroughBranchAndLoop.startCoroutine(
@@ -81,5 +97,23 @@ fun box(): String {
     failureContinuation.resumeWith(Result.failure(IllegalStateException("resumed failure")))
     val failure = completed?.exceptionOrNull()
     if (failure?.message != "resumed failure") return "failure propagation"
+
+    var genericCompleted: Result<String>? = null
+    ::resumeGenericString.startCoroutine(
+        Continuation(EmptyCoroutineContext) { genericCompleted = it },
+    )
+    val genericContinuation = parked ?: return "missing generic continuation"
+    parked = null
+    genericContinuation.resume(0)
+    if (genericCompleted?.getOrNull() != "generic") return "generic frame value"
+
+    var capturedCompleted: Result<Int>? = null
+    ::resumeCapturedCell.startCoroutine(
+        Continuation(EmptyCoroutineContext) { capturedCompleted = it },
+    )
+    val capturedContinuation = parked ?: return "missing captured-cell continuation"
+    parked = null
+    capturedContinuation.resume(0)
+    if (capturedCompleted?.getOrNull() != 7) return "captured mutable local"
     return "OK"
 }
