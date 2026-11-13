@@ -376,7 +376,7 @@ impl<'a> BodyLowering<'a> {
             Some(parent) => (
                 super::super::body_unit::superclass_constructor_ordinal(
                     Some(&self.ir.classes[parent as usize]),
-                    &operands.declaration.declared_parameters(),
+                    operands.declaration.declared_parameters(),
                 )?,
                 None,
             ),
