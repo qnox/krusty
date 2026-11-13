@@ -1,10 +1,11 @@
-//! Registry of compiler-provided array factory declarations.
+//! Registry of compiler-provided array constructors (`IntArray(n)`, `Array(n) { … }`).
 //!
-//! These declarations have no ordinary classpath body. Resolution records their stable identity
+//! These constructors have no ordinary classpath body. Resolution records their stable identity
 //! and [`SyntheticKind`]; checked FIR owns their semantics and common lowering constructs the IR.
-//! Functions that have a real classpath declaration resolve through metadata instead.
+//! The array factory functions (`arrayOf`, `intArrayOf`, `emptyArray`, `arrayOfNulls`, …) are
+//! ordinary `kotlin` package declarations: they are selected from metadata like any other call.
 
-use crate::types::{Ty, TypeName};
+use crate::types::Ty;
 
 pub use crate::types::ArrayFactoryKind as SyntheticKind;
 
@@ -19,19 +20,6 @@ pub struct Synthetic {
 /// caller is responsible for honoring user-declared shadowing first.
 pub fn lookup(name: &str) -> Option<&'static Synthetic> {
     TABLE.iter().find(|s| s.name == name)
-}
-
-/// Resolve a compiler-provided declaration from an already-bound package qualifier. This is the
-/// qualified counterpart of [`lookup`]: callers supply semantic package identity, so source syntax
-/// such as `kotlin.arrayOf` and an imported `arrayOf` select the same registry entry.
-pub fn lookup_qualified(package: TypeName, name: &str) -> Option<&'static Synthetic> {
-    TABLE.iter().find(|synthetic| {
-        synthetic.name == name
-            && synthetic
-                .fqn
-                .rsplit_once('/')
-                .is_some_and(|(owner, declared)| declared == name && package.matches(owner))
-    })
 }
 
 pub(crate) fn by_kind(kind: SyntheticKind) -> Option<&'static Synthetic> {
@@ -56,69 +44,6 @@ const fn syn(fqn: &'static str, name: &'static str, kind: SyntheticKind) -> Synt
 }
 
 static TABLE: &[Synthetic] = &[
-    // Primitive vararg literals — `intArrayOf(1, 2, 3): IntArray`.
-    syn(
-        "kotlin/intArrayOf",
-        "intArrayOf",
-        SyntheticKind::PrimitiveVararg(Ty::Int),
-    ),
-    syn(
-        "kotlin/longArrayOf",
-        "longArrayOf",
-        SyntheticKind::PrimitiveVararg(Ty::Long),
-    ),
-    syn(
-        "kotlin/doubleArrayOf",
-        "doubleArrayOf",
-        SyntheticKind::PrimitiveVararg(Ty::Double),
-    ),
-    syn(
-        "kotlin/floatArrayOf",
-        "floatArrayOf",
-        SyntheticKind::PrimitiveVararg(Ty::Float),
-    ),
-    syn(
-        "kotlin/booleanArrayOf",
-        "booleanArrayOf",
-        SyntheticKind::PrimitiveVararg(Ty::Boolean),
-    ),
-    syn(
-        "kotlin/charArrayOf",
-        "charArrayOf",
-        SyntheticKind::PrimitiveVararg(Ty::Char),
-    ),
-    syn(
-        "kotlin/byteArrayOf",
-        "byteArrayOf",
-        SyntheticKind::PrimitiveVararg(Ty::Byte),
-    ),
-    syn(
-        "kotlin/shortArrayOf",
-        "shortArrayOf",
-        SyntheticKind::PrimitiveVararg(Ty::Short),
-    ),
-    // Unsigned vararg literals keep their semantic inline-class element. The backend owns the
-    // corresponding signed primitive storage array (`UByteArray` -> `[B`, `UIntArray` -> `[I`).
-    syn(
-        "kotlin/ubyteArrayOf",
-        "ubyteArrayOf",
-        SyntheticKind::PrimitiveVararg(Ty::UByte),
-    ),
-    syn(
-        "kotlin/ushortArrayOf",
-        "ushortArrayOf",
-        SyntheticKind::PrimitiveVararg(Ty::UShort),
-    ),
-    syn(
-        "kotlin/uintArrayOf",
-        "uintArrayOf",
-        SyntheticKind::PrimitiveVararg(Ty::UInt),
-    ),
-    syn(
-        "kotlin/ulongArrayOf",
-        "ulongArrayOf",
-        SyntheticKind::PrimitiveVararg(Ty::ULong),
-    ),
     // Primitive size constructors — `IntArray(n)` / `IntArray(n) { i -> e }`.
     syn(
         "kotlin/IntArray",
@@ -160,19 +85,9 @@ static TABLE: &[Synthetic] = &[
         "ShortArray",
         SyntheticKind::PrimitiveSize(Ty::Short),
     ),
-    // Reference creators.
-    syn("kotlin/arrayOf", "arrayOf", SyntheticKind::ReferenceVararg),
+    // The reference-array constructor `Array(n) { i -> e }`. Unsigned size constructors
+    // (`UIntArray(n)`, …) are value-class declarations in metadata, not entries here.
     syn("kotlin/Array", "Array", SyntheticKind::ReferenceSize),
-    syn(
-        "kotlin/emptyArray",
-        "emptyArray",
-        SyntheticKind::EmptyReference,
-    ),
-    syn(
-        "kotlin/arrayOfNulls",
-        "arrayOfNulls",
-        SyntheticKind::NullableReference,
-    ),
 ];
 
 #[cfg(test)]
@@ -200,23 +115,25 @@ mod tests {
         // An unsigned array is a value class whose size constructor is declared in metadata.
         assert!(lookup("UIntArray").is_none());
         assert!(lookup("ULongArray").is_none());
-    }
-
-    #[test]
-    fn lookup_covers_the_documented_creator_families() {
-        // Vararg + size primitive families, plus the four reference creators.
+        // The array factory functions are ordinary `kotlin` declarations selected from metadata.
         for name in [
-            "intArrayOf",
-            "longArrayOf",
-            "IntArray",
-            "LongArray",
-            "uintArrayOf",
-            "ulongArrayOf",
             "arrayOf",
-            "Array",
+            "intArrayOf",
+            "uintArrayOf",
             "emptyArray",
             "arrayOfNulls",
         ] {
+            assert!(
+                lookup(name).is_none(),
+                "{name} must resolve through metadata"
+            );
+        }
+    }
+
+    #[test]
+    fn lookup_covers_the_documented_constructor_families() {
+        // Primitive size constructors, plus the reference-array constructor.
+        for name in ["IntArray", "LongArray", "Array"] {
             assert!(lookup(name).is_some(), "{name} should be synthetic");
         }
     }
@@ -224,28 +141,24 @@ mod tests {
     #[test]
     fn creator_kind_carries_the_element_without_parsing_the_name() {
         assert_eq!(
-            lookup("intArrayOf").map(|s| s.kind),
-            Some(SyntheticKind::PrimitiveVararg(Ty::Int))
-        );
-        assert_eq!(
             lookup("IntArray").map(|s| s.kind),
             Some(SyntheticKind::PrimitiveSize(Ty::Int))
         );
         assert_eq!(
-            lookup("arrayOf").map(|s| s.kind),
-            Some(SyntheticKind::ReferenceVararg)
+            lookup("Array").map(|s| s.kind),
+            Some(SyntheticKind::ReferenceSize)
         );
     }
 
     #[test]
     fn syn_constructs_the_expected_identity() {
         let s = syn(
-            "kotlin/intArrayOf",
-            "intArrayOf",
-            SyntheticKind::PrimitiveVararg(Ty::Int),
+            "kotlin/IntArray",
+            "IntArray",
+            SyntheticKind::PrimitiveSize(Ty::Int),
         );
-        assert_eq!(s.fqn, "kotlin/intArrayOf");
-        assert_eq!(s.name, "intArrayOf");
+        assert_eq!(s.fqn, "kotlin/IntArray");
+        assert_eq!(s.name, "IntArray");
     }
 
     #[test]

@@ -25,10 +25,12 @@ impl BodyLowering<'_> {
     ) -> Lowered<ExprId> {
         match origin {
             Some("IF") => self.if_chain(branches, ty),
-            Some("WHEN") => self.subjectless_when(branches, ty),
+            // A compiler-generated `when`, such as a data class member's, carries no source
+            // origin; its branches are evaluated in order as a subjectless `when`'s are.
+            Some("WHEN") | None => self.subjectless_when(branches, ty),
             Some("ANDAND") => self.short_circuit(branches, ty, IrShortCircuitKind::And),
             Some("OROR") => self.short_circuit(branches, ty, IrShortCircuitKind::Or),
-            _ => unsupported("a `when` of another origin than `if`, `when`, `&&` or `||`"),
+            Some(_) => unsupported("a `when` of another origin than `if`, `when`, `&&` or `||`"),
         }
     }
 

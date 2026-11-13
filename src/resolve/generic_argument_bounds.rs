@@ -176,8 +176,12 @@ impl Checker<'_> {
 
     /// kotlinc's error for a formal left with no constraint to infer it from.
     pub(super) fn report_uninferred_formal(&mut self, call: ExprId, formal: &str) {
+        self.report_uninferred_formal_at(self.call_callee_name_span(call), formal);
+    }
+
+    pub(super) fn report_uninferred_formal_at(&mut self, span: Span, formal: &str) {
         self.diags.error(
-            self.call_callee_name_span(call),
+            span,
             format!(
                 "cannot infer type for type parameter '{}'. Specify it explicitly.",
                 crate::types::type_parameter_source_name(formal)

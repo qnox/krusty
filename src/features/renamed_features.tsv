@@ -1,0 +1,5 @@
+# A feature kotlinc later split or renamed, and the feature an older release names it by.
+# A release whose feature table lacks the first column spells it as the second.
+# current	older
+CompanionBlocks	CompanionBlocksAndExtensions
+CompanionExtensions	CompanionBlocksAndExtensions

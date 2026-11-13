@@ -60,11 +60,12 @@ pub struct BackendCallableFact {
     /// Exact declarations this declaration overrides, as checked FIR froze them from the member
     /// hierarchy. A target keys a specially implemented language declaration on them.
     pub overridden_declarations: Box<[crate::types::OverriddenDeclaration]>,
-    /// For a member of a supertype of builtin primitive classifiers (`Number.toLong`,
-    /// `Comparable.compareTo`), what each such primitive runs when a value of it is the receiver,
-    /// as the member hierarchy proves. A target carrying the primitive as an object dispatches the
-    /// call to these; every other callable has none.
-    pub primitive_implementations: Box<[PrimitiveImplementation]>,
+    /// For a member of a supertype of builtin classes (`CharSequence.length`, `Number.toLong`,
+    /// `Comparable.compareTo`), or a property's getter of one, what each such class runs when a
+    /// value of it is the receiver, as the member hierarchy proves. A target carrying the builtin
+    /// value in a representation of its own (a string, a box) dispatches the call to these; every
+    /// other callable has none.
+    pub builtin_implementations: Box<[BuiltinImplementation]>,
     pub member_realization: MemberRealization,
     pub params: Vec<Ty>,
     pub physical_params: Vec<Ty>,
@@ -315,7 +316,7 @@ mod tests {
             compiler_intrinsic: None,
             semantic_role: None,
             overridden_declarations: Box::new([]),
-            primitive_implementations: Box::new([]),
+            builtin_implementations: Box::new([]),
             member_realization: MemberRealization::Dispatch,
             params: params.clone(),
             physical_params: params,
@@ -540,7 +541,7 @@ mod tests {
             compiler_intrinsic: None,
             semantic_role: None,
             overridden_declarations: Box::new([]),
-            primitive_implementations: Box::new([]),
+            builtin_implementations: Box::new([]),
             member_realization: MemberRealization::Dispatch,
             params: vec![Ty::Int],
             physical_params: vec![Ty::Int],
@@ -583,21 +584,23 @@ mod tests {
     }
 }
 
-/// What one builtin primitive runs for a call of a supertype's member on a value of it.
+/// What one builtin class runs for a call of a supertype's member on a value of it.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PrimitiveImplementation {
-    /// The primitive, whose classifier is a proper subtype of the member's.
+pub struct BuiltinImplementation {
+    /// The builtin type (`String`, a primitive), whose classifier is a proper subtype of the
+    /// member's.
     pub receiver: Ty,
-    /// The primitive classifier's override; `None` when it inherits the member's own body.
-    pub declaration: Option<PrimitiveOverrideDeclaration>,
+    /// The builtin classifier's override; `None` when it inherits the member's own body.
+    pub declaration: Option<BuiltinOverrideDeclaration>,
 }
 
-/// One primitive classifier's override of a supertype's member, as its provider published it.
+/// One builtin classifier's override of a supertype's member, as its provider published it.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PrimitiveOverrideDeclaration {
+pub struct BuiltinOverrideDeclaration {
     /// The operation the provider realizes the override as, if it is one.
     pub operation: Option<BackendCompilerIntrinsic>,
-    /// The override's declared parameter and result types (`Int.compareTo(other: Int): Int`).
+    /// The override's declared parameter and result types (`Int.compareTo(other: Int): Int`); a
+    /// property's are its getter's.
     pub params: Box<[Ty]>,
     pub ret: Ty,
 }
@@ -806,25 +809,35 @@ impl CheckedBackendCallables {
         Ok(facts)
     }
 
-    /// Record what each builtin primitive runs for every member of a library classifier this
-    /// file calls, as `implementations` answers it for the member's owner, name and identity.
-    /// The frontend answers it from the member hierarchy at the handoff; every other callable
-    /// keeps none.
-    pub fn record_primitive_implementations(
+    /// Record what each builtin class runs for every member of a library classifier this file
+    /// calls, as `implementations` answers it for the member's owner, name and identity. The
+    /// frontend answers it from the member hierarchy at the handoff; every other callable keeps
+    /// none.
+    pub fn record_builtin_implementations(
         &mut self,
         mut implementations: impl FnMut(
             TypeName,
             &str,
             ExternalCallableId,
-        ) -> Box<[PrimitiveImplementation]>,
+        ) -> Box<[BuiltinImplementation]>,
     ) {
+        // A getter is published under its accessor's name; its property's declared name is what
+        // the declarations overriding it are named.
+        let getter_properties = self
+            .properties
+            .values()
+            .map(|property| (property.getter, property.name.clone()))
+            .collect::<HashMap<_, _>>();
         for (&identity, fact) in &mut self.callables {
             let (ExternalCallableKind::Member, Some(SemanticCallableOwner::Classifier(owner))) =
                 (fact.kind, fact.declaration_owner)
             else {
                 continue;
             };
-            fact.primitive_implementations = implementations(owner, &fact.name, identity);
+            let name = getter_properties
+                .get(&identity)
+                .map_or(fact.name.as_str(), |name| name);
+            fact.builtin_implementations = implementations(owner, name, identity);
         }
     }
 
@@ -923,7 +936,7 @@ impl CheckedBackendCallables {
                     compiler_intrinsic: callable.compiler_intrinsic,
                     semantic_role: callable.semantic_role,
                     overridden_declarations: Box::new([]),
-                    primitive_implementations: Box::new([]),
+                    builtin_implementations: Box::new([]),
                     member_realization: callable.member_realization,
                     params: callable.params,
                     physical_params: callable.physical_params,
