@@ -54,15 +54,15 @@ impl KlibBodyClassContract {
     }
 
     /// Whether a support unit materializes this class and emits its members as functions of the
-    /// class it materializes: a value class, or a class without type parameters that is not
-    /// sealed. A builtin type of the common type model is neither, and neither is `kotlin.Any`,
-    /// the root of every class, which each target lays out itself.
+    /// class it materializes: a value class, or a class or object without type parameters that
+    /// is not sealed. A builtin type of the common type model is neither, and neither is
+    /// `kotlin.Any`, the root of every class, which each target lays out itself.
     pub(crate) fn emits_members(&self) -> bool {
         if self.is_builtin_type() || self.classifier == crate::types::wk::any() {
             return false;
         }
         self.is_value
-            || (self.kind == super::TypeKind::Class
+            || (matches!(self.kind, super::TypeKind::Class | super::TypeKind::Object)
                 && matches!(
                     self.modality,
                     KotlinModality::Final | KotlinModality::Open | KotlinModality::Abstract

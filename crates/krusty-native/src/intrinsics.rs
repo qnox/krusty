@@ -1903,21 +1903,6 @@ pub(super) fn throwable_field(owner: krusty::types::TypeName, name: &str) -> Opt
     }
 }
 
-/// Whether this is an object the runtime realizes ENTIRELY, so it has no instance of its own.
-///
-/// `kotlin.properties.Delegates` is one: it holds no state, and every member of it is answered
-/// directly (see [`runtime_companion_member`]), so nothing ever reads the value a reference to it
-/// would carry. A provider that materializes the receiver before the call reaches that table needs
-/// something to materialize, and for such an object the honest answer is the null reference —
-/// there is no object, and nothing dereferences it.
-pub(super) fn is_stateless_runtime_object(classifier: krusty::types::TypeName) -> bool {
-    // The stdlib's standard delegates. `Delegates` declares no state and every member of it this
-    // runtime answers takes its arguments alone. `Result.Companion` is the receiver of the inline
-    // `success` and `failure` an expanded `runCatching` reaches, whose bodies never read it.
-    classifier.matches("kotlin/properties/Delegates")
-        || classifier.matches("kotlin/Result$Companion")
-}
-
 /// The runtime entry point answering the companion object of a BUILT-IN type, if this names one.
 ///
 /// Each is declared in no file krusty compiles and carries no state — every member of one is a
@@ -1925,8 +1910,6 @@ pub(super) fn is_stateless_runtime_object(classifier: krusty::types::TypeName) -
 /// runtime holds one static object per companion, with a descriptor of its own so that
 /// `Int.Companion === Long.Companion` is false.
 ///
-/// Apart from [`is_stateless_runtime_object`], which answers a NULL for an object nothing reads:
-/// that will not do here, because `o === Int.Companion` is exactly what the corpus asks.
 pub(super) fn builtin_companion(classifier: krusty::types::TypeName) -> Option<&'static str> {
     [
         ("kotlin/Byte$Companion", "kt_byte_companion"),
@@ -1953,11 +1936,11 @@ pub(super) fn runtime_object(classifier: krusty::types::TypeName) -> Option<&'st
         .then_some("kt_set_empty")
 }
 
-/// A member of a COMPANION the runtime realizes, whose receiver carries nothing.
+/// A member of `Delegates` whose implementation the runtime supplies without using its receiver.
 ///
-/// Such an object has no state and no instance in any file krusty compiles, so there is no
-/// receiver to pass and none to evaluate — the call is its arguments alone. That is why these are
-/// apart from [`runtime_member`], which leads every call with the receiver.
+/// Reading `Delegates` still materializes the KLIB object, so identity is preserved. These calls
+/// use only their arguments, which is why they are separate from [`runtime_member`], which leads
+/// every call with the receiver.
 pub(super) fn runtime_companion_member(
     owner: DeclarationOwner,
     name: &str,
@@ -1967,9 +1950,8 @@ pub(super) fn runtime_companion_member(
         return None;
     }
     match (name, params) {
-        // `Delegates.notNull()`. `Delegates` is an OBJECT of the stdlib, carrying nothing, and the
-        // delegate it answers with starts empty — so this is the same shape: no receiver to read
-        // and no operand to pass.
+        // `Delegates.notNull()`. The delegate starts empty, and the implementation takes no
+        // arguments, so the runtime supplies it without calling a member on the object.
         ("notNull", []) => Some("kt_not_null_var"),
         // `observable(initial) { property, old, new -> … }`: the initial value and the callback,
         // both references, and the `KProperty` it later hands that callback is the one the

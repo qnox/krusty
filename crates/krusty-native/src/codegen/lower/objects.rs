@@ -2609,9 +2609,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if classifier == krusty::types::wk::unit() {
             return self.runtime_call("kt_unit", &[], any(), &[]);
         }
-        // An object the runtime realizes entirely has no instance and needs none: every member of
-        // it is answered without reading the receiver. One provider materializes that receiver
-        // before the call reaches the table that says so, and this is what it materializes.
         // The companion object of a BUILT-IN type. Its members are constants the frontend folds,
         // so the object itself is only ever an identity — and that identity is asked about:
         // `o === Int.Companion` is a corpus case, and `Int` written as a value is the same object.
@@ -2622,10 +2619,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         {
             return self.runtime_call(symbol, &[], any(), &[]);
         }
-        if super::super::super::intrinsics::is_stateless_runtime_object(classifier) {
-            return Ok(Some(self.builder.ins().iconst(types::I64, 0)));
-        }
-        // Another file's object is read through the entry its file exports.
+        // Another module's object is read through the entry its module exports.
         if self.file.ir.class_id_by_name(classifier).is_none() {
             let instance = krusty::backend::instance_links::InstanceEntry::Object(classifier);
             if let Some(symbol) = self.file.dependency_instances.get(&instance) {

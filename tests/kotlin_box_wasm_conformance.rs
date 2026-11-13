@@ -1168,6 +1168,14 @@ fun box(): String {
 }
 
 #[test]
+fn wasm_library_object_values_preserve_identity() {
+    expect_wasm_box(
+        include_str!("box_regressions/libraryObjectValues.kt"),
+        "wasmLibraryObjectValues",
+    );
+}
+
+#[test]
 fn wasm_class_equality_and_rendering_use_the_class_own_members() {
     expect_wasm_box(
         r#"

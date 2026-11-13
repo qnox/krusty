@@ -288,6 +288,13 @@ fn native_dependency_interface_aliases_join_by_identity() {
         "consumer files must share interface import numbers and join their aliases"
     );
 }
+
+#[test]
+fn native_library_object_values_preserve_identity() {
+    let source = include_str!("box_regressions/libraryObjectValues.kt");
+    super::common::expect_box_ok_with_stdlib(source, "nativeLibraryObjectValuesOracle");
+    super::common::expect_native_box(source, "nativeLibraryObjectValues", "OK");
+}
 fn run_native_abi_case(source: &str, stem: &str) -> Outcome {
     if let Some(reason) = not_applicable(source) {
         return Outcome::NotApplicable(reason);

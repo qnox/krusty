@@ -410,7 +410,11 @@ impl CallLinker for TemplateCalls<'_> {
         }
     }
 
-    fn singleton(&self, classifier: crate::types::TypeName) -> Result<(), KlibBodyDeclineReason> {
+    fn singleton(
+        &mut self,
+        _ir: &mut IrFile,
+        classifier: crate::types::TypeName,
+    ) -> Result<(), KlibBodyDeclineReason> {
         match self.callees.source.classifier(classifier) {
             Some(record) if record.is_object() => Ok(()),
             _ => Err(KlibBodyDeclineReason::SignatureMismatch(format!(

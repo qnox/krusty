@@ -63,17 +63,64 @@ impl KlibIrArena {
 
     fn emitted_calls_from(
         &self,
+        pending: Vec<KlibIrExprId>,
+        forms: EmittedCallForms,
+        functions: HashSet<KlibIrSymbol>,
+    ) -> Vec<&KlibIrSymbol> {
+        self.emitted_walk(pending, forms, functions).0
+    }
+
+    /// The objects whose values the bodies reached from `roots` read, through the closures
+    /// `forms` lowers with them. A support unit creates each such object's instance.
+    pub(crate) fn emitted_object_symbols_from(
+        &self,
+        roots: Vec<KlibIrExprId>,
+        forms: EmittedCallForms,
+    ) -> Vec<&KlibIrSymbol> {
+        self.emitted_walk(roots, forms, HashSet::default()).1
+    }
+
+    /// [`Self::emitted_object_symbols_from`] of `function`'s body and parameter defaults.
+    pub(crate) fn emitted_object_symbols<'a>(
+        &'a self,
+        function: &'a KlibIrFunction,
+        forms: EmittedCallForms,
+    ) -> Vec<&'a KlibIrSymbol> {
+        let mut roots = Vec::new();
+        let mut functions = HashSet::default();
+        functions.insert(function.base.symbol.clone());
+        if let Some(KlibIrBody::Block(statements)) = &function.body {
+            push_statement_expressions(self, statements, &mut roots);
+        }
+        roots.extend(
+            function
+                .context_parameters
+                .iter()
+                .chain(&function.extension_receiver)
+                .chain(&function.regular_parameters)
+                .filter_map(|parameter| parameter.default_value),
+        );
+        self.emitted_walk(roots, forms, functions).1
+    }
+
+    /// The emitted calls and the object values reached from `pending`, through reached closures.
+    fn emitted_walk(
+        &self,
         mut pending: Vec<KlibIrExprId>,
         forms: EmittedCallForms,
         mut functions: HashSet<KlibIrSymbol>,
-    ) -> Vec<&KlibIrSymbol> {
+    ) -> (Vec<&KlibIrSymbol>, Vec<&KlibIrSymbol>) {
         let mut expressions = HashSet::default();
         let mut calls = self.unfolded_call_symbols(pending.clone(), forms);
+        let mut objects = Vec::new();
         while let Some(id) = pending.pop() {
             if !expressions.insert(id) {
                 continue;
             }
             let expression = self.expr(id);
+            if let KlibIrExprKind::GetObject(symbol) = &expression.kind {
+                objects.push(symbol);
+            }
             push_child_expressions(self, &expression.kind, &mut pending);
             if let Some(nested) = (forms.closure)(self, expression) {
                 let nested = self.function(nested);
@@ -87,7 +134,7 @@ impl KlibIrArena {
                 }
             }
         }
-        calls
+        (calls, objects)
     }
 
     /// The callable symbols reached from `pending`, except those of calls `forms` fold.

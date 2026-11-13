@@ -47,6 +47,13 @@ pub use callee_facts::KlibCalleeFacts;
 pub(crate) use class_initialization::delegated_superclass_constructor;
 pub(crate) use closure_forms::emitted_closure_function;
 
+/// The classifier a serialized object symbol names, when its signature names a class.
+pub(crate) fn object_classifier(
+    signature: &crate::metadata::id_signature::KlibPublicIdSignature,
+) -> Option<crate::types::TypeName> {
+    klib_types::classifier_name(signature).ok()
+}
+
 /// The serialized forms common body lowering realizes without the declaration edges they name.
 pub(crate) const EMITTED_CALL_FORMS: crate::metadata::klib_ir::tree::EmittedCallForms =
     crate::metadata::klib_ir::tree::EmittedCallForms {
