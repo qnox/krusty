@@ -1624,7 +1624,8 @@ fn stdlib_calls_reach_header_declared_callees() {
     // reached past a call that leaves a parameter to its default, and past a `for` loop over an
     // array, which loops by index. The same complete inputs were measured on every release. A
     // call of an inherited member no library serializes now links to the declaration it inherits
-    // and declines there as a member function call.
+    // and declines there as a member function call. A `for` loop over a range literal counts, and
+    // one over another progression declines at the loop rather than at its protocol calls.
     let expected =
         if crate::kotlin_version::target() >= crate::kotlin_version::KotlinVersion::V2_4_20 {
             vec![
@@ -1633,8 +1634,12 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it calls `kotlin.UInt.<init>`)", 4),
                 ("it converts a value implicitly)", 4),
                 ("it declares type parameters)", 207),
+                (
+                    "it uses a `for` loop over a progression that is not a range literal)",
+                    4,
+                ),
                 ("it uses a call of a file-private declaration)", 6),
-                ("it uses a call of a member function)", 88),
+                ("it uses a call of a member function)", 84),
                 ("it uses a call through a property accessor signature)", 39),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),
@@ -1651,8 +1656,12 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it calls `kotlin.UInt.<init>`)", 4),
                 ("it converts a value implicitly)", 4),
                 ("it declares type parameters)", 189),
+                (
+                    "it uses a `for` loop over a progression that is not a range literal)",
+                    4,
+                ),
                 ("it uses a call of a file-private declaration)", 4),
-                ("it uses a call of a member function)", 85),
+                ("it uses a call of a member function)", 81),
                 ("it uses a call through a property accessor signature)", 39),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),

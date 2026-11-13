@@ -24,6 +24,10 @@ on:
         description: Build and publish a release of this master commit after the test suite passes
         type: boolean
         default: false
+  # A daily release of master's tip, as if dispatched with `release` on. Cron is UTC: 11:00 UTC is
+  # 12:00 CET, and 13:00 during CEST. A tip that already has its release republishes nothing.
+  schedule:
+    - cron: '0 11 * * *'
 
 permissions:
   contents: read
@@ -123,7 +127,7 @@ jobs:
         run: scripts/check-outcome-lists.sh "$BASE" "$HEAD"
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: stable
+          toolchain: 1.100.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
@@ -166,7 +170,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: stable
+          toolchain: 1.100.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # Queue branches restore master's entries but never save their own: per-branch copies
@@ -219,7 +223,7 @@ jobs:
       # Self-hosted runners have no preinstalled rustup.
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: stable
+          toolchain: 1.100.0
       - name: install coverage tooling
         run: rustup toolchain install "$KRUSTY_COVERAGE_TOOLCHAIN" --profile minimal --component llvm-tools-preview
       # Prebuilt binary: `cargo install cargo-llvm-cov` compiled it from source on every run
@@ -494,7 +498,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: stable
+          toolchain: 1.100.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # Queue branches restore master's entries but never save their own: per-branch copies
@@ -542,7 +546,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: stable
+          toolchain: 1.100.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # Queue branches restore master's entries but never save their own: per-branch copies
@@ -912,6 +916,10 @@ jobs:
           # Required serialization/reference CLI toolchains can be cold. Keep the local
           # 120-second default; this complete CI pass includes their provisioning and compilation.
           KRUSTY_CONFORMANCE_TIMEOUT_SECONDS: "600"
+          # box_selection_reference runs the upstream test generators' selection over the whole
+          # Kotlin test-data tree as one BoxRunner call: about 1s locally, past the 10s default on a
+          # busy 8 GB runner while the step's other tests share its cores.
+          KRUSTY_BOX_TIMEOUT_MS: "60000"
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
           KRUSTY_RECORD_CLASS_DUMPS: "0"
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
@@ -1381,12 +1389,12 @@ jobs:
             "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/$kotlin/kotlin-stdlib-$kotlin.jar"
           scripts/bazel-smoke.sh "$PWD/krusty" "$RUNNER_TEMP/kotlin-stdlib.jar"
 
-  # A release is started by hand (`release` input) on a master commit and builds its own immutable
-  # artifacts there, even after master advances. All six platforms build concurrently on their
-  # hosted runners; the queue's own master runs leave them out.
+  # A release is started by hand (`release` input) or by the daily schedule on a master commit and
+  # builds its own immutable artifacts there, even after master advances. All six platforms build
+  # concurrently on their hosted runners; the queue's own master runs leave them out.
   build-release:
     needs: [ci-and-conformance]
-    if: github.ref == 'refs/heads/master' && inputs.release
+    if: github.ref == 'refs/heads/master' && (inputs.release || github.event_name == 'schedule')
     strategy:
       fail-fast: false
       matrix:
@@ -1407,7 +1415,7 @@ jobs:
           filter: tree:0
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: stable
+          toolchain: 1.100.0
           targets: ${{ matrix.target.triple }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:

@@ -58,7 +58,7 @@ fn initializer_object(ir: &mut IrFile, owner: TypeName, property: &str) -> TypeN
 }
 
 fn encoded_id(ir: &IrFile, classifier: TypeName) -> String {
-    let known_inner = |_| Ok(None);
+    let known_inner = |_| Ok(crate::metadata::ClassifierApplication::Direct);
     let mut strings = StringTable::with_local_classifiers(
         &names(ir),
         &enum_entry_bodies(ir),
@@ -143,7 +143,7 @@ fn anonymous_references_and_declarations_share_the_raw_id_in_either_order() {
     let object = initializer_object(&mut ir, entry, "storage");
     let inner = member(&mut ir, object, "Inner");
     let anonymous = ResolvedClassId::anonymous(object);
-    let known_inner = |_| Ok(None);
+    let known_inner = |_| Ok(crate::metadata::ClassifierApplication::Direct);
     for reference_first in [true, false] {
         let mut strings = StringTable::with_local_classifiers(
             &names(&ir),

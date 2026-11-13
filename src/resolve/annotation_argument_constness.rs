@@ -102,19 +102,20 @@ impl Checker<'_> {
         }
     }
 
-    /// Source elements packed by an array-construction synthetic (`arrayOf`), in their own order.
+    /// Source elements packed by a vararg array operation (`arrayOf`, an array literal), in their
+    /// own order.
     fn synthetic_vararg_elements(&self, argument: ExprId) -> Option<&[ExprId]> {
         use crate::synthetics::SyntheticKind;
         let Expr::Call { args, .. } = self.file.expr(argument) else {
             return None;
         };
         matches!(
-            self.expr_lowers.get(&argument),
-            Some(ExprLowering::CompilerSynthetic(
+            self.selected_array_operation(argument),
+            Some(
                 SyntheticKind::PrimitiveVararg(_)
                     | SyntheticKind::ReferenceVararg
                     | SyntheticKind::EmptyReference,
-            ))
+            )
         )
         .then_some(args.as_slice())
     }
