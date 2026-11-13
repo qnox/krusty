@@ -108,7 +108,7 @@ fn klib_constructor_class_contract_survives_declared_and_frozen_views() {
         .class_member_header(
             &identity,
             &contract.signature,
-            crate::libraries::KlibAccessorRole::Getter,
+            Some(crate::libraries::KlibAccessorRole::Getter),
         )
         .expect("the exact declaring class")
         .expect("the constructor is a direct class member");

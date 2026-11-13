@@ -111,6 +111,7 @@ fn specialized_transport_removal_does_not_retag_original_prefix_debug_identity()
                 source_name: "value".into(),
                 receiver,
                 crossinline_parameter: None,
+                inlined: false,
             }),
             provenance: crate::ir::IrCtorParameterProvenance::Capture,
             capture_identity: None,
