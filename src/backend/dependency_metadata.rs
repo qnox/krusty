@@ -216,9 +216,8 @@ pub struct DependencyExportSignatures {
     /// target realized it, the entry answering its instance (see `super::construction_entries`).
     singletons: Vec<crate::ir::ClassId>,
     singleton_entries: Vec<(crate::types::TypeName, FunId)>,
-    /// Every enum class of this file another module may read a constant of, and, once a target
-    /// realized it, the entry answering each constant (see `super::enums`).
-    enums: Vec<crate::ir::ClassId>,
+    /// The entry a target realized answering each constant of every enum of this file (see
+    /// `super::enums`).
     enum_constant_entries: Vec<(EnumConstant, FunId)>,
 }
 
@@ -370,16 +369,6 @@ impl DependencyExportSignatures {
     /// Every object instance entry a target realized, by the object's classifier.
     pub fn singleton_entries(&self) -> &[(crate::types::TypeName, FunId)] {
         &self.singleton_entries
-    }
-
-    /// Record an enum class another module may read a constant of.
-    pub(crate) fn record_enum(&mut self, class: crate::ir::ClassId) {
-        self.enums.push(class);
-    }
-
-    /// Every enum class this file publishes, in record order.
-    pub(crate) fn enums(&self) -> &[crate::ir::ClassId] {
-        &self.enums
     }
 
     /// Record the target-realized entry answering one constant of a published enum.

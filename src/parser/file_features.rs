@@ -37,6 +37,8 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.lambda_implementation_uses_inferred_result =
         features.language_version() < crate::language_version::LanguageVersion::V2_4;
     file.full_value_classes = features.has("FullValueClasses");
+    file.smart_cast_value_class_components =
+        features.has("AllowSmartCastsOnValueClassUnderlyingProperties");
     file.forbid_value_class_recursion_via_type_parameters =
         features.has("ForbidValueClassRecursionViaTypeParameters");
     file.value_class_recursion_via_type_parameters_warning = features.deprecation_warning_message(
