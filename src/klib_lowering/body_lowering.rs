@@ -166,6 +166,16 @@ pub(super) trait CallLinker {
         Ok(None)
     }
 
+    /// The receiver kind of the `indices` getter `getter` is, when its provider declaration is
+    /// kotlinc's counted-loop bound (`IndicesHandler`). `None` keeps the iterator protocol, which
+    /// a linker whose dependency preparation omits the protocol edges declines instead.
+    fn indices_receiver(
+        &self,
+        _getter: &crate::metadata::id_signature::KlibAccessorIdSignature,
+    ) -> Lowered<Option<crate::libraries::IndicesReceiver>> {
+        Ok(None)
+    }
+
     /// The function a call of the public declaration `callee` invokes.
     fn link(&mut self, ir: &mut IrFile, callee: &KlibPublicIdSignature) -> Lowered<LinkedCallee>;
 
