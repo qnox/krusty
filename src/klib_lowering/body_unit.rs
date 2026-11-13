@@ -36,6 +36,7 @@ use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol};
 use crate::types::{Ty, TypeName};
 
 mod class_construction;
+pub(super) use class_construction::superclass_constructor_ordinal;
 mod enum_materialization;
 mod local_class;
 
@@ -1144,8 +1145,7 @@ impl CallLinker for Linker<'_, '_> {
     }
 
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
-        // A support unit links no member of a generic class.
-        (sub.kotlin_class_internal() == Some(owner)).then_some(sub)
+        self.sources.callees.applied_supertype(sub, owner)
     }
 
     fn dependency_override(

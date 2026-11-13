@@ -162,6 +162,22 @@ impl<'a> KlibCalleeFacts<'a> {
         super::type_evidence::ordinary_subtype(self.class_type_oracle, parameters, sub, sup)
     }
 
+    /// `sub` viewed as `owner`, through the same-compilation hierarchy evidence when there is some.
+    pub(super) fn applied_supertype(
+        &self,
+        sub: crate::types::Ty,
+        owner: crate::types::TypeName,
+    ) -> Option<crate::types::Ty> {
+        match self.class_type_oracle {
+            Some(oracle) => crate::assignable::applied_supertype(
+                oracle,
+                sub,
+                crate::types::Ty::obj_name(owner),
+            ),
+            None => (sub.kotlin_class_internal() == Some(owner)).then_some(sub),
+        }
+    }
+
     pub(super) fn same_type(&self, left: crate::types::Ty, right: crate::types::Ty) -> bool {
         super::type_evidence::same_type(self.class_type_oracle, left, right)
     }

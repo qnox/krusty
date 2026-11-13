@@ -737,9 +737,9 @@ impl KlibDeclarationBodies {
             next += 1;
             if let Some(class) = self.constructed_local_class(&identity.module, arena, symbol) {
                 if classes.insert(&class.base.symbol) {
-                    symbols.extend(
-                        arena.emitted_callable_symbols_from(arena.class_member_roots(class), forms),
-                    );
+                    let mut roots = arena.class_member_roots(class);
+                    roots.extend(arena.class_superclass_delegations(class));
+                    symbols.extend(arena.emitted_callable_symbols_from(roots, forms));
                 }
             }
         }
