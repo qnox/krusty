@@ -12,6 +12,15 @@ open class Pair2(val a: Int, val b: Int) {
     open fun sum(): Int = a + b
 }
 
+open class Holder<T> {
+    val value: T
+    constructor(x: T) {
+        value = x
+    }
+}
+
+inline fun makeHolder(s: String): Holder<String> = object : Holder<String>(s + "!") {}
+
 inline fun makeBase(k: Int): Base = object : Base(k + 1) {
     var y = k * 2
     override fun describe(): String = "anon${x}_$y"
@@ -39,5 +48,6 @@ fun box(): String {
     val pair = makePair(2)
     if (pair.a != 2 || pair.b != 12) return "two superclass arguments ${pair.a} ${pair.b}"
     if (pair.sum() != 28) return "super call ${pair.sum()}"
+    if (makeHolder("a").value != "a!") return "generic secondary constructor"
     return "OK"
 }
