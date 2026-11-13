@@ -59,29 +59,6 @@ impl KlibReferenceBindings {
     }
 }
 
-/// The real declarations that member references of ordinary bodies inherit, by the same
-/// normalization as template references. A reference that names no declaration stays unbound.
-pub(super) fn inherited_members(
-    libraries: &KlibLibraries,
-) -> Vec<(
-    (String, KlibDeclarationSignature),
-    Option<KlibDependencyCallable>,
-)> {
-    libraries
-        .bodies
-        .unserialized_member_references()
-        .into_iter()
-        .filter_map(|(module, reference)| {
-            let binding = match normalize_reference(libraries, &module, &reference) {
-                KlibReferenceOrigin::Exact(binding) => Some(binding.declaration),
-                KlibReferenceOrigin::Ambiguous => None,
-                KlibReferenceOrigin::Missing => return None,
-            };
-            Some(((module, reference), binding))
-        })
-        .collect()
-}
-
 pub(super) fn normalize_reference(
     libraries: &KlibLibraries,
     module: &str,
@@ -116,8 +93,39 @@ pub(super) fn normalize_reference(
             )
         }
         KlibCalleeOrigin::Ambiguous => return KlibReferenceOrigin::Ambiguous,
-        KlibCalleeOrigin::Missing => None,
+        KlibCalleeOrigin::Missing => {
+            // No library serializes the member, so it is a fake override of the declaration it
+            // inherits. Where the shared hierarchy names the applied rung that declares it, the
+            // binding carries that dispatch; otherwise it binds the inherited declaration alone.
+            return match hierarchy_binding(libraries, module, reference, None) {
+                KlibReferenceOrigin::Missing => {
+                    match libraries.bodies.linked_origin(module, reference) {
+                        KlibCalleeOrigin::Exact(declaration) => {
+                            KlibReferenceOrigin::Exact(KlibReferenceBinding {
+                                declaration,
+                                dispatch: None,
+                            })
+                        }
+                        KlibCalleeOrigin::Ambiguous => KlibReferenceOrigin::Ambiguous,
+                        KlibCalleeOrigin::Missing => KlibReferenceOrigin::Missing,
+                    }
+                }
+                bound => bound,
+            };
+        }
     };
+    hierarchy_binding(libraries, module, reference, edges)
+}
+
+/// The member of `reference`'s classifier hierarchy it names, with the applied superclass or
+/// interface that declares it. `edges`, when present, are the overridden declarations a
+/// serialized fake override names, and restrict the candidates to them.
+fn hierarchy_binding(
+    libraries: &KlibLibraries,
+    module: &str,
+    reference: &KlibDeclarationSignature,
+    edges: Option<HashSet<KlibIrSignature>>,
+) -> KlibReferenceOrigin {
     let KlibDeclarationSignature::Public(signature) = reference else {
         return KlibReferenceOrigin::Missing;
     };

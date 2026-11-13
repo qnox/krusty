@@ -329,6 +329,23 @@ fn copied_inline_capture_holders(
             }
         }
     }
+    // An anonymous object that lifts an inline lambda's shared cell stores the holder the same
+    // way. kotlinc's copied instructions name that holder, and the class does not list it.
+    for &class_id in ir.specialized_anonymous_classes.keys() {
+        let Some(class) = ir.classes.get(class_id as usize) else {
+            continue;
+        };
+        for (&(owner, _), element) in &ir.shared_class_capture_fields {
+            if owner != class_id {
+                continue;
+            }
+            let (holder, _) = crate::shared_captures::holder_class(element);
+            omitted
+                .entry(class.fq_name())
+                .or_default()
+                .insert(holder.to_string());
+        }
+    }
     omitted
 }
 
@@ -569,7 +586,19 @@ fn call_site_regenerated_lambdas(ir: &IrFile) -> HashSet<String> {
     call_site_suspend_lambdas(ir)
         .into_iter()
         .chain(call_site_specialized_function_classes(ir))
+        .chain(call_site_inlined_anonymous_objects(ir))
         .collect()
+}
+
+/// An anonymous object copied into an inline caller. The caller's `new` does not list it;
+/// the class's own `InnerClasses` row still names itself.
+fn call_site_inlined_anonymous_objects(ir: &IrFile) -> impl Iterator<Item = String> + '_ {
+    ir.classes
+        .iter()
+        .filter(|class| {
+            class.is_anonymous_object && class.lambda.is_none() && !class.is_source_declared
+        })
+        .map(|class| class.fq_name())
 }
 
 /// Specialized non-suspend function classes. A copy nested in another such class stays

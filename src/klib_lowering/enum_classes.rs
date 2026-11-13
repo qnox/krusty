@@ -242,7 +242,7 @@ fn authenticate_constructor(
             "an enum constructor delegates to a file-private constructor",
         ));
     };
-    let enum_constructor = match bodies.callee_origin(
+    let enum_constructor = match bodies.linked_origin(
         module,
         &KlibDeclarationSignature::Public(enum_constructor.clone()),
     ) {
@@ -261,7 +261,7 @@ fn authenticate_constructor(
         .class_member_header(
             &enum_constructor,
             &enum_class,
-            crate::libraries::KlibAccessorRole::Getter,
+            Some(crate::libraries::KlibAccessorRole::Getter),
         )
         .map_err(mismatch)?
         .ok_or_else(|| mismatch("an enum constructor delegates past kotlin.Enum"))?;

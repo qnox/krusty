@@ -7,6 +7,7 @@
 //! receiver each one takes, and the classifier the `KProperty` argument was resolved to. Lowering
 //! reads them and asks resolution nothing.
 
+use crate::context_parameters::ContextBindingSource;
 use crate::types::TypeName;
 
 use super::{FirCallTarget, FirTypeSubstitution, ResolvedTy};
@@ -59,7 +60,7 @@ pub enum FirDelegateDispatchReceiver {
     ContextBinding {
         ty: ResolvedTy,
         name: Box<str>,
-        shadow_depth: u32,
+        source: ContextBindingSource,
     },
     Singleton {
         ty: ResolvedTy,

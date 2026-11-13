@@ -384,9 +384,26 @@ impl Emitter<'_> {
             .map_or(line, u32::from)
     }
 
-    fn regenerated_inline_template(&self) -> Option<krusty::ir::FunId> {
+    pub(super) fn regenerated_inline_template(&self) -> Option<krusty::ir::FunId> {
         let function = self.function?;
-        crate::lambda_classes::specialization_template(self.ir, function)
+        if let Some(template) = crate::lambda_classes::specialization_template(self.ir, function) {
+            return Some(template);
+        }
+        // A method of an anonymous object regenerated for an inline call. Its declaration lines
+        // keep the inline function's source identity; the caller's spliced lambda does not.
+        let class = self
+            .ir
+            .classes
+            .iter()
+            .position(|class| class.methods.contains(&function))?;
+        let class = u32::try_from(class).expect("class identity fits");
+        let specialization = self.ir.specialized_anonymous_classes.get(&class)?;
+        match specialization.inline_callee {
+            krusty::ir::IrInlineCallee::Module(callable) => {
+                self.ir.checked_callable_functions.get(&callable).copied()
+            }
+            krusty::ir::IrInlineCallee::Dependency(_) => None,
+        }
     }
 
     /// The source file and JVM path a copied inline line is mapped under.

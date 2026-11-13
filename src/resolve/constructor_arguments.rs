@@ -73,6 +73,7 @@ impl Checker<'_> {
     /// so the caller keeps its own diagnostic for a mapping failure or several candidates.
     pub(super) fn report_single_constructor_argument_mismatches(
         &mut self,
+        scope: &CheckerScope<'_>,
         arguments: &CtorDelegationCall,
         candidates: &[CtorDelegationCandidate],
         rejected: &[ConstructorCandidateRejection],
@@ -89,6 +90,16 @@ impl Checker<'_> {
             })
             .collect::<Vec<_>>();
         for &(argument, mismatch) in &reportable {
+            // An argument call whose own formals the parameter leaves uninferred reports that
+            // first, and renders them as uninferred in the mismatch (`super(arrayOf())`).
+            if self.report_uninferred_call_argument(
+                scope,
+                argument,
+                mismatch.expected,
+                mismatch.actual,
+            ) {
+                continue;
+            }
             self.report_assignability_error(
                 mismatch.expected,
                 mismatch.actual,
