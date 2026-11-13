@@ -17,9 +17,9 @@ use super::{
     property_declaration_identity, supertype_preorder,
 };
 
-/// Every builtin class a target carries in a representation of its own: `String` and the
-/// primitives, each the only instance type of its own final classifier.
-const BUILTIN_TYPES: [Ty; 9] = [
+/// Every builtin class a target carries in a representation of its own: `String`, the primitives
+/// and the unsigned integers, each the only instance type of its own final classifier.
+const BUILTIN_TYPES: [Ty; 13] = [
     Ty::String,
     Ty::Boolean,
     Ty::Byte,
@@ -29,6 +29,10 @@ const BUILTIN_TYPES: [Ty; 9] = [
     Ty::Long,
     Ty::Float,
     Ty::Double,
+    Ty::UByte,
+    Ty::UShort,
+    Ty::UInt,
+    Ty::ULong,
 ];
 
 /// Whether a member is a function or a property, which decides the declarations overriding it.

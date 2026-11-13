@@ -34,6 +34,8 @@ fun box(): String {
     if (!isComparable("text")) return "fail: String is Comparable"
     if (!isComparable(42)) return "fail: Int is Comparable"
     if (!isComparable('c')) return "fail: Char is Comparable"
+    if (!isComparable(7u)) return "fail: UInt is Comparable"
+    if (!isComparable(7uL)) return "fail: ULong is Comparable"
     if (isComparable(Letters())) return "fail: Letters is Comparable"
     if (isCharSequence(42)) return "fail: Int is CharSequence"
     if (isNotIterator(Counter(1))) return "fail: Counter !is Iterator"
