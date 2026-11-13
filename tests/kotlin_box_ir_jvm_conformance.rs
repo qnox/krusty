@@ -1353,22 +1353,36 @@ fun box(): String = Registry.value()\n";
         .filter(|(_, bytes)| bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]))
         .collect();
 
+    // kotlinc's test infrastructure compiles the partitioned files, which keep the test data's
+    // line numbers, so the reference compiles the same unit the module harness compiled.
+    let modules = split_modules(&source).expect("the fixture declares two modules");
+    let units = krusty::conformance::module_units(&modules);
+    let [unit] = units.as_slice() else {
+        panic!("the folded common module compiles into the platform unit: {units:?}");
+    };
+    assert_eq!(
+        unit.common_file_count, 1,
+        "Common.kt is the folded common source"
+    );
     let reference_root = common::scratch_dir().expect("allocate reference source-set directory");
     let reference_output = reference_root.join("classes");
-    let common_path = reference_root.join("Common.kt");
-    let platform_path = reference_root.join("Platform.kt");
-    fs::write(&common_path, COMMON).expect("write common reference source");
-    fs::write(&platform_path, PLATFORM).expect("write platform reference source");
-    let arguments = vec![
+    let mut arguments = vec![
         "-d".to_string(),
         reference_output.to_string_lossy().into_owned(),
         "-module-name".to_string(),
-        "platform".to_string(),
+        unit.name.clone(),
         "-Xmulti-platform".to_string(),
-        format!("-Xcommon-sources={}", common_path.to_string_lossy()),
-        common_path.to_string_lossy().into_owned(),
-        platform_path.to_string_lossy().into_owned(),
     ];
+    let mut paths = Vec::new();
+    for (index, (name, text)) in unit.files.iter().enumerate() {
+        let path = reference_root.join(format!("{name}.kt"));
+        fs::write(&path, text).expect("write reference source");
+        if index < unit.common_file_count {
+            arguments.push(format!("-Xcommon-sources={}", path.to_string_lossy()));
+        }
+        paths.push(path.to_string_lossy().into_owned());
+    }
+    arguments.extend(paths);
     let (reference_status, reference_diagnostics) =
         common::kotlinc_compile(&arguments).expect("reference compiler is provisioned");
     assert_eq!(

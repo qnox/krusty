@@ -411,9 +411,9 @@ fn native_target_conditions_match_the_pinned_evaluator() {
     let constants_start = original.find("private val TARGET_FAMILY").unwrap();
     let constants_end = original.find("internal val List<TargetBackend>").unwrap();
     let evaluator_start = original.find("internal fun Settings.evaluate(").unwrap();
-    let evaluator_end = original
-        .find("fun RegisteredDirectives.collectToggledCheckers(")
-        .unwrap();
+    // The evaluator is the top-level function's text up to its closing brace at column 0; later
+    // releases follow it with more declarations, earlier ones end the file there.
+    let evaluator_end = evaluator_start + original[evaluator_start..].find("\n}\n").unwrap() + 3;
     let (arch, other, target, other_target) = match std::env::consts::ARCH {
         "aarch64" => ("ARM64", "X64", "linux_arm64", "linux_x64"),
         "x86_64" => ("X64", "ARM64", "linux_x64", "linux_arm64"),
