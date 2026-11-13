@@ -34852,17 +34852,16 @@ impl<'a> Checker<'a> {
                         None,
                     )
                     .is_ok()
+                && self
+                    .callable_ref_argument_plan(&function, expected)
+                    .is_some()
                 && {
                     let ret = function.callable.ret;
                     expected.ret == Ty::Unit
                         || expected.ret.non_null().is_ty_param()
                         || if expected.ret.non_null().mentions_ty_param() {
-                            crate::assignable::applied_supertype(
-                                self,
-                                ret,
-                                expected.ret.non_null(),
-                            )
-                            .is_some()
+                            crate::assignable::applied_supertype(self, ret, expected.ret.non_null())
+                                .is_some()
                         } else {
                             self.receiver_is_assignable(ret, expected.ret)
                         }
