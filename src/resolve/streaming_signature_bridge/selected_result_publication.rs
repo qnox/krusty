@@ -6,17 +6,10 @@
 
 use super::ProductionSignatureSemantics;
 use crate::resolve::selected_result_aliases::SelectionInputs;
-use crate::resolve::selected_result_publication::CompactSelectedResultPublication;
+use crate::resolve::selected_result_publication::{
+    whole_array_arguments, CompactSelectedResultPublication,
+};
 use crate::types::{Ty, TyKind};
-
-pub(super) fn whole_array_arguments(
-    arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
-) -> Box<[bool]> {
-    arguments
-        .iter()
-        .map(|argument| argument.spread || argument.name.is_some())
-        .collect()
-}
 
 impl ProductionSignatureSemantics<'_> {
     pub(super) fn forget_selected_result_publication(&self, origin: crate::fir::OriginId) {

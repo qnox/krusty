@@ -10,6 +10,15 @@ use crate::libraries::{
 };
 use crate::types::{Ty, TyKind, TypeName};
 
+pub(super) fn whole_array_arguments(
+    arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
+) -> Box<[bool]> {
+    arguments
+        .iter()
+        .map(|argument| argument.spread || argument.name.is_some())
+        .collect()
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum DispatchBinding {
     /// The call's checked explicit receiver supplies the declaring classifier's arguments.
