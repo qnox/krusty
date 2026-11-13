@@ -6,13 +6,25 @@ use crate::ir::{
     IrExpr, IrField, IrFile, IrFunction, IrFunctionOverride, IrGeneratedParameterRole,
     IrLocalClassNameProvenance, IrModuleSource, IrParameterIdentity, IrPropertyOverride, IrTypeOp,
 };
-use crate::types::{type_name, type_name_nested_child, wk, Ty, TypeName};
+use crate::types::{type_name, wk, Ty, TypeName};
 
 use super::class_storage::{
     external_type_substitution, plan_frame_values, realize_frame_values, ContinuationFields,
 };
 use super::label_reentry::{split_at_suspensions, ReentryDecline};
 use super::value_namespace::max_value_index;
+
+#[derive(Clone, Copy)]
+struct ResumeContract {
+    class: ClassId,
+    runtime: crate::ir::IrCoroutineRuntime,
+    machine_result_ty: Ty,
+    completion_result_ty: Ty,
+    function_result: Ty,
+    any: Ty,
+    completion_field: u32,
+    result_field: u32,
+}
 
 /// Lower one CPS-shaped suspend body into a generated continuation class and a wrapper entry.
 pub(super) fn realize(
@@ -44,14 +56,24 @@ pub(super) fn realize(
     {
         return Err(ReentryDecline::UnsupportedCallShape);
     }
+    if ir
+        .shared_capture_parameters
+        .keys()
+        .any(|(owner, _)| *owner == function)
+        || body_contains_ref_new(ir, body)
+    {
+        // A shared source local/parameter is a holder cell, while ordinary frame fields carry
+        // the source value. This builder has no authenticated holder-field contract yet.
+        return Err(ReentryDecline::UnsupportedCallShape);
+    }
     let receiver = ir.functions[function as usize]
         .dispatch_receiver
         .filter(|_| !ir.functions[function as usize].is_static);
     let receiver_slots = u32::from(receiver.is_some());
     let completion_slot = receiver_slots + ir.functions[function as usize].params.len() as u32 - 1;
     let any = Ty::nullable(Ty::obj_name(wk::any()));
-    let machine_result_ty = Ty::obj_args(type_name("kotlin/Result"), &[any]);
-    let completion_result_ty = Ty::obj_args(type_name("kotlin/Result"), &[function_result]);
+    let machine_result_ty = Ty::obj_args_name(type_name("kotlin/Result"), &[any]);
+    let completion_result_ty = Ty::obj_args_name(type_name("kotlin/Result"), &[function_result]);
     let class_name = machine_name(ir, function)?;
     let class = ir.add_class(IrClass::synthetic(class_name));
     {
@@ -63,22 +85,29 @@ pub(super) fn realize(
         machine.enclosure = Some(IrEnclosure::Function(function));
         machine.superclass = wk::any();
         machine.interfaces = vec![wk::continuation()].into();
-        machine.supertypes = vec![Ty::obj_args(wk::continuation(), &[any])];
-        machine.fields = vec![
-            IrField::new("result".to_string(), machine_result_ty).with_is_private(false),
-            IrField::new("label".to_string(), Ty::Int).with_is_private(false),
-        ];
+        machine.supertypes = vec![Ty::obj_args_name(wk::continuation(), &[any])];
     }
 
     let frame = plan_frame_values(ir, function, body, class);
+    let result_field = u32::try_from(ir.classes[class as usize].fields.len())
+        .expect("a continuation frame has fewer than u32::MAX fields");
+    ir.classes[class as usize]
+        .fields
+        .push(IrField::new("result".to_string(), machine_result_ty).with_is_private(false));
+    let label_field = u32::try_from(ir.classes[class as usize].fields.len())
+        .expect("a continuation frame has fewer than u32::MAX fields");
+    ir.classes[class as usize]
+        .fields
+        .push(IrField::new("label".to_string(), Ty::Int).with_is_private(false));
+    let constructor_value_count = receiver_slots + source_parameters.len() as u32 + 1;
     let completion_field = *frame
         .slots
         .get(&completion_slot)
         .ok_or(ReentryDecline::UnsupportedCallShape)?;
     let storage = ContinuationFields {
         class,
-        label: 1,
-        result: 0,
+        label: label_field,
+        result: result_field,
         runtime,
         suspend_functions: suspend_functions.clone(),
     };
@@ -103,13 +132,16 @@ pub(super) fn realize(
 
     let resume = build_resume_with(
         ir,
-        class,
-        runtime,
-        machine_result_ty,
-        completion_result_ty,
-        function_result,
-        any,
-        completion_field,
+        ResumeContract {
+            class,
+            runtime,
+            machine_result_ty,
+            completion_result_ty,
+            function_result,
+            any,
+            completion_field,
+            result_field,
+        },
     )?;
     ir.synthetic_methods.insert(resume);
     ir.note_class_method(class, resume);
@@ -117,10 +149,18 @@ pub(super) fn realize(
     ir.synthetic_methods.insert(context);
     ir.note_class_method(class, context);
     ir.classes[class as usize].methods = vec![run, resume, context];
-    publish_resume_with(ir, class, resume, runtime.resume_with, machine_result_ty);
+    publish_resume_with(
+        ir,
+        class,
+        resume,
+        runtime.resume_with,
+        runtime.resume_with_declared_parameter,
+        runtime.resume_with_declared_result,
+        machine_result_ty,
+    );
     publish_context_override(ir, class, context, runtime);
 
-    let constructor_args = (0..receiver_slots + source_parameters.len() as u32 + 1)
+    let constructor_args = (0..constructor_value_count)
         .map(|slot| {
             let value = ir.add_expr(IrExpr::GetValue(slot));
             let value_ty = if slot == completion_slot {
@@ -148,13 +188,6 @@ pub(super) fn realize(
         } else {
             source_parameters[(slot - receiver_slots) as usize]
         };
-        let provenance = if slot == completion_slot {
-            IrCtorParameterProvenance::Continuation
-        } else if receiver.is_some() && slot == 0 {
-            IrCtorParameterProvenance::ContinuationDispatchReceiver
-        } else {
-            IrCtorParameterProvenance::Value
-        };
         ctor_args.push(IrCtorArg {
             name: None,
             context_kind: crate::types::ContextParameterKind::None,
@@ -168,15 +201,17 @@ pub(super) fn realize(
             check: None,
             anonymous_super_forward: None,
             capture: None,
-            provenance,
+            // These are ordinary generated primary-constructor value parameters. They are not
+            // closure-prefix roles: the shared constructor emitter stores their explicit
+            // field_index values using the same field-store plan as source `val` parameters.
+            provenance: IrCtorParameterProvenance::Value,
             capture_identity: None,
         });
     }
     {
         let machine = &mut ir.classes[class as usize];
-        machine.constructor_prefix_count =
-            u32::try_from(ctor_args.len()).expect("constructor fits u32");
-        machine.ctor_param_count = 0;
+        machine.constructor_prefix_count = 0;
+        machine.ctor_param_count = constructor_value_count;
         machine.ctor_args = ctor_args;
     }
     let construct = ir.add_expr(IrExpr::New {
@@ -298,6 +333,28 @@ fn publish_context_override(
         });
 }
 
+fn body_contains_ref_new(ir: &IrFile, body: ExprId) -> bool {
+    fn walk(ir: &IrFile, expression: ExprId, seen: &mut HashSet<ExprId>) -> bool {
+        if !seen.insert(expression) {
+            return false;
+        }
+        match ir.expr(expression) {
+            IrExpr::RefNew { .. } => return true,
+            IrExpr::Lambda { captures, .. } => {
+                return captures
+                    .iter()
+                    .copied()
+                    .any(|capture| walk(ir, capture, seen));
+            }
+            _ => {}
+        }
+        let mut children = Vec::new();
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
+        children.into_iter().any(|child| walk(ir, child, seen))
+    }
+    walk(ir, body, &mut HashSet::default())
+}
+
 fn machine_name(ir: &IrFile, function: u32) -> Result<TypeName, ReentryDecline> {
     let source = ir
         .source_debug
@@ -313,16 +370,17 @@ fn machine_name(ir: &IrFile, function: u32) -> Result<TypeName, ReentryDecline> 
     Ok(type_name(&classifier))
 }
 
-fn build_resume_with(
-    ir: &mut IrFile,
-    class: ClassId,
-    runtime: crate::ir::IrCoroutineRuntime,
-    machine_result_ty: Ty,
-    completion_result_ty: Ty,
-    function_result: Ty,
-    any: Ty,
-    completion_field: u32,
-) -> Result<u32, ReentryDecline> {
+fn build_resume_with(ir: &mut IrFile, contract: ResumeContract) -> Result<u32, ReentryDecline> {
+    let ResumeContract {
+        class,
+        runtime,
+        machine_result_ty,
+        completion_result_ty,
+        function_result,
+        any,
+        completion_field,
+        result_field,
+    } = contract;
     let owner = ir.classes[class as usize].fq_name_id();
     let completion_ty = ir.classes[class as usize].fields[completion_field as usize].ty;
     let exception_index = 2;
@@ -333,7 +391,7 @@ fn build_resume_with(
     let store = ir.add_expr(IrExpr::SetField {
         receiver,
         class,
-        index: 0,
+        index: result_field,
         value: result,
     });
     let value = ir.add_expr(IrExpr::Variable {
@@ -363,6 +421,7 @@ fn build_resume_with(
     let failed = failure_result(
         ir,
         runtime.result_failure,
+        runtime.result_companion,
         completion_result_ty,
         function_result,
         exception,
@@ -419,7 +478,7 @@ fn build_resume_with(
         type_operand: function_result,
     });
     ir.set_logical_type(success_value, function_result);
-    let companion = type_name_nested_child(type_name("kotlin/Result"), "Companion");
+    let companion = runtime.result_companion;
     let companion_value = ir.add_expr(IrExpr::SingletonValue {
         classifier: companion,
     });
@@ -484,11 +543,11 @@ fn build_resume_with(
 fn failure_result(
     ir: &mut IrFile,
     failure: crate::fir::ExternalCallableId,
+    companion: TypeName,
     result_ty: Ty,
     function_result: Ty,
     exception: ExprId,
 ) -> Result<ExprId, ReentryDecline> {
-    let companion = type_name_nested_child(type_name("kotlin/Result"), "Companion");
     let companion_value = ir.add_expr(IrExpr::SingletonValue {
         classifier: companion,
     });
@@ -553,6 +612,8 @@ fn publish_resume_with(
     class: ClassId,
     function: u32,
     identity: crate::fir::ExternalCallableId,
+    declared_parameter: Ty,
+    declared_result: Ty,
     result_ty: Ty,
 ) {
     let owner = ir.classes[class as usize].fq_name_id();
@@ -570,8 +631,8 @@ fn publish_resume_with(
             collection_barrier: None,
             overridden_is_interface: true,
             name: "resumeWith".to_string(),
-            declared_parameters: vec![result_ty],
-            declared_result: Ty::Unit,
+            declared_parameters: vec![declared_parameter],
+            declared_result,
             applied_parameters: vec![result_ty],
             applied_result: Ty::Unit,
             implementation_parameters: vec![result_ty],

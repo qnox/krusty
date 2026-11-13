@@ -79,6 +79,16 @@ impl InheritedFacts for IrNodeTypeColumn {
             copy.physical = physical;
         }
     }
+
+    fn relocate(&mut self, source: ExprId, target: ExprId) {
+        // The replacement keeps the source expression's logical type, while its physical result
+        // belongs to the new invocation. The lowering that changes the invocation ABI may then
+        // clear or replace that transferred physical carrier explicitly.
+        let physical = self.get_mut(source).physical.take();
+        if let Some(physical) = physical {
+            self.get_mut(target).physical = Some(physical);
+        }
+    }
 }
 
 impl IrFile {

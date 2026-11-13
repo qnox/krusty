@@ -106,4 +106,13 @@ impl InheritedFacts for ValueClassConstructorFacts {
         } = self;
         parameter_constructions.inherit(source, target);
     }
+
+    fn relocate(&mut self, source: ExprId, target: ExprId) {
+        let Self {
+            primary_owners: _,
+            primary_declared_params: _,
+            parameter_constructions,
+        } = self;
+        parameter_constructions.relocate(source, target);
+    }
 }

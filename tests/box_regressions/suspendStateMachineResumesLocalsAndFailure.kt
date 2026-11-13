@@ -13,16 +13,27 @@ private suspend fun pause(): Int = suspendCoroutineUninterceptedOrReturn { conti
     COROUTINE_SUSPENDED
 }
 
+private suspend fun immediate(value: Int): Int = value
+
+private fun shouldEnterBranch(value: Int): Boolean {
+    events += "c"
+    return value > 0
+}
+
 private suspend fun resumeThroughBranchAndLoop(): Int {
-    var total = 4
+    var total = immediate(4)
     events += "a"
     val resumed = pause()
     events += "b"
-    if (resumed > 0) {
-        events += "c"
+    total += resumed
+    if (shouldEnterBranch(resumed)) {
+        val branchValue = pause()
+        total += branchValue
+        events += "d"
         var index = 0
         while (index < 2) {
-            total += resumed + index
+            val loopValue = pause()
+            total += loopValue + index
             events += "l"
             index += 1
         }
@@ -46,16 +57,28 @@ fun box(): String {
     val first = parked ?: return "missing continuation"
     parked = null
     first.resume(3)
-    if (events != "abcll") return "resume path: $events"
-    if (completed?.getOrNull() != 11) return "saved local/result"
+    if (events != "abc" || completed != null) return "branch condition resume: $events"
+    val second = parked ?: return "missing loop continuation"
+    parked = null
+    second.resume(1)
+    if (events != "abcd" || completed != null) return "branch-body resume: $events"
+    val third = parked ?: return "missing second loop continuation"
+    parked = null
+    third.resume(5)
+    if (events != "abcdl" || completed != null) return "first loop resume: $events"
+    val fourth = parked ?: return "missing second loop continuation"
+    parked = null
+    fourth.resume(7)
+    if (events != "abcdll") return "resume path: $events"
+    if (completed?.getOrNull() != 21) return "saved local/result"
 
     completed = null
     ::resumeFailure.startCoroutine(
         Continuation(EmptyCoroutineContext) { completed = it },
     )
-    val second = parked ?: return "missing failure continuation"
+    val failureContinuation = parked ?: return "missing failure continuation"
     parked = null
-    second.resumeWith(Result.failure(IllegalStateException("resumed failure")))
+    failureContinuation.resumeWith(Result.failure(IllegalStateException("resumed failure")))
     val failure = completed?.exceptionOrNull()
     if (failure?.message != "resumed failure") return "failure propagation"
     return "OK"

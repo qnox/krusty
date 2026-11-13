@@ -163,4 +163,9 @@ impl InheritedFacts for CompiledInlineCalls {
         let Self { lowering: _, calls } = self;
         calls.inherit(source, target);
     }
+
+    fn relocate(&mut self, source: ExprId, target: ExprId) {
+        let Self { lowering: _, calls } = self;
+        calls.relocate(source, target);
+    }
 }

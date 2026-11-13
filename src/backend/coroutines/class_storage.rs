@@ -212,7 +212,7 @@ impl MachineStorage for ContinuationFields {
     fn resumed_value(&self, ir: &mut IrFile) -> ExprId {
         let result = self.read(ir, self.result);
         let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
-        let result_ty = Ty::obj_args(crate::types::type_name("kotlin/Result"), &[any]);
+        let result_ty = Ty::obj_args_name(crate::types::type_name("kotlin/Result"), &[any]);
         let call = ir.add_expr(IrExpr::Call {
             callee: Box::new(Callee::External {
                 target: self.runtime.get_or_throw,
@@ -253,25 +253,45 @@ impl MachineStorage for ContinuationFields {
         call: ExprId,
     ) -> Result<ExprId, ReentryDecline> {
         if ir.intrinsic_suspension_points.contains_key(&call) {
-            return Ok(call);
+            // The splitter replaces the original suspension expression with the value supplied
+            // by the resumed frame. Keep a separate root for the intrinsic invocation while
+            // retaining its source operands, which frame rewriting still updates in place.
+            let copy = crate::ir::relocate_with_operands(ir, call, |operand| operand);
+            let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+            ir.take_physical_type(copy);
+            ir.set_logical_type(copy, any);
+            return Ok(copy);
         }
         let Some(logical_result) =
             recorded_suspension_result(ir, call).or_else(|| ir.checked_type(call))
         else {
             return Err(ReentryDecline::UnsupportedCallShape);
         };
+        if ir.suspend_calls.contains_key(&call)
+            && matches!(
+                ir.expr(call),
+                IrExpr::Call {
+                    callee,
+                    ..
+                } if matches!(&**callee, Callee::External { .. })
+            )
+        {
+            // Dependency-call authentication currently owns the provider's pre-CPS signature.
+            // Until that checked ABI has an explicit continuation adaptation contract, decline
+            // this call shape rather than relaxing signature verification after adding the tail.
+            return Err(ReentryDecline::UnsupportedCallShape);
+        }
         let continuation_ty = continuation_passing(logical_result).0;
         let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
         let completion = self.this(ir);
         ir.set_logical_type(completion, continuation_ty);
-        let expression = match ir.expr(call).clone() {
-            IrExpr::Call {
-                callee,
-                dispatch_receiver,
-                mut args,
-            } => {
-                let mut callee = *callee;
-                match &mut callee {
+        let call = match ir.expr(call).clone() {
+            IrExpr::Call { .. } => {
+                let copied = crate::ir::relocate_with_operands(ir, call, |operand| operand);
+                let IrExpr::Call { callee, args, .. } = &mut ir.exprs[copied as usize] else {
+                    unreachable!("a copied call retains its node kind")
+                };
+                match &mut **callee {
                     Callee::Local(function) | Callee::ClassStatic { function, .. }
                         if self.suspend_functions.contains(function) => {}
                     Callee::External { params, ret, .. } => {
@@ -285,30 +305,23 @@ impl MachineStorage for ContinuationFields {
                     _ => return Err(ReentryDecline::UnsupportedCallShape),
                 }
                 args.push(completion);
-                IrExpr::Call {
-                    callee: Box::new(callee),
-                    dispatch_receiver,
-                    args,
-                }
+                copied
             }
-            IrExpr::MethodCall {
-                class,
-                index,
-                receiver,
-                mut args,
-            } if suspend_call_fid(ir, call, &self.suspend_functions).is_some() => {
+            IrExpr::MethodCall { .. }
+                if suspend_call_fid(ir, call, &self.suspend_functions).is_some() =>
+            {
+                let copied = crate::ir::relocate_with_operands(ir, call, |operand| operand);
+                let IrExpr::MethodCall { args, .. } = &mut ir.exprs[copied as usize] else {
+                    unreachable!("a copied method call retains its node kind")
+                };
                 args.push(Some(completion));
-                IrExpr::MethodCall {
-                    class,
-                    index,
-                    receiver,
-                    args,
-                }
+                copied
             }
             _ => return Err(ReentryDecline::UnsupportedCallShape),
         };
-        let call = ir.add_expr(expression);
         ir.call_declared_ret.insert(call, any);
+        ir.take_physical_type(call);
+        ir.set_logical_type(call, any);
         Ok(call)
     }
 }
