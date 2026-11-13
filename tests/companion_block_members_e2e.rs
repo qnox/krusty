@@ -1381,7 +1381,7 @@ fn interface_block_storage_follows_kotlinc_2_5() {
     let build = ReleaseBuild::new(
         "InterfaceStorage",
         SRC,
-        "2.5.0-Beta2",
+        "2.5.0-RC",
         &["+CompanionBlocks", "+CompanionExtensions"],
     );
     for class in [
