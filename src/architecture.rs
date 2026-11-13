@@ -328,7 +328,6 @@ mod tests {
             "plugins",
             "runtime",
             "spelling",
-            "symbol_resolver",
             "symbol_source",
             "toolchain",
             "trace",
