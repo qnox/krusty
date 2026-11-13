@@ -399,9 +399,6 @@ pub(super) fn emit_dependencies<B: Backend>(
                 identity.clone(),
             );
         }
-        for object in unit.materialized_objects() {
-            exports.record_singleton(object);
-        }
         let mut published = Vec::with_capacity(closed.len());
         for (identity, _) in &closed {
             let Some((_external, realization)) = platform.external_callable_by_dependency(identity)
