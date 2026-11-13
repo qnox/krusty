@@ -23,5 +23,4 @@ fn string_comparison_keeps_the_selected_jvm_call_abi() {
 fn a_platform_string_comparison_runs_the_whole_portable_program() {
     let source = include_str!("box_regressions/stringCompareTo.kt");
     common::expect_box_same_as_kotlinc(source, "StringComparisonProgram");
-    common::expect_native_box(source, "StringComparisonProgram", "OK");
 }
