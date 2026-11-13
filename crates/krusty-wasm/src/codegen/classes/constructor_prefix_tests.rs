@@ -349,7 +349,9 @@ fn constructor_only_captures_reject_inconsistent_transport_roles() {
                 .insert((id, p), ClassCaptureIdentity::Receiver(7));
         }),
         ("shared capture field", |ir, id, _| {
-            ir.shared_class_capture_fields.insert((id, 0), Ty::String);
+            // A mark whose element is not the capture's declared type is not a shared cell.
+            ir.shared_class_capture_fields
+                .insert((id, 0), Ty::ty_param("Marked", Ty::obj("kotlin/Any")));
         }),
         ("shared superclass edge", |ir, id, _| {
             ir.shared_super_capture_parameters
@@ -415,6 +417,7 @@ fn capture_storage_and_unproven_prefix_roles_still_decline() {
         source_name: "captured".into(),
         receiver: None,
         crossinline_parameter: None,
+        inlined: false,
     });
     assert_eq!(check_class(&captured), expected);
     let mut stored = original.clone();
@@ -563,7 +566,7 @@ fn incomplete_or_shared_capture_transport_is_rejected_without_panicking() {
                 .field_index
                 .unwrap();
             ir.shared_class_capture_fields
-                .insert((id, field), Ty::String);
+                .insert((id, field), Ty::ty_param("Marked", Ty::obj("kotlin/Any")));
         }),
         ("shared superclass edge", |ir, id, _| {
             ir.shared_super_capture_parameters
@@ -603,7 +606,7 @@ fn incomplete_or_shared_capture_transport_is_rejected_without_panicking() {
                 .field_index
                 .unwrap();
             ir.shared_class_capture_fields
-                .insert((id, field), Ty::String);
+                .insert((id, field), Ty::ty_param("Marked", Ty::obj("kotlin/Any")));
         }),
     ];
     let (original, class, parameter) = capture_transport();
@@ -906,6 +909,87 @@ fn non_enclosing_receiver_profiles_remain_unsupported() {
 }
 
 #[test]
+fn proven_context_and_lambda_receivers_are_ordinary_references() {
+    let (original, class, parameter) = stored_enclosing_receiver();
+    let declared = original.classes[class as usize].ctor_args[parameter as usize].ty;
+    let identity = ClassCaptureIdentity::Receiver(0);
+    let expected = Err(format!(
+        "a class capturing its surroundings (`{}`)",
+        original.classes[class as usize].fq_name()
+    ));
+    let install = |ir: &mut IrFile, receiver: IrCapturedReceiver| {
+        let argument = &mut ir.classes[class as usize].ctor_args[parameter as usize];
+        argument.capture.as_mut().unwrap().receiver = Some(receiver);
+        argument.capture_identity = Some(identity);
+        ir.class_capture_identities
+            .insert((class, parameter), identity);
+    };
+
+    let mut context = copy_transport(&original);
+    install(
+        &mut context,
+        IrCapturedReceiver::Context {
+            kind: krusty::types::CapturedContextKind::Anonymous,
+            types: vec![declared].into_boxed_slice(),
+            index: 0,
+        },
+    );
+    assert_eq!(check_supported(&context, class), Ok(()));
+
+    let mut wrong_type = copy_transport(&context);
+    let IrCapturedReceiver::Context { types, .. } = wrong_type.classes[class as usize].ctor_args
+        [parameter as usize]
+        .capture
+        .as_mut()
+        .unwrap()
+        .receiver
+        .as_mut()
+        .unwrap()
+    else {
+        panic!("context receiver");
+    };
+    types[0] = Ty::Int;
+    assert_eq!(check_supported(&wrong_type, class), expected);
+
+    let mut wrong_index = copy_transport(&context);
+    let IrCapturedReceiver::Context { index, .. } = wrong_index.classes[class as usize].ctor_args
+        [parameter as usize]
+        .capture
+        .as_mut()
+        .unwrap()
+        .receiver
+        .as_mut()
+        .unwrap()
+    else {
+        panic!("context receiver");
+    };
+    *index = 1;
+    assert_eq!(check_supported(&wrong_index, class), expected);
+
+    let mut lambda = copy_transport(&original);
+    install(&mut lambda, IrCapturedReceiver::Lambda(Some("with".into())));
+    assert_eq!(check_supported(&lambda, class), Ok(()));
+
+    let mut scalar = copy_transport(&lambda);
+    let field = scalar.classes[class as usize].ctor_args[parameter as usize]
+        .field_index
+        .unwrap();
+    scalar.classes[class as usize].ctor_args[parameter as usize].ty = Ty::Unit;
+    scalar.classes[class as usize].fields[field as usize].ty = Ty::Unit;
+    assert_eq!(check_supported(&scalar, class), expected);
+
+    let mut callable = copy_transport(&original);
+    install(
+        &mut callable,
+        IrCapturedReceiver::Callable {
+            label: "callable".into(),
+            owner: krusty::fir::CapturedCallableOwner::Declaration,
+        },
+    );
+    assert_eq!(check_supported(&callable, class), expected);
+}
+
+#[test]
 fn enclosing_receivers_stay_stored_for_initializer_and_member_reads() {
     let ir = named_enclosing_receiver_classes();
     let captures = enclosing_capture_slots(&ir);
@@ -929,8 +1013,10 @@ fn enclosing_receivers_stay_stored_for_initializer_and_member_reads() {
                 let mut copy = copy_transport(&ir);
                 match shared {
                     0 => {
-                        copy.shared_class_capture_fields
-                            .insert((class, field), argument.ty);
+                        copy.shared_class_capture_fields.insert(
+                            (class, field),
+                            Ty::ty_param("Marked", Ty::obj("kotlin/Any")),
+                        );
                     }
                     1 => {
                         copy.shared_super_capture_parameters
@@ -1178,8 +1264,10 @@ fn interface_delegate_prefix_requires_positive_role_and_unique_typed_storage() {
                 .push((parameter, field));
         }),
         ("shared holder", |ir, class, _, field| {
-            ir.shared_class_capture_fields
-                .insert((class, field), Ty::String);
+            ir.shared_class_capture_fields.insert(
+                (class, field),
+                Ty::ty_param("Marked", Ty::obj("kotlin/Any")),
+            );
         }),
     ];
     let (original, class, parameter, field) = interface_delegate_transport();

@@ -3794,6 +3794,84 @@ pub(crate) fn finalize_navigation(
         .collect()
 }
 
+/// Definition indexes for the checked files of an analysis the server already ran.
+///
+/// The same symbol tables and occurrence walk as an interactive analysis. Hover, completion, and
+/// signature help are not built: a definition or references query does not read them.
+pub(crate) fn checked_definition_indexes(
+    sources: &[&str],
+    files: &[FileAnalysis],
+    symbols: &FrontendSymbols,
+    checked: usize,
+) -> Vec<DefinitionIndex> {
+    let highlight_symbols = HighlightSymbols::from_source_set(files, symbols);
+    let definition_symbols = DefinitionSymbols::from_source_set(
+        sources,
+        files,
+        symbols,
+        MAX_SOURCE_SET_NAVIGATION_ENTRIES,
+    );
+    let mut budget = NavigationBudget::default();
+    let mut indexes = Vec::with_capacity(checked.min(files.len()));
+    for (index, file) in files.iter().enumerate().take(checked) {
+        let source = sources.get(index).copied().unwrap_or("");
+        let remaining = budget.remaining();
+        let semantic = file.semantic_occurrences(
+            source,
+            index as u32,
+            symbols,
+            &highlight_symbols,
+            &definition_symbols,
+            SemanticLimits {
+                definition_entries: remaining,
+                type_definition_entries: 0,
+                implementation_entries: 0,
+                hover_entries: 0,
+                hover_wire_bytes: 0,
+                library_definition_wire_bytes: 0,
+            },
+        );
+        indexes.push(DefinitionIndex::from_occurrences(
+            semantic.definitions,
+            &mut budget,
+        ));
+    }
+    indexes
+}
+
+/// How long the server's definition and references lookups take once the indexes exist.
+///
+/// One definition lookup, on the first occurrence when there is one, then a references scan of
+/// every index for that target. Index construction is not included. An empty index is still a
+/// query: it is the handler's answer for a cursor that hits nothing.
+pub(crate) struct NavigationQueries {
+    pub definition_us: u64,
+    pub references_us: u64,
+}
+
+pub(crate) fn measure_navigation_queries(indexes: &[DefinitionIndex]) -> NavigationQueries {
+    let query = indexes
+        .iter()
+        .find_map(|index| index.entries.first().map(|entry| (index, entry[0])))
+        .or_else(|| indexes.first().map(|index| (index, 0)));
+    let started = std::time::Instant::now();
+    let targets = query
+        .map(|(index, offset)| index.get(offset).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let definition_us = started.elapsed().as_micros() as u64;
+    let started = std::time::Instant::now();
+    let target_ids = targets.into_iter().collect::<HashSet<_>>();
+    if !target_ids.is_empty() {
+        for index in indexes {
+            for _occurrence in index.occurrences_targeting(&target_ids) {}
+        }
+    }
+    NavigationQueries {
+        definition_us,
+        references_us: started.elapsed().as_micros() as u64,
+    }
+}
+
 mod source_set_documents;
 
 pub use source_set_documents::{analyze_documents_for_lsp, analyze_for_lsp};

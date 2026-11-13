@@ -1112,7 +1112,9 @@ pub(super) enum UnitReturnLine {
 /// return belongs to that call expression, so keep the region's end.
 pub(super) fn implicit_return_end(ir: &IrFile, value: ExprId) -> Option<u32> {
     let mut end = ir.end_line(value);
-    let inline_call_end = ir.inline_regions.contains(&value);
+    // The outermost inline expansion owns the call's end line. A region nested inside it, and the
+    // value that region returns, keep their own ends for SMAP and do not replace the call.
+    let mut inline_call_end = ir.inline_regions.contains(&value);
     let mut returned = value;
     while let crate::ir::IrExpr::Block {
         value: Some(inner), ..
@@ -1120,6 +1122,13 @@ pub(super) fn implicit_return_end(ir: &IrFile, value: ExprId) -> Option<u32> {
     {
         returned = *inner;
         let inner_end = ir.end_line(returned);
+        if ir.inline_regions.contains(&returned) {
+            if !inline_call_end {
+                inline_call_end = true;
+                end = inner_end.or(end);
+            }
+            continue;
+        }
         end = if inline_call_end {
             end.or(inner_end)
         } else {

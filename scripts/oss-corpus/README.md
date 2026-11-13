@@ -5,8 +5,9 @@ never on pull requests) builds the most-starred Kotlin projects listed in `proje
 in Android as the Android sample, each from a pinned commit with its own Gradle build. A row whose
 last field is `lsp` stays in that project set for the language server (`scripts/parity-scan.py`)
 and is not built here; `intellij-community` and `kotlin` are those rows. The scan reports whether
-each module opened completely and how many errors it produced, and it does not time parsing, type
-information, or navigation separately. Each built project runs three builds:
+each module opened completely, how many errors it produced, and how long the server's
+go-to-definition and find-references lookups took. It does not time parsing or type information
+separately from the combined analysis. Each built project runs three builds:
 
 1. **Reference:** a plain build, which compiles with kotlinc.
 2. **krusty:** the same build with the krusty Gradle plugin applied by `krusty.init.gradle`. The

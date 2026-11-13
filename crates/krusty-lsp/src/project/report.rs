@@ -140,6 +140,7 @@ mod tests {
             kind: ProviderKind::Jps,
             jdk_home: Some(PathBuf::from("/jdk")),
             modules: vec![module],
+            repository_libraries: Vec::new(),
         }
     }
 
