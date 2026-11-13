@@ -1,3 +1,4 @@
+@file:Suppress("OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE")
 @file:OptIn(kotlin.experimental.ExperimentalTypeInference::class)
 
 // A receiver-less callable reference passed where overloads differ only in the result of their
