@@ -54,11 +54,41 @@ struct ObjectStorage<'a> {
     fields: Vec<(&'a KlibIrSymbol, Ty, bool)>,
 }
 
+/// A member an object literal declares, which its own bodies call.
+#[derive(Clone)]
+pub(super) struct ObjectMember {
+    fun: FunId,
+    owner: TypeName,
+    params: Vec<Ty>,
+    ret: Ty,
+}
+
+impl ObjectMember {
+    /// The call shape of the member, as of any function this unit lowers.
+    pub(super) fn linked(&self) -> super::LinkedCallee {
+        super::LinkedCallee {
+            callee: crate::ir::Callee::Local(self.fun),
+            receiver: Some(Ty::obj_name(self.owner)),
+            params: self.params.clone(),
+            ret: self.ret,
+            context_count: 0,
+            singleton_dispatch: None,
+            type_parameters: Vec::new(),
+            type_parameter_bounds: Some(Vec::new()),
+            class_type_parameters: Vec::new(),
+            parameter_defaults: Vec::new(),
+            edge: super::super::CallEdge::default(),
+        }
+    }
+}
+
 struct Capture {
     symbol: KlibIrSymbol,
     name: String,
     ty: Ty,
     crossinline: Option<u32>,
+    /// What the capture is when it holds a receiver rather than a value.
+    receiver: Option<crate::ir::IrCapturedReceiver>,
 }
 
 impl<'a> BodyLowering<'a> {
@@ -157,7 +187,7 @@ impl<'a> BodyLowering<'a> {
                 anonymous_super_forward: None,
                 capture: Some(IrConstructorCapture {
                     source_name: capture.name.clone().into_boxed_str(),
-                    receiver: None,
+                    receiver: capture.receiver.clone(),
                     crossinline_parameter: capture.crossinline,
                     inlined: false,
                 }),
@@ -344,7 +374,7 @@ impl<'a> BodyLowering<'a> {
             Some(parent) => (
                 super::super::body_unit::superclass_constructor_ordinal(
                     Some(&self.ir.classes[parent as usize]),
-                    &operands.params,
+                    &operands.declaration.declared_parameters(),
                 )?,
                 None,
             ),
@@ -404,20 +434,43 @@ impl<'a> BodyLowering<'a> {
 
     fn capture(&self, symbol: &KlibIrSymbol) -> Lowered<Option<Capture>> {
         if let Some((slot, identity)) = self.header.parameter_identity(symbol) {
-            // An extension receiver has no source name; kotlinc names its captured copy after the
-            // function it extends.
-            let name = identity.source_name.clone().unwrap_or_else(|| {
-                format!(
-                    "$this_{}",
-                    self.ir.functions[self.function.function as usize].name
-                )
-            });
+            // A receiver has no source name; its declaration fact names the capture, and a target
+            // spells it.
+            let receiver = match identity.source_name {
+                Some(_) => None,
+                None => {
+                    self.header
+                        .capture_parameter(
+                            symbol,
+                            0,
+                            crate::ir::IrCapturingCallable::LocalFunction,
+                            &self
+                                .ir
+                                .fn_params
+                                .get(&self.function.function)
+                                .expect("a body publishes its parameters")
+                                .captured_receivers,
+                            false,
+                        )?
+                        .and_then(|parameter| parameter.receiver)
+                }
+            };
+            let name = match (&identity.source_name, &receiver) {
+                (Some(name), _) => name.clone(),
+                (None, Some(crate::ir::IrCapturedReceiver::Callable { label, .. })) => {
+                    label.to_string()
+                }
+                (None, _) => {
+                    return Err(mismatch("an object literal captures an unnamed parameter"))
+                }
+            };
             let crossinline = self.crossinline_parameter(slot);
             return Ok(Some(Capture {
                 symbol: (*symbol).clone(),
                 name,
                 ty: self.header.slot_type(slot),
                 crossinline,
+                receiver,
             }));
         }
         if let Some(local) = self.locals.get(symbol) {
@@ -432,6 +485,7 @@ impl<'a> BodyLowering<'a> {
                     .unwrap_or_else(|| "capture".to_owned()),
                 ty: local.ty,
                 crossinline: None,
+                receiver: None,
             }));
         }
         Ok(None)
@@ -483,11 +537,37 @@ impl<'a> BodyLowering<'a> {
         captures: &HashMap<KlibIrSymbol, CaptureField>,
         storage: &ObjectStorage<'a>,
     ) -> Lowered<()> {
+        // Every member is declared before any body is lowered, so a body calls the members the
+        // object declares, its properties' accessors included, as it calls any function.
+        let mut declared = HashMap::default();
+        for member in &class.members {
+            let functions: Vec<_> = match member {
+                KlibIrMember::Function(id) if !self.arena.function(*id).constructor => vec![*id],
+                KlibIrMember::Property(property) => {
+                    property.getter.iter().chain(&property.setter).copied().collect()
+                }
+                _ => Vec::new(),
+            };
+            for id in functions {
+                let function = self.arena.function(id);
+                let member = self.declare_member(function, owner)?;
+                self.object_members
+                    .insert(function.base.symbol.signature.clone(), member.clone());
+                declared.insert(id, member);
+            }
+        }
         for member in &class.members {
             match member {
                 KlibIrMember::Function(id) if !self.arena.function(*id).constructor => {
                     let function = self.arena.function(*id).clone();
-                    let (fun, ret, params) = self.lower_member(&function, class_id, owner, captures, storage)?;
+                    let (fun, ret, params) = self.lower_member(
+                        &function,
+                        &declared[id],
+                        class_id,
+                        owner,
+                        captures,
+                        storage,
+                    )?;
                     self.ir.classes[class_id as usize].methods.push(fun);
                     self.record_function_override(&function, fun, owner, supertypes, &params, ret)?;
                 }
@@ -497,14 +577,26 @@ impl<'a> BodyLowering<'a> {
                     };
                     let name = property.name.clone();
                     let getter = self.arena.function(getter_id).clone();
-                    let (fun, ret, _) =
-                        self.lower_member(&getter, class_id, owner, captures, storage)?;
+                    let (fun, ret, _) = self.lower_member(
+                        &getter,
+                        &declared[&getter_id],
+                        class_id,
+                        owner,
+                        captures,
+                        storage,
+                    )?;
                     self.ir.classes[class_id as usize].methods.push(fun);
                     let setter = match property.setter {
                         Some(setter_id) => {
                             let setter = self.arena.function(setter_id).clone();
-                            let (setter, _, _) =
-                                self.lower_member(&setter, class_id, owner, captures, storage)?;
+                            let (setter, _, _) = self.lower_member(
+                                &setter,
+                                &declared[&setter_id],
+                                class_id,
+                                owner,
+                                captures,
+                                storage,
+                            )?;
                             self.ir.classes[class_id as usize].methods.push(setter);
                             Some(setter)
                         }
@@ -521,14 +613,11 @@ impl<'a> BodyLowering<'a> {
         Ok(())
     }
 
-    fn lower_member(
+    fn declare_member(
         &mut self,
         function: &KlibIrFunction,
-        class: ClassId,
         owner: TypeName,
-        captures: &HashMap<KlibIrSymbol, CaptureField>,
-        storage: &ObjectStorage<'a>,
-    ) -> Lowered<(FunId, Ty, Vec<Ty>)> {
+    ) -> Lowered<ObjectMember> {
         let mut params = Vec::new();
         let mut identities = Vec::new();
         for parameter in &function.regular_parameters {
@@ -558,6 +647,24 @@ impl<'a> BodyLowering<'a> {
                     .collect(),
             ),
         );
+        Ok(ObjectMember {
+            fun,
+            owner,
+            params,
+            ret,
+        })
+    }
+
+    fn lower_member(
+        &mut self,
+        function: &KlibIrFunction,
+        declared: &ObjectMember,
+        class: ClassId,
+        owner: TypeName,
+        captures: &HashMap<KlibIrSymbol, CaptureField>,
+        storage: &ObjectStorage<'a>,
+    ) -> Lowered<(FunId, Ty, Vec<Ty>)> {
+        let (fun, ret, params) = (declared.fun, declared.ret, declared.params.clone());
         let statements = match &function.body {
             Some(crate::metadata::klib_ir::tree::KlibIrBody::Block(statements)) => statements,
             Some(_) => return Err(KlibBodyDeclineReason::SyntheticBody),
