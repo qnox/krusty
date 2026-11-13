@@ -6,7 +6,7 @@
 //! that names only some of them. The value lives in a column parallel to [`IrFile::functions`]; a
 //! function without one has the empty value.
 
-use super::{DeclarationAnnotations, FunId, IrFile, IrVarargParameter};
+use super::{DeclarationAnnotations, FunId, IrEqualityBoundParameter, IrFile, IrVarargParameter};
 
 /// The declared parameter facts of one function. Each list is parallel to the function's physical
 /// parameters ([`super::IrFunction::params`]) or empty, which means no parameter has the fact.
@@ -28,6 +28,10 @@ pub struct IrDeclaredParameters {
     /// The `vararg` parameter. Class `@Metadata` must record its element type, or a consumer demands
     /// one literal array.
     pub vararg: Option<IrVarargParameter>,
+    /// The parameter an `equals` reads as its equality bound, declared with `@EqualityBound` or
+    /// inherited from the `equals` it overrides. `@Metadata` records it, or a consuming module's
+    /// override loses the bound.
+    pub equality_bound: Option<IrEqualityBoundParameter>,
     /// How many of the leading parameters are context parameters. `@Metadata` records them as
     /// `Function.context_parameter`, or a consuming compiler demands them positionally.
     pub context_count: usize,
@@ -38,6 +42,7 @@ static NO_DECLARED_PARAMETERS: IrDeclaredParameters = IrDeclaredParameters {
     annotations: Vec::new(),
     no_infer: Vec::new(),
     vararg: None,
+    equality_bound: None,
     context_count: 0,
 };
 
@@ -256,6 +261,7 @@ mod tests {
                 index: 1,
                 is_last: true,
             }),
+            equality_bound: None,
             context_count: 1,
         };
         *ir.declared_parameters_mut(0) = source.clone();
