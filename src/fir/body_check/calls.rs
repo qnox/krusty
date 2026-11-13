@@ -1643,6 +1643,11 @@ impl BodyFirChecker<'_> {
             selected.callable.ret,
             self.info.resolved_call_type_arguments(expression),
         );
+        if let Some(crate::libraries::CompilerIntrinsic::ArrayFactory(kind)) =
+            selected.callable.compiler_intrinsic
+        {
+            return self.array_operation(expression, arguments, kind);
+        }
         if selected.callable.compiler_intrinsic == Some(crate::libraries::CompilerIntrinsic::TypeOf)
             && !self.file.recursive_type_of
         {

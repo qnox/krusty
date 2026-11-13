@@ -70,6 +70,31 @@ pub(super) fn useless_alias_type(
 }
 
 impl Checker<'_> {
+    /// Star-project a class literal from the type parameters published for its declaration.
+    ///
+    /// `internal` is the classifier the literal already selected. A header that did not finalize
+    /// still publishes those parameters, including for a nested class. A classifier with no
+    /// published declaration stays the unbound type.
+    fn unindexed_class_literal_receiver(&self, internal: TypeName) -> Option<Ty> {
+        let count = self.written_classifier_type_parameter_count(internal)?;
+        if count == 0 {
+            return Some(Ty::obj_name(internal));
+        }
+        let star = Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")));
+        Some(Ty::obj_args_name(internal, &vec![star; count]))
+    }
+
+    /// Type parameters published for the declaration `internal` already names.
+    fn written_classifier_type_parameter_count(&self, internal: TypeName) -> Option<usize> {
+        let index = self.resolved_index?;
+        let declaration = index.classifier_declaration(internal)?;
+        let mut count = 0u32;
+        while index.type_parameter(declaration, count).is_some() {
+            count += 1;
+        }
+        Some(count as usize)
+    }
+
     /// Resolve one class-literal left-hand side as an unbound semantic type. A value root remains
     /// bound and is checked by the caller. A simple classifier is selected once by the ordinary
     /// scope tower; the special type-argument diagnostic consumes that selected alias identity.
@@ -114,10 +139,14 @@ impl Checker<'_> {
             let Some((internal, [])) = ty.obj_parts() else {
                 return ty;
             };
-            let classifier = self
-                .fed_source()
-                .classifier(internal)
-                .expect("a resolved class-literal classifier must retain its declaration");
+            // A header that did not finalize is not published, so this classifier is absent and
+            // the declaration's published type parameters are the count. A published classifier
+            // carries those parameters itself.
+            let Some(classifier) = self.fed_source().classifier(internal) else {
+                return self
+                    .unindexed_class_literal_receiver(internal)
+                    .unwrap_or(ty);
+            };
             super::class_literal_receiver::star_projected_class_literal_receiver(ty, &classifier)
         })
     }

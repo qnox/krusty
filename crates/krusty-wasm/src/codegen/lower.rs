@@ -21,7 +21,6 @@ use krusty::fx_hash::{HashMap, HashSet};
 mod absent_arguments;
 pub(super) mod any_members;
 mod arrays;
-pub(super) mod box_members;
 mod boxing;
 mod callable_reference_identity;
 mod class_literals;
@@ -31,6 +30,7 @@ mod exceptions;
 mod function_values;
 mod generated_members;
 mod intrinsic_operations;
+pub(super) mod library_members;
 mod objects;
 mod scalar_instructions;
 mod scalar_value_classes;
@@ -93,6 +93,8 @@ pub(super) struct LoweredFile {
 
 /// One file's checked IR and the facts frozen beside it.
 pub(super) struct FileInput<'a> {
+    /// The module's Pass-1 facts, which certify a declaration another file of it realizes.
+    pub(super) module_facts: &'a krusty::backend::BackendModuleFacts,
     pub(super) array_range_checks: bool,
     pub(super) classifiers: &'a dyn krusty::backend::BackendClassifierSource,
     pub(super) ir: &'a IrFile,
@@ -120,6 +122,7 @@ pub(super) fn lower_file(
     state: ModuleState<'_>,
 ) -> Result<LoweredFile, Unsupported> {
     let FileInput {
+        module_facts,
         array_range_checks,
         classifiers,
         ir,
@@ -179,12 +182,14 @@ pub(super) fn lower_file(
         let results = carrier(function.ret)?.into_iter().collect::<Vec<_>>();
         signatures.push(Some(module.func_type(params, results)));
     }
-    let indices = callable_registry.declare_file(ir, module)?;
+    let enum_constant_entries =
+        callable_registry.link_enum_constants(dependency_exports, module)?;
+    let indices = callable_registry.declare_file(ir, module, &enum_constant_entries)?;
     let reference_file =
         runtime
             .callable_references
             .begin_file(module_name, ir, dependency_exports)?;
-    let call_targets = callable_registry.file_calls(ir, callables, module)?;
+    let call_targets = callable_registry.file_calls(ir, callables, module_facts, module)?;
     let inert_singleton_bindings = krusty::backend::inert_staged_singleton_bindings(
         ir,
         |expression| {
@@ -573,6 +578,14 @@ fn expression_type(
             ir.functions[function as usize].ret
         }
         IrExpr::PropertyRead { ty, .. } if ir.checked_type(id).is_none() => *ty,
+        // A `when` without an `else` branch, such as a guard a counted loop's lowering adds, is a
+        // statement: no branch's value can be its own.
+        IrExpr::When { branches }
+            if ir.checked_type(id).is_none()
+                && branches.iter().all(|(condition, _)| condition.is_some()) =>
+        {
+            Ty::Unit
+        }
         // A top-level property read has its storage's declared type.
         IrExpr::GetStatic(index) if ir.checked_type(id).is_none() => ir.statics[*index as usize].ty,
         // A shared cell's element is read, and a write evaluates to what it stored, at the
@@ -930,7 +943,7 @@ impl<'a> Body<'a> {
     /// Emit `id`, leaving its value on the stack when it has one.
     fn expression(&mut self, id: u32) -> Result<(), Unsupported> {
         let node = self.ir.expr(id).clone();
-        if let Some(result) = self.box_member_expression(id, &node) {
+        if let Some(result) = self.library_member_expression(id, &node) {
             return result;
         }
         if let Some(result) = self.emitted_dependency_expression(id, &node) {
@@ -1584,10 +1597,11 @@ impl<'a> Body<'a> {
                 impl_fn,
                 &captures,
                 function_values::FunctionEquality::Identity,
+                self.type_of(id)?,
                 sam.as_deref(),
             )?,
             IrExpr::CallableReference(reference) if !reference.declaration_suspend => {
-                self.callable_reference(&reference)?
+                self.callable_reference(id, &reference)?
             }
             IrExpr::InvokeFunction {
                 func,
@@ -1738,12 +1752,24 @@ impl<'a> Body<'a> {
         }
         self.code.block(BlockType::Empty);
         let next = self.open();
-        self.loops.push(Loop { label, exit, next });
+        self.loops.push(Loop {
+            label: label.clone(),
+            exit,
+            next,
+        });
         self.statement(body)?;
         self.loops.pop();
         self.close();
         if let Some(update) = update {
+            // The update is still the loop's own code: a counted loop over an inclusive bound
+            // leaves from it before stepping past the last value.
+            self.loops.push(Loop {
+                label,
+                exit,
+                next: top,
+            });
             self.statement(update)?;
+            self.loops.pop();
         }
         if post_test {
             self.value(cond, Ty::Boolean)?;
@@ -2113,6 +2139,7 @@ mod tests {
         );
         lower_file(
             FileInput {
+                module_facts: &module_facts,
                 array_range_checks: super::super::super::array_access::default_range_checks(),
                 classifiers: &classifiers,
                 ir,

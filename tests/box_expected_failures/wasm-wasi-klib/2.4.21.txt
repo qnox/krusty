@@ -19,28 +19,22 @@ annotations/instances/annotationWithTypeParameters.kt
 annotations/instances/annotationsUnsignedTypes.kt
 annotations/instances/arrayContentEqAny.kt
 annotations/instances/arraysAndKClass.kt
-annotations/instances/differentAnnotationTypes.kt
 annotations/instances/differentOrder.kt
 annotations/instances/enumAndKClass.kt
 annotations/instances/enumArray.kt
 annotations/instances/inInlineFunction.kt
-annotations/instances/innerAnnotationInstantiation.kt
 annotations/instances/instanceEquality.kt
 annotations/instances/mixedArray.kt
 annotations/instances/multifileEqHc.kt
 annotations/instances/multimoduleTypeParams.kt
 annotations/instances/naNAndZero.kt
 annotations/instances/nested.kt
-annotations/instances/nestedAnnotationInstances.kt
 annotations/instances/nestedDefaults.kt
-annotations/instances/rearrangedArgumentsInAnnotationCall.kt
 annotations/instances/repeatableInstantiation.kt
 annotations/instances/typeAliasesAndGenericsInterop.kt
 annotations/instances/unsignedAndBooleanArrays.kt
 annotations/instances/varargInAnnotationParameterInstantiation.kt
 annotations/instances/withDefaults.kt
-annotations/recursiveAnnotationWithVarargAndDefaultValue.kt
-annotations/recursiveAnnotationWithVarargAndWithoutDefaultValue.kt
 annotations/selfReferentialAnnotation.kt
 annotations/typeAnnotations/checkingNotincorporatedInputTypes.kt
 arithmetic/basic_charConversions.kt
@@ -168,7 +162,6 @@ binaryOp/kt11163_properIeee754comparisons.kt
 binaryOp/kt23030_properIeee754comparisons.kt
 binaryOp/kt44402.kt
 boxing/boxBoolean.kt
-boxing/box_cache0.kt
 boxing/boxing1.kt
 boxing/boxing11.kt
 boxing/boxing12.kt
@@ -314,7 +307,6 @@ callableReference/adaptedReferences/suspendUnitConversion.kt
 callableReference/adaptedReferences/unboundReferences.kt
 callableReference/adaptedReferences/unitCoercionOverloads.kt
 callableReference/adaptedReferences/varargFromBaseClass.kt
-callableReference/adaptedReferences/varargWithDefaultValue.kt
 callableReference/arrayOfNulls.kt
 callableReference/bound/array.kt
 callableReference/bound/boundReferenceToOverloadedFunction.kt
@@ -612,7 +604,6 @@ controlStructures/breakContinueInExpressions/inlinedBreakContinue/initializerBlo
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/inlineFunctionWithMultipleParameters.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/lambdaPassedToInlineFunction.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/loopWithinInlineFunction.kt
-controlStructures/breakContinueInExpressions/inlinedBreakContinue/stdlibFunctions.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/withReturnValueNested.kt
 controlStructures/breakInWhen.kt
 controlStructures/continueInExpr.kt
@@ -624,7 +615,6 @@ controlStructures/emptyFor.kt
 controlStructures/factorialTest.kt
 controlStructures/forArrayList.kt
 controlStructures/forArrayListMultiDecl.kt
-controlStructures/forInArray/forInArraySpecializedToUntil.kt
 controlStructures/forInArray/forInDelegatedPropertyUpdatedInLoopBody.kt
 controlStructures/forInArray/forInDoubleArrayWithUpcast.kt
 controlStructures/forInArray/forInFieldUpdatedInLoopBody.kt
@@ -704,7 +694,6 @@ controlStructures/kt513.kt
 controlStructures/kt628.kt
 controlStructures/kt910.kt
 controlStructures/longRange.kt
-controlStructures/quicksort.kt
 controlStructures/slowDsl/slowHtmlLikeDsl.kt
 controlStructures/tryCatchInExpressions/differentTypes.kt
 controlStructures/tryCatchInExpressions/kt8608.kt
@@ -1519,7 +1508,6 @@ extensionFunctions/suspendConversionForExtensionFunAsAFunType.kt
 extensionFunctions/suspendConversionForExtensionFunAsAPropertyType.kt
 extensionFunctions/suspendConversionForExtensionFunAsASuperType.kt
 extensionFunctions/thisMethodInObjectLiteral.kt
-extensionFunctions/virtual.kt
 extensionProperties/contextPropertyInInterface.kt
 extensionProperties/extensionPropertyDelegated.kt
 extensionProperties/extensionPropertyDifferentReceiver.kt
@@ -1866,7 +1854,6 @@ inline/inlineNoReturn.kt
 inline/inlineOrder.kt
 inline/inlineSimpleAssignment.kt
 inline/inlinedLambdaWithErasedParamType.kt
-inline/innerInlineFunCapturesOuter.kt
 inline/iteratorOnInlineFunctionResult.kt
 inline/kt26117.kt
 inline/kt26787.kt
@@ -1903,7 +1890,6 @@ inline/safeCall.kt
 inline/severalClosures.kt
 inline/sharedVar.kt
 inline/simpleDouble.kt
-inline/simpleEnum.kt
 inline/simpleInt.kt
 inline/simpleLambda.kt
 inline/simpleObject.kt
@@ -2461,7 +2447,6 @@ inlineSizeReduction/valAssignment.kt
 inlineSizeReduction/valDeclaration.kt
 inlineStdlib/callableRefToFunInCurrentModule.kt
 innerClass/inheritanceMultipleModules1.kt
-innerClass/inheritanceMultipleModules2.kt
 innerClass/inheritanceMultipleModules3.kt
 innerClass/multipleModules.kt
 innerClass/noPrimaryConstructor.kt
@@ -2498,7 +2483,6 @@ ir/enumClass2.kt
 ir/enumClass3.kt
 ir/fileClassInitializers.kt
 ir/kt41765.kt
-ir/kt55318.kt
 ir/lambdaWithLoop.kt
 ir/primitiveNumberComparisons/comparableToDouble.kt
 ir/primitiveNumberComparisons/doubleEqeq.kt
@@ -3062,8 +3046,6 @@ ranges/forInCharSequenceWithMultipleGetFunctions.kt
 ranges/forInCustomCharSequence.kt
 ranges/forInCustomIterable.kt
 ranges/forInDoubleRangeWithCustomIterator.kt
-ranges/forInDownTo/forInDownToWithPossibleUnderflow.kt
-ranges/forInDownTo/forInSumDownToSum.kt
 ranges/forInDownTo/forIntInDownTo.kt
 ranges/forInDownTo/forIntInDownToWithNonConstBounds.kt
 ranges/forInDownTo/forIntInNonOptimizedDownTo.kt
@@ -3071,8 +3053,6 @@ ranges/forInDownTo/forLongInDownTo.kt
 ranges/forInDownTo/forNullableIntInDownTo.kt
 ranges/forInFloatRangeWithCustomIterator.kt
 ranges/forInIndices/forInArrayListIndices.kt
-ranges/forInIndices/forInCharSequenceIndices.kt
-ranges/forInIndices/forInCharSequenceTypeParameterIndices.kt
 ranges/forInIndices/forInCollectionImplicitReceiverIndices.kt
 ranges/forInIndices/forInCollectionIndices.kt
 ranges/forInIndices/forInCollectionTypeParameterIndices.kt
@@ -3106,7 +3086,6 @@ ranges/forInProgressionWithIndex/forInWithIndexReversed.kt
 ranges/forInProgressionWithIndex/forInWithIndexWithDestructuringInLoop.kt
 ranges/forInProgressionWithIndex/forInWithIndexWithIndex.kt
 ranges/forInProgressionWithIndex/kt42909.kt
-ranges/forInRangeLiteralWithMixedTypeBounds.kt
 ranges/forInRangeWithImplicitReceiver.kt
 ranges/forInReversed/ForInReversedReversedRange.kt
 ranges/forInReversed/forInReversedArrayIndices.kt
@@ -3155,11 +3134,8 @@ ranges/forWithPossibleOverflow/forInRangeToIntMaxValueReversed.kt
 ranges/forWithPossibleOverflow/forInRangeToLongMaxValue.kt
 ranges/forWithPossibleOverflow/forInRangeToLongMaxValueReversed.kt
 ranges/forWithPossibleOverflow/forInUntilIntMinValueReversed.kt
-ranges/kt37370.kt
 ranges/kt37370a.kt
 ranges/kt47492.kt
-ranges/kt47492a.kt
-ranges/kt47492b.kt
 ranges/literal/emptyDownto.kt
 ranges/literal/emptyRange.kt
 ranges/literal/inexactDownToMinValue.kt
@@ -3952,9 +3928,7 @@ strings/kt3571.kt
 strings/kt5389_stringBuilderGet.kt
 strings/kt5956.kt
 strings/kt86478_stringBuilderSetLength.kt
-strings/kt894.kt
 strings/nestedConcat.kt
-strings/rawStringsWithManyQuotes.kt
 strings/stringPlusOnlyWorksOnString.kt
 strings/trimOptimization.kt
 super/basicproperty.kt
@@ -4061,7 +4035,6 @@ typeMapping/kt3863.kt
 typeMapping/kt3976.kt
 typeMapping/nullableNothing.kt
 typealias/abbreviationWithCapturedType.kt
-typealias/deserializedAbbreviationWithRedundantArgument.kt
 typealias/localTypeAliases.kt
 typealias/nestedTypeAliasesAndStaticScope.kt
 typealias/nestedTypeAliasesAndTypeArguments.kt
