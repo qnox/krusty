@@ -14,6 +14,9 @@ pub(crate) struct EmittedCallForms {
     /// The calls inside an expression that the form the expression is realizes without their
     /// declarations, such as an array `for` loop's iterator protocol.
     pub(crate) folded_calls: fn(&KlibIrArena, &KlibIrExpr) -> Vec<KlibIrExprId>,
+    /// The declaration a call is realized as a call of in place of the one it names, such as the
+    /// array content extension a data class array member operator lowers to.
+    pub(crate) implied_callee: fn(&KlibIrArena, &KlibIrExpr) -> Option<&'static KlibIrSymbol>,
 }
 
 impl KlibIrArena {
@@ -104,6 +107,7 @@ impl KlibIrArena {
             let expression = self.expr(id);
             push_child_expressions(self, &expression.kind, &mut pending);
             folded_calls.extend((forms.folded_calls)(self, expression));
+            calls.extend((forms.implied_callee)(self, expression));
             match &expression.kind {
                 KlibIrExprKind::Call { access, .. }
                     if !folded_calls.contains(&id) && !(forms.folded_call)(self, expression) =>

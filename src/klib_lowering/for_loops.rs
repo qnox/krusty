@@ -258,7 +258,7 @@ fn reads_variable(
 }
 
 /// The class `ty` applies, by its classifier, when that classifier is a public class.
-fn class_name(arena: &KlibIrArena, ty: KlibIrTypeId) -> Option<crate::types::TypeName> {
+pub(super) fn class_name(arena: &KlibIrArena, ty: KlibIrTypeId) -> Option<crate::types::TypeName> {
     let KlibIrType::Simple { classifier, .. } = arena.ty(ty) else {
         return None;
     };
