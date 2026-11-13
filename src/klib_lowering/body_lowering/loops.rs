@@ -250,7 +250,9 @@ impl BodyLowering<'_> {
         } = indices_loop;
         if let Some(reversed) = reversed {
             let KlibIrSignature::Public(callee) = &reversed.symbol.signature else {
-                return Err(mismatch("a reversed indices loop names a non-public callee"));
+                return Err(mismatch(
+                    "a reversed indices loop names a non-public callee",
+                ));
             };
             if !self.linker.reverses_progression(callee)? {
                 return unsupported("a `for` loop over indices through another progression call");
