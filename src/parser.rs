@@ -2356,6 +2356,11 @@ impl<'a> Parser<'a> {
         // consumer sees one list.
         let mut type_param_bounds = type_param_bounds;
         type_param_bounds.extend(self.parse_where_clause(&type_params, &name));
+        self.report_cyclic_type_parameter_bounds(
+            &type_params,
+            &mut type_param_bounds,
+            type_parameters::CyclicBoundAnchor::TypeParameter,
+        );
         let signature_end = self.t[self.i.saturating_sub(1)].span.hi;
         // A `=`-body or block body may sit on a following line (`fun f(): T\n{ … }`). Skip plain line
         // breaks to find it, restoring the position if what follows is neither — an abstract/no-body
@@ -2822,6 +2827,11 @@ impl<'a> Parser<'a> {
         // supertype list, before the body. Same constraint as the inline form; one joined list.
         let mut type_param_bounds = type_param_bounds;
         type_param_bounds.extend(self.parse_where_clause(&type_params, &name));
+        self.report_cyclic_type_parameter_bounds(
+            &type_params,
+            &mut type_param_bounds,
+            type_parameters::CyclicBoundAnchor::Bound,
+        );
         // Optional class body: member `fun`s, body properties (`val`/`var`), and `init { }` blocks.
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
@@ -3168,6 +3178,11 @@ impl<'a> Parser<'a> {
         // body. Same constraint as the inline form; one joined list.
         let mut type_param_bounds = type_param_bounds;
         type_param_bounds.extend(self.parse_where_clause(&type_params, &name));
+        self.report_cyclic_type_parameter_bounds(
+            &type_params,
+            &mut type_param_bounds,
+            type_parameters::CyclicBoundAnchor::Bound,
+        );
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
         let mut companions = companion_declarations::ClassifierCompanions::default();
