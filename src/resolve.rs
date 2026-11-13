@@ -382,6 +382,8 @@ pub use super_calls::ResolvedSuperCall;
 mod superclass_validation;
 mod type_parameter_owners;
 use type_parameter_owners::ty_param_names_into;
+mod cyclic_upper_bounds;
+mod resolved_bound_view;
 mod uninferred_call_results;
 mod upper_bound_violations;
 mod value_class_parameters;
@@ -19768,8 +19770,9 @@ impl<'a> Checker<'a> {
         // Legal *nested* shadowing (`val x` inside a block, shadowing an outer `val x`) lowers
         // fine — each declaration gets a fresh slot and the lowering's scope is truncated at block
         // exit, restoring the outer mapping (verified). Only a same-scope *redeclaration* is
-        // rejected (kotlinc errors on it too — conflicting declarations).
-        if self.declared_in_current_scope(scope, &name) {
+        // rejected (kotlinc errors on it too — conflicting declarations). An unnamed local
+        // (`val _ = ...`) binds no name, so it can neither conflict nor be conflicted with.
+        if name != "_" && self.declared_in_current_scope(scope, &name) {
             self.diags.error(
                 self.file.stmt_spans[s.0 as usize],
                 format!("krusty: conflicting local declaration '{name}'"),
@@ -21130,6 +21133,27 @@ impl<'a> Checker<'a> {
                         .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>();
+            let written = f
+                .type_param_bounds
+                .iter()
+                .map(|(_, bound)| {
+                    self.resolved_type_bounds
+                        .get(&(bound.span.lo, bound.span.hi))
+                        .map_or(Ty::Error, |resolved| resolved.0)
+                })
+                .collect::<Vec<_>>();
+            let identities = f
+                .type_params
+                .iter()
+                .map(|name| semantic_tparams.bound(name).ty_param_name().unwrap_or(name))
+                .collect::<Vec<_>>();
+            self.report_cyclic_type_parameter_bounds(
+                &f.type_params,
+                &identities,
+                &f.type_param_bounds,
+                &written,
+                true,
+            );
             source_generic_signature_from_tparams(
                 f,
                 &semantic_tparams,

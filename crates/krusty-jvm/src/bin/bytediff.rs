@@ -169,8 +169,8 @@ fn main() {
         let src = std::fs::read_to_string(f).unwrap_or_default();
         let src =
             krusty::conformance::prepare_test_source(&src, krusty::conformance::TestTarget::Jvm);
-        if src.contains("// FILE:")
-            || src.contains("// MODULE:")
+        if krusty::conformance::contains_directive(&src, "FILE")
+            || krusty::conformance::contains_directive(&src, "MODULE")
             || !src.contains("fun box()")
             || src.contains("// LAMBDAS: INDY")
             || src.contains("IGNORE_BACKEND_K2: JVM_IR")

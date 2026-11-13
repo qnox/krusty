@@ -376,6 +376,39 @@ pub(super) fn ordinary_roots<'a>(
             roots.push(selected);
         }
     }
+    // A class of this file extending a dependency class initializes each instance with the
+    // dependency constructor it delegates to, so that constructor materializes its class just as
+    // a construction does.
+    let mut delegations = source
+        .ir
+        .external_super_constructors
+        .values()
+        .chain(source.ir.external_secondary_super_constructors.values())
+        .map(|target| target.declaration)
+        .collect::<Vec<_>>();
+    delegations.sort_unstable_by_key(|target| target.raw());
+    delegations.dedup();
+    for target in delegations {
+        let Some(selected) = source
+            .callables
+            .callable(target)
+            .ok_or("a dependency superclass constructor has no frozen fact")?
+            .klib_body_callable()
+        else {
+            continue;
+        };
+        if bodies.function_has_body(selected.identity()) != Some(true) {
+            continue;
+        }
+        if callees
+            .constructor_initialization_callees(selected.identity(), bodies)
+            .map_err(|reason| format!("an invalid superclass constructor root: {reason:?}"))?
+            .is_some()
+            && seen.insert(selected.identity())
+        {
+            roots.push(selected);
+        }
+    }
     Ok(roots)
 }
 

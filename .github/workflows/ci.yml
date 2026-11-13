@@ -15,7 +15,7 @@ jobs:
         fetch-depth: 0
         filter: tree:0
     - name: verify exact implementation source
-      run: 'git diff --exit-code c6d308edfc5639a14573168f68122149eb79c907 HEAD -- . '':!.github/workflows/ci.yml''
+      run: 'git diff --exit-code 71588a80e5aa779a0c7a0e1696e2a1404582f89b HEAD -- . '':!.github/workflows/ci.yml''
 
         git rev-parse HEAD > implementation-evidence.txt
 
@@ -97,7 +97,6 @@ jobs:
       KRUSTY_BOX_CASE_TIMEOUT_MS: '8000'
       BOX_REFERENCES: box-reference-classes-${{ matrix.target != 'jvm' && format('{0}-', matrix.target) || '' }}${{ matrix.version
         }}
-      KRUSTY_BLESS_BOX_EXPECTATIONS: '1'
       KRUSTY_TEST_THREADS: '4'
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -274,9 +273,9 @@ jobs:
         KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/native-recordings
         KRUSTY_CLASS_DUMP_COMPILE_MISSING: '1'
         KRUSTY_CLASS_DUMP_WRITE: ${{ steps.native-recording-mode.outputs.write }}
-      run: 'set -o pipefail
+      run: 'set +e
 
-        {
+        (
 
         chmod +x conformance-bin
 
@@ -285,7 +284,13 @@ jobs:
         bash scripts/conformance-badge.sh fields native-conformance native-pct.txt "${{ matrix.version }}"
 
 
-        } 2>&1 | tee complete-lane.log
+        ) 2>&1 | tee complete-lane.log
+
+        status=${PIPESTATUS[0]}
+
+        printf "%s\n" "$status" > complete-lane.exit
+
+        exit "$status"
 
         '
     - name: run focused Native conformance ${{ matrix.version }}
@@ -310,9 +315,6 @@ jobs:
       with:
         path: target/cache/native-recordings
         key: recorded-kotlinc-native-bytes-${{ matrix.version }}-${{ github.sha }}
-    - name: enforce native box conformance ${{ matrix.version }}
-      if: matrix.target == 'native' && steps.native_box.outcome == 'failure'
-      run: exit 1
     - name: enforce focused Native conformance ${{ matrix.version }}
       if: matrix.target == 'native' && steps.native_focused.outcome == 'failure'
       run: exit 1
@@ -332,9 +334,9 @@ jobs:
         KRUSTY_CLASS_DUMP_COMPILE_MISSING: '1'
         KRUSTY_CLASS_DUMP_WRITE: ${{ github.ref == 'refs/heads/master' && steps.klib-recordings.outputs.cache-hit != 'true'
           && '1' || '0' }}
-      run: 'set -o pipefail
+      run: 'set +e
 
-        {
+        (
 
         set -euo pipefail
 
@@ -343,9 +345,16 @@ jobs:
         just wasm-conformance-run "${{ matrix.target }}" "$PWD/conformance-bin" "${{ matrix.version }}"
 
 
-        } 2>&1 | tee complete-lane.log
+        ) 2>&1 | tee complete-lane.log
+
+        status=${PIPESTATUS[0]}
+
+        printf "%s\n" "$status" > complete-lane.exit
+
+        exit "$status"
 
         '
+      continue-on-error: true
     - name: run focused Wasm conformance ${{ matrix.version }}
       if: matrix.target == 'wasm-js'
       env:
@@ -456,20 +465,84 @@ jobs:
       with:
         path: target/cache/box-corpus/${{ matrix.version }}
         key: ${{ steps.box-corpus.outputs.cache-primary-key }}
-    - name: record manifest evidence
+    - name: capture only verified full-run removals
       if: always()
+      env:
+        TARGET: ${{ matrix.target }}
+        VERSION: ${{ matrix.version }}
       run: 'set -euo pipefail
 
-        start=$(git rev-parse HEAD)
+        python3 - <<''CHECK''
 
-        printf ''%s\n'' "$start" > evidence-commit.txt
+        import json,os,re,subprocess
+
+        from pathlib import Path
+
+        text=Path(''complete-lane.log'').read_text()
+
+        status=int(Path(''complete-lane.exit'').read_text())
+
+        label=os.environ[''TARGET'']+''-klib''
+
+        summary=re.findall(re.escape(label)+r'' conformance: scanned (\d+),[^
+
+        ]*compiler-panics (\d+),[^
+
+        ]*failed (\d+),[^
+
+        ]*'',text)
+
+        assert len(summary)==1 and int(summary[0][0])>1000 and summary[0][1]==''0'', ''missing complete corpus summary or
+        compiler panic''
+
+        changes=re.findall(r''^\s+([^
+
+        ]+): expected ([a-z-]+), got ([a-z-]+)\s*$'',text,re.M)
+
+        assert all(old==''fail'' and new==''pass'' for _,old,new in changes), ''negative or applicability outcome change''
+
+        assert not re.search(r''^\s+unexpected(?: non-pass)? '',text,re.M), ''unexpected non-pass''
+
+        counts=re.findall(r''FAILED <[^>]+ box expectations>: (\d+) file\(s\) outcome changed:'',text)
+
+        assert (not changes and not counts and status==0) or (len(counts)==1 and int(counts[0])==len(changes) and status==101),
+        ''incomplete mismatch report or other test failure''
+
+        assert int(summary[0][2])==(1 if changes else 0), ''unexpected corpus failures''
+
+        manifest=Path(''tests/box_expected_failures'')/label/(os.environ[''VERSION'']+''.txt'')
+
+        assert manifest.is_file(), ''missing exact-version manifest''
+
+        lines=manifest.read_text().splitlines(keepends=True)
+
+        removed={path for path,_,_ in changes}
+
+        assert len(removed)==len(changes) and removed<={line.strip() for line in lines}, ''mismatch paths absent from original
+        manifest''
+
+        manifest.write_text(''''.join(line for line in lines if line.strip() not in removed))
+
+        commit=subprocess.check_output([''git'',''rev-parse'',''HEAD''],text=True).strip()
+
+        Path(''evidence-commit.txt'').write_text(commit+''
+
+        '')
+
+        Path(''positive-outcomes.json'').write_text(json.dumps({''runner_commit'':commit,''target'':os.environ[''TARGET''],''version'':os.environ[''VERSION''],''scanned'':int(summary[0][0]),''strict_exit'':status,''removed'':sorted(removed)},indent=2)+''
+
+        '')
+
+        CHECK
+
+        start=$(git rev-parse HEAD)
 
         git diff -- tests/box_expected_failures tests/box_expected_not_applicable > outcome-manifests.patch
 
         git add tests/box_expected_failures tests/box_expected_not_applicable
 
         GIT_AUTHOR_NAME=''Anton Efimchuk'' GIT_AUTHOR_EMAIL=''anton.efimchuk@gmail.com'' GIT_COMMITTER_NAME=''Anton Efimchuk''
-        GIT_COMMITTER_EMAIL=''anton.efimchuk@gmail.com'' git commit --allow-empty -m ''Record completed runner lane outcomes''
+        GIT_COMMITTER_EMAIL=''anton.efimchuk@gmail.com'' git commit --allow-empty -m ''Record verified positive runner outcomes''
 
         scripts/check-outcome-lists.sh "$start" HEAD
 
@@ -481,13 +554,13 @@ jobs:
         name: outcomes-${{ matrix.target }}-${{ matrix.version }}
         path: 'evidence-commit.txt
 
+          positive-outcomes.json
+
           outcome-manifests.patch
 
           complete-lane.log
 
-          tests/box_expected_failures
-
-          tests/box_expected_not_applicable
+          complete-lane.exit
 
           '
         if-no-files-found: error
