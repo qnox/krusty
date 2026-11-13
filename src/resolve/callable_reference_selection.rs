@@ -658,6 +658,16 @@ pub(super) fn input_parameter_fits(
     }
 }
 
+/// [`parameter_plan`] for a reference that binds no context arguments.
+pub(super) fn plain_parameter_plan(
+    params: &[Ty],
+    call_sig: &CallSig,
+    expected_params: &[Ty],
+    is_assignable: impl FnMut(Ty, Ty) -> bool,
+) -> Option<Vec<AdaptedRefArgument>> {
+    parameter_plan(params, call_sig, 0, expected_params, is_assignable)
+}
+
 pub(super) fn parameter_plan(
     params: &[Ty],
     call_sig: &CallSig,
