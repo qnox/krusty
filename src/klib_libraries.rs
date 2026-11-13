@@ -35,10 +35,10 @@ use crate::types::TypeName;
 
 pub use archives::OpenedKlibLibraries;
 pub use archives::{KlibLibrariesOpenError, KlibLibraryInput, KlibStdlibSemantics};
-pub use declaration_bodies::{KlibBodyLibrary, KlibDeclarationBodies, KlibDeclarationBodiesError};
 pub(crate) use declaration_bodies::{
-    KlibCalleeOrigin, KlibEnumEntryClass, LocatedClass, LocatedMember,
+    member_signature, KlibCalleeOrigin, KlibEnumEntryClass, LocatedClass, LocatedMember,
 };
+pub use declaration_bodies::{KlibBodyLibrary, KlibDeclarationBodies, KlibDeclarationBodiesError};
 pub use declaration_signatures::KlibLibraryError;
 pub use serialized_references::{
     KlibReferenceBinding, KlibReferenceBindings, KlibReferenceDispatch, KlibReferenceOrigin,
@@ -143,10 +143,6 @@ impl KlibLibraries {
             lookups: lookup::SymbolLookups::default(),
         };
         libraries.references = std::rc::Rc::new(KlibReferenceBindings::freeze(&libraries));
-        let inherited = serialized_references::inherited_members(&libraries);
-        std::rc::Rc::get_mut(&mut libraries.bodies)
-            .expect("the bodies stay unshared until their provider is published")
-            .bind_inherited_members(inherited);
         libraries
     }
 
@@ -213,6 +209,13 @@ impl SymbolSource for KlibLibraries {
         self.lookups.symbols(namespace, name, || {
             lookup::declared_symbols(&self.inventory, &self.identities, namespace, name)
         })
+    }
+
+    fn klib_body_class_contract(
+        &self,
+        classifier: crate::types::TypeName,
+    ) -> Option<crate::libraries::KlibBodyClassContract> {
+        self.inventory.class_body_contract(classifier)
     }
 
     fn external_callable(

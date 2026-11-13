@@ -66,6 +66,7 @@ mod loops;
 mod member_dispatch;
 mod metadata_constants;
 mod module_declarations;
+mod node_positions;
 mod package_declarations;
 mod properties;
 mod property_references;
@@ -346,16 +347,16 @@ pub(crate) fn lower_body_with_context(
                 });
             };
             let stmts = stmts.clone();
-            if let (Some(&first), Some(&line)) =
-                (stmts.first(), lowering.ir.expr_lines.get(&lowered))
+            if let (Some(&first), Some(line)) = (stmts.first(), lowering.ir.statement_line(lowered))
             {
-                lowering.ir.expr_lines.insert(first, line);
+                lowering.ir.set_statement_line(first, line);
             }
             roots.extend(stmts.iter().copied());
         } else {
             roots.push(lowered);
         }
     }
+    lowering.settle_body_positions();
     let lowered = LoweredFirBody {
         owner,
         roots: roots.into_boxed_slice(),
@@ -447,6 +448,8 @@ struct BodyLowering<'a> {
     /// The call each `{ val t = operand…; call(t…) }` block this body built evaluates once its
     /// stored operands are bound, recorded when the block is created.
     operand_bound_calls: HashMap<ExprId, ExprId>,
+    /// The first node this body built. Every node from here on is this body's.
+    first_expression: usize,
     /// The lambda literal about to be lowered for a functional interface whose method returns
     /// `Unit`: its implementation returns nothing, as the interface method does, rather than the
     /// `Unit` value a function type's `invoke` returns.
@@ -674,6 +677,7 @@ impl<'a> BodyLowering<'a> {
             local_callable_scopes,
             published_local_callables,
         } = scopes;
+        let first_expression = ir.exprs.len();
         let context_parameter_count = u32::try_from(body.context_receiver_types().len())
             .expect("too many FIR context parameters");
         let context_value_count = body.context_value_count();
@@ -747,6 +751,7 @@ impl<'a> BodyLowering<'a> {
             root_block: root_scope_block(body),
             lowered_root_block: None,
             operand_bound_calls: HashMap::default(),
+            first_expression,
             unit_method_lambda: None,
         }
     }
@@ -809,6 +814,21 @@ impl<'a> BodyLowering<'a> {
             .checked_add(1)
             .expect("too many FIR lowering temporaries");
         temporary
+    }
+
+    /// Declare a temporary holding `value`, as fir2ir's `createTemporaryVariable` does: the
+    /// variable is built at its initializer's offsets, so it states the line `value` starts on.
+    fn value_temporary(&mut self, value: ExprId, ty: crate::types::Ty) -> (ExprId, u32) {
+        let temporary = self.allocate_temporary();
+        let declaration = self.ir.add_expr(IrExpr::Variable {
+            index: temporary,
+            ty,
+            init: Some(value),
+            named: false,
+        });
+        self.ir
+            .settle_positions_of(declaration as usize..declaration as usize + 1, value);
+        (declaration, temporary)
     }
 
     /// Attach a generated static helper to the class that lexically owns this checked FIR body.
@@ -1091,7 +1111,9 @@ pub(super) enum UnitReturnLine {
 /// return belongs to that call expression, so keep the region's end.
 pub(super) fn implicit_return_end(ir: &IrFile, value: ExprId) -> Option<u32> {
     let mut end = ir.end_line(value);
-    let inline_call_end = ir.inline_regions.contains(&value);
+    // The outermost inline expansion owns the call's end line. A region nested inside it, and the
+    // value that region returns, keep their own ends for SMAP and do not replace the call.
+    let mut inline_call_end = ir.inline_regions.contains(&value);
     let mut returned = value;
     while let crate::ir::IrExpr::Block {
         value: Some(inner), ..
@@ -1099,6 +1121,13 @@ pub(super) fn implicit_return_end(ir: &IrFile, value: ExprId) -> Option<u32> {
     {
         returned = *inner;
         let inner_end = ir.end_line(returned);
+        if ir.inline_regions.contains(&returned) {
+            if !inline_call_end {
+                inline_call_end = true;
+                end = inner_end.or(end);
+            }
+            continue;
+        }
         end = if inline_call_end {
             end.or(inner_end)
         } else {

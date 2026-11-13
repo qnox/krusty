@@ -69,7 +69,7 @@ impl<'a> CommonSupertypeSolver<'a> {
                 result
             }
         };
-        let mut key = Vec::with_capacity(bounds.len());
+        let mut key = Vec::<Ty>::with_capacity(bounds.len());
         for bound in bounds.iter().copied().map(Ty::non_null) {
             // `Nothing` is the bottom type, so it cannot widen a lower-bound join. This is
             // particularly visible through covariant producers: `emptySet()` contributes
@@ -77,7 +77,11 @@ impl<'a> CommonSupertypeSolver<'a> {
             if bound == Ty::Nothing {
                 continue;
             }
-            if !key.contains(&bound) {
+            // Bounds that are equal types (each a subtype of the other) are one bound, and the
+            // first one stands for them, as kotlinc's common supertype keeps the first of equal
+            // types: `MutableList<J>` then `MutableList<J!>` join at `MutableList<J>`, and the
+            // reverse order at `MutableList<J!>`.
+            if !key.iter().any(|known| self.equal_types(*known, bound)) {
                 key.push(bound);
             }
         }
@@ -113,6 +117,21 @@ impl<'a> CommonSupertypeSolver<'a> {
         self.active.pop();
         self.completed.push((nullable, key, result));
         Some(result)
+    }
+
+    /// Kotlin's type equality: each type is a subtype of the other. A type that mentions an
+    /// unresolved type is equal only to itself, so an error never absorbs a real bound.
+    fn equal_types(&self, left: Ty, right: Ty) -> bool {
+        if left == right {
+            return true;
+        }
+        if left.contains_error() || right.contains_error() {
+            return false;
+        }
+        let oracle = SourceOracle(self.source);
+        let context = crate::assignable::TyCtx::new();
+        crate::assignable::is_assignable(&context, &oracle, left, right)
+            && crate::assignable::is_assignable(&context, &oracle, right, left)
     }
 
     fn common_active(&mut self, bounds: &[Ty]) -> Ty {

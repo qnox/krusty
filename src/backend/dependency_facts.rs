@@ -60,6 +60,12 @@ pub struct BackendCallableFact {
     /// Exact declarations this declaration overrides, as checked FIR froze them from the member
     /// hierarchy. A target keys a specially implemented language declaration on them.
     pub overridden_declarations: Box<[crate::types::OverriddenDeclaration]>,
+    /// For a member of a supertype of builtin classes (`CharSequence.length`, `Number.toLong`,
+    /// `Comparable.compareTo`), or a property's getter of one, what each such class runs when a
+    /// value of it is the receiver, as the member hierarchy proves. A target carrying the builtin
+    /// value in a representation of its own (a string, a box) dispatches the call to these; every
+    /// other callable has none.
+    pub builtin_implementations: Box<[BuiltinImplementation]>,
     pub member_realization: MemberRealization,
     pub params: Vec<Ty>,
     pub physical_params: Vec<Ty>,
@@ -244,13 +250,15 @@ impl BackendCallableFact {
 
     /// The target-free declaration view used when a selected KLIB body is lowered to common IR.
     pub fn klib_body_callable(&self) -> Option<crate::libraries::KlibBodyCallable<'_>> {
-        self.klib_body_callable_with_singleton(self.singleton_dispatch)
+        self.klib_body_callable_with_singleton(self.singleton_dispatch, None)
     }
 
-    fn klib_body_callable_with_singleton(
-        &self,
+    fn klib_body_callable_with_singleton<'a>(
+        &'a self,
         singleton_dispatch: Option<SingletonDispatch>,
-    ) -> Option<crate::libraries::KlibBodyCallable<'_>> {
+        class_contract: Option<&'a crate::libraries::KlibBodyClassContract>,
+    ) -> Option<crate::libraries::KlibBodyCallable<'a>> {
+        let class_contract = self.edge_class_contract(class_contract);
         crate::libraries::KlibBodyCallable::new(
             crate::libraries::KlibBodyCallableShape {
                 name: &self.name,
@@ -269,7 +277,7 @@ impl BackendCallableFact {
                 compiler_intrinsic: self.compiler_operation(),
                 range_construction: self.member_realization.range_construction(),
                 declaration_modifiers: self.klib_body_declaration_modifiers,
-                class_contract: self.klib_body_class_contract.as_ref(),
+                class_contract,
                 accessor: self.klib_body_accessor.as_ref(),
             },
             singleton_dispatch,
@@ -277,6 +285,15 @@ impl BackendCallableFact {
             self.declaration_owner,
             self.dependency_callable.as_ref(),
         )
+    }
+
+    /// The class a singleton edge authenticates through: the class the provider recorded for
+    /// that singleton when it has one, otherwise the class of the member itself.
+    fn edge_class_contract<'a>(
+        &'a self,
+        provided: Option<&'a crate::libraries::KlibBodyClassContract>,
+    ) -> Option<&'a crate::libraries::KlibBodyClassContract> {
+        provided.or(self.klib_body_class_contract.as_ref())
     }
 }
 
@@ -299,6 +316,7 @@ mod tests {
             compiler_intrinsic: None,
             semantic_role: None,
             overridden_declarations: Box::new([]),
+            builtin_implementations: Box::new([]),
             member_realization: MemberRealization::Dispatch,
             params: params.clone(),
             physical_params: params,
@@ -523,6 +541,7 @@ mod tests {
             compiler_intrinsic: None,
             semantic_role: None,
             overridden_declarations: Box::new([]),
+            builtin_implementations: Box::new([]),
             member_realization: MemberRealization::Dispatch,
             params: vec![Ty::Int],
             physical_params: vec![Ty::Int],
@@ -565,6 +584,27 @@ mod tests {
     }
 }
 
+/// What one builtin class runs for a call of a supertype's member on a value of it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BuiltinImplementation {
+    /// The builtin type (`String`, a primitive), whose classifier is a proper subtype of the
+    /// member's.
+    pub receiver: Ty,
+    /// The builtin classifier's override; `None` when it inherits the member's own body.
+    pub declaration: Option<BuiltinOverrideDeclaration>,
+}
+
+/// One builtin classifier's override of a supertype's member, as its provider published it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BuiltinOverrideDeclaration {
+    /// The operation the provider realizes the override as, if it is one.
+    pub operation: Option<BackendCompilerIntrinsic>,
+    /// The override's declared parameter and result types (`Int.compareTo(other: Int): Int`); a
+    /// property's are its getter's.
+    pub params: Box<[Ty]>,
+    pub ret: Ty,
+}
+
 /// What the provider normalized for one selected dependency property.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BackendPropertyFact {
@@ -596,6 +636,13 @@ pub enum DependencyFactError {
     PluginRuntimeAbi(ExternalCallableId),
 }
 
+/// One checked singleton receiver of a declaration, with the class that singleton is.
+#[derive(Debug)]
+struct SingletonEdge {
+    dispatch: SingletonDispatch,
+    class_contract: Option<crate::libraries::KlibBodyClassContract>,
+}
+
 /// The frozen dependency facts of one checked file. It holds a fact for every dependency callable
 /// and property identity the file's IR references, including the accessors of each property.
 #[derive(Debug, Default)]
@@ -603,7 +650,7 @@ pub struct CheckedBackendCallables {
     callables: HashMap<ExternalCallableId, BackendCallableFact>,
     properties: HashMap<ExternalPropertyId, BackendPropertyFact>,
     singleton_dispatches: HashMap<crate::ir::ExprId, SingletonDispatch>,
-    singleton_selections: HashMap<ExternalCallableId, Vec<SingletonDispatch>>,
+    singleton_selections: HashMap<ExternalCallableId, Vec<SingletonEdge>>,
     /// The runtime declarations native plugins selected at the handoff for their generated code,
     /// with the parameters a plugin's transform appended to each.
     plugin_runtime: HashMap<ExternalCallableId, Box<[Ty]>>,
@@ -629,8 +676,17 @@ impl CheckedBackendCallables {
         expression: crate::ir::ExprId,
         target: ExternalCallableId,
     ) -> Option<crate::libraries::KlibBodyCallable<'_>> {
+        let dispatch = self.singleton_dispatch(expression);
+        let class_contract = dispatch.and_then(|dispatch| {
+            self.singleton_selections.get(&target).and_then(|edges| {
+                edges
+                    .iter()
+                    .find(|edge| edge.dispatch == dispatch)
+                    .and_then(|edge| edge.class_contract.as_ref())
+            })
+        });
         self.callable(target)?
-            .klib_body_callable_with_singleton(self.singleton_dispatch(expression))
+            .klib_body_callable_with_singleton(dispatch, class_contract)
     }
 
     /// Selected KLIB callables in provider-identity order. Dependency-body lowering consumes this
@@ -641,8 +697,11 @@ impl CheckedBackendCallables {
         let mut selected = Vec::new();
         for (identity, callable) in callables {
             match self.singleton_selections.get(identity) {
-                Some(singletons) => selected.extend(singletons.iter().filter_map(|singleton| {
-                    callable.klib_body_callable_with_singleton(Some(*singleton))
+                Some(edges) => selected.extend(edges.iter().filter_map(|edge| {
+                    callable.klib_body_callable_with_singleton(
+                        Some(edge.dispatch),
+                        edge.class_contract.as_ref(),
+                    )
                 })),
                 None => selected.extend(callable.klib_body_callable()),
             }
@@ -735,8 +794,11 @@ impl CheckedBackendCallables {
             let dispatch = SingletonDispatch { classifier };
             facts.singleton_dispatches.insert(expression, dispatch);
             let selections = facts.singleton_selections.entry(*target).or_default();
-            if !selections.contains(&dispatch) {
-                selections.push(dispatch);
+            if !selections.iter().any(|edge| edge.dispatch == dispatch) {
+                selections.push(SingletonEdge {
+                    dispatch,
+                    class_contract: provider.klib_body_class_contract(classifier),
+                });
             }
         }
         for (identity, overridden) in &ir.external_overridden_declarations {
@@ -745,6 +807,38 @@ impl CheckedBackendCallables {
             }
         }
         Ok(facts)
+    }
+
+    /// Record what each builtin class runs for every member of a library classifier this file
+    /// calls, as `implementations` answers it for the member's owner, name and identity. The
+    /// frontend answers it from the member hierarchy at the handoff; every other callable keeps
+    /// none.
+    pub fn record_builtin_implementations(
+        &mut self,
+        mut implementations: impl FnMut(
+            TypeName,
+            &str,
+            ExternalCallableId,
+        ) -> Box<[BuiltinImplementation]>,
+    ) {
+        // A getter is published under its accessor's name; its property's declared name is what
+        // the declarations overriding it are named.
+        let getter_properties = self
+            .properties
+            .values()
+            .map(|property| (property.getter, property.name.clone()))
+            .collect::<HashMap<_, _>>();
+        for (&identity, fact) in &mut self.callables {
+            let (ExternalCallableKind::Member, Some(SemanticCallableOwner::Classifier(owner))) =
+                (fact.kind, fact.declaration_owner)
+            else {
+                continue;
+            };
+            let name = getter_properties
+                .get(&identity)
+                .map_or(fact.name.as_str(), |name| name);
+            fact.builtin_implementations = implementations(owner, name, identity);
+        }
     }
 
     /// Freeze dependency identities on `super` calls introduced after the initial handoff.
@@ -842,6 +936,7 @@ impl CheckedBackendCallables {
                     compiler_intrinsic: callable.compiler_intrinsic,
                     semantic_role: callable.semantic_role,
                     overridden_declarations: Box::new([]),
+                    builtin_implementations: Box::new([]),
                     member_realization: callable.member_realization,
                     params: callable.params,
                     physical_params: callable.physical_params,

@@ -101,6 +101,14 @@ impl Checker<'_> {
         format!("fun {type_parameters}{name}")
     }
 
+    /// kotlinc's owner wording of a callable whose formal is left uninferred: `fun <T> arrayOf`.
+    pub(super) fn uninferred_callable_owner(
+        name: &str,
+        signature: &crate::libraries::GenericSig,
+    ) -> String {
+        format!("fun {}{name}", type_parameters_display(signature, false))
+    }
+
     pub(super) fn library_member_candidate_display(
         name: &str,
         member: &crate::libraries::LibraryMember,

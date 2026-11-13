@@ -47,22 +47,22 @@ pub(crate) fn publish_checked_declaration_annotations(
         }
         diags.set_file(file_index as u32);
         let no_bodies = crate::fx_hash::HashSet::default();
-        let info = check_file_at_impl_mode_with_index(
+        let info = check_file_at_impl_mode_with_index(IndexedFileCheck {
             file,
-            file_index as u32,
-            Some(files),
-            table,
-            None,
+            file_index: file_index as u32,
+            source_files: Some(files),
+            syms: table,
+            resolved_index: None,
             diags,
-            CaptureDiscovery::Published,
-            Some(&selected),
-            Some(&no_bodies),
-            None,
-            None,
-            None,
-            SourceFragmentMode::DeclarationAnnotations,
-            None,
-        );
+            captures: CaptureDiscovery::Published,
+            selected_declarations: Some(&selected),
+            selected_body_declarations: Some(&no_bodies),
+            active_declarations: None,
+            selected_stable_roots: None,
+            selected_stable_bodies: None,
+            fragment: SourceFragmentMode::DeclarationAnnotations,
+            streamed_cache: None,
+        });
         let mut checked = Vec::new();
         for &(internal, declaration) in &declarations {
             let Decl::Class(class) = file.decl(declaration) else {
@@ -1258,12 +1258,12 @@ impl Checker<'_> {
             } if name == "class" => {
                 AnnotationValue::Class(Ty::obj_name(self.class_literal_targets.get(&e).copied()?))
             }
-            Expr::Call { callee, args } => match self.expr_lowers.get(&e) {
-                Some(ExprLowering::CompilerSynthetic(
+            Expr::Call { callee, args } => match self.selected_array_operation(e) {
+                Some(
                     SyntheticKind::PrimitiveVararg(_)
                     | SyntheticKind::ReferenceVararg
                     | SyntheticKind::EmptyReference,
-                )) => {
+                ) => {
                     let element = expected.and_then(Ty::array_elem);
                     let mut values = Vec::new();
                     for &argument in args {

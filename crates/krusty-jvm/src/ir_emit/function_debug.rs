@@ -1,7 +1,7 @@
 //! JVM debug tables for declared and explicitly published generated functions.
 
 use super::{jvm_declared_ty, jvm_function_params, method_descriptor, slot_words};
-use krusty::ir::{IrFile, IrParameterRole};
+use krusty::ir::IrFile;
 use krusty::jvm::classfile::ClassWriter;
 
 /// Attach kotlinc's `LineNumberTable` + `LocalVariableTable` to a declared method. Source methods
@@ -93,8 +93,7 @@ pub(super) fn attach_declared_function_debug(
         slot += slot_words(*ty);
     }
     // An emitted `inline fun` stores `$i$f$` at this slot before any statement. That marker has
-    // no line, so the declaration-line fallback must not land on it: `set_method_debug` would
-    // otherwise insert the signature line at pc 0 whenever the body's own first entry is later.
+    // no line, so a body that marks none of its own takes the declaration line after it.
     if opens_with_inline_depth_marker(ir, fid, !function.is_static) {
         body_pc += inline_depth_marker_width(slot);
     }
@@ -191,25 +190,4 @@ fn aload_len(slot: u16) -> u16 {
     } else {
         4
     }
-}
-
-/// The line a lambda implementation marks right after its parameter guards: its body's line,
-/// kotlinc's shape even for an empty body (whose emission marks no line of its own). A
-/// destructured parameter's component reads come first and carry no line, so there the body's own
-/// statements, or its fall-through return, give the first line instead. A body a compiler plugin
-/// rebuilt without offsets (Compose's composable lambda) opens on no line.
-pub(super) fn lambda_entry_line(ir: &IrFile, fid: u32) -> Option<u32> {
-    if opens_on_no_line(ir, fid) {
-        return None;
-    }
-    let destructures = ir
-        .function_parameter_identities(fid)
-        .is_some_and(|identities| {
-            identities
-                .iter()
-                .any(|identity| identity.role == IrParameterRole::DestructuredValue)
-        });
-    (!destructures)
-        .then(|| ir.function_position(fid).decl_line)
-        .flatten()
 }

@@ -21,7 +21,6 @@ mod for_loop_bindings;
 mod inline_templates;
 mod object_literal_overrides;
 mod object_literals;
-mod ordinary_class_members;
 mod parameter_defaults;
 mod primitive_calls;
 mod range_membership_producers;
@@ -1621,6 +1620,25 @@ fn equal_internal_body_signatures_from_distinct_modules_remain_distinct() {
             Some(expected_name)
         );
     }
+}
+
+/// The call edges the member hierarchy gives calls of `members`, none of which overrides another
+/// declaration: each keeps its own semantic role.
+pub(super) fn non_overriding_edges<'a>(
+    members: impl IntoIterator<Item = crate::libraries::KlibBodyCallable<'a>>,
+) -> crate::fx_hash::HashMap<crate::libraries::KlibDependencyCallable, super::CallEdge> {
+    members
+        .into_iter()
+        .map(|member| {
+            (
+                member.identity().clone(),
+                super::CallEdge {
+                    semantic_role: member.semantic_role(),
+                    overridden: Box::new([]),
+                },
+            )
+        })
+        .collect()
 }
 
 // --- The Kotlin/Native stdlib -----------------------------------------------------------------

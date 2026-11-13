@@ -1,8 +1,7 @@
-//! Declaration-owned instance field coordinates shared by constructor and value-member bodies.
+//! Declaration-owned instance field coordinates shared by constructor and member bodies.
 
 use super::*;
 use crate::ir::ClassId;
-use crate::metadata::klib_ir::tree::KlibIrField;
 
 #[cfg(test)]
 mod tests;
@@ -10,9 +9,10 @@ mod tests;
 #[derive(Clone, Copy)]
 enum Access {
     Initializer,
-    /// A member of a same-library file-local class, which reads and writes the class's fields.
-    Member,
     ValueReadOnly,
+    /// A member of an ordinary or file-local class: it reads its receiver's fields and writes the
+    /// mutable ones.
+    Member,
 }
 
 #[derive(Clone, Copy)]
@@ -20,6 +20,7 @@ struct Field<'a> {
     symbol: &'a KlibIrSymbol,
     index: u32,
     ty: Ty,
+    final_: bool,
 }
 
 #[derive(Clone)]
@@ -35,6 +36,30 @@ impl<'a> InstanceStorageFrame<'a> {
     /// read authority remains local to that member, as before the shared frame.
     pub(super) fn nested_initializer(&self) -> Option<Self> {
         matches!(self.access, Access::Initializer).then(|| self.clone())
+    }
+
+    pub(super) fn initializer(
+        class: ClassId,
+        plan: &'a super::super::class_initialization::ClassInitialization<'a, 'a>,
+    ) -> Self {
+        Self {
+            class,
+            receiver: Some(super::super::class_headers::declared_receiver(
+                plan.header.contract,
+            )),
+            fields: plan
+                .field_declarations
+                .iter()
+                .enumerate()
+                .map(|(index, field)| Field {
+                    symbol: &field.base.symbol,
+                    index: u32::try_from(index).expect("a field list fits u32"),
+                    ty: plan.storage.fields[index].ty,
+                    final_: plan.storage.fields[index].final_,
+                })
+                .collect(),
+            access: Access::Initializer,
+        }
     }
 
     pub(super) fn local_initializer(
@@ -69,50 +94,39 @@ impl<'a> InstanceStorageFrame<'a> {
                     symbol: field.symbol,
                     index: u32::try_from(index).expect("a field list fits u32"),
                     ty: field.ty,
+                    final_: field.final_,
                 })
                 .collect(),
             access,
         }
     }
 
-    /// A final ordinary member reads and writes the fields of the class it declares, by the
-    /// symbols of that class's own instance storage.
-    pub(super) fn ordinary_member(
+    /// A member body of `class`, reading its receiver's fields, each with its declared type and
+    /// finality. A value class member's one field is its value, which it never writes.
+    pub(super) fn member(
         class: ClassId,
-        receiver: Ty,
-        fields: &[(&'a crate::metadata::klib_ir::KlibIrSymbol, Ty)],
-    ) -> Self {
-        Self {
-            class,
-            receiver: Some(receiver),
-            fields: fields
-                .iter()
-                .enumerate()
-                .map(|(index, (symbol, ty))| Field {
-                    symbol: *symbol,
-                    index: u32::try_from(index).expect("a field list fits u32"),
-                    ty: *ty,
-                })
-                .collect(),
-            access: Access::Member,
-        }
-    }
-
-    pub(super) fn value_member(
-        class: ClassId,
-        field: &'a KlibIrField,
-        ty: Ty,
+        fields: impl IntoIterator<Item = (&'a KlibIrSymbol, Ty, bool)>,
         receiver: Option<Ty>,
+        value: bool,
     ) -> Self {
         Self {
             class,
             receiver,
-            fields: vec![Field {
-                symbol: &field.base.symbol,
-                index: 0,
-                ty,
-            }],
-            access: Access::ValueReadOnly,
+            fields: fields
+                .into_iter()
+                .enumerate()
+                .map(|(index, (symbol, ty, final_))| Field {
+                    symbol,
+                    index: u32::try_from(index).expect("a field list fits u32"),
+                    ty,
+                    final_,
+                })
+                .collect(),
+            access: if value {
+                Access::ValueReadOnly
+            } else {
+                Access::Member
+            },
         }
     }
 
@@ -123,10 +137,10 @@ impl<'a> InstanceStorageFrame<'a> {
                 Access::Initializer => {
                     "an initializer accesses a field outside its exact declaring class"
                 }
-                Access::Member => "a member accesses a field outside its exact declaring class",
                 Access::ValueReadOnly => {
                     "a value class member reads a field outside its declaring class"
                 }
+                Access::Member => "a class member accesses a field outside its declaring class",
             }));
         };
         if matches.next().is_some() {
@@ -187,6 +201,9 @@ impl<'a> BodyLowering<'a> {
             return unsupported("a field write");
         }
         let field = frame.field(symbol)?;
+        if value.is_some() && matches!(frame.access, Access::Member) && field.final_ {
+            return Err(mismatch("a class member writes a final field"));
+        }
         let (class, declared_receiver, access) = (frame.class, frame.receiver, frame.access);
         // Preserve the value-member boundary's original error order: type before receiver.
         if matches!(access, Access::ValueReadOnly) && ty != field.ty {
@@ -194,8 +211,12 @@ impl<'a> BodyLowering<'a> {
                 "a field read disagrees with its declared storage type",
             ));
         }
-        let declared_receiver =
-            declared_receiver.ok_or_else(|| mismatch("a value class member has no receiver"))?;
+        let declared_receiver = declared_receiver.ok_or_else(|| {
+            mismatch(match access {
+                Access::ValueReadOnly => "a value class member has no receiver",
+                Access::Initializer | Access::Member => "a class member has no receiver",
+            })
+        })?;
         let receiver =
             receiver.ok_or_else(|| mismatch("an instance field access has no receiver"))?;
         let receiver = self.operand(receiver, declared_receiver)?;

@@ -695,15 +695,15 @@ fn unmodelled_local_variables_decline_by_form() {
         (0b100, "DEFINED", true, "it uses a `const` variable"),
         (
             0,
-            "IR_TEMPORARY_VARIABLE",
+            "IR_TEMPORARY_VARIABLE_FOR_INLINED_PARAMETER",
             true,
             "it uses a compiler-introduced variable",
         ),
         (
-            0,
-            "DEFINED",
-            false,
-            "it uses a variable without an initializer",
+            0b10,
+            "IR_TEMPORARY_VARIABLE",
+            true,
+            "it uses a mutable or annotated compiler temporary",
         ),
     ];
     for (flags, origin, initialized, reason) in cases {
@@ -717,6 +717,65 @@ fn unmodelled_local_variables_decline_by_form() {
         assert_eq!(
             demo.declined("f", &[]),
             format!("the KLIB body of `demo.f` ({reason})")
+        );
+    }
+}
+
+/// A compiler temporary, such as the cast `other` of a data class's `equals`, is an unnamed `val`
+/// the source never names.
+#[test]
+fn a_compiler_temporary_lowers_as_an_unnamed_local() {
+    let demo = demo(&[("f", &[T::Int], T::Int)], |_, body| {
+        let a = body.param(0);
+        let (declaration, x) = body.variable_with(T::Int, Some(a), 0, "IR_TEMPORARY_VARIABLE");
+        let read = body.get(&x, T::Int);
+        Some(vec![declaration, body.ret(read)])
+    });
+    let mut unit = DependencyBodyUnit::default();
+    let function = demo
+        .lower(&mut unit, "f", &[])
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    validated(unit.ir());
+    assert_eq!(
+        lowered_body(&unit, function),
+        "scope {scope {temp v1: Int = v0!: Int; return@Some(0) v1!: Int: Nothing}: Nothing}"
+    );
+}
+
+/// A local declared without an initializer and assigned later lowers as the source declaration
+/// does: a reassignable binding holding the deferred type's zero until its definite assignment.
+#[test]
+fn a_deferred_local_lowers_as_the_source_declaration() {
+    for (flags, keyword) in [(0, "val"), (0b10, "var")] {
+        let demo = demo(&[("f", &[T::Int], T::Int)], |_, body| {
+            let (declaration, x) = body.variable_with(T::Int, None, flags, "DEFINED");
+            let a = body.param(0);
+            let assignment = body.set(&x, a);
+            let read = body.get(&x, T::Int);
+            Some(vec![declaration, assignment, body.ret(read)])
+        });
+        let mut unit = DependencyBodyUnit::default();
+        let f = demo
+            .lower(&mut unit, "f", &[])
+            .unwrap_or_else(|decline| panic!("{decline}"));
+        validated(unit.ir());
+        assert_eq!(
+            unit.ir()
+                .deferred_local_types
+                .values()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![Ty::Int],
+            "{keyword}"
+        );
+        assert_eq!(
+            lowered_body(&unit, f),
+            source_body(
+                &format!("fun f(a: Int): Int {{\n {keyword} x: Int\n x = a\n return x\n}}\n"),
+                "f",
+                1
+            ),
+            "{keyword}"
         );
     }
 }
@@ -1364,8 +1423,8 @@ fn stdlib_range_literal_membership_without_a_range_construction_declines() {
 }
 
 /// A `contains` a checked source edge selected stays that call: the fold never replaces a
-/// declaration another obligation needs. The member lowers, and its body declines at the member
-/// call it does not link.
+/// declaration another obligation needs. The support unit then declines at that member call,
+/// which it does not link.
 #[test]
 fn stdlib_range_literal_membership_keeps_a_selected_contains() {
     use crate::symbol_source::SymbolSource;
@@ -1406,8 +1465,7 @@ fn stdlib_range_literal_membership_keeps_a_selected_contains() {
             .map(|function| lowered_body(&unit, function))
             .map_err(|decline| decline.to_string()),
         Err(
-            "the KLIB body of `kotlin.text.isSurrogate` (it reaches the KLIB body of \
-             `kotlin.ranges.CharRange.contains` (it uses a call of a member function))"
+            "the KLIB body of `kotlin.text.isSurrogate` (it uses a call of a member function)"
                 .to_owned()
         )
     );

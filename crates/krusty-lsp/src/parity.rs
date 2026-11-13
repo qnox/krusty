@@ -103,6 +103,22 @@ pub struct ModuleReport {
     /// analyze the source set it claims and therefore cannot count as clean.
     #[serde(default)]
     pub java_stub_failed: bool,
+    /// Classpath entries the plan names that are not on disk. A missing jar is an incomplete open:
+    /// the errors it causes are not a measure of the sources that were actually checked.
+    #[serde(default)]
+    pub missing_classpath_entries: usize,
+    /// Every source the plan reads was readable, nothing was dropped for the plan budget, Java stubs
+    /// were built when Java sources existed, and every classpath entry exists. Errors do not clear
+    /// this: a fully opened module can still fail to check.
+    #[serde(default)]
+    pub open_complete: bool,
+    /// Microseconds for the definition lookup the server runs once the index exists.
+    /// `None` when this record did not issue that query. Never copied from `elapsed_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_query_us: Option<u64>,
+    /// Microseconds for the references scan the server runs over the indexes it already has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub references_query_us: Option<u64>,
     pub error_count: usize,
     pub warning_count: usize,
     pub diagnostics: Vec<DiagnosticRecord>,
@@ -392,6 +408,7 @@ pub fn run_plan(plan: &ModulePlan) -> ModuleReport {
         .into_iter()
         .collect::<Vec<_>>();
 
+    let missing_classpath_entries = plan.classpath.iter().filter(|path| !path.exists()).count();
     let classpath = Rc::new(Classpath::new(plan.classpath.clone()));
     classpath.prepare_for_source_analysis();
     let java_stub_failed = !java.is_empty() && !set_java_stub_overlay(&classpath, &java);
@@ -440,13 +457,28 @@ pub fn run_plan(plan: &ModulePlan) -> ModuleReport {
             }
         }
     }
+    // Stop the analysis clock before building navigation indexes. The query times below are only
+    // the lookups, so they must not absorb parsing, type checking, or index construction.
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let source_refs = checked
+        .iter()
+        .chain(inferred.iter())
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let indexes = crate::analysis::checked_definition_indexes(
+        &source_refs,
+        &analysis.files,
+        &analysis.symbols,
+        plan.checked.len(),
+    );
+    let queries = crate::analysis::measure_navigation_queries(&indexes);
     ModuleReport {
         module: plan.module.clone(),
         checked_files: plan.checked.len(),
         inferred_files: plan.inferred.len(),
         java_files: plan.java.len(),
         classpath_entries: plan.classpath.len(),
-        elapsed_ms: started.elapsed().as_millis() as u64,
+        elapsed_ms,
         status: module_status(error_count, plan.truncated, unreadable, java_stub_failed)
             .to_string(),
         truncated: plan.truncated,
@@ -454,6 +486,13 @@ pub fn run_plan(plan: &ModulePlan) -> ModuleReport {
         unreadable_checked_files: unreadable_checked,
         visible_declarations,
         java_stub_failed,
+        missing_classpath_entries,
+        open_complete: unreadable == 0
+            && !java_stub_failed
+            && !plan.truncated
+            && missing_classpath_entries == 0,
+        definition_query_us: Some(queries.definition_us),
+        references_query_us: Some(queries.references_us),
         error_count,
         warning_count,
         diagnostics,
@@ -550,6 +589,7 @@ mod tests {
             kind: ProviderKind::Jps,
             jdk_home: None,
             modules,
+            repository_libraries: Vec::new(),
         }
     }
 
@@ -962,6 +1002,33 @@ mod tests {
             "only the broken file may be reported: {:?}",
             report.diagnostics
         );
+        assert!(
+            report.open_complete,
+            "errors do not mean the module failed to open"
+        );
+        assert_eq!(report.missing_classpath_entries, 0);
+        assert!(
+            report.definition_query_us.is_some() && report.references_query_us.is_some(),
+            "definition and references lookups are timed on their own"
+        );
+    }
+
+    #[test]
+    fn a_missing_classpath_entry_is_an_incomplete_open() {
+        let tree = crate::project::TempTree::new("parity-missing-classpath");
+        tree.write("app/src/Ok.kt", "package app\nfun fine(): Int = 1\n");
+        let plan = ModulePlan {
+            module: "app".to_string(),
+            checked: vec![tree.path("app/src/Ok.kt")],
+            classpath: vec![tree.path("missing-stdlib.jar")],
+            ..ModulePlan::default()
+        };
+        let report = run_plan(&plan);
+        assert_eq!(report.missing_classpath_entries, 1);
+        assert!(!report.open_complete);
+        assert_eq!(report.unreadable_files, 0);
+        assert!(report.definition_query_us.is_some());
+        assert!(report.references_query_us.is_some());
     }
 
     #[test]

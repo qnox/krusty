@@ -11,7 +11,7 @@ impl Body<'_> {
             .ok_or_else(|| format!("a `{}` value carried as a reference", describe(ty)))?;
         let form = self
             .runtime
-            .box_form(self.module, ty, value)
+            .box_form(self.module, ty, value)?
             .ok_or_else(|| format!("a `{}` value carried as a reference", describe(ty)))?;
         let scratch = match form.needs_scratch() {
             true => Some(self.local(value)),
@@ -23,9 +23,11 @@ impl Body<'_> {
 
     /// Read the `ty` value out of the box the frontend checked the reference on the stack is.
     pub(super) fn unbox(&mut self, ty: Ty) -> Result<(), Unsupported> {
-        let form = scalar_carrier(ty)?
-            .and_then(|value| self.runtime.box_form(self.module, ty, value))
-            .ok_or_else(|| format!("a reference read as a `{}` value", describe(ty)))?;
+        let form = match scalar_carrier(ty)? {
+            Some(value) => self.runtime.box_form(self.module, ty, value)?,
+            None => None,
+        }
+        .ok_or_else(|| format!("a reference read as a `{}` value", describe(ty)))?;
         form.emit_unbox(&mut self.code);
         Ok(())
     }
@@ -35,10 +37,12 @@ impl Body<'_> {
     /// does, instead of trapping in the unchecked read [`Self::unbox`] performs for a reference
     /// the frontend proved is the box.
     pub(super) fn checked_unbox_cast(&mut self, arg: u32, ty: Ty) -> Result<(), Unsupported> {
-        let form = scalar_carrier(ty)?
-            .and_then(|value| self.runtime.box_form(self.module, ty, value))
-            .ok_or_else(|| format!("a reference cast to a `{}` value", describe(ty)))?;
-        let failure = self.runtime.exceptions.ensure_class(
+        let form = match scalar_carrier(ty)? {
+            Some(value) => self.runtime.box_form(self.module, ty, value)?,
+            None => None,
+        }
+        .ok_or_else(|| format!("a reference cast to a `{}` value", describe(ty)))?;
+        let failure = self.runtime.exception_class(
             self.module,
             self.classifiers,
             krusty::libraries::RuntimeExceptionKind::ClassCast.classifier(),
@@ -50,9 +54,12 @@ impl Body<'_> {
             .ref_test(false, HeapType::Concrete(form.structure))
             .op(EQZ32)
             .if_(BlockType::Empty);
-        self.runtime
-            .exceptions
-            .construct_class(&mut self.code, failure, None, self.runtime.string);
+        self.runtime.exceptions.construct_class(
+            &mut self.code,
+            failure,
+            None,
+            self.runtime.string,
+        )?;
         self.code
             .throw(self.runtime.exceptions.tag)
             .end()

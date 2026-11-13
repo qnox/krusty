@@ -272,40 +272,12 @@ impl BodyLowering<'_, '_, '_> {
                             self.file.ir.functions[*function as usize].dispatch_receiver
                         {
                             if !self.file.values.is_value_class(owner) {
-                                let class = self.file.ir.class_id_by_name(owner);
-                                let slotted = class.is_some_and(|class| {
-                                    let key = super::super::super::classes::function_key(
-                                        self.file.ir,
-                                        class,
-                                        *function,
-                                    );
-                                    self.file.model.slot(class, &key).is_some()
-                                });
-                                // A method installed on a class this file lays out dispatches
-                                // through its slot. A final member emitted with its body, whose
-                                // class records storage but not a method-table entry, is the
-                                // function a call of that declaration runs: the runtime object's
-                                // table is not this file's.
-                                if slotted || class.is_none() {
-                                    return self.own_class_member(*function, owner, receiver, args);
-                                }
-                                let object = self.reference(receiver)?;
-                                self.null_check(object)?;
-                                if self.terminated {
-                                    return Ok(None);
-                                }
-                                vec![object]
-                            } else {
-                                match self.value_class_member_receiver(*function, receiver)? {
-                                    Some(value) => vec![value],
-                                    None => return Ok(None),
-                                }
+                                return self.own_class_member(*function, owner, receiver, args);
                             }
-                        } else {
-                            match self.value_class_member_receiver(*function, receiver)? {
-                                Some(value) => vec![value],
-                                None => return Ok(None),
-                            }
+                        }
+                        match self.value_class_member_receiver(*function, receiver)? {
+                            Some(value) => vec![value],
+                            None => return Ok(None),
                         }
                     }
                 };

@@ -26,7 +26,7 @@ fn gap_is_only_local_loads(bytes: &[u8]) -> bool {
     while index < bytes.len() {
         let opcode = bytes[index];
         let len = match opcode {
-            0x15 | 0x16 | 0x17 | 0x18 | 0x19 => 2,
+            0x15..=0x19 => 2,
             0x1a..=0x2d => 1,
             _ => return false,
         };
@@ -41,6 +41,27 @@ fn gap_is_only_local_loads(bytes: &[u8]) -> bool {
 impl CodeBuilder {
     /// Record a local owned by an inline frame. Its marker may close later and insert immediately
     /// ahead of the frame's first already-recorded local.
+    /// Keep inline-frame locals live across a `checkcast` of the inlined result. The cast is the
+    /// call's result, so the frame ends at the store that follows it.
+    pub fn extend_inline_frame_locals_ending_at(&mut self, end: u16, extra: u16) {
+        for (entry, placement) in self
+            .local_entries
+            .iter_mut()
+            .zip(self.local_entry_placements.iter())
+        {
+            let inline_frame = matches!(
+                placement,
+                LocalEntryPlacement::FrameLocal(_) | LocalEntryPlacement::FrameMarker(_)
+            );
+            let Some(length) = entry.1 else {
+                continue;
+            };
+            if inline_frame && entry.0.saturating_add(length) == end {
+                entry.1 = Some(length.saturating_add(extra));
+            }
+        }
+    }
+
     pub fn add_inline_frame_local(
         &mut self,
         frame: u64,

@@ -1007,3 +1007,38 @@ fn one_forwarder_overrides_kotlin_and_java_declarations_of_one_slot() {
         "KotlinAndJavaDelegatedDeclarations",
     );
 }
+
+const JAVA_DECLARATION_FIRST: &str = "import java.util.function.Predicate
+
+interface Check {
+    fun test(t: String): Boolean
+}
+
+interface Both : Predicate<String>, Check
+
+class Short : Both {
+    override fun test(t: String): Boolean = t.length < 3
+}
+
+class Forwarding(both: Both) : Both by both
+
+fun box(): String {
+    val forwarding = Forwarding(Short())
+    val check: Check = forwarding
+    val predicate: Predicate<String> = forwarding
+    return if (check.test(\"a\") && !predicate.test(\"long\")) \"OK\" else \"fail\"
+}
+";
+
+/// With `Predicate` listed first, the forwarder forwards its `test(p0)`, but `Check` declares the
+/// parameter non-null `String` rather than `String!`. kotlinc's forwarder therefore checks it for
+/// null, and so does krusty's.
+#[test]
+fn a_forwarder_checks_a_parameter_its_kotlin_declaration_makes_non_null() {
+    common::expect_box_same_as_kotlinc(JAVA_DECLARATION_FIRST, "JavaDeclarationFirstDelegation");
+    common::assert_classes_identical_to_kotlinc(
+        "JavaDeclarationFirstDelegation",
+        JAVA_DECLARATION_FIRST,
+        &["Forwarding"],
+    );
+}

@@ -228,25 +228,6 @@ impl<'a> KlibBodyCallable<'a> {
         self.kind == ExternalCallableKind::Member
     }
 
-    /// A member of an ordinary class whose call is not virtual and whose declaration already
-    /// permits an ordinary body. The member is final, or its class is, so the body that was
-    /// compiled for this declaration is the one a call runs. An open member of an open class
-    /// still dispatches through the receiver's class.
-    pub(crate) fn closes_as_ordinary_member(self) -> bool {
-        let Some(class) = self.class_contract() else {
-            return false;
-        };
-        if !self.is_member() || class.is_value || class.is_builtin_type() {
-            return false;
-        }
-        let Some(modifiers) = self.declaration_modifiers() else {
-            return false;
-        };
-        modifiers.permits_ordinary_body()
-            && (class.modality == crate::metadata::semantic::KotlinModality::Final
-                || modifiers.modality == crate::metadata::semantic::KotlinModality::Final)
-    }
-
     pub(crate) fn kind(self) -> ExternalCallableKind {
         self.kind
     }
@@ -323,6 +304,16 @@ impl<'a> KlibBodyCallable<'a> {
         self.singleton_classifier
     }
 
+    /// The class contract that belongs to the declaration, with a singleton edge's own class
+    /// removed. That class is the singleton the edge dispatches to, so two edges of one
+    /// declaration may name different singleton classes and still be the same declaration.
+    fn declaration_class_contract(self) -> Option<&'a super::KlibBodyClassContract> {
+        match (self.singleton_classifier, self.class_contract) {
+            (Some(singleton), Some(class)) if class.classifier == singleton => None,
+            _ => self.class_contract,
+        }
+    }
+
     /// Whether two selected edges describe the same dependency declaration before their
     /// call-site singleton dispatch is applied. A KLIB identity names one declaration, while
     /// inherited object selections may legitimately contribute several receiver variants.
@@ -344,7 +335,7 @@ impl<'a> KlibBodyCallable<'a> {
             && self.compiler_intrinsic == other.compiler_intrinsic
             && self.range_construction == other.range_construction
             && self.declaration_modifiers == other.declaration_modifiers
-            && self.class_contract == other.class_contract
+            && self.declaration_class_contract() == other.declaration_class_contract()
             && self.companion_receiver == other.companion_receiver
             && self.declaration_owner == other.declaration_owner
             && self.identity == other.identity

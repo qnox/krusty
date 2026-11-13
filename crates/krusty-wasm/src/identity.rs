@@ -1,8 +1,11 @@
-//! Stable identity hashes on runtime-owned objects. The immutable hash travels with the object,
-//! so hashing neither retains otherwise dead values nor depends on mutable object contents.
+//! Stable identity hashes: what `kotlin.Any.hashCode` answers, and what `kotlin.Any.toString`
+//! prints after the class name. Every object with Kotlin's identity semantics (an instance of a
+//! declared class, a reference array, a lambda) extends `$Identified` and is given its hash when it
+//! is allocated. The immutable hash travels with the object, so hashing neither retains otherwise
+//! dead values nor depends on mutable object contents.
 
-use super::encode::{Code, CompositeType, Function, HeapType, Module, SubType, ValType};
-use super::objects::{immutable, ObjectRoot};
+use super::encode::{Code, Function, HeapType, Module, ValType};
+use super::objects::ObjectRoot;
 
 pub(super) const HASH_FIELD: u32 = 1;
 pub(super) const PREFIX_FIELDS: u32 = 2;
@@ -15,14 +18,7 @@ pub(super) struct IdentityObjects {
 
 impl IdentityObjects {
     pub(super) fn declare(module: &mut Module, objects: &ObjectRoot) -> Self {
-        let object = module.subtype(SubType {
-            composite: CompositeType::Struct(vec![
-                immutable(ValType::reference(objects.any_table)),
-                immutable(ValType::I32),
-            ]),
-            supertype: Some(objects.object),
-            open: true,
-        });
+        let object = objects.identified;
         let counter = module.global(ValType::I32);
         let allocate_type = module.func_type(Vec::new(), vec![ValType::I32]);
         let allocate = module.declare();

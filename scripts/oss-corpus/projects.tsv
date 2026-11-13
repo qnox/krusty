@@ -1,11 +1,17 @@
-# The top-starred Kotlin projects the corpus builds, and Now in Android as the Android sample, one
-# per line (tab-separated):
-#   <name>  <git URL>  <commit>  <Gradle root>  <JDK>  <Kotlin version pin>  [<Android variant>]
+# The top-starred Kotlin projects the corpus builds, and Android apps that use Compose and Parcelize
+# (Now in Android, Bitwarden, Element X), one per line (tab-separated):
+#   <name>  <git URL>  <commit>  <Gradle root>  <JDK>  <Kotlin version pin>  [<Android variants>]  [<lane>]
 # The Kotlin version pin names the file and key that select the project's Kotlin Gradle plugin;
 # run.sh rewrites it to the newest release in the repository's `kotlin-versions` manifest. "-" means
 # the project already builds with that release. A patches/<name>.patch is applied after checkout.
 # Android modules are compared only for a project that names a variant: its main, unit-test and
-# instrumented-test compiles. Without one ("-" or no column) Android modules are left out.
+# instrumented-test compiles. Several comma-separated variants name, in order, the variant each
+# module contributes: the first it has (an app's `fdroidDebug`, then `debug` for the library modules
+# it consumes). Without one ("-" or no column) Android modules are left out.
+# The lane, when it is the last field, is `lsp`, `compile`, or `compile,lsp`. A row without one is
+# in both sets. `lsp` is the language-server metric (scripts/parity-scan.py: open completeness and
+# error counts) and is not built by this corpus. Parse time, type-information latency, and
+# navigation latency are not measured by that scan.
 okhttp	https://github.com/lysine-dev/okhttp	fb34d4da74628621bb83c5d31a830dc19cf8e833	.	21	gradle/libs.versions.toml:kotlin
 leakcanary	https://github.com/square/leakcanary	eb60b0be53732aa016c79b7774b497770ad1e4f3	.	21	-
 quarkdown	https://github.com/iamgio/quarkdown	5ac1a4d3f3473f87cc06127379317bbb4d88106e	.	17	-
@@ -19,3 +25,7 @@ koin	https://github.com/InsertKoinIO/koin	bba2318a63c01d3c8592236b35da89192b4413
 Exposed	https://github.com/JetBrains/Exposed	09f814c61c22851b76840ccb65c1ac2c4db97452	.	21	gradle/libs.versions.toml:kotlin
 okio	https://github.com/lysine-dev/okio	e84aa17bac2b31e688c8be4f61557779032f7a7c	.	21	gradle/libs.versions.toml:kotlin
 nowinandroid	https://github.com/android/nowinandroid	2982e63cb691ad49cd009aab43dc206fee6699c2	.	21	gradle/libs.versions.toml:kotlin	demoDebug
+bitwarden	https://github.com/bitwarden/android	6829b0add474461912f1c817975756011ab68cdd	.	21	-	fdroidDebug,debug
+element-x-android	https://github.com/element-hq/element-x-android	010fe5a25d55214a3c9c764406a67598ad4e6f5f	.	21	-	fdroidDebug,debug
+intellij-community	https://github.com/JetBrains/intellij-community	b2c2e6113bcb04dfa18a73dcffca3de2532f1b6f	.	21	-	-	lsp
+kotlin	https://github.com/JetBrains/kotlin	3c7a5041f238102285764d370665f56f587f9dc4	.	21	-	-	lsp

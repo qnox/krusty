@@ -12,8 +12,11 @@
 //! once, when the backend is finalized.
 
 mod array_access;
+mod array_objects;
 mod boxes;
+mod builtin_members;
 mod callable_references;
+mod class_tokens;
 mod codegen;
 mod encode;
 mod exception_transport;
@@ -22,8 +25,8 @@ mod hashing;
 mod host;
 mod identity;
 mod interface_dispatch;
+mod numeric_conversions;
 mod objects;
-mod reference_arrays;
 mod runtime;
 mod target;
 mod type_objects;

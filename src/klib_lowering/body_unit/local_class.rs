@@ -67,8 +67,8 @@ impl<'s> Linker<'_, 's> {
             statements: &[],
             header: prepared.init_header,
             function: init,
+            initialization: None,
             value_member: None,
-            ordinary: None,
             local_body: Some(super::super::same_library_class::LocalBody::Initialize(
                 super::super::same_library_class::LocalInitialize {
                     class: class_id,
@@ -102,7 +102,7 @@ impl<'s> Linker<'_, 's> {
                     match self
                         .sources
                         .bodies
-                        .callee_origin(&prepared.key.module, &declaration)
+                        .linked_origin(&prepared.key.module, &declaration)
                     {
                         KlibCalleeOrigin::Exact(identity) => Some(identity),
                         KlibCalleeOrigin::Missing => None,
@@ -150,8 +150,8 @@ impl<'s> Linker<'_, 's> {
                 statements: member.statements,
                 header: member.header,
                 function,
+                initialization: None,
                 value_member: None,
-                ordinary: None,
                 local_body: Some(super::super::same_library_class::LocalBody::Member(
                     super::super::same_library_class::LocalMemberFields {
                         class: class_id,
@@ -453,6 +453,10 @@ pub(super) fn installed_identity(
         KlibDeclarationSignature::Accessor(signature) => {
             KlibIrSignature::Accessor(signature.clone())
         }
+        KlibDeclarationSignature::FileLocal { file, slot } => KlibIrSignature::FileLocal {
+            file: *file,
+            slot: *slot,
+        },
     };
     super::super::same_library_class::LocalIdentity {
         module: identity.module.clone(),
