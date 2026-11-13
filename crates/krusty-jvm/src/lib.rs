@@ -27,6 +27,7 @@ mod declaration_collisions;
 mod declared_type_nullability;
 mod default_call_operands;
 mod default_parameter_representation;
+mod declared_jvm_default;
 mod default_wrappers;
 mod deferred_local_storage;
 mod enclosing_capture_storage;

@@ -57,7 +57,7 @@ pub(super) fn derive_bridges(
             ir,
             cid,
             callables,
-            jvm_default,
+            crate::declared_jvm_default::of_class(&ir.classes[cid], jvm_default),
         );
         order.extend(std::iter::repeat_n(u32::MAX, inherited.len()));
         ir.classes[cid].bridges.extend(inherited);
