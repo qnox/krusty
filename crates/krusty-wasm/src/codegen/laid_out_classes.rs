@@ -14,7 +14,7 @@ use krusty::fx_hash::HashMap;
 use krusty::backend::class_tables::LaidOutSuperclass;
 use krusty::backend::CheckedBackendCallables;
 use krusty::fir::CallableId;
-use krusty::ir::{CtorDelegateTarget, IrFile};
+use krusty::ir::{ClassId, CtorDelegateTarget, IrFile};
 use krusty::libraries::{ExternalCallableKind, KlibDependencyCallable};
 use krusty::types::SemanticCallableOwner;
 use krusty::types::{Ty, TypeName};
@@ -111,11 +111,8 @@ impl LaidOutClasses {
         }
         self.active_source.clear();
 
-        for (child, selected_ordinal, target) in super_constructor_edges(ir) {
+        for (class_id, selected_ordinal, target) in super_constructor_edges(ir) {
             let selected_ordinal = selected_ordinal as usize;
-            let Some(class_id) = ir.class_id_by_name(child) else {
-                continue;
-            };
             let parent = ir.classes[class_id as usize].superclass;
             let Some(fact) = callables.callable(target) else {
                 continue;
@@ -128,9 +125,7 @@ impl LaidOutClasses {
                 || !fact
                     .klib_body_class_contract
                     .as_ref()
-                    .is_some_and(|contract| {
-                        contract.classifier == parent && contract.module == identity.module
-                    })
+                    .is_some_and(|contract| contract.matches_owner(&identity.module, parent))
             {
                 continue;
             }
@@ -242,7 +237,7 @@ impl LaidOutClasses {
 }
 
 /// The actual checked super-constructor edges, with their current-provider parent ordinals.
-fn super_constructor_edges(ir: &IrFile) -> Vec<(TypeName, u32, krusty::fir::ExternalCallableId)> {
+fn super_constructor_edges(ir: &IrFile) -> Vec<(ClassId, u32, krusty::fir::ExternalCallableId)> {
     let mut selected = Vec::new();
     selected.extend(
         ir.external_super_constructors
@@ -250,7 +245,7 @@ fn super_constructor_edges(ir: &IrFile) -> Vec<(TypeName, u32, krusty::fir::Exte
             .filter_map(|(&child, target)| {
                 let class = ir.class_id_by_name(child)?;
                 Some((
-                    child,
+                    class,
                     ir.classes[class as usize].super_ctor.ordinal,
                     target.declaration,
                 ))
@@ -268,9 +263,9 @@ fn super_constructor_edges(ir: &IrFile) -> Vec<(TypeName, u32, krusty::fir::Exte
             else {
                 return None;
             };
-            Some((child, selected.ordinal, target.declaration))
+            Some((class, selected.ordinal, target.declaration))
         },
     ));
-    selected.sort_unstable_by_key(|(child, ordinal, _)| (*child, *ordinal));
+    selected.sort_unstable_by_key(|(class, ordinal, _)| (*class, *ordinal));
     selected
 }
