@@ -2872,7 +2872,7 @@ pub(crate) use clone::make_expression_children_unique;
 pub use clone::make_expression_children_unique_tracked;
 pub(crate) use clone::{
     clone_class_method, clone_expression_with_own_lambdas, clone_function_implementation,
-    clone_with_operands,
+    clone_with_operands, relocate_with_operands,
 };
 mod semantic_validation;
 pub use semantic_validation::{

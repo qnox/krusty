@@ -16,12 +16,22 @@ use super::{ExprId, IrExpr, IrFile};
 pub(super) trait InheritedFacts {
     /// Give `target`, a copy of `source`, the facts this table records about `source`.
     fn inherit(&mut self, source: ExprId, target: ExprId);
+
+    /// Move an operation-owned fact to a relocated expression, retiring it from the old slot.
+    /// The default retains source-owned facts; operation owners in a relocation plan override it.
+    fn relocate(&mut self, _source: ExprId, _target: ExprId) {}
 }
 
 impl<V: Clone, S: BuildHasher> InheritedFacts for HashMap<ExprId, V, S> {
     fn inherit(&mut self, source: ExprId, target: ExprId) {
         if let Some(value) = self.get(&source).cloned() {
             self.insert(target, value);
+        }
+    }
+
+    fn relocate(&mut self, source: ExprId, target: ExprId) {
+        if let Some(value) = self.remove(&source) {
+            self.entry(target).or_insert(value);
         }
     }
 }
@@ -32,16 +42,32 @@ impl<S: BuildHasher> InheritedFacts for HashSet<ExprId, S> {
             self.insert(target);
         }
     }
+
+    fn relocate(&mut self, source: ExprId, target: ExprId) {
+        if self.remove(&source) {
+            self.insert(target);
+        }
+    }
 }
 
 /// Give `target`, a structural copy of `source`, every fact a copy inherits.
 #[deny(unused_variables)]
 pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
+    expression_facts(ir, source, target, false);
+}
+
+/// Give `target` a structural copy of `source`'s facts, then move operation-owned facts from the
+/// old expression identity. Source/value facts remain available to the replacement expression.
+pub(super) fn relocate_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
+    expression_facts(ir, source, target, true);
+}
+
+#[deny(unused_variables)]
+fn expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId, relocating: bool) {
     let IrFile {
         // Facts about the expression itself. A copy is the same source operation, so it inherits
         // its origin, position, types, checked selections and lowering roles.
         exprs,
-        module_constructions,
         callable_reference_provenance,
         callable_reference_enclosures,
         expression_owners,
@@ -129,9 +155,9 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         // The role the JVM value-class pass gave one physical type operation, and the unbox call
         // it selected as that operation's receiver. Operation relocation moves them with the
         // operation.
-        value_class_type_operations: _,
-        value_class_unbox_type_operation_edges: _,
-        value_class_null_safe_unbox_type_operation_edges: _,
+        value_class_type_operations,
+        value_class_unbox_type_operation_edges,
+        value_class_null_safe_unbox_type_operation_edges,
         // The accessor bodies materialized for one inline property access.
         inline_property_access: _,
         // A callable reference consumed as an inline argument: the expansion that consumes the
@@ -144,9 +170,9 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         initializer_blocks: _,
         // JVM realization of one physical call: the exact static it calls, its overridden-call
         // plan and its language-member role. Operation relocation moves them with the call.
-        jvm_member_targets: _,
-        jvm_overridden_call_realizations: _,
-        semantic_call_roles: _,
+        jvm_member_targets,
+        jvm_overridden_call_realizations,
+        semantic_call_roles,
         // Keyed by the property operation identity, which a copy keeps (`IrFile::add_expr`), not
         // by the expression.
         property_declaration_types: _,
@@ -351,24 +377,20 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         lambda_sam_jvm_signature: _,
     } = ir;
 
-    let inherited: [&mut dyn InheritedFacts; 76] = [
-        module_constructions,
+    let inherited: &mut [&mut dyn InheritedFacts] = &mut [
         callable_reference_provenance,
         callable_reference_enclosures,
         expression_owners,
-        generated_secondary_constructor_calls,
         fir_origins,
         checked_return_depths,
         inline_return_frames,
         inline_cleanup_results,
-        annotation_constructions,
         property_initializer_stores,
         positions,
         generated_lines,
         value_names,
         debug_local_provenance,
         inline_expansions,
-        types,
         deferred_local_types,
         whens,
         binding_read_stability,
@@ -385,54 +407,77 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         elvis_safe_call_guards,
         jvm_value_class_null_guards,
         jvm_erased_primitive_wrapper_values,
-        compiled_inline_calls,
-        module_inline_calls,
-        inline_call_sites,
         inline_callable_reference_receiver_bindings,
         inline_regions,
         callable_scopes,
-        builtin_calls,
         safe_calls,
         elvis_temporaries,
-        call_operand_bindings,
-        argument_evaluation_bindings,
-        invocation_operand_bindings,
         destructuring_containers,
         inline_synthetic_lines,
-        external_inline_expansions,
         external_frame_lines,
         external_frame_closes,
-        module_member_accesses,
-        jvm_protected_dependency_calls,
-        value_class_constructor_facts,
-        value_class_suspend_calls,
-        suspend_calls,
-        suspend_lambda_placements,
-        suspend_call_overridden_results,
-        intrinsic_suspension_points,
         erased_value_constructions,
-        reified_call_subst,
         reified_markers,
         lambda_exits,
-        inline_call_type_arguments,
-        ext_call_source_receiver,
-        external_singleton_dispatches,
-        dispatch_classes,
-        call_declared_ret,
-        declaration_result_coercions,
-        jvm_external_result_coercions,
-        call_declared_params,
-        physical_call_parameters,
-        construction_targets,
-        static_extension_receivers,
-        call_inline_modifiers,
-        synthesized_accessor_calls,
-        private_property_accessor_calls,
     ];
     for facts in inherited {
         facts.inherit(source, target);
     }
     inherit_declaration_argument_boundaries(exprs, declaration_argument_boundaries, source, target);
+    let operation_facts: &mut [(&mut dyn InheritedFacts, bool)] = &mut [
+        (compiled_inline_calls, true),
+        (module_inline_calls, true),
+        (inline_call_sites, true),
+        (builtin_calls, true),
+        (call_operand_bindings, true),
+        (argument_evaluation_bindings, true),
+        (invocation_operand_bindings, true),
+        (external_inline_expansions, true),
+        (module_member_accesses, true),
+        (jvm_protected_dependency_calls, true),
+        (value_class_constructor_facts, true),
+        (value_class_suspend_calls, true),
+        (suspend_calls, true),
+        (suspend_lambda_placements, true),
+        (suspend_call_overridden_results, true),
+        (intrinsic_suspension_points, true),
+        (reified_call_subst, true),
+        (inline_call_type_arguments, true),
+        (ext_call_source_receiver, true),
+        (external_singleton_dispatches, true),
+        (dispatch_classes, true),
+        (call_declared_ret, true),
+        (declaration_result_coercions, true),
+        (jvm_external_result_coercions, true),
+        (call_declared_params, true),
+        (physical_call_parameters, true),
+        (static_extension_receivers, true),
+        (call_inline_modifiers, true),
+        (synthesized_accessor_calls, true),
+        (private_property_accessor_calls, true),
+        (types, true),
+        (module_constructions, true),
+        (generated_secondary_constructor_calls, true),
+        (annotation_constructions, true),
+        (construction_targets, true),
+        (value_class_type_operations, false),
+        (value_class_unbox_type_operation_edges, false),
+        (value_class_null_safe_unbox_type_operation_edges, false),
+        (jvm_member_targets, false),
+        (jvm_overridden_call_realizations, false),
+        (semantic_call_roles, false),
+    ];
+    for (facts, copy_on_clone) in operation_facts {
+        if *copy_on_clone {
+            facts.inherit(source, target);
+        }
+        if relocating {
+            facts.relocate(source, target);
+        }
+    }
+    if relocating {
+        declaration_argument_boundaries.remove(&source);
+    }
 }
 
 /// A copied call's argument boundaries name the copy's own arguments, at the same positions.
@@ -469,9 +514,10 @@ fn inherit_declaration_argument_boundaries(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{IrConst, IrExpr, IrFile};
-    use super::copy_expression_facts;
+    use super::super::{Callee, IrConst, IrExpr, IrFile};
+    use super::{copy_expression_facts, relocate_expression_facts};
     use crate::fir::SourceFileId;
+    use crate::types::{type_name, Ty};
 
     #[test]
     fn a_copy_inherits_the_facts_its_owning_modules_record() {
@@ -526,5 +572,43 @@ mod tests {
         assert_eq!(ir.jvm_member_targets.get(&source), Some(&5));
         assert!(ir.initializer_blocks.contains(&source));
         assert_eq!(ir.jvm_continuation_functions, continuation_functions);
+    }
+
+    #[test]
+    fn relocation_moves_selected_call_facts_but_keeps_source_value_type() {
+        let mut ir = IrFile::default();
+        let source = ir.add_expr(IrExpr::Call {
+            callee: Box::new(Callee::External {
+                target: crate::fir::ExternalCallableId::from_raw(3),
+                default_provider: None,
+                params: Vec::new(),
+                ret: Ty::Int,
+                substitutions: Vec::new(),
+                defaults: Vec::new(),
+                extension_receiver_parameter: None,
+            }),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        let singleton = type_name("sample/Companion");
+        ir.external_singleton_dispatches.insert(source, singleton);
+        ir.call_declared_ret.insert(source, Ty::Int);
+        ir.set_logical_type(source, Ty::Int);
+        ir.set_physical_type(source, Ty::Int);
+        let call = ir.expr(source).clone();
+        let target = ir.add_expr(call);
+
+        relocate_expression_facts(&mut ir, source, target);
+
+        assert!(!ir.external_singleton_dispatches.contains_key(&source));
+        assert_eq!(
+            ir.external_singleton_dispatches.get(&target),
+            Some(&singleton)
+        );
+        assert!(!ir.call_declared_ret.contains_key(&source));
+        assert_eq!(ir.call_declared_ret.get(&target).copied(), Some(Ty::Int));
+        assert_eq!(ir.logical_type(source), Some(Ty::Int));
+        assert_eq!(ir.physical_type(source), None);
+        assert_eq!(ir.physical_type(target), Some(Ty::Int));
     }
 }
