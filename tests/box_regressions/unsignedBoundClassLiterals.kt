@@ -11,5 +11,5 @@ fun box(): String {
     val narrow = byte::class
     val same = narrow == UByte::class
     return if (literal == "UInt" && local == "ULong" && parameter == "UInt" && same) "OK"
-    else "unsigned class literals: $literal $local $parameter $narrow"
+    else "unsigned class literals: $literal $local $parameter ${narrow.simpleName}"
 }
