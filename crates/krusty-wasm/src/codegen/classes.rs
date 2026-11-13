@@ -55,19 +55,20 @@ use krusty::backend::class_tables::{
 use krusty::backend::local_properties::RealizedLocalPropertyAccess;
 use krusty::backend::BackendClassifierSource;
 use krusty::fir::{CallableId, PropertyId, ResolvedPropertyOverrideTarget};
-use krusty::ir::{ClassId, FunId, IrClass, IrExpr, IrFile, IrLocalPropertyLayout};
+use krusty::ir::{ClassId, FunId, IrClass, IrFile, IrLocalPropertyLayout};
 use krusty::types::{Ty, TypeName};
 
 use super::super::encode::{
-    Code, CompositeType, FieldType, HeapType, Module, StorageType, SubType, ValType,
+    BlockType, Code, CompositeType, FieldType, Function, HeapType, Module, StorageType, SubType,
+    ValType,
 };
 use super::super::exception_transport::ExceptionTransport;
 use super::super::identity::PREFIX_FIELDS;
 use super::super::interface_dispatch::{ClassRef, MemberRef};
 use super::super::objects::{immutable, ObjectRoot, ITABLE_FIELD, REFERENCE};
-use super::super::runtime::Runtime;
+use super::super::runtime::{Runtime, AND32, EQ32, EQ64, OR32};
 use super::laid_out_classes::{DependencyImplementation, LaidOutClass, LaidOutClasses, Placed};
-use super::lower::{carrier, parameter_carrier, Unsupported, STRING};
+use super::lower::{carrier, cell_reference, parameter_carrier, Unsupported, STRING};
 
 mod constructor_prefix;
 pub(super) use constructor_prefix::enclosing_field;
@@ -126,6 +127,17 @@ pub(super) enum OwnedBase {
     Enum,
     /// A runtime exception class, by its runtime struct: its message and cause.
     Exception(u32),
+}
+
+impl OwnedBase {
+    /// How many struct fields after the dispatch table this base contributes.
+    fn fields(self) -> u32 {
+        match self {
+            OwnedBase::None => 0,
+            OwnedBase::Enum => ENUM_BASE_FIELDS,
+            OwnedBase::Exception(_) => EXCEPTION_BASE_FIELDS,
+        }
+    }
 }
 
 /// A synthesized property accessor a table slot holds: the field it reads or writes.
@@ -328,6 +340,7 @@ impl FileClasses {
     /// `signatures` are the file's function indices and types, by `FunId`.
     pub(super) fn records(
         &self,
+        module: &mut Module,
         ir: &IrFile,
         functions: &[Option<u32>],
         signatures: &[Option<u32>],
@@ -367,7 +380,7 @@ impl FileClasses {
             }
             for &owner in chain.iter().rev() {
                 fields.extend(
-                    own_fields(&ir.classes[owner as usize])
+                    own_fields(module, ir, owner)
                         .expect("every field was carried when the struct was declared"),
                 );
             }
@@ -474,6 +487,12 @@ pub(super) const ENUM_BASE_FIELDS: u32 = 2;
 /// prefix.
 const EXCEPTION_BASE_FIELDS: u32 = 2;
 
+/// The type a method of `owner` receives its receiver at: a builtin value's own type, which it is
+/// carried as, and otherwise the class's.
+pub(super) fn receiver_type(owner: krusty::types::TypeName) -> Ty {
+    krusty::types::builtin_semantic(owner).unwrap_or_else(|| Ty::obj_name(owner))
+}
+
 /// The wasm signature of a method of the file: the receiver, then its parameters.
 pub(super) fn method_type(
     module: &mut Module,
@@ -481,7 +500,11 @@ pub(super) fn method_type(
     function: FunId,
 ) -> Result<u32, Unsupported> {
     let declaration = &ir.functions[function as usize];
-    let mut params = vec![REFERENCE];
+    let receiver = match declaration.dispatch_receiver {
+        Some(owner) => carrier(receiver_type(owner))?.ok_or("a `Unit` receiver")?,
+        None => REFERENCE,
+    };
+    let mut params = vec![receiver];
     for parameter in 0..declaration.params.len() {
         params.push(
             parameter_carrier(module, ir, function, parameter as u32)?
@@ -517,17 +540,16 @@ pub(super) fn module_plan(
 fn check_supported(ir: &IrFile, id: ClassId) -> Result<(), Unsupported> {
     let class = &ir.classes[id as usize];
     let name = class.fq_name();
-    // An annotation class that is only applied needs nothing at run time beyond an ordinary
-    // layout. An annotation INSTANCE compares, hashes, and prints by its members, which this
-    // object form does not provide, so a file constructing one is still declined.
-    let construct = if class.annotation_impl_of.is_some()
-        || (class.is_annotation && constructs(ir, class.fq_name))
-    {
-        "an annotation instance"
-    } else if class.prop_ref.is_some() || class.func_ref.is_some() {
+    // An annotation class, applied or constructed, is an ordinary layout. An annotation instance
+    // compares, hashes and prints by its members, which this object form does not provide: those
+    // three slots stay unrealized, so a use of one declines at the call.
+    let construct = if class.prop_ref.is_some() || class.func_ref.is_some() {
         "a callable reference"
     } else if class.lambda.is_some() || class.sam_wrapper.is_some() {
         "a function value's class"
+    // A value class is its box: an ordinary object whose stored field is the underlying value.
+    // A non-null unsigned number stays the scalar carrier; a nullable one, and any reference
+    // array of unsigned elements, uses that value class's own runtime box.
     // An inner class's enclosing instance is already an ordinary constructor-prefix argument and
     // field in checked IR, which this object form can carry like every other reference field.
     // Anonymous superclass operands are also ordinary parameters, without capture storage.
@@ -571,24 +593,14 @@ fn check_exception_storage(
     Ok(())
 }
 
-/// Whether a body `ir` emits constructs the class named `name`. Orphan expressions and
-/// cloning-only inline templates are not emitted, so a construction there is no obligation.
-fn constructs(ir: &IrFile, name: TypeName) -> bool {
-    krusty::ir::emitted_body_roots(ir)
-        .into_iter()
-        .flat_map(|root| krusty::ir::value_namespace_expressions(ir, root))
-        .any(|expression| {
-            matches!(ir.expr(expression), IrExpr::New { internal, .. } if *internal == name)
-        })
-}
-
 /// Lay out every class of `ir` in `module`: types, constructors' and accessors' indices, and the
 /// dispatch tables, whose entries name `functions` (the file's function indices, by `FunId`). A
 /// superclass no class of `ir` declares is read from `laid_out`, the classes earlier files of the
 /// source module laid out.
 /// What the source module says about classes beyond the file being declared.
-#[derive(Clone, Copy)]
 pub(super) struct BeyondFile<'a> {
+    /// The table types of the classes the module plan covers, which this file's classes take.
+    pub(super) module_tables: &'a mut super::module_tables::ModuleTables,
     pub(super) classifiers: &'a dyn BackendClassifierSource,
     /// The module-wide numbering of every class's table and every interface member.
     pub(super) plan: &'a ModuleSlotPlan,
@@ -605,6 +617,7 @@ pub(super) fn declare(
     beyond: BeyondFile<'_>,
 ) -> Result<FileClasses, Unsupported> {
     let BeyondFile {
+        module_tables,
         classifiers,
         plan,
         laid_out,
@@ -684,9 +697,9 @@ pub(super) fn declare(
             }
         }
         if let Some(parent) = table.superclass {
-            fields.extend(inherited_fields(ir, &tables, parent)?);
+            fields.extend(inherited_fields(module, ir, &tables, parent)?);
         }
-        fields.extend(own_fields(class)?);
+        fields.extend(own_fields(module, ir, id)?);
         let root = match bases[id as usize] {
             OwnedBase::None => objects.identified,
             OwnedBase::Enum => objects.enum_base,
@@ -701,19 +714,32 @@ pub(super) fn declare(
             }),
             open: true,
         });
-        let table_type = module.subtype(SubType {
-            composite: table_struct(
-                &slot_types[id as usize],
-                objects.itable,
-                objects.type_infos.ty,
-            ),
-            supertype: Some(match (parent, laid_out_parent) {
-                (Some(parent), _) => parent.table_type.expect("a superclass has a table type"),
-                (None, Some(superclass)) => superclass.table_type,
-                (None, None) => objects.any_table,
+        // A class the module plan covers takes the table type every file reads from the plan,
+        // so a file dispatching through it from elsewhere casts to this one type.
+        let table_type = match module_tables.table(plan, class.fq_name, module, objects) {
+            Some(Ok(planned)) if planned.slot_types == slot_types[id as usize] => {
+                planned.table_type
+            }
+            Some(Ok(_)) => {
+                return Err(format!(
+                    "a class whose table differs from its module-wide plan (`{}`)",
+                    class.fq_name()
+                ))
+            }
+            Some(Err(_)) | None => module.subtype(SubType {
+                composite: table_struct(
+                    &slot_types[id as usize],
+                    objects.itable,
+                    objects.type_infos.ty,
+                ),
+                supertype: Some(match (parent, laid_out_parent) {
+                    (Some(parent), _) => parent.table_type.expect("a superclass has a table type"),
+                    (None, Some(superclass)) => superclass.table_type,
+                    (None, None) => objects.any_table,
+                }),
+                open: true,
             }),
-            open: true,
-        });
+        };
         let form = &mut forms[id as usize];
         form.structure = Some(structure);
         form.table_type = Some(table_type);
@@ -767,6 +793,7 @@ pub(super) fn declare(
             slot_types: &slot_types,
             laid_out: laid_out_superclass(id),
             base: bases[id as usize],
+            value_field: single_value_field(&forms, &tables, &bases, id, class)?,
         }
         .resolve(
             id,
@@ -870,6 +897,9 @@ struct TableEntries<'a> {
     laid_out: Option<&'a LaidOutClass>,
     /// The base no file declares that the class extends.
     base: OwnedBase,
+    /// The one stored field of a single-field value class, which answers `equals` and
+    /// `hashCode` from it.
+    value_field: Option<ValueStorage>,
 }
 
 impl TableEntries<'_> {
@@ -890,6 +920,7 @@ impl TableEntries<'_> {
             slot_types,
             laid_out,
             base,
+            value_field,
         } = *self;
         let Synthesized { accessors, bridges } = synthesized;
         let class = &ir.classes[id as usize];
@@ -901,6 +932,22 @@ impl TableEntries<'_> {
                 continue;
             };
             let function = match entry {
+                Slot::AnyMember(AnyMember::Equals) if let Some(storage) = value_field => {
+                    value_class_equals(
+                        module,
+                        storage,
+                        ty,
+                        runtime.objects.object,
+                        runtime.object_equals,
+                    )
+                }
+                Slot::AnyMember(AnyMember::HashCode)
+                    if let Some(function) = value_field.and_then(|storage| {
+                        value_class_hash(module, &runtime.hashing, storage, class.fields[0].ty, ty)
+                    }) =>
+                {
+                    function
+                }
                 Slot::AnyMember(member) => {
                     match inherited_any_member(ir, runtime, module, id, *member, base) {
                         Some(function) => function,
@@ -987,6 +1034,9 @@ fn inherited_any_member(
     member: AnyMember,
     base: OwnedBase,
 ) -> Option<u32> {
+    if ir.classes[class as usize].annotation_impl_of.is_some() {
+        return None;
+    }
     Some(match (member, base) {
         (AnyMember::Equals, _) => runtime.objects.identity_equals,
         (AnyMember::HashCode, _) => runtime.identity.hash_code,
@@ -1022,7 +1072,7 @@ pub(super) fn accessor_function(
 
 /// A table struct: one immutable typed function reference per typed slot, `funcref` elsewhere,
 /// and the interface table and the type information after `kotlin.Any`'s slots.
-fn table_struct(slots: &[Option<u32>], itable: u32, type_info: u32) -> CompositeType {
+pub(super) fn table_struct(slots: &[Option<u32>], itable: u32, type_info: u32) -> CompositeType {
     let mut fields = Vec::with_capacity(slots.len() + 2);
     for (slot, ty) in slots.iter().enumerate() {
         if slot as u32 == ITABLE_FIELD {
@@ -1044,18 +1094,173 @@ fn table_struct(slots: &[Option<u32>], itable: u32, type_info: u32) -> Composite
     CompositeType::Struct(fields)
 }
 
+/// Where a single-field value class keeps its underlying value.
+#[derive(Clone, Copy)]
+struct ValueStorage {
+    structure: u32,
+    field: u32,
+    value: ValType,
+}
+
+/// The one stored field of a value class, or nothing when `class` is not that shape.
+fn single_value_field(
+    forms: &[ClassForm],
+    tables: &NumberedClassTables,
+    bases: &[OwnedBase],
+    id: ClassId,
+    class: &IrClass,
+) -> Result<Option<ValueStorage>, Unsupported> {
+    if !class.is_value || class.fields.len() != 1 {
+        return Ok(None);
+    }
+    let value = carrier(class.fields[0].ty)?
+        .ok_or_else(|| format!("a `Unit`-typed value class field (`{}`)", class.fq_name()))?;
+    let field = 1 + bases[id as usize].fields() + tables.table(id).first_field;
+    Ok(Some(ValueStorage {
+        structure: forms[id as usize]
+            .structure
+            .expect("a value class has a struct"),
+        field,
+        value,
+    }))
+}
+
+/// `equals` for a single-field value class.
+///
+/// The other operand is this class only when it carries the same dispatch table. A recursion
+/// group canonicalizes two structs of one layout into one GC type, so `ref.test` of the struct
+/// cannot separate `First` from `Second`. The table stored in every instance is that class's
+/// identity.
+///
+/// The field then compares as that value does: scalar bits, with every NaN equal to every other
+/// NaN, or ordinary Kotlin equality for a reference. A payload's own `equals` answers, including
+/// a custom override.
+fn value_class_equals(
+    module: &mut Module,
+    storage: ValueStorage,
+    equals: u32,
+    object: u32,
+    object_equals: u32,
+) -> u32 {
+    let function = module.declare();
+    let mut code = Code::default();
+    let object_heap = HeapType::Concrete(object);
+    let heap = HeapType::Concrete(storage.structure);
+    code.local_get(1)
+        .ref_test(false, object_heap)
+        .if_(BlockType::Value(ValType::I32))
+        .local_get(0)
+        .ref_cast(false, object_heap)
+        .struct_get(object, 0)
+        .local_get(1)
+        .ref_cast(false, object_heap)
+        .struct_get(object, 0)
+        .ref_eq()
+        .if_(BlockType::Value(ValType::I32))
+        .local_get(0)
+        .ref_cast(false, heap)
+        .struct_get(storage.structure, storage.field)
+        .local_get(1)
+        .ref_cast(false, heap)
+        .struct_get(storage.structure, storage.field);
+    let locals = match storage.value {
+        ValType::F32 | ValType::F64 => {
+            // Locals follow the two reference parameters.
+            code.local_set(3).local_set(2);
+            let (ne, bits, bits_eq) = match storage.value {
+                ValType::F32 => (0x5c, 0xbc, EQ32),
+                _ => (0x62, 0xbd, EQ64),
+            };
+            code.local_get(2).local_get(2).op(ne);
+            code.local_get(3).local_get(3).op(ne);
+            code.op(AND32);
+            code.local_get(2).op(bits).local_get(3).op(bits).op(bits_eq);
+            code.op(OR32);
+            vec![storage.value, storage.value]
+        }
+        ValType::I32 => {
+            code.op(EQ32);
+            Vec::new()
+        }
+        ValType::I64 => {
+            code.op(EQ64);
+            Vec::new()
+        }
+        ValType::Ref { .. } => {
+            code.call(object_equals);
+            Vec::new()
+        }
+    };
+    code.else_().i32_const(0).end();
+    code.else_().i32_const(0).end();
+    module.define(
+        function,
+        Function {
+            ty: equals,
+            locals,
+            code,
+        },
+    );
+    function
+}
+
+/// `hashCode` for a single-field value class: the hash of the value it holds. A reference field
+/// is hashed through the object model; a scalar uses the same hash as its primitive box.
+fn value_class_hash(
+    module: &mut Module,
+    hashing: &super::super::hashing::Hashing,
+    storage: ValueStorage,
+    field_ty: Ty,
+    hash_ty: u32,
+) -> Option<u32> {
+    let reference = matches!(storage.value, ValType::Ref { .. });
+    if !reference && !hashing.emit_scalar_hash(&mut Code::default(), field_ty) {
+        return None;
+    }
+    let function = module.declare();
+    let mut code = Code::default();
+    code.local_get(0)
+        .ref_cast(false, HeapType::Concrete(storage.structure))
+        .struct_get(storage.structure, storage.field);
+    if reference {
+        code.call(hashing.hash_code);
+    } else {
+        let hashed = hashing.emit_scalar_hash(&mut code, field_ty);
+        debug_assert!(hashed, "the probe above accepted this scalar");
+    }
+    module.define(
+        function,
+        Function {
+            ty: hash_ty,
+            locals: Vec::new(),
+            code,
+        },
+    );
+    Some(function)
+}
+
 /// The struct fields `class` declares, each mutable: a field is written by the constructor after
-/// the object exists.
-fn own_fields(class: &IrClass) -> Result<Vec<FieldType>, Unsupported> {
-    class
+/// the object exists. A shared capture is the cell reference, not the element's carrier.
+fn own_fields(
+    module: &mut Module,
+    ir: &IrFile,
+    class: ClassId,
+) -> Result<Vec<FieldType>, Unsupported> {
+    let declared = ir.classes[class as usize]
         .fields
         .iter()
-        .map(|field| {
-            let value = carrier(field.ty)?.ok_or_else(|| {
+        .enumerate()
+        .map(|(index, field)| (u32::try_from(index).expect("too many fields"), field.ty))
+        .collect::<Vec<_>>();
+    declared
+        .into_iter()
+        .map(|(index, ty)| {
+            let value = field_storage(module, ir, class, index, ty)?.ok_or_else(|| {
+                let declaration = &ir.classes[class as usize];
                 format!(
                     "a `Unit`-typed field (`{}.{}`)",
-                    class.fq_name(),
-                    field.name
+                    declaration.fq_name(),
+                    declaration.fields[index as usize].name
                 )
             })?;
             Ok(FieldType {
@@ -1068,15 +1273,16 @@ fn own_fields(class: &IrClass) -> Result<Vec<FieldType>, Unsupported> {
 
 /// Every field of `class` and its superclasses in this file, root first.
 fn inherited_fields(
+    module: &mut Module,
     ir: &IrFile,
     tables: &NumberedClassTables,
     class: ClassId,
 ) -> Result<Vec<FieldType>, Unsupported> {
     let mut fields = match tables.table(class).superclass {
-        Some(parent) => inherited_fields(ir, tables, parent)?,
+        Some(parent) => inherited_fields(module, ir, tables, parent)?,
         None => Vec::new(),
     };
-    fields.extend(own_fields(&ir.classes[class as usize])?);
+    fields.extend(own_fields(module, ir, class)?);
     Ok(fields)
 }
 
@@ -1113,11 +1319,11 @@ fn slot_types<'r>(
                 Slot::AnyMember(member) => Some(objects.any_slot_types[member.slot() as usize]),
                 Slot::Function(function) => Some(method_type(module, ir, *function)?),
                 Slot::FieldGetter { class, field } => {
-                    let value = field_carrier(ir, *class, *field)?;
+                    let value = field_carrier(module, ir, *class, *field)?;
                     Some(module.func_type(vec![REFERENCE], vec![value]))
                 }
                 Slot::FieldSetter { class, field } => {
-                    let value = field_carrier(ir, *class, *field)?;
+                    let value = field_carrier(module, ir, *class, *field)?;
                     Some(module.func_type(vec![REFERENCE, value], Vec::new()))
                 }
                 Slot::Abstract => match keys.get(&(slot as u32)) {
@@ -1231,18 +1437,59 @@ fn property_key_type(
     method_type(module, ir, function)
 }
 
-/// How field `field` of `class` is carried.
+/// How field `field` of `class` is carried. A shared capture is the cell, not its element.
 pub(super) fn field_carrier(
+    module: &mut Module,
     ir: &IrFile,
     class: ClassId,
     field: u32,
 ) -> Result<ValType, Unsupported> {
     let declaration = &ir.classes[class as usize];
-    carrier(declaration.fields[field as usize].ty)?.ok_or_else(|| {
+    let declared = &declaration.fields[field as usize];
+    field_storage(module, ir, class, field, declared.ty)?.ok_or_else(|| {
         format!(
             "a `Unit`-typed field (`{}.{}`)",
             declaration.fq_name(),
-            declaration.fields[field as usize].name
+            declared.name
         )
     })
+}
+
+/// The carrier of constructor argument `index`, a cell when that argument fills a shared capture.
+pub(super) fn constructor_argument_carrier(
+    module: &mut Module,
+    ir: &IrFile,
+    class: ClassId,
+    index: usize,
+    declared: Ty,
+) -> Result<ValType, Unsupported> {
+    let field = ir.classes[class as usize]
+        .ctor_args
+        .get(index)
+        .and_then(|argument| argument.field_index);
+    match field {
+        Some(field) if ir.shared_class_capture_fields.contains_key(&(class, field)) => {
+            field_storage(module, ir, class, field, declared)?.ok_or_else(|| {
+                format!(
+                    "a `Unit` shared capture (`{}`)",
+                    ir.classes[class as usize].fq_name()
+                )
+            })
+        }
+        _ => carrier(declared)?.ok_or_else(|| "a `Unit` constructor parameter".to_string()),
+    }
+}
+
+/// A shared capture field stores the cell. Every other field stores its declared carrier.
+fn field_storage(
+    module: &mut Module,
+    ir: &IrFile,
+    class: ClassId,
+    field: u32,
+    declared: Ty,
+) -> Result<Option<ValType>, Unsupported> {
+    match ir.shared_class_capture_fields.get(&(class, field)) {
+        Some(&element) => cell_reference(module, element).map(Some),
+        None => carrier(declared),
+    }
 }

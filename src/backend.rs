@@ -20,7 +20,9 @@ pub mod enums;
 pub mod interface_identity;
 pub mod local_properties;
 mod module_facts;
+pub mod module_links;
 pub mod property_entries;
+pub mod range_constructions;
 mod source_class_members;
 pub mod value_classes;
 
@@ -30,8 +32,8 @@ pub use dependency_call_shape::{DeclaredOperandRoles, DependencyCallShape, Depen
 pub use dependency_facts::referenced_dependencies;
 pub use dependency_facts::{
     BackendCallableFact, BackendCompilerIntrinsic, BackendPropertyFact, BackendSemanticCallRole,
-    CheckedBackendCallables, DependencyClassifier, DependencyFactError, DependencyGetterSignature,
-    PrimitiveImplementation, PrimitiveOverrideDeclaration,
+    BuiltinImplementation, BuiltinOverrideDeclaration, CheckedBackendCallables,
+    DependencyClassifier, DependencyFactError, DependencyGetterSignature,
 };
 pub(crate) use dependency_metadata::has_standalone_dependency_code;
 pub use dependency_metadata::KlibDependencyCallable;

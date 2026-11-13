@@ -55,7 +55,6 @@ pub use annotation_argument_provenance::AnnotationArgumentProvenance;
 pub use call_arg_mapping_failure::{CallArgMappingError, CallArgMappingFailure};
 pub(crate) use call_realization::KlibBodyCallableShape;
 pub use call_realization::KlibBodyCompanionReceiver;
-pub(crate) use call_realization::KlibSerializedMember;
 pub use call_realization::{
     DefaultCallRealization, DirectCFunction, ExternalCallableKind, ExternalCallableRealization,
     ExternalPropertyRealization, KlibBodyCallable, KlibDeclarationSignature,
@@ -67,7 +66,7 @@ pub use callable_scope_rung::CallableScopeRung;
 pub(crate) use classifier_callables::{
     constructor_declaration_signature, constructor_generic_signature, ConstructorAlias,
 };
-pub use classifier_callables::{BoundInnerConstructor, ConstructorCandidate};
+pub use classifier_callables::{BoundInnerConstructor, ConstructorCandidate, ConstructorOrigin};
 pub(crate) use classifier_declaration::type_alias_target_classifier;
 pub use classifier_declaration::{
     AliasExpansion, ClassifierDeclaration, ClassifierDeclarationKey, TypeAliasTemplate,
@@ -125,7 +124,9 @@ pub use inline_body::{
 };
 #[cfg(test)]
 pub(crate) use klib_body_class::test_fixture as klib_body_class_fixture;
-pub(crate) use klib_body_class::{KlibBodyClassContract, KlibBodyClassParameters, KlibStoredField};
+pub(crate) use klib_body_class::{
+    KlibBodyClassContract, KlibBodyClassParameters, KlibClassStorage, KlibStoredField,
+};
 pub use member_flags::LmFlags;
 pub(crate) use metadata_normalization::{
     associated_function_parameter_identities, associated_property_parameter_identities,
@@ -565,6 +566,12 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// means this provider takes no part in source-set diagnostics, and a check that needs the
     /// name reports an internal error rather than inventing one.
     fn diagnostic_target_name(&self) -> Option<&str> {
+        None
+    }
+
+    /// The error this platform reports for a value of type `Array<Nothing?>`, which it cannot
+    /// represent. `None` where such an array is an ordinary value.
+    fn array_of_nullable_nothing_error(&self) -> Option<&'static str> {
         None
     }
 
@@ -1908,6 +1915,10 @@ pub enum PropertyReadStability {
     Stable,
     /// An open default-getter `val`, stable only through a statically final receiver classifier.
     StableOnFinalReceiver,
+    /// A final default-getter `val` that is a component of a value class declared in another
+    /// module. kotlinc smart-casts it only under `AllowSmartCastsOnValueClassUnderlyingProperties`;
+    /// any other property of another module is unstable.
+    ValueClassComponentOfOtherModule,
 }
 
 impl PropertyReadStability {
@@ -1926,9 +1937,15 @@ impl PropertyReadStability {
         }
     }
 
-    pub(crate) fn permits(self, receiver_is_final: bool) -> bool {
+    pub(crate) fn permits(
+        self,
+        receiver_is_final: bool,
+        smart_cast_value_class_components: bool,
+    ) -> bool {
         matches!(self, Self::Stable)
             || (receiver_is_final && matches!(self, Self::StableOnFinalReceiver))
+            || (smart_cast_value_class_components
+                && matches!(self, Self::ValueClassComponentOfOtherModule))
     }
 }
 

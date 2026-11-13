@@ -17,7 +17,7 @@
 #   just box-corpus clone+cache the Kotlin codegen/box corpus; prints box dir
 #   just conformance       print box-suite conformance "<pct> <passed> <applicable>" (stderr: JVM bytes)
 #   just profile-box [filter]  profile compiler-only box cases; writes target/flamegraph.svg
-#   just install-hooks    lefthook install
+#   just install-hooks    lefthook install, plus the outcome-manifest merge driver
 #   just version          krusty release version, e.g. 2.4.20-build.3
 #   just max-version      highest supported Kotlin reference version (release base)
 #   just build-number V   build number for reference version V (resets per version)
@@ -46,7 +46,7 @@ ci: lint coverage-gate
 # Lint gate (enforced locally + in CI + by the pre-commit hook): formatting must be clean, and
 # clippy must introduce NO new findings beyond the frozen baseline (clippy-baseline.tsv). Existing
 # findings are tolerated; any new one fails. Identical behaviour everywhere — it's plain cargo + sh.
-lint: versioning-tests release-tests legacy-ratchet-tests reference-cache-tests fmt-check legacy-baseline-check clippy-baseline-check
+lint: versioning-tests release-tests legacy-ratchet-tests reference-cache-tests outcome-set-merge-tests fmt-check legacy-baseline-check clippy-baseline-check
 
 # The CI step that drops kotlinc reference inventories no recent run read, before master saves them.
 reference-cache-tests:
@@ -106,7 +106,7 @@ clippy-findings:
         exit 1
     fi
     sed -nE 's/^([^:]+):[0-9]+:[0-9]+: warning: (.*)$/\1\t\2/p' "$output" \
-      | sort | uniq -c | sed -E 's/^ *([0-9]+) /\1\t/' | sort
+      | LC_ALL=C sort | uniq -c | sed -E 's/^ *([0-9]+) /\1\t/' | LC_ALL=C sort
 
 # Freeze the current clippy findings as the accepted baseline. Run after intentionally fixing (or
 # knowingly accepting) findings; commit the updated clippy-baseline.tsv.
@@ -154,6 +154,17 @@ legacy-baseline:
 # Test the legacy-surface ratchet against a disposable repository.
 legacy-ratchet-tests:
     bash scripts/test-legacy-ratchet.sh
+
+# Test the outcome-manifest merge driver against a disposable repository.
+outcome-set-merge-tests:
+    bash scripts/test-outcome-set-merge.sh
+
+# Register the outcome-manifest merge driver (.gitattributes `merge=sorted-set`) in this clone's
+# git config; git reads merge drivers only from local config. A checkout that predates the driver
+# script merges those files line by line.
+install-merge-drivers:
+    git config merge.sorted-set.name "outcome manifest set merge"
+    git config merge.sorted-set.driver 'if test -f scripts/outcome-set-merge.sh; then bash scripts/outcome-set-merge.sh %O %A %B; else git merge-file -L ours -L base -L theirs %A %O %B; fi'
 
 # Full test suite through the canonical self-provisioning harness.
 test *ARGS:
@@ -388,7 +399,7 @@ box-corpus VERSION=`just max-version`:
         # Keep cone mode: a fresh sparse clone checks out the repository-root files that cone mode
         # owns. Switching to non-cone while excluding them can leave those paths in place and abort
         # the update before the requested corpus directory is materialized.
-        git -C "$root" sparse-checkout set compiler/testData/codegen/box "$mock_dir" $cli_dirs $bytecode_dirs >&2
+        git -C "$root" sparse-checkout set compiler/testData/codegen/box "$mock_dir" $cli_dirs $bytecode_dirs "${selection_dirs[@]}" >&2
     }
     # Kotlin's command-line test corpus (`.args`/`.out` pairs) and the third-party annotation
     # sources some of its cases put on the classpath; kotlin_cli_jvm_conformance runs it.
@@ -397,6 +408,25 @@ box-corpus VERSION=`just max-version`:
     # (bytecodeText) and whole-class declaration listings (bytecodeListing);
     # kotlin_bytecode_text_conformance and kotlin_bytecode_listing_conformance run them.
     bytecode_dirs="compiler/testData/codegen/bytecodeText compiler/testData/codegen/bytecodeListing"
+    # The matching generators and backend matcher are the selection oracle, not another
+    # compiler build. Keep their original sources beside each exact-version corpus.
+    selection_files=()
+    selection_dirs=()
+    while IFS= read -r selection_file; do
+        [ -n "$selection_file" ] || continue
+        selection_files+=("$selection_file")
+        selection_dirs+=("${selection_file%/*}")
+    done < tests/box_selection_sources.txt
+    box_roots=()
+    load_box_roots() {
+        local roots_text
+        roots_text=$(python3 scripts/box_selection.py --checkout "$root" --required-roots) || return 1
+        box_roots=()
+        while IFS= read -r box_root; do
+            [ -n "$box_root" ] && box_roots+=("$box_root")
+        done <<< "$roots_text"
+        [ "${#box_roots[@]}" -gt 0 ]
+    }
     mock_dir=""
     if [ -d "$root/.git" ] && [ -d "$box" ]; then
         mock_dir="$(mock_dir_at_tag)"
@@ -405,6 +435,15 @@ box-corpus VERSION=`just max-version`:
     if [ -n "$mock_dir" ] && [ -f "$root/$mock_dir/rt.jar" ]; then
         complete=1
         for dir in $cli_dirs $bytecode_dirs; do [ -d "$root/$dir" ] || complete=0; done
+        for selection_file in "${selection_files[@]}"; do
+            [ -f "$root/$selection_file" ] || complete=0
+        done
+        if [ "$complete" = 1 ]; then
+            load_box_roots || exit 1
+            for box_root in "${box_roots[@]}"; do
+                [ -d "$root/$box_root" ] || complete=0
+            done
+        fi
     fi
     if [ "$complete" = 1 ]; then
         echo "$box"
@@ -417,20 +456,31 @@ box-corpus VERSION=`just max-version`:
         exit 1
     fi
     if [ -n "$mock_dir" ]; then
-        # A cache provisioned before the mock JDK, the CLI corpus or the bytecode corpora was needed: extend it rather
-        # than accept it.
-        echo "adding the mock JDK, the CLI corpus and the bytecode corpora to the Kotlin codegen/box corpus (v${ver})…" >&2
-        git -C "$root" sparse-checkout add "$mock_dir" $cli_dirs $bytecode_dirs >&2 \
+        # A cache provisioned before the mock JDK, the CLI corpus, the bytecode corpora or the
+        # generator sources were needed: extend it rather than accept it.
+        echo "adding the mock JDK, CLI corpus, bytecode corpora and generator sources to Kotlin v${ver}…" >&2
+        git -C "$root" sparse-checkout add "$mock_dir" $cli_dirs $bytecode_dirs "${selection_dirs[@]}" >&2 \
             || { echo "failed to extend the v${ver} corpus checkout" >&2; exit 1; }
     else
         # No checkout, or a restored one whose tree cannot name its mock JDK: provision afresh.
         clone_corpus
     fi
+    load_box_roots || exit 1
+    git -C "$root" sparse-checkout add "${box_roots[@]}" >&2 \
+        || { echo "failed to provision the upstream box roots for v${ver}" >&2; exit 1; }
     [ -d "$box" ] || { echo "box dir missing after sparse checkout: $box" >&2; exit 1; }
     [ -f "$root/$mock_dir/rt.jar" ] \
         || { echo "mock JDK missing after sparse checkout: $root/$mock_dir/rt.jar" >&2; exit 1; }
     [ -d "$root/compiler/testData/cli/jvm" ] \
         || { echo "CLI corpus missing after sparse checkout: $root/compiler/testData/cli/jvm" >&2; exit 1; }
+    for selection_file in "${selection_files[@]}"; do
+        [ -f "$root/$selection_file" ] \
+            || { echo "selection source missing after sparse checkout: $root/$selection_file" >&2; exit 1; }
+    done
+    for box_root in "${box_roots[@]}"; do
+        [ -d "$root/$box_root" ] \
+            || { echo "upstream box root missing after sparse checkout: $root/$box_root" >&2; exit 1; }
+    done
     echo "$box"
 
 # Provision the kotlinx.serialization compiler-plugin box corpus (plugins/kotlinx-serialization/
@@ -533,10 +583,11 @@ test-all *ARGS:
 # Build the krusty-build library test binary and print its path. Gradle lanes run this prebuilt
 # binary; they do not compile krusty again.
 #
-# CI builds this right after `cargo build --profile gate -p krusty-cli`. Selecting krusty-cli's
-# binary here as well resolves the same features as that build: on its own, krusty-build's graph
-# lacks the Native backend, so bumpalo (under zopfli) loses Cranelift's `allocator-api2` feature
-# and krusty, which links zopfli, compiled a second time (484 s of the 1157 s tool-bins build).
+# CI builds this right after `just conformance-bin-and-cli`, and must reuse that build's krusty.
+# Selecting krusty-cli's binary here keeps the Native backend in the graph: without it bumpalo
+# (under zopfli) loses Cranelift's `allocator-api2` feature and krusty, which links zopfli,
+# compiled a second time (484 s of a 1157 s build). krusty-build's own dev-dependencies add the
+# libc, object and once_cell features that the root package's dev-dependencies add there.
 krusty-build-tests:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -566,6 +617,14 @@ conformance-bin:
     #!/usr/bin/env bash
     set -euo pipefail
     scripts/cargo-test-binary.sh conformance --test conformance
+
+# CI's tool-bins job: the conformance binary and the `krusty` CLI (target/gate/krusty) from one
+# Cargo invocation. The CLI alone resolves libc, object and once_cell without the features the
+# root package's dev-dependencies add, so building the two apart compiled krusty twice.
+conformance-bin-and-cli:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scripts/cargo-test-binary.sh --build conformance -p krusty-cli -p krusty --test conformance --bin krusty
 
 # Run the codegen/box conformance suite and print the case report "<pct> <passed> <applicable>":
 # applicable cases whose box() returns "OK". The same run's JVM byte report "<pct> <matched> <total>",
@@ -699,7 +758,7 @@ survey *ARGS:
     fi
 
 # Install git hooks via lefthook (reads lefthook.yml). Needs lefthook on PATH.
-install-hooks:
+install-hooks: install-merge-drivers
     @command -v lefthook >/dev/null 2>&1 || { echo "lefthook not found — install it: https://lefthook.dev (e.g. 'go install github.com/evilmartians/lefthook@latest' or your package manager)" >&2; exit 1; }
     lefthook install
     @echo "git hooks installed via lefthook"

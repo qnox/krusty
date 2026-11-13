@@ -6,7 +6,6 @@ use crate::fx_hash::HashSet;
 use crate::klib_libraries::KlibDeclarationBodies;
 use crate::libraries::{
     KlibAccessorRole, KlibBodyCallable, KlibBodyClassContract, KlibBodyClassParameters,
-    KlibDeclarationSignature, KlibSerializedMember,
 };
 use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrClass, KlibIrFunction, KlibIrVariance};
 use crate::metadata::klib_ir::KlibIrSymbolKind;
@@ -20,9 +19,7 @@ pub(super) struct ClassMemberHeader<'a, 'b> {
     pub(super) contract: &'a KlibBodyClassContract,
     pub(super) arena: &'b KlibIrArena,
     pub(super) function: &'b KlibIrFunction,
-    /// The serialized class, when the member is a direct member of it. `None` means the provider
-    /// serialized the member as its function; there is no class node to read.
-    pub(super) class: Option<&'b KlibIrClass>,
+    pub(super) class: &'b KlibIrClass,
     pub(super) types: KlibTypeParameters,
     pub(super) formals: Vec<String>,
 }
@@ -63,13 +60,9 @@ pub(super) fn declared_receiver(class: &KlibBodyClassContract) -> Ty {
     }
 }
 
-/// Authenticate `selected` as a member. `held_function` is the function this authentication
-/// already holds. A member the provider serialized as its function uses that function;
-/// authentication does not look up another one.
 pub(super) fn authenticate<'a, 'b>(
     selected: KlibBodyCallable<'a>,
     bodies: &'b KlibDeclarationBodies,
-    held_function: Option<(&'b KlibIrArena, &'b KlibIrFunction)>,
 ) -> Result<ClassMemberHeader<'a, 'b>, KlibBodyDeclineReason> {
     let class = selected
         .class_contract()
@@ -96,7 +89,8 @@ pub(super) fn authenticate<'a, 'b>(
             &class.signature,
             selected
                 .accessor()
-                .map_or(KlibAccessorRole::Getter, |accessor| accessor.role),
+                .map_or(KlibAccessorRole::Getter, |accessor| accessor.role)
+                .into(),
         )
         .map_err(mismatch)?;
     if let Some(member) = member {
@@ -111,29 +105,23 @@ pub(super) fn authenticate<'a, 'b>(
             contract: class,
             arena: member.arena,
             function: member.function,
-            class: Some(member.class),
+            class: member.class,
             types,
             formals,
         });
     }
-    // The class has no serialized header for this member. A singleton the provider serialized
-    // as its function carries that fact on the edge. The function is the one this
-    // authentication already holds, and a class with no type parameters has nothing to bind.
-    let held_member = (selected.serialized_member() == KlibSerializedMember::Function
-        && class_is_singleton
-        && class.parameters.formals.is_empty())
-    .then_some(held_function)
-    .flatten()
-    .filter(|(_, function)| {
-        function.base.symbol.kind == KlibIrSymbolKind::Function
-            && signature_is(selected.signature(), &function.base.symbol.signature)
-    });
-    if let Some((arena, function)) = held_member {
+    // A singleton member can be serialized as the function itself. Its dispatch receiver names
+    // the class, and a class with no type parameters has nothing further to bind.
+    let bare_function = (class.parameters.formals.is_empty() && class_is_singleton)
+        .then(|| bodies.function(selected.identity()))
+        .flatten();
+    if let Some((arena, function)) = bare_function {
+        authenticate_receiver(class, arena, function)?;
         return Ok(ClassMemberHeader {
             contract: class,
             arena,
             function,
-            class: None,
+            class: receiver_named_class(),
             types: KlibTypeParameters::default(),
             formals: Vec::new(),
         });
@@ -143,22 +131,38 @@ pub(super) fn authenticate<'a, 'b>(
     ))
 }
 
-fn signature_is(declared: &KlibDeclarationSignature, serialized: &KlibIrSignature) -> bool {
-    match (declared, serialized) {
-        (KlibDeclarationSignature::Public(declared), KlibIrSignature::Public(serialized)) => {
-            declared == serialized
-        }
-        (KlibDeclarationSignature::Accessor(declared), KlibIrSignature::Accessor(serialized)) => {
-            declared == serialized
-        }
-        _ => false,
-    }
+/// Placeholder class node for a member serialized as its function, whose receiver names the
+/// class. The class has no type parameters, so later phases do not read this node.
+fn receiver_named_class() -> &'static KlibIrClass {
+    use std::sync::OnceLock;
+    static CLASS: OnceLock<KlibIrClass> = OnceLock::new();
+    CLASS.get_or_init(|| KlibIrClass {
+        base: crate::metadata::klib_ir::tree::KlibIrDeclarationBase {
+            symbol: crate::metadata::klib_ir::KlibIrSymbol {
+                kind: KlibIrSymbolKind::Class,
+                signature: crate::metadata::klib_ir::KlibIrSignature::FileLocal {
+                    file: 0,
+                    slot: 0,
+                },
+            },
+            origin: "DEFINED".to_owned(),
+            flags: 0,
+            annotations: Vec::new(),
+        },
+        name: String::new(),
+        this_receiver: None,
+        type_parameters: Vec::new(),
+        supertypes: Vec::new(),
+        members: Vec::new(),
+        value_class_representation: None,
+        sealed_subclasses: Vec::new(),
+    })
 }
 
 /// The raw header of `identity`, a private member of `class` that no provider records. Only
 /// members of its class call a private member, so the calling member's authenticated class is
-/// the authority: the callee must be a direct member of that exact class header (a getter in its
-/// own property's getter slot), its receiver must name that exact class, and it must be private.
+/// the authority: the callee must be a direct member of that exact class header (an accessor in
+/// the slot of its own shape), its receiver must name that exact class, and it must be private.
 pub(super) fn authenticate_private_member<'a, 'b>(
     class: &'a KlibBodyClassContract,
     identity: &crate::libraries::KlibDependencyCallable,
@@ -173,7 +177,7 @@ pub(super) fn authenticate_private_member<'a, 'b>(
         ));
     }
     let member = bodies
-        .class_member_header(identity, &class.signature, KlibAccessorRole::Getter)
+        .class_member_header(identity, &class.signature, None)
         .map_err(mismatch)?
         .ok_or_else(|| mismatch("a private member is not a direct member of its calling class"))?;
     if member.class.base.symbol.kind != KlibIrSymbolKind::Class {
@@ -194,7 +198,7 @@ pub(super) fn authenticate_private_member<'a, 'b>(
         contract: class,
         arena: member.arena,
         function: member.function,
-        class: Some(member.class),
+        class: member.class,
         types,
         formals,
     })

@@ -14,6 +14,11 @@ impl BodyLowering<'_> {
     ) -> Result<ExprId, FirLoweringFailure> {
         let (classifier, mut arguments) =
             self.prepare_captured_class(object.declaration, &object.captures)?;
+        self.record_capture_order(
+            object.declaration,
+            object.captures.len(),
+            &object.capture_order,
+        )?;
         let header = self
             .index
             .classifier_header(object.declaration)

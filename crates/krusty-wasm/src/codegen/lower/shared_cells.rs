@@ -12,6 +12,14 @@
 use super::*;
 use crate::encode::{CompositeType, FieldType, StorageType};
 
+/// The nullable reference a shared-capture field or constructor parameter carries.
+pub(in crate::codegen) fn cell_reference(
+    module: &mut Module,
+    element: Ty,
+) -> Result<ValType, Unsupported> {
+    Ok(ValType::nullable(cell_type(module, element)?))
+}
+
 /// One physical cell form, shared by local allocation, parameters and closure fields.
 fn cell_type(module: &mut Module, elem: Ty) -> Result<u32, Unsupported> {
     let carried = carrier(elem)?.ok_or_else(|| "a shared cell of `Unit`".to_string())?;
@@ -148,8 +156,38 @@ impl Body<'_> {
         Ok(())
     }
 
+    /// Pass the cell `argument` into a constructor parameter that stores it.
+    pub(super) fn pass_shared_capture(
+        &mut self,
+        argument: u32,
+        element: Ty,
+    ) -> Result<(), Unsupported> {
+        self.cell_holder(argument, element)?;
+        Ok(())
+    }
+
     /// Push the cell `holder` reads, returning its struct type.
     fn cell_holder(&mut self, holder: u32, elem: Ty) -> Result<u32, Unsupported> {
+        if let IrExpr::GetField {
+            receiver,
+            class,
+            index,
+        } = self.ir.expr(holder)
+        {
+            let recorded = self
+                .ir
+                .shared_class_capture_fields
+                .get(&(*class, *index))
+                .copied();
+            if recorded != Some(elem) {
+                return Err("a shared cell reached through another holder".to_string());
+            }
+            let class = *class;
+            let index = *index;
+            let receiver = *receiver;
+            self.field_read(receiver, class, index)?;
+            return self.cell_type(elem);
+        }
         let IrExpr::GetValue(slot) = self.ir.expr(holder) else {
             return Err("a shared cell reached through another holder".to_string());
         };

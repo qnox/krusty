@@ -9,6 +9,7 @@ pub mod jdk;
 pub mod jps;
 mod lock;
 pub mod maven;
+pub mod maven_repository;
 pub mod model;
 pub mod provider;
 pub mod report;
@@ -25,7 +26,7 @@ mod testing;
 pub(crate) use testing::TempTree;
 
 pub use bsp::{discover as discover_bsp, BspConnection, BspProvider};
-pub use detect::{detect, find_build_root};
+pub use detect::{detect, detect_for_scan, find_build_root};
 pub use jdk::{
     is_jdk_home, resolve_jdk, Jdk, JdkEnvironment, JdkRequest, JdkSource, SystemEnvironment,
 };
