@@ -279,7 +279,9 @@ impl Checker<'_> {
                             .obj_internal()
                             .and_then(|owner| self.resolver().classifier(owner))
                             .is_some_and(|class| class.is_final());
-                        property.read_stability.permits(receiver_final)
+                        property
+                            .read_stability
+                            .permits(receiver_final, self.file.smart_cast_value_class_components)
                     }),
                 }));
                 // kotlinc's tower does not stop at an invisible member: a visible candidate at a

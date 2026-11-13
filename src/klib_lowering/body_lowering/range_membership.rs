@@ -39,7 +39,7 @@ impl BodyLowering<'_> {
         };
         let Some(construction) = self
             .linker
-            .common_primitive(&KlibDeclarationSignature::Public(range.clone()))?
+            .range_literal_bounds(&KlibDeclarationSignature::Public(range.clone()))?
         else {
             return unsupported("a membership in another range than a builtin range construction");
         };

@@ -655,6 +655,16 @@ impl BodyFirChecker<'_> {
         );
         let selected_ty = ResolvedTy::new(selected.ty)
             .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))?;
+        if let Some(binding) = selected.context_binding.as_ref() {
+            if matches!(
+                binding.source,
+                crate::resolve::ContextBindingSource::RequiredClassCapture { .. }
+            ) {
+                return self
+                    .materialize_context_binding(span, cause, origin, &binding.name, binding.source)
+                    .map(Some);
+            }
+        }
         if let Some((owner, field)) = self.class_context_storage(selected) {
             if let Some(receiver) = self.script_statement_receiver(cause, field) {
                 return Ok(Some(receiver));
@@ -681,38 +691,14 @@ impl BodyFirChecker<'_> {
                 conversion: None,
             }));
         }
-        if let Some(crate::resolve::ContextBinding {
-            name, shadow_depth, ..
-        }) = selected
+        if let Some(crate::resolve::ContextBinding { name, source, .. }) = selected
             .context_binding
             .as_ref()
             .filter(|binding| binding.name != "this")
         {
-            if let Some((owner, parameter, ty)) = self
-                .current_named_context_parameter(name)
-                .filter(|(_, _, ty)| *ty == selected_ty)
-            {
-                let value = self.body.add_expr(FirExpr {
-                    origin,
-                    ty,
-                    kind: if self.constructor_prefix_capture_access {
-                        FirExprKind::ConstructorContextRead { owner, parameter }
-                    } else {
-                        FirExprKind::ClassStorageRead {
-                            owner,
-                            field: parameter,
-                        }
-                    },
-                });
-                return Ok(Some(FirReceiver {
-                    value,
-                    conversion: None,
-                }));
-            }
-            let (enclosing_depth, binding) = self
-                .binding_source_at_shadow_depth(name, *shadow_depth)
-                .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnknownLocal))?;
-            return Ok(Some(self.bound_receiver(origin, enclosing_depth, binding)));
+            return self
+                .materialize_context_binding(span, origin, origin, name, *source)
+                .map(Some);
         }
         if let Some(singleton) = selected.singleton.as_ref() {
             let ty = ResolvedTy::new(selected.ty).map_err(|error| {

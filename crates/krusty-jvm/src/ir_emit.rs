@@ -1869,6 +1869,50 @@ fn assert_determined_member_signatures(ir: &IrFile, c: &krusty::ir::IrClass) {
     }
 }
 
+/// The identity source map of an anonymous object regenerated at an inline call. Its primary file
+/// is the declaration class, not the `$$inlined$` binary name the copy is emitted under.
+fn start_regenerated_anonymous_source_map(
+    ir: &IrFile,
+    class_id: ClassId,
+    writer: &mut krusty::jvm::classfile::ClassWriter,
+) {
+    let Some(specialization) = ir.specialized_anonymous_classes.get(&class_id) else {
+        return;
+    };
+    let Some(source) = ir.classes.get(specialization.source as usize) else {
+        return;
+    };
+    let lines = u16::try_from(ir.source_line_count)
+        .unwrap_or(u16::MAX)
+        .max(1);
+    writer.start_inline_origin_source_map_at(lines, &source.fq_name());
+}
+
+/// Intern the declaration class's enclosing method. kotlinc visits it before replacing the copy's
+/// enclosure with the call site, and those constants stay at the front of the pool.
+fn retain_declaration_enclosure(
+    ir: &IrFile,
+    class_id: ClassId,
+    facade: &str,
+    env: &EmitEnv,
+    writer: &mut krusty::jvm::classfile::ClassWriter,
+) {
+    let Some(specialization) = ir.specialized_anonymous_classes.get(&class_id) else {
+        return;
+    };
+    let Some(source) = ir.classes.get(specialization.source as usize) else {
+        return;
+    };
+    let Some((owner, method)) =
+        enclosure::class_enclosure(ir, env.override_results, source, facade)
+    else {
+        return;
+    };
+    if let Some((name, descriptor)) = method {
+        writer.retain_replaced_enclosing_method(&owner, &name, &descriptor);
+    }
+}
+
 fn emit_class(
     ir: &IrFile,
     class_id: ClassId,
@@ -1923,7 +1967,11 @@ fn emit_class(
             None => cw.set_enclosing_class(&owner),
         }
     }
-    enclosure::start_inline_body_source_map(ir, c, &mut cw);
+    if ir.specialized_anonymous_classes.contains_key(&class_id) {
+        start_regenerated_anonymous_source_map(ir, class_id, &mut cw);
+    } else {
+        enclosure::start_inline_body_source_map(ir, c, &mut cw);
+    }
     let transformed = env.run.transformed_coroutine(&fq_name);
     let transformed_metadata = env
         .continuation_metadata
@@ -1952,6 +2000,9 @@ fn emit_class(
     // first — `object Fast : Factory` pool: this, super, `lib/Factory`, then `<init>`), so add them
     // ahead of the pool seeding below.
     supertype_markers::add_interfaces(&mut cw, ir, c);
+    if ir.specialized_anonymous_classes.contains_key(&class_id) {
+        retain_declaration_enclosure(ir, class_id, facade, env, &mut cw);
+    }
     // Seed the constant pool in kotlinc's interning order for a plain property class that will carry a
     // computed `@Metadata` + debug tables — so the emitted class is byte-identical, not just
     // structurally equal. Gated exactly like the debug tables (opt-in, non-data, qualifying shape).
@@ -2134,6 +2185,13 @@ fn emit_class(
             let field_ann = field_visibility::publishes_field_nullability(c, field_index)
                 .then(|| declared_field_annotation(c, field_index))
                 .flatten();
+            // A class regenerated from an inline declaration is copied: kotlinc visits every field
+            // (name and descriptor only) before the constructor body introduces field refs. A
+            // capture the constructor's local table omits would otherwise be interned at its first
+            // `putfield`, after the previous field's ref.
+            if ir.specialized_anonymous_classes.contains_key(&class_id) {
+                cw.intern_copied_field(&physical_name, &field_desc);
+            }
             cw.add_field_late_sig(
                 acc,
                 &physical_name,
@@ -2629,8 +2687,12 @@ fn emit_class(
         );
     }
     // A cross-module provider's `@Metadata` wins; otherwise compute one from the IR (bounded shapes).
+    // A call-site copy of an anonymous object keeps the declaration's record plus its origin.
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
-        .then(|| build_class_metadata(ir, c, opts, env))
+        .then(|| {
+            class_metadata::regenerated_anonymous_metadata(ir, class_id, c, opts, env)
+                .or_else(|| build_class_metadata(ir, c, opts, env))
+        })
         .flatten();
     // A value class visits generated nullability before its class-level `@JvmInline`.
     let early_value_nullability =
