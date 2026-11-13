@@ -146,6 +146,21 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         params: &[Ty],
         ret: Ty,
     ) -> Result<Option<Value>, Unsupported> {
+        let number = self.file.dependency_interface_number(identity);
+        self.dependency_interface_stub_at(number, signature, receiver, args, params, ret)
+    }
+
+    /// Enter the same typed interface dispatch for a function or a property accessor. Their
+    /// declaration identities select the stub number before any operands are evaluated.
+    pub(super) fn dependency_interface_stub_at(
+        &mut self,
+        number: u32,
+        signature: super::super::super::intrinsics::FunctionSignature<'_>,
+        receiver: u32,
+        args: &[u32],
+        params: &[Ty],
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
         let mut declared_member_params = signature.params.to_vec();
         if let Some(receiver) = signature.receiver {
             if signature.context_count > declared_member_params.len() {
@@ -180,7 +195,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             &applied_representations,
         )?;
         let runtime = self.runtime_implementations(signature)?;
-        let number = self.file.dependency_interface_number(identity);
         let Some(object) = self.receiver(receiver)? else {
             return Ok(None);
         };

@@ -15,6 +15,9 @@ use krusty::fir::ResolvedFunctionOverrideTarget;
 
 use super::super::super::laid_out_classes::DependencyImplementation;
 
+#[cfg(test)]
+mod property_identity_tests;
+
 impl FileLowering<'_> {
     /// Record, for the link, which function stands at each number of `itable`, the interface
     /// table of the type `descriptor` describes: see `native::interface_calls`. A number the type
@@ -77,6 +80,22 @@ impl FileLowering<'_> {
         identity: &krusty::libraries::KlibDependencyCallable,
     ) -> u32 {
         let bytes = krusty::backend::interface_identity::member_identity(identity);
+        self.dependency_interface_number_by_identity(bytes)
+    }
+
+    /// A property's getter and setter use the property's canonical identity and distinct roles,
+    /// exactly as the declaring interface and its implementations publish them.
+    pub(super) fn dependency_interface_property_number(
+        &mut self,
+        identity: &krusty::libraries::KlibDependencyCallable,
+        setter: bool,
+    ) -> Result<u32, Unsupported> {
+        let bytes = property_member_identity(identity, setter)
+            .ok_or("a dependency interface property without an accessor identity")?;
+        Ok(self.dependency_interface_number_by_identity(bytes))
+    }
+
+    fn dependency_interface_number_by_identity(&mut self, bytes: Vec<u8>) -> u32 {
         let base = self.slot_plan.interfaces().count();
         let number = match self.dependency_interface_numbers.get(&bytes).copied() {
             Some(number) => number,

@@ -4,6 +4,74 @@
 use super::*;
 
 impl BodyLowering<'_, '_, '_> {
+    /// An interface property without a concrete accessor export still dispatches through the
+    /// exact property identity its declaring module and every implementor published. Runtime
+    /// property operations have already had priority when this fallback is reached.
+    pub(in super::super) fn dependency_interface_property(
+        &mut self,
+        operation: &IrCheckedOperation,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        let access = self.file.callables.dependency_accessor(operation)?;
+        let realization = access.callable;
+        if !access.dispatches()
+            || !realization.owner_is_interface
+            || !realization.is_member_function()
+        {
+            return None;
+        }
+        let identity = realization.dependency_callable.as_ref()?;
+        Some((|| {
+            // These properties may also be implemented by runtime-owned values. An unhandled
+            // runtime operation must decline rather than send those values to source-only stubs.
+            if !realization.builtin_implementations.is_empty() {
+                return Err(
+                    "an interface property with an unmodeled builtin implementation".into(),
+                );
+            }
+            let callee = access.callee().map_err(Unsupported::from)?;
+            let Callee::External { params, ret, .. } = &callee else {
+                unreachable!("a frozen dependency accessor is an external call")
+            };
+            // Until an accessor bridge carries distinct declaration and applied shapes, preserve
+            // the exact declared frame. The accessor adapter also rejects unchecked generic
+            // substitutions, rather than treating an erased reference as a scalar result.
+            let declared_params = realization
+                .declared_params
+                .as_deref()
+                .unwrap_or(&realization.params);
+            let declared_ret = realization.declared_ret.unwrap_or(realization.ret);
+            if params.as_slice() != declared_params || *ret != declared_ret {
+                return Err("a dependency interface property requiring an accessor bridge".into());
+            }
+            if access.arguments.len() != params.len() {
+                return Err("an interface property with an invalid accessor operand count".into());
+            }
+            let receiver = access
+                .receiver
+                .ok_or("an interface property without its receiver")?;
+            let number = self
+                .file
+                .dependency_interface_property_number(identity, access.writes())?;
+            let signature = super::super::super::super::intrinsics::FunctionSignature::new(
+                super::super::super::super::intrinsics::DeclarationOwner::callable(
+                    realization.physical_owner,
+                    realization.declaration_owner,
+                ),
+                &realization.name,
+                &realization.params,
+                realization.ret,
+            );
+            self.dependency_interface_stub_at(
+                number,
+                signature,
+                receiver,
+                access.arguments,
+                params,
+                *ret,
+            )
+        })())
+    }
+
     /// A selected property's exact accessor export owns the access before target storage helpers.
     /// No accessor spelling, overload reconstruction, or second evaluation of operands is needed.
     pub(in super::super) fn emitted_dependency_property(
