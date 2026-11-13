@@ -12,7 +12,6 @@ use crate::libraries::{EmptySymbolSource, SemanticPlatform};
 mod header_validation;
 mod inline_preparation;
 mod retained_syntax;
-pub(crate) use crate::resolve::class_internal_resolver;
 pub use crate::resolve::ClassFlags as FrontendClassFlags;
 pub(crate) use crate::resolve::ClassModel as FrontendClassModel;
 pub(crate) use crate::resolve::ClassSig as FrontendClassSig;

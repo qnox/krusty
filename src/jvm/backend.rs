@@ -1531,33 +1531,21 @@ fn facade_package_metadata_inner(
             type_param_bounds: generic
                 .map(|signature| signature.formal_bounds.clone())
                 .unwrap_or_default(),
-            // Resolve the contract's source type references once, against this module: a type
-            // parameter stays a `Type.type_parameter` reference; a class becomes its internal
-            // name. Unresolvable references stay `Source` (the emitter degrades them to `Any`).
             context_count: sig.context_count,
             vararg_index: sig.vararg_index,
             visibility: sig.visibility,
-            contract: sig.contract.as_ref().map(|c| {
-                // Source-level class name → JVM internal name — the SAME lookup the checker uses
-                // (`class_internal_resolver`, shared via `frontend`), so contract types resolve
-                // identically on both sides of the metadata boundary.
-                let resolve_class = crate::frontend::class_internal_resolver(syms);
-                std::sync::Arc::new(c.with_resolved_types(&mut |tref| {
-                    if f.type_params.iter().any(|tp| tp == &tref.name) {
-                        Some(Ty::ty_param(
-                            &tref.name,
-                            Ty::nullable(Ty::obj("kotlin/Any")),
-                        ))
-                    } else {
-                        let ty = Ty::obj_name(resolve_class(&tref.name)?);
-                        Some(if tref.nullable() {
-                            Ty::nullable(ty)
-                        } else {
-                            ty
-                        })
-                    }
-                }))
-            }),
+            // The checker already bound every contract type reference and published the result
+            // with the package declaration. Metadata emission consumes that fact directly; it
+            // must not resolve the source contract a second time from the backend.
+            contract: ir
+                .and_then(|ir| ir.top_level_function_fids.get(&d.0).map(|fid| (ir, fid)))
+                .and_then(|(ir, fid)| {
+                    ir.package_functions
+                        .iter()
+                        .find(|declaration| declaration.function == *fid)
+                })
+                .and_then(|declaration| declaration.contract.as_ref())
+                .map(|contract| contract.to_arc()),
         });
     }
     // Package properties share one metadata list. An extension accessor's leading JVM parameter does
