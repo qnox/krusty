@@ -907,11 +907,18 @@ impl<'a> Body<'a> {
         numeric_conversions::convert(&mut self.code, source_ty, target_ty)
     }
 
-    /// Whether a cast of `arg` to `target` reads a scalar out of a reference: the operand is
-    /// carried as a reference and the target as a scalar.
-    fn is_unboxing_cast(&self, arg: u32, target: Ty) -> bool {
+    /// Whether a cast of `arg` to `target` checks a reference against a scalar's box: the operand
+    /// is carried as a reference and the target is a scalar-carried type or its nullable form.
+    /// Every such scalar's box is keyed by its own classifier, so `UInt?` checks against the
+    /// `UInt` box, never the `Int` one.
+    fn is_primitive_cast(&self, arg: u32, target: Ty) -> bool {
+        let scalar =
+            |ty: Ty| matches!(carrier(ty), Ok(Some(ty)) if !matches!(ty, ValType::Ref { .. }));
         matches!(self.carrier_of(arg), Ok(Some(ValType::Ref { .. })))
-            && matches!(carrier(target), Ok(Some(target)) if !matches!(target, ValType::Ref { .. }))
+            && match target.kind() {
+                TyKind::Nullable(inner) => scalar(inner),
+                _ => scalar(target),
+            }
     }
 
     fn carrier_of(&self, id: u32) -> Result<Option<ValType>, Unsupported> {
@@ -1340,13 +1347,13 @@ impl<'a> Body<'a> {
             {
                 self.cast(arg, type_operand, op == IrTypeOp::CastNonNull)?
             }
-            // `as Int` on a reference reads the value out of its box once the cast has checked it.
+            // `as Int` and `as Int?` on a reference check it against the primitive's box.
             IrExpr::TypeOp {
                 op: IrTypeOp::Cast | IrTypeOp::CastNonNull,
                 arg,
                 type_operand,
-            } if self.is_unboxing_cast(arg, type_operand) => {
-                self.checked_unbox_cast(arg, type_operand)?
+            } if self.is_primitive_cast(arg, type_operand) => {
+                self.checked_primitive_cast(arg, type_operand)?
             }
             IrExpr::TypeOp {
                 op: op @ (IrTypeOp::Cast | IrTypeOp::CastNonNull),
