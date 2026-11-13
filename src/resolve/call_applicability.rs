@@ -249,7 +249,13 @@ pub(super) fn score_with_declaration(
             .argument_uses_context_only_result(scope, argument)
             .then_some(1)
             .or_else(|| checker.member_argument_score(expected, semantic_actual))
-            .or_else(|| contextual_call_result.then_some(0))
+            // A nested call re-solved to the parameter's own classifier is an ordinary fit; one
+            // whose result only an expected-type binding could reshape ranks below it.
+            .or_else(|| {
+                contextual_call_result.then(|| {
+                    usize::from(checker.call_result_reapplies_its_classifier(argument, expected))
+                })
+            })
             .or_else(|| {
                 checker
                     .unbound_call_result_signature(argument)

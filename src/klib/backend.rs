@@ -749,14 +749,6 @@ fn record_constructor_exports(
             .ok_or_else(|| format!("object {} has no IR identity", source.fq_name()))?;
         exports.record_singleton(id);
     }
-    // Only the declaring file holds an enum's constants, so another module reads each through
-    // the entry this file exports.
-    if source.is_enum && class.visibility != crate::types::Visibility::Private {
-        let id = ir
-            .class_id_by_name(source.fq_name_id())
-            .ok_or_else(|| format!("enum {} has no IR identity", source.fq_name()))?;
-        exports.record_enum(id);
-    }
     if source.is_interface
         || source.is_abstract
         || source.is_sealed

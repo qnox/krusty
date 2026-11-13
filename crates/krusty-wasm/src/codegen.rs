@@ -227,6 +227,7 @@ impl Backend for WasmBackend {
         let plan = &state.slot_plan.as_ref().expect("planned just above").1;
         let lowered = match lower::lower_file(
             lower::FileInput {
+                module_facts: file.classifiers.module(),
                 ir: &file.ir,
                 properties: &properties,
                 callables: &file.callables,
@@ -283,17 +284,20 @@ impl Backend for WasmBackend {
     }
 
     fn check_module(&self, state: &Self::State, diags: &mut DiagSink) {
-        if let Some(construct) = state
-            .started
-            .as_ref()
-            .filter(|_| !state.declined)
-            .and_then(|started| started.runtime.objects.interfaces.declined())
-        {
-            diags.error(
-                krusty::diag::Span::new(0, 0),
-                format!("{DECLINE_PREFIX}{construct} yet"),
-            );
-            return;
+        if let Some(started) = state.started.as_ref().filter(|_| !state.declined) {
+            if let Some(construct) = started.runtime.objects.interfaces.declined() {
+                diags.error(
+                    krusty::diag::Span::new(0, 0),
+                    format!("{DECLINE_PREFIX}{construct} yet"),
+                );
+                return;
+            }
+            if let Err(error) = started.callables.check_links() {
+                diags.error(
+                    krusty::diag::Span::new(0, 0),
+                    format!("{DECLINE_PREFIX}{error} yet"),
+                );
+            }
         }
         if state.started.is_some() && !state.declined && state.entry.is_none() {
             diags.error(

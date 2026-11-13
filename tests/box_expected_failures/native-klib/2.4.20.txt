@@ -1216,7 +1216,6 @@ inline/requireNotNull.kt
 inline/rootConstructor.kt
 inline/safeCall.kt
 inline/sharedVar.kt
-inline/simpleEnum.kt
 inline/simpleReturnFunctionWithResultUnused.kt
 inline/statementsAfterReturn.kt
 inline/thisImplicitlyCaptured.kt
@@ -2359,7 +2358,6 @@ regressions/multimodule/inlineAssertFailsWithBlock.kt
 regressions/multimodule/inlineAssertFailsWithCompletedBlock.kt
 regressions/multimodule/inlineNarrowElementInRange.kt
 regressions/multimodule/inlineStdlibRepeat.kt
-regressions/multimodule/inlineTextTrim.kt
 regressions/objectCaptureOuterConstructorProperty.kt
 regressions/objectInsideDelegation.kt
 reified/callChain.kt
@@ -2439,7 +2437,6 @@ strings/concatGenericWithPrimitiveUpperBound.kt
 strings/concatGenericWithStringUpperBound.kt
 strings/concatNullableGenericWithPrimitiveUpperBound.kt
 strings/constInStringTemplate.kt
-strings/kt13213.kt
 strings/kt2592.kt
 strings/kt3571.kt
 strings/nestedConcat.kt

@@ -154,6 +154,18 @@ pub(super) trait CallLinker {
         Ok(None)
     }
 
+    /// The range literal kotlinc's `ForLoopsLowering` counts through when a `for` loop iterates
+    /// the progression a call of `callee` builds: a builtin scalar's `rangeTo`/`rangeUntil`, or
+    /// the `until`/`downTo` builder. `None` keeps the loop an iterator-protocol loop over the
+    /// call, as template linkers do; a linker whose dependency preparation omits the loop's
+    /// protocol edges declines a call it does not prove instead.
+    fn range_literal(
+        &self,
+        _callee: &KlibPublicIdSignature,
+    ) -> Lowered<Option<crate::fir::FirRangeOperation>> {
+        Ok(None)
+    }
+
     /// The function a call of the public declaration `callee` invokes.
     fn link(&mut self, ir: &mut IrFile, callee: &KlibPublicIdSignature) -> Lowered<LinkedCallee>;
 

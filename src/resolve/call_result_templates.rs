@@ -116,20 +116,8 @@ impl Checker<'_> {
                 && expected.array_elem().is_some()
                 && actual.is_reference_array();
         }
-        if matches!(self.file.expr(expression), Expr::Call { .. }) {
-            let actual = self.expr_types[expression.0 as usize];
-            let expected_owner = expected.kotlin_class_internal();
-            let actual_owner = actual.kotlin_class_internal();
-            // A nullable result keeps its nullability under every binding of its arguments.
-            if expected_owner.is_some()
-                && (!actual.is_nullable() || expected.admits_null())
-                && expected_owner == actual_owner
-                && expected_owner
-                    .and_then(|owner| self.resolver().classifier(owner))
-                    .is_some_and(|class| !class.type_params.is_empty())
-            {
-                return true;
-            }
+        if self.call_result_reapplies_its_classifier(expression, expected) {
+            return true;
         }
         let resolved = self.resolved_calls.get(&expression);
         let generic = self.expected_type_callable_signature(expression);
@@ -161,6 +149,28 @@ impl Checker<'_> {
                 &bindings,
             )
         })
+    }
+
+    /// Whether the call `expression` produces the generic classifier `expected` applies, so the
+    /// expected type only re-solves the call's own type arguments (`Holder(1)` as `Holder<Any>`):
+    /// the argument fits that parameter as any assignable one does.
+    pub(super) fn call_result_reapplies_its_classifier(
+        &self,
+        expression: ExprId,
+        expected: Ty,
+    ) -> bool {
+        if !matches!(self.file.expr(expression), Expr::Call { .. }) {
+            return false;
+        }
+        let actual = self.expr_types[expression.0 as usize];
+        let expected_owner = expected.kotlin_class_internal();
+        // A nullable result keeps its nullability under every binding of its arguments.
+        expected_owner.is_some()
+            && (!actual.is_nullable() || expected.admits_null())
+            && expected_owner == actual.kotlin_class_internal()
+            && expected_owner
+                .and_then(|owner| self.resolver().classifier(owner))
+                .is_some_and(|class| !class.type_params.is_empty())
     }
 
     /// The argument kind of the nested generic call `argument`, whose checked type is `ty`.
