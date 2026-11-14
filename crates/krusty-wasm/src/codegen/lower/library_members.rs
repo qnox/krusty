@@ -133,15 +133,18 @@ impl Body<'_> {
             IrExpr::Checked(operation) => {
                 let access = self.callables.dependency_accessor(operation)?;
                 let receiver = access.receiver?;
-                if !access.dispatches() || access.writes() || access.callable.is_member_extension()
-                {
+                if !access.dispatches() || access.callable.is_member_extension() {
                     return None;
                 }
                 (
                     access.target,
                     receiver,
                     access.arguments,
-                    MemberRole::Getter,
+                    if access.writes() {
+                        MemberRole::Setter
+                    } else {
+                        MemberRole::Getter
+                    },
                 )
             }
             _ => return None,
@@ -150,20 +153,35 @@ impl Body<'_> {
         if target_owns_call(self.ir, self.callables, id, fact) {
             return None;
         }
-        if let IrExpr::Call { callee, .. } = node {
-            if let Some(member) = published_class::select(
-                fact,
-                role,
-                callee,
-                self.classifiers,
-                self.laid_out_classes,
-                self.module,
-            ) {
-                let fact = fact.clone();
-                return Some(member.and_then(|member| {
+        let callables = self.callables;
+        let application = || match node {
+            IrExpr::Call { callee, .. } => Ok((**callee).clone()),
+            IrExpr::Checked(operation) => callables
+                .dependency_accessor(operation)
+                .ok_or_else(|| {
+                    "a checked class accessor without its frozen declaration".to_owned()
+                })?
+                .callee()
+                .map_err(str::to_owned),
+            _ => Err("a published class member without its checked application".into()),
+        };
+        if let Some(member) = published_class::select(
+            fact,
+            role,
+            application,
+            self.classifiers,
+            self.laid_out_classes,
+            self.module,
+        ) {
+            let fact = fact.clone();
+            return Some(
+                member.and_then(|member| {
                     self.published_class_call(id, &fact, member, receiver, args)
-                }));
-            }
+                }),
+            );
+        }
+        if role == MemberRole::Setter {
+            return None;
         }
         let published = self.calls.external(target).is_some();
         if !dispatches_through_library_member(self.ir, self.callables, id, fact, published) {
