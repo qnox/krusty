@@ -1,6 +1,6 @@
-use super::*;
 use super::super::super::function_lowering::{raw_function_header_with_class, HeaderPurpose};
 use super::super::super::tests::{base, local_symbol, public_symbol};
+use super::*;
 use crate::metadata::klib_ir::tree::{
     KlibIrFunction, KlibIrNullability, KlibIrParameter, KlibIrType, KlibIrTypeArgument,
     KlibIrTypeId, KlibIrVariance,
@@ -323,8 +323,7 @@ impl Fixture {
             class.fields.truncate(1);
         }
         let class = ir.add_class(class);
-        let function =
-            super::super::super::function_lowering::declare_function(&mut ir, &header);
+        let function = super::super::super::function_lowering::declare_function(&mut ir, &header);
         let builtins = IrBuiltinOperators::new();
         let mut linker = NoCalls;
         let mut lowering = BodyLowering::new(
