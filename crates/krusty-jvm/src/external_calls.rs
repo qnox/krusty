@@ -339,6 +339,7 @@ fn realize_expressions(
                     arguments,
                     parameters,
                     result,
+                    substitutions,
                     source_receiver,
                 } = &**checked_op =>
             {
@@ -350,6 +351,7 @@ fn realize_expressions(
                     arguments,
                     parameters,
                     result,
+                    substitutions,
                     source_receiver,
                 ))
             }
@@ -361,6 +363,7 @@ fn realize_expressions(
                     arguments,
                     parameters,
                     result,
+                    substitutions,
                     source_receiver,
                 } = &**checked_op =>
             {
@@ -372,6 +375,7 @@ fn realize_expressions(
                     arguments,
                     parameters,
                     result,
+                    substitutions,
                     source_receiver,
                 ))
             }
@@ -387,6 +391,7 @@ fn realize_expressions(
             arguments,
             parameters,
             result,
+            substitutions,
             source_receiver,
         )) = property
         {
@@ -401,6 +406,19 @@ fn realize_expressions(
             } else {
                 realization.getter
             };
+            let accessor = callables
+                .callable(target)
+                .ok_or(ExternalDependencyTarget::Callable(target))?;
+            let extension_receiver_parameter = if accessor.is_member_extension()
+                || (accessor.is_extension() && receiver.is_none())
+            {
+                Some(
+                    u32::try_from(accessor.context_count)
+                        .map_err(|_| ExternalDependencyTarget::Callable(target))?,
+                )
+            } else {
+                None
+            };
             let property_target = krusty::fir::ResolvedPropertyOverrideTarget::External(target);
             property_virtual_target = Some(if write {
                 krusty::ir::IrVirtualTarget::PropertySetter(property_target)
@@ -413,9 +431,9 @@ fn realize_expressions(
                     default_provider: None,
                     params: parameters.to_vec(),
                     ret: *result,
-                    substitutions: Vec::new(),
+                    substitutions: substitutions.to_vec(),
                     defaults: Vec::new(),
-                    extension_receiver_parameter: None,
+                    extension_receiver_parameter,
                 }),
                 dispatch_receiver: *receiver,
                 args: arguments.to_vec(),
