@@ -236,6 +236,16 @@ fn list_symbol(
         ("remove", [element], Ty::Boolean) if mutates && element.is_reference() => {
             ("kt_mutable_list_remove", vec![any(), any()], Ty::Boolean)
         }
+        ("removeAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => (
+            "kt_mutable_list_remove_all",
+            vec![any(), any()],
+            Ty::Boolean,
+        ),
+        ("retainAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => (
+            "kt_mutable_list_retain_all",
+            vec![any(), any()],
+            Ty::Boolean,
+        ),
         ("clear", [], Ty::Unit) if mutates => ("kt_mutable_list_clear", vec![any()], Ty::Unit),
         ("addAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => (
             "kt_mutable_collection_add_all",
@@ -471,12 +481,18 @@ impl BodyLowering<'_, '_, '_> {
             }
             operands.push((value, self.physical_type(*argument)));
         }
-        let produced =
-            self.dispatch_by_implementor_with(implementors, object, &operands, ret, |body, _| {
+        let produced = self.dispatch_by_implementor_with(
+            implementors,
+            object,
+            &operands,
+            ret,
+            false,
+            |body, _| {
                 // Unreachable: the arms above cover every class that can stand behind the type.
                 body.runtime_call("kt_abstract_method_called", &[], Ty::Unit, &[])?;
                 Ok(Some(body.builder.ins().iconst(types::I64, 0)))
-            })?;
+            },
+        )?;
         Ok(produced)
     }
 
@@ -787,6 +803,15 @@ impl BodyLowering<'_, '_, '_> {
                 "value" => ("kt_indexed_value_value", any()),
                 _ => return None,
             }
+        } else if (is_list(self.file, ty) || is_collection(self.file, ty))
+            && self.file.implements_collection_of(ty)
+        {
+            // The class publishes its `size` getter on the descriptor. `kt_collection_size`
+            // calls that for a program object and the runtime layout otherwise.
+            match name {
+                "getSize" | "size" => ("kt_collection_size", Ty::Int),
+                _ => return None,
+            }
         } else if is_list(self.file, ty) && !self.file.implements_collection_of(ty) {
             match name {
                 "getSize" | "size" => ("kt_list_size", Ty::Int),
@@ -868,10 +893,16 @@ impl BodyLowering<'_, '_, '_> {
         if !(list || is_collection(self.file, ty)) || self.file.implements_collection_of(ty) {
             return None;
         }
-        let declaration = classifier_shapes::collection_declaration(
-            self.file.classifiers,
-            signature.owner.semantic_classifier()?,
-        )?;
+        // `ArrayList.contains` is declared on `AbstractMutableList`. The receiver is still the
+        // runtime's list, so the operation is that list's, not a member the owner alone names.
+        let owner = signature.owner.semantic_classifier()?;
+        let declaration = classifier_shapes::collection_declaration(self.file.classifiers, owner)
+            .or_else(|| {
+            let internal = ty.non_null().obj_internal()?;
+            self.file
+                .standard_collection_implementation(internal)
+                .map(classifier_shapes::CollectionDeclaration::Implementation)
+        })?;
         let (symbol, carried, answer) = if list {
             list_symbol(declaration, signature, physical)?
         } else {
@@ -1261,6 +1292,7 @@ impl BodyLowering<'_, '_, '_> {
             object,
             &operands,
             answer,
+            false,
             move |body, object| {
                 let mut values = Vec::with_capacity(runtime_operands.len() + 1);
                 values.push(object);

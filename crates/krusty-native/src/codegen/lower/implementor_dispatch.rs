@@ -252,22 +252,27 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     /// Whether `internal`'s member stays with the runtime, rather than a direct implementor call.
     ///
-    /// A collection or a closed range is also worn by objects the runtime builds. No static type
-    /// tells one of those from a class of this file, which is why a member asked of such a type
-    /// declines once the handlers that can tell them apart have passed. A special bridge may skip
-    /// the override entirely when the argument cannot be what the declaration accepts, and this
-    /// dispatch has no bridge to put in front of an implementor's arm.
-    fn runtime_owns_member(&self, internal: krusty::types::TypeName, name: &str) -> bool {
+    /// A closed range is worn by objects the runtime builds, and nothing in this file is one of
+    /// them. A collection is worn by both, so its member is dispatched below: the file's classes
+    /// first, then the runtime's own objects. A special bridge whose answer is `Boolean` or `Int`
+    /// (`contains`, `remove`, `indexOf`) is dispatched too, and an argument that is not the
+    /// override's element answers the bridge's rejection instead of being cast. A bridge with any
+    /// other answer, such as `Map.get`, stays with the runtime.
+    fn runtime_owns_member(
+        &self,
+        internal: krusty::types::TypeName,
+        signature: super::super::super::intrinsics::FunctionSignature<'_>,
+    ) -> bool {
         if super::classifier_shapes::is_closed_range(internal)
             || super::classifier_shapes::is_closed_floating_range(internal)
         {
             return true;
         }
         let ty = Ty::obj_name(internal);
-        self.file.implements_collection_of(ty)
-            || self.file.mapped_collection(ty).is_some_and(|collection| {
-                super::super::super::intrinsics::has_special_bridge(collection, name)
-            })
+        let bridge = self.file.mapped_collection(ty).is_some_and(|collection| {
+            super::super::super::intrinsics::has_special_bridge(collection, signature.name)
+        });
+        bridge && !matches!(signature.ret, Ty::Boolean | Ty::Int)
     }
 
     /// Dispatch one dependency interface member by the exact override edge each implementor
@@ -283,7 +288,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         args: &[u32],
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
-        if self.runtime_owns_member(internal, signature.name) {
+        if self.runtime_owns_member(internal, signature) {
             return None;
         }
         let declared = self.file.implementors_of(internal);
@@ -298,11 +303,28 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             Ok(runtime) => runtime,
             Err(declined) => return Some(Err(declined)),
         };
-        Some(self.dependency_interface_dispatch(&implementors, &runtime, receiver, args, ret))
+        let bridge = self
+            .file
+            .mapped_collection(Ty::obj_name(internal))
+            .is_some_and(|collection| {
+                super::super::super::intrinsics::has_special_bridge(collection, signature.name)
+            });
+        Some(self.dependency_interface_dispatch(
+            &implementors,
+            &runtime,
+            receiver,
+            args,
+            ret,
+            bridge,
+        ))
     }
 
     /// Dispatch among the classes of this file implementing a dependency interface member, then
     /// among the classes the runtime makes that implement it.
+    ///
+    /// `bridge` is a collection special bridge: an argument that is not an instance of the
+    /// override's element type answers the rejection (`false`, or `-1` for an index) instead of
+    /// being cast into that element type.
     fn dependency_interface_dispatch(
         &mut self,
         implementors: &[ImplementorArm],
@@ -310,6 +332,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         receiver: u32,
         args: &[u32],
         ret: Ty,
+        bridge: bool,
     ) -> Result<Option<Value>, Unsupported> {
         let object = self.reference(receiver)?;
         if self.terminated {
@@ -326,13 +349,26 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             operands.push((value, self.physical_type(*argument)));
         }
         let runtime_operands = operands.clone();
-        self.dispatch_by_implementor_with(implementors, object, &operands, ret, |body, object| {
-            body.dispatch_runtime_implementations(runtime, object, &runtime_operands, ret, |body| {
-                // Unreachable when every implementor was tested. The merge fills the carrier.
-                body.runtime_call("kt_abstract_method_called", &[], Ty::Unit, &[])?;
-                Ok(None)
-            })
-        })
+        self.dispatch_by_implementor_with(
+            implementors,
+            object,
+            &operands,
+            ret,
+            bridge,
+            |body, object| {
+                body.dispatch_runtime_implementations(
+                    runtime,
+                    object,
+                    &runtime_operands,
+                    ret,
+                    |body| {
+                        // Unreachable when every implementor was tested. The merge fills the carrier.
+                        body.runtime_call("kt_abstract_method_called", &[], Ty::Unit, &[])?;
+                        Ok(None)
+                    },
+                )
+            },
+        )
     }
 
     pub(super) fn dispatch_by_implementor_with(
@@ -341,6 +377,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         object: Value,
         arguments: &[(Value, Option<Ty>)],
         answer: Ty,
+        bridge: bool,
         runtime: impl FnOnce(&mut Self, Value) -> Result<Option<Value>, Unsupported>,
     ) -> Result<Option<Value>, Unsupported> {
         let merge = self.builder.create_block();
@@ -365,6 +402,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
             self.continue_in(mine);
             self.builder.seal_block(mine);
+            if bridge
+                && self.bridge_argument_misses(arguments, &arm.params, answer, merge, carried)?
+            {
+                self.continue_in(rest);
+                self.builder.seal_block(rest);
+                continue;
+            }
             let mut operands = Vec::with_capacity(arguments.len());
             for (&(value, source), boundary) in arguments.iter().zip(&arm.params) {
                 let Some(crossing) = self.convert(value, source, boundary.declared)? else {
@@ -393,6 +437,63 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         self.builder.switch_to_block(merge);
         self.builder.seal_block(merge);
         Ok(carried.clif().map(|_| self.builder.block_params(merge)[0]))
+    }
+
+    /// An argument of a collection special bridge that is not an instance of the override's
+    /// element. The rejection is already on its way to `merge`; the caller continues with the
+    /// next implementor.
+    fn bridge_argument_misses(
+        &mut self,
+        arguments: &[(Value, Option<Ty>)],
+        params: &[ParameterBoundary],
+        answer: Ty,
+        merge: Block,
+        carried: Carrier,
+    ) -> Result<bool, Unsupported> {
+        let (Some((value, source)), Some(boundary)) = (arguments.first(), params.first()) else {
+            return Ok(false);
+        };
+        if boundary.implementation.non_null() == boundary.declared.non_null()
+            || !boundary.implementation.is_reference()
+        {
+            return Ok(false);
+        }
+        if source.is_none_or(|ty| self.carrier(ty) != Carrier::Ref) {
+            let rejected = self.bridge_rejection(answer);
+            self.jump_to_merge(merge, carried, rejected);
+            return Ok(true);
+        }
+        let Some(descriptor) = self.file.type_descriptor(boundary.implementation)? else {
+            return Ok(false);
+        };
+        let type_address = self.data_address(descriptor);
+        let matches = self
+            .runtime_call(
+                "kt_is_instance",
+                &[any(), any()],
+                Ty::Boolean,
+                &[*value, type_address],
+            )?
+            .expect("`kt_is_instance` returns a Boolean");
+        let accepted = self.builder.create_block();
+        let rejected = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(matches, accepted, &[], rejected, &[]);
+        self.continue_in(rejected);
+        self.builder.seal_block(rejected);
+        let rejected_value = self.bridge_rejection(answer);
+        self.jump_to_merge(merge, carried, rejected_value);
+        self.continue_in(accepted);
+        self.builder.seal_block(accepted);
+        Ok(false)
+    }
+
+    /// `contains`/`remove` answer `false` for a foreign argument; an index answers `-1`.
+    fn bridge_rejection(&mut self, answer: Ty) -> Option<Value> {
+        let clif = self.carrier(answer).clif()?;
+        let bits = if answer == Ty::Int { -1 } else { 0 };
+        Some(self.builder.ins().iconst(clif, bits))
     }
 
     fn unit_where_wanted(&mut self, answer: Ty) -> Result<Option<Value>, Unsupported> {
