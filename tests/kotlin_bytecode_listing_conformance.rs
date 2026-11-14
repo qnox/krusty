@@ -162,6 +162,13 @@ fn class_sam_callable_references_and_nested_explicit_sam_match_whole_listings() 
 }
 
 #[test]
+fn inherited_default_bridges_keep_the_whole_annotation_listing() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/jvm/defaultCompatibilityBridgeAnnotations/annotations.kt");
+    SUITE.assert_owned_case(&fixture);
+}
+
+#[test]
 fn krusty_reproduces_kotlincs_bytecode_listing_corpus() {
     SUITE.assert_krusty_ratchet();
 }
