@@ -119,7 +119,7 @@ pub fn resolve_maven(batch: &MavenBatch) -> io::Result<()> {
 fn test_gradle(action: &GradleBuildAction) -> Option<io::Result<CommandOutput>> {
     #[cfg(test)]
     {
-        return hooks::take_gradle(action);
+        hooks::take_gradle(action)
     }
     #[cfg(not(test))]
     {
@@ -131,7 +131,7 @@ fn test_gradle(action: &GradleBuildAction) -> Option<io::Result<CommandOutput>> 
 fn test_maven(batch: &MavenBatch) -> Option<io::Result<()>> {
     #[cfg(test)]
     {
-        return hooks::take_maven(batch);
+        hooks::take_maven(batch)
     }
     #[cfg(not(test))]
     {
