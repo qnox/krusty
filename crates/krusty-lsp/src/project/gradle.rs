@@ -12,13 +12,17 @@ use super::model::{
 use super::provider::{ProbeError, ProjectProvider};
 use super::runner::{Command, CommandRunner, BUILD_TOOL_TIMEOUT, GRADLE, SCAN_PROBE_TIMEOUT};
 
-const PROBE_VERSION: &str = "6";
+const PROBE_VERSION: &str = "7";
 /// Cold `krustyModel` configuration of a repository the size of the Kotlin compiler. Used only by
 /// the offline model and parity probes. The editor probe keeps the ordinary 120-second ceiling:
 /// it runs on the analysis thread, and a hung Gradle sync must not stall analysis for this long.
 pub(crate) const PROBE_TIMEOUT: Duration = SCAN_PROBE_TIMEOUT;
 const SENTINEL: &str = "KRUSTY_MODEL_JSON ";
 const TASK: &str = "krustyModel";
+/// Scan-only. Task-depends on each compile classpath so Gradle downloads external artifacts and
+/// builds the project jars those classpaths name. The model task only orders itself after this
+/// one: a failed artifact stays missing instead of discarding the model.
+const DOWNLOAD_TASK: &str = "krustyDownload";
 const MAX_FAILURE_DETAILS: usize = 8;
 
 /// Printed by the init script, one line per Gradle project.
@@ -191,6 +195,70 @@ allprojects { project ->
 }
 "#;
 
+/// The editor script names resolved files and does not task-depend on them, so it does not build
+/// project jars. The scan script adds [`DOWNLOAD_TASK`] in front of the model task.
+fn init_script(materialize_dependencies: bool) -> String {
+    if !materialize_dependencies {
+        return INIT_SCRIPT.to_string();
+    }
+    const ANCHOR: &str = "allprojects { project ->\n";
+    let insertion = r#"    project.tasks.register("krustyDownload")
+    def owner = project
+    owner.gradle.projectsEvaluated {
+        def download = owner.tasks.findByName("krustyDownload")
+        def model = owner.tasks.findByName("krustyModel")
+        if (download == null) {
+            return
+        }
+        if (model != null) {
+            model.mustRunAfter(download)
+        }
+        try {
+            owner.extensions.findByName("sourceSets")?.each { set ->
+                def configuration = owner.configurations.findByName(set.compileClasspathConfigurationName)
+                if (configuration != null) {
+                    download.dependsOn(configuration)
+                }
+            }
+        } catch (ignored) {
+        }
+        try {
+            def kotlin = owner.extensions.findByName("kotlin")
+            if (kotlin != null && owner.plugins.hasPlugin("org.jetbrains.kotlin.multiplatform")) {
+                kotlin.targets.findAll { target -> target.platformType?.name == "jvm" }.each { target ->
+                    target.compilations.each { compilation ->
+                        def files = compilation.compileDependencyFiles
+                        if (files != null) {
+                            download.dependsOn(files)
+                        }
+                    }
+                }
+            }
+        } catch (ignored) {
+        }
+        try {
+            def android = owner.extensions.findByName("android")
+            if (android != null) {
+                def variants = android.hasProperty("applicationVariants") ? android.applicationVariants :
+                               (android.hasProperty("libraryVariants") ? android.libraryVariants : [])
+                variants.each { variant ->
+                    try {
+                        download.dependsOn(variant.getCompileClasspath(null))
+                    } catch (ignored) {
+                    }
+                }
+            }
+        } catch (ignored) {
+        }
+    }
+
+"#;
+    let (head, tail) = INIT_SCRIPT
+        .split_once(ANCHOR)
+        .expect("gradle init script anchor");
+    format!("{head}{ANCHOR}{insertion}{tail}")
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GradleProject {
@@ -278,20 +346,27 @@ pub struct GradleProvider {
     gradle: PathBuf,
     init_script: PathBuf,
     probe_timeout: Duration,
+    /// Scan and offline model only. The editor probe leaves dependency jars where they are.
+    materialize_dependencies: bool,
 }
 
 impl GradleProvider {
     /// Editor probe. The command keeps the ordinary 120-second ceiling.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self::with_probe_timeout(root, BUILD_TOOL_TIMEOUT)
+        Self::with_probe_timeout(root, BUILD_TOOL_TIMEOUT, false)
     }
 
-    /// Offline model and parity probe. The command may run for [`PROBE_TIMEOUT`].
+    /// Offline model and parity probe. The command may run for [`PROBE_TIMEOUT`], and it asks
+    /// Gradle to download external artifacts and build the project jars on each compile classpath.
     pub fn for_scan(root: impl Into<PathBuf>) -> Self {
-        Self::with_probe_timeout(root, PROBE_TIMEOUT)
+        Self::with_probe_timeout(root, PROBE_TIMEOUT, true)
     }
 
-    fn with_probe_timeout(root: impl Into<PathBuf>, probe_timeout: Duration) -> Self {
+    fn with_probe_timeout(
+        root: impl Into<PathBuf>,
+        probe_timeout: Duration,
+        materialize_dependencies: bool,
+    ) -> Self {
         let root = root.into();
         let gradle = GRADLE.resolve(&root);
         let init_script = init_script_path(&root);
@@ -300,6 +375,7 @@ impl GradleProvider {
             gradle,
             init_script,
             probe_timeout,
+            materialize_dependencies,
         }
     }
 
@@ -308,16 +384,25 @@ impl GradleProvider {
     }
 
     pub fn command(&self) -> Command {
+        let mut args = vec![
+            "--quiet".to_string(),
+            "--console=plain".to_string(),
+            // Gradle's configuration cache rejects the probe's execution-time project access.
+            "--no-configuration-cache".to_string(),
+        ];
+        // One invocation. `--continue` leaves the modules whose artifacts did land on disk, the
+        // same way Maven's `--fail-at-end` does for a JPS library.
+        if self.materialize_dependencies {
+            args.push("--continue".to_string());
+        }
+        args.push("--init-script".to_string());
+        args.push(self.init_script.to_string_lossy().into_owned());
+        if self.materialize_dependencies {
+            args.push(DOWNLOAD_TASK.to_string());
+        }
+        args.push(TASK.to_string());
         Command::new(self.gradle.clone(), self.root.clone())
-            .args([
-                "--quiet".to_string(),
-                "--console=plain".to_string(),
-                // Gradle's configuration cache rejects the probe's execution-time project access.
-                "--no-configuration-cache".to_string(),
-                "--init-script".to_string(),
-                self.init_script.to_string_lossy().into_owned(),
-                TASK.to_string(),
-            ])
+            .args(args)
             .with_timeout(self.probe_timeout)
     }
 
@@ -326,8 +411,11 @@ impl GradleProvider {
             std::fs::create_dir_all(parent)
                 .map_err(|error| ProbeError::Io(format!("{}: {error}", parent.display())))?;
         }
-        std::fs::write(&self.init_script, INIT_SCRIPT)
-            .map_err(|error| ProbeError::Io(format!("{}: {error}", self.init_script.display())))
+        std::fs::write(
+            &self.init_script,
+            init_script(self.materialize_dependencies),
+        )
+        .map_err(|error| ProbeError::Io(format!("{}: {error}", self.init_script.display())))
     }
 }
 
@@ -354,7 +442,11 @@ impl ProjectProvider for GradleProvider {
         let output = runner
             .run(&command)
             .map_err(|error| ProbeError::Io(format!("{}: {error}", self.gradle.display())))?;
-        if !output.succeeded() {
+        // A dependency task can fail while the model task still printed every project. The scan
+        // keeps that model; an entry Gradle did not produce stays missing. The editor probe has
+        // no download task, so any failure is the model itself.
+        let model_was_printed = output.stdout.contains(SENTINEL);
+        if !output.succeeded() && !(self.materialize_dependencies && model_was_printed) {
             return Err(ProbeError::Tool {
                 program: self.gradle.to_string_lossy().into_owned(),
                 status: output.status,
@@ -642,6 +734,7 @@ fn gradle_failure_details(output: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::project::runner::testing::FakeRunner;
+    use crate::project::runner::CommandOutput;
     use crate::project::testing::TempTree;
 
     fn recorded_output() -> String {
@@ -675,6 +768,11 @@ mod tests {
 
         let script = std::fs::read_to_string(&command.args[4]).unwrap();
         assert!(script.contains("lenient = true"), "{script}");
+        assert!(
+            !script.contains("krustyDownload"),
+            "the editor probe must not build or download dependency jars"
+        );
+        assert!(!command.args.iter().any(|arg| arg == "--continue"));
         assert!(script.contains("compileTask?.compilerOptions"), "{script}");
         assert!(script.contains("set.allJava?.srcDirs"), "{script}");
         assert!(
@@ -699,9 +797,75 @@ mod tests {
 
         provider.probe(&runner).unwrap();
 
-        assert_eq!(runner.command(0).timeout, PROBE_TIMEOUT);
-        assert_eq!(runner.command(0).program, tree.path("gradlew"));
-        assert_eq!(runner.command(0).args[5], TASK);
+        let command = runner.command(0);
+        assert_eq!(command.timeout, PROBE_TIMEOUT);
+        assert_eq!(command.program, tree.path("gradlew"));
+        assert_eq!(runner.command_count(), 1);
+        assert!(command.args.iter().any(|arg| arg == "--continue"));
+        let task_at = command
+            .args
+            .iter()
+            .position(|arg| arg == "--init-script")
+            .expect("init script");
+        assert_eq!(
+            &command.args[task_at + 2..],
+            &[DOWNLOAD_TASK.to_string(), TASK.to_string()]
+        );
+        let script = std::fs::read_to_string(&command.args[task_at + 1]).unwrap();
+        assert!(
+            script.contains("project.tasks.register(\"krustyDownload\")"),
+            "{script}"
+        );
+        assert!(script.contains("model.mustRunAfter(download)"), "{script}");
+        assert!(
+            script.contains("download.dependsOn(configuration)"),
+            "{script}"
+        );
+        assert!(
+            script.contains("set.compileClasspathConfigurationName"),
+            "{script}"
+        );
+        assert!(
+            script.contains("compilation.compileDependencyFiles"),
+            "{script}"
+        );
+        assert!(
+            script.contains("variant.getCompileClasspath(null)"),
+            "{script}"
+        );
+        assert!(
+            !script.contains("curl") && !script.contains("http"),
+            "gradle downloads through its own resolution, not a fetched URL"
+        );
+    }
+
+    #[test]
+    fn a_failed_dependency_still_yields_the_model_on_a_scan() {
+        let tree = TempTree::new("gradle-scan-partial");
+        tree.write("gradlew", "#!/bin/sh\n");
+        let output = CommandOutput {
+            status: 1,
+            stdout: recorded_output(),
+            stderr: "Execution failed for task ':core:jar'.\n".to_string(),
+        };
+        let model = GradleProvider::for_scan(tree.root())
+            .probe(&FakeRunner::new(vec![output]))
+            .unwrap();
+        assert!(model.module(&ModuleId::new(":core", "main")).is_some());
+    }
+
+    #[test]
+    fn the_editor_probe_rejects_a_model_printed_by_a_failed_build() {
+        let tree = TempTree::new("gradle-editor-failed-model");
+        let output = CommandOutput {
+            status: 1,
+            stdout: recorded_output(),
+            stderr: "failed\n".to_string(),
+        };
+        let error = GradleProvider::new(tree.root())
+            .probe(&FakeRunner::new(vec![output]))
+            .unwrap_err();
+        assert!(error.to_string().contains("exited with 1"), "{error}");
     }
 
     #[test]
