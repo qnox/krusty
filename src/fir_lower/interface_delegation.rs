@@ -475,6 +475,7 @@ fn materialize_delegation(
                             overridden: overridden.target,
                             overridden_owner: overridden.owner,
                             overridden_is_interface: overridden.interface,
+                            overridden_getter_semantic_role: overridden.getter_semantic_role,
                             name: name.clone(),
                             declared_type: overridden.ty.get(),
                             applied_type: overridden.applied_ty.get(),

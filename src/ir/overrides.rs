@@ -16,6 +16,8 @@ pub struct IrPropertyOverride {
     pub overridden: crate::fir::ResolvedPropertyOverrideTarget,
     pub overridden_owner: TypeName,
     pub overridden_is_interface: bool,
+    /// Exact provider role of the overridden property's getter.
+    pub overridden_getter_semantic_role: Option<crate::types::SemanticCallRole>,
     pub name: String,
     pub declared_type: Ty,
     pub applied_type: Ty,

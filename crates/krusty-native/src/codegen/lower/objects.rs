@@ -55,7 +55,9 @@ pub(super) mod ktype {
     /// The interface table; see the note on `KType`. Absent for a type implementing no interface
     /// of the program.
     pub const ITABLE: u32 = 160;
-    pub const SIZE: usize = 168;
+    /// A checked implementation of `KCallable.name`, when this type provides one.
+    pub const CALLABLE_NAME: u32 = 168;
+    pub const SIZE: usize = 176;
 }
 
 const CLASS_NAMES_MEMBER: u32 = 1;
@@ -164,6 +166,8 @@ pub(super) struct DescriptorShape<'s> {
     /// A callable reference's declaration identity, and the byte offset of its bound receiver —
     /// 0 when it binds none. The two travel together because only a reference has either.
     pub(super) reference_target: Option<(DataId, u32)>,
+    /// The exact checked body answering `KCallable.name`, when this type declares it.
+    pub(super) callable_name: Option<FuncId>,
     /// How to reach this type's own `iterator`/`hasNext`/`next`, for a class of this file the
     /// runtime may be asked to walk. Empty for everything else, which is every type emitted here
     /// but a class.
@@ -483,6 +487,7 @@ impl<'a> FileLowering<'a> {
             superclass,
             interfaces,
             reference_target,
+            callable_name,
             walk,
             qualified_name,
             simple_name,
@@ -614,6 +619,12 @@ impl<'a> FileLowering<'a> {
             };
             let global = self.module.declare_data_in_data(data, &mut description);
             description.write_data_addr(offset, global, 0);
+        }
+        if let Some(callable_name) = callable_name {
+            let function = self
+                .module
+                .declare_func_in_data(callable_name, &mut description);
+            description.write_function_addr(ktype::CALLABLE_NAME, function);
         }
         self.module
             .define_data(descriptor, &description)
@@ -782,6 +793,14 @@ impl<'a> FileLowering<'a> {
             }
         }
         let walk = self.define_walk_members(class, &base)?;
+        let callable_name = self
+            .model
+            .callable_name_slot(class, self.ir)
+            .and_then(|slot| match slot {
+                crate::classes::CallableNameSlot::Class(index) => vtable.get(index as usize),
+                crate::classes::CallableNameSlot::Interface(index) => itable.get(index as usize),
+            })
+            .copied();
         let (qualified_name, simple_name, class_names) = self.reflection_names(class);
         if instantiable {
             self.record_dependency_implementations(descriptor, &base, class, (&vtable, &itable))?;
@@ -799,6 +818,7 @@ impl<'a> FileLowering<'a> {
                 superclass,
                 interfaces: &interfaces,
                 reference_target: None,
+                callable_name,
                 walk,
                 qualified_name: qualified_name.as_deref(),
                 simple_name: simple_name.as_deref(),
