@@ -19,6 +19,30 @@ impl Classpath {
         let Some(class) = file.get_name(internal) else {
             return Vec::new();
         };
+        // The class's own type parameters are the constructor's: `AtomicReference("x")` infers
+        // `AtomicReference<String>`.
+        let formals = class
+            .formals
+            .iter()
+            .map(crate::types::TyParamName::from)
+            .collect::<Vec<_>>();
+        let result = Ty::obj_args_name(
+            internal,
+            &class
+                .formals
+                .iter()
+                .zip(&class.formal_bounds)
+                .map(|(formal, bounds)| {
+                    Ty::ty_param(
+                        formal,
+                        bounds
+                            .first()
+                            .copied()
+                            .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
         class
             .constructors
             .iter()
@@ -31,11 +55,11 @@ impl Classpath {
                 );
                 member.visibility = constructor.visibility;
                 member.generic_sig = Some(crate::libraries::GenericSig {
-                    formals: Vec::new(),
-                    formal_bounds: Vec::new(),
+                    formals: formals.clone(),
+                    formal_bounds: class.formal_bounds.clone(),
                     receiver: None,
                     params: constructor.params.clone(),
-                    ret: Ty::obj_name(internal),
+                    ret: result,
                     return_policy: Default::default(),
                 });
                 member.call_sig = crate::libraries::CallSig::metadata_member(
