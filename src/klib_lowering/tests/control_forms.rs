@@ -1051,21 +1051,26 @@ fn type_checks_and_casts_lower_as_the_source_operators_do() {
 }
 
 #[test]
-fn type_operators_checked_fir_expands_decline_by_name() {
-    let cases = [
-        (
+fn a_safe_cast_lowers_as_the_source_safe_cast_does() {
+    let source = "fun f(a: Any?): String? {\n return a as? String\n}\n";
+    assert_eq!(
+        lowered_f(&type_check(
             KlibIrTypeOperator::SafeCast,
-            T::NullableString,
-            T::NullableString,
-            "a safe cast",
-        ),
-        (
-            KlibIrTypeOperator::ImplicitNotNull,
             T::String,
-            T::String,
-            "an implicit non-null assertion",
-        ),
-    ];
+            T::NullableString
+        )),
+        source_body(source, "f", 1)
+    );
+}
+
+#[test]
+fn type_operators_checked_fir_expands_decline_by_name() {
+    let cases = [(
+        KlibIrTypeOperator::ImplicitNotNull,
+        T::String,
+        T::String,
+        "an implicit non-null assertion",
+    )];
     for (operator, target, result, reason) in cases {
         assert_eq!(
             type_check(operator, target, result).declined("f", &[]),
@@ -1151,6 +1156,40 @@ fn a_type_parameter_smart_cast_lowers_as_the_source_smart_cast_does() {
             "{source_type}"
         );
     }
+}
+
+/// `kotlin.coroutines.intrinsics.createCoroutineUnintercepted` narrows its `suspend () -> T`
+/// receiver by `this is BaseContinuationImpl`: a value of a function type narrows to any type it is
+/// checked against, since any class can implement a function type besides its own supertypes.
+#[test]
+fn a_function_value_smart_cast_lowers_as_the_source_smart_cast_does() {
+    let demo = demo(
+        &[("f", &[T::Function0Int], T::NullableCharSequence)],
+        |_, body| {
+            let a = body.param(0);
+            let operand = body.ty(T::CharSequence);
+            let checked = body.expr(
+                T::Boolean,
+                KlibIrExprKind::TypeOperator {
+                    operator: KlibIrTypeOperator::InstanceOf,
+                    operand,
+                    argument: a,
+                },
+            );
+            let a = body.param(0);
+            let narrowed = body.type_operator(KlibIrTypeOperator::ImplicitCast, a, T::CharSequence);
+            let returned = body.return_(narrowed);
+            let guard = body.branches("IF", vec![(checked, returned)], T::Unit);
+            let fallback = body.constant(T::NullableNothing, KlibIrConstant::Null);
+            Some(vec![KlibIrStatement::Expression(guard), body.ret(fallback)])
+        },
+    );
+    let source = "fun f(a: () -> Int): CharSequence? {\n if (a is CharSequence) return a\n \
+                  return null\n}\n";
+    assert_eq!(
+        lowered_f(&demo),
+        super::demo_package::source_body_with_stdlib(source, "f", 1)
+    );
 }
 
 /// `rendered` with each type parameter identity spelled `<P>`: a KLIB body names its function's
