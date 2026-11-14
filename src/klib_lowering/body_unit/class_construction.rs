@@ -578,8 +578,7 @@ impl<'u, 's> Linker<'u, 's> {
                 property_overrides,
             });
         ir.dependency_methods.insert(implementation, declared);
-        ir.classes[class as usize].methods.push(declared);
-        ir.note_class_method(class, declared);
+        attach_materialized_member(ir, class, declared);
         let implementation_owner = ir.classes[class as usize].fq_name;
         let (params, result) = (
             ir.functions[declared as usize].params.clone(),
@@ -696,7 +695,7 @@ fn materialized_secondary(
 /// The ordinal of the constructor a delegation with `params` reaches in a materialized superclass.
 /// A superclass without a primary constructor is reached through the secondary one declaring the
 /// selected parameters; Kotlin declares no two constructors of a class with the same ones.
-pub(in crate::klib_lowering) fn superclass_constructor_ordinal(
+pub(in super::super) fn superclass_constructor_ordinal(
     superclass: Option<&IrClass>,
     params: &[Ty],
 ) -> Result<u32, KlibBodyDeclineReason> {
@@ -712,5 +711,18 @@ pub(in crate::klib_lowering) fn superclass_constructor_ordinal(
                 )
             }),
         _ => Ok(0),
+    }
+}
+
+/// Record a materialized receiver member once, including final methods that have no virtual slot.
+pub(super) fn attach_materialized_member(
+    ir: &mut IrFile,
+    class: crate::ir::ClassId,
+    function: FunId,
+) {
+    let declaration = &mut ir.classes[class as usize];
+    if !declaration.is_value && !declaration.methods.contains(&function) {
+        declaration.methods.push(function);
+        ir.note_class_method(class, function);
     }
 }

@@ -13,9 +13,14 @@ use crate::fx_hash::{HashMap, HashSet};
 
 use crate::fir::{
     CallableId, DeclarationFlags, DeclarationId, DeclarationKind, PropertyId,
-    ResolvedFunctionOverrideTarget, ResolvedModuleIndex, ResolvedPropertyOverrideTarget,
+    ResolvedDelegatedMember, ResolvedFunctionOverrideTarget, ResolvedInterfaceDelegation,
+    ResolvedModuleIndex, ResolvedPropertyOverrideTarget,
 };
 use crate::types::{SemanticCallRole, Ty, TypeName};
+
+#[cfg(test)]
+#[path = "module_classes/forwarder_tests.rs"]
+mod forwarder_tests;
 
 /// The named classes of one module, by identity.
 #[derive(Clone, Debug, Default)]
@@ -39,9 +44,31 @@ pub struct ModuleClass {
     pub(crate) members: Box<[ModuleMember]>,
     pub(crate) function_overrides: Box<[ModuleFunctionOverride]>,
     pub(crate) property_overrides: Box<[ModulePropertyOverride]>,
-    /// Whether it implements an interface `by` a delegate, which the declaring file realizes
-    /// with forwarders after the members numbered here.
-    pub(crate) delegates_interfaces: bool,
+    /// The forwarders its interface delegations (`I by d`) generate, in the order the declaring
+    /// file creates them: delegation by delegation, each member's function, or getter then
+    /// setter.
+    pub(crate) forwarders: Box<[ModuleForwarder]>,
+}
+
+/// One forwarder an interface delegation generates.
+#[derive(Debug)]
+pub(crate) struct ModuleForwarder {
+    /// What it takes after the dispatch receiver and answers.
+    pub(crate) parameters: Box<[Ty]>,
+    pub(crate) result: Ty,
+    /// A `suspend` function, which takes its caller's continuation after `parameters`.
+    pub(crate) suspend: bool,
+    /// The declarations it realizes, the delegated interface member first. A class member among
+    /// them gives up its slot to the forwarder.
+    pub(crate) realizes: Box<[ForwardedMember]>,
+}
+
+/// A declaration a forwarder realizes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ForwardedMember {
+    Function(ResolvedFunctionOverrideTarget),
+    Getter(ResolvedPropertyOverrideTarget),
+    Setter(ResolvedPropertyOverrideTarget),
 }
 
 /// One named interface: what its member numbers are computed from.
@@ -356,7 +383,7 @@ impl ModuleClasses {
                     members,
                     function_overrides: function_overrides(),
                     property_overrides: property_overrides(),
-                    delegates_interfaces: !classifier.interface_delegations.is_empty(),
+                    forwarders: forwarders(&classifier.interface_delegations),
                 },
             );
         }
@@ -424,7 +451,7 @@ fn dependency_class(superclass: &crate::fir::ResolvedDependencySuperclass) -> Mo
             .map(property_override)
             .collect(),
         // A dependency class's delegations are realized where it is declared.
-        delegates_interfaces: false,
+        forwarders: Box::default(),
     }
 }
 
@@ -616,4 +643,69 @@ fn interface_implementations(index: &ResolvedModuleIndex) -> HashSet<PropertyId>
         }
     }
     properties
+}
+
+/// The forwarders `delegations` generate, in the order the declaring file creates them.
+fn forwarders(delegations: &[ResolvedInterfaceDelegation]) -> Box<[ModuleForwarder]> {
+    let mut forwarders = Vec::new();
+    for delegation in delegations {
+        for member in &delegation.members {
+            match member {
+                ResolvedDelegatedMember::Function(function) => {
+                    forwarders.push(ModuleForwarder {
+                        parameters: function.call.parameters.iter().map(|ty| ty.get()).collect(),
+                        result: function.call.result.get(),
+                        suspend: function.call.suspend,
+                        realizes: function
+                            .overridden
+                            .iter()
+                            .map(|declaration| ForwardedMember::Function(declaration.target))
+                            .collect(),
+                    });
+                }
+                ResolvedDelegatedMember::Property(property) => {
+                    // An accessor takes the context parameters, then a member extension's
+                    // receiver; the setter takes the value after them.
+                    let mut parameters = property
+                        .context_parameters
+                        .iter()
+                        .map(|parameter| parameter.ty.get())
+                        .collect::<Vec<_>>();
+                    if let Some(position) = property.getter.extension_receiver_parameter {
+                        if let Some(receiver) = property.getter.parameters.get(position as usize) {
+                            parameters.push(receiver.get());
+                        }
+                    }
+                    let realized = property
+                        .overridden
+                        .iter()
+                        .map(|declaration| declaration.target)
+                        .collect::<Vec<_>>();
+                    let ty = property.ty.get();
+                    forwarders.push(ModuleForwarder {
+                        parameters: parameters.clone().into_boxed_slice(),
+                        result: ty,
+                        suspend: false,
+                        realizes: realized
+                            .iter()
+                            .map(|&p| ForwardedMember::Getter(p))
+                            .collect(),
+                    });
+                    if property.setter.is_some() {
+                        parameters.push(ty);
+                        forwarders.push(ModuleForwarder {
+                            parameters: parameters.into_boxed_slice(),
+                            result: Ty::Unit,
+                            suspend: false,
+                            realizes: realized
+                                .iter()
+                                .map(|&p| ForwardedMember::Setter(p))
+                                .collect(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    forwarders.into_boxed_slice()
 }

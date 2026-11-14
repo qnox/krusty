@@ -6,6 +6,8 @@ open class OpenBase<T>(val stored: T) {
     open var current: T = stored
     var writes: Int = 0
     fun readStored(): T = stored
+    fun readThroughMember(): T = readStored()
+    open fun dispatchThroughMember(): T = readThroughMember()
 
     open fun describe(): String = "base:$stored"
 }
@@ -52,6 +54,8 @@ fun box(): String {
 
     val firstInt = makeThroughFirst(23)
     if (firstInt.stored != 23 || firstInt.readStored() != 23) return "first integer storage"
+    if (firstInt.readThroughMember() != 23) return "final member integer call"
+    if (firstInt.dispatchThroughMember() != 23) return "open to final integer call"
     if (firstInt.describe() != "first:23") return "first int override: ${firstInt.describe()}"
     firstInt.current = 29
     if (firstInt.writes != 1 || firstInt.current != 29) return "first integer property dispatch"
@@ -74,6 +78,8 @@ fun box(): String {
     val ordinaryString = makeOrdinary("ordinary")
     if (ordinaryString.stored != "ordinary" || ordinaryString.readStored() != "ordinary") return "ordinary string constructor"
     if (ordinaryString.describe() != "base:ordinary") return "ordinary string dispatch"
+    if (ordinaryString.readThroughMember() != "ordinary") return "final member string call"
+    if (ordinaryString.dispatchThroughMember() != "ordinary") return "open to final string call"
     if (ordinaryString === makeOrdinary("ordinary")) return "ordinary string identity"
 
     val ordinaryInt = makeOrdinary(19)

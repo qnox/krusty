@@ -529,11 +529,14 @@ impl Emitter<'_> {
     /// Compile the literal lambda `argument` of a call to the inline function `callee`, which route
     /// planning gave to the MethodInliner port ([`Self::lambda_splice_reason`] found no reason to
     /// splice it). An error is a broken invariant of that plan, never a cue to try another route.
+    /// A lambda for a `crossinline` parameter reads the caller's properties through their
+    /// accessors, as kotlinc's does: the callee may place it in an object of another class.
     pub(super) fn inline_lambda_node(
         &mut self,
         argument: u32,
         callee: &str,
         callee_suspends: bool,
+        crossinline: bool,
     ) -> Result<LambdaArgument, &'static str> {
         let reference_line = matches!(self.ir.expr(argument), IrExpr::CallableReference(_))
             .then(|| self.ir.source_line(argument))
@@ -632,7 +635,11 @@ impl Emitter<'_> {
         let caller_type_parameters = self.type_parameter_function.replace(impl_fn);
         let caller_fakes = self.enter_placed_fake_continuations(&fake_continuations);
         let brace_depth = self.unit_lambda_brace_depth();
+        // A lambda nested in a `crossinline` one moves wherever that one does.
+        let caller_crossinline = self.crossinline_lambda_body;
+        self.crossinline_lambda_body |= crossinline;
         let result = self.emit_fn_body_inline(inline_body, &parameter_slots, &mut scratch);
+        self.crossinline_lambda_body = caller_crossinline;
         self.leave_placed_fake_continuations(&fake_continuations, caller_fakes);
         self.type_parameter_function = caller_type_parameters;
         if let Some(caller_machine) = caller_machine {
@@ -857,7 +864,8 @@ impl Emitter<'_> {
     /// captured values: `$x` for a captured local `x`. A callable reference `argument`'s bound
     /// receiver, which its template places after the reference's captures, is `receiver`, the
     /// value kotlinc's `InlineCallableReferenceToLambda` binds it to. A captured receiver of a
-    /// literal is not named yet.
+    /// literal is the parameter kotlinc lifts it to: `this$0` for the enclosing instance,
+    /// `$this_f` for the receiver of `f`.
     fn capture_names(&self, argument: u32, impl_fn: u32, count: usize) -> Vec<Option<String>> {
         let identities = self.ir.fn_params.get(&impl_fn).map(|info| &info.identities);
         let bound_receiver = match self.ir.expr(argument) {
@@ -881,6 +889,10 @@ impl Emitter<'_> {
                 match identity.role {
                     krusty::ir::IrParameterRole::CapturedValue { .. } => {
                         Some(format!("${}", identity.source_name.as_ref()?))
+                    }
+                    krusty::ir::IrParameterRole::CapturedReceiver { ordinal } => {
+                        crate::capture_names::lifted_receiver(self.ir, impl_fn, ordinal as usize)
+                            .map(|(name, _)| name)
                     }
                     _ => None,
                 }

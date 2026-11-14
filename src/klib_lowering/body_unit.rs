@@ -1020,6 +1020,75 @@ impl CallLinker for Linker<'_, '_> {
         }
     }
 
+    fn indices_receiver(
+        &self,
+        getter: &KlibAccessorIdSignature,
+    ) -> Result<Option<crate::libraries::IndicesReceiver>, KlibBodyDeclineReason> {
+        let signature = KlibDeclarationSignature::Accessor(getter.clone());
+        let identity = match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, &signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => identity,
+            // Dependency preparation omitted this getter's edge: the loop is not one this unit counts.
+            KlibCalleeOrigin::Missing => {
+                return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                    "a `for` loop over an `indices` getter without a provider declaration",
+                ))
+            }
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
+                    getter.property().clone(),
+                )))
+            }
+        };
+        Ok(self
+            .sources
+            .declarations
+            .external_callable_by_dependency(&identity)
+            .and_then(|(_, realization)| {
+                match realization.klib_body_callable()?.compiler_intrinsic()? {
+                    crate::libraries::CompilerIntrinsic::Indices(kind) => Some(kind),
+                    _ => None,
+                }
+            }))
+    }
+
+    fn reverses_progression(
+        &self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<bool, KlibBodyDeclineReason> {
+        let signature = KlibDeclarationSignature::Public(callee.clone());
+        let identity = match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, &signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => identity,
+            KlibCalleeOrigin::Missing => {
+                return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                    "a `for` loop over a `reversed` call without a provider declaration",
+                ))
+            }
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
+                    callee.clone(),
+                )))
+            }
+        };
+        Ok(self
+            .sources
+            .declarations
+            .external_callable_by_dependency(&identity)
+            .is_some_and(|(_, realization)| {
+                realization
+                    .klib_body_callable()
+                    .and_then(|callable| callable.compiler_intrinsic())
+                    == Some(crate::libraries::CompilerIntrinsic::ProgressionReversed)
+            }))
+    }
+
     fn local_class(
         &self,
         signature: &KlibIrSignature,
@@ -2070,6 +2139,9 @@ impl<'s> Linker<'_, 's> {
     ) -> Result<FunId, KlibBodyDeclineReason> {
         let statements = block_statements(function)?;
         let declared = declare_function(ir, &header);
+        if let Some(member) = &value_member {
+            class_construction::attach_materialized_member(ir, member.class, declared);
+        }
         self.functions.insert(identity.clone(), declared);
         if let Some(receiver) = header.value_receiver() {
             self.member_receivers.insert(identity.clone(), receiver);

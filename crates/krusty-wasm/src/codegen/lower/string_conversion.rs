@@ -46,6 +46,10 @@ impl Body<'_> {
 
     /// [`Self::stacked_string_of`] of a value proven to be a `proven`, a subtype of `ty`.
     fn stacked_string_of_value(&mut self, ty: Ty, proven: Ty) -> Result<(), Unsupported> {
+        if ty.is_unsigned() {
+            self.stacked_unsigned_string(ty);
+            return Ok(());
+        }
         let nullable_scalar = match ty.kind() {
             TyKind::Nullable(inner) => self
                 .scalar_string_function(inner)
@@ -107,6 +111,12 @@ impl Body<'_> {
             );
         }
         self.expression(id)?;
+        self.stacked_unsigned_string(source);
+        Ok(())
+    }
+
+    /// Replace the exact non-null unsigned scalar `source` on the stack with its decimal text.
+    fn stacked_unsigned_string(&mut self, source: Ty) {
         if let Some(mask) = source.unsigned_widen_mask() {
             self.code.i32_const(mask).op(AND32);
         }
@@ -115,7 +125,6 @@ impl Body<'_> {
         } else {
             self.runtime.string_of_u32
         });
-        Ok(())
     }
 
     /// Replace the reference on the stack, statically of type `ty` and proven to be a `proven`,
