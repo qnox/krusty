@@ -34,6 +34,7 @@ mod extension_specialization;
 mod generic_inference;
 pub(crate) use generic_inference::{reified_runtime_type, ReifiedDeclarations};
 mod builtin_overrides;
+pub(crate) use builtin_overrides::builtin_implementation_facts;
 mod hierarchy_projection;
 mod indexed_convention_selection;
 mod lambda_call_shape;

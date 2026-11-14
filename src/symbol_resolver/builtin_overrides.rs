@@ -115,6 +115,35 @@ pub(crate) fn builtin_overrides(
         .collect()
 }
 
+/// The representation overrides for one selected external declaration, in the handoff form
+/// consumed by checked IR and backends.
+pub(crate) fn builtin_implementation_facts(
+    source: &dyn SymbolSource,
+    owner: TypeName,
+    name: &str,
+    identity: ExternalCallableId,
+) -> Box<[crate::fir::BuiltinImplementation]> {
+    builtin_overrides(source, owner, name, identity)
+        .into_iter()
+        .map(|implementation| {
+            let declaration = implementation.declaration.map(|declaration| {
+                crate::fir::BuiltinOverrideDeclaration {
+                    operation: declaration
+                        .callable
+                        .compiler_intrinsic
+                        .or(declaration.callable.member_realization.compiler_intrinsic()),
+                    params: declaration.identity.params,
+                    ret: declaration.identity.ret,
+                }
+            });
+            crate::fir::BuiltinImplementation {
+                receiver: implementation.receiver,
+                declaration,
+            }
+        })
+        .collect()
+}
+
 /// Every builtin class whose classifier is a proper subtype of `owner`: the builtin values an
 /// instance of `owner` can be, which a target carrying them in representations of its own must
 /// answer a call of `owner`'s member or a type test against `owner` for.
