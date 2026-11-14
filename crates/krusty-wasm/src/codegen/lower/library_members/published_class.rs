@@ -75,7 +75,14 @@ pub(in crate::codegen) fn select(
         let slot = *layout
             .declaration_slots
             .get(&identity)
-            .ok_or("a selected class member without its producer slot binding")?;
+            .ok_or_else(|| {
+                format!(
+                    "a selected class member without its producer slot binding: owner={owner:?}, declaration={:?}, requested_identity={identity:?}, published_declarations={}, physical_slots={}",
+                    fact.dependency_callable,
+                    layout.declaration_slots.len(),
+                    layout.slot_types.len(),
+                )
+            })?;
         let signature = layout
             .slot_types
             .get(slot as usize)
