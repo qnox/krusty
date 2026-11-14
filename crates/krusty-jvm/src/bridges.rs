@@ -44,7 +44,6 @@ pub(super) fn derive_bridges(
             ir,
             cid,
             &OverrideBridgeFacts {
-                classpath: superclasses.classpath,
                 callables,
                 override_results,
                 jvm_default,
@@ -419,7 +418,6 @@ pub(super) fn implementation_function(
 /// concrete override — without it a call through a base reference resolves to a method that is not there.
 /// What bridge derivation reads of the module beyond the class being derived.
 struct OverrideBridgeFacts<'a> {
-    classpath: &'a krusty::jvm::classpath::Classpath,
     callables: &'a krusty::backend::CheckedBackendCallables,
     override_results: &'a crate::override_results::OverrideResults,
     jvm_default: crate::ir_emit::JvmDefaultMode,
@@ -434,7 +432,6 @@ fn superclass_method_bridges(
     order: &mut Vec<u32>,
 ) -> Result<(), SkipReason> {
     let OverrideBridgeFacts {
-        classpath,
         callables,
         override_results,
         jvm_default,
