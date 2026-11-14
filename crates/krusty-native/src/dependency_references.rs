@@ -244,6 +244,7 @@ fn build_property(ir: &mut IrFile, plan: PropertyPlan) -> DependencyProperty {
                 arguments: Vec::new(),
                 parameters: getter.parameters,
                 result: getter.result,
+                substitutions: Vec::new(),
                 source_receiver: None,
             },
         )));
@@ -274,6 +275,7 @@ fn build_property(ir: &mut IrFile, plan: PropertyPlan) -> DependencyProperty {
                 arguments: vec![value],
                 parameters: setter.parameters.clone(),
                 result: setter.result,
+                substitutions: Vec::new(),
                 source_receiver: None,
             },
         )));

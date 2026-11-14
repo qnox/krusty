@@ -7,12 +7,12 @@ use crate::ir::{
     IrGenericSig, IrLocalClassNameProvenance, IrModuleSource, IrParameterIdentity,
     IrPropertyOverride, IrTypeOp, IrTypeParameter,
 };
-use crate::types::{Ty, TypeName, type_name, wk};
+use crate::types::{type_name, wk, Ty, TypeName};
 
 use super::class_storage::{
-    ContinuationFields, external_type_substitution, plan_frame_values, realize_frame_values,
+    external_type_substitution, plan_frame_values, realize_frame_values, ContinuationFields,
 };
-use super::label_reentry::{ReentryDecline, split_at_suspensions};
+use super::label_reentry::{split_at_suspensions, ReentryDecline};
 use super::value_namespace::max_value_index;
 
 #[derive(Clone, Copy)]
@@ -322,6 +322,7 @@ fn build_context_getter(
             arguments: Vec::new(),
             parameters: Vec::new(),
             result: runtime.context_ty,
+            substitutions: Vec::new(),
             source_receiver: Some(runtime.context_receiver_ty),
         },
     )));
@@ -535,6 +536,7 @@ fn build_resume_with(ir: &mut IrFile, contract: ResumeContract) -> Result<u32, R
             arguments: Vec::new(),
             parameters: Vec::new(),
             result: any,
+            substitutions: Vec::new(),
             source_receiver: None,
         },
     )));

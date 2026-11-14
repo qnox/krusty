@@ -280,6 +280,7 @@ impl MachineStorage for ContinuationFields {
                 arguments: Vec::new(),
                 parameters: Vec::new(),
                 result: any,
+                substitutions: Vec::new(),
                 source_receiver: None,
             },
         )))
