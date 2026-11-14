@@ -297,6 +297,15 @@ impl DependencyExportSignatures {
         Ok(())
     }
 
+    /// Declaration-only target fixture; this never records an instance definition.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn record_object_declaration_for_test(
+        &mut self,
+        declaration: super::instance_links::ObjectDeclaration,
+    ) -> Result<(), &'static str> {
+        self.record_object_declaration(declaration)
+    }
+
     pub fn object_declarations(&self) -> &[super::instance_links::ObjectDeclaration] {
         &self.object_declarations
     }

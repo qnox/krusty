@@ -838,9 +838,21 @@ mod tests {
             },
         );
         assert!(!object_getter_is_defined(&module, wrong_result));
-        // Merely repeating declaration metadata cannot publish a preexisting getter.
-        registry.record_defined_objects(&DependencyExportSignatures::default(), &module);
-        assert!(!registry.has_defined_object(&foreign, &module));
+        // A matching class header and an already defined program-wide instance link do not
+        // prove this file actually exported its getter. Its current entry inventory is required.
+        let mut unpublished = CallableRegistry::default();
+        unpublished
+            .instances
+            .define(InstanceEntry::Object(declaration.classifier), || function)
+            .unwrap();
+        let mut headers = DependencyExportSignatures::default();
+        headers
+            .record_object_declaration_for_test(declaration.clone())
+            .unwrap();
+        assert_eq!(headers.object_declarations(), &[declaration.clone()]);
+        assert!(headers.instance_entries().is_empty());
+        unpublished.record_defined_objects(&headers, &module);
+        assert!(!unpublished.has_defined_object(&declaration, &module));
     }
 
     #[test]
