@@ -7,7 +7,6 @@ annotations/annotationAllTarget.kt
 annotations/annotationsOnDelegatedMembers.kt
 annotations/deprecatedJvmOverloads.kt
 annotations/internalPropertyOrTypealias.kt
-annotations/kt43399.kt
 annotations/kt62788.kt
 annotations/kt9320.kt
 annotations/literals.kt
