@@ -37,13 +37,13 @@ pub use dependency_facts::{
     DependencyClassifier, DependencyFactError, DependencyGetterSignature,
 };
 pub(crate) use dependency_metadata::has_standalone_dependency_code;
-pub use dependency_metadata::KlibDependencyCallable;
 pub use dependency_metadata::{authenticated_singleton_receiver, inert_staged_singleton_bindings};
 pub use dependency_metadata::{
     DependencyExportSignatures, DependencyMemberReceiver, DependencyMetadata, EnumConstant,
     SingletonExtensionUnreadReceiver, SingletonMemberReceiver,
 };
 pub(crate) use dependency_metadata::{ExportedConstructor, ExportedPropertyAccessor};
+pub use dependency_metadata::{KlibClassIdentity, KlibDependencyCallable};
 pub use dependency_signature::{instantiate_dependency_signature, DependencyFunctionSignature};
 
 /// The parameter form [`Entry::selected`] reports beside the selected function.
