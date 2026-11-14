@@ -14,6 +14,17 @@ pub(super) type Facts = crate::fx_hash::HashMap<ExternalCallableId, Box<[Builtin
 pub(super) fn for_checked_unit(checker: &Checker<'_>) -> Result<Facts, ExternalCallableId> {
     let mut selected =
         crate::fx_hash::HashMap::<ExternalCallableId, (TypeName, Box<str>)>::default();
+    let mut nonvirtual = checker
+        .resolved_super_calls
+        .values()
+        .filter_map(|call| call.external_declaration)
+        .collect::<crate::fx_hash::HashSet<_>>();
+    nonvirtual.extend(checker.expr_lowers.values().filter_map(|lowering| {
+        let ExprLowering::SuperPropertyWrite { target } = lowering else {
+            return None;
+        };
+        target.external_declaration
+    }));
     for call in checker
         .resolved_calls
         .values()
@@ -68,7 +79,7 @@ pub(super) fn for_checked_unit(checker: &Checker<'_>) -> Result<Facts, ExternalC
         }
     }
 
-    Ok(selected
+    let mut facts = selected
         .into_iter()
         .map(|(identity, (owner, name))| {
             let implementations = builtin_overrides(checker.libraries, owner, &name, identity)
@@ -94,7 +105,13 @@ pub(super) fn for_checked_unit(checker: &Checker<'_>) -> Result<Facts, ExternalC
                 .into_boxed_slice();
             (identity, implementations)
         })
-        .collect())
+        .collect::<Facts>();
+    // A checked `super` target is emitted as a direct call. It cannot dynamically dispatch to a
+    // represented builtin override, but still needs an explicit checked record at backend freeze.
+    for identity in nonvirtual {
+        facts.entry(identity).or_default();
+    }
+    Ok(facts)
 }
 
 fn record_member(
