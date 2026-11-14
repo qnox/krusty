@@ -274,7 +274,7 @@ impl Backend for WasmBackend {
             .is_none_or(|(module, _)| module != file.module_name)
         {
             let plan = classes::module_plan(
-                file.classifiers.module().classes(),
+                file.classifiers.classes(),
                 &file.classifiers,
                 &file.callables,
                 &started.classes,
@@ -282,7 +282,7 @@ impl Backend for WasmBackend {
             state.slot_plan = Some((file.module_name.to_owned(), plan));
             // The table types are built from the plan, so they are that module's too.
             started.tables = module_tables::ModuleTables::with_published(
-                file.classifiers.module().classes(),
+                file.classifiers.classes(),
                 &file.classifiers,
                 &started.classes,
             );

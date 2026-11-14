@@ -332,10 +332,19 @@ impl FileRecorder<'_, '_, '_> {
                     Some(slot) => self.slot_function(*slot)?,
                     None => self.slot_entry(&Slot::Function(*target))?,
                 };
-                let declared = &ir.functions[*declared as usize];
                 let target = &ir.functions[*target as usize];
+                let (declared_parameters, declared_result) = match declared {
+                    krusty::backend::class_tables::BridgeDeclaration::Function(function) => {
+                        let declared = &ir.functions[*function as usize];
+                        (declared.params.clone(), declared.ret)
+                    }
+                    krusty::backend::class_tables::BridgeDeclaration::Signature {
+                        parameters,
+                        result,
+                    } => (parameters.to_vec(), *result),
+                };
                 self.thunk(
-                    (&declared.params, declared.ret),
+                    (&declared_parameters, declared_result),
                     (&target.params, target.ret),
                     implementation,
                 )

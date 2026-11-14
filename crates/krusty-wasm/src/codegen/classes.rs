@@ -156,19 +156,19 @@ pub(super) struct Accessor {
 /// A representation bridge a table slot holds (see [`Slot::Bridge`] and [`Slot::AccessorBridge`]):
 /// `class` is the class that introduced it, whose table type every receiver reaching the bridge
 /// has.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct OverrideBridge {
     pub(super) class: ClassId,
     pub(super) member: BridgedMember,
 }
 
 /// The member a bridge wears the base's signature of, and where it forwards.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum BridgedMember {
     /// A method: the base method `declared`, forwarded through `target_slot` (see
     /// [`Slot::Bridge`]) to `target`.
     Method {
-        declared: FunId,
+        declared: krusty::backend::class_tables::BridgeDeclaration,
         target_slot: Option<u32>,
         target: FunId,
     },
@@ -191,15 +191,15 @@ pub(super) enum BridgedMember {
 impl BridgedMember {
     /// The bridge `entry` stands for, or `None` for an entry that is not one this form carries.
     fn of(entry: &Slot) -> Option<Self> {
-        match *entry {
+        match entry {
             Slot::Bridge {
                 declared,
                 target_slot,
                 target,
             } => Some(Self::Method {
-                declared,
-                target_slot,
-                target,
+                declared: declared.clone(),
+                target_slot: *target_slot,
+                target: *target,
             }),
             Slot::AccessorBridge {
                 declared,
@@ -208,19 +208,19 @@ impl BridgedMember {
                 setter,
                 target_slot,
             } => Some(Self::Accessor {
-                declared,
-                implemented,
-                setter,
-                target_slot,
+                declared: *declared,
+                implemented: *implemented,
+                setter: *setter,
+                target_slot: *target_slot,
             }),
             Slot::FunctionBridge {
                 arity,
                 target_slot,
                 target,
             } => Some(Self::Function {
-                arity,
-                target_slot,
-                target,
+                arity: *arity,
+                target_slot: *target_slot,
+                target: *target,
             }),
             _ => None,
         }
@@ -630,6 +630,28 @@ pub(super) fn method_type(
     }
     let results = carrier(declaration.ret)?.into_iter().collect();
     Ok(module.func_type(params, results))
+}
+
+fn bridge_method_type(
+    module: &mut Module,
+    ir: &IrFile,
+    owner: TypeName,
+    declaration: &krusty::backend::class_tables::BridgeDeclaration,
+) -> Result<u32, Unsupported> {
+    match declaration {
+        krusty::backend::class_tables::BridgeDeclaration::Function(function) => {
+            method_type(module, ir, *function)
+        }
+        krusty::backend::class_tables::BridgeDeclaration::Signature { parameters, result } => {
+            let receiver = carrier(receiver_type(owner))?.ok_or("a `Unit` receiver")?;
+            let mut wasm_parameters = vec![receiver];
+            for parameter in parameters.iter().copied() {
+                wasm_parameters.push(carrier(parameter)?.ok_or("a `Unit` parameter")?);
+            }
+            let results = carrier(*result)?.into_iter().collect();
+            Ok(module.func_type(wasm_parameters, results))
+        }
+    }
 }
 
 /// The function type of an accessor of a property of type `ty`, as a class table carries it: the
@@ -1170,7 +1192,7 @@ impl TableEntries<'_> {
                         class: introducer,
                         member,
                     };
-                    match bridges.iter().find(|(known, ..)| *known == bridge) {
+                    match bridges.iter().find(|(known, ..)| known == &bridge) {
                         Some((_, function, _)) => *function,
                         None => {
                             let function = module.declare();
@@ -1503,7 +1525,12 @@ fn slot_types<'r>(
                     Some(key) => Some(key_type(ir, module, objects, key)?),
                     None => None,
                 },
-                Slot::Bridge { declared, .. } => Some(method_type(module, ir, *declared)?),
+                Slot::Bridge { declared, .. } => Some(bridge_method_type(
+                    module,
+                    ir,
+                    ir.classes[id as usize].fq_name,
+                    declared,
+                )?),
                 Slot::AccessorBridge {
                     declared, setter, ..
                 } => Some(accessor_type(module, *declared, *setter)?),

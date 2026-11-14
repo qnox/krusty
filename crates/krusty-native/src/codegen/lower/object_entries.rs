@@ -89,13 +89,24 @@ impl FileLowering<'_> {
 
     pub(super) fn define_bridge(
         &mut self,
-        declared: krusty::ir::FunId,
+        declared: krusty::backend::class_tables::BridgeDeclaration,
         target_slot: Option<u32>,
         target: krusty::ir::FunId,
         id: FuncId,
     ) -> Result<(), Unsupported> {
-        let base = self.ir.functions[declared as usize].clone();
-        let carried = super::super::super::captures::carried_parameters(self.ir, declared);
+        let (carried, base_ret, base_name) = match declared {
+            krusty::backend::class_tables::BridgeDeclaration::Function(function) => {
+                let base = self.ir.functions[function as usize].clone();
+                (
+                    super::super::super::captures::carried_parameters(self.ir, function),
+                    base.ret,
+                    base.name,
+                )
+            }
+            krusty::backend::class_tables::BridgeDeclaration::Signature { parameters, result } => {
+                (parameters.into_vec(), result, "producer member".to_owned())
+            }
+        };
         let forwarded = super::super::super::captures::carried_parameters(self.ir, target);
         let forwarded_ret = self.ir.functions[target as usize].ret;
         // Through the slot where there is one, so a further subclass's override is reached
@@ -106,10 +117,10 @@ impl FileLowering<'_> {
             None => BridgeTarget::Function(target),
         };
         self.define_converting_bridge(
-            (&carried, base.ret),
+            (&carried, base_ret),
             (&forwarded, forwarded_ret),
             target,
-            &format!("bridge to `{}`", base.name),
+            &format!("bridge to `{base_name}`"),
             id,
         )
     }

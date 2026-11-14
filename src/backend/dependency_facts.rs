@@ -800,14 +800,17 @@ impl CheckedBackendCallables {
         classes: &super::class_tables::module_classes::ModuleClasses,
     ) -> Result<Self, DependencyFactError> {
         use super::class_tables::module_classes::ModuleMember;
-        use crate::fir::{ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget};
+        use crate::fir::ResolvedPropertyOverrideTarget;
         let mut facts = Self::freeze(ir, provider)?;
         let identities = classes
             .iter()
             .flat_map(|(_, class)| class.members.iter())
             .filter_map(|member| match member {
                 ModuleMember::Function {
-                    callable: ResolvedFunctionOverrideTarget::External(identity),
+                    callable:
+                        crate::backend::class_tables::module_slots::PlanKey::DependencyCallable(
+                            identity,
+                        ),
                     ..
                 }
                 | ModuleMember::Property {

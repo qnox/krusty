@@ -1627,9 +1627,10 @@ fn stdlib_calls_reach_header_declared_callees() {
     // now links to the declaration it inherits and declines there as a member function call. A
     // `for` loop over a range literal counts, and one over another progression declines at the
     // loop rather than at its protocol calls.
-    let expected =
-        if crate::kotlin_version::target() >= crate::kotlin_version::KotlinVersion::V2_4_20 {
-            vec![
+    let expected = if crate::kotlin_version::target()
+        >= crate::kotlin_version::KotlinVersion::V2_4_20
+    {
+        vec![
                 ("it calls `kotlin.ArithmeticException.<init>`)", 2),
                 ("it calls `kotlin.NumberFormatException.<init>`)", 4),
                 ("it calls `kotlin.UInt.<init>`)", 4),
@@ -1648,14 +1649,15 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it uses a call through a property accessor signature)", 40),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses an access of a generic property)", 2),
+                ("it uses a loop whose body is not a block)", 2),
+                ("its library serializes none)", 100),
                 (
-                    "it uses an object literal with a superclass constructor argument)",
+                    "its serialized declaration disagrees with the selected one: an object literal's supertype TypeName(\"kotlinx/cinterop/CValues\") is not a selected classifier)",
                     1,
                 ),
-                ("its library serializes none)", 100),
             ]
-        } else {
-            vec![
+    } else {
+        vec![
                 ("it calls `kotlin.ArithmeticException.<init>`)", 2),
                 ("it calls `kotlin.NumberFormatException.<init>`)", 4),
                 ("it calls `kotlin.UInt.<init>`)", 4),
@@ -1674,13 +1676,14 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it uses a call through a property accessor signature)", 40),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses an access of a generic property)", 2),
+                ("it uses a loop whose body is not a block)", 2),
+                ("its library serializes none)", 100),
                 (
-                    "it uses an object literal with a superclass constructor argument)",
+                    "its serialized declaration disagrees with the selected one: an object literal's supertype TypeName(\"kotlinx/cinterop/CValues\") is not a selected classifier)",
                     1,
                 ),
-                ("its library serializes none)", 100),
             ]
-        };
+    };
     assert_eq!(
         reached.into_iter().collect::<Vec<_>>(),
         expected

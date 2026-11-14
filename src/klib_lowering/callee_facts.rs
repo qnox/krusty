@@ -162,25 +162,22 @@ impl<'a> KlibCalleeFacts<'a> {
         super::type_evidence::ordinary_subtype(self.class_type_oracle, parameters, sub, sup)
     }
 
-    pub(super) fn same_type(&self, left: crate::types::Ty, right: crate::types::Ty) -> bool {
-        super::type_evidence::same_type(self.class_type_oracle, left, right)
-    }
-
-    /// Apply a receiver to the declaring classifier through the calling compilation's explicit
-    /// class evidence. Without that evidence, only the receiver's own classifier is known.
+    /// `sub` viewed as `owner`, through the same-compilation hierarchy evidence when there is some.
     pub(super) fn applied_supertype(
         &self,
-        receiver: crate::types::Ty,
+        sub: crate::types::Ty,
         owner: crate::types::TypeName,
     ) -> Option<crate::types::Ty> {
         match self.class_type_oracle {
-            Some(classes) => crate::assignable::applied_supertype(
-                classes,
-                receiver,
-                crate::types::Ty::obj_name(owner),
-            ),
-            None => (receiver.kotlin_class_internal() == Some(owner)).then_some(receiver),
+            Some(oracle) => {
+                crate::assignable::applied_supertype(oracle, sub, crate::types::Ty::obj_name(owner))
+            }
+            None => (sub.kotlin_class_internal() == Some(owner)).then_some(sub),
         }
+    }
+
+    pub(super) fn same_type(&self, left: crate::types::Ty, right: crate::types::Ty) -> bool {
+        super::type_evidence::same_type(self.class_type_oracle, left, right)
     }
 
     pub(super) fn constructor(
@@ -503,6 +500,47 @@ impl<'a> KlibCalleeFacts<'a> {
             }
             _ => Ok(None),
         }
+    }
+
+    /// Authenticate the two target-owned builtin property reads whose serialized accessor is
+    /// deliberately left outside the dependency-body unit. This keeps an exact `Array.size` or
+    /// `String.length` target edge as its ordinary checked property read; other target intrinsics
+    /// remain external calls and are not folded into common IR.
+    pub(crate) fn target_property_read(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+        operation: crate::libraries::CompilerIntrinsic,
+    ) -> Result<
+        Option<super::primitive_calls::CommonPrimitiveCall>,
+        super::decline::KlibBodyDeclineReason,
+    > {
+        use crate::libraries::CompilerIntrinsic::{ArraySize, StringLength};
+        if !matches!(operation, ArraySize | StringLength) {
+            return Ok(None);
+        }
+        let selected = match self.get(identity) {
+            Some(KlibCalleeFact::Ambiguous) => {
+                return Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
+                    "conflicting provider contracts for a target property getter".to_owned(),
+                ));
+            }
+            Some(KlibCalleeFact::Selected(callables)) => callables[0],
+            None => return Ok(None),
+        };
+        if selected.compiler_intrinsic() != Some(operation) {
+            return Ok(None);
+        }
+        let Some(primitive) = super::primitive_calls::authenticate(selected, bodies)? else {
+            return Ok(None);
+        };
+        if !matches!(
+            primitive.operation,
+            super::primitive_calls::CommonPrimitive::PropertyRead(found) if found == operation
+        ) {
+            return Ok(None);
+        }
+        Ok(Some(primitive))
     }
 
     /// Index the frozen views of a caller's selected dependency declarations.

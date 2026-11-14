@@ -22,17 +22,26 @@ pub(super) fn define_override_bridges(
     runtime: &mut Runtime,
 ) -> Result<(), Unsupported> {
     let ir = context.ir;
-    for &(bridge, function, ty) in &classes.bridges {
-        let OverrideBridge { class, member } = bridge;
+    for (bridge, &function, &ty) in &classes.bridges {
+        let OverrideBridge { class, member } = bridge.clone();
         let (declared, implemented, target_slot, direct) = match member {
             BridgedMember::Method {
                 declared,
                 target_slot,
                 target,
             } => {
-                let base = &ir.functions[declared as usize];
                 let implementation = &ir.functions[target as usize];
-                if base.params.len() != implementation.params.len() {
+                let (base_parameters, base_result) = match declared {
+                    krusty::backend::class_tables::BridgeDeclaration::Function(function) => {
+                        let base = &ir.functions[function as usize];
+                        (base.params.clone(), base.ret)
+                    }
+                    krusty::backend::class_tables::BridgeDeclaration::Signature {
+                        parameters,
+                        result,
+                    } => (parameters.into_vec(), result),
+                };
+                if base_parameters.len() != implementation.params.len() {
                     return Err(format!(
                         "an override bridge whose operands disagree with the member it overrides \
                          (`{}`)",
@@ -40,7 +49,7 @@ pub(super) fn define_override_bridges(
                     ));
                 }
                 (
-                    (base.params.clone(), base.ret),
+                    (base_parameters, base_result),
                     (implementation.params.clone(), implementation.ret),
                     target_slot,
                     Some(target),

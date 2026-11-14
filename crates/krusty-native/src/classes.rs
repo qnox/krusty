@@ -262,7 +262,7 @@ pub(super) enum Slot {
     FieldSetter { class: ClassId, field: u32 },
     /// See [`class_tables::Slot::Bridge`].
     Bridge {
-        declared: FunId,
+        declared: krusty::backend::class_tables::BridgeDeclaration,
         target_slot: Option<u32>,
         target: FunId,
     },
@@ -998,7 +998,7 @@ mod tests {
         assert_eq!(
             model.layouts[b as usize].vtable[base_slot as usize],
             Slot::Bridge {
-                declared: a_f,
+                declared: krusty::backend::class_tables::BridgeDeclaration::Function(a_f),
                 target_slot: Some(own_slot),
                 target: b_f,
             },

@@ -651,6 +651,9 @@ impl FileLowering<'_> {
                     .or_else(|| self.dependency_signatures.member_declaration(*function))
                     .map(member_identity)
             }
+            PlanKey::FileFunction(_) | PlanKey::FileGetter { .. } | PlanKey::FileSetter { .. } => {
+                None
+            }
             PlanKey::Getter(property) | PlanKey::Setter(property) => {
                 let declaration = self
                     .dependency_signatures

@@ -339,7 +339,7 @@ impl Backend for CraneliftBackend {
             .as_ref()
             .is_none_or(|(module, _)| module != file.module_name)
         {
-            let classes = file.classifiers.module().classes();
+            let classes = file.classifiers.classes();
             let plan = match krusty::backend::value_classes::ValueClassInventory::of_module_classes(
                 classes.iter().map(|(name, _)| name),
                 classes.carried_types(),
@@ -538,6 +538,7 @@ impl Backend for CraneliftBackend {
             lower::FileInput {
                 ir: &file.ir,
                 classifiers: &file.classifiers,
+                class_layouts: file.classifiers.classes(),
                 callables: &file.callables,
                 runtime_symbols,
                 abi_symbols: &mut state.abi_symbols,

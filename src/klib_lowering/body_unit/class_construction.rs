@@ -5,6 +5,21 @@ use crate::fx_hash::HashSet;
 use crate::ir::{IrClass, IrCtorArg, IrCtorParameterProvenance, IrExpr, IrField};
 
 impl<'u, 's> Linker<'u, 's> {
+    fn dependency_identity(
+        &self,
+        callable: crate::fir::ExternalCallableId,
+    ) -> Result<KlibDependencyCallable, KlibBodyDeclineReason> {
+        self.sources
+            .declarations
+            .external_callable(callable)
+            .and_then(|realization| realization.dependency_callable)
+            .ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch(
+                    "a materialized class member has no exact KLIB dependency identity".to_owned(),
+                )
+            })
+    }
+
     pub(super) fn materialize_class(
         &mut self,
         ir: &mut IrFile,
@@ -449,6 +464,7 @@ impl<'u, 's> Linker<'u, 's> {
             ));
         }
         let class = member.class;
+        let class_owner = member.contract.classifier;
         let declared = if function.body.is_some() {
             self.queue(
                 ir,
@@ -470,9 +486,119 @@ impl<'u, 's> Linker<'u, 's> {
             }
             declared
         };
+        let accessor = selected.accessor().cloned();
+        let property_getter = if let Some(accessor) = &accessor {
+            let property = self
+                .sources
+                .declarations
+                .external_property(accessor.property)
+                .ok_or_else(|| {
+                    KlibBodyDeclineReason::SignatureMismatch(
+                        "a dispatched property accessor has no exact property realization"
+                            .to_owned(),
+                    )
+                })?;
+            let role_matches = match accessor.role {
+                crate::libraries::KlibAccessorRole::Getter => property.getter == implementation,
+                crate::libraries::KlibAccessorRole::Setter => {
+                    property.setter == Some(implementation)
+                }
+            };
+            if !role_matches {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "a dispatched property accessor changed its exact getter or setter identity"
+                        .to_owned(),
+                ));
+            }
+            Some(self.dependency_identity(property.getter)?)
+        } else {
+            None
+        };
+        let property_setter = if let Some(accessor) = &accessor {
+            let property = self
+                .sources
+                .declarations
+                .external_property(accessor.property)
+                .expect("the exact property was validated above");
+            property
+                .setter
+                .map(|setter| self.dependency_identity(setter))
+                .transpose()?
+        } else {
+            None
+        };
+        let property_overrides = if let Some(implementation_accessor) = &accessor {
+            let implementation_role = implementation_accessor.role;
+            edges
+                .iter()
+                .filter_map(|(declaration, target, owner, interface)| {
+                    let accessor = declaration.accessor()?;
+                    (accessor.role == implementation_role).then_some((
+                        declaration,
+                        *target,
+                        *owner,
+                        *interface,
+                        accessor.property,
+                    ))
+                })
+                .map(|(_declaration, target, owner, interface, property)| {
+                    let realization = self
+                        .sources
+                        .declarations
+                        .external_property(property)
+                        .ok_or_else(|| {
+                            KlibBodyDeclineReason::SignatureMismatch(
+                                "an overridden property getter has no exact property realization"
+                                    .to_owned(),
+                            )
+                        })?;
+                    let role_matches = match implementation_role {
+                        crate::libraries::KlibAccessorRole::Getter => realization.getter == target,
+                        crate::libraries::KlibAccessorRole::Setter => {
+                            realization.setter == Some(target)
+                        }
+                    };
+                    if !role_matches {
+                        return Err(KlibBodyDeclineReason::SignatureMismatch(
+                            "an overridden property accessor changed its exact identity".to_owned(),
+                        ));
+                    }
+                    let overridden = self.dependency_identity(realization.getter)?;
+                    Ok(super::MaterializedClassPropertyOverride {
+                        overridden,
+                        overridden_owner: owner,
+                        overridden_is_interface: interface,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
+        let function_overrides = edges
+            .iter()
+            .filter(|(declaration, _, _, _)| declaration.accessor().is_none())
+            .map(
+                |(declaration, _, owner, interface)| super::MaterializedClassFunctionOverride {
+                    implementation: identity.clone(),
+                    overridden: declaration.identity().clone(),
+                    overridden_owner: *owner,
+                    overridden_is_interface: *interface,
+                    overridden_role: declaration.semantic_role(),
+                },
+            )
+            .collect();
+        self.materialized_class_members
+            .push(super::MaterializedClassMember {
+                owner: class_owner,
+                target: identity.clone(),
+                accessor: accessor.map(|accessor| accessor.role),
+                property_getter,
+                property_setter,
+                function_overrides,
+                property_overrides,
+            });
         ir.dependency_methods.insert(implementation, declared);
-        ir.classes[class as usize].methods.push(declared);
-        ir.note_class_method(class, declared);
+        attach_materialized_member(ir, class, declared);
         let implementation_owner = ir.classes[class as usize].fq_name;
         let (params, result) = (
             ir.functions[declared as usize].params.clone(),
@@ -503,7 +629,9 @@ impl<'u, 's> Linker<'u, 's> {
                 implementation_parameter_identities: selected.parameter_identities().to_vec(),
                 overridden_parameter_identities: declaration.parameter_identities().to_vec(),
                 implementation_result: result,
-                suspend: false,
+                suspend: selected
+                    .declaration_modifiers()
+                    .is_some_and(|modifiers| modifiers.is_suspend),
                 has_kotlin_superclass_override: false,
                 depth: 0,
             });
@@ -527,21 +655,10 @@ fn secondary_delegation(
             default_masks: Vec::new(),
         });
     };
-    // A materialized superclass without a primary constructor reaches the secondary one declaring
-    // the selected parameters; Kotlin declares no two constructors of a class with the same ones.
-    let ordinal = match superclass.map(|class| &ir.classes[class as usize]) {
-        Some(parent) if !parent.has_primary_ctor => parent
-            .secondary_ctors
-            .iter()
-            .position(|secondary| secondary.params == call.params)
-            .map(|index| u32::try_from(index + 1).expect("a constructor ordinal fits u32"))
-            .ok_or_else(|| {
-                KlibBodyDeclineReason::SignatureMismatch(
-                    "a superclass has no constructor with the delegation's parameters".to_owned(),
-                )
-            })?,
-        _ => 0,
-    };
+    let ordinal = superclass_constructor_ordinal(
+        superclass.map(|class| &ir.classes[class as usize]),
+        &call.params,
+    )?;
     Ok(crate::ir::CtorDelegateTarget::Super {
         owner: call.owner,
         target_params: call.params.clone(),
@@ -592,6 +709,41 @@ fn materialized_secondary(
         vc_params: false,
         param_checks: vec![None; params.len()],
         params,
+    }
+}
+
+/// The ordinal of the constructor a delegation with `params` reaches in a materialized superclass.
+/// A superclass without a primary constructor is reached through the secondary one declaring the
+/// selected parameters; Kotlin declares no two constructors of a class with the same ones.
+pub(in super::super) fn superclass_constructor_ordinal(
+    superclass: Option<&IrClass>,
+    params: &[Ty],
+) -> Result<u32, KlibBodyDeclineReason> {
+    match superclass {
+        Some(parent) if !parent.has_primary_ctor => parent
+            .secondary_ctors
+            .iter()
+            .position(|secondary| secondary.params == params)
+            .map(|index| u32::try_from(index + 1).expect("a constructor ordinal fits u32"))
+            .ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch(
+                    "a superclass has no constructor with the delegation's parameters".to_owned(),
+                )
+            }),
+        _ => Ok(0),
+    }
+}
+
+/// Record a materialized receiver member once, including final methods that have no virtual slot.
+pub(super) fn attach_materialized_member(
+    ir: &mut IrFile,
+    class: crate::ir::ClassId,
+    function: FunId,
+) {
+    let declaration = &mut ir.classes[class as usize];
+    if !declaration.is_value && !declaration.methods.contains(&function) {
+        declaration.methods.push(function);
+        ir.note_class_method(class, function);
     }
 }
 
