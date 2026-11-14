@@ -2464,7 +2464,6 @@ unsignedTypes/inUnsignedDownTo.kt
 unsignedTypes/kt47716.kt
 unsignedTypes/unsignedRangeIterator.kt
 unsignedTypes/varargsOfUnsignedTypes.kt
-vararg/inlineClassArraysAsNamedArgumentInVararg.kt
 vararg/kt37715.kt
 vararg/referenceToContainsFromVarargParameter.kt
 vararg/spreadCopiesArray.kt
