@@ -10,9 +10,15 @@
 //! object links it by; one this object keeps to itself is recorded as such, and the later file
 //! declines where it would inherit it rather than name a symbol no object defines.
 
-use super::super::super::super::laid_out_classes::{LaidOutClass, ObjectFunction};
+use super::super::super::super::laid_out_classes::{
+    DependencyImplementation, LaidOutClass, ObjectFunction,
+};
 use super::super::objects::{constructor_parameters, secondary_constructor_parameters};
 use super::super::*;
+use krusty::backend::class_tables::module_slots::{PlanKey, PublishedClassSlots};
+use krusty::backend::class_tables::SlotKey;
+use krusty::backend::interface_identity::{member_identity, property_member_identity};
+use krusty::fir::ResolvedPropertyOverrideTarget;
 use krusty::fx_hash::HashSet;
 
 /// The entry points a later file's subclass of one class calls.
@@ -107,12 +113,103 @@ impl FileLowering<'_> {
         ordinal: u32,
     ) -> Result<(FuncId, Vec<Ty>), Unsupported> {
         let name = self.ir.classes[class as usize].fq_name();
+        let owner = self.ir.classes[class as usize].superclass;
+        if !self
+            .classifiers
+            .classifier(owner)
+            .is_some_and(|fact| fact.source)
+        {
+            return Err(declined!(
+                "a same-module superclass constructor lookup for non-source class `{}`",
+                owner.render()
+            ));
+        }
         let (entry, parameters) = self
             .laid_out_superclass(class)
             .and_then(|record| record.constructors.get(ordinal as usize).cloned().flatten())
             .ok_or_else(|| {
-                declined!("a superclass constructor of `{name}` its declaring file does not export")
+                declined!("a same-module superclass constructor of `{name}` its declaring file does not export")
             })?;
+        Ok((self.import_object_function(&entry)?, parameters))
+    }
+
+    /// Resolve a dependency superclass constructor only through the exact frozen selected
+    /// declaration. Ordinals alone are not a dependency identity.
+    pub(in super::super) fn dependency_super_constructor(
+        &mut self,
+        class: ClassId,
+        declaration: krusty::fir::ExternalCallableId,
+        selected_declared_parameters: &[Ty],
+    ) -> Result<(FuncId, Vec<Ty>), Unsupported> {
+        let name = self.ir.classes[class as usize].fq_name();
+        let fact = self.callables.callable(declaration).ok_or_else(|| {
+            declined!("a superclass constructor of `{name}` without its frozen declaration")
+        })?;
+        let owner = self.ir.classes[class as usize].superclass;
+        if self
+            .classifiers
+            .classifier(owner)
+            .is_some_and(|fact| fact.source)
+        {
+            return Err(declined!(
+                "a dependency superclass constructor lookup for source class `{}`",
+                owner.render()
+            ));
+        }
+        if !fact.is_constructor()
+            || fact.declaration_owner
+                != Some(krusty::types::SemanticCallableOwner::Classifier(owner))
+        {
+            return Err(declined!(
+                "a selected superclass constructor of `{name}` with a different owner or role"
+            ));
+        }
+        let identity = self
+            .callables
+            .declaration_identity(declaration)
+            .ok_or_else(|| {
+                declined!("a superclass constructor of `{name}` without KLIB identity")
+            })?;
+        let entry = self
+            .laid_out_superclass(class)
+            .and_then(|record| record.published_constructors.get(identity).cloned())
+            .ok_or_else(|| {
+                declined!("the selected superclass constructor of `{name}` has no published entry")
+            })?;
+        let parameters = fact
+            .declared_params
+            .as_deref()
+            .unwrap_or(fact.params.as_slice())
+            .to_vec();
+        if parameters.as_slice() != selected_declared_parameters
+            || fact.params.len() != parameters.len()
+            || fact.physical_params.len() != parameters.len()
+            || fact.physical_ret != Ty::Unit
+        {
+            return Err(declined!(
+                "the selected superclass constructor of `{name}` has a different declaration or physical frame"
+            ));
+        }
+        // The source declaration frame controls argument coercion; the provider's physical frame
+        // controls linkage. For `Base<T>(T)` selected as `Base<Int>`, the checked argument is Int,
+        // but the emitted constructor still receives the erased reference carrier for T.
+        let mut expected_parameters = Vec::with_capacity(fact.physical_params.len() + 1);
+        expected_parameters.push(Ty::obj_name(owner));
+        expected_parameters.extend(fact.physical_params.iter().copied());
+        let expected = self.signature_of(&expected_parameters, fact.physical_ret)?;
+        let ObjectFunction::Linked { signature, .. } = &entry else {
+            return Err(declined!(
+                "the selected superclass constructor of `{name}` is not linkable"
+            ));
+        };
+        if signature.call_conv != expected.call_conv
+            || signature.params != expected.params
+            || signature.returns != expected.returns
+        {
+            return Err(declined!(
+                "the selected superclass constructor of `{name}` has a different Native frame"
+            ));
+        }
         Ok((self.import_object_function(&entry)?, parameters))
     }
 
@@ -298,29 +395,287 @@ impl FileLowering<'_> {
             // A slot or interface number stays one: the subclass reads its own table there, which
             // holds its override where it has one.
             let dependency_implementations = self.dependency_implementations(class)?;
-            records.push((
-                self.ir.classes[class as usize].fq_name,
-                LaidOutClass {
-                    table,
-                    descriptor: self
-                        .module
-                        .declarations()
-                        .get_data_decl(self.classes[class as usize].descriptor)
-                        .name
-                        .clone()
-                        .ok_or("an extended class with an anonymous descriptor")?,
-                    fields_end: layout.fields_end,
-                    reference_offsets: layout.reference_offsets,
-                    vtable,
-                    interface_bodies,
-                    constructors,
-                    methods,
-                    activation,
-                    dependency_implementations,
-                },
-            ));
+            let class_identity = self
+                .classifiers
+                .classifier(self.ir.classes[class as usize].fq_name)
+                .and_then(|fact| fact.klib_identity.clone());
+            if let (Some(published), Some(classifier)) = (
+                self.dependency_signatures.classifier(class),
+                class_identity.as_ref(),
+            ) {
+                if published != classifier {
+                    return Err(
+                        "a Native class layout identity differs from its exact classifier fact"
+                            .into(),
+                    );
+                }
+            }
+            let mut record = LaidOutClass {
+                class_identity,
+                published_layout: None,
+                table,
+                descriptor: self
+                    .module
+                    .declarations()
+                    .get_data_decl(self.classes[class as usize].descriptor)
+                    .name
+                    .clone()
+                    .ok_or("an extended class with an anonymous descriptor")?,
+                fields_end: layout.fields_end,
+                reference_offsets: layout.reference_offsets,
+                vtable,
+                interface_bodies,
+                constructors,
+                methods,
+                activation,
+                dependency_implementations,
+                published_constructors: HashMap::default(),
+                published_methods: HashMap::default(),
+            };
+            if self.unit_kind == krusty::backend::CheckedIrUnitKind::Source {
+                record.published_layout = self.published_native_layout(class, &record)?;
+            }
+            records.push((self.ir.classes[class as usize].fq_name, record));
         }
         Ok(records)
+    }
+}
+
+impl FileLowering<'_> {
+    /// Create the Ty-free physical export record for one exact source classifier. The
+    /// declaration identities and constructor ordinals are captured while this file's frozen
+    /// provider view is still live; consumers rebind them against their own view.
+    fn published_native_layout(
+        &self,
+        class: ClassId,
+        record: &LaidOutClass,
+    ) -> Result<
+        Option<super::super::super::super::laid_out_classes::PublishedNativeClassLayout>,
+        Unsupported,
+    > {
+        let Some(identity) = record.class_identity.clone() else {
+            return Ok(None);
+        };
+        let linked = |function: &ObjectFunction| match function {
+            ObjectFunction::Linked { .. } => Some(function.clone()),
+            ObjectFunction::Local(_) => None,
+        };
+        let mut declaration_slots = krusty::fx_hash::HashMap::default();
+        for (key, &slot) in &self.model.layout(class).slots {
+            let bytes = match key {
+                SlotKey::Any(_) => None,
+                SlotKey::Function(function) => {
+                    self.dependency_signatures.member_slot_identity(*function)
+                }
+                SlotKey::Getter(property) | SlotKey::Setter(property) => {
+                    let setter = matches!(key, SlotKey::Setter(_));
+                    let declaration = match property {
+                        ResolvedPropertyOverrideTarget::Module(property) => {
+                            self.dependency_signatures.property_declaration(*property)
+                        }
+                        ResolvedPropertyOverrideTarget::External(getter) => {
+                            self.callables.declaration_identity(*getter)
+                        }
+                    };
+                    declaration
+                        .and_then(|declaration| property_member_identity(declaration, setter))
+                }
+            };
+            if let Some(bytes) = bytes {
+                match declaration_slots.insert(bytes, slot) {
+                    Some(previous) if previous != slot => {
+                        return Err(
+                            "one Native class declaration occupies conflicting published slots"
+                                .into(),
+                        )
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut interfaces = Vec::with_capacity(record.table.interfaces.len());
+        for interface in &record.table.interfaces {
+            let Some(identity) = self
+                .classifiers
+                .classifier(*interface)
+                .and_then(|fact| fact.klib_identity.clone())
+            else {
+                return Ok(None);
+            };
+            interfaces.push(identity);
+        }
+
+        let mut interface_entries = krusty::fx_hash::HashMap::default();
+        for (&number, &entry) in &record.table.interface_entries {
+            let keys = self
+                .slot_plan
+                .interface_member_keys(number)
+                .ok_or("a Native interface entry outside the current module plan")?;
+            let mut recorded = false;
+            for key in keys {
+                let Some(identity) = self.interface_plan_identity(key) else {
+                    continue;
+                };
+                match interface_entries.insert(identity, entry) {
+                    Some(previous) if previous != entry => {
+                        return Err(
+                            "one Native interface identity occupies conflicting published entries"
+                                .into(),
+                        )
+                    }
+                    _ => recorded = true,
+                }
+            }
+            if !recorded {
+                return Ok(None);
+            }
+        }
+
+        let mut interface_bodies = krusty::fx_hash::HashMap::default();
+        for (&number, function) in &record.interface_bodies {
+            let keys = self
+                .slot_plan
+                .interface_member_keys(number)
+                .ok_or("a Native interface body outside the current module plan")?;
+            let Some(function) = linked(function) else {
+                return Ok(None);
+            };
+            let mut recorded = false;
+            for key in keys {
+                let Some(identity) = self.interface_plan_identity(key) else {
+                    continue;
+                };
+                interface_bodies.insert(identity, function.clone());
+                recorded = true;
+            }
+            if !recorded {
+                return Ok(None);
+            }
+        }
+
+        let mut constructors = krusty::fx_hash::HashMap::default();
+        let Some(entries) = self.extension_entries.get(&class) else {
+            return Ok(None);
+        };
+        for (exported, declaration) in self.dependency_signatures.constructor_declarations() {
+            if exported.class != class {
+                continue;
+            }
+            let ordinal = exported.secondary.map_or(0, |secondary| secondary + 1);
+            let Some(Some(entry)) = entries.constructors.get(ordinal) else {
+                continue;
+            };
+            if constructors.contains_key(declaration) {
+                return Err(
+                    "one Native constructor identity has conflicting physical entries".into(),
+                );
+            }
+            let Some(function) = linked(&self.object_function(*entry)) else {
+                return Ok(None);
+            };
+            constructors.insert(declaration.clone(), function);
+        }
+
+        let mut methods = krusty::fx_hash::HashMap::default();
+        for (&callable, (function, _, _)) in &record.methods {
+            let Some(fun_id) =
+                self.ir
+                    .checked_callable_functions
+                    .iter()
+                    .find_map(|(candidate, &function_id)| {
+                        (*candidate == callable).then_some(function_id)
+                    })
+            else {
+                continue;
+            };
+            let Some(identity) = self.dependency_signatures.member_declaration(fun_id) else {
+                continue;
+            };
+            if let Some(function) = linked(function) {
+                methods.insert(identity.clone(), function);
+            }
+        }
+
+        let mut dependency_implementations = Vec::new();
+        for (identity, implementation) in &record.dependency_implementations {
+            let function = match implementation {
+                DependencyImplementation::Slot(slot) => record.vtable.get(*slot as usize).cloned(),
+                DependencyImplementation::Interface(number) => self
+                    .extension_tables
+                    .get(&class)
+                    .and_then(|(_, itable)| itable.get(*number as usize))
+                    .map(|function| self.object_function(*function)),
+                DependencyImplementation::Function(function) => Some(function.clone()),
+                DependencyImplementation::Bridge { .. } => self
+                    .published_dependency_bridges
+                    .get(&(class, identity.clone()))
+                    .cloned(),
+            };
+            let Some(function) = function else {
+                return Ok(None);
+            };
+            let Some(function) = linked(&function) else {
+                return Ok(None);
+            };
+            dependency_implementations.push((identity.clone(), function));
+        }
+
+        let Some(vtable) = record.vtable.iter().map(linked).collect::<Option<Vec<_>>>() else {
+            return Ok(None);
+        };
+        let Some(activation) = linked(&record.activation) else {
+            return Ok(None);
+        };
+
+        Ok(Some(
+            super::super::super::super::laid_out_classes::PublishedNativeClassLayout {
+                identity,
+                descriptor: record.descriptor.clone(),
+                fields_end: record.fields_end,
+                reference_offsets: record.reference_offsets.clone(),
+                slots: PublishedClassSlots {
+                    count: record.table.slots,
+                    declarations: declaration_slots,
+                },
+                interfaces,
+                interface_entries,
+                vtable,
+                interface_bodies,
+                constructors,
+                methods,
+                activation,
+                dependency_implementations,
+            },
+        ))
+    }
+
+    fn interface_plan_identity(&self, key: PlanKey) -> Option<Vec<u8>> {
+        match key {
+            PlanKey::Callable(callable) => {
+                let function = self.ir.checked_callable_functions.get(&callable)?;
+                self.dependency_signatures
+                    .interface_member(*function)
+                    .or_else(|| self.dependency_signatures.member_declaration(*function))
+                    .map(member_identity)
+            }
+            PlanKey::Getter(property) | PlanKey::Setter(property) => {
+                let declaration = self
+                    .dependency_signatures
+                    .interface_property(property)
+                    .or_else(|| self.dependency_signatures.property_declaration(property))?;
+                property_member_identity(declaration, matches!(key, PlanKey::Setter(_)))
+            }
+            PlanKey::DependencyCallable(callable) => self
+                .callables
+                .declaration_identity(callable)
+                .map(member_identity),
+            PlanKey::DependencyGetter(getter) | PlanKey::DependencySetter(getter) => {
+                let declaration = self.callables.declaration_identity(getter)?;
+                property_member_identity(declaration, matches!(key, PlanKey::DependencySetter(_)))
+            }
+            PlanKey::Forwarder { .. } => None,
+        }
     }
 }
 

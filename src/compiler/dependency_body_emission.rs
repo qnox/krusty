@@ -136,14 +136,24 @@ pub(super) fn emit_dependencies<B: Backend>(
         &emitted_roots::OrdinaryRootCapabilities {
             realizes_intrinsic: &target_realizes_intrinsic,
             represents_classifier: &target_represents_classifier,
-            retains_initializer: &|identity| {
-                matches!(
-                    support_state.emitted.get(identity),
-                    Some(
-                        PublishedDependency::AllocatingConstructor
-                            | PublishedDependency::ConstructorInitializer(_)
-                    )
-                )
+            retains_initializer: &|selected| match support_state.emitted.get(selected.identity()) {
+                Some(PublishedDependency::AllocatingConstructor) => Ok(true),
+                Some(PublishedDependency::ConstructorInitializer(identity)) => {
+                    if selected.class_contract().is_some_and(|class| {
+                        class.module == identity.module
+                            && class.signature == identity.signature
+                            && class.module == selected.identity().module
+                            && selected.declaration_owner()
+                                == Some(crate::types::SemanticCallableOwner::Classifier(
+                                    class.classifier,
+                                ))
+                    }) {
+                        Ok(true)
+                    } else {
+                        Err("a retained superclass initializer changed its canonical class contract")
+                    }
+                }
+                _ => Ok(false),
             },
         },
     ) {
@@ -649,6 +659,32 @@ fn prepare_bodyless_externals(
         if !visited.insert(identity.clone()) {
             continue;
         }
+        if externals
+            .get(&identity)
+            .and_then(|external| external.constructor_initializer_target())
+            .is_some()
+        {
+            match capabilities
+                .callees
+                .authenticates_retained_constructor(&identity, bodies)
+            {
+                Ok(true) => continue,
+                Ok(false) => {
+                    diags.error(
+                        Span::new(0, 0),
+                        "an emitted initializer lost its constructor declaration",
+                    );
+                    return false;
+                }
+                Err(reason) => {
+                    diags.error(
+                        Span::new(0, 0),
+                        format!("invalid retained KLIB constructor declaration: {reason:?}"),
+                    );
+                    return false;
+                }
+            }
+        }
         let constructor = match capabilities
             .callees
             .authenticates_constructor(&identity, bodies)
@@ -662,14 +698,6 @@ fn prepare_bodyless_externals(
                 return false;
             }
         };
-        if constructor
-            && externals
-                .get(&identity)
-                .and_then(|external| external.constructor_initializer_target())
-                .is_some()
-        {
-            continue;
-        }
         let edges = if constructor {
             match capabilities
                 .callees

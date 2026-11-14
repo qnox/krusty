@@ -81,10 +81,39 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Option<Result<Option<Value>, Unsupported>> {
         let access = self.file.callables.dependency_accessor(operation)?;
         let realization = access.callable;
+        let callee = access.callee();
+        if access.dispatches() {
+            let property_target = match operation {
+                IrCheckedOperation::ExternalPropertyRead { target, .. }
+                | IrCheckedOperation::ExternalPropertyWrite { target, .. } => *target,
+                _ => return Some(Err(declined!("a checked dependency property operation"))),
+            };
+            let Some(property) = self.file.callables.property(property_target) else {
+                return Some(Err(declined!("a selected dependency property identity")));
+            };
+            let key = if access.writes() {
+                super::PlanKey::DependencySetter(property.getter)
+            } else {
+                super::PlanKey::DependencyGetter(property.getter)
+            };
+            if let Some(result) = self.published_dependency_member_call(
+                super::super::dispatch::PublishedDependencyCall {
+                    target: access.target,
+                    key,
+                    slot_identity: property.getter,
+                    fact: realization.clone(),
+                    callee: callee.clone(),
+                    receiver: access.receiver,
+                    args: access.arguments,
+                },
+            ) {
+                return Some(result);
+            }
+        }
         let identity = realization.dependency_callable.as_ref()?;
         let export = self.file.dependency_symbols.get(identity)?;
         Some((|| {
-            let callee = access.callee().map_err(Unsupported::from)?;
+            let callee = callee.map_err(Unsupported::from)?;
             let selected = ExportedDeclaration {
                 realization,
                 export,
