@@ -149,6 +149,19 @@ const SUITE: Suite = Suite {
 };
 
 #[test]
+fn class_sam_callable_references_and_nested_explicit_sam_match_whole_listings() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/jvm/samCallableReferenceDeclarations");
+    for name in [
+        "callableRefGenericSamInterface.kt",
+        "callableRefSpecializedSamInterface.kt",
+        "kt16650.kt",
+    ] {
+        SUITE.assert_owned_case(&root.join(name));
+    }
+}
+
+#[test]
 fn krusty_reproduces_kotlincs_bytecode_listing_corpus() {
     SUITE.assert_krusty_ratchet();
 }
