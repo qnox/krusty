@@ -17,7 +17,7 @@
 //! Only the compiler-provided freestanding headers are used (`stdint.h`, `stddef.h`, `stdbool.h`),
 //! which C11 §4 guarantees exist without a hosted implementation.
 //!
-//! The runtime is fifteen translation units over four headers:
+//! The runtime is sixteen translation units over four headers:
 //!
 //! * `SYS_HEADER` (`krusty_sys.h`) is the kernel interface — the syscall shim per architecture
 //!   and the page-mapping primitives over it. It is the whole of the target-specific surface, a
@@ -28,6 +28,8 @@
 //!   is not exposed here, because nothing outside the runtime may include it.
 //! * `krusty_rt.c` is the object model, strings and string builders, boxing, class literals,
 //!   `lazy`, `Delegates.notNull`, pairs and ranges.
+//! * `krusty_unsigned_arrays.c` is unsigned array value-class identity and its retained signed
+//!   storage, equality, content hashing and rendering.
 //! * `krusty_collections.c` is lists, and how any `Iterable` is walked; `krusty_maps.c` is maps
 //!   and sets, and the companions and `Unit` the runtime keeps as static objects.
 //! * `krusty_classes.c` is identity, equality and hashing of any value, what `is` and a cast ask,
