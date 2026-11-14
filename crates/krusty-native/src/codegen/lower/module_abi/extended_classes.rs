@@ -10,13 +10,14 @@
 //! object links it by; one this object keeps to itself is recorded as such, and the later file
 //! declines where it would inherit it rather than name a symbol no object defines.
 
-use super::super::super::super::laid_out_classes::{LaidOutClass, ObjectFunction};
+use super::super::super::super::laid_out_classes::{
+    DependencyImplementation, LaidOutClass, ObjectFunction,
+};
 use super::super::objects::{constructor_parameters, secondary_constructor_parameters};
 use super::super::*;
 use krusty::backend::class_tables::module_slots::{PlanKey, PublishedClassSlots};
 use krusty::backend::class_tables::SlotKey;
 use krusty::backend::interface_identity::{member_identity, property_member_identity};
-use krusty::backend::KlibDependencyCallable;
 use krusty::fir::ResolvedPropertyOverrideTarget;
 use krusty::fx_hash::HashSet;
 

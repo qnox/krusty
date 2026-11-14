@@ -79,7 +79,7 @@ use krusty::ir::{
 use krusty::types::{Ty, TypeName};
 
 use super::super::classes::{self as model, AnyMember, ClassModel, Slot};
-use super::super::laid_out_classes::{LaidOutClass, LaidOutClasses};
+use super::super::laid_out_classes::{LaidOutClass, LaidOutClasses, ObjectFunction};
 use super::super::symbols::Symbols;
 use super::{Entry, BOX_RESULT_FRAME, PROGRAM_ENTRY};
 use crate::NativeTarget;
@@ -255,7 +255,6 @@ pub fn lower_file(
         ir,
         classifiers,
         callables,
-        dependency_signatures,
         dependency_properties,
         runtime_symbols,
         abi_symbols,
@@ -322,7 +321,6 @@ pub fn lower_file(
         source,
         classifiers,
         callables,
-        dependency_signatures,
         inert_singleton_bindings,
         values: value_classes,
         slot_plan,
@@ -500,7 +498,6 @@ struct FileLowering<'a> {
     source: krusty::fir::SourceFileId,
     classifiers: &'a dyn krusty::backend::BackendClassifierSource,
     callables: &'a krusty::backend::CheckedBackendCallables,
-    dependency_signatures: &'a krusty::backend::DependencyExportSignatures,
     /// Staged bound singleton accesses proven inert by the exact checked call and export effect.
     inert_singleton_bindings: krusty::fx_hash::HashSet<krusty::ir::ExprId>,
     /// Which classifiers are value classes, and which occurrences travel unboxed.
@@ -522,8 +519,7 @@ struct FileLowering<'a> {
     /// What the vtable and interface table of each class in `extended` hold.
     extension_tables: HashMap<krusty::ir::ClassId, (Vec<FuncId>, Vec<FuncId>)>,
     /// Linkable Native bridge bodies recorded by exact dependency-interface member identity.
-    published_dependency_bridges:
-        HashMap<(krusty::ir::ClassId, Vec<u8>), super::laid_out_classes::ObjectFunction>,
+    published_dependency_bridges: HashMap<(krusty::ir::ClassId, Vec<u8>), ObjectFunction>,
     module: &'a mut ObjectModule,
     /// Symbols of this file's classes and functions.
     symbols: Symbols,
