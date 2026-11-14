@@ -11,7 +11,7 @@ krusty = { path = "../.." }
 # Reading the relocatable ELF objects krusty's linker takes in (the prebuilt runtime's and the
 # program's). Only the ELF reader: the linker writes its executable by hand, and reads no other
 # object format, archive or compressed section. The code generator brings its own dependency.
-object = { version = "0.40.0", default-features = false, features = ["read_core", "elf", "std"] }
+object = { version = "0.41.0", default-features = false, features = ["read_core", "elf", "std"] }
 cranelift-codegen = { version = "0.137", features = ["x86", "arm64", "riscv64"] }
 cranelift-frontend = "0.137"
 cranelift-module = "0.137"
@@ -23,4 +23,4 @@ krusty = { path = "../..", features = ["test-support"] }
 # The linker's unit tests build their input objects with `object`'s ELF writer, so each relocation
 # is exercised on every architecture without a C toolchain. Its extra dependencies are already in
 # the tree (via `zip`).
-object = { version = "0.40.0", default-features = false, features = ["write_core", "elf", "std"] }
+object = { version = "0.41.0", default-features = false, features = ["write_core", "elf", "std"] }
