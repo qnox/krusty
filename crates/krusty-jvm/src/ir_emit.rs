@@ -2903,6 +2903,19 @@ fn emit_interface_class(
             continue;
         }
         let f = &ir.functions[fid as usize];
+        if !bodies_on_interface
+            && default_impls::emit_annotation_carrier(
+                ir,
+                fid,
+                c.fq_name,
+                facade,
+                &mut default_impls,
+                env,
+                opts,
+            )
+        {
+            continue;
+        }
         // A STATIC member of an interface is not a default method: a lambda synthetic
         // (`f$lambda$0`) is a private static helper that stays where it is. Moving it to the holder
         // prepended a receiver its body never reads, and published it abstract on the interface —
@@ -2942,12 +2955,7 @@ fn emit_interface_class(
                 && !ir.inline_only_fns.contains(&fid)
             {
                 jd_bridge_fids.push(fid);
-                let di = default_impls.get_or_insert_with(|| {
-                    let mut w =
-                        new_writer(&format!("{fq_name}$DefaultImpls"), "java/lang/Object", opts);
-                    w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
-                    w
-                });
+                let di = default_impls::holder(&mut default_impls, &fq_name, opts);
                 interface_compatibility::emit_own_member_forward(
                     ir,
                     c,
@@ -2962,12 +2970,7 @@ fn emit_interface_class(
             if f.body.is_some() && !f.is_static {
                 // `disable`: the body moves to the holder as a receiver-first static, and the
                 // interface keeps only the abstract declaration emitted below.
-                let di = default_impls.get_or_insert_with(|| {
-                    let mut w =
-                        new_writer(&format!("{fq_name}$DefaultImpls"), "java/lang/Object", opts);
-                    w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
-                    w
-                });
+                let di = default_impls::holder(&mut default_impls, &fq_name, opts);
                 emit_holder_method(ir, fid, c.fq_name, &fq_name, facade, di, env);
             }
             // A private member has NO interface-side declaration under `disable`: kotlinc writes
@@ -3004,12 +3007,7 @@ fn emit_interface_class(
             // would publish a holder class the build says does not exist — a downstream compilation
             // resolving against it links to a class kotlinc would never have produced.
             if emits_default_impls {
-                let di = default_impls.get_or_insert_with(|| {
-                    let mut w =
-                        new_writer(&format!("{fq_name}$DefaultImpls"), "java/lang/Object", opts);
-                    w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
-                    w
-                });
+                let di = default_impls::holder(&mut default_impls, &fq_name, opts);
                 if enable_compat {
                     // The interface owns the real default application; the holder's copy is a
                     // thin synthetic forward to it (kotlinc's `enable` shape).
