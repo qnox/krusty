@@ -180,6 +180,23 @@ impl<'a> KlibCalleeFacts<'a> {
         super::type_evidence::same_type(self.class_type_oracle, left, right)
     }
 
+    /// Apply a receiver to the declaring classifier through the calling compilation's explicit
+    /// class evidence. Without that evidence, only the receiver's own classifier is known.
+    pub(super) fn applied_supertype(
+        &self,
+        receiver: crate::types::Ty,
+        owner: crate::types::TypeName,
+    ) -> Option<crate::types::Ty> {
+        match self.class_type_oracle {
+            Some(classes) => crate::assignable::applied_supertype(
+                classes,
+                receiver,
+                crate::types::Ty::obj_name(owner),
+            ),
+            None => (receiver.kotlin_class_internal() == Some(owner)).then_some(receiver),
+        }
+    }
+
     pub(super) fn constructor(
         &self,
         identity: &KlibDependencyCallable,

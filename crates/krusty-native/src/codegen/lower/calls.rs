@@ -430,15 +430,20 @@ impl BodyLowering<'_, '_, '_> {
                 // the exact compiler intrinsic the source-form operation uses.
                 // A member's operation travels as its realization; a package function's as its
                 // intrinsic. Either is the same exact provider fact.
+                let intrinsic = realization
+                    .compiler_intrinsic
+                    .or(realization.member_realization.compiler_intrinsic())
+                    .or_else(|| self.unsigned_array_carrier_access(realization));
                 if let Some(realized) = self.compiler_intrinsic_call(
                     site,
-                    realization
-                        .compiler_intrinsic
-                        .or(realization.member_realization.compiler_intrinsic())
-                        .or_else(|| self.unsigned_array_carrier_access(realization)),
+                    intrinsic,
                     dispatch_receiver,
                     args,
                     super::compiler_intrinsics::DeclaredOperands {
+                        operation: super::super::dependency_intrinsics::declaration_operation(
+                            intrinsic,
+                            realization.semantic_role,
+                        ),
                         receiver: match realization.declaration_owner {
                             Some(krusty::types::SemanticCallableOwner::Classifier(owner)) => {
                                 Some(Ty::obj_name(owner))
