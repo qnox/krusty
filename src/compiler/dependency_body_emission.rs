@@ -412,7 +412,11 @@ pub(super) fn emit_dependencies<B: Backend>(
             }
             published.push((identity.clone(), PublishedDependency::AllocatingConstructor));
         }
-        let mut callables = match CheckedBackendCallables::freeze(unit.ir(), platform) {
+        let mut callables = match CheckedBackendCallables::freeze_with_class_declarations(
+            unit.ir(),
+            platform,
+            module_facts.classes(),
+        ) {
             Ok(callables) => callables,
             Err(error) => {
                 diags.error(

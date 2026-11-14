@@ -5,7 +5,7 @@
 //! deliberately read-only: it records metadata and the exact public declaration identities before
 //! target representation mutates the file, without cloning or re-resolving the program.
 
-use crate::fx_hash::HashMap;
+use crate::fx_hash::{HashMap, HashSet};
 
 use super::{Artifact, CheckedIrFile, CompilationTarget};
 use crate::diag::DiagSink;
@@ -16,8 +16,8 @@ pub use crate::libraries::KlibDependencyCallable;
 ///
 /// KLIB metadata also describes declarations which intentionally have no callable target: an
 /// `@InlineOnly` declaration is a template consumed by common lowering, while an external or
-/// abstract declaration has no body in this IR unit. Those declarations remain in the library's
-/// semantic metadata, but recording either one in [`DependencyExportSignatures`] would promise a
+/// abstract declaration has no body in this IR unit. Those declarations retain their declaration
+/// identities, but recording either one as an executable callable export would promise a
 /// physical definition which no backend can emit.
 pub(crate) fn has_standalone_dependency_code(ir: &crate::ir::IrFile, callable: FunId) -> bool {
     ir.functions
@@ -196,9 +196,10 @@ impl SingletonMemberReceiver {
 pub struct DependencyExportSignatures {
     classifiers: HashMap<crate::ir::ClassId, crate::libraries::KlibClassIdentity>,
     callables: HashMap<FunId, KlibDependencyCallable>,
-    /// Every visible function an interface of this file declares, abstract ones included: the
-    /// identity a dependent module's implementation of the member is recorded under.
-    interface_members: HashMap<FunId, KlibDependencyCallable>,
+    /// Declaration identities of visible non-static members, including bodyless abstract ones.
+    member_declarations: HashMap<FunId, KlibDependencyCallable>,
+    /// The interface subset whose implementations participate in interface dispatch.
+    interface_members: HashSet<FunId>,
     interface_properties: HashMap<crate::fir::PropertyId, KlibDependencyCallable>,
     /// Every property of this file another module may name, by its getter's published identity,
     /// whether or not the getter has code of its own: what a reference to the property is equal
@@ -299,7 +300,15 @@ impl DependencyExportSignatures {
     /// The published identity of a function an interface of this file declares, with or without
     /// a body: what another module's class implementing it names it by.
     pub fn interface_member(&self, function: FunId) -> Option<&KlibDependencyCallable> {
-        self.interface_members.get(&function)
+        self.interface_members
+            .contains(&function)
+            .then(|| self.member_declarations.get(&function))
+            .flatten()
+    }
+
+    /// A member declaration identity, independently of executable target code.
+    pub fn member_declaration(&self, function: FunId) -> Option<&KlibDependencyCallable> {
+        self.member_declarations.get(&function)
     }
 
     /// The published getter identity of a property an interface of this file declares, with or
@@ -387,15 +396,27 @@ impl DependencyExportSignatures {
         );
     }
 
+    pub(crate) fn record_member_declaration(
+        &mut self,
+        function: FunId,
+        identity: KlibDependencyCallable,
+    ) {
+        let previous = self.member_declarations.insert(function, identity);
+        assert!(
+            previous.is_none(),
+            "one member publishes one KLIB declaration identity"
+        );
+    }
+
     pub(crate) fn record_interface_member(
         &mut self,
         function: FunId,
         identity: KlibDependencyCallable,
     ) {
-        let previous = self.interface_members.insert(function, identity);
+        self.record_member_declaration(function, identity);
         assert!(
-            previous.is_none(),
-            "one interface member cannot publish two KLIB declaration identities"
+            self.interface_members.insert(function),
+            "one interface member is recorded once"
         );
     }
 

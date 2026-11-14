@@ -52,6 +52,8 @@ pub(super) struct LaidOutClass {
     pub(super) class_identity: Option<KlibClassIdentity>,
     pub(super) structure: u32,
     pub(super) table_type: u32,
+    /// Exact published callable/accessor identities at physical class slots.
+    pub(super) declaration_slots: HashMap<Vec<u8>, u32>,
     /// Its struct's fields after the dispatch table, which a subclass's struct begins with.
     pub(super) fields: Vec<FieldType>,
     /// The base no file declares that its struct extends, whose fields lead `fields`.
@@ -298,13 +300,23 @@ impl LaidOutClasses {
         &self,
         identity: &KlibClassIdentity,
     ) -> Result<Option<u32>, String> {
+        Ok(self
+            .published_layout(identity)?
+            .map(|layout| layout.structure))
+    }
+
+    /// The producer's physical inventory, selected only by its frozen class identity.
+    pub(super) fn published_layout(
+        &self,
+        identity: &KlibClassIdentity,
+    ) -> Result<Option<&LaidOutClass>, String> {
         let Some(layout) = self.published_source.get(identity) else {
             return Ok(None);
         };
         if let Some(reason) = &layout.refusal {
             return Err(reason.clone());
         }
-        Ok(Some(layout.structure))
+        Ok(Some(layout))
     }
 }
 
