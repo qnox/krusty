@@ -1,8 +1,10 @@
-//! The class `Signature` and `@Metadata` a `-Xlambdas=class` Kotlin function lambda carries.
+//! The class `Signature` and `@Metadata` a source lambda class carries, including a SAM class
+//! whose implementation is the lambda body.
 //!
 //! `Lambda.toString()` asks kotlin-reflect to read that record and render the function type.
-//! Without it, reflection falls back to the raw `FunctionN` interface. The record names the
-//! class's typed `invoke`, which the class declares beside the erased `FunctionN.invoke` bridge.
+//! Without it, reflection falls back to the raw function/SAM interface. The record names the
+//! class's typed lambda method (`invoke`, or the selected SAM method), which the class declares
+//! beside any erased bridge.
 
 use krusty::ir::type_reflection::type_parameters_named_by;
 use krusty::ir::{IrFile, IrParameterRole, IrTypeParameter};

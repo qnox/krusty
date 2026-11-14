@@ -664,6 +664,7 @@ pub(super) fn realize(
                 has_receiver: target.has_receiver,
                 suspend: false,
             };
+            let lambda_origin = ir.lambda_origins.get(&fid).cloned();
             match class_shape(ir, fid, every_emitted_root, None, false, None) {
                 Ok((site, body, captures)) => realize_class(
                     ir,
@@ -676,7 +677,7 @@ pub(super) fn realize(
                         // This source lambda's implementation is emitted directly as the SAM
                         // method. Preserve its lambda metadata even though the class extends
                         // Object rather than Kotlin's `Lambda` runtime base.
-                        lambda_origin: ir.lambda_origins.get(&fid).cloned(),
+                        lambda_origin,
                         sam: Some(target),
                         ..ClassRole::default()
                     },
