@@ -77,17 +77,25 @@ impl FileLowering<'_> {
         identity: &krusty::libraries::KlibDependencyCallable,
     ) -> u32 {
         let bytes = krusty::backend::interface_identity::member_identity(identity);
-        if let Some((number, _)) = self
+        let base = self.slot_plan.interfaces().count();
+        let number = match self.dependency_interface_numbers.get(&bytes).copied() {
+            Some(number) => number,
+            None => {
+                let number = base
+                    + u32::try_from(self.dependency_interface_numbers.len())
+                        .expect("a dependency interface number fits u32");
+                self.dependency_interface_numbers
+                    .insert(bytes.clone(), number);
+                number
+            }
+        };
+        if !self
             .dependency_interface_calls
             .iter()
-            .find(|(_, known)| *known == bytes)
+            .any(|(known, _)| *known == number)
         {
-            return *number;
+            self.dependency_interface_calls.push((number, bytes));
         }
-        let number = self.slot_plan.interfaces().count()
-            + u32::try_from(self.dependency_interface_calls.len())
-                .expect("a dependency interface number fits u32");
-        self.dependency_interface_calls.push((number, bytes));
         number
     }
 

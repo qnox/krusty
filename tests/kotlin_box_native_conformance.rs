@@ -277,6 +277,17 @@ fn kotlin_codegen_box_native_conformance() {
     box_lane::run(&NativeLane { target: host() });
 }
 
+#[test]
+fn native_dependency_interface_aliases_join_by_identity() {
+    let source = include_str!("box_regressions/multimodule/nativeInterfaceAliasJoin.kt");
+    super::box_reference_classes::checked_box(source, "nativeInterfaceAliasJoin")
+        .expect("pinned kotlinc must run the exact KLIB module graph");
+    assert_eq!(
+        run_native_abi_case(source, "nativeInterfaceAliasJoin"),
+        Outcome::Pass,
+        "consumer files must share interface import numbers and join their aliases"
+    );
+}
 fn run_native_abi_case(source: &str, stem: &str) -> Outcome {
     if let Some(reason) = not_applicable(source) {
         return Outcome::NotApplicable(reason);

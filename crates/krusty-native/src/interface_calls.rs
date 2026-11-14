@@ -22,7 +22,9 @@
 //! therefore also publishes, per number, the KLIB declaration identity of every interface function
 //! standing there ([`IDENTITIES_SECTION`]), and a dependent module records its implementations of
 //! a dependency's members by that identity ([`DEPENDENCY_IMPLEMENTATIONS_SECTION`]). The link joins
-//! the two, so every implementation in the program reaches the stub of the member it implements.
+//! the two. A source member can have several identities at one inherited slot, and one identity
+//! can have several source-module-local call stubs; the link joins these aliases transitively so
+//! every call and implementation reaches one stub for the same logical slot.
 //!
 //! The interface tables themselves are the link's too: it numbers the members whose stub looks a
 //! table up, packing them so that no type's table holds two at one index, writes each type's table
