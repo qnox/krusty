@@ -149,23 +149,29 @@ impl<'u, 's> Linker<'u, 's> {
         ir: &mut IrFile,
         selected: KlibBodyCallable<'_>,
     ) -> Result<bool, KlibBodyDeclineReason> {
-        let header = super::super::class_headers::authenticate(selected, self.sources.bodies)?;
-        let Some(primary) = header.contract.primary_constructor.clone() else {
-            return Ok(false);
+        let (module, primary) = {
+            let header = super::super::class_headers::authenticate(selected, self.sources.bodies)?;
+            let Some(primary) = header.contract.primary_constructor.clone() else {
+                return Ok(false);
+            };
+            (header.contract.module.clone(), primary)
         };
         let constructor = KlibDependencyCallable {
-            module: header.contract.module.clone(),
+            module,
             declaration: crate::libraries::KlibDeclarationSignature::Public(primary),
         };
         if self.classes.contains_key(&constructor) {
             return Ok(true);
         }
-        let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(&constructor)
-        else {
-            return Ok(false);
-        };
-        let Some(selected_constructor) = callables.first().copied() else {
-            return Ok(false);
+        let selected_constructor = {
+            let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(&constructor)
+            else {
+                return Ok(false);
+            };
+            let Some(selected_constructor) = callables.first().copied() else {
+                return Ok(false);
+            };
+            selected_constructor
         };
         self.materialize_class(ir, &constructor, selected_constructor)?;
         Ok(self.classes.contains_key(&constructor))

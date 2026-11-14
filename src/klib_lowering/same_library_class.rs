@@ -636,8 +636,6 @@ struct ClassDeclaration<'a> {
     class_name: TypeName,
 }
 
-}
-
 fn prepare_class<'a>(
     source: LocalClassSource<'a, '_>,
     signature: &KlibIrSignature,
