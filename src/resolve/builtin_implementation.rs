@@ -82,32 +82,22 @@ pub(super) fn for_checked_unit(checker: &Checker<'_>) -> Result<Facts, ExternalC
     // expression tables. Retain that exact external member as well, including Java synthetic
     // properties which have no external Kotlin property identity.
     for lowering in checker.stmt_lowers.values() {
-        let StmtLowering::MemberPropertyWrite {
-            setter: Some(setter),
-            ..
-        } = lowering
-        else {
-            continue;
-        };
-        let Some(identity) = setter.external_identity else {
-            continue;
-        };
-        let Some(SemanticCallableOwner::Classifier(owner)) = setter.declaration_owner else {
-            return Err(identity);
-        };
-        let name = match setter.external_property_identity {
-            Some(property) => {
-                checker
-                    .libraries
-                    .external_property(property)
-                    .ok_or(identity)?
-                    .name
+        match lowering {
+            StmtLowering::MemberPropertyWrite {
+                setter: Some(setter),
+                ..
+            } => record_property_setter(checker, &mut selected, setter)?,
+            StmtLowering::ImplicitPropertyWrite(target) => {
+                if let crate::resolve::ImplicitPropertyWriteTarget::Member {
+                    setter: Some(setter),
+                    ..
+                } = target.as_ref()
+                {
+                    record_property_setter(checker, &mut selected, &setter.callable)?;
+                }
             }
-            None => setter.name.clone(),
-        };
-        selected
-            .entry(identity)
-            .or_insert_with(|| (owner, name.into_boxed_str()));
+            _ => {}
+        }
     }
 
     // Override declarations are checked in Pass 1 and can be referenced by common IR even when
@@ -183,6 +173,33 @@ pub(super) fn for_checked_unit(checker: &Checker<'_>) -> Result<Facts, ExternalC
         facts.entry(identity).or_default();
     }
     Ok(facts)
+}
+
+fn record_property_setter(
+    checker: &Checker<'_>,
+    selected: &mut crate::fx_hash::HashMap<ExternalCallableId, (TypeName, Box<str>)>,
+    setter: &crate::libraries::LibraryCallable,
+) -> Result<(), ExternalCallableId> {
+    let Some(identity) = setter.external_identity else {
+        return Ok(());
+    };
+    let Some(SemanticCallableOwner::Classifier(owner)) = setter.declaration_owner else {
+        return Err(identity);
+    };
+    let name = match setter.external_property_identity {
+        Some(property) => {
+            checker
+                .libraries
+                .external_property(property)
+                .ok_or(identity)?
+                .name
+        }
+        None => setter.name.clone(),
+    };
+    selected
+        .entry(identity)
+        .or_insert_with(|| (owner, name.into_boxed_str()));
+    Ok(())
 }
 
 fn record_member(
