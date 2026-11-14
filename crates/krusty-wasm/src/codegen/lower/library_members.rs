@@ -11,7 +11,7 @@
 //! entry its module exports. A published class dispatches through its producer-owned class table
 //! even when a concrete member also has an executable export, preserving virtual overrides.
 
-use krusty::backend::interface_identity::{member_identity, property_member_identity};
+use krusty::backend::interface_identity::property_member_identity;
 use krusty::backend::{BackendCallableFact, CheckedBackendCallables};
 use krusty::libraries::ExternalCallableKind;
 use krusty::libraries::MemberRealization;
@@ -39,7 +39,7 @@ pub(in crate::codegen) fn library_member_identity(
 ) -> Option<Vec<u8>> {
     let identity = fact.dependency_callable.as_ref()?;
     match role {
-        MemberRole::Function => Some(member_identity(identity)),
+        MemberRole::Function => fact.member_slot_identity(),
         MemberRole::Getter => property_member_identity(identity, false),
         MemberRole::Setter => property_member_identity(identity, true),
     }

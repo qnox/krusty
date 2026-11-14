@@ -121,6 +121,19 @@ pub struct BackendCallableFact {
 }
 
 impl BackendCallableFact {
+    /// The selected declaration's virtual slot identity, including its authenticated accessor
+    /// role when a serialized property accessor is represented as an ordinary IR call.
+    pub fn member_slot_identity(&self) -> Option<Vec<u8>> {
+        let identity = self.dependency_callable.as_ref()?;
+        match self.klib_body_accessor.as_ref() {
+            Some(accessor) => super::interface_identity::property_member_identity(
+                identity,
+                accessor.role == crate::libraries::KlibAccessorRole::Setter,
+            ),
+            None => Some(super::interface_identity::member_identity(identity)),
+        }
+    }
+
     /// The selected operation shared by declaration and member realization views.
     pub fn compiler_operation(&self) -> Option<crate::libraries::CompilerIntrinsic> {
         self.compiler_intrinsic
