@@ -171,6 +171,7 @@ pub use enum_entry_properties::EnumEntryProperty;
 use enum_entry_properties::{EnumEntryPropertyBinding, EnumEntryStorage};
 mod enum_entry_method_owner;
 pub(crate) use enum_entry_method_owner::owns_storage as enum_entry_storage_owner_matches;
+mod callable_reference_result;
 mod explicit_backing_fields;
 mod explicit_property_write;
 mod explicit_receiver_levels;
@@ -34022,24 +34023,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn callable_ref_is_compatible(
-        &self,
-        params: &[Ty],
-        ret: Ty,
-        suspend: bool,
-        expected: &'static crate::types::FnSig,
-        allow_unit_coercion: bool,
-    ) -> bool {
-        callable_reference_selection::is_compatible(
-            params,
-            ret,
-            suspend,
-            expected,
-            allow_unit_coercion,
-            |actual, target| self.receiver_is_assignable(actual, target),
-        )
-    }
-
     fn callable_ref_parameter_shape_at_least_as_specific(
         &self,
         left_params: &[Ty],
@@ -35034,6 +35017,12 @@ impl<'a> Checker<'a> {
                 if structurally_fits {
                     structurally_adaptable.push(function.clone());
                 }
+                // Overload specificity compares the declarations, not their instantiation for this
+                // expected shape: `listOf(vararg elements: T)` takes `Array<out T>` where
+                // `listOf(element: T)` takes any `T`, whatever the expected array type binds.
+                let declared_shape = callable_reference_selection::erased_declared_parameters(
+                    &function.callable.params,
+                );
                 let specialization = self.specialize_callable_ref_candidate(
                     &mut function,
                     None,
@@ -35147,6 +35136,7 @@ impl<'a> Checker<'a> {
                     argument_mapping,
                     type_arguments,
                     plan,
+                    declared_shape,
                 ))
             })
             .collect::<Vec<_>>();
@@ -35212,7 +35202,7 @@ impl<'a> Checker<'a> {
             .iter()
             .map(
                 |candidate| callable_reference_selection::AdaptedReferenceSpecificity {
-                    parameters: &candidate.0.callable.params,
+                    parameters: &candidate.7,
                     plan: &candidate.6,
                     is_vararg: candidate.0.call_sig.vararg_index.is_some(),
                 },
@@ -35247,6 +35237,7 @@ impl<'a> Checker<'a> {
             vararg_collect,
             argument_mapping,
             type_arguments,
+            _,
             _,
         ) = &candidates[*selected_index];
         self.replace_call_type_arguments(

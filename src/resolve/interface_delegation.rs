@@ -77,38 +77,14 @@ fn hierarchy_names(source: &dyn SymbolSource, root: Ty) -> Option<Vec<String>> {
     Some(names)
 }
 
-fn interface_hierarchy(source: &dyn SymbolSource, root: Ty) -> Option<Vec<Ty>> {
-    let mut interfaces = Vec::new();
-    let mut queue = VecDeque::from([root]);
-    let mut seen = HashSet::default();
-    while let Some(current) = queue.pop_front() {
-        let owner = current.kotlin_class_internal()?;
-        if !seen.insert(owner) {
-            continue;
-        }
-        let declaration = source.classifier(owner)?;
-        if declaration.is_interface() {
-            interfaces.push(current);
-        }
-        queue.extend(
-            crate::symbol_resolver::direct_supertypes(source, current)
-                .into_iter()
-                .filter(|supertype| {
-                    supertype
-                        .kotlin_class_internal()
-                        .and_then(|classifier| source.classifier(classifier))
-                        .is_some_and(|classifier| classifier.is_interface())
-                }),
-        );
-    }
-    Some(interfaces)
-}
-
 fn interface_owners(source: &dyn SymbolSource, root: Ty) -> Option<HashSet<TypeName>> {
-    interface_hierarchy(source, root)?
-        .into_iter()
-        .map(|interface| interface.kotlin_class_internal())
-        .collect()
+    let mut owners = HashSet::default();
+    for (owner, _, _) in crate::symbol_resolver::applied_hierarchy(source, root) {
+        if source.classifier(owner)?.is_interface() {
+            owners.insert(owner);
+        }
+    }
+    Some(owners)
 }
 
 fn is_delegated_function(function: &FunctionInfo, interface_owners: &HashSet<TypeName>) -> bool {
@@ -473,6 +449,7 @@ fn delegated_function_declaration(
         applied_parameters: resolved_types(applied_parameters)?,
         applied_result: ResolvedTy::new(applied_result).ok()?,
         interface: function.callable.owner_is_interface,
+        has_kotlin_superclass_override: false,
     })
 }
 
@@ -845,43 +822,47 @@ fn delegation_members(
                 delegated_forwarder_parameter_identities(&primary.parameter_identities);
             let type_parameters = delegated_type_parameters(function.generic_sig.as_ref())?;
             let mut overridden = vec![primary];
-            // `members_in_hierarchy(own, name)` is an override view and deliberately coalesces
-            // identical slots. A generated forwarder still implements every exact interface
-            // declaration in that slot, so enumerate direct declarations from each applied
-            // interface occurrence and retain their stable identities independently.
-            for interface in interface_hierarchy(source, own)? {
-                let owner = interface.kotlin_class_internal()?;
-                let declarations =
-                    crate::symbol_resolver::members_in_hierarchy(source, interface, &name);
-                for obligation in declarations.functions().iter().filter(|obligation| {
-                    obligation.callable.owner == owner
-                        && obligation.receiver_rank == 0
-                        && obligation.visibility != crate::libraries::Visibility::Private
-                        && crate::symbol_resolver::function_override_input_slots_match(
-                            source,
-                            obligation,
-                            representative,
-                        )
-                        && applied_function_result(source, index, own, obligation).is_some_and(
-                            |result| {
-                                crate::symbol_resolver::resolution_subtype(
-                                    source,
-                                    call.result.get(),
-                                    result,
-                                )
-                            },
-                        )
-                }) {
+            // An override view coalesces slots. Retain every exact direct declaration,
+            // including superclass declarations whose existing slots this body replaces.
+            for (owner, applied, _) in crate::symbol_resolver::applied_hierarchy(source, own) {
+                source.classifier(owner)?;
+                if owner == own.kotlin_class_internal()? {
+                    continue;
+                }
+                for obligation in
+                    super::override_plans::overridable_declared_functions(source, applied, &name)
+                        .iter()
+                        .filter(|obligation| {
+                            crate::symbol_resolver::function_override_input_slots_match(
+                                source,
+                                obligation,
+                                representative,
+                            ) && applied_function_result(source, index, own, obligation)
+                                .is_some_and(|result| {
+                                    crate::symbol_resolver::resolution_subtype(
+                                        source,
+                                        call.result.get(),
+                                        result,
+                                    )
+                                })
+                        })
+                {
                     let obligation =
                         delegated_function_declaration(source, index, own, obligation)?;
-                    if overridden
+                    if !overridden
                         .iter()
                         .any(|known| known.target == obligation.target)
                     {
-                        continue;
+                        overridden.push(obligation);
                     }
-                    overridden.push(obligation);
                 }
+            }
+            let covering = super::override_plans::has_kotlin_superclass_override(
+                source,
+                overridden.iter().map(|edge| (edge.owner, edge.interface)),
+            );
+            for (edge, covered) in overridden.iter_mut().zip(covering) {
+                edge.has_kotlin_superclass_override = covered;
             }
             // The declarations a forwarder overrides agree on each parameter up to flexibility. A
             // Java `T!` that a Kotlin declaration fixes not-null is enhanced to that rigid `T`, as

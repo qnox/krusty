@@ -80,7 +80,7 @@ pub struct ResolvedDelegatedFunction {
     pub parameter_identities: Box<[ResolvedParameterIdentity]>,
     /// Function-owned generic parameters of the selected interface declaration.
     pub type_parameters: Box<[ResolvedDelegatedTypeParameter]>,
-    /// Every exact interface declaration the one generated body implements.
+    /// Every exact interface or superclass declaration the one generated body implements.
     pub overridden: Box<[ResolvedDelegatedFunctionDeclaration]>,
     /// Per forwarder parameter, the positions a Java parameter takes rigid from a Kotlin
     /// declaration the forwarder also overrides; metadata marks them `EnhancedNullability`.
@@ -113,6 +113,7 @@ pub struct ResolvedDelegatedFunctionDeclaration {
     pub applied_parameters: Box<[ResolvedTy]>,
     pub applied_result: ResolvedTy,
     pub interface: bool,
+    pub has_kotlin_superclass_override: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
