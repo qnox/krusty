@@ -79,6 +79,46 @@ pub(super) fn for_checked_unit(checker: &Checker<'_>) -> Result<Facts, ExternalC
         }
     }
 
+    // Override declarations are checked in Pass 1 and can be referenced by common IR even when
+    // no source body calls them (for example, a data class's generated Any methods). Carry their
+    // builtin implementation facts from the same finalized override plan that FIR lowering uses.
+    if let Some(index) = checker.resolved_index {
+        let source = crate::fir::SourceFileId::from_raw(checker.file_index);
+        for raw in 0..index.declaration_count() {
+            let declaration = crate::fir::DeclarationId::from_raw(raw as u32);
+            if !index
+                .declaration_anchor(declaration)
+                .is_some_and(|anchor| anchor.source == source)
+            {
+                continue;
+            }
+            for edge in index.function_overrides(declaration) {
+                for (target, owner) in [
+                    (edge.implementation, edge.implementation_owner),
+                    (edge.overridden, edge.overridden_owner),
+                ] {
+                    if let crate::fir::ResolvedFunctionOverrideTarget::External(identity) = target {
+                        selected
+                            .entry(identity)
+                            .or_insert_with(|| (owner, edge.name.clone()));
+                    }
+                }
+            }
+            for edge in index.property_overrides(declaration) {
+                for (target, owner) in [
+                    (edge.implementation, edge.implementation_owner),
+                    (edge.overridden, edge.overridden_owner),
+                ] {
+                    if let crate::fir::ResolvedPropertyOverrideTarget::External(identity) = target {
+                        selected
+                            .entry(identity)
+                            .or_insert_with(|| (owner, edge.name.clone()));
+                    }
+                }
+            }
+        }
+    }
+
     let mut facts = selected
         .into_iter()
         .map(|(identity, (owner, name))| {
