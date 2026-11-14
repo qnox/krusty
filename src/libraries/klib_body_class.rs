@@ -36,6 +36,16 @@ impl KlibBodyClassContract {
         self.module == module && self.classifier == classifier
     }
 
+    /// Whether this exact serialized ordinary class forbids subclass dispatch. Enum entries may
+    /// override their enum's members, so an enum's final modality is not sufficient evidence.
+    pub fn proves_final_class(&self, identity: &super::KlibClassIdentity, owner: TypeName) -> bool {
+        self.matches_owner(&identity.module, owner)
+            && self.signature == identity.signature
+            && self.kind == super::TypeKind::Class
+            && self.modality == KotlinModality::Final
+            && !self.is_expect
+    }
+
     /// Whether the common type model carries this class's instances as one of its builtin types,
     /// as it does an unsigned integer, rather than as an instance of a class.
     pub(crate) fn is_builtin_type(&self) -> bool {
