@@ -29,12 +29,7 @@ fn retain_into(
             }
         })
         .collect();
-    let directory = root.join(format!(
-        "{label}-{}-{}",
-        std::process::id(),
-        NEXT_FAILURE.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&directory)?;
+    let directory = reserve_directory(root, &label, &NEXT_FAILURE)?;
     let mut manifest = format!(
         "test: {}\nKotlin: {}\n{report}\n\nartifacts:\n",
         std::thread::current().name().unwrap_or("unknown"),
@@ -61,6 +56,38 @@ fn retain_into(
     }
     std::fs::write(directory.join("failure.txt"), manifest)?;
     Ok(directory)
+}
+
+fn reserve_directory(root: &Path, label: &str, counter: &AtomicU64) -> io::Result<PathBuf> {
+    std::fs::create_dir_all(root)?;
+    loop {
+        let directory = root.join(format!(
+            "{label}-{}-{}",
+            std::process::id(),
+            counter.fetch_add(1, Ordering::Relaxed)
+        ));
+        match std::fs::create_dir(&directory) {
+            Ok(()) => return Ok(directory),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[test]
+fn an_existing_report_is_never_overwritten_after_process_id_reuse() {
+    let root =
+        std::env::temp_dir().join(format!("krusty-evidence-reuse-test-{}", std::process::id()));
+    let existing = root.join(format!("case-{}-0", std::process::id()));
+    std::fs::create_dir_all(&existing).unwrap();
+    std::fs::write(existing.join("failure.txt"), "previous failure").unwrap();
+    let fresh = reserve_directory(&root, "case", &AtomicU64::new(0)).unwrap();
+    assert_ne!(fresh, existing);
+    assert_eq!(
+        std::fs::read_to_string(existing.join("failure.txt")).unwrap(),
+        "previous failure"
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

@@ -25,12 +25,12 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
-use krusty::backend::{Artifact, BOX_RESULT_FRAME, Backend};
+use krusty::backend::{Artifact, Backend, BOX_RESULT_FRAME};
 use krusty::conformance::TestTarget;
 use krusty::diag::{DiagSink, Severity};
 use krusty::source::SourceInput;
 
-use super::box_lane_profile::{Stage, timed};
+use super::box_lane_profile::{timed, Stage};
 use super::box_ratchet::{self, Platform};
 
 /// How long one case may run. The programs are tiny; anything near this is a miscompiled loop.
@@ -255,7 +255,7 @@ fn atomicfu_plugins(
     target: krusty::compilation_target::CompilationTarget,
 ) -> krusty::plugins::registry::NativePlugins {
     use krusty::compilation_target::CompilationTarget;
-    use krusty::plugins::cli::{ATOMICFU_PLUGIN_ID, PluginConfig};
+    use krusty::plugins::cli::{PluginConfig, ATOMICFU_PLUGIN_ID};
     use krusty::plugins::registry::{Activation, PluginRegistry};
     if !krusty::conformance::directive(directive_source, "WITH_ATOMICFU") {
         return krusty::plugins::registry::NativePlugins::none();
@@ -1728,11 +1728,9 @@ fn runner_bounds_output_while_retaining_the_verdict_tail() {
 
     assert!(captured.truncated);
     assert_eq!(captured.bytes.len(), 64);
-    assert!(
-        captured
-            .bytes
-            .ends_with(format!("{BOX_RESULT_FRAME}OK").as_bytes())
-    );
+    assert!(captured
+        .bytes
+        .ends_with(format!("{BOX_RESULT_FRAME}OK").as_bytes()));
     assert_eq!(captured.result_frames, 1);
 }
 
