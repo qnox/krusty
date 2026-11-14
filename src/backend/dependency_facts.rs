@@ -740,17 +740,18 @@ pub struct CheckedBackendCallables {
 }
 
 impl CheckedBackendCallables {
-    /// Store semantic facts checked for the reachable KLIB dependency bodies before backend
-    /// lowering. Conflicting records for one stable identity indicate a broken checker handoff.
+    /// Store the checked graph before completing the source callable facts. Only another checked
+    /// graph is evidence at this stage: freshly frozen callable implementation slots are empty.
+    /// Source-vs-graph consistency is checked when actual selected implementations are recorded.
     pub(crate) fn record_klib_dependency_facts(
         &mut self,
         facts: crate::resolve::CheckedKlibDependencyFacts,
     ) -> Result<(), ExternalCallableId> {
         for (&identity, implementations) in &facts.builtin_implementations {
             if self
-                .callables
+                .klib_builtin_implementations
                 .get(&identity)
-                .is_some_and(|callable| callable.builtin_implementations != *implementations)
+                .is_some_and(|previous| previous != implementations)
             {
                 return Err(identity);
             }
@@ -942,6 +943,13 @@ impl CheckedBackendCallables {
             let Some(selected) = implementations.get(&identity) else {
                 return Err(identity);
             };
+            if self
+                .klib_builtin_implementations
+                .get(&identity)
+                .is_some_and(|graph| graph != selected)
+            {
+                return Err(identity);
+            }
             fact.builtin_implementations = selected.clone();
         }
         Ok(())
