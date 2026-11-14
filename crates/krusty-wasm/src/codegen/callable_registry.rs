@@ -108,6 +108,9 @@ impl CallableRegistry {
                 "an object (`{}`) without its declaring file's entry",
                 classifier.render().replace('/', ".")
             )),
+            Some(InstanceEntry::Constructor { .. }) => {
+                Err("a constructor without its declaring file's entry".to_owned())
+            }
             None => Ok(()),
         }
     }
@@ -217,12 +220,22 @@ impl CallableRegistry {
             member_receivers: HashMap::default(),
             singleton_member_receivers: HashMap::default(),
             singleton_extension_unread_receivers: HashMap::default(),
-            instances: krusty::backend::instance_links::link_reads(
-                ir,
-                module_facts,
-                &mut self.instances,
-                || wasm.declare(),
-            ),
+            instances: {
+                let mut reads = krusty::backend::instance_links::link_reads(
+                    ir,
+                    module_facts,
+                    &mut self.instances,
+                    || wasm.declare(),
+                );
+                reads.extend(krusty::backend::instance_links::link_constructor_reads(
+                    ir,
+                    self.source_module.as_deref().unwrap_or_default(),
+                    module_facts,
+                    &mut self.instances,
+                    || wasm.declare(),
+                ));
+                reads
+            },
         };
         for expression in krusty::ir::emitted_body_roots(ir)
             .into_iter()
