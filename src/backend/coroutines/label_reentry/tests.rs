@@ -278,7 +278,7 @@ fn a_value_block_in_a_statement_keeps_its_value_and_value_position_suspension_de
     });
     let terminal = call(&mut ir, leaf);
     let after = local(&mut ir, 3, terminal);
-    let (body, labels) = split(&mut ir, vec![retained_value, after]);
+    let (_body, labels) = split(&mut ir, vec![retained_value, after]);
     assert_eq!(labels, Ok(1));
     assert!(matches!(ir.exprs[retained_value as usize],
         IrExpr::Block { value: Some(value), .. } if value == one));
