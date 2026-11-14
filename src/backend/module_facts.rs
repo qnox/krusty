@@ -1316,6 +1316,29 @@ mod tests {
     }
 
     #[test]
+    fn frozen_function_supertypes_keep_their_checked_classifier() {
+        let facts = classifier_name_snapshot(
+            "package ownership.functions\n\
+             fun interface Plain { fun invoke(value: Int): Int }\n\
+             fun interface Callable : (Int) -> Int { override fun invoke(value: Int): Int }\n\
+             interface Suspending : suspend (Int) -> Int\n",
+        );
+        for (name, parent) in [
+            ("Plain", "kotlin/Any"),
+            ("Callable", "kotlin/Function1"),
+            ("Suspending", "kotlin/coroutines/SuspendFunction1"),
+        ] {
+            let classifier =
+                crate::types::type_name_child(crate::types::type_name("ownership/functions"), name);
+            assert_eq!(
+                facts.classifier(classifier).unwrap().supertypes.as_ref(),
+                &[crate::types::type_name(parent)],
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn classifier_declaration_names_retain_companion_segments() {
         use crate::types::{type_name, ClassifierDeclarationName};
         let outer = type_name("ownership/companions/Outer");
