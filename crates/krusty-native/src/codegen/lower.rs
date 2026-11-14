@@ -255,6 +255,7 @@ pub fn lower_file(
         ir,
         classifiers,
         callables,
+        dependency_signatures,
         dependency_properties,
         runtime_symbols,
         abi_symbols,
@@ -272,7 +273,7 @@ pub fn lower_file(
         laid_out,
     } = input;
     let class_model = model::build(ir, value_classes, slot_plan, laid_out)?;
-    let extended = extended_elsewhere(ir, unit_kind, module_facts);
+    let extended = extended_elsewhere(ir, unit_kind, module_facts, classifiers);
     let exported = module_abi::exported_classes(&class_model, &extended);
     // Another file calls a default-argument entry by the one symbol its identity names.
     if let Some(declaration) = ir.default_entries.keys().find(|&&declaration| {
@@ -321,6 +322,7 @@ pub fn lower_file(
         source,
         classifiers,
         callables,
+        dependency_signatures,
         inert_singleton_bindings,
         values: value_classes,
         slot_plan,
@@ -331,6 +333,7 @@ pub fn lower_file(
         class_descriptors: Vec::new(),
         extension_entries: HashMap::default(),
         extension_tables: HashMap::default(),
+        published_dependency_bridges: HashMap::default(),
         module: &mut module,
         symbols: super::super::symbols::symbols(ir, module_name, runtime_symbols.clone()),
         model: class_model,
@@ -458,6 +461,7 @@ fn extended_elsewhere(
     ir: &IrFile,
     unit_kind: krusty::backend::CheckedIrUnitKind,
     module_facts: &krusty::backend::BackendModuleFacts,
+    classifiers: &dyn krusty::backend::BackendClassifierSource,
 ) -> krusty::fx_hash::HashSet<krusty::ir::ClassId> {
     let mut extended = krusty::fx_hash::HashSet::default();
     let classes = module_facts.classes();
@@ -475,6 +479,16 @@ fn extended_elsewhere(
         {
             extended.insert(id as krusty::ir::ClassId);
         }
+        // A public open source classifier can be subclassed by a later KLIB consumer. Its
+        // physical layout and constructor/activation entries therefore need a provider-owned
+        // linkable record even when this source module has no local subclass.
+        if !support
+            && classifiers.classifier(class.fq_name).is_some_and(|fact| {
+                fact.source && fact.is_extensible && fact.klib_identity.is_some()
+            })
+        {
+            extended.insert(id as krusty::ir::ClassId);
+        }
     }
     extended
 }
@@ -486,6 +500,7 @@ struct FileLowering<'a> {
     source: krusty::fir::SourceFileId,
     classifiers: &'a dyn krusty::backend::BackendClassifierSource,
     callables: &'a krusty::backend::CheckedBackendCallables,
+    dependency_signatures: &'a krusty::backend::DependencyExportSignatures,
     /// Staged bound singleton accesses proven inert by the exact checked call and export effect.
     inert_singleton_bindings: krusty::fx_hash::HashSet<krusty::ir::ExprId>,
     /// Which classifiers are value classes, and which occurrences travel unboxed.
@@ -506,6 +521,9 @@ struct FileLowering<'a> {
     extension_entries: HashMap<krusty::ir::ClassId, module_abi::ExtensionEntries>,
     /// What the vtable and interface table of each class in `extended` hold.
     extension_tables: HashMap<krusty::ir::ClassId, (Vec<FuncId>, Vec<FuncId>)>,
+    /// Linkable Native bridge bodies recorded by exact dependency-interface member identity.
+    published_dependency_bridges:
+        HashMap<(krusty::ir::ClassId, Vec<u8>), super::laid_out_classes::ObjectFunction>,
     module: &'a mut ObjectModule,
     /// Symbols of this file's classes and functions.
     symbols: Symbols,
