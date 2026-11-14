@@ -78,8 +78,14 @@ impl<'a> FileLowering<'a> {
         class: ClassId,
         base: &str,
     ) -> Result<DataId, Unsupported> {
-        let named = self.unit_kind == krusty::backend::CheckedIrUnitKind::Source
-            && !self.ir.local_class_name_provenance.contains_key(&class);
+        // A support unit names the descriptors of the dependency classes a source file extends,
+        // which that file's descriptors point at as their superclass's.
+        let named = match self.unit_kind {
+            krusty::backend::CheckedIrUnitKind::Source => {
+                !self.ir.local_class_name_provenance.contains_key(&class)
+            }
+            krusty::backend::CheckedIrUnitKind::DependencySupport => self.exported.contains(&class),
+        };
         if !named {
             return self.declare_local_data(&format!("kt_type_{base}"), false);
         }

@@ -372,9 +372,9 @@ pub(super) fn module_blocks(
     let mut library_source = String::new();
     let mut compiler_input = true;
     for line in prepared.lines() {
-        if line.trim_start().starts_with("// MODULE:") {
+        if krusty::conformance::directive_payload(line, "MODULE").is_some() {
             compiler_input = true;
-        } else if let Some(name) = line.trim_start().strip_prefix("// FILE:") {
+        } else if let Some(name) = krusty::conformance::directive_payload(line, "FILE") {
             let extension = Path::new(name.trim())
                 .extension()
                 .and_then(|extension| extension.to_str());
@@ -415,26 +415,27 @@ fn reference_units(
             })
             .collect::<Vec<_>>()
     };
-    if source.contains("// MODULE:") {
+    if krusty::conformance::contains_directive(source, "MODULE") {
         let mut blocks = module_blocks(source, target)?;
         for block in &mut blocks {
             block.files = files(Some(&block.name));
         }
         if krusty::conformance::directive(source, "WITH_COROUTINES") {
-            krusty::conformance::inject_support_module(
+            krusty::conformance::inject_coroutine_support(
                 &mut blocks,
+                source,
                 krusty::conformance::COROUTINE_HELPERS,
-            );
+            )?;
         }
         Ok(krusty::conformance::module_units(&blocks))
     } else {
         let mut unit = units.first().ok_or("empty compilation plan")?.clone();
         unit.files = files(None);
         if krusty::conformance::directive(source, "WITH_COROUTINES") {
-            unit.files.push((
-                "CoroutineUtil".to_string(),
-                krusty::conformance::COROUTINE_HELPERS.to_string(),
-            ));
+            unit.files.extend(krusty::conformance::coroutine_sources(
+                source,
+                krusty::conformance::COROUTINE_HELPERS,
+            )?);
         }
         Ok(vec![unit])
     }
@@ -576,16 +577,17 @@ struct FragmentGraph {
 }
 impl FragmentGraph {
     fn new(source: &str, target: TestTarget, units: &[ModuleUnit]) -> Result<Self, String> {
-        let mut blocks = if source.contains("// MODULE:") {
+        let mut blocks = if krusty::conformance::contains_directive(source, "MODULE") {
             module_blocks(source, target)?
         } else {
             Vec::new()
         };
         if !blocks.is_empty() && krusty::conformance::directive(source, "WITH_COROUTINES") {
-            krusty::conformance::inject_support_module(
+            krusty::conformance::inject_coroutine_support(
                 &mut blocks,
+                source,
                 krusty::conformance::COROUTINE_HELPERS,
-            );
+            )?;
         }
         let mut representatives = BTreeMap::new();
         for unit in units {
@@ -647,7 +649,10 @@ mod tests {
         let reference = reference_units(source, &actual, TestTarget::WasmJs).unwrap();
         assert_eq!(
             reference[0].files,
-            [("real.mjs".into(), "fun box() = \"OK\"\n".into())]
+            [(
+                "real.mjs".into(),
+                "// FILE: real.mjs.kt\nfun box() = \"OK\"\n".into()
+            )]
         );
         assert_eq!(actual[0].files.len(), 2, "execution inventory is retained");
         let source = "// MODULE: common\n// FILE: real.mjs.kt\nexpect fun answer(): String\n// MODULE: main()()(common)\n// FILE: Main.kt\nactual fun answer() = <!DEBUG_INFO_EXPRESSION_TYPE(\"String\")!>\"OK\"<!>\nfun box() = answer()\n";
@@ -657,10 +662,14 @@ mod tests {
         assert_eq!(
             reference[0].files,
             [
-                ("real.mjs".into(), "expect fun answer(): String\n".into()),
+                (
+                    "real.mjs".into(),
+                    "\n// FILE: real.mjs.kt\nexpect fun answer(): String\n".into()
+                ),
                 (
                     "Main".into(),
-                    "actual fun answer() = \"OK\"\nfun box() = answer()\n".into()
+                    "\n\n\n\n// FILE: Main.kt\nactual fun answer() = \"OK\"\nfun box() = answer()\n"
+                        .into()
                 ),
             ]
         );

@@ -159,9 +159,10 @@ fn unsigned_array_literal_is_checked_array_fir_not_a_value_class_call() {
 
 #[test]
 fn array_of_unsigned_values_retains_the_semantic_reference_array_type() {
-    let (body, _) = checked_function_body(
-        "fun make(): Array<UInt> = arrayOf(13u, 4294967295u)\n",
+    let (body, _) = checked_function_body_with_platform(
+        "// WITH_STDLIB\nfun make(): Array<UInt> = arrayOf(13u, 4294967295u)\n",
         "make",
+        jvm_stdlib_semantics(),
     );
     let root = body.expr(root_expression(&body)).expect("arrayOf call");
     let FirExprKind::ArrayLiteral {
@@ -181,7 +182,13 @@ fn array_of_unsigned_values_retains_the_semantic_reference_array_type() {
 
 #[test]
 fn inherited_size_lookup_does_not_replace_unsigned_array_factory_type() {
-    let (body, _) = checked_function_body("fun make(): Int = uintArrayOf(1u).size\n", "make");
+    let (body, _) = checked_function_body_with_platform(
+        "// WITH_STDLIB\n\
+         @OptIn(ExperimentalUnsignedTypes::class)\n\
+         fun make(): Int = uintArrayOf(1u).size\n",
+        "make",
+        jvm_stdlib_semantics(),
+    );
     let array = (0..body.expression_count())
         .filter_map(|raw| body.expr(FirExprId::from_raw(raw as u32)))
         .find(|expression| matches!(expression.kind, FirExprKind::ArrayLiteral { .. }))
@@ -195,10 +202,12 @@ fn inherited_size_lookup_does_not_replace_unsigned_array_factory_type() {
 
 #[test]
 fn spread_collection_literal_uses_the_vararg_array_expectation() {
-    let (body, _) = checked_function_body(
+    let (body, _) = checked_function_body_with_platform(
         "// LANGUAGE: +CollectionLiterals\n\
+         // WITH_STDLIB\n\
          fun make(): Array<String> = arrayOf(*[\"O\"], *arrayOf(elements = arrayOf(\"K\")))\n",
         "make",
+        jvm_stdlib_semantics(),
     );
     let root = body
         .expr(root_expression(&body))

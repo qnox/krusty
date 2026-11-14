@@ -89,7 +89,7 @@ pub struct StringTable<'a> {
     intersection_approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
     /// Checked declaration lookup for `inner` classifiers. It distinguishes a known non-inner
     /// declaration from a classifier missing at the backend boundary.
-    inner_classifiers: InnerClassifiers<'a>,
+    classifier_applications: ClassifierApplications<'a>,
     /// `Some` when the messages are written for a KLIB `PackageFragment` rather than a JVM
     /// `@Metadata` annotation: the two carry the same declaration schema but name classes and
     /// place types differently (see [`KlibTables`]).
@@ -126,31 +126,39 @@ enum QualifiedNameKind {
     Package = 1,
 }
 
-/// Where a classifier's flattened semantic application splits.
-///
-/// An `inner` class keeps its leading `own_arguments` and writes the tail as `outer`, the class
-/// whose instance it captures. A local or anonymous classifier has no enclosing instance: `outer`
-/// is absent and the tail is lexical captures, which metadata does not record as type arguments.
+/// Where an `inner` classifier's flattened semantic application splits: its own leading
+/// `own_arguments`, then the arguments of `outer`, the class whose instance it captures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InnerClassifier {
-    pub outer: Option<TypeName>,
+    pub outer: TypeName,
     pub own_arguments: usize,
 }
 
-/// Checked declaration lookup for a metadata type's classifier. `Ok(None)` means every semantic
-/// argument belongs to the classifier. `Err(classifier)` is an absent backend fact and must stop
-/// emission.
-pub type InnerClassifiers<'a> = &'a dyn Fn(TypeName) -> Result<Option<InnerClassifier>, TypeName>;
+/// Declaration-owned application layout. Lexical formals remain in semantic applications but do
+/// not become arguments of a JVM local classifier. An inner instance instead records its outer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClassifierApplication {
+    Direct,
+    LexicalCapture {
+        own_arguments: usize,
+        captured_arguments: usize,
+    },
+    Inner(InnerClassifier),
+}
 
-fn no_inner_classifiers(_: TypeName) -> Result<Option<InnerClassifier>, TypeName> {
-    Ok(None)
+/// Missing declaration evidence stops emission; direct and captured layouts are explicit facts.
+pub type ClassifierApplications<'a> =
+    &'a dyn Fn(TypeName) -> Result<ClassifierApplication, TypeName>;
+
+fn direct_classifier_application(_: TypeName) -> Result<ClassifierApplication, TypeName> {
+    Ok(ClassifierApplication::Direct)
 }
 
 /// Checked type facts supplied by a metadata-emitting target.
 #[derive(Clone)]
 pub struct MetadataTypeLookups<'a> {
     pub intersection_approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
-    pub inner_classifiers: InnerClassifiers<'a>,
+    pub classifier_applications: ClassifierApplications<'a>,
     pub local_classifiers: crate::fx_hash::HashSet<TypeName>,
     pub enum_entry_bodies: crate::fx_hash::HashSet<TypeName>,
     pub anonymous_classifiers: crate::fx_hash::HashSet<TypeName>,
@@ -162,7 +170,7 @@ impl Default for MetadataTypeLookups<'_> {
             intersection_approximation: None,
             // Standalone metadata-builder tests declare no inner classifiers. Production emitters
             // replace this with their frozen checked classifier view.
-            inner_classifiers: &no_inner_classifiers,
+            classifier_applications: &direct_classifier_application,
             local_classifiers: Default::default(),
             enum_entry_bodies: Default::default(),
             anonymous_classifiers: Default::default(),
@@ -182,7 +190,7 @@ impl Default for StringTable<'_> {
             enum_entry_bodies: Default::default(),
             anonymous_classifiers: Default::default(),
             intersection_approximation: None,
-            inner_classifiers: &no_inner_classifiers,
+            classifier_applications: &direct_classifier_application,
             klib: None,
         }
     }
@@ -194,22 +202,22 @@ impl<'a> StringTable<'a> {
         enum_entry_bodies: &crate::fx_hash::HashSet<TypeName>,
         anonymous_classifiers: &crate::fx_hash::HashSet<TypeName>,
         intersection_approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
-        inner_classifiers: InnerClassifiers<'a>,
+        classifier_applications: ClassifierApplications<'a>,
     ) -> Self {
         StringTable {
             local_classifiers: local_classifiers.clone(),
             enum_entry_bodies: enum_entry_bodies.clone(),
             anonymous_classifiers: anonymous_classifiers.clone(),
             intersection_approximation,
-            inner_classifiers,
+            classifier_applications,
             ..StringTable::default()
         }
     }
 
     /// A table for a KLIB `PackageFragment`: plain strings, qualified names and type tables.
-    pub fn klib(inner_classifiers: InnerClassifiers<'a>) -> Self {
+    pub fn klib(classifier_applications: ClassifierApplications<'a>) -> Self {
         Self {
-            inner_classifiers,
+            classifier_applications,
             klib: Some(KlibTables::default()),
             ..Self::default()
         }
@@ -226,22 +234,23 @@ impl<'a> StringTable<'a> {
         }
     }
 
-    /// How `classifier`'s application splits. A missing frozen classifier fact is an emission
-    /// error, never permission to serialize the flattened shape.
-    ///
-    /// An enclosing instance that is itself local has no metadata `outer_type` chain. Lexical
-    /// captures are omitted only from JVM metadata: a KLIB fragment keeps the semantic
-    /// application until its own reference producer records a different policy.
-    fn inner_classifier(
+    /// Project a checked application onto this carrier's metadata policy. KLIB retains its existing
+    /// flattened lexical applications; JVM inner types with a local outer retain their flat form.
+    fn classifier_application(
         &self,
         classifier: TypeName,
-    ) -> Result<Option<InnerClassifier>, TypeEncodeError> {
-        (self.inner_classifiers)(classifier)
-            .map(|inner| {
-                inner.filter(|split| match split.outer {
-                    Some(outer) => !self.local_classifiers.contains(&outer),
-                    None => !self.is_klib(),
-                })
+    ) -> Result<ClassifierApplication, TypeEncodeError> {
+        (self.classifier_applications)(classifier)
+            .map(|application| match application {
+                ClassifierApplication::LexicalCapture { .. } if self.is_klib() => {
+                    ClassifierApplication::Direct
+                }
+                ClassifierApplication::Inner(inner)
+                    if self.local_classifiers.contains(&inner.outer) =>
+                {
+                    ClassifierApplication::Direct
+                }
+                other => other,
             })
             .map_err(TypeEncodeError::MissingClassifier)
     }
@@ -626,6 +635,12 @@ pub(crate) enum TypeEncodeError {
         arguments: usize,
         own: usize,
     },
+    LexicalClassifierArity {
+        classifier: TypeName,
+        arguments: usize,
+        own: usize,
+        captured: usize,
+    },
 }
 
 impl fmt::Display for TypeEncodeError {
@@ -666,6 +681,16 @@ impl fmt::Display for TypeEncodeError {
             } => write!(
                 f,
                 "inner classifier '{}' declares {own} own type parameters but its application has {arguments} arguments",
+                classifier.render()
+            ),
+            Self::LexicalClassifierArity {
+                classifier,
+                arguments,
+                own,
+                captured,
+            } => write!(
+                f,
+                "local classifier '{}' declares {own} own and {captured} captured type parameters but its application has {arguments} arguments",
                 classifier.render()
             ),
         }
@@ -1095,8 +1120,25 @@ fn encode_type_with_parameter(
             // kotlinc interns the enclosing classifier before recursively interning its arguments,
             // even though protobuf field order writes `argument` before `class_name`.
             let classifier = strings.class_id(classifier_name);
-            let split = strings.inner_classifier(classifier_name)?;
-            let own_arguments = split.map_or(arguments.len(), |split| split.own_arguments);
+            let application = strings.classifier_application(classifier_name)?;
+            let (own_arguments, inner) = match application {
+                ClassifierApplication::Direct => (arguments.len(), None),
+                ClassifierApplication::Inner(inner) => (inner.own_arguments, Some(inner)),
+                ClassifierApplication::LexicalCapture {
+                    own_arguments,
+                    captured_arguments,
+                } => {
+                    if arguments.len() != own_arguments + captured_arguments {
+                        return Err(TypeEncodeError::LexicalClassifierArity {
+                            classifier: classifier_name,
+                            arguments: arguments.len(),
+                            own: own_arguments,
+                            captured: captured_arguments,
+                        });
+                    }
+                    (own_arguments, None)
+                }
+            };
             if own_arguments > arguments.len() {
                 return Err(TypeEncodeError::InnerClassifierArity {
                     classifier: classifier_name,
@@ -1116,18 +1158,16 @@ fn encode_type_with_parameter(
             // The semantic and spelling trees use the same flattened order: this classifier's
             // arguments first, then each enclosing inner classifier's. The recursive outer node
             // owns the spelling tail so aliases, type-use annotations and definitely-non-null
-            // flags stay attached to the captured outer arguments. A tail with no outer is a
-            // lexical capture and is not a metadata argument.
+            // flags stay attached to the captured outer arguments.
             let outer_spelling = Spelled {
                 args: spelled.args.iter().skip(own_arguments).cloned().collect(),
                 ..Spelled::default()
             };
-            let outer = split
-                .and_then(|split| split.outer)
-                .map(|outer| {
+            let outer = inner
+                .map(|inner| {
                     encode_type_with_parameter(
                         strings,
-                        Ty::obj_args_name(outer, outer_arguments),
+                        Ty::obj_args_name(inner.outer, outer_arguments),
                         &outer_spelling,
                         type_parameters,
                         None,
@@ -1640,8 +1680,8 @@ mod tests {
         let inner = outer.nested_child("Inner");
         let lookup = |classifier| {
             (classifier == inner)
-                .then_some(Some(InnerClassifier {
-                    outer: Some(outer),
+                .then_some(ClassifierApplication::Inner(InnerClassifier {
+                    outer,
                     own_arguments: 2,
                 }))
                 .ok_or(classifier)
@@ -1675,10 +1715,14 @@ mod tests {
     fn a_local_application_encodes_own_arguments_and_omits_lexical_captures() {
         let classifier = crate::types::type_name("sample/Holder");
         let lookup = |name| {
-            Ok((name == classifier).then_some(InnerClassifier {
-                outer: None,
-                own_arguments: 1,
-            }))
+            Ok(if name == classifier {
+                ClassifierApplication::LexicalCapture {
+                    own_arguments: 1,
+                    captured_arguments: 1,
+                }
+            } else {
+                ClassifierApplication::Direct
+            })
         };
         let mut strings = StringTable::with_local_classifiers(
             &Default::default(),
@@ -1708,13 +1752,17 @@ mod tests {
     fn a_klib_fragment_keeps_lexical_captures_in_the_semantic_application() {
         let classifier = crate::types::type_name("sample/Holder");
         let lookup = |name| {
-            Ok((name == classifier).then_some(InnerClassifier {
-                outer: None,
-                own_arguments: 1,
-            }))
+            Ok(if name == classifier {
+                ClassifierApplication::LexicalCapture {
+                    own_arguments: 1,
+                    captured_arguments: 1,
+                }
+            } else {
+                ClassifierApplication::Direct
+            })
         };
         let application = Ty::obj_args_name(classifier, &[Ty::Int, Ty::String]);
-        let encode = |lookup: &dyn Fn(TypeName) -> Result<Option<InnerClassifier>, TypeName>| {
+        let encode = |lookup: &dyn Fn(TypeName) -> Result<ClassifierApplication, TypeName>| {
             let mut strings = StringTable::klib(lookup);
             strings.open_type_table();
             let encoded = encode_type(&mut strings, application, &TypeParameters::new())
@@ -1727,7 +1775,7 @@ mod tests {
             (encoded, table)
         };
 
-        assert_eq!(encode(&lookup), encode(&no_inner_classifiers));
+        assert_eq!(encode(&lookup), encode(&direct_classifier_application));
     }
 
     #[test]

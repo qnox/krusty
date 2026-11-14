@@ -127,15 +127,16 @@ fn test_modules(src: &str, stem: &str) -> Result<Vec<TestModule>, String> {
             })
             .collect()
     };
-    if src.contains("// MODULE:") {
+    if krusty::conformance::contains_directive(src, "MODULE") {
         let mut modules = krusty::conformance::split_modules(src)
             .ok_or("the case's modules are outside the box compilation model")?;
         let declared_support = modules.iter().any(|module| module.name == "support");
         if krusty::conformance::directive(src, "WITH_COROUTINES") {
-            krusty::conformance::inject_support_module(
+            krusty::conformance::inject_coroutine_support(
                 &mut modules,
+                src,
                 krusty::conformance::COROUTINE_HELPERS,
-            );
+            )?;
         }
         return Ok(krusty::conformance::module_units(&modules)
             .into_iter()
@@ -149,8 +150,10 @@ fn test_modules(src: &str, stem: &str) -> Result<Vec<TestModule>, String> {
             })
             .collect());
     }
-    let mut files = if src.contains("// FILE:") || src.contains("// WITH_COROUTINES") {
-        let (blocks, java) = krusty::conformance::split_files(src);
+    let mut files = if krusty::conformance::contains_directive(src, "FILE")
+        || krusty::conformance::directive(src, "WITH_COROUTINES")
+    {
+        let (blocks, java) = krusty::conformance::split_files(src)?;
         if blocks.is_empty() && java.is_empty() {
             kotlin(vec![(stem.to_string(), src.to_string())], false)
         } else {

@@ -89,6 +89,32 @@ impl KlibPublicIdSignature {
         self.mask
     }
 
+    /// This member's exact identity as a member of `class`: the same member segment, member id
+    /// and mask under the class's paths. kotlinc's member ids hash the member's own mangled
+    /// signature, never its owner, so an inherited member keeps them in every class.
+    pub(crate) fn as_member_of(&self, class: &Self) -> Option<Self> {
+        let member = self.declaration.segments.last()?;
+        let mut declaration = class.declaration.segments.to_vec();
+        declaration.push(member.clone());
+        Some(Self {
+            package: class.package.clone(),
+            declaration: KlibNamePath {
+                segments: declaration.into_boxed_slice(),
+            },
+            member_id: self.member_id,
+            mask: self.mask,
+        })
+    }
+
+    /// Whether `class` names the class that declares this member.
+    pub(crate) fn is_member_of(&self, class: &Self) -> bool {
+        let segments = self.declaration.segments();
+        self.package == class.package
+            && segments
+                .split_last()
+                .is_some_and(|(_, owner)| owner == class.declaration.segments())
+    }
+
     /// Public class identity for an already-resolved classifier.
     ///
     /// KLIB serialized IR names classifier types by the same structural package/declaration paths
@@ -200,6 +226,13 @@ impl KlibAccessorIdSignature {
 pub enum KlibDeclarationSignature {
     Public(KlibPublicIdSignature),
     Accessor(KlibAccessorIdSignature),
+    /// A top-level function private to its file, by its file-local identity: the KLIB's file
+    /// index and that file's signature slot. No provider publishes it; only a body of its own
+    /// module calls it, so it names a declaration only together with that module.
+    FileLocal {
+        file: u32,
+        slot: u32,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

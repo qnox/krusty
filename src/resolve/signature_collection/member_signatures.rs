@@ -370,7 +370,8 @@ pub(in crate::resolve) fn declared_member_callable_headers(
     for method_index in 0..method_count {
         let method = compact_headers
             .is_none()
-            .then(|| &class.methods[method_index]);
+            .then(|| class.methods.get(method_index))
+            .flatten();
         let header = match compact_headers {
             Some(headers) => streamed_callable_header_by_declaration(
                 headers,

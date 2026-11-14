@@ -245,6 +245,7 @@ impl<'a> CommonIrBodySink<'a> {
         finalize_inherited_statuses(index, self.ir);
         finalize_constructors(index, self.ir)?;
         super::annotation_constructions::finalize_defaults(self.ir)?;
+        super::annotation_constructions::normalize_declaration_defaults(self.ir);
         super::annotation_constructions::assign_evaluation_scopes(self.ir);
         super::constructors::finalize_local_superclass_captures(self.ir)?;
         finalize_enum_entries(self.ir)?;
@@ -1594,6 +1595,13 @@ impl<'a> CommonIrBodySink<'a> {
             .has(crate::fir::DeclarationFlags::COMPANION);
         if !default_fragment && self.ir.functions[function as usize].body.is_some() {
             return Err(FirFileLoweringFailure::DuplicateBody(callable.id));
+        }
+        if let Some(guard) = body.equality_bound_guard() {
+            self.ir.declared_parameters_mut(function).equality_bound =
+                Some(crate::ir::IrEqualityBoundParameter {
+                    index: guard.ordinal as usize,
+                    bound: guard.bound.get(),
+                });
         }
         if callable.is_inline() {
             let (modifiers, modes) = body.inline_parameter_contract();

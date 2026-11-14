@@ -7,6 +7,8 @@
 
 use krusty::fx_hash::{HashMap, HashSet};
 
+use krusty::backend::instance_links::InstanceEntry;
+use krusty::backend::module_links::ModuleLinks;
 use krusty::backend::{
     CheckedBackendCallables, DependencyExportSignatures, DependencyFunctionSignature,
     DependencyMemberReceiver, KlibDependencyCallable, SingletonExtensionUnreadReceiver,
@@ -46,10 +48,9 @@ pub(super) struct CallableRegistry {
     singleton_member_receivers: HashMap<KlibDependencyCallable, SingletonMemberReceiver>,
     singleton_extension_unread_receivers:
         HashMap<KlibDependencyCallable, SingletonExtensionUnreadReceiver>,
-    /// The entry answering each published object declaration's instance, by its classifier.
-    dependency_singletons: HashMap<krusty::backend::DependencyClassifier, u32>,
-    /// The entry answering each constant of a published enum.
-    dependency_enum_constants: HashMap<krusty::backend::EnumConstant, u32>,
+    /// The entry answering each object's instance and each enum constant, linked by the
+    /// instance (see `krusty::backend::instance_links`).
+    instances: ModuleLinks<InstanceEntry, u32>,
 }
 
 pub(super) struct FileCallTargets {
@@ -65,10 +66,8 @@ pub(super) struct FileCallTargets {
     singleton_member_receivers: HashMap<ExternalCallableId, SingletonMemberReceiver>,
     singleton_extension_unread_receivers:
         HashMap<ExternalCallableId, SingletonExtensionUnreadReceiver>,
-    /// The instance entry of each other module's object this file reads as a value.
-    singletons: HashMap<krusty::backend::DependencyClassifier, u32>,
-    /// The entry of each constant of another file's enum this file reads.
-    enum_constants: HashMap<krusty::backend::EnumConstant, u32>,
+    /// The entry of each object instance and enum constant of another file this file reads.
+    instances: HashMap<InstanceEntry, u32>,
 }
 
 impl CallableRegistry {
@@ -82,8 +81,39 @@ impl CallableRegistry {
         }
     }
 
+    /// Link the entry answering each object instance and enum constant this file realizes,
+    /// reusing the index a read in an earlier file reserved. [`Self::declare_file`] declares each
+    /// entry there.
+    pub(super) fn link_instances(
+        &mut self,
+        exports: &DependencyExportSignatures,
+        wasm: &mut Module,
+    ) -> Result<Vec<(krusty::ir::FunId, u32)>, Unsupported> {
+        krusty::backend::instance_links::link_entries(exports, &mut self.instances, || {
+            wasm.declare()
+        })
+        .map_err(str::to_owned)
+    }
+
+    /// The instances a read reserved an entry for and no file of the module defined.
+    pub(super) fn check_links(&self) -> Result<(), Unsupported> {
+        // Boundary conversion for a diagnostic.
+        match self.instances.undefined().next() {
+            Some(InstanceEntry::EnumConstant(constant)) => Err(format!(
+                "an enum constant (`{}.{}`) without its declaring file's entry",
+                constant.classifier.render().replace('/', "."),
+                constant.name
+            )),
+            Some(InstanceEntry::Object(classifier)) => Err(format!(
+                "an object (`{}`) without its declaring file's entry",
+                classifier.render().replace('/', ".")
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// Declare every emitted function defined by `ir`, reusing an index reserved by an earlier
-    /// cross-file call. Every checked callable identity that realizes the same `FunId` binds to
+    /// cross-file call, or `linked` to an instance ([`Self::link_instances`]). Every checked callable identity that realizes the same `FunId` binds to
     /// that index, and so does every identity a default-argument entry is published under. An
     /// inline-only function is a cloning template, not a declaration, and therefore receives no
     /// Wasm index and binds no callable identity.
@@ -91,6 +121,7 @@ impl CallableRegistry {
         &mut self,
         ir: &IrFile,
         wasm: &mut Module,
+        linked: &[(krusty::ir::FunId, u32)],
     ) -> Result<Vec<Option<u32>>, Unsupported> {
         let mut identities = vec![Vec::new(); ir.functions.len()];
         for (&callable, &function) in &ir.checked_callable_functions {
@@ -132,6 +163,12 @@ impl CallableRegistry {
                     .iter()
                     .filter_map(|target| self.module.get(target).copied())
                     .chain(
+                        linked
+                            .iter()
+                            .filter(|(entry, _)| *entry as usize == function)
+                            .map(|&(_, index)| index),
+                    )
+                    .chain(
                         default_targets
                             .iter()
                             .filter_map(|target| self.module_defaults.get(target).copied()),
@@ -166,6 +203,7 @@ impl CallableRegistry {
         &mut self,
         ir: &IrFile,
         callables: &CheckedBackendCallables,
+        module_facts: &krusty::backend::BackendModuleFacts,
         wasm: &mut Module,
     ) -> Result<FileCallTargets, Unsupported> {
         let mut targets = FileCallTargets {
@@ -179,8 +217,12 @@ impl CallableRegistry {
             member_receivers: HashMap::default(),
             singleton_member_receivers: HashMap::default(),
             singleton_extension_unread_receivers: HashMap::default(),
-            singletons: HashMap::default(),
-            enum_constants: HashMap::default(),
+            instances: krusty::backend::instance_links::link_reads(
+                ir,
+                module_facts,
+                &mut self.instances,
+                || wasm.declare(),
+            ),
         };
         for expression in krusty::ir::emitted_body_roots(ir)
             .into_iter()
@@ -215,28 +257,6 @@ impl CallableRegistry {
                             .to_owned()
                     })?;
                     targets.signatures.insert(*target, signature.clone());
-                    continue;
-                }
-                // Another file's enum constant is read through the entry its file publishes.
-                IrExpr::EnumEntry { classifier, name }
-                    if ir.class_id_by_name(*classifier).is_none() =>
-                {
-                    let constant = krusty::backend::EnumConstant {
-                        classifier: *classifier,
-                        name: name.clone(),
-                    };
-                    if let Some(&entry) = self.dependency_enum_constants.get(&constant) {
-                        targets.enum_constants.insert(constant, entry);
-                    }
-                    continue;
-                }
-                // Another module's object is read through the entry its module publishes.
-                IrExpr::SingletonValue { classifier }
-                    if ir.class_id_by_name(*classifier).is_none() =>
-                {
-                    if let Some(&entry) = self.dependency_singletons.get(classifier) {
-                        targets.singletons.insert(*classifier, entry);
-                    }
                     continue;
                 }
                 IrExpr::Checked(operation) => {
@@ -305,6 +325,10 @@ impl CallableRegistry {
                         == Some(krusty::backend::BackendCompilerIntrinsic::TypeOf)
                     {
                         // `typeOf` keeps its checked call, and emission makes the `KType` it names.
+                        continue;
+                    }
+                    if super::lower::declared_by_string_builder(callable) {
+                        // The runtime lays `StringBuilder` out and realizes its members.
                         continue;
                     }
                     if super::lower::any_members::call_member(ir, callables, expression).is_some() {
@@ -447,23 +471,6 @@ impl CallableRegistry {
         exports: &DependencyExportSignatures,
         functions: &[Option<u32>],
     ) -> Result<(), Unsupported> {
-        for (constant, entry) in exports.enum_constant_entries() {
-            let entry = functions
-                .get(*entry as usize)
-                .copied()
-                .flatten()
-                .ok_or_else(|| "an enum constant entry without its function".to_string())?;
-            self.dependency_enum_constants
-                .insert(constant.clone(), entry);
-        }
-        for &(classifier, entry) in exports.singleton_entries() {
-            let entry = functions
-                .get(entry as usize)
-                .copied()
-                .flatten()
-                .ok_or_else(|| "an object instance entry without its function".to_string())?;
-            self.dependency_singletons.insert(classifier, entry);
-        }
         for (function, identity) in exports.callables() {
             let emitted = functions
                 .get(function as usize)
@@ -571,26 +578,9 @@ impl FileCallTargets {
         self.module.get(&target).copied()
     }
 
-    /// The entry answering the constant `name` of another file's enum `classifier`.
-    pub(super) fn dependency_enum_constant(
-        &self,
-        classifier: krusty::backend::DependencyClassifier,
-        name: &str,
-    ) -> Option<u32> {
-        self.enum_constants
-            .get(&krusty::backend::EnumConstant {
-                classifier,
-                name: name.into(),
-            })
-            .copied()
-    }
-
-    /// The entry answering the instance of another module's object `classifier`.
-    pub(super) fn dependency_singleton(
-        &self,
-        classifier: krusty::backend::DependencyClassifier,
-    ) -> Option<u32> {
-        self.singletons.get(&classifier).copied()
+    /// The entry answering `instance`, an object or enum constant another file realizes.
+    pub(super) fn instance(&self, instance: &InstanceEntry) -> Option<u32> {
+        self.instances.get(instance).copied()
     }
 
     pub(super) fn external(&self, target: ExternalCallableId) -> Option<u32> {
@@ -653,6 +643,11 @@ impl FileCallTargets {
 
 #[cfg(test)]
 mod tests {
+    fn no_facts() -> krusty::backend::BackendModuleFacts {
+        krusty::backend::BackendModuleFacts::from_classifiers([], [])
+            .expect("an empty module has valid facts")
+    }
+
     use super::*;
     use crate::encode::{Code, Function};
     use krusty::backend::BackendCallableFact;
@@ -927,7 +922,7 @@ mod tests {
 
         registry.enter_source_module("app");
         let functions = registry
-            .declare_file(&ir, &mut wasm)
+            .declare_file(&ir, &mut wasm, &[])
             .expect("the inline template is a valid non-emitted function");
 
         assert_eq!(functions, [None]);
@@ -958,10 +953,15 @@ mod tests {
 
         registry.enter_source_module("app");
         let functions = registry
-            .declare_file(&ir, &mut wasm)
+            .declare_file(&ir, &mut wasm, &[])
             .expect("the emitted entry has one declaration");
         let calls = registry
-            .file_calls(&ir, &CheckedBackendCallables::default(), &mut wasm)
+            .file_calls(
+                &ir,
+                &CheckedBackendCallables::default(),
+                &no_facts(),
+                &mut wasm,
+            )
             .expect("a dead inline template cannot affect emitted calls");
 
         assert_eq!(functions.len(), 2);
@@ -993,7 +993,12 @@ mod tests {
 
         registry.enter_source_module("app");
         let calls = registry
-            .file_calls(&ir, &CheckedBackendCallables::default(), &mut wasm)
+            .file_calls(
+                &ir,
+                &CheckedBackendCallables::default(),
+                &no_facts(),
+                &mut wasm,
+            )
             .expect("a supported constructor initializer has registered calls");
 
         assert_eq!(calls.module(target), registry.module.get(&target).copied());
@@ -1026,7 +1031,7 @@ mod tests {
         );
         assert_eq!(
             registry
-                .declare_file(&inline_file(callable), &mut wasm)
+                .declare_file(&inline_file(callable), &mut wasm, &[])
                 .expect("an existing physical definition remains authoritative"),
             [None]
         );
@@ -1036,7 +1041,7 @@ mod tests {
         registry.enter_source_module("app");
         registry.module_index(callable, &mut wasm);
         assert_eq!(
-            registry.declare_file(&inline_file(callable), &mut wasm),
+            registry.declare_file(&inline_file(callable), &mut wasm, &[]),
             Err("a source call reserved an inline-only Wasm function".to_string())
         );
     }
@@ -1071,7 +1076,12 @@ mod tests {
             |_| false,
         );
         let calls = registry
-            .file_calls(&caller, &CheckedBackendCallables::default(), &mut wasm)
+            .file_calls(
+                &caller,
+                &CheckedBackendCallables::default(),
+                &no_facts(),
+                &mut wasm,
+            )
             .expect("the inherited provider reserves its exact entry");
         let reserved = calls
             .module_default(provider)
@@ -1111,7 +1121,7 @@ mod tests {
         );
         let entry = declaration.default_entries[&function];
         let functions = registry
-            .declare_file(&declaration, &mut wasm)
+            .declare_file(&declaration, &mut wasm, &[])
             .expect("the actual declaration realizes the provider-owned entry");
         assert_eq!(functions[entry as usize], Some(reserved));
         assert_ne!(functions[function as usize], Some(reserved));

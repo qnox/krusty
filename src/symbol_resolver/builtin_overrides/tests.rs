@@ -104,7 +104,7 @@ fn every_primitive_compares_through_its_own_comparable_override() {
             .iter()
             .map(|implementation| implementation.receiver)
             .collect::<Vec<_>>();
-        assert_eq!(receivers, BUILTIN_TYPES);
+        assert_eq!(receivers, REPRESENTED_BUILTINS);
         for implementation in &overrides {
             let declaration = implementation
                 .declaration
@@ -118,12 +118,15 @@ fn every_primitive_compares_through_its_own_comparable_override() {
                 declaration.identity.params.as_ref(),
                 [implementation.receiver]
             );
-            if implementation.receiver != Ty::String {
-                assert_eq!(
-                    operation(&declaration.callable),
-                    Some(CompilerIntrinsic::PrimitiveCompare)
-                );
-            }
+            // A string and an unsigned integer compare in a body of their own.
+            let has_body = matches!(
+                implementation.receiver,
+                Ty::String | Ty::UByte | Ty::UShort | Ty::UInt | Ty::ULong
+            );
+            assert_eq!(
+                operation(&declaration.callable),
+                (!has_body).then_some(CompilerIntrinsic::PrimitiveCompare)
+            );
         }
     }
 }
@@ -189,5 +192,33 @@ fn a_string_reads_its_own_length_and_chars_through_char_sequence() {
             assert_eq!(declaration.identity.params.as_ref(), params);
             assert_eq!(declaration.identity.ret, ret);
         }
+    }
+}
+
+#[test]
+fn the_builtin_subtypes_of_a_classifier_are_the_builtin_classes_below_it() {
+    for libraries in wasm_stdlibs() {
+        assert_eq!(
+            builtin_subtypes(&libraries, type_name("kotlin/Comparable")),
+            REPRESENTED_BUILTINS
+        );
+        assert_eq!(
+            builtin_subtypes(&libraries, type_name("kotlin/CharSequence")),
+            [Ty::String]
+        );
+        assert_eq!(
+            builtin_subtypes(&libraries, type_name("kotlin/Number")),
+            [
+                Ty::Byte,
+                Ty::Short,
+                Ty::Int,
+                Ty::Long,
+                Ty::Float,
+                Ty::Double
+            ]
+        );
+        assert!(builtin_subtypes(&libraries, type_name("kotlin/collections/Iterable")).is_empty());
+        // A builtin class is not its own proper subtype.
+        assert!(builtin_subtypes(&libraries, type_name("kotlin/Int")).is_empty());
     }
 }

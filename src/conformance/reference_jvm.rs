@@ -11,7 +11,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
-    directive, inject_support_module, module_units, split_files, split_modules, BoxJdk, SourceBlock,
+    contains_directive, coroutine_sources, directive, inject_coroutine_support, module_units,
+    source_modules, split_files, BoxJdk, SourceBlock,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,12 +63,17 @@ fn scratch_dir() -> Result<ScratchDir, String> {
 }
 
 fn language_args(src: &str) -> Vec<String> {
-    src.lines()
+    let features = crate::features::FeatureTable::for_version(crate::kotlin_version::target())
+        .expect("the configured reference release has a feature table");
+    let mut arguments: Vec<String> = src
+        .lines()
         .filter_map(|line| line.trim_start().strip_prefix("// LANGUAGE:"))
         .flat_map(|payload| payload.split([' ', ',', '\t']))
         .filter(|token| !token.is_empty())
-        .map(|token| format!("-XXLanguage:{token}"))
-        .collect()
+        .map(|token| features.language_argument(token))
+        .collect();
+    arguments.dedup();
+    arguments
 }
 
 fn write_sources(
@@ -232,14 +238,16 @@ pub fn reference_jvm_acceptance(
     };
     let args = language_args(src);
 
-    if src.contains("// MODULE:") {
-        let Some(mut modules) = split_modules(src) else {
+    if contains_directive(src, "MODULE") {
+        let Some(mut modules) = source_modules(src) else {
             return ReferenceJvmAcceptance::Unavailable(
                 "reference JVM oracle does not support this // MODULE: shape".into(),
             );
         };
         if directive(src, "WITH_COROUTINES") {
-            inject_support_module(&mut modules, coroutine_helpers);
+            if let Err(error) = inject_coroutine_support(&mut modules, src, coroutine_helpers) {
+                return ReferenceJvmAcceptance::Unavailable(error);
+            }
         }
         let units = module_units(&modules);
         let mut outputs = HashMap::<String, PathBuf>::default();
@@ -280,8 +288,11 @@ pub fn reference_jvm_acceptance(
         return ReferenceJvmAcceptance::Accepted;
     }
 
-    let (mut kotlin, java) = if src.contains("// FILE:") {
-        split_files(src)
+    let (mut kotlin, java) = if contains_directive(src, "FILE") {
+        match split_files(src) {
+            Ok(files) => files,
+            Err(error) => return ReferenceJvmAcceptance::Unavailable(error),
+        }
     } else {
         (
             vec![(fallback_stem.to_string(), src.to_string())],
@@ -289,7 +300,10 @@ pub fn reference_jvm_acceptance(
         )
     };
     if directive(src, "WITH_COROUTINES") {
-        kotlin.push(("CoroutineUtil".into(), coroutine_helpers.into()));
+        match coroutine_sources(src, coroutine_helpers) {
+            Ok(helpers) => kotlin.extend(helpers),
+            Err(error) => return ReferenceJvmAcceptance::Unavailable(error),
+        }
     }
     compile_unit(
         &kotlinc,
