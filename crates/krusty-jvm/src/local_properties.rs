@@ -12,7 +12,7 @@ pub(super) fn realize(
     let accesses = krusty::backend::local_properties::realize(ir)?;
     let suspend_lambda_bodies = suspend_lambda_body_expressions(ir);
     for access in accesses {
-        let Some(layout) = ir.local_property_layouts.get(&access.target).cloned() else {
+        let Some(layout) = ir.property_layout_at(access.operation, access.target)? else {
             return Err(access.target);
         };
         if access.read {

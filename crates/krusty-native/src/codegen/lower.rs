@@ -1482,7 +1482,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 if self.file.is_imported_property(target) {
                     return self.module_property_write(target, *dispatch_receiver, *value);
                 }
-                match self.checked_property(target) {
+                match self.checked_property_at(id, target) {
                     Ok(objects::CheckedProperty::Member(class, index)) => {
                         self.property_write(class, index, *dispatch_receiver, *value)?
                     }
@@ -2191,7 +2191,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 if self.file.is_imported_property(target) {
                     return self.module_property_read(target, *dispatch_receiver);
                 }
-                match self.checked_property(target) {
+                match self.checked_property_at(id, target) {
                     Ok(objects::CheckedProperty::Member(class, index)) => {
                         self.property_read(class, index, *dispatch_receiver)
                     }

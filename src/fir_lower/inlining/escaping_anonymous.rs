@@ -247,69 +247,52 @@ fn retarget_caller_property_use(
     let IrExpr::Checked(operation) = ir.expr(expression).clone() else {
         return Ok(());
     };
-    let (target, receiver, extension_receiver, context_arguments, value) = match *operation {
+    let (target, receiver, extension_receiver, context_arguments) = match *operation {
         crate::ir::IrCheckedOperation::PropertyRead {
             target,
             dispatch_receiver,
             extension_receiver,
             context_arguments,
             ..
-        } => (
+        }
+        | crate::ir::IrCheckedOperation::PropertyWrite {
             target,
             dispatch_receiver,
             extension_receiver,
             context_arguments,
-            None,
-        ),
-        crate::ir::IrCheckedOperation::PropertyWrite {
-            target,
-            dispatch_receiver,
-            extension_receiver,
-            context_arguments,
-            value,
             ..
         } => (
             target,
             dispatch_receiver,
             extension_receiver,
             context_arguments,
-            Some(value),
         ),
         _ => return Ok(()),
     };
     if extension_receiver.is_some() || !context_arguments.is_empty() {
         return Err(malformed(source_name));
     }
-    let name = match ir.local_property_layouts.get(&target) {
-        Some(crate::ir::IrLocalPropertyLayout::Member { name, .. }) => name.clone(),
-        _ => return Err(malformed(source_name)),
+    let receiver = receiver.ok_or_else(|| malformed(source_name))?;
+    let IrExpr::New { internal, .. } = ir.expr(receiver) else {
+        return Err(malformed(source_name));
     };
-    let property = ir.classes[copy_id as usize]
-        .properties
-        .iter()
-        .find(|property| property.name == name)
+    let actual = ir
+        .class_id_by_name(*internal)
         .ok_or_else(|| malformed(source_name))?;
-    let ty = property.ty;
-    let owner = ir.classes[copy_id as usize].fq_name;
-    ir.exprs[expression as usize] = match value {
-        Some(value) => IrExpr::PropertyWrite {
-            receiver,
-            owner,
-            name,
-            value,
-            ty,
-            interface: false,
-            operation: Some(expression),
-        },
-        None => IrExpr::PropertyRead {
-            receiver,
-            owner,
-            name,
-            ty,
-            interface: false,
-            operation: Some(expression),
-        },
-    };
+    if actual != copy_id && !specialization_descends_from(ir, actual, copy_id, receiver) {
+        return Err(malformed(source_name));
+    }
+    if !matches!(
+        ir.property_layout_for_class(target, actual)
+            .map_err(|_| malformed(source_name))?,
+        Some(crate::ir::IrLocalPropertyLayout::Member { .. })
+    ) {
+        return Err(malformed(source_name));
+    }
+    // Retain the selected PropertyId. The projection authenticated either same-ordinal copied
+    // storage/accessors or the original inherited declaration through recorded supertypes.
+    ir.dispatch_classes
+        .insert(expression, ir.classes[actual as usize].fq_name);
     Ok(())
 }
 
@@ -1159,37 +1142,23 @@ fn retarget_property_operation(
     }
     let CopiedPropertyLayout::Member {
         backing_field: true,
-        name,
-        ty,
-        interface,
+        property,
         ..
     } = layout
     else {
         return Err(malformed(source_name));
     };
-    if extension_receiver.is_some() || !context_arguments.is_empty() {
+    if extension_receiver.is_some()
+        || !context_arguments.is_empty()
+        || ir.classes[copy_id as usize]
+            .properties
+            .get(property as usize)
+            .is_none()
+    {
         return Err(malformed(source_name));
     }
-    let owner = ir.classes[copy_id as usize].fq_name;
-    ir.exprs[expression as usize] = match value {
-        Some(value) => IrExpr::PropertyWrite {
-            receiver: Some(receiver),
-            owner,
-            name,
-            value,
-            ty,
-            interface,
-            operation: Some(expression),
-        },
-        None => IrExpr::PropertyRead {
-            receiver: Some(receiver),
-            owner,
-            name,
-            ty,
-            interface,
-            operation: Some(expression),
-        },
-    };
+    ir.dispatch_classes
+        .insert(expression, ir.classes[copy_id as usize].fq_name);
     Ok(())
 }
 
@@ -1199,9 +1168,7 @@ enum CopiedPropertyLayout {
         backing_field: bool,
         getter: Option<FunId>,
         setter: Option<FunId>,
-        name: String,
-        ty: Ty,
-        interface: bool,
+        property: u32,
     },
     Extension {
         declaring_class: ClassId,
@@ -1222,9 +1189,7 @@ fn copied_property_layout(
             backing_field,
             getter,
             setter,
-            name,
-            ty,
-            interface,
+            property,
             ..
         } => {
             let declaring_class = lineage.iter().find_map(|(candidate, name)| {
@@ -1235,9 +1200,7 @@ fn copied_property_layout(
                 backing_field: backing_field.is_some(),
                 getter: *getter,
                 setter: *setter,
-                name: name.clone(),
-                ty: *ty,
-                interface: *interface,
+                property: *property,
             })
         }
         crate::ir::IrLocalPropertyLayout::MemberExtension {

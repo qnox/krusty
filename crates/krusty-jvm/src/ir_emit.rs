@@ -5295,18 +5295,13 @@ impl<'a> Emitter<'a> {
             });
         let declaration_ty = *physical.unwrap_or(operation.ty);
         if let Some(realization) = self.property_realizations.get(operation.expression) {
-            let access = match realization {
-                crate::property_realizations::PropertyRealization::Physical(access) => {
-                    Some(access.clone())
-                }
-                crate::property_realizations::PropertyRealization::Local(target) => self
-                    .local_property_read_access(
-                        *target,
-                        selected.map(|(name, _)| name.as_str()),
-                        operation.interface,
-                        receiver_class,
-                    ),
-            };
+            let access = self.property_realization_read_access(
+                realization,
+                operation.expression,
+                selected.map(|(name, _)| name.as_str()),
+                operation.interface,
+                receiver_class,
+            );
             if let Some(mut access) = access {
                 self.retarget_explicit_backing_read(&operation, &mut access);
                 return self.emit_realized_property_read(&operation, access, code);
@@ -5400,13 +5395,12 @@ impl<'a> Emitter<'a> {
         let access = self
             .property_realizations
             .get(operation.expression)
-            .map(|realization| match realization {
-                crate::property_realizations::PropertyRealization::Physical(access) => {
-                    access.clone()
-                }
-                crate::property_realizations::PropertyRealization::Local(target) => self
-                    .local_property_write_access(*target, receiver_class)
-                    .expect("a realized local member property write has exact JVM access"),
+            .map(|realization| {
+                self.property_realization_write_access(
+                    realization,
+                    operation.expression,
+                    receiver_class,
+                )
             })
             .or_else(|| {
                 self.ir

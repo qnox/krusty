@@ -11,18 +11,23 @@ impl Emitter<'_> {
     /// consume that backend table directly instead of recovering the property from its spelling.
     pub(super) fn local_property_read_access(
         &self,
+        operation: krusty::ir::ExprId,
         target: krusty::fir::PropertyId,
         selected_accessor: Option<&str>,
         selected_interface: bool,
         receiver: Option<TypeName>,
     ) -> Option<krusty::jvm::inline::PropertyAccess> {
+        let layout = self
+            .ir
+            .property_layout_at(operation, target)
+            .expect("a realized property retains its checked specialization")?;
         let krusty::ir::IrLocalPropertyLayout::Member {
             class,
             owner,
             name,
             property,
             ..
-        } = self.ir.local_property_layouts.get(&target)?
+        } = &layout
         else {
             return None;
         };
@@ -348,16 +353,21 @@ impl Emitter<'_> {
 
     pub(super) fn local_property_write_access(
         &self,
+        operation: krusty::ir::ExprId,
         target: krusty::fir::PropertyId,
         receiver: Option<TypeName>,
     ) -> Option<krusty::jvm::inline::PropertyAccess> {
+        let layout = self
+            .ir
+            .property_layout_at(operation, target)
+            .expect("a realized property retains its checked specialization")?;
         let krusty::ir::IrLocalPropertyLayout::Member {
             class,
             owner,
             name,
             property,
             ..
-        } = self.ir.local_property_layouts.get(&target)?
+        } = &layout
         else {
             return None;
         };
@@ -659,4 +669,43 @@ fn annotation_member_descriptor(
         &krusty::jvm::method_descriptors::jvm_tys(parameters),
         stored,
     )
+}
+
+impl Emitter<'_> {
+    pub(super) fn property_realization_read_access(
+        &self,
+        realization: &crate::property_realizations::PropertyRealization,
+        operation: krusty::ir::ExprId,
+        selected_accessor: Option<&str>,
+        interface: bool,
+        receiver: Option<TypeName>,
+    ) -> Option<krusty::jvm::inline::PropertyAccess> {
+        match realization {
+            crate::property_realizations::PropertyRealization::Physical(access) => {
+                Some(access.clone())
+            }
+            crate::property_realizations::PropertyRealization::Local(target) => self
+                .local_property_read_access(
+                    operation,
+                    *target,
+                    selected_accessor,
+                    interface,
+                    receiver,
+                ),
+        }
+    }
+
+    pub(super) fn property_realization_write_access(
+        &self,
+        realization: &crate::property_realizations::PropertyRealization,
+        operation: krusty::ir::ExprId,
+        receiver: Option<TypeName>,
+    ) -> krusty::jvm::inline::PropertyAccess {
+        match realization {
+            crate::property_realizations::PropertyRealization::Physical(access) => access.clone(),
+            crate::property_realizations::PropertyRealization::Local(target) => self
+                .local_property_write_access(operation, *target, receiver)
+                .expect("a realized local member property write has exact JVM access"),
+        }
+    }
 }
