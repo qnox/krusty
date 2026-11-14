@@ -18,6 +18,11 @@ pub struct KlibBodyDeclarationModifiers {
 }
 
 impl KlibBodyDeclarationModifiers {
+    /// Whether the selected semantic declaration requires a continuation frame.
+    pub fn is_suspend(self) -> bool {
+        self.is_suspend
+    }
+
     pub(crate) fn permits_ordinary_body(self) -> bool {
         !self.is_inline
             && !self.is_suspend

@@ -1,7 +1,11 @@
 //! Physical dispatch through a class already emitted by a dependency module.
 
-use krusty::backend::{BackendCallableFact, BackendClassifierSource};
+use krusty::backend::{
+    instantiate_dependency_signature, BackendCallableFact, BackendClassifierSource,
+};
+use krusty::ir::Callee;
 use krusty::libraries::{ExternalCallableKind, MemberRealization};
+use krusty::types::Ty;
 
 use super::super::super::super::encode::{Module, ValType};
 use super::super::super::super::objects::REFERENCE;
@@ -13,6 +17,8 @@ pub(in crate::codegen) struct PublishedMember {
     pub(in crate::codegen) table: u32,
     pub(in crate::codegen) slot: u32,
     pub(in crate::codegen) signature: u32,
+    pub(in crate::codegen) applied_parameters: Box<[Ty]>,
+    pub(in crate::codegen) applied_result: Ty,
 }
 
 /// The same selected declaration controls both dependency prewalking and body emission.
@@ -20,6 +26,7 @@ pub(in crate::codegen) struct PublishedMember {
 pub(in crate::codegen) fn select(
     fact: &BackendCallableFact,
     role: MemberRole,
+    callee: &Callee,
     classifiers: &dyn BackendClassifierSource,
     layouts: &LaidOutClasses,
     module: &mut Module,
@@ -45,6 +52,24 @@ pub(in crate::codegen) fn select(
         Err(reason) => return Some(Err(reason)),
     };
     Some((|| {
+        if fact
+            .klib_body_declaration_modifiers
+            .is_some_and(|modifiers| modifiers.is_suspend())
+        {
+            return Err(
+                "a suspend class member requires its authenticated continuation frame".into(),
+            );
+        }
+        let applied = instantiate_dependency_signature(fact, callee).map_err(str::to_owned)?;
+        let Callee::External { params, ret, .. } = callee else {
+            return Err("a published member without its checked external call".into());
+        };
+        if applied.parameters.as_ref() != params.as_slice()
+            || applied.result != *ret
+            || applied.receiver.is_some()
+        {
+            return Err("a published class member disagrees with its checked application".into());
+        }
         let identity = library_member_identity(fact, role)
             .ok_or("a published class member without its exact declaration identity")?;
         let slot = *layout
@@ -71,6 +96,8 @@ pub(in crate::codegen) fn select(
             table: layout.table_type,
             slot,
             signature,
+            applied_parameters: applied.parameters,
+            applied_result: applied.result,
         })
     })())
 }
