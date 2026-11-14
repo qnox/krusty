@@ -454,7 +454,7 @@ impl BodyLowering<'_> {
         let Some((Some(function), arguments)) = arguments.split_first() else {
             return Err(mismatch("a function invocation has no function value"));
         };
-        if arguments.len() != arity + usize::from(suspend) {
+        if arguments.len() != arity {
             return Err(mismatch(
                 "a function invocation passes another number of arguments than its arity",
             ));
@@ -475,15 +475,9 @@ impl BodyLowering<'_> {
                 "a function invocation's value has another shape than its function class",
             ));
         }
-        if suspend && ty != Ty::nullable(Ty::obj_name(crate::types::wk::any())) {
-            return Err(mismatch(
-                "a suspend function invocation does not return its physical `Any?` carrier",
-            ));
-        }
         // An erased body uses the erasure of the function value's result, or the bound an
         // already expanded inline function's type parameter erased to.
-        if !suspend
-            && signature.ret != ty
+        if signature.ret != ty
             && self.header.erased(signature.ret) != ty
             && !self
                 .linker
@@ -493,13 +487,7 @@ impl BodyLowering<'_> {
                 "a function invocation is typed apart from its result",
             ));
         }
-        let mut params = signature.params.to_vec();
-        if suspend {
-            params.push(Ty::obj_args(
-                "kotlin/coroutines/Continuation",
-                &[signature.ret],
-            ));
-        }
+        let params = signature.params.to_vec();
         let mut args = Vec::with_capacity(arguments.len());
         for (argument, parameter) in arguments.iter().zip(&params) {
             let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
@@ -511,13 +499,12 @@ impl BodyLowering<'_> {
             func,
             args,
             params,
-            ret: if suspend {
-                Ty::nullable(Ty::obj_name(crate::types::wk::any()))
-            } else {
-                signature.ret
-            },
+            ret: signature.ret,
         });
-        Ok(if suspend || signature.ret == ty {
+        if suspend {
+            self.ir.suspend_calls.insert(invocation, signature.ret);
+        }
+        Ok(if signature.ret == ty {
             invocation
         } else {
             self.ir.set_logical_type(invocation, signature.ret);
