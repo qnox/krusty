@@ -462,6 +462,11 @@ mod tests {
                 .filter(|path| !path.starts_with(&jvm_provider)),
         );
         paths.extend(rust_files_under("src/js"));
+        // These code generators live in workspace crates rather than the compiler crate, so the
+        // module dependency budgets below do not catch a direct path back into resolver APIs.
+        // Keep the same checked-facts boundary across every representation backend.
+        paths.extend(rust_files_under("crates/krusty-native/src/codegen"));
+        paths.extend(rust_files_under("crates/krusty-wasm/src/codegen"));
         for path in paths {
             if path
                 .components()
@@ -607,16 +612,38 @@ mod tests {
             Path::new("/workspace/src/jvm_libraries/contract_dsl_tests.rs")
         ));
         assert!(is_test_only_module_source(&source_path(
-            "src/jvm/jvm_libraries/contract_dsl_tests.rs"
+            "src/jvm/jvm_libraries/tests/contract_dsl_tests.rs"
         )));
         assert!(!is_test_only_module_source(&source_path(
             "src/jvm/jvm_libraries/synthetic_properties.rs"
         )));
         // Dependency budgets share the same proven parent-module production boundary.
         assert_allowed_crate_modules_in_file(
-            &source_path("src/jvm/jvm_libraries/contract_dsl_tests.rs"),
+            &source_path("src/jvm/jvm_libraries/tests/contract_dsl_tests.rs"),
             &[],
         );
+    }
+
+    #[test]
+    fn explicit_test_module_paths_cross_directory_boundaries() {
+        let root = std::env::temp_dir().join(format!(
+            "krusty-architecture-nested-path-{}",
+            std::process::id()
+        ));
+        let source = root.join("src");
+        fs::create_dir_all(source.join("parent/tests")).expect("create nested module tree");
+        let child = source.join("parent/tests/child.rs");
+        fs::write(&child, "pub fn fixture() {} ").expect("write child module");
+        for (declaration, expected) in [
+            ("#[cfg(test)] #[path = \"parent/tests/child.rs\"] mod child;", true),
+            ("#[cfg(not(test))] #[path = \"parent/tests/child.rs\"] mod child;", false),
+            ("#[cfg(any(test, feature = \"extra\"))] #[path = \"parent/tests/child.rs\"] mod child;", false),
+            ("#[cfg(test)] #[path = \"parent/tests/child.rs\"] mod child; #[cfg(not(test))] #[path = \"parent/tests/child.rs\"] mod child;", false),
+        ] {
+            fs::write(source.join("parent.rs"), declaration).expect("write parent module");
+            assert_eq!(is_test_only_module_source(&child), expected, "{declaration}");
+        }
+        fs::remove_dir_all(root).expect("remove nested module tree");
     }
 
     #[test]
@@ -1519,10 +1546,23 @@ mod tests {
         }
     }
 
-    /// An out-of-line module source has no attributes of its own. Check its immediately enclosing
-    /// module declaration so a file included only by a proven test-only parent is not mistaken for
-    /// production code when backend files are enumerated recursively.
+    /// An out-of-line module source has no attributes of its own. Prove its test-only parent
+    /// declaration, including explicit paths that cross extra directories, before excluding it.
     fn is_test_only_module_source(path: &Path) -> bool {
+        test_only_module_source(path, &mut BTreeSet::new())
+    }
+
+    fn test_only_module_source(path: &Path, visiting: &mut BTreeSet<PathBuf>) -> bool {
+        let key = normalize_source_path(path);
+        if !visiting.insert(key.clone()) {
+            return false;
+        }
+        let result = module_source_has_only_test_parents(path, visiting);
+        visiting.remove(&key);
+        result
+    }
+
+    fn module_source_has_only_test_parents(path: &Path, visiting: &mut BTreeSet<PathBuf>) -> bool {
         let (module_name, containing_dir) =
             if path.file_name().and_then(|name| name.to_str()) == Some("mod.rs") {
                 let Some(module_dir) = path.parent() else {
@@ -1541,25 +1581,21 @@ mod tests {
         let (Some(module_name), Some(containing_dir)) = (module_name, containing_dir) else {
             return false;
         };
-        let Some(parent_module_name) = containing_dir.file_name().and_then(|name| name.to_str())
-        else {
-            return false;
-        };
-        let parent_candidates = [
-            if parent_module_name == "src" {
-                containing_dir.join("lib.rs")
-            } else {
-                containing_dir
-                    .parent()
-                    .unwrap_or(containing_dir)
-                    .join(format!("{parent_module_name}.rs"))
-            },
-            if parent_module_name == "src" {
-                containing_dir.join("main.rs")
-            } else {
-                containing_dir.join("mod.rs")
-            },
-        ];
+        let mut parent_candidates = Vec::new();
+        for directory in containing_dir.ancestors() {
+            let Some(name) = directory.file_name().and_then(|name| name.to_str()) else {
+                break;
+            };
+            if name == "src" {
+                parent_candidates.push(directory.join("lib.rs"));
+                parent_candidates.push(directory.join("main.rs"));
+                break;
+            }
+            if let Some(parent) = directory.parent() {
+                parent_candidates.push(parent.join(format!("{name}.rs")));
+            }
+            parent_candidates.push(directory.join("mod.rs"));
+        }
         let mut matched_declaration = false;
         for parent in parent_candidates {
             if parent == path {
@@ -1573,7 +1609,7 @@ mod tests {
                 continue;
             };
             matched_declaration = true;
-            if !test_only && !is_test_only_module_source(&parent) {
+            if !test_only && !test_only_module_source(&parent, visiting) {
                 return false;
             }
         }
