@@ -239,7 +239,6 @@ closures/kt47894_inlineFunWithObjectWithNothing.kt
 collectionLiterals/primitiveArrays.kt
 collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
-collectionLiterals/unsignedArrays.kt
 collections/clashWithInternalMapMethod.kt
 collections/inheritFromAbstractMutableListInt.kt
 companionBlocksAndExtensions/callableReferences.kt
@@ -2460,7 +2459,6 @@ unsignedTypes/inUnsignedDownTo.kt
 unsignedTypes/kt47716.kt
 unsignedTypes/unsignedRangeIterator.kt
 unsignedTypes/varargsOfUnsignedTypes.kt
-vararg/inlineClassArraysAsNamedArgumentInVararg.kt
 vararg/kt37715.kt
 vararg/spreadCopiesArray.kt
 vararg/useSuspendFunResultAsVararg.kt

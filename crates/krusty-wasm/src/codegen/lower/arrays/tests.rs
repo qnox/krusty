@@ -92,3 +92,51 @@ fn size_frames_reject_missing_or_extra_operands_and_non_array_receivers() {
         );
     }
 }
+
+#[test]
+fn an_array_view_requires_its_exact_signed_object_and_table() {
+    let signed = ArrayForm {
+        object: 10,
+        storage: 11,
+        table: 12,
+        read: ElementRead::Signed,
+        view: None,
+    };
+    let view = ArrayForm {
+        object: 20,
+        storage: 11,
+        table: 22,
+        read: ElementRead::Unsigned,
+        view: Some((signed.object, signed.table)),
+    };
+    assert_eq!(
+        array_view_conversion(signed, view),
+        Some(ArrayViewConversion::Wrap)
+    );
+    assert_eq!(
+        array_view_conversion(view, signed),
+        Some(ArrayViewConversion::Unwrap)
+    );
+    assert_eq!(array_view_conversion(signed, signed), None);
+    assert_eq!(array_view_conversion(view, view), None);
+    assert_eq!(
+        array_view_conversion(
+            view,
+            ArrayForm {
+                object: 30,
+                ..signed
+            }
+        ),
+        None
+    );
+    assert_eq!(
+        array_view_conversion(
+            view,
+            ArrayForm {
+                table: 32,
+                ..signed
+            }
+        ),
+        None
+    );
+}
