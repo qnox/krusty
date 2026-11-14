@@ -989,15 +989,19 @@ impl BodyLowering<'_, '_, '_> {
         Ok(self.builder.inst_results(call).first().copied())
     }
 
-    /// Whether a checked read of `target` is answered by a reference object's slot: its selected
-    /// getter carries a reference role that takes no operands. Other getter roles are not this
-    /// lowering's, and the read goes on to the path that owns them.
-    pub(super) fn reads_reference_slot(&self, target: krusty::fir::ExternalPropertyId) -> bool {
+    /// Whether a checked read of `target` uses the reflection-reference member path. `get` and
+    /// `set` use generated reference slots; `KCallable.name` uses the descriptor callback so
+    /// ordinary source `KProperty` implementations keep their own table layouts.
+    pub(super) fn reads_reference_member(&self, target: krusty::fir::ExternalPropertyId) -> bool {
         self.file
             .callables
             .property(target)
             .and_then(|property| self.file.callables.callable(property.getter))
-            .is_some_and(|getter| reference_slot(getter.semantic_role, 0).is_some())
+            .is_some_and(|getter| {
+                getter.semantic_role
+                    == Some(krusty::types::SemanticCallRole::KotlinCallableReferenceName)
+                    || reference_slot(getter.semantic_role, 0).is_some()
+            })
     }
 
     /// A checked read of a dependency property whose selected getter carries a reference role.
