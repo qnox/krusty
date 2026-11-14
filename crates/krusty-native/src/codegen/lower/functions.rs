@@ -402,8 +402,7 @@ impl<'a> FileLowering<'a> {
                 arity: declared, ..
             } = &self.ir.exprs[index]
             {
-                let source_arity = suspend_source_arity.unwrap_or(arity);
-                if usize::from(*declared) != source_arity {
+                if usize::from(*declared) != arity {
                     return Err(declined!(
                         "a lambda of arity {declared} whose body takes {} parameters for {} \
                          captures",
