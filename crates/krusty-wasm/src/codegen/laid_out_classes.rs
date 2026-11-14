@@ -146,8 +146,17 @@ impl LaidOutClasses {
         }
         self.active_source.clear();
 
-        for (class_id, selected_ordinal, target) in super_constructor_edges(ir) {
-            let selected_ordinal = selected_ordinal as usize;
+        self.activate_superclass_initializers(ir, callables, classifiers, module);
+    }
+
+    fn activate_superclass_initializers(
+        &mut self,
+        ir: &IrFile,
+        callables: &CheckedBackendCallables,
+        classifiers: &dyn krusty::backend::BackendClassifierSource,
+        module: &mut Module,
+    ) {
+        for (class_id, target) in super_constructor_edges(ir) {
             let parent = ir.classes[class_id as usize].superclass;
             let Some(fact) = callables.callable(target) else {
                 continue;
@@ -162,7 +171,7 @@ impl LaidOutClasses {
             }
             let Some(PublishedConstructor::Layout {
                 class: class_identity,
-                ordinal: parent_ordinal,
+                ordinal: _,
             }) = self.published_constructors.get(identity)
             else {
                 continue;
@@ -178,12 +187,7 @@ impl LaidOutClasses {
             let Some(published) = self.published_source.get(class_identity) else {
                 continue;
             };
-            let Some((function, signature)) = published
-                .constructor_entries
-                .get(*parent_ordinal)
-                .copied()
-                .flatten()
-            else {
+            let Ok(Some((_, _, signature))) = self.published_initializer(identity, module) else {
                 continue;
             };
             let current = self.active_source.entry(parent).or_insert_with(|| {
@@ -209,25 +213,28 @@ impl LaidOutClasses {
                 current.refusal = Some("source classes with conflicting KLIB producers".into());
                 continue;
             }
-            if current.constructors.len() <= selected_ordinal {
-                current.constructors.resize(selected_ordinal + 1, None);
-            }
-            let Some(slot) = current.constructors.get_mut(selected_ordinal) else {
-                continue;
-            };
-            *slot = Some((function, parameters.to_vec()));
         }
     }
 
     /// Begin a dependency support unit, whose classes every later file of the program extends.
-    pub(super) fn enter_dependency_support(&mut self) {
+    pub(super) fn enter_dependency_support(
+        &mut self,
+        ir: &IrFile,
+        callables: &CheckedBackendCallables,
+        classifiers: &dyn krusty::backend::BackendClassifierSource,
+        module: &mut Module,
+    ) {
         self.support = true;
         self.active_source.clear();
+        self.activate_superclass_initializers(ir, callables, classifiers, module);
     }
 
     pub(super) fn get(&self, class: TypeName) -> Option<&LaidOutClass> {
         if self.support {
-            return self.dependencies.get(&class);
+            return self
+                .active_source
+                .get(&class)
+                .or_else(|| self.dependencies.get(&class));
         }
         self.classes
             .get(&class)
@@ -297,6 +304,46 @@ impl LaidOutClasses {
             .or_insert(binding);
     }
 
+    /// The existing exact constructor index, independent of any consumer-local ordinal.
+    pub(super) fn published_constructor(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Result<Option<(&KlibClassIdentity, usize)>, String> {
+        match self.published_constructors.get(identity) {
+            Some(PublishedConstructor::Layout { class, ordinal }) => Ok(Some((class, *ordinal))),
+            Some(PublishedConstructor::Conflict) => {
+                Err("a constructor with conflicting KLIB producers".into())
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Resolve the selected canonical initializer to its already-defined producer function.
+    pub(super) fn published_initializer(
+        &self,
+        identity: &KlibDependencyCallable,
+        module: &Module,
+    ) -> Result<Option<(&KlibClassIdentity, u32, u32)>, String> {
+        let Some((owner, ordinal)) = self.published_constructor(identity)? else {
+            return Ok(None);
+        };
+        let layout = self
+            .published_layout(owner)?
+            .ok_or("a selected superclass initializer without its producer layout")?;
+        let (function, signature) = layout
+            .constructor_entries
+            .get(ordinal)
+            .copied()
+            .flatten()
+            .ok_or("a selected superclass initializer without its physical frame")?;
+        if module.defined_function_type(function) != Some(signature) {
+            return Err(
+                "a selected superclass initializer without its defined producer frame".into(),
+            );
+        }
+        Ok(Some((owner, function, signature)))
+    }
+
     /// Read only the physical layout authenticated by the selected classifier record.
     pub(super) fn published_structure(
         &self,
@@ -324,7 +371,11 @@ impl LaidOutClasses {
 
 /// Constructor bodies receive the allocated instance, followed by the complete declaration
 /// parameters (including any declaration-owned prefix), and return no value.
-fn constructor_frame_matches(module: &mut Module, parameters: &[Ty], signature: u32) -> bool {
+pub(super) fn constructor_frame_matches(
+    module: &mut Module,
+    parameters: &[Ty],
+    signature: u32,
+) -> bool {
     let mut frame = vec![super::super::objects::REFERENCE];
     for &parameter in parameters {
         let Ok(Some(carrier)) = super::lower::carrier(parameter) else {
@@ -335,19 +386,15 @@ fn constructor_frame_matches(module: &mut Module, parameters: &[Ty], signature: 
     module.func_type(frame, Vec::new()) == signature
 }
 
-/// The actual checked super-constructor edges, with their current-provider parent ordinals.
-fn super_constructor_edges(ir: &IrFile) -> Vec<(ClassId, u32, krusty::fir::ExternalCallableId)> {
+/// Actual checked super-constructor declarations; consumer ordinals are not producer identities.
+fn super_constructor_edges(ir: &IrFile) -> Vec<(ClassId, krusty::fir::ExternalCallableId)> {
     let mut selected = Vec::new();
     selected.extend(
         ir.external_super_constructors
             .iter()
             .filter_map(|(&child, target)| {
                 let class = ir.class_id_by_name(child)?;
-                Some((
-                    class,
-                    ir.classes[class as usize].super_ctor.ordinal,
-                    target.declaration,
-                ))
+                Some((class, target.declaration))
             }),
     );
     selected.extend(ir.external_secondary_super_constructors.iter().filter_map(
@@ -356,16 +403,13 @@ fn super_constructor_edges(ir: &IrFile) -> Vec<(ClassId, u32, krusty::fir::Exter
             let secondary = ir.classes[class as usize]
                 .secondary_ctors
                 .get(child_ordinal as usize)?;
-            let CtorDelegateTarget::Super {
-                target: selected, ..
-            } = &secondary.delegate
-            else {
+            let CtorDelegateTarget::Super { .. } = &secondary.delegate else {
                 return None;
             };
-            Some((class, selected.ordinal, target.declaration))
+            Some((class, target.declaration))
         },
     ));
-    selected.sort_unstable_by_key(|(class, ordinal, _)| (*class, *ordinal));
+    selected.sort_unstable_by_key(|(class, target)| (*class, target.raw()));
     selected
 }
 
@@ -433,6 +477,168 @@ mod tests {
             &[Ty::Int, Ty::Long],
             missing_receiver
         ));
+    }
+
+    fn producer_layout(
+        owner: &KlibClassIdentity,
+        identities: &[KlibDependencyCallable; 2],
+        functions: [u32; 2],
+        signatures: [u32; 2],
+    ) -> LaidOutClass {
+        LaidOutClass {
+            class_identity: Some(owner.clone()),
+            structure: 0,
+            table_type: 0,
+            declaration_slots: HashMap::default(),
+            fields: Vec::new(),
+            base: OwnedBase::None,
+            slot_types: Vec::new(),
+            entries: Vec::new(),
+            ancestors: Vec::new(),
+            constructors: vec![None; 3],
+            constructor_entries: vec![
+                None,
+                Some((functions[0], signatures[0])),
+                Some((functions[1], signatures[1])),
+            ],
+            constructor_identities: vec![
+                None,
+                Some(identities[0].clone()),
+                Some(identities[1].clone()),
+            ],
+            methods: HashMap::default(),
+            activation: Vec::new(),
+            table: LaidOutSuperclass::default(),
+            interface_bodies: HashMap::default(),
+            dependency_implementations: Vec::new(),
+            refusal: None,
+        }
+    }
+
+    #[test]
+    fn exact_secondary_super_edges_select_distinct_defined_initializers() {
+        use super::super::super::encode::{Code, Function, ValType};
+        use super::super::super::objects::REFERENCE;
+        let owner = class("producer", "Parent");
+        let identities =
+            ["FirstConstructor", "SecondConstructor"].map(|name| KlibDependencyCallable {
+                module: "producer".into(),
+                declaration: krusty::libraries::KlibDeclarationSignature::Public(
+                    class("producer", name).signature,
+                ),
+            });
+        let mut module = Module::default();
+        let signatures = [
+            module.func_type(vec![REFERENCE, ValType::I32], Vec::new()),
+            module.func_type(vec![REFERENCE, REFERENCE], Vec::new()),
+        ];
+        let functions = [module.declare(), module.declare()];
+        for index in 0..2 {
+            module.define(
+                functions[index],
+                Function {
+                    ty: signatures[index],
+                    locals: Vec::new(),
+                    code: Code::default(),
+                },
+            );
+        }
+        for order in [[0, 1], [1, 0]] {
+            let mut layouts = LaidOutClasses::default();
+            let layout = producer_layout(&owner, &identities, functions, signatures);
+            layouts.publish_source(layout.clone());
+            // Both consumer edges can have ordinal zero before provider rebinding. That slot
+            // cannot select between the two producer constructors; the exact declaration does.
+            let mut consumer = layout;
+            consumer.constructors = vec![None];
+            for index in order {
+                consumer.constructors[0] = Some((functions[index], vec![Ty::Int]));
+                layouts
+                    .active_source
+                    .insert(krusty::types::type_name("sample/Parent"), consumer.clone());
+                let resolved = layouts
+                    .published_initializer(&identities[index], &module)
+                    .unwrap();
+                assert_eq!(
+                    resolved,
+                    Some((&owner, functions[index], signatures[index]))
+                );
+            }
+            for index in 0..2 {
+                assert_eq!(
+                    layouts
+                        .published_initializer(&identities[index], &module)
+                        .unwrap(),
+                    Some((&owner, functions[index], signatures[index]))
+                );
+            }
+            let reserved = module.declare();
+            layouts
+                .published_source
+                .get_mut(&owner)
+                .unwrap()
+                .constructor_entries[1] = Some((reserved, signatures[0]));
+            assert_eq!(
+                layouts.published_initializer(&identities[0], &module),
+                Err("a selected superclass initializer without its defined producer frame".into())
+            );
+        }
+    }
+
+    #[test]
+    fn source_initializer_acknowledgement_requires_defined_frame_and_live_target() {
+        use super::super::super::encode::{Code, Function, ValType};
+        use super::super::super::objects::REFERENCE;
+        use super::super::{Started, WasmBackend, WasmModule, WasmTarget};
+        use krusty::backend::{Backend, ConstructorInitializerDeclaration};
+        let backend = WasmBackend::new(WasmTarget::Js);
+        let owner = class("producer", "Parent");
+        let identities =
+            ["FirstConstructor", "SecondConstructor"].map(|name| KlibDependencyCallable {
+                module: "producer".into(),
+                declaration: krusty::libraries::KlibDeclarationSignature::Public(
+                    class("producer", name).signature,
+                ),
+            });
+        let mut request = ConstructorInitializerDeclaration {
+            constructor: identities[0].clone(),
+            class: owner.clone(),
+            parameters: vec![Ty::Int].into_boxed_slice(),
+        };
+        let mut state = WasmModule::default();
+        assert!(!backend.emitted_constructor_initializer(&mut state, &request));
+        state.started = Some(Started::new(WasmTarget::Js));
+        let started = state.started.as_mut().unwrap();
+        let signatures = [
+            started
+                .module
+                .func_type(vec![REFERENCE, ValType::I32], Vec::new()),
+            started
+                .module
+                .func_type(vec![REFERENCE, REFERENCE], Vec::new()),
+        ];
+        let functions = [started.module.declare(), started.module.declare()];
+        started
+            .classes
+            .publish_source(producer_layout(&owner, &identities, functions, signatures));
+        assert!(!backend.emitted_constructor_initializer(&mut state, &request));
+        state.started.as_mut().unwrap().module.define(
+            functions[0],
+            Function {
+                ty: signatures[0],
+                locals: Vec::new(),
+                code: Code::default(),
+            },
+        );
+        assert!(backend.emitted_constructor_initializer(&mut state, &request));
+        request.parameters = vec![Ty::Long].into_boxed_slice();
+        assert!(!backend.emitted_constructor_initializer(&mut state, &request));
+        request.parameters = vec![Ty::Int].into_boxed_slice();
+        request.class = class("different", "Parent");
+        assert!(!backend.emitted_constructor_initializer(&mut state, &request));
+        request.class = owner;
+        state.declined = true;
+        assert!(!backend.emitted_constructor_initializer(&mut state, &request));
     }
 
     #[test]

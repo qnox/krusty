@@ -5,6 +5,7 @@
 pub mod class_names;
 pub mod class_tables;
 pub mod construction_entries;
+mod constructor_initializers;
 mod constructor_selection;
 pub mod coroutines;
 pub mod counted_loops;
@@ -13,6 +14,8 @@ mod dependency_accessor;
 mod dependency_call_shape;
 mod dependency_facts;
 mod dependency_metadata;
+pub(crate) use constructor_initializers::initializer_declarations;
+pub use constructor_initializers::ConstructorInitializerDeclaration;
 mod dependency_signature;
 pub mod dispatch_entries;
 mod entry;
@@ -187,6 +190,16 @@ pub trait Backend {
         state: &mut Self::State,
         diags: &mut DiagSink,
     ) -> Vec<Artifact>;
+
+    /// Acknowledge only a defined initializer in the target's canonical physical registry after
+    /// file emission. This never grants allocation, and artifact presence is not evidence.
+    fn emitted_constructor_initializer(
+        &self,
+        _state: &mut Self::State,
+        _declaration: &ConstructorInitializerDeclaration,
+    ) -> bool {
+        false
+    }
 
     /// Report what makes the accumulated module unemittable as a whole (a program with no entry,
     /// say) before anything is finalized. An error here suppresses [`Backend::finalize`].

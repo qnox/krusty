@@ -1861,10 +1861,61 @@ impl Body<'_> {
     /// The constructor `ordinal` of the superclass of `class` an earlier file laid out, and the
     /// parameters it takes.
     fn laid_out_constructor(
-        &self,
+        &mut self,
         class: ClassId,
         ordinal: u32,
+        external: Option<krusty::fir::ExternalCallableId>,
     ) -> Result<(u32, Vec<Ty>), Unsupported> {
+        if let Some(external) = external {
+            let parent = self.ir.classes[class as usize].superclass;
+            let fact = self
+                .callables
+                .callable(external)
+                .ok_or("a selected superclass initializer without its frozen declaration")?;
+            if fact.kind != krusty::libraries::ExternalCallableKind::Constructor
+                || fact.declaration_owner
+                    != Some(krusty::types::SemanticCallableOwner::Classifier(parent))
+            {
+                return Err(
+                    "a selected superclass initializer with a different constructor owner".into(),
+                );
+            }
+            let identity = fact
+                .dependency_callable
+                .as_ref()
+                .ok_or("a selected superclass initializer without its canonical identity")?;
+            let (owner, function, signature) = self
+                .laid_out_classes
+                .published_initializer(identity, self.module)?
+                .ok_or("a selected superclass initializer without its published constructor")?;
+            if self
+                .classifiers
+                .classifier(parent)
+                .and_then(|fact| fact.klib_identity.clone())
+                .as_ref()
+                != Some(owner)
+            {
+                return Err(
+                    "a selected superclass initializer with a different producer class".into(),
+                );
+            }
+            let parameters = fact
+                .declared_params
+                .as_deref()
+                .unwrap_or(&fact.params)
+                .to_vec();
+            if !super::super::laid_out_classes::constructor_frame_matches(
+                self.module,
+                &parameters,
+                signature,
+            ) {
+                return Err(
+                    "a selected superclass initializer differing from its defined producer frame"
+                        .into(),
+                );
+            }
+            return Ok((function, parameters));
+        }
         self.file_classes()?
             .laid_out_superclass(class)
             .and_then(|superclass| superclass.constructors.get(ordinal as usize))
@@ -1955,8 +2006,14 @@ impl Body<'_> {
                 self.delegate(constructor, &params, 0, &declaration.super_args)?;
             }
             None if self.file_classes()?.laid_out_superclass(class).is_some() => {
-                let (constructor, params) =
-                    self.laid_out_constructor(class, declaration.super_ctor.ordinal)?;
+                let (constructor, params) = self.laid_out_constructor(
+                    class,
+                    declaration.super_ctor.ordinal,
+                    self.ir
+                        .external_super_constructors
+                        .get(&declaration.fq_name_id())
+                        .map(|edge| edge.declaration),
+                )?;
                 self.delegate(constructor, &params, 0, &declaration.super_args)?;
             }
             None if self.file_classes()?.exception_base(class).is_some() => {
@@ -2082,7 +2139,17 @@ impl Body<'_> {
                     self.delegate(constructor, &params, 0, &secondary.delegate_args)?;
                 }
                 None if self.file_classes()?.laid_out_superclass(class).is_some() => {
-                    let (constructor, params) = self.laid_out_constructor(class, target.ordinal)?;
+                    let (constructor, params) = self.laid_out_constructor(
+                        class,
+                        target.ordinal,
+                        self.ir
+                            .external_secondary_super_constructors
+                            .get(&(
+                                declaration.fq_name_id(),
+                                u32::try_from(ordinal).expect("a constructor ordinal fits u32"),
+                            ))
+                            .map(|edge| edge.declaration),
+                    )?;
                     self.delegate(constructor, &params, 0, &secondary.delegate_args)?;
                 }
                 None if self.file_classes()?.exception_base(class).is_some() => {
