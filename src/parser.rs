@@ -2,6 +2,8 @@
 //! Kotlin precedence table. Line breaks are not tokens: each token records whether one precedes it,
 //! and only the line-sensitive grammar points consult that (see `parser/line_breaks.rs`).
 
+mod file_headers;
+
 use crate::ast::*;
 use crate::diag::{DiagSink, Span};
 use crate::features::LangFeatures;
@@ -619,6 +621,9 @@ struct Parser<'a> {
     /// Whether a physical line break separates `t[i]` from the token before it (always true at
     /// end of input), as kotlinc's `newlineBeforeCurrentToken`.
     newline_before: Vec<bool>,
+    /// Spans where the shared file preamble recognized an `import` directive. `import` is a soft
+    /// keyword, so the grammar consults this inventory instead of a keyword token.
+    file_import_starts: Vec<u32>,
     i: usize,
     file: File,
     diags: &'a mut DiagSink,
@@ -809,6 +814,7 @@ impl<'a> Parser<'a> {
             src,
             t,
             newline_before,
+            file_import_starts: crate::token::file_header::from_tokens(src, tokens).import_starts,
             i: 0,
             file,
             diags,
@@ -1021,47 +1027,6 @@ impl<'a> Parser<'a> {
             .adopt_hoisted_classifiers(id, declaration_index + 1);
     }
 
-    /// Parse one `import` directive, recording its path (and, for a single-name import, the
-    /// classifier reference it names).
-    fn parse_import_directive(&mut self) {
-        self.bump(); // 'import'
-        let import_span = self.tok().span;
-        let segments = self.parse_qualified_name_segments();
-        let fq = segments
-            .iter()
-            .map(|(segment, _)| segment.as_str())
-            .collect::<Vec<_>>()
-            .join(".");
-        // `import a.b.*` — the segment scan consumes the trailing `.` (it only keeps a
-        // segment when an `Ident` follows), leaving us at `*`. Recover the wildcard so it is
-        // recorded as `a.b.*` (the form the import-level builder recognizes).
-        let mut wildcard = false;
-        if self.at(TokenKind::Star) {
-            self.bump(); // '*'
-            wildcard = true;
-        }
-        let mut alias = None;
-        if self.at(TokenKind::Ident) && self.keyword_text("as") {
-            self.bump(); // 'as'
-            if self.at(TokenKind::Ident) {
-                alias = Some(self.text().to_string());
-                self.bump();
-            }
-        }
-        if !fq.is_empty() {
-            if !wildcard {
-                let mut reference = simple_type_ref(&fq, import_span);
-                reference.flags = reference.flags.with_import(true);
-                self.file.detached_type_refs.push(reference);
-            }
-            self.file.import_paths.push(crate::ast::ImportPath {
-                segments,
-                wildcard,
-                alias,
-            });
-        }
-    }
-
     fn parse_file(&mut self) {
         self.parse_file_with_declaration_sink(&mut |_| {});
     }
@@ -1082,8 +1047,7 @@ impl<'a> Parser<'a> {
                 self.parse_annotation();
                 continue;
             }
-            let file_header_item =
-                matches!(self.kind(), TokenKind::KwPackage | TokenKind::KwImport);
+            let file_header_item = self.at(TokenKind::KwPackage) || self.at_import_directive();
             if !file_header_item {
                 if let Some((name, definition)) = self.script.take() {
                     self.parse_script_class(&name, &definition);
@@ -1144,7 +1108,7 @@ impl<'a> Parser<'a> {
                         self.file.package = Some(pkg);
                     }
                 }
-                TokenKind::KwImport => self.parse_import_directive(),
+                TokenKind::Ident if self.at_import_directive() => self.parse_import_directive(),
                 // `fun interface F { fun m(…): R }` — a SAM interface (parsed as an interface).
                 TokenKind::KwFun
                     if self
@@ -1348,7 +1312,7 @@ impl<'a> Parser<'a> {
             return false;
         };
         match token.kind {
-            KwFun | KwClass | KwVal | KwVar | KwImport | KwPackage | At => true,
+            KwFun | KwClass | KwVal | KwVar | KwPackage | At => true,
             Ident => {
                 self.token_is_modifier(token)
                     || (!self.token_is_escaped_ident(token)
@@ -1361,6 +1325,7 @@ impl<'a> Parser<'a> {
                                 | "typealias"
                                 | "data"
                                 | "companion"
+                                | "import"
                         ))
             }
             _ => false,

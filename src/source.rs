@@ -338,131 +338,21 @@ struct ScannedFileHeader {
     imports: Vec<ScannedImport>,
 }
 
-/// Package and import directives that sit outside parentheses, brackets, and braces.
-///
-/// An empty `package` that opens the file is recorded, matching the parser's preamble. A later
-/// empty `package` is not, and a `package` or `import` nested in a body is not a file directive.
+/// The same token-only preamble consumed by the syntax parser and name lexer.
 fn scan_file_imports(text: &str, tokens: &[crate::token::Token]) -> ScannedFileHeader {
-    use crate::token::TokenKind;
-
-    let mut cursor = 0;
-    while tokens
-        .get(cursor)
-        .is_some_and(|token| token.kind == TokenKind::Newline)
-    {
-        cursor += 1;
+    let header = crate::token::file_header::from_tokens(text, tokens);
+    ScannedFileHeader {
+        package: header.package,
+        imports: header
+            .imports
+            .into_iter()
+            .map(|import| ScannedImport {
+                path: import.path,
+                wildcard: import.wildcard,
+                imported_name: import.imported_name,
+            })
+            .collect(),
     }
-    let package_opens_file = tokens
-        .get(cursor)
-        .is_some_and(|token| token.kind == TokenKind::KwPackage);
-
-    let mut depth = 0i32;
-    let mut index = 0;
-    let mut package = None;
-    let mut saw_package = false;
-    let mut imports = Vec::new();
-    while index < tokens.len() {
-        match tokens[index].kind {
-            TokenKind::LParen | TokenKind::LBrace | TokenKind::LBracket => {
-                depth += 1;
-                index += 1;
-            }
-            TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket => {
-                depth -= 1;
-                index += 1;
-            }
-            TokenKind::KwPackage if depth == 0 => {
-                index += 1;
-                let (segments, next) = scan_dotted_path(text, tokens, index);
-                index = next;
-                let name = segments.join(".");
-                if !saw_package {
-                    saw_package = true;
-                    if package_opens_file || !name.is_empty() {
-                        package = Some(name);
-                    }
-                } else if package.is_none() && !name.is_empty() {
-                    package = Some(name);
-                }
-            }
-            TokenKind::KwImport if depth == 0 => {
-                index += 1;
-                let (segments, next) = scan_dotted_path(text, tokens, index);
-                index = next;
-                if segments.is_empty() {
-                    continue;
-                }
-                let mut wildcard = false;
-                if tokens
-                    .get(index)
-                    .is_some_and(|token| token.kind == TokenKind::Star)
-                {
-                    wildcard = true;
-                    index += 1;
-                }
-                let mut alias = None;
-                if tokens
-                    .get(index)
-                    .is_some_and(|token| token.kind == TokenKind::Ident && token.text(text) == "as")
-                {
-                    index += 1;
-                    if tokens
-                        .get(index)
-                        .is_some_and(|token| token.kind == TokenKind::Ident)
-                    {
-                        alias = Some(tokens[index].text(text).to_string());
-                        index += 1;
-                    }
-                }
-                let imported_name = if wildcard {
-                    None
-                } else {
-                    Some(alias.unwrap_or_else(|| segments[segments.len() - 1].clone()))
-                };
-                imports.push(ScannedImport {
-                    path: segments.join("."),
-                    wildcard,
-                    imported_name,
-                });
-            }
-            _ => index += 1,
-        }
-    }
-    ScannedFileHeader { package, imports }
-}
-
-fn scan_dotted_path(
-    text: &str,
-    tokens: &[crate::token::Token],
-    mut index: usize,
-) -> (Vec<String>, usize) {
-    use crate::token::TokenKind;
-
-    let mut segments = Vec::new();
-    if tokens
-        .get(index)
-        .is_some_and(|token| token.kind == TokenKind::Ident)
-    {
-        segments.push(tokens[index].text(text).to_string());
-        index += 1;
-        while tokens
-            .get(index)
-            .is_some_and(|token| token.kind == TokenKind::Dot)
-        {
-            let name_index = index + 1;
-            if tokens
-                .get(name_index)
-                .is_some_and(|token| token.kind == TokenKind::Ident)
-            {
-                segments.push(tokens[name_index].text(text).to_string());
-                index = name_index + 1;
-            } else {
-                index += 1;
-                break;
-            }
-        }
-    }
-    (segments, index)
 }
 
 fn candidates_from_header(
@@ -666,6 +556,13 @@ val text = \"import q.Quoted\"
             "package p\nval text = \"import q.Hidden\"\nimport q.Shown\nfun use(x: Widget) = x",
             "fun render() = 1\nimport q.Later\nval value: Shown = value\n",
             "package p\nclass Outer {\n    import q.Inner\n}\nimport q.After\nfun use(x: Shown) = x\n",
+            // Only the file preamble owns import directives; declaration bodies keep ordinary names.
+            "package p\nimport q.Shown\nval import = Shown()\nfun use(import: Widget) = import\n",
+            "package p; import q.Semi\nfun use(x: Semi) = x\n",
+            "package p import q.Same import r.Other as Alias\nfun use(x: Same) = Alias()\n",
+            "@file:Suppress(\"unused\")\nimport q.Shown\nval value = Shown()\n",
+            "fun import(value: Int) = value\nimport(1)\n",
+            "`import`(1)\n",
             "",
         ];
         for source in sources {

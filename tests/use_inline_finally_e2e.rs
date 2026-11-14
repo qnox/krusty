@@ -126,7 +126,8 @@ fn a_close_failure_after_a_normal_body_is_propagated() {
 #[test]
 fn use_passes_the_resource_to_its_lambda() {
     let src = format!(
-        "{RESOURCE}import kotlinx.coroutines.runBlocking\n\
+        "import kotlinx.coroutines.runBlocking\n\
+        {RESOURCE}\
         suspend fun count(probe: Probe): Int = probe.closed\n\
         fun box(): String = runBlocking {{\n\
         \x20   val probe = Probe()\n\
@@ -140,7 +141,8 @@ fn use_passes_the_resource_to_its_lambda() {
 #[test]
 fn use_closes_on_the_exceptional_path() {
     let src = format!(
-        "{RESOURCE}import kotlinx.coroutines.runBlocking\n\
+        "import kotlinx.coroutines.runBlocking\n\
+        {RESOURCE}\
         suspend fun boom(): String = throw IllegalStateException(\"x\")\n\
         fun box(): String = runBlocking {{\n\
         \x20   val probe = Probe()\n\
