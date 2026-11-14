@@ -695,11 +695,6 @@ impl CallLinker for TemplateCalls<'_> {
                 reason,
             )))
         };
-        let (arena, declaration) = self
-            .callees
-            .declarations
-            .function(&identity)
-            .ok_or_else(|| declined(KlibBodyDeclineReason::Unjoined))?;
         let Some((target, realization)) = self
             .callees
             .source
@@ -725,26 +720,31 @@ impl CallLinker for TemplateCalls<'_> {
                 "an access of an inline dependency property from an inline template",
             ));
         }
-        accessor_access(
-            self.callees.source,
-            callee,
-            arena,
-            declaration,
-            &realization,
-        )
-        .map(|receiver| {
-            let (receiver, class_type_parameters) = receiver.unzip();
-            LinkedAccessor {
-                target: LinkedAccessorTarget::External(property),
-                write: accessors.setter == Some(target),
-                receiver,
-                params: realization.callable.params.clone(),
-                ret: realization.callable.ret,
-                context_count: realization.callable.context_count,
-                class_type_parameters: class_type_parameters.unwrap_or_default(),
-            }
-        })
-        .map_err(declined)
+        let selected = realization
+            .klib_body_callable()
+            .ok_or_else(|| declined(KlibBodyDeclineReason::Unjoined))?;
+        let selected_accessor = selected.accessor().ok_or_else(|| {
+            declined(KlibBodyDeclineReason::SignatureMismatch(
+                "the selected accessor has no property identity".to_owned(),
+            ))
+        })?;
+        if selected_accessor.property != property
+            || (selected_accessor.role == crate::libraries::KlibAccessorRole::Setter)
+                != (accessors.setter == Some(target))
+        {
+            return Err(declined(KlibBodyDeclineReason::SignatureMismatch(
+                "the selected callable resolves another accessor of the property".to_owned(),
+            )));
+        }
+        let mut linked = super::accessor_calls::authenticate(selected, self.callees.declarations)?
+            .ok_or_else(|| {
+                declined(KlibBodyDeclineReason::UnsupportedOperation(
+                    "an inline-template property accessor without an exact selected contract",
+                ))
+            })?;
+        linked.target = LinkedAccessorTarget::External(property);
+        linked.callable = Some(target);
+        Ok(linked)
     }
 
     fn requires_declaration(
@@ -1023,53 +1023,6 @@ fn member_call(
 /// The dispatch receiver an access through the non-generic accessor `declaration` reads, by the
 /// provider's realization of it: a member's must belong to the class metadata names as its owner
 /// and is read at the serialized receiver's type, the argument the call passes.
-fn accessor_access(
-    source: &dyn crate::symbol_source::SymbolSource,
-    callee: &KlibAccessorIdSignature,
-    arena: &crate::metadata::klib_ir::tree::KlibIrArena,
-    declaration: &crate::metadata::klib_ir::tree::KlibIrFunction,
-    realization: &ExternalCallableRealization,
-) -> Result<Option<(Ty, Vec<String>)>, KlibBodyDeclineReason> {
-    let generic = realization
-        .callable
-        .generic_sig
-        .as_deref()
-        .is_some_and(|generic| !generic.formals.is_empty());
-    if !declaration.type_parameters.is_empty() || generic {
-        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-            "type parameters",
-        ));
-    }
-    let extension = declaration.extension_receiver.is_some();
-    let declared = declaration.context_parameters.len()
-        + usize::from(extension)
-        + declaration.regular_parameters.len();
-    if realization.callable.context_count != declaration.context_parameters.len()
-        || realization.callable.params.len() != declared
-    {
-        return Err(KlibBodyDeclineReason::SignatureMismatch(format!(
-            "the serialized accessor is selected with {} parameters",
-            realization.callable.params.len()
-        )));
-    }
-    let Some(receiver) = &declaration.dispatch_receiver else {
-        return Ok(None);
-    };
-    if extension {
-        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-            "a member extension",
-        ));
-    }
-    let owner = member_owner(callee.property())?;
-    if realization.declaration_owner != Some(SemanticCallableOwner::Classifier(owner)) {
-        return Err(KlibBodyDeclineReason::SignatureMismatch(format!(
-            "the serialized member of {owner:?} is selected as one of {:?}",
-            realization.declaration_owner
-        )));
-    }
-    class_receiver(source, owner, arena, receiver).map(Some)
-}
-
 /// The type a member of `owner` reads its dispatch receiver at, with the class's type parameters
 /// a call binds from its receiver: the serialized receiver's type for a non-generic class, and the
 /// class applied to its own type parameters, as the provider names them, for a generic one.

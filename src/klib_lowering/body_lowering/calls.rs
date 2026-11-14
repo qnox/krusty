@@ -160,6 +160,7 @@ impl BodyLowering<'_> {
                         arguments: Vec::new(),
                         parameters: Vec::new(),
                         result: operands.ret,
+                        substitutions: Vec::new(),
                         source_receiver: operands.receiver_type,
                     },
                 )))
@@ -705,14 +706,61 @@ impl BodyLowering<'_> {
         access: &KlibIrMemberAccess,
         ty: Ty,
     ) -> Lowered<ExprId> {
-        if !access.type_arguments.is_empty() {
-            return unsupported("an access of a generic property");
-        }
         let signature = crate::libraries::KlibDeclarationSignature::Accessor(accessor.clone());
         if let Some(primitive) = self.linker.common_primitive(&signature)? {
             return self.primitive_call(primitive, access, ty);
         }
-        let linked = self.linker.link_accessor(self.ir, accessor)?;
+        let mut linked = self.linker.link_accessor(self.ir, accessor)?;
+        if linked.type_parameters.len() != access.type_arguments.len() {
+            return Err(mismatch(
+                "a property access has another number of type arguments than its selected accessor",
+            ));
+        }
+        if !linked.reified_type_parameters.is_empty() {
+            return unsupported("a reified generic property accessor");
+        }
+        let mut bindings = crate::fx_hash::HashMap::default();
+        for (formal, argument) in linked.type_parameters.iter().zip(&access.type_arguments) {
+            let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                "a property access that leaves a type argument unset",
+            ))?;
+            bindings.insert(*formal, self.semantic(argument)?);
+        }
+        if linked.type_parameter_bounds.len() != linked.type_parameters.len() {
+            return Err(mismatch(
+                "the selected accessor's bounds do not match its formal identities",
+            ));
+        }
+        let mut substitutions = Vec::with_capacity(linked.type_parameters.len());
+        if !linked.type_parameters.is_empty() {
+            let target = linked.callable.ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch(
+                    "a generic accessor has no exact external callable identity".to_owned(),
+                )
+            })?;
+            for (ordinal, formal) in linked.type_parameters.iter().enumerate() {
+                let value = bindings[formal];
+                substitutions.push(IrCheckedSubstitution {
+                    parameter: FirTypeParameterRef::External {
+                        callable: target,
+                        ordinal: u32::try_from(ordinal).map_err(|_| {
+                            mismatch("a property accessor has too many type parameters")
+                        })?,
+                    },
+                    reified: false,
+                    value,
+                    reified_runtime: value,
+                    additional_bounds: Vec::new(),
+                });
+            }
+            for parameter in &mut linked.params {
+                *parameter = crate::types::ty_subst_keep_unbound(*parameter, &bindings);
+            }
+            linked.ret = crate::types::ty_subst_keep_unbound(linked.ret, &bindings);
+            linked.receiver = linked
+                .receiver
+                .map(|receiver| crate::types::ty_subst_keep_unbound(receiver, &bindings));
+        }
         let CallOperands {
             receiver,
             args: arguments,
@@ -733,6 +781,43 @@ impl BodyLowering<'_> {
                 parameter_defaults: &[],
             },
         )?;
+        // Accessor bounds may mention both accessor formals and declaring-class formals. The
+        // former are known from the serialized accessor type arguments; the latter are only
+        // known after the dispatch receiver has been applied to its declaring class.
+        let mut bound_bindings = bindings;
+        if !linked.class_type_parameters.is_empty() {
+            let receiver_type = source_receiver.ok_or_else(|| {
+                mismatch("a generic member accessor has no applied dispatch receiver")
+            })?;
+            if receiver_type.type_args().len() != linked.class_type_parameters.len() {
+                return Err(mismatch(
+                    "an accessor receiver applies another number of declaring-class type arguments",
+                ));
+            }
+            bound_bindings.extend(
+                linked
+                    .class_type_parameters
+                    .iter()
+                    .map(crate::types::TyParamName::from)
+                    .zip(receiver_type.type_args().iter().copied()),
+            );
+        }
+        for (formal, bounds) in linked
+            .type_parameters
+            .iter()
+            .zip(&linked.type_parameter_bounds)
+        {
+            let value = bound_bindings[formal];
+            for bound in bounds {
+                let bound = crate::types::ty_subst_keep_unbound(*bound, &bound_bindings);
+                if !self
+                    .linker
+                    .is_subtype(self.header.type_parameters(), value, bound)
+                {
+                    return Err(KlibBodyDeclineReason::ImplicitConversion);
+                }
+            }
+        }
         let LinkedAccessor { target, write, .. } = linked;
         let target = match target {
             LinkedAccessorTarget::External(property) => property,
@@ -753,6 +838,7 @@ impl BodyLowering<'_> {
                 arguments,
                 parameters,
                 result,
+                substitutions,
                 source_receiver,
             }
         } else {
@@ -763,6 +849,7 @@ impl BodyLowering<'_> {
                 arguments,
                 parameters,
                 result,
+                substitutions,
                 source_receiver,
             }
         }))))

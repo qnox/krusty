@@ -628,6 +628,7 @@ fn a_dependency_property_read_reads_the_provider_property() {
                     arguments,
                     parameters,
                     result,
+                    substitutions: _,
                     source_receiver,
                 } => Some((
                     *target,

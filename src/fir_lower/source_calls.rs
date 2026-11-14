@@ -124,6 +124,7 @@ pub(super) struct ExternalPropertyRequest<'a> {
     pub(super) dispatch_receiver: DispatchOperand,
     pub(super) extension_receiver: Option<ExprId>,
     pub(super) arguments: &'a [IrCheckedArgument],
+    pub(super) substitutions: &'a [crate::fir::FirTypeSubstitution],
     pub(super) write: bool,
 }
 
@@ -318,6 +319,7 @@ impl BodyLowering<'_> {
                 },
             extension_receiver,
             arguments,
+            substitutions,
             write,
         } = request;
         let source_receiver = dispatch_receiver
@@ -361,6 +363,7 @@ impl BodyLowering<'_> {
                 arguments,
                 parameters: parameter_types,
                 result: result.get(),
+                substitutions: super::checked::lower_substitutions(substitutions),
                 source_receiver,
             }
         } else {
@@ -378,6 +381,7 @@ impl BodyLowering<'_> {
                 arguments,
                 parameters: parameter_types,
                 result: result.get(),
+                substitutions: super::checked::lower_substitutions(substitutions),
                 source_receiver,
             }
         };

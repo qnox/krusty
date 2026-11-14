@@ -322,6 +322,13 @@ pub(super) struct LinkedAccessor {
     pub(super) context_count: usize,
     /// As [`LinkedCallee::class_type_parameters`].
     pub(super) class_type_parameters: Vec<String>,
+    /// The exact provider-selected external accessor called by this property operation, when the
+    /// target is a dependency property.
+    pub(super) callable: Option<crate::fir::ExternalCallableId>,
+    /// This accessor's own formal identities and bounds, distinct from declaring-class formals.
+    pub(super) type_parameters: Vec<crate::types::TyParamName>,
+    pub(super) type_parameter_bounds: Vec<Vec<Ty>>,
+    pub(super) reified_type_parameters: Vec<u32>,
 }
 
 /// What an accessor call reaches.

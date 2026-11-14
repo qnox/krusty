@@ -247,6 +247,7 @@ fn assert_only_generated_uses_are_frozen(provider: &KlibLibraries, runtime: IrCo
             arguments: Vec::new(),
             parameters: Vec::new(),
             result: marker.callable.ret,
+            substitutions: Vec::new(),
             source_receiver: None,
         },
     )));

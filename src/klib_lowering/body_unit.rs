@@ -127,7 +127,7 @@ impl EmittedDependencyCallable {
         }
     }
 
-    fn realizes_getter(self) -> bool {
+    fn realizes_accessor(self) -> bool {
         matches!(
             self.realization,
             DependencyExternalRealization::EmittedBody
@@ -1301,6 +1301,10 @@ impl CallLinker for Linker<'_, '_> {
                 ret: linked.ret,
                 context_count: linked.context_count,
                 class_type_parameters: linked.class_type_parameters,
+                callable: None,
+                type_parameters: Vec::new(),
+                type_parameter_bounds: Vec::new(),
+                reified_type_parameters: Vec::new(),
             });
         }
         // An accessor with a body of a class the unit materializes is emitted here, as the class's
@@ -1320,6 +1324,10 @@ impl CallLinker for Linker<'_, '_> {
                 ret: linked.ret,
                 context_count: linked.context_count,
                 class_type_parameters: linked.class_type_parameters,
+                callable: None,
+                type_parameters: Vec::new(),
+                type_parameter_bounds: Vec::new(),
+                reified_type_parameters: Vec::new(),
             });
         }
         // A complete retained export or positive target plan owns this edge. Other accessors
@@ -1328,7 +1336,7 @@ impl CallLinker for Linker<'_, '_> {
             .sources
             .externals
             .get(&identity)
-            .is_some_and(|external| external.realizes_getter())
+            .is_some_and(|external| external.realizes_accessor())
         {
             return Err(unsupported());
         }
@@ -1341,11 +1349,34 @@ impl CallLinker for Linker<'_, '_> {
             }
             None => return Err(KlibBodyDeclineReason::Unjoined),
         };
-        super::accessor_calls::authenticate(selected, self.sources.bodies)?.ok_or(
-            KlibBodyDeclineReason::UnsupportedOperation(
-                "a dependency property accessor without a getter contract",
-            ),
-        )
+        let mut linked = super::accessor_calls::authenticate(selected, self.sources.bodies)?
+            .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                "a dependency property accessor without an exact accessor contract",
+            ))?;
+        let (callable, realization) = self
+            .sources
+            .declarations
+            .external_callable_by_dependency(&identity)
+            .ok_or(KlibBodyDeclineReason::Unjoined)?;
+        let selected_accessor = selected.accessor().ok_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch(
+                "the selected accessor has no property identity".to_owned(),
+            )
+        })?;
+        let realized_accessor = realization.klib_body_accessor.as_ref().ok_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch(
+                "the selected external callable is not a property accessor".to_owned(),
+            )
+        })?;
+        if realized_accessor.property != selected_accessor.property
+            || realized_accessor.role != selected_accessor.role
+        {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "the external callable resolves another accessor of the property".to_owned(),
+            ));
+        }
+        linked.callable = Some(callable);
+        Ok(linked)
     }
 
     fn requires_declaration(
@@ -1711,6 +1742,10 @@ impl<'s> Linker<'_, 's> {
             ret: linked.ret,
             context_count: linked.context_count,
             class_type_parameters: linked.class_type_parameters,
+            callable: None,
+            type_parameters: Vec::new(),
+            type_parameter_bounds: Vec::new(),
+            reified_type_parameters: Vec::new(),
         }))
     }
 
