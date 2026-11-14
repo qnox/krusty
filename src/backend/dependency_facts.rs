@@ -167,6 +167,11 @@ impl BackendCallableFact {
         self.kind == ExternalCallableKind::Extension
     }
 
+    /// Whether this exact dependency declaration initializes its declaring class.
+    pub fn is_constructor(&self) -> bool {
+        self.kind == ExternalCallableKind::Constructor
+    }
+
     /// Whether this exact dependency declaration is an instance member.
     pub fn is_member_function(&self) -> bool {
         self.kind == ExternalCallableKind::Member
