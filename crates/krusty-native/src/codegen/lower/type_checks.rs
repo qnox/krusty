@@ -121,6 +121,12 @@ impl<'a> FileLowering<'a> {
                 return self.import_data(&symbol).map(Some);
             }
         }
+        if let Some(symbol) = target
+            .obj_internal()
+            .and_then(super::super::super::intrinsics::builtin_companion_descriptor)
+        {
+            return self.import_data(symbol).map(Some);
+        }
         let symbol = match target {
             Ty::String => "kt_type_string",
             Ty::Boolean => "kt_type_boolean",
