@@ -36,7 +36,7 @@ use crate::types::TypeName;
 pub use archives::OpenedKlibLibraries;
 pub use archives::{KlibLibrariesOpenError, KlibLibraryInput, KlibStdlibSemantics};
 pub(crate) use declaration_bodies::{
-    member_signature, KlibCalleeOrigin, KlibEnumEntryClass, LocatedClass, LocatedMember,
+    member_signature, KlibCalleeOrigin, KlibEnumEntryClass, LocatedClass,
 };
 pub use declaration_bodies::{KlibBodyLibrary, KlibDeclarationBodies, KlibDeclarationBodiesError};
 pub use declaration_signatures::KlibLibraryError;

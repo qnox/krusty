@@ -46,18 +46,6 @@ pub(crate) enum LocatedClass<'a> {
     Several,
 }
 
-/// The class that directly declares one function, and the arena that owns both.
-pub(crate) enum LocatedMember<'a> {
-    Missing,
-    Several,
-    One {
-        module: String,
-        arena: &'a KlibIrArena,
-        class: &'a KlibIrClass,
-        function: &'a KlibIrFunction,
-    },
-}
-
 pub(crate) struct KlibClassMember<'a> {
     pub(crate) arena: &'a KlibIrArena,
     pub(crate) class: &'a crate::metadata::klib_ir::tree::KlibIrClass,
@@ -661,45 +649,6 @@ impl KlibDeclarationBodies {
             Some(class) => LocatedClass::One(class),
             None => LocatedClass::Missing,
         }
-    }
-
-    /// The class in `module`'s producer graph that directly declares `signature`.
-    ///
-    /// The match is the function's serialized symbol, including a property accessor. Two classes
-    /// declaring one symbol are [`LocatedMember::Several`].
-    pub(crate) fn function_owner<'a>(
-        &'a self,
-        module: &str,
-        signature: &KlibIrSignature,
-    ) -> LocatedMember<'a> {
-        let mut found = None;
-        for owner in self.body_provider_modules(module) {
-            let Some(&library) = self.modules.get(&owner) else {
-                continue;
-            };
-            for tree in self.libraries[library].trees() {
-                let mut pending = vec![&tree.declaration];
-                while let Some(member) = pending.pop() {
-                    let Some(class) = class_of(&tree.arena, member) else {
-                        continue;
-                    };
-                    pending.extend(class.members.iter());
-                    let Some(function) = declared_function(&tree.arena, class, signature) else {
-                        continue;
-                    };
-                    if found.is_some() {
-                        return LocatedMember::Several;
-                    }
-                    found = Some(LocatedMember::One {
-                        module: owner.clone(),
-                        arena: &tree.arena,
-                        class,
-                        function,
-                    });
-                }
-            }
-        }
-        found.unwrap_or(LocatedMember::Missing)
     }
 
     /// Whether the exact serialized declaration intentionally carries an executable body.
