@@ -302,8 +302,13 @@ impl PublishedDependencyClassShape {
                     } else {
                         None
                     };
+                    let getter_key = PlanKey::DependencyGetter(getter_id);
+                    let setter_key =
+                        resolved_setter_id.map(|_| PlanKey::DependencySetter(getter_id));
                     members.push(ModuleMember::Property {
                         property: ResolvedPropertyOverrideTarget::External(getter_id),
+                        getter_key,
+                        setter_key,
                         accessor_parameters: accessor_parameters.into_boxed_slice(),
                         value,
                         getter_value: value,
@@ -413,6 +418,8 @@ impl PublishedDependencyClassShape {
                         let implementation_receiver = extension_receiver(getter_callable);
                         property_overrides.push(ModulePropertyOverride {
                             implementation: ResolvedPropertyOverrideTarget::External(getter_id),
+                            getter_key,
+                            setter_key,
                             overridden: ResolvedPropertyOverrideTarget::External(overridden_id),
                             overridden_is_interface: edge.overridden_is_interface,
                             declared_type: overridden_callable.ret(),

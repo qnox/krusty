@@ -141,13 +141,13 @@ fn table(
                     ));
                 }
                 if *setter {
-                    let Some(PlanKey::DependencySetter(_)) = setter_key else {
+                    let Some(setter_key @ PlanKey::DependencySetter(_)) = *setter_key else {
                         return Err(
                             "a dependency table containing a file-local setter identity".into()
                         );
                     };
                     members.push((
-                        *setter_key.expect("validated setter key"),
+                        setter_key,
                         property_member_identity(declaration, true)
                             .ok_or("an inherited setter without accessor identity")?,
                         (
