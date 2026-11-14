@@ -947,7 +947,11 @@ pub fn split_files_with_preamble(
                 ExplicitFileKind::Kotlin(name) => current_name = Some((name, false)),
                 ExplicitFileKind::Java(name) => current_name = Some((name, true)),
                 ExplicitFileKind::Companion => {
-                    let name = rest.trim().rsplit(['/', '\\']).next().unwrap_or(rest.trim());
+                    let name = rest
+                        .trim()
+                        .rsplit(['/', '\\'])
+                        .next()
+                        .unwrap_or(rest.trim());
                     current_name = Some((name.to_string(), false));
                 }
                 ExplicitFileKind::Unsupported(name) => {
@@ -1836,13 +1840,11 @@ fun box(): String = \"OK\"
         let main_sources = modules[1].files.iter().map(|(_, source)| source.as_str());
         assert_eq!(case_directive_region(src), "// WITH_STDLIB\n");
         assert_eq!(
-            UnitCodegenModes::of_unit_in_case(case_directive_region(src), lib_sources)
-                .jvm_default,
+            UnitCodegenModes::of_unit_in_case(case_directive_region(src), lib_sources).jvm_default,
             crate::jvm::emit_modes::JvmDefaultMode::Disable
         );
         assert_eq!(
-            UnitCodegenModes::of_unit_in_case(case_directive_region(src), main_sources)
-                .jvm_default,
+            UnitCodegenModes::of_unit_in_case(case_directive_region(src), main_sources).jvm_default,
             crate::jvm::emit_modes::JvmDefaultMode::Enable
         );
     }
@@ -2044,10 +2046,7 @@ fun box(): String = \"OK\"
         assert!(java.is_empty());
         assert_eq!(kt.len(), 2);
         assert_eq!(kt[0].0, "a");
-        assert_eq!(
-            kt[0].1,
-            "// WITH_STDLIB\n// FILE: a.kt\nfun a() = 1\n"
-        );
+        assert_eq!(kt[0].1, "// WITH_STDLIB\n// FILE: a.kt\nfun a() = 1\n");
         assert_eq!(kt[1].0, "b");
         assert_eq!(kt[1].1, "\n\n\n// FILE: b.kt\nfun box(): String = \"OK\"\n");
     }

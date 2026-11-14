@@ -871,8 +871,7 @@ fn explicit_array_checks_share_metadata_with_the_reference_compiler() {
     // preserving original source lines. The option above is the compilation context's one
     // decision: it reaches both compilers as arguments, never by re-reading a file.
     assert_eq!(
-        written_source,
-        source,
+        written_source, source,
         "the written file retains the leading text, marker, and original line positions"
     );
     for target in WasmTarget::ALL {
