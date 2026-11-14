@@ -650,14 +650,14 @@ mod tests {
             Path::new("/workspace/src/jvm_libraries/contract_dsl_tests.rs")
         ));
         assert!(is_test_only_module_source(&source_path(
-            "src/jvm/jvm_libraries/contract_dsl_tests.rs"
+            "src/jvm/jvm_libraries/tests/contract_dsl_tests.rs"
         )));
         assert!(!is_test_only_module_source(&source_path(
             "src/jvm/jvm_libraries/synthetic_properties.rs"
         )));
         // Dependency budgets share the same proven parent-module production boundary.
         assert_allowed_crate_modules_in_file(
-            &source_path("src/jvm/jvm_libraries/contract_dsl_tests.rs"),
+            &source_path("src/jvm/jvm_libraries/tests/contract_dsl_tests.rs"),
             &[],
         );
     }
