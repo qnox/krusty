@@ -1,7 +1,7 @@
 //! Builtin implementations selected for external members used by a checked source unit.
 
-use crate::fir::{BuiltinImplementation, BuiltinOverrideDeclaration, ExternalCallableId};
-use crate::symbol_resolver::{builtin_overrides, ResolvedMember};
+use crate::fir::{BuiltinImplementation, ExternalCallableId};
+use crate::symbol_resolver::{builtin_implementation_facts, ResolvedMember};
 use crate::symbol_source::SymbolSource;
 use crate::types::{SemanticCallableOwner, TypeName};
 
@@ -146,7 +146,7 @@ pub(super) fn for_checked_unit(checker: &Checker<'_>) -> Result<Facts, ExternalC
         .map(|(identity, (owner, name))| {
             (
                 identity,
-                implementation_facts(checker.libraries, owner, &name, identity),
+                builtin_implementation_facts(checker.libraries, owner, &name, identity),
             )
         })
         .collect::<Facts>();
@@ -195,39 +195,10 @@ pub(crate) fn for_checked_external_members(
         };
         facts.insert(
             identity,
-            implementation_facts(source, owner, &name, identity),
+            builtin_implementation_facts(source, owner, &name, identity),
         );
     }
     Ok(facts)
-}
-
-fn implementation_facts(
-    source: &dyn SymbolSource,
-    owner: TypeName,
-    name: &str,
-    identity: ExternalCallableId,
-) -> Box<[BuiltinImplementation]> {
-    builtin_overrides(source, owner, name, identity)
-        .into_iter()
-        .map(|implementation| {
-            let declaration =
-                implementation
-                    .declaration
-                    .map(|declaration| BuiltinOverrideDeclaration {
-                        operation: declaration
-                            .callable
-                            .compiler_intrinsic
-                            .or(declaration.callable.member_realization.compiler_intrinsic()),
-                        params: declaration.identity.params,
-                        ret: declaration.identity.ret,
-                    });
-            BuiltinImplementation {
-                receiver: implementation.receiver,
-                declaration,
-            }
-        })
-        .collect::<Vec<_>>()
-        .into_boxed_slice()
 }
 
 fn record_property_setter(
