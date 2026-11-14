@@ -15,6 +15,9 @@ use crate::libraries::{KlibBodyCallable, KlibDependencyCallable};
 #[derive(Clone, Default)]
 pub struct KlibCalleeFacts<'a> {
     callables: HashMap<&'a KlibDependencyCallable, IndexedKlibCallee<'a>>,
+    /// Builtin dispatch facts derived for each exact member identity before common-IR lowering.
+    builtin_implementation_facts:
+        HashMap<crate::fir::ExternalCallableId, Box<[crate::fir::BuiltinImplementation]>>,
     /// Header evidence is not a checked source call which requires an executable export.
     selected: HashSet<&'a KlibDependencyCallable>,
     /// Same-compilation declaration identities for reference equality. These do not grant an
@@ -55,6 +58,62 @@ pub(crate) struct CallEdge {
 }
 
 impl<'a> KlibCalleeFacts<'a> {
+    /// Derive builtin implementations for the selected KLIB member declarations while provider
+    /// identities and accessor-to-property names are still available to the body checker.
+    pub(crate) fn with_builtin_implementation_facts(
+        mut self,
+        source: &dyn SymbolSource,
+    ) -> Result<Self, KlibDependencyCallable> {
+        for fact in self.callables.values() {
+            let IndexedKlibCallee::Selected(callables) = fact else {
+                continue;
+            };
+            let callable = callables[0];
+            if !callable.is_member() {
+                continue;
+            }
+            let Some(crate::types::SemanticCallableOwner::Classifier(owner)) =
+                callable.declaration_owner()
+            else {
+                return Err(callable.identity().clone());
+            };
+            let Some((external, realization)) =
+                source.external_callable_by_dependency(callable.identity())
+            else {
+                return Err(callable.identity().clone());
+            };
+            if realization.dependency_callable.as_ref() != Some(callable.identity())
+                || realization.callable.external_identity != Some(external)
+                || realization.kind != crate::libraries::ExternalCallableKind::Member
+                || realization.declaration_owner
+                    != Some(crate::types::SemanticCallableOwner::Classifier(owner))
+            {
+                return Err(callable.identity().clone());
+            }
+            let name = callable
+                .accessor()
+                .map_or_else(|| callable.name(), |accessor| accessor.name.as_ref());
+            let implementations =
+                crate::symbol_resolver::builtin_implementation_facts(source, owner, name, external);
+            if self
+                .builtin_implementation_facts
+                .get(&external)
+                .is_some_and(|existing| existing != &implementations)
+            {
+                return Err(callable.identity().clone());
+            }
+            self.builtin_implementation_facts
+                .insert(external, implementations);
+        }
+        Ok(self)
+    }
+
+    pub(crate) fn builtin_implementation_facts(
+        &self,
+    ) -> &HashMap<crate::fir::ExternalCallableId, Box<[crate::fir::BuiltinImplementation]>> {
+        &self.builtin_implementation_facts
+    }
+
     /// The call edge facts of the members realized outside the unit, frozen with its closure.
     pub(crate) fn with_member_edges(
         mut self,
