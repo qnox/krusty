@@ -11,6 +11,9 @@ pub enum RuntimeExceptionKind {
     NullPointer,
     IllegalState,
     IllegalArgument,
+    UnsupportedOperation,
+    Arithmetic,
+    NumberFormat,
     ClassCast,
 }
 
@@ -44,6 +47,9 @@ impl RuntimeExceptionKind {
             Self::NullPointer => "kotlin/NullPointerException",
             Self::IllegalState => "kotlin/IllegalStateException",
             Self::IllegalArgument => "kotlin/IllegalArgumentException",
+            Self::UnsupportedOperation => "kotlin/UnsupportedOperationException",
+            Self::Arithmetic => "kotlin/ArithmeticException",
+            Self::NumberFormat => "kotlin/NumberFormatException",
             Self::ClassCast => "kotlin/ClassCastException",
         })
     }

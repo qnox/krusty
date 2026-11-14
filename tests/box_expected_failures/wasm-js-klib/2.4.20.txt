@@ -196,7 +196,6 @@ branching/when_with_try1.kt
 bridges/complexTraitImpl.kt
 bridges/covariantGenericDiamond.kt
 bridges/delegationComplexWithList.kt
-bridges/fakeGenericCovariantOverride.kt
 bridges/genericProperty.kt
 bridges/internalMethodFakeOverrideInFriendModule.kt
 bridges/internalMethodOverrideInFriendModule.kt
@@ -227,7 +226,6 @@ bridges/test24.kt
 bridges/test25.kt
 bridges/test3.kt
 bridges/test5.kt
-builtinStubMethods/customReadOnlyIterator.kt
 builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
 callableReference/adaptedReferences/adaptedSecondArgArray.kt
 callableReference/adaptedReferences/adaptedSecondArgTypeVariable.kt
@@ -294,7 +292,6 @@ callableReference/bound/multiCase.kt
 callableReference/bound/nullReceiver.kt
 callableReference/bound/primitiveReceiver.kt
 callableReference/bound/receiverEvaluatedOnce.kt
-callableReference/bound/simpleFunction.kt
 callableReference/bound/simpleProperty.kt
 callableReference/callableReferenceOfCompanionConst.kt
 callableReference/callableReferenceOfCompanionProperty.kt
@@ -416,7 +413,6 @@ classDelegation/multipleModules.kt
 classLiteral/bound/primitives.kt
 classLiteral/classEquality.kt
 classes/comanionObjectFieldVsClassField.kt
-classes/implementComparableInSubclass.kt
 classes/initializerBlockDImpl.kt
 classes/kt1535.kt
 classes/kt1538.kt
@@ -424,7 +420,6 @@ classes/kt1980.kt
 classes/kt2417.kt
 classes/kt2566_2.kt
 classes/kt343.kt
-classes/kt500.kt
 classes/kt508.kt
 classes/kt8011.kt
 classes/kt8011a.kt
@@ -1407,7 +1402,6 @@ fakeOverride/substitutionInLocal.kt
 fakeOverride/varianceOverload.kt
 fieldRename/delegates.kt
 finally/kt4134.kt
-finally/notChainCatch.kt
 finally/someStuff.kt
 fir/functionsDifferInTypeParameterBounds.kt
 fir/inferenceWithTypeAliasFromOtherModule.kt
@@ -3631,11 +3625,8 @@ specialBuiltins/enumAsOrdinaled.kt
 specialBuiltins/exceptionCause.kt
 specialBuiltins/irrelevantRemoveAtOverride.kt
 specialBuiltins/maps.kt
-specialBuiltins/noSpecialBridgeInSuperClass.kt
 specialBuiltins/notEmptyListAny.kt
 specialBuiltins/notEmptyMap.kt
-specialBuiltins/redundantStubForSize.kt
-specialBuiltins/removeAtTwoSpecialBridges.kt
 specialBuiltins/throwable.kt
 specialBuiltins/throwableCause.kt
 specialBuiltins/throwableComplex.kt
@@ -3832,7 +3823,6 @@ wasm-new-exception-handling/finally7.kt
 wasm-new-exception-handling/finally8.kt
 wasm-new-exception-handling/finally9.kt
 wasm-new-exception-handling/kt4134.kt
-wasm-new-exception-handling/notChainCatch.kt
 wasm-new-exception-handling/rethrow.kt
 wasm-new-exception-handling/returnsDifferentTypes.kt
 wasm-new-exception-handling/someStuff.kt
@@ -3867,7 +3857,6 @@ wasm-old-exception-handling/finally7.kt
 wasm-old-exception-handling/finally8.kt
 wasm-old-exception-handling/finally9.kt
 wasm-old-exception-handling/kt4134.kt
-wasm-old-exception-handling/notChainCatch.kt
 wasm-old-exception-handling/rethrow.kt
 wasm-old-exception-handling/returnsDifferentTypes.kt
 wasm-old-exception-handling/someStuff.kt

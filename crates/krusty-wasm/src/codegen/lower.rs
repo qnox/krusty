@@ -51,6 +51,7 @@ pub(super) use shared_cells::parameter_carrier;
 
 pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerIntrinsic) -> bool {
     is_scalar_operation(operation)
+        || intrinsic_operations::member_operation(operation).is_some()
         || IrBinOp::of_primitive_operator(operation).is_some()
         || operation == krusty::backend::BackendCompilerIntrinsic::ThrowableMessage
         || operation == krusty::backend::BackendCompilerIntrinsic::ThrowableCause
@@ -1332,6 +1333,32 @@ impl<'a> Body<'a> {
                 && let Some(field) = self.throwable_field(*target) =>
             {
                 self.throwable_field_read(field, dispatch_receiver, &args, *ret)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver,
+                args,
+            } if let Callee::External {
+                target,
+                params,
+                ret,
+                defaults,
+                extension_receiver_parameter,
+                ..
+            } = &**call_callee
+                && let Some(operation) = self
+                    .callables
+                    .callable(*target)
+                    .and_then(|fact| fact.compiler_operation())
+                    .and_then(intrinsic_operations::member_operation) =>
+            {
+                intrinsic_operations::string_get_frame(
+                    params,
+                    *ret,
+                    defaults,
+                    *extension_receiver_parameter,
+                )?;
+                self.intrinsic(operation, dispatch_receiver, &args)?;
             }
             IrExpr::Call {
                 dispatch_receiver: Some(receiver),
