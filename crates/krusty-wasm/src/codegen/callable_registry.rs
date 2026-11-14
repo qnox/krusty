@@ -263,6 +263,20 @@ impl CallableRegistry {
                     let Some(access) = callables.dependency_accessor(operation) else {
                         continue;
                     };
+                    krusty::trace_compiler!(
+                        "lower",
+                        "wasm checked accessor expression={expression} operation={operation:?} selected_callable={:?} identity={:?} role={:?} owner={:?} kind={:?} interface={} export_emitted={}",
+                        access.target,
+                        access.callable.dependency_callable,
+                        access.callable.semantic_role,
+                        access.callable.declaration_owner,
+                        access.callable.kind,
+                        access.callable.owner_is_interface,
+                        access.callable
+                            .dependency_callable
+                            .as_ref()
+                            .is_some_and(|identity| self.dependencies.contains_key(identity)),
+                    );
                     if !access
                         .callable
                         .dependency_callable
@@ -343,13 +357,28 @@ impl CallableRegistry {
                         .dependency_callable
                         .as_ref()
                         .is_some_and(|identity| self.dependencies.contains_key(identity));
-                    if dispatch_receiver.is_some()
+                    let member_dispatch = dispatch_receiver.is_some()
                         && extension_receiver_parameter.is_none()
                         && defaults.is_empty()
                         && super::lower::library_members::dispatches_through_library_member(
                             ir, callables, expression, callable, published,
-                        )
-                    {
+                        );
+                    if matches!(ir.expr(expression), IrExpr::Checked(_)) {
+                        krusty::trace_compiler!(
+                            "lower",
+                            "wasm checked dependency accessor expression={expression} target={target:?} identity={:?} member_dispatch={member_dispatch} published={published} owner={:?} kind={:?} interface={} realization={:?} operation={:?} semantic_role={:?} params={:?} ret={:?}",
+                            callable.dependency_callable,
+                            callable.declaration_owner,
+                            callable.kind,
+                            callable.owner_is_interface,
+                            callable.member_realization,
+                            callable.compiler_operation(),
+                            callable.semantic_role,
+                            callable.declared_params.as_deref().unwrap_or(&callable.params),
+                            callable.declared_ret.unwrap_or(callable.ret),
+                        );
+                    }
+                    if member_dispatch {
                         // The member's implementations are reached through its library member.
                         continue;
                     }

@@ -970,11 +970,27 @@ impl BodyLowering<'_, '_, '_> {
     /// getter carries a reference role that takes no operands. Other getter roles are not this
     /// lowering's, and the read goes on to the path that owns them.
     pub(super) fn reads_reference_slot(&self, target: krusty::fir::ExternalPropertyId) -> bool {
-        self.file
+        let selected = self
+            .file
             .callables
             .property(target)
-            .and_then(|property| self.file.callables.callable(property.getter))
-            .is_some_and(|getter| reference_slot(getter.semantic_role, 0).is_some())
+            .and_then(|property| self.file.callables.callable(property.getter));
+        let recognized =
+            selected.is_some_and(|getter| reference_slot(getter.semantic_role, 0).is_some());
+        krusty::trace_compiler!(
+            "lower",
+            "native checked property read target={target:?} recognized_reference_slot={recognized} getter={:?}",
+            selected.map(|getter| (
+                getter.dependency_callable.as_ref(),
+                getter.semantic_role,
+                getter.kind,
+                getter.declaration_owner,
+                getter.owner_is_interface,
+                getter.params.as_slice(),
+                getter.ret,
+            )),
+        );
+        recognized
     }
 
     /// A checked read of a dependency property whose selected getter carries a reference role.

@@ -133,7 +133,22 @@ impl Body<'_> {
         };
         let fact = self.callables.callable(target)?;
         let published = self.calls.external(target).is_some();
-        if !dispatches_through_library_member(self.ir, self.callables, id, fact, published) {
+        let dispatches =
+            dispatches_through_library_member(self.ir, self.callables, id, fact, published);
+        if matches!(node, IrExpr::Checked(_)) {
+            krusty::trace_compiler!(
+                "lower",
+                "wasm library-member checked property expression={id} selected_callable={target:?} identity={:?} semantic_role={:?} owner={:?} kind={:?} interface={} realization={:?} operation={:?} published={published} dispatches={dispatches}",
+                fact.dependency_callable,
+                fact.semantic_role,
+                fact.declaration_owner,
+                fact.kind,
+                fact.owner_is_interface,
+                fact.member_realization,
+                fact.compiler_operation(),
+            );
+        }
+        if !dispatches {
             return None;
         }
         // A function's identity names a function, and an accessor's a property.

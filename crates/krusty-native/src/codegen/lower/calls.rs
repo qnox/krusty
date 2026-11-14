@@ -367,6 +367,18 @@ impl BodyLowering<'_, '_, '_> {
                 let Some(realization) = self.file.callables.callable(*target) else {
                     return Err("an unresolvable dependency call".into());
                 };
+                krusty::trace_compiler!(
+                    "lower",
+                    "native external call site={site} target={target:?} identity={:?} semantic_role={:?} owner={:?} kind={:?} interface={} params={:?} ret={:?} expression={:?}",
+                    realization.dependency_callable,
+                    realization.semantic_role,
+                    realization.declaration_owner,
+                    realization.kind,
+                    realization.owner_is_interface,
+                    realization.declared_params.as_deref().unwrap_or(&realization.params),
+                    realization.declared_ret.unwrap_or(realization.ret),
+                    self.file.ir.expr(site),
+                );
                 // The target stdlib's own `typeOf` body only says it is a compiler intrinsic.
                 if realization.compiler_intrinsic
                     == Some(krusty::backend::BackendCompilerIntrinsic::TypeOf)

@@ -1986,6 +1986,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 } = &**checked_op
                     && self.reads_reference_slot(*target) =>
             {
+                krusty::trace_compiler!(
+                    "lower",
+                    "native checked property read uses reference slot target={target:?} receiver={receiver}"
+                );
                 self.reference_property(*target, *receiver)
                     .expect("the selected getter role was checked by the guard")
             }
