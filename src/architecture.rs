@@ -340,7 +340,13 @@ mod tests {
         ];
         // The JVM backend crate's own modules are its business; what it may use of the frontend is
         // the same budget as the class-file layer that stays in this crate.
+        let provider_tests = source_path("src/jvm/jvm_libraries/tests");
         for path in jvm_backend_files() {
+            // These standalone files are included by a `#[cfg(test)]` parent, so their own source
+            // has no test attribute for the Rust dependency scanner to recognize.
+            if path.starts_with(&provider_tests) {
+                continue;
+            }
             let check = if path.starts_with(source_path("crates/krusty-jvm")) {
                 assert_allowed_external_crate_modules_in_file
             } else {
