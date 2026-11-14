@@ -299,6 +299,7 @@ impl CallableRegistry {
                     target,
                     default_provider,
                     params,
+                    ret,
                     defaults,
                     extension_receiver_parameter,
                     ..
@@ -418,7 +419,18 @@ impl CallableRegistry {
                             callable.ret,
                             callable.overridden_declarations,
                         );
-                        "a dependency callable whose target code was not emitted".to_string()
+                        format!(
+                            "a dependency callable whose target code was not emitted: `{}`; selected declaration {identity:?}; owner {:?}; kind {:?}; realization {:?}; checked parameters {params:?}; checked result {ret:?}; provider parameters {:?}; provider result {:?}; declared parameters {:?}; declared result {:?}; compiler operation {:?}",
+                            callable.name,
+                            callable.declaration_owner,
+                            callable.kind,
+                            callable.member_realization,
+                            callable.params,
+                            callable.ret,
+                            callable.declared_params,
+                            callable.declared_ret,
+                            callable.compiler_operation(),
+                        )
                     })?;
                     targets.external.insert(*target, index);
                     if let Some(entry) = default_entry {
