@@ -1363,6 +1363,9 @@ mod dependency_constructor_exports;
 #[path = "wasm_escaping_closures.rs"]
 mod escaping_closures;
 
+#[path = "wasm_default_identity_hash.rs"]
+mod default_identity_hash;
+
 #[path = "wasm_type_of.rs"]
 mod type_of;
 
