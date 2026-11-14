@@ -52,7 +52,7 @@ pub(super) fn define_override_bridges(
                 target,
             } => {
                 let implementation = &ir.functions[target as usize];
-                let owner = ir.classes[class as usize].fq_name();
+                let owner = ir.classes[class as usize].fq_name_id();
                 if implementation.params.len() != arity
                     || implementation.dispatch_receiver != Some(owner)
                 {
