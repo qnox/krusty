@@ -37,6 +37,8 @@ use crate::types::{Ty, TypeName};
 
 mod class_construction;
 mod enum_materialization;
+#[cfg(test)]
+mod initializer_capability_tests;
 mod local_class;
 
 /// An exact dependency edge linked outside this support unit. Body exports, target instruction
