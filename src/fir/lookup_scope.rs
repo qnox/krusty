@@ -74,6 +74,9 @@ pub struct HeaderFileScope {
     /// Whether this file enables eager lambda analysis, under which a lambda's checked result
     /// decides overload applicability during signature solving as well.
     pub eager_lambda_analysis: bool,
+    /// Whether this file binds a referenced declaration's context parameters at the reference.
+    /// Signature solving types `::name` from the reference's own value parameters accordingly.
+    pub callable_references_to_contextual: bool,
 }
 
 #[derive(Default)]
@@ -139,6 +142,7 @@ impl HeaderScopeArena {
             is_common,
             explicit_context_arguments: file.explicit_context_arguments,
             eager_lambda_analysis: file.eager_lambda_analysis,
+            callable_references_to_contextual: file.callable_references_to_contextual,
         });
     }
 
@@ -147,6 +151,13 @@ impl HeaderScopeArena {
             .iter()
             .find(|scope| scope.source == source)
             .copied()
+    }
+
+    /// Whether the file's callable references bind the context arguments of their declarations
+    /// (`CallableReferencesToContextual`).
+    pub fn binds_reference_contexts(&self, source: SourceFileId) -> bool {
+        self.file(source)
+            .is_some_and(|file| file.callable_references_to_contextual)
     }
 
     pub fn path(&self, range: LookupNameRange) -> &[LookupNameId] {
