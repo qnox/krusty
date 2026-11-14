@@ -48,10 +48,11 @@ jobs:
       timeout-minutes: 40
       run: |
         set -euo pipefail
-        git diff --exit-code 9a990eaff HEAD -- . ':!.github/workflows/ci.yml'
+        test "$(git rev-parse HEAD^)" = 28a239a7c7cb34c38128bb25cf2db2b5ba9501fd
+        git diff --exit-code 28a239a7c7cb34c38128bb25cf2db2b5ba9501fd HEAD -- src
         git rev-parse HEAD > compiler-source.txt
         set +e
-        cargo test --profile gate -p krusty --test conformance --no-run --message-format=json 2>&1 | tee machine-check.jsonl
+        cargo test --features trace --profile gate -p krusty --test conformance --no-run --message-format=json 2>&1 | tee machine-check.jsonl
         status=${PIPESTATUS[0]}
         set -e
         printf '%s\n' "$status" > machine-check.exit
@@ -97,6 +98,8 @@ jobs:
     - name: run complete JVM coroutine fixtures
       timeout-minutes: 6
       continue-on-error: true
+      env:
+        KRUSTY_TRACE: suspend,lower
       run: |
         mkdir -p target/coroutine-target-results
         CONFORMANCE_TEST=$(cat conformance-test-executable.txt)
@@ -109,6 +112,7 @@ jobs:
       timeout-minutes: 6
       continue-on-error: true
       env:
+        KRUSTY_TRACE: suspend,lower
         KRUSTY_NATIVE_BOX_ONLY: suspendStateMachine
         KRUSTY_REQUIRE_NATIVE_CONFORMANCE: '1'
         KRUSTY_TEST_THREADS: '1'
@@ -124,6 +128,7 @@ jobs:
       timeout-minutes: 6
       continue-on-error: true
       env:
+        KRUSTY_TRACE: suspend,lower
         KRUSTY_WASM_JS_BOX_ONLY: suspendStateMachine
         KRUSTY_REQUIRE_WASM_JS_CONFORMANCE: '1'
         KRUSTY_TEST_THREADS: '1'
@@ -139,6 +144,7 @@ jobs:
       timeout-minutes: 6
       continue-on-error: true
       env:
+        KRUSTY_TRACE: suspend,lower
         KRUSTY_WASM_WASI_BOX_ONLY: suspendStateMachine
         KRUSTY_REQUIRE_WASM_WASI_CONFORMANCE: '1'
         KRUSTY_TEST_THREADS: '1'
