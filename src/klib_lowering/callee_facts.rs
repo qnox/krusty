@@ -54,7 +54,7 @@ impl<'a> KlibCalleeFacts<'a> {
     /// Copy checker-produced semantic facts for the selected KLIB dependency graph.
     pub(crate) fn with_checked_dependency_facts(
         mut self,
-        checked: &crate::backend::CheckedBackendCallables,
+        checked: &'a crate::backend::CheckedBackendCallables,
     ) -> Self {
         self.builtin_implementation_facts.extend(
             checked
@@ -68,6 +68,9 @@ impl<'a> KlibCalleeFacts<'a> {
                 .iter()
                 .map(|(id, edge)| (id.clone(), edge.clone())),
         );
+        if let Some(hierarchy) = checked.klib_type_hierarchy() {
+            self.class_type_oracle = Some(hierarchy);
+        }
         self
     }
 

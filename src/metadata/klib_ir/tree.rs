@@ -16,6 +16,7 @@
 
 use super::symbols::KlibIrSymbol;
 use super::KlibIrConstant;
+use crate::metadata::klib_ir::KlibIrSignature;
 
 mod emitted_callables;
 pub(crate) use emitted_callables::EmittedCallForms;
@@ -83,6 +84,16 @@ impl KlibIrArena {
 
     pub fn function_count(&self) -> usize {
         self.functions.len()
+    }
+
+    /// Classifier signatures named by this arena's serialized type table.
+    pub(crate) fn classifier_signatures_in_types(&self) -> impl Iterator<Item = &KlibIrSignature> {
+        self.types.iter().filter_map(|ty| match ty {
+            KlibIrType::Simple { classifier, .. } => Some(&classifier.signature),
+            KlibIrType::DefinitelyNotNull(_)
+            | KlibIrType::Dynamic { .. }
+            | KlibIrType::Error { .. } => None,
+        })
     }
 
     /// The `index`th function of this arena, in decoding order.

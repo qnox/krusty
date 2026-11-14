@@ -12,6 +12,7 @@ pub(crate) struct CheckedKlibDependencyFacts {
         crate::fx_hash::HashMap<ExternalCallableId, Box<[crate::fir::BuiltinImplementation]>>,
     pub(crate) member_edges:
         crate::fx_hash::HashMap<crate::libraries::KlibDependencyCallable, CheckedMemberCallEdge>,
+    pub(crate) type_hierarchy: super::klib_type_facts::CheckedKlibTypeFacts,
 }
 
 /// Check and freeze semantic facts for the body graph reachable from the source file's selected
@@ -23,6 +24,14 @@ pub(crate) fn for_checked_klib_bodies<'a>(
     roots: impl IntoIterator<Item = crate::libraries::KlibBodyCallable<'a>>,
 ) -> Result<CheckedKlibDependencyFacts, ExternalCallableId> {
     let mut facts = CheckedKlibDependencyFacts::default();
+    let roots = roots.into_iter().collect::<Vec<_>>();
+    let mut classifier_roots = Vec::new();
+    let mut semantic_types = Vec::new();
+    for callable in &roots {
+        semantic_types.extend(callable.params().iter().copied());
+        semantic_types.push(callable.ret());
+        semantic_types.extend(callable.type_parameters().iter().copied());
+    }
     let mut pending = roots
         .into_iter()
         .map(|callable| callable.identity().clone())
@@ -32,6 +41,7 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         if !visited.insert(identity.clone()) {
             continue;
         }
+        classifier_roots.extend(bodies.type_classifiers_in_body(&identity));
         pending.extend(bodies.direct_callees(&identity));
         pending.extend(
             bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS),
@@ -54,6 +64,9 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         let Some(selected) = realization.klib_body_callable() else {
             continue;
         };
+        semantic_types.extend(selected.params().iter().copied());
+        semantic_types.push(selected.ret());
+        semantic_types.extend(selected.type_parameters().iter().copied());
         if realization.kind != crate::libraries::ExternalCallableKind::Member {
             continue;
         }
@@ -96,6 +109,12 @@ pub(crate) fn for_checked_klib_bodies<'a>(
             facts.member_edges.insert(identity, edge);
         }
     }
+    facts.type_hierarchy = super::klib_type_facts::CheckedKlibTypeFacts::from_source(
+        source,
+        classifier_roots,
+        std::iter::empty(),
+        semantic_types,
+    );
     Ok(facts)
 }
 

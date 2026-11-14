@@ -732,6 +732,8 @@ pub struct CheckedBackendCallables {
     klib_builtin_implementations: HashMap<ExternalCallableId, Box<[BuiltinImplementation]>>,
     klib_member_edges:
         HashMap<crate::libraries::KlibDependencyCallable, crate::fir::CheckedMemberCallEdge>,
+    /// Checker-frozen class hierarchy used by common KLIB dependency-body lowering.
+    klib_type_hierarchy: Option<crate::resolve::CheckedKlibTypeFacts>,
     singleton_dispatches: HashMap<crate::ir::ExprId, SingletonDispatch>,
     singleton_selections: HashMap<ExternalCallableId, Vec<SingletonEdge>>,
     /// The runtime declarations native plugins selected at the handoff for their generated code,
@@ -758,6 +760,7 @@ impl CheckedBackendCallables {
         }
         self.klib_builtin_implementations = facts.builtin_implementations;
         self.klib_member_edges = facts.member_edges;
+        self.klib_type_hierarchy = Some(facts.type_hierarchy);
         Ok(())
     }
 
@@ -771,6 +774,10 @@ impl CheckedBackendCallables {
         &self,
     ) -> &HashMap<crate::libraries::KlibDependencyCallable, crate::fir::CheckedMemberCallEdge> {
         &self.klib_member_edges
+    }
+
+    pub(crate) fn klib_type_hierarchy(&self) -> Option<&crate::resolve::CheckedKlibTypeFacts> {
+        self.klib_type_hierarchy.as_ref()
     }
 
     /// Whether native plugins selected `identity` at the handoff for the code they generate.

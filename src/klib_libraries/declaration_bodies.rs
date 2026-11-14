@@ -708,6 +708,26 @@ impl KlibDeclarationBodies {
             .map(|(_, function)| function.body.is_some())
     }
 
+    /// Public classifiers present in the serialized type table of one exact body declaration.
+    ///
+    /// The arena can also contain nested declarations that share the body's storage. Including
+    /// those types is intentional: common lowering may emit their bodies as part of the same
+    /// dependency unit.
+    pub(crate) fn type_classifiers_in_body(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Vec<TypeName> {
+        let Some((arena, _)) = self.function(identity) else {
+            return Vec::new();
+        };
+        let mut names = HashSet::default();
+        arena
+            .classifier_signatures_in_types()
+            .filter_map(class_identity)
+            .filter(|name| names.insert(*name))
+            .collect()
+    }
+
     /// Exact producer-resolved callees named directly by this function body. Missing and
     /// ambiguous origins stay absent here and are diagnosed by body lowering; consumers use this
     /// inventory only to prepare capabilities for declarations which the same lowering reaches.

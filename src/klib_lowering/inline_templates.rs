@@ -420,11 +420,7 @@ impl CallLinker for TemplateCalls<'_> {
     }
 
     fn applied_supertype(&self, sub: Ty, owner: crate::types::TypeName) -> Option<Ty> {
-        crate::assignable::applied_supertype(
-            &crate::symbol_resolver::SourceOracle(self.callees.source),
-            sub,
-            Ty::obj_name(owner),
-        )
+        self.callees.applied_supertype(sub, owner)
     }
 
     fn is_subtype(
@@ -433,20 +429,11 @@ impl CallLinker for TemplateCalls<'_> {
         sub: Ty,
         sup: Ty,
     ) -> bool {
-        super::type_evidence::ordinary_subtype(
-            Some(&crate::symbol_resolver::SourceOracle(self.callees.source)),
-            parameters,
-            sub,
-            sup,
-        )
+        self.callees.is_subtype(parameters, sub, sup)
     }
 
     fn same_type(&self, left: Ty, right: Ty) -> bool {
-        super::type_evidence::same_type(
-            Some(&crate::symbol_resolver::SourceOracle(self.callees.source)),
-            left,
-            right,
-        )
+        self.callees.same_type(left, right)
     }
 
     fn link_constructor(
@@ -584,8 +571,7 @@ impl CallLinker for TemplateCalls<'_> {
     }
 
     fn constructor_bound(&self, parameters: &KlibTypeParameters, argument: Ty, bound: Ty) -> bool {
-        let oracle = crate::symbol_resolver::SourceOracle(self.callees.source);
-        super::type_evidence::satisfies(Some(&oracle), parameters, argument, bound)
+        self.callees.constructor_bound(parameters, argument, bound)
     }
 
     fn link_accessor(

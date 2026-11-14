@@ -35,11 +35,13 @@ use scope::{ContextReceiver, ContextReceiverKind, FlowExclusion, NarrowPath, Ns}
 mod abstract_obligations;
 mod argument_parameter_mapping;
 mod builtin_implementation;
+mod klib_type_facts;
 use argument_parameter_mapping::{
     call_argument_parameter_indices, call_argument_parameter_indices_result,
     named_whole_array_varargs,
 };
 pub(crate) use builtin_implementation::for_checked_external_members;
+pub(crate) use klib_type_facts::CheckedKlibTypeFacts;
 mod call_site_publication;
 mod constructor_references;
 mod implicit_source_member_lambda;

@@ -90,12 +90,17 @@ pub(super) fn emit_dependencies<B: Backend>(
     let bodies = facts.bodies();
     let intrinsics = facts.intrinsics();
     let selected = source.callables.klib_body_callables();
-    let type_oracle = crate::symbol_resolver::SourceOracle(platform);
+    if source.callables.klib_type_hierarchy().is_none() {
+        diags.error(
+            Span::new(0, 0),
+            "internal error: checked KLIB bodies have no frozen class-hierarchy facts",
+        );
+        return Vec::new();
+    }
     let target_represents_classifier =
         |classifier| backend.represents_dependency_classifier(classifier);
     let callees = KlibCalleeFacts::new(selected.iter().copied())
         .with_checked_dependency_facts(&source.callables)
-        .with_type_oracle(&type_oracle)
         .with_target_classifiers(&target_represents_classifier);
     let mut roots: Vec<crate::libraries::KlibBodyCallable<'_>> = Vec::new();
     for callable in selected.iter().copied().filter(|callable| {
@@ -195,7 +200,6 @@ pub(super) fn emit_dependencies<B: Backend>(
             }),
         )
         .with_checked_dependency_facts(&source.callables)
-        .with_type_oracle(&type_oracle)
         .with_target_classifiers(&target_represents_classifier);
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
