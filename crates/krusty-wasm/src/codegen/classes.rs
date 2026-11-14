@@ -268,6 +268,9 @@ pub(super) struct FileClasses {
     /// How each class implements each member of a dependency's interface, as interface recording
     /// found it.
     pub(super) dependency_implementations: Vec<Vec<(MemberRef, DependencyImplementation)>>,
+    /// Checked callable arities, independent of whether their method adapters were emitted.
+    pub(super) function_arities: Vec<Vec<usize>>,
+    pub(super) suspend_function_arities: Vec<Vec<usize>>,
     /// Why a class with no instances of its own cannot be extended by a later file: what its
     /// table or interface entries needed that this form does not provide.
     pub(super) refusals: Vec<Option<Unsupported>>,
@@ -482,6 +485,8 @@ impl FileClasses {
                     interface_bodies: self.interface_bodies[id as usize].clone(),
                     dependency_implementations: self.dependency_implementations[id as usize]
                         .clone(),
+                    function_arities: self.function_arities[id as usize].clone(),
+                    suspend_function_arities: self.suspend_function_arities[id as usize].clone(),
                     refusal: self.refusals[id as usize].clone(),
                 },
             ));
@@ -897,6 +902,8 @@ pub(super) fn declare(
         ancestors: ancestry,
         interface_bodies: vec![HashMap::default(); classes],
         dependency_implementations: vec![Vec::new(); classes],
+        function_arities: vec![Vec::new(); classes],
+        suspend_function_arities: vec![Vec::new(); classes],
         refusals,
     })
 }

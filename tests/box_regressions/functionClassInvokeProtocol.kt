@@ -1,5 +1,11 @@
 // WITH_STDLIB
 
+fun interface PlainSam {
+    fun render(value: Int): String
+}
+fun interface CallableSam : (Int) -> String {
+    override fun invoke(value: Int): String
+}
 var calls = 0
 open class RenderNumber : (Int) -> String {
     override fun invoke(value: Int): String {
@@ -21,6 +27,10 @@ fun argument(): Int {
     return 12
 }
 fun <T, R> applyCallable(function: (T) -> R, argument: T): R = function(argument)
+var accumulated = 0
+class Accumulate : (Int) -> Unit {
+    override fun invoke(value: Int) { accumulated += value }
+}
 class Answer : () -> Int {
     override fun invoke(): Int = 42
 }
@@ -53,5 +63,21 @@ fun box(): String {
     if (applyCallable(reference, 13) != "number:13") return "generic callable"
     if (choose(inherited)(argument()) != "number:12" || calls != 4) return "evaluated invocation"
     if (order != "receiver;argument;") return "evaluation order"
+    val sam: Any = PlainSam { "sam:$it" }
+    if (sam is Function1<*, *> || (sam as? ((Int) -> String)) != null) return "plain SAM membership"
+    val callableSam: (Int) -> String = CallableSam { "callable:$it" }
+    if (callableSam(14) != "callable:14") return "callable SAM"
+    val ordinary: Any = lambda
+    if ((ordinary as? (suspend () -> String)) != null) return "ordinary suspension marker"
+    val suspended: suspend () -> String = { "OK" }
+    val erasedSuspend: Any = suspended
+    if ((erasedSuspend as? (suspend () -> String)) == null) return "suspend membership"
+    val unitFunction: (Int) -> Unit = Accumulate()
+    val unitResult: Any = unitFunction(2)
+    if (unitResult !== Unit || accumulated != 2) return "Unit result"
+    applyCallable(unitFunction, 3)
+    if (accumulated != 5) return "generic Unit result"
+    val physicalCast = ordinary as (suspend () -> String)
+    if (physicalCast !== ordinary) return "explicit physical cast"
     return "OK"
 }

@@ -7,7 +7,6 @@
 
 use super::*;
 use crate::encode::{CompositeType, SubType};
-use crate::function_values::INVOKE_FIELD;
 use crate::objects::immutable;
 
 /// What `==` on a function value compares.
@@ -124,11 +123,32 @@ impl Body<'_> {
             FunctionEquality::Declaration { .. } => self.runtime.callable_references.hash_code,
         };
         let to_string = self.runtime.objects.trap(self.module, to_string_ty);
+        let callable = sam.is_none_or(|target| {
+            classifier_and_supertypes(self.classifiers, target.classifier)
+                .into_iter()
+                .any(|classifier| self.function_arity(Ty::obj_name(classifier)) == Some(own.len()))
+        });
+        let suspend = sam.map_or_else(
+            || self.ir.suspend_funs.contains(&function),
+            |target| {
+                classifier_and_supertypes(self.classifiers, target.classifier)
+                    .into_iter()
+                    .any(|classifier| self.is_suspend_function_type(Ty::obj_name(classifier)))
+            },
+        );
         let objects = &mut self.runtime.objects;
         let (class, itable) =
             objects
                 .interfaces
                 .class(self.module, objects.itable, vec![structure]);
+        if callable {
+            objects
+                .interfaces
+                .function_instance_of(class, own.len(), suspend);
+            objects
+                .interfaces
+                .implement(class, shape.protocol, invoke)?;
+        }
         // A value of a classifier type (`KProperty0<Int>`) is an instance of every classifier
         // above it, whose members it implements with nothing yet.
         if let Some(TyKind::Obj(classifier, _)) = instance.map(|ty| ty.non_null().kind()) {
@@ -299,21 +319,17 @@ impl Body<'_> {
         }
         let any = Ty::obj_name(krusty::types::wk::any());
         let shape = self.runtime.function_shape(self.module, args.len());
-        let callee = self.local(REFERENCE);
         self.expression(function)?;
-        self.code.local_tee(callee);
         for (&arg, &param) in args.iter().zip(params) {
             self.value(arg, param)?;
             self.coerce_emitted_value(param, any)?;
         }
-        self.code.local_get(callee);
-        let object = self.runtime.objects.object;
-        self.code
-            .ref_cast(false, HeapType::Concrete(object))
-            .struct_get(object, 0)
-            .ref_cast(false, HeapType::Concrete(shape.table))
-            .struct_get(shape.table, INVOKE_FIELD)
-            .call_ref(shape.invoke);
+        let stub = self
+            .runtime
+            .objects
+            .interfaces
+            .stub(self.module, shape.protocol);
+        self.code.call(stub);
         self.coerce_emitted_value(any, ret)
     }
 
@@ -331,8 +347,11 @@ impl Body<'_> {
             return Err("a function cast to a type that is not a function type".into());
         };
         let arity = signature.params.len() + usize::from(signature.suspend);
-        let shape = self.runtime.function_shape(self.module, arity);
-        let object = self.runtime.objects.object;
+        let test = self
+            .runtime
+            .objects
+            .interfaces
+            .function_test(self.module, arity);
         self.value(arg, Ty::obj_name(krusty::types::wk::any()))?;
         let value = self.local(REFERENCE);
         self.code.local_tee(value);
@@ -341,9 +360,7 @@ impl Body<'_> {
             self.code.local_get(value);
         }
         self.code
-            .ref_cast(false, HeapType::Concrete(object))
-            .struct_get(object, 0)
-            .ref_test(false, HeapType::Concrete(shape.table))
+            .call(test)
             .if_(BlockType::Empty)
             .else_()
             .unreachable()
@@ -353,6 +370,63 @@ impl Body<'_> {
         }
         self.code.local_get(value);
         Ok(())
+    }
+
+    /// Physical callable arity from the checked function type or frozen classifier role.
+    pub(super) fn function_arity(&self, ty: Ty) -> Option<usize> {
+        match ty.non_null().kind() {
+            TyKind::Fun(signature) => Some(signature.params.len() + usize::from(signature.suspend)),
+            TyKind::Obj(classifier, _) => match self.classifiers.classifier(classifier)?.role {
+                Some(krusty::types::ClassifierRole::FunctionOfArity(arity)) => {
+                    Some(usize::from(arity))
+                }
+                Some(krusty::types::ClassifierRole::SuspendFunctionOfArity(arity)) => {
+                    Some(usize::from(arity) + 1)
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    pub(super) fn is_suspend_function_type(&self, ty: Ty) -> bool {
+        match ty.non_null().kind() {
+            TyKind::Fun(signature) => signature.suspend,
+            TyKind::Obj(classifier, _) => {
+                self.classifiers.classifier(classifier).is_some_and(|fact| {
+                    matches!(
+                        fact.role,
+                        Some(krusty::types::ClassifierRole::SuspendFunctionOfArity(_))
+                    )
+                })
+            }
+            _ => false,
+        }
+    }
+
+    /// Safe casts and `is` of suspend functions additionally require semantic suspension
+    /// membership. Explicit casts above retain Kotlin's physical FunctionN check.
+    pub(super) fn function_type_test(
+        &mut self,
+        arity: usize,
+        nullable: bool,
+        requires_suspend: bool,
+    ) {
+        let value = self.local(REFERENCE);
+        self.code.local_set(value);
+        let interfaces = &mut self.runtime.objects.interfaces;
+        let test = if requires_suspend {
+            interfaces.suspend_function_test(self.module, arity)
+        } else {
+            interfaces.function_test(self.module, arity)
+        };
+        self.code.local_get(value).call(test);
+        if nullable {
+            self.code
+                .local_get(value)
+                .ref_is_null()
+                .op(super::super::super::runtime::OR32);
+        }
     }
 
     /// Convert the reference on top of `code`'s stack to the carrier of `ty`.

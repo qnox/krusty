@@ -26,7 +26,7 @@ use krusty::fir::{
     ResolvedPropertyOverrideTarget,
 };
 use krusty::ir::{ClassId, IrFile, IrLocalPropertyLayout};
-use krusty::types::Ty;
+use krusty::types::{SemanticCallRole, Ty};
 
 use super::super::boxes::{BoxAdapter, BoxForm};
 use super::super::encode::{Code, Function, Module, ValType};
@@ -35,7 +35,7 @@ use super::super::objects::REFERENCE;
 use super::super::runtime::Runtime;
 use super::callable_registry::CallableRegistry;
 use super::classes::{accessor_function, field_carrier, Accessor, FileClasses};
-use super::laid_out_classes::{DependencyImplementation, SignatureAdapters};
+use super::laid_out_classes::{DependencyImplementation, ResultAdapter, SignatureAdapters};
 use super::lower::library_members::{
     library_member_identity, library_member_owner, library_member_signature, MemberRole,
 };
@@ -119,6 +119,50 @@ pub(super) fn record(
             continue;
         }
         let record = classes.forms[id as usize].record;
+        let mut arities = classes
+            .laid_out_superclass(id)
+            .map(|parent| parent.function_arities.clone())
+            .unwrap_or_default();
+        let mut suspend_arities = classes
+            .laid_out_superclass(id)
+            .map(|parent| parent.suspend_function_arities.clone())
+            .unwrap_or_default();
+        let mut current = Some(id);
+        while let Some(owner) = current {
+            let name = recording.ir.classes[owner as usize].fq_name_id();
+            for edge in recording
+                .ir
+                .function_overrides
+                .get(&name)
+                .into_iter()
+                .flatten()
+            {
+                if edge.overridden_is_interface
+                    && edge.overridden_semantic_role == Some(SemanticCallRole::KotlinFunctionInvoke)
+                    && matches!(edge.overridden, ResolvedFunctionOverrideTarget::External(_))
+                {
+                    let arity = edge.declared_parameters.len() + usize::from(edge.suspend);
+                    if !arities.contains(&arity) {
+                        arities.push(arity);
+                    }
+                    if edge.suspend && !suspend_arities.contains(&arity) {
+                        suspend_arities.push(arity);
+                    }
+                }
+            }
+            current = classes.tables.table(owner).superclass;
+        }
+        if let Some(record) = record {
+            for &arity in &arities {
+                program.runtime.objects.interfaces.function_instance_of(
+                    record,
+                    arity,
+                    suspend_arities.contains(&arity),
+                );
+            }
+        }
+        classes.function_arities[id as usize] = arities;
+        classes.suspend_function_arities[id as usize] = suspend_arities;
         if record.is_none() && classes.refusals[id as usize].is_some() {
             continue;
         }
@@ -508,11 +552,16 @@ impl FileRecorder<'_, '_, '_> {
         match (&signature.1[..], &implemented_signature.1[..]) {
             ([ValType::Ref { .. }], [ValType::Ref { .. }]) => {}
             ([wide @ ValType::Ref { .. }], [scalar]) if *wide == REFERENCE => {
-                adapters.result = Some(
+                adapters.result = Some(ResultAdapter::Box(
                     self.box_of(implemented.1, *scalar)?
                         .ok_or_else(unadapted)?
                         .adapter(),
-                );
+                ));
+            }
+            ([wide], []) if *wide == REFERENCE && implemented.1 == Ty::Unit => {
+                adapters.result = Some(ResultAdapter::Unit(
+                    self.program.runtime.unit_object(self.program.module),
+                ));
             }
             (declared, implementation) if declared == implementation => {}
             _ => return Err(unadapted()),
@@ -585,12 +634,20 @@ impl FileRecorder<'_, '_, '_> {
             ([wide], [narrow]) if wide == narrow => {}
             ([wide], [ValType::Ref { .. }]) if *wide == REFERENCE => {}
             ([wide], [scalar]) if *wide == REFERENCE => {
-                let form = adapters.result.ok_or_else(unadapted)?;
+                let Some(ResultAdapter::Box(form)) = adapters.result else {
+                    return Err(unadapted());
+                };
                 let scratch = form.needs_scratch().then(|| {
                     locals.push(*scalar);
                     signature.0.len() as u32
                 });
                 form.emit_box(&mut code, scratch);
+            }
+            ([wide], []) if *wide == REFERENCE => {
+                let Some(ResultAdapter::Unit(unit)) = adapters.result else {
+                    return Err(unadapted());
+                };
+                code.global_get(unit);
             }
             ([], []) => {}
             _ => return Err(unadapted()),
@@ -628,13 +685,46 @@ impl FileRecorder<'_, '_, '_> {
                 if !edge.overridden_is_interface {
                     continue;
                 }
+                if edge.overridden_semantic_role == Some(SemanticCallRole::KotlinFunctionInvoke) {
+                    let arity = edge.declared_parameters.len() + usize::from(edge.suspend);
+                    let protocol = self
+                        .program
+                        .runtime
+                        .objects
+                        .interfaces
+                        .function_invoke(self.program.module, arity);
+                    if !self.implements(protocol) {
+                        let any = Ty::nullable(Ty::obj_name(krusty::types::wk::any()));
+                        let parameters = vec![any; arity];
+                        let implemented = self
+                            .function_edge_implementation(owner, edge, numbered, (&parameters, any))
+                            .and_then(|carried| self.implement_carried(protocol, carried));
+                        // An abstract/non-instantiated producer still publishes callable
+                        // membership. A later concrete class must supply its invocation; a
+                        // missing body here must not poison every call of this arity.
+                        if self.record.is_some() || implemented.is_ok() {
+                            self.settle(
+                                DependencyMember {
+                                    member: protocol,
+                                    library: true,
+                                },
+                                implemented,
+                            )?;
+                        }
+                    }
+                }
                 let Some(member) = self.dependency_member(target, MemberRole::Function) else {
                     continue;
                 };
                 if self.implements(member.member) {
                     continue;
                 }
-                let implemented = match self.function_edge_implementation(owner, edge, numbered) {
+                let implemented = match self.function_edge_implementation(
+                    owner,
+                    edge,
+                    numbered,
+                    (&edge.declared_parameters, edge.declared_result),
+                ) {
                     Ok(carried) => self.implement_carried(member.member, carried),
                     Err(reason) => Err(reason),
                 };
@@ -724,6 +814,7 @@ impl FileRecorder<'_, '_, '_> {
         owner: ClassId,
         edge: &krusty::ir::IrFunctionOverride,
         numbered: &HashMap<u32, Placed>,
+        declaration: (&[Ty], Ty),
     ) -> Result<Carried, Unsupported> {
         let ir = self.recording.ir;
         let implementation = match edge.implementation {
@@ -759,11 +850,11 @@ impl FileRecorder<'_, '_, '_> {
                 (self.slot_function(slot)?, Some(slot))
             }
         };
-        let declared = member_signature(&edge.declared_parameters, edge.declared_result)?;
+        let declared = member_signature(declaration.0, declaration.1)?;
         let implemented =
             member_signature(&edge.implementation_parameters, edge.implementation_result)?;
         let adapters = self.adapters_for_placed(
-            (&edge.declared_parameters, edge.declared_result),
+            declaration,
             (&edge.implementation_parameters, edge.implementation_result),
             &declared,
             &implemented,
