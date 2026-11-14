@@ -103,7 +103,7 @@ fn char_range_body_graph_freezes_its_exact_initializer_conversion_edge() {
     let constructor = libraries
         .external_callable(constructor.external_identity.unwrap())
         .unwrap();
-    let membership = frozen(&libraries, "kotlin.text", "isSurrogate", Ty::Char, &[]);
+    let membership = frozen(&libraries, "kotlin/text", "isSurrogate", Ty::Char, &[]);
     for selected in [
         constructor.klib_body_callable().unwrap(),
         membership.klib_body_callable().unwrap(),
