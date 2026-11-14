@@ -8,7 +8,7 @@ jobs:
     runs-on:
       - self-hosted
       - rust-4c-8gb
-    timeout-minutes: 90
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -40,7 +40,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence
-          source=a68fe6c05
+          source=b50427b8be676a73c4e4edbf490835d54b980ae0
           git diff --exit-code "$source" HEAD -- . ':!.github/workflows/ci.yml'
           git rev-parse "$source" > evidence/source-commit.txt
           sha256sum \
@@ -49,7 +49,14 @@ jobs:
             tests/box_regressions/suspendLambdaRetainedInlineObject.kt \
             tests/box_regressions/suspendLambdaRetainedInlineObjectCaptures.kt \
             tests/box_regressions/resultCompanionIdentity.kt \
+            src/klib_lowering/tests/accessor_calls.rs \
             > evidence/fixtures.sha256
+      - name: check every target and test API
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          CARGO_BUILD_JOBS=1 cargo check --workspace --all-targets > evidence/check.log 2>&1
+          cat evidence/check.log
       - name: build the conformance executable once
         timeout-minutes: 40
         run: |
@@ -69,6 +76,16 @@ jobs:
           echo "KRUSTY_KOTLINC=$(just kotlinc 2.4.21)" >> "$GITHUB_ENV"
           echo "KRUSTY_KOTLIN_NATIVE=$(just kotlin-native 2.4.21)" >> "$GITHUB_ENV"
           echo "KRUSTY_KOTLIN_BOX_DIR=$(just box-corpus 2.4.21)" >> "$GITHUB_ENV"
+      - name: run focused accessor owner tests
+        timeout-minutes: 25
+        env:
+          KRUSTY_REQUIRE_KLIB: '1'
+        run: |
+          set -euo pipefail
+          CARGO_BUILD_JOBS=1 cargo test -p krusty --lib dependency_accessors_require_exact_generic_substitutions -- --nocapture > evidence/accessor-backend.log 2>&1
+          cat evidence/accessor-backend.log
+          CARGO_BUILD_JOBS=1 cargo test -p krusty --lib a_generic_extension_getter_keeps_its_selected_formal_through_body_lowering -- --nocapture > evidence/accessor-klib-producer.log 2>&1
+          cat evidence/accessor-klib-producer.log
       - name: run every whole coroutine and Result companion fixture on all four targets
         timeout-minutes: 35
         env:
