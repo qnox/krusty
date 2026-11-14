@@ -574,6 +574,12 @@ impl BodyLowering<'_> {
         if let Callee::External { params, ret, .. } = &mut callee {
             (*params, *ret) = (operands.params, operands.ret);
         }
+        let suspend_result = match &callee {
+            Callee::External { target, .. } if self.linker.is_suspend_callable(*target) => {
+                Some(operands.ret)
+            }
+            _ => None,
+        };
         let declared_ret = match callee {
             Callee::Local(function) => Some(self.ir.functions[function as usize].ret),
             _ => None,
@@ -625,6 +631,9 @@ impl BodyLowering<'_> {
                 args,
             }),
         };
+        if let Some(result) = suspend_result {
+            self.ir.suspend_calls.insert(call, result);
+        }
         if let Some(role) = linked.edge.semantic_role {
             self.ir.semantic_call_roles.insert(call, role);
         }

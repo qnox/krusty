@@ -118,6 +118,13 @@ pub(super) struct RangeMembershipHeader {
 
 /// Joins the calls a body makes of public dependency declarations to the functions they invoke.
 pub(super) trait CallLinker {
+    /// Whether this exact provider-assigned dependency callable is declared `suspend`. A selected
+    /// suspend call in a KLIB body keeps its source result type in common IR; the common coroutine
+    /// preparation later supplies the target continuation ABI.
+    fn is_suspend_callable(&self, _target: crate::fir::ExternalCallableId) -> bool {
+        false
+    }
+
     /// The same authenticated primitive call shape that dependency planning treats as a leaf.
     /// Template linkers retain their ordinary checked external-call boundary by default.
     fn common_primitive(

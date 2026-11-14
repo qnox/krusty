@@ -97,7 +97,6 @@ pub fn lower_inline_template(
             .map_or(&[][..], |generic| &generic.formal_bounds),
         reified: &selected.callable.reified_type_parameter_ordinals,
         inline_modifiers: &selected.callable.inline_modifiers,
-        suspend: selected.callable.suspend,
     };
     let checkpoint = LoweringCheckpoint::of(ir);
     Some(
@@ -127,8 +126,6 @@ struct Declaration<'a> {
     /// Each value parameter's `noinline`/`crossinline` modifier, context parameters included and
     /// the extension receiver excluded, in declaration order.
     inline_modifiers: &'a [InlineParameterModifier],
-    /// Whether the function suspends. Its template would have to suspend its caller.
-    suspend: bool,
 }
 
 fn lower(
@@ -143,11 +140,6 @@ fn lower(
         callees,
         bodies,
     };
-    if declaration.suspend {
-        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-            "a suspend function",
-        ));
-    }
     let (arena, function) = bodies
         .function(callable.identity())
         .ok_or(KlibBodyDeclineReason::Unjoined)?;
@@ -388,6 +380,13 @@ impl TemplateCalls<'_> {
 }
 
 impl CallLinker for TemplateCalls<'_> {
+    fn is_suspend_callable(&self, target: ExternalCallableId) -> bool {
+        self.callees
+            .source
+            .external_callable(target)
+            .is_some_and(|realization| realization.callable.suspend)
+    }
+
     /// A template is expanded into a source file, whose read of the constant reaches the enum
     /// through the entry its declaring file exports. The selected library record proves the
     /// enum and its constant.
