@@ -786,6 +786,26 @@ fn wasm_source_library_superclasses_keep_their_layout_and_dispatch() {
     }
 }
 
+#[test]
+fn wasm_source_library_inherits_unboxed_function_parameter_adapters() {
+    let source = include_str!("box_regressions/multimodule/sourceLibraryUnboxedFunctionBridge.kt");
+    let stem = "sourceLibraryUnboxedFunctionBridge";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the whole unboxed function bridge module graph");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        assert_eq!(
+            lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            Outcome::Pass,
+            "source layout preserves exact function parameter adapters on {}",
+            target.name()
+        );
+    }
+}
+
 // PLATFORM-SPECIFIC: Wasm's checked-access default and host trap are independent of the portable
 // reference-array value/identity/effect-order case in the shared box inventory.
 const REFERENCE_ARRAY_BOUNDS: &str = r#"fun captured(index: Int): Throwable? {

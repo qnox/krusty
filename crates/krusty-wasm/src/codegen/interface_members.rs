@@ -505,20 +505,17 @@ impl FileRecorder<'_, '_, '_> {
                 _ => return Err(unadapted()),
             }
         }
-        if let ([ValType::Ref { .. }], [scalar]) = (&signature.1[..], &implemented_signature.1[..])
-        {
-            adapters.result = Some(
-                self.box_of(implemented.1, *scalar)?
-                    .ok_or_else(unadapted)?
-                    .adapter(),
-            );
-        } else if signature.1 != implemented_signature.1
-            && !matches!(
-                (&signature.1[..], &implemented_signature.1[..]),
-                ([ValType::Ref { .. }], [ValType::Ref { .. }])
-            )
-        {
-            return Err(unadapted());
+        match (&signature.1[..], &implemented_signature.1[..]) {
+            ([ValType::Ref { .. }], [ValType::Ref { .. }]) => {}
+            ([wide @ ValType::Ref { .. }], [scalar]) if *wide == REFERENCE => {
+                adapters.result = Some(
+                    self.box_of(implemented.1, *scalar)?
+                        .ok_or_else(unadapted)?
+                        .adapter(),
+                );
+            }
+            (declared, implementation) if declared == implementation => {}
+            _ => return Err(unadapted()),
         }
         Ok(adapters)
     }
@@ -634,6 +631,9 @@ impl FileRecorder<'_, '_, '_> {
                 let Some(member) = self.dependency_member(target, MemberRole::Function) else {
                     continue;
                 };
+                if self.implements(member.member) {
+                    continue;
+                }
                 let implemented = match self.function_edge_implementation(owner, edge, numbered) {
                     Ok(carried) => self.implement_carried(member.member, carried),
                     Err(reason) => Err(reason),
@@ -805,6 +805,9 @@ impl FileRecorder<'_, '_, '_> {
                 let Some(member) = self.dependency_member(target, role) else {
                     continue;
                 };
+                if self.implements(member.member) {
+                    continue;
+                }
                 let implemented =
                     match self.property_edge_implementation(owner, edge, setter, numbered) {
                         Ok(carried) => self.implement_carried(member.member, carried),
