@@ -22,6 +22,9 @@ fn bridge_erasure_visiting(ty: Ty, visiting: &mut crate::fx_hash::HashSet<&'stat
             erased
         }
         TyKind::Nullable(inner) => Ty::nullable(bridge_erasure_visiting(inner, visiting)),
+        // A Java declaration's flexible type (`K!`) erases as its nullable upper bound.
+        TyKind::PlatformNullable(inner) => Ty::nullable(bridge_erasure_visiting(inner, visiting)),
+        TyKind::MutabilityFlexible(inner) => bridge_erasure_visiting(inner, visiting),
         TyKind::Obj(internal, _) if internal == crate::types::TypeName::ROOT => {
             Ty::obj("kotlin/Any")
         }
@@ -33,6 +36,16 @@ fn bridge_erasure_visiting(ty: Ty, visiting: &mut crate::fx_hash::HashSet<&'stat
 mod tests {
     use super::bridge_erasure;
     use crate::types::Ty;
+
+    #[test]
+    fn a_flexible_java_type_parameter_erases_to_its_nullable_bound() {
+        let key = Ty::ty_param("K", Ty::nullable(Ty::obj("kotlin/Any")));
+
+        assert_eq!(
+            bridge_erasure(Ty::platform_nullable(key)),
+            Ty::nullable(Ty::obj("kotlin/Any"))
+        );
+    }
 
     #[test]
     fn dependent_type_parameter_erases_to_its_class_bound_for_bridge_descriptors() {
