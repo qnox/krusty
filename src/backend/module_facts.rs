@@ -339,7 +339,11 @@ impl BackendModuleFacts {
                         .map(|anchor| anchor.source),
                     classifier
                         .declared_supertypes()
-                        .filter_map(|ty| ty.get().non_null().obj_internal())
+                        .filter_map(|ty| {
+                            crate::libraries::function_classifiers::supertype_classifier(ty.get())
+                                .non_null()
+                                .obj_internal()
+                        })
                         .collect::<Box<[_]>>(),
                 ),
             );
