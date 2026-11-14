@@ -340,6 +340,7 @@ fn a_callable_reference_capture_obliges_the_adapter_parameter() {
             adapter,
             captures: vec![captured],
             bound_receiver: None,
+            bound_contexts: 0,
             function_type: Ty::fun(Vec::new(), Ty::Unit),
             declaration_parameters: Box::new([]),
             declaration_result: Ty::Unit,

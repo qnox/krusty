@@ -36,3 +36,25 @@ fn a_declaration_whose_underlying_carrier_differs_is_not_the_class_scalar() {
         Ok(None)
     );
 }
+
+#[test]
+fn runtime_array_views_retain_their_own_representation() {
+    for (owner, underlying) in [
+        ("kotlin/UByteArray", Ty::obj("kotlin/ByteArray")),
+        ("kotlin/UShortArray", Ty::obj("kotlin/ShortArray")),
+        ("kotlin/UIntArray", Ty::obj("kotlin/IntArray")),
+        ("kotlin/ULongArray", Ty::obj("kotlin/LongArray")),
+    ] {
+        assert_eq!(
+            scalar_representation(type_name(owner), &declared(underlying)),
+            Ok(Some(REFERENCE)),
+        );
+    }
+    assert_eq!(
+        scalar_representation(
+            type_name("sample/ArrayHolder"),
+            &declared(Ty::obj("kotlin/ByteArray"))
+        ),
+        Ok(None),
+    );
+}

@@ -228,6 +228,12 @@ fn realize_adapter_reference(
     };
     let arity = u8::try_from(function_type.params.len())
         .map_err(|_| FunctionReferenceRealizationTarget::Invalid)?;
+    // Values bound for context parameters live in the runtime's `boundContextArguments`; a
+    // reference that also stores field captures has no carrier shape for the pair.
+    let bound_contexts = reference.bound_contexts as usize;
+    if bound_contexts > 0 && bound_contexts != reference.captures.len() {
+        return Err(FunctionReferenceRealizationTarget::Invalid);
+    }
     // A shared mutable capture travels as its JVM holder, as the adapter declares it.
     let capture_types = holder_parameters(
         ir,
@@ -251,7 +257,7 @@ fn realize_adapter_reference(
         adapted_flags(adaptation, reference.declaration_result)
     }) | (i32::from(suspend_conversion) << 1);
     let capture_fields = local_capture_fields(ir, &reference).unwrap_or_else(|| {
-        (0..reference.captures.len())
+        (0..reference.captures.len() - bound_contexts)
             .map(|index| format!("$captured${index}"))
             .collect()
     });
@@ -395,7 +401,24 @@ fn realize_adapter_reference(
             return Err(FunctionReferenceRealizationTarget::Invalid);
         }
     };
-    let adapted = reference.adaptation.is_some() || suspend_conversion;
+    // Binding context arguments alone is not an adaptation: kotlinc keeps the plain reference
+    // carrier for a reference whose value parameters pass through in order.
+    let adapted = reference.adaptation.as_deref().is_some_and(|adaptation| {
+        let mut next = None;
+        let identity = adaptation.arguments.iter().all(|argument| match argument {
+            krusty::fir::FirAdaptedReferenceArgument::Context => true,
+            krusty::fir::FirAdaptedReferenceArgument::Value(ordinal) => {
+                let in_order = next.is_none_or(|expected| *ordinal == expected);
+                next = Some(*ordinal + 1);
+                in_order
+            }
+            _ => false,
+        });
+        !identity
+            || adaptation.suspend_conversion
+            || (adaptation.result_type.get() == Ty::Unit
+                && reference.declaration_result != Ty::Unit)
+    }) || suspend_conversion;
     let bound = reference.bound_receiver.is_some();
     let continuation = Ty::obj("kotlin/coroutines/Continuation");
     let mut invoke_parameters = function_type.params.clone();
@@ -446,6 +469,7 @@ fn realize_adapter_reference(
         adapted,
         fun_interface_constructor,
         bound,
+        bound_contexts: reference.bound_contexts,
         field_capture_count: u32::try_from(reference.captures.len())
             .map_err(|_| FunctionReferenceRealizationTarget::Invalid)?,
         capture_fields,
@@ -497,6 +521,32 @@ fn realize_adapter_reference(
         );
     }
     let mut constructor_arguments = reference.captures;
+    let mut capture_types = capture_types;
+    if bound_contexts > 0 {
+        // The carrier takes the bound context values as one `Object[]`, each boxed as the array
+        // holds it: `new Object[] { c0, c1 }`.
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let array_type = Ty::array(any);
+        let elements = constructor_arguments
+            .drain(..bound_contexts)
+            .map(|value| {
+                ir.add_expr(IrExpr::TypeOp {
+                    op: krusty::ir::IrTypeOp::ImplicitCoercion,
+                    arg: value,
+                    type_operand: any,
+                })
+            })
+            .collect::<Vec<_>>();
+        let array = ir.add_expr(IrExpr::Vararg {
+            array_type,
+            spreads: vec![false; elements.len()],
+            elements,
+        });
+        ir.set_logical_type(array, array_type);
+        constructor_arguments.insert(0, array);
+        capture_types.drain(..bound_contexts);
+        capture_types.insert(0, array_type);
+    }
     constructor_arguments.extend(reference.bound_receiver);
     // The constructor's declared parameters say that a value-class receiver is bound as its box.
     let carrier = match constructor_arguments.as_slice() {
@@ -564,14 +614,16 @@ fn local_capture_fields(
     ir: &IrFile,
     reference: &krusty::ir::IrCallableReference,
 ) -> Option<Vec<String>> {
-    if reference.captures.is_empty() {
+    // Bound context values live in the runtime base class, not in fields of the carrier.
+    let skip = reference.bound_contexts as usize;
+    if reference.captures.len() == skip {
         return Some(Vec::new());
     }
     let krusty::ir::IrCallableReferenceTarget::Local { function, .. } = reference.target else {
         return None;
     };
     let identities = ir.function_parameter_identities(function)?;
-    (0..reference.captures.len())
+    (skip..reference.captures.len())
         .map(|capture| {
             let identity = identities.get(capture)?;
             matches!(
@@ -620,7 +672,12 @@ fn realize_own_invoke(
         .as_ref()
         .map(|reference| reference.capture_fields.clone())
         .unwrap_or_default();
-    let stored = capture_fields.len() + usize::from(bound);
+    // The values bound for context parameters come first, read from the base class's array.
+    let bound_contexts = ir.classes[class as usize]
+        .func_ref
+        .as_ref()
+        .map_or(0, |reference| reference.bound_contexts as usize);
+    let stored = bound_contexts + capture_fields.len() + usize::from(bound);
     let stored_reads = expressions
         .iter()
         .filter_map(|&current| match ir.exprs[current as usize] {
@@ -634,12 +691,27 @@ fn realize_own_invoke(
         _ => krusty::ir::lower_value_indices(ir, body, stored as u32, stored as u32 - 1),
     }
     let mut fields = Vec::with_capacity(stored);
+    // The inherited `boundContextArguments` array holds the values bound for context parameters.
+    let context_array = (bound_contexts > 0).then(|| {
+        let array_ty = Ty::array(Ty::nullable(Ty::obj("kotlin/Any")));
+        let index = ir.classes[class as usize].fields.len();
+        ir.classes[class as usize].fields.push(krusty::ir::IrField {
+            name: "boundContextArguments".to_string(),
+            ty: array_ty,
+            constructor_store_line: 0,
+            type_param: None,
+            default: None,
+            flags: krusty::ir::IrfFlags::default(),
+        });
+        (index, array_ty)
+    });
+    let context_types = ir.functions[adapter as usize].params[..bound_contexts].to_vec();
     for (capture, name) in capture_fields.into_iter().enumerate() {
         // A shared mutable capture's field holds its cell, which the adapter no longer declares.
         let ordinal = u32::try_from(capture).expect("a reference has few captures");
         let ty = match ir.shared_capture_parameters.remove(&(adapter, ordinal)) {
             Some(element) => super::shared_captures::holder_ty(&element),
-            None => ir.functions[adapter as usize].params[capture],
+            None => ir.functions[adapter as usize].params[bound_contexts + capture],
         };
         fields.push((ir.classes[class as usize].fields.len(), None));
         ir.classes[class as usize].fields.push(krusty::ir::IrField {
@@ -665,7 +737,34 @@ fn realize_own_invoke(
     }
     let mut captured_reads = Vec::new();
     for (current, value) in stored_reads {
-        let (field, coerced) = fields[value];
+        if let (Some((array_field, array_ty)), true) = (context_array, value < bound_contexts) {
+            // `(T) this.boundContextArguments[value]`
+            let this = ir.add_expr(IrExpr::GetValue(0));
+            let array = ir.add_expr(IrExpr::GetField {
+                receiver: this,
+                class,
+                index: u32::try_from(array_field).expect("a reference carrier has few fields"),
+            });
+            ir.set_logical_type(array, array_ty);
+            let index = ir.add_expr(IrExpr::Const(krusty::ir::IrConst::Int(value as i32)));
+            let any = Ty::nullable(Ty::obj("kotlin/Any"));
+            let element = ir.add_expr(IrExpr::Call {
+                callee: Box::new(krusty::ir::Callee::Intrinsic {
+                    operation: krusty::ir::IrIntrinsic::ArrayGet,
+                    ret: any,
+                }),
+                dispatch_receiver: Some(array),
+                args: vec![index],
+            });
+            ir.set_logical_type(element, any);
+            ir.exprs[current as usize] = IrExpr::TypeOp {
+                op: krusty::ir::IrTypeOp::ImplicitCoercion,
+                arg: element,
+                type_operand: context_types[value],
+            };
+            continue;
+        }
+        let (field, coerced) = fields[value - bound_contexts];
         if coerced.is_none() {
             captured_reads.push(current);
         }
@@ -1027,6 +1126,7 @@ mod tests {
             adapter,
             captures,
             bound_receiver: None,
+            bound_contexts: 0,
             function_type,
             declaration_parameters: signature.params.clone().into_boxed_slice(),
             declaration_result: signature.ret,

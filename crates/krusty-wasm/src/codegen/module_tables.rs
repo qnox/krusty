@@ -61,14 +61,6 @@ impl ModuleTables {
         module: &mut Module,
         objects: &ObjectRoot,
     ) -> Result<ModuleTable, Unsupported> {
-        if planned.appends_forwarders {
-            // Its type would lack the forwarders' slots, so no file can type the table yet.
-            return Err(
-                "a class delegating an interface, whose forwarders the module-wide \
-                        plan does not number"
-                    .to_owned(),
-            );
-        }
         let parent = match planned.superclass {
             Some(superclass) => Some(
                 self.table(plan, superclass, module, objects)
