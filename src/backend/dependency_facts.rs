@@ -16,6 +16,7 @@ pub use references::referenced_dependencies;
 use crate::fx_hash::HashMap;
 use std::collections::hash_map::Entry;
 
+pub use crate::fir::{BuiltinImplementation, BuiltinOverrideDeclaration};
 use crate::fir::{ExternalCallableId, ExternalPropertyId};
 pub use crate::libraries::CompilerIntrinsic as BackendCompilerIntrinsic;
 pub use crate::libraries::DependencyGetterSignature;
@@ -582,27 +583,6 @@ mod tests {
         });
         assert!(!fact.is_singleton_member_of(owner));
     }
-}
-
-/// What one builtin class runs for a call of a supertype's member on a value of it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct BuiltinImplementation {
-    /// The builtin type (`String`, a primitive), whose classifier is a proper subtype of the
-    /// member's.
-    pub receiver: Ty,
-    /// The builtin classifier's override; `None` when it inherits the member's own body.
-    pub declaration: Option<BuiltinOverrideDeclaration>,
-}
-
-/// One builtin classifier's override of a supertype's member, as its provider published it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct BuiltinOverrideDeclaration {
-    /// The operation the provider realizes the override as, if it is one.
-    pub operation: Option<BackendCompilerIntrinsic>,
-    /// The override's declared parameter and result types (`Int.compareTo(other: Int): Int`); a
-    /// property's are its getter's.
-    pub params: Box<[Ty]>,
-    pub ret: Ty,
 }
 
 /// What the provider normalized for one selected dependency property.
