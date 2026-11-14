@@ -1359,7 +1359,9 @@ impl<'a> Body<'a> {
                 arg,
                 type_operand,
             } if self.class_of_type(type_operand).is_some()
-                || self.interface_of_type(type_operand).is_some() =>
+                || self.interface_of_type(type_operand).is_some()
+                || type_operand.non_null().obj_internal()
+                    == Some(crate::boxes::result_companion_classifier()) =>
             {
                 self.cast(arg, type_operand, op == IrTypeOp::CastNonNull)?
             }
