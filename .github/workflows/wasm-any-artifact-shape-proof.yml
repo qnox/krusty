@@ -1,0 +1,92 @@
+name: wasm-any-artifact-shape-proof
+on:
+  push:
+    branches: [ci/wasm-any-artifact-shape-proof]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: [self-hosted, rust-4c-8gb]
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: '1'
+      KRUSTY_LANGUAGE_VERSION: '2.4.21'
+      KRUSTY_TEST_THREADS: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 5e480b4a484ed039cf2f7e393196e6925bab744b
+          fetch-depth: 1
+      - name: verify exact product and fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          test "$(git rev-parse HEAD)" = 5e480b4a484ed039cf2f7e393196e6925bab744b
+          git rev-parse HEAD > evidence/source-commit.txt
+          sha256sum tests/box_regressions/runtimeAnyConstruction.kt crates/krusty-wasm/src/codegen/tests/laid_out_superclasses.rs > evidence/inputs.sha256
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: build-tool-bins
+          save-if: false
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: zulu
+          java-version: '21'
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/kotlinc/2.4.21
+          key: kotlinc-2.4.21
+      - name: find installed just
+        id: just
+        shell: bash
+        run: if command -v just >/dev/null; then echo 'found=true' >> "$GITHUB_OUTPUT"; fi
+      - name: install just
+        if: steps.just.outputs.found != 'true'
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: just
+      - name: provision exact target inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "KRUSTY_KOTLINC=$(just kotlinc 2.4.21)" >> "$GITHUB_ENV"
+      - name: build the owning Wasm test binary once
+        timeout-minutes: 40
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/cargo-test-binary.sh krusty_wasm -p krusty-wasm --lib > evidence/build.log 2>&1
+          cat evidence/build.log
+          cp "$(tail -n 1 evidence/build.log)" wasm-unit-bin
+          sha256sum wasm-unit-bin > evidence/binary.sha256
+      - name: verify complete root Any output and existing artifact contract
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset KRUSTY_BLESS CLASS_DUMP_BLESS KRUSTY_NO_RUN
+          for test in codegen::tests::laid_out_superclasses::root_any_construction_keeps_identity_and_interface_dispatch codegen::tests::a_program_is_one_module_and_the_loader_that_runs_it; do
+            key="${test##*::}"
+            set +e
+            timeout 300 ./wasm-unit-bin --exact "$test" --nocapture > "evidence/$key.log" 2>&1
+            status=$?
+            set -e
+            printf '%s\t%s\n' "$test" "$status" | tee -a evidence/status.tsv
+            cat "evidence/$key.log"
+            test "$status" -eq 0
+            grep -q 'test result: ok. 1 passed; 0 failed; 0 ignored;' "evidence/$key.log"
+          done
+          sha256sum --check evidence/inputs.sha256
+      - name: preserve exact binary and logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wasm-any-artifact-shape-proof
+          path: |
+            evidence/
+            wasm-unit-bin
+          if-no-files-found: error
