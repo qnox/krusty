@@ -173,6 +173,7 @@ impl ExistingLibrary {
                 None
             };
             std::sync::Arc::new(LibraryType {
+                klib_identity: None,
                 runtime_exception: None,
                 declaration_name: None,
                 is_kotlin: true,

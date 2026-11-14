@@ -200,6 +200,7 @@ mod tests {
 
     fn class(supertypes: &[TypeName]) -> Arc<BackendClassifierFact> {
         Arc::new(BackendClassifierFact {
+            klib_identity: None,
             runtime_exception: None,
             declaration_name: None,
             access: ClassifierAccess::Public,

@@ -194,6 +194,7 @@ impl SingletonMemberReceiver {
 /// provider later places on `Callee::External`.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DependencyExportSignatures {
+    classifiers: HashMap<crate::ir::ClassId, crate::libraries::KlibClassIdentity>,
     callables: HashMap<FunId, KlibDependencyCallable>,
     /// Every visible function an interface of this file declares, abstract ones included: the
     /// identity a dependent module's implementation of the member is recorded under.
@@ -241,6 +242,26 @@ pub(crate) enum ExportedPropertyAccessor {
 }
 
 impl DependencyExportSignatures {
+    /// Exact class declaration exported by this producer, including abstract classes.
+    pub fn classifier(
+        &self,
+        class: crate::ir::ClassId,
+    ) -> Option<&crate::libraries::KlibClassIdentity> {
+        self.classifiers.get(&class)
+    }
+
+    pub(crate) fn record_classifier(
+        &mut self,
+        class: crate::ir::ClassId,
+        identity: crate::libraries::KlibClassIdentity,
+    ) {
+        let previous = self.classifiers.insert(class, identity);
+        assert!(
+            previous.is_none(),
+            "one class exports one declaration identity"
+        );
+    }
+
     pub(crate) fn property_accessors(
         &self,
     ) -> &[(ExportedPropertyAccessor, KlibDependencyCallable)] {

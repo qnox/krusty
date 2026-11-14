@@ -268,6 +268,7 @@ pub(super) fn lower_file(
         functions: &indices,
         globals: &globals,
         classes: classes.as_ref(),
+        laid_out_classes,
         calls: &call_targets,
         callables,
         inert_singleton_bindings: &inert_singleton_bindings,
@@ -369,10 +370,6 @@ pub(super) fn lower_file(
             module,
             runtime,
         )?;
-        for (name, record) in classes.records(module, ir, &indices, &signatures, dependency_exports)
-        {
-            laid_out_classes.insert(name, record);
-        }
     } else if !member_property_definitions.is_empty() {
         return Err("a member property definition without its class layout".to_string());
     }
@@ -403,6 +400,12 @@ pub(super) fn lower_file(
     } else {
         None
     };
+    if let Some(classes) = &classes {
+        for (name, record) in classes.records(module, ir, &indices, &signatures, dependency_exports)
+        {
+            laid_out_classes.insert(name, record);
+        }
+    }
     callable_registry.publish(ir, dependency_exports, &indices)?;
     let mut reach = reach.into_inner();
     if let Some(classes) = &classes {
@@ -476,6 +479,7 @@ struct FileContext<'a> {
     /// The global holding each of the file's top-level properties.
     globals: &'a [u32],
     classes: Option<&'a FileClasses>,
+    laid_out_classes: &'a LaidOutClasses,
     calls: &'a FileCallTargets,
     /// Provider facts frozen for exactly the dependency identities this file calls.
     callables: &'a CheckedBackendCallables,
@@ -734,6 +738,7 @@ struct Body<'a> {
     /// The global holding each of the file's top-level properties.
     globals: &'a [u32],
     classes: Option<&'a FileClasses>,
+    laid_out_classes: &'a LaidOutClasses,
     /// Exact source/dependency call targets registered before this body is emitted.
     calls: &'a FileCallTargets,
     /// Provider facts frozen for exactly the dependency identities this file calls.
@@ -808,6 +813,7 @@ impl<'a> Body<'a> {
             functions: context.functions,
             globals: context.globals,
             classes: context.classes,
+            laid_out_classes: context.laid_out_classes,
             calls: context.calls,
             callables: context.callables,
             inert_singleton_bindings: context.inert_singleton_bindings,
@@ -1384,7 +1390,7 @@ impl<'a> Body<'a> {
                 op: op @ (IrTypeOp::Cast | IrTypeOp::CastNonNull),
                 arg,
                 type_operand,
-            } if self.class_of_type(type_operand).is_some()
+            } if self.class_structure(type_operand)?.is_some()
                 || self.interface_of_type(type_operand).is_some() =>
             {
                 self.cast(arg, type_operand, op == IrTypeOp::CastNonNull)?

@@ -22056,49 +22056,9 @@ fun after(): Int = 2
 
     fn import_test_classifier(alias_target: Option<TypeName>) -> crate::libraries::LibraryType {
         crate::libraries::LibraryType {
-            runtime_exception: None,
-            declaration_name: None,
             is_kotlin: true,
-            is_data: false,
-            access: crate::libraries::ClassifierAccess::Public,
-            source_file: None,
-            stable_declaration: None,
-            is_nested: false,
-            outer_instance: None,
-            kind: crate::libraries::TypeKind::Class,
-            inheritance: Default::default(),
-            supertypes: crate::types::TypeNameList::new(),
-            supertype_templates: Vec::new(),
-            constructors: Vec::new(),
-            hidden_member_properties: Default::default(),
-            hidden_deprecated_callables: Default::default(),
-            declared_callables: HashMap::default(),
-            declared_callable_order: Vec::new(),
-            members: Vec::new(),
-            methods_as_declarations: false,
-            companion: Vec::new(),
-            constants: HashMap::default(),
-            sam_eligible: false,
-            callable_signature: None,
-            callable_signatures: Vec::new(),
-            companion_object: None,
-            qualified_name: None,
-            value_underlying: None,
-            value_declaration: None,
             alias_target,
-            type_parameters: crate::types::TypeParameters::default(),
-            own_type_parameter_count: 0,
-            sealed_subclasses: crate::types::TypeNameList::new(),
-            enum_entries: Vec::new(),
-            enum_entries_accessor: None,
-            named_parameter_lists: Vec::new(),
-            annotations: Vec::new(),
-            retention: None,
-            annotation_targets: None,
-            mapped_collection: None,
-            mapped_builtin: false,
-            annotation_element_defaults: Vec::new(),
-            deprecation: None,
+            ..crate::libraries::LibraryType::declaration_header()
         }
     }
 
@@ -24458,6 +24418,7 @@ fun box(): String {
                         )
                     };
                 return Some(std::sync::Arc::new(crate::libraries::LibraryType {
+                    klib_identity: None,
                     runtime_exception: None,
                     declaration_name: None,
                     is_kotlin: true,
@@ -24595,6 +24556,7 @@ fun box(): String {
                     })
                     .collect();
                 std::sync::Arc::new(crate::libraries::LibraryType {
+                    klib_identity: None,
                     runtime_exception: None,
                     declaration_name: None,
                     is_kotlin: true,
