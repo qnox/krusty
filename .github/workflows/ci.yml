@@ -48,8 +48,8 @@ jobs:
       timeout-minutes: 40
       run: |
         set -euo pipefail
-        test "$(git rev-parse HEAD^)" = 5d7f74096f1dae223502610c7928b456982c45ec
-        git diff --exit-code 5d7f74096f1dae223502610c7928b456982c45ec HEAD -- src
+        test "$(git rev-parse HEAD^)" = d31f3ad5a81bb90c263dcee09ad1d80369b2831a
+        git diff --exit-code d31f3ad5a81bb90c263dcee09ad1d80369b2831a HEAD -- src
         git rev-parse HEAD > compiler-source.txt
         set +e
         cargo test --features trace --profile gate -p krusty --test conformance --no-run --message-format=json 2>&1 | tee machine-check.jsonl
