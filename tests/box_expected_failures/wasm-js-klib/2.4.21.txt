@@ -177,13 +177,10 @@ boxing/boxing8.kt
 boxing/boxing9.kt
 boxing/kt53100_casts.kt
 boxing/missingValueClassUnboxing.kt
-boxingOptimization/boxedIntegersCmp.kt
-boxingOptimization/boxedRealsCmp.kt
 boxingOptimization/casts.kt
 boxingOptimization/checkcastAndInstanceOf2.kt
 boxingOptimization/fold.kt
 boxingOptimization/foldRange.kt
-boxingOptimization/intCompareTo.kt
 boxingOptimization/kt19767_2.kt
 boxingOptimization/kt48394.kt
 boxingOptimization/kt49548.kt
@@ -443,7 +440,6 @@ classes/kt1538.kt
 classes/kt1980.kt
 classes/kt2417.kt
 classes/kt2566_2.kt
-classes/kt3114.kt
 classes/kt343.kt
 classes/kt500.kt
 classes/kt508.kt
@@ -1545,7 +1541,6 @@ functions/functionExpression/functionLiteralExpression.kt
 functions/invoke/kt3190.kt
 functions/kt1199.kt
 functions/kt1413.kt
-functions/kt2929.kt
 functions/kt395.kt
 functions/kt58825_arrayOverloads.kt
 functions/localFunctions/callInlineLocalInLambda.kt
@@ -1896,7 +1891,6 @@ inlineClasses/boxReturnValueOnOverride/unrelatedGenericsGeneric.kt
 inlineClasses/bridgeGenerationWithInlineClassOverAny.kt
 inlineClasses/bridgeGenerationWithInlineClassOverAnyGeneric.kt
 inlineClasses/bridgeGenerationWithInlineClassOverAnyGeneric2.kt
-inlineClasses/bridgesWhenInlineClassImplementsGenericInterface.kt
 inlineClasses/bridgesWhenInlineClassImplementsGenericInterfaceGeneric.kt
 inlineClasses/callableRefClassMergingGenerics.kt
 inlineClasses/callableRefClassMergingPrimitives.kt
@@ -1946,8 +1940,6 @@ inlineClasses/castInsideWhenExpression.kt
 inlineClasses/castInsideWhenExpressionGeneric.kt
 inlineClasses/checkLambdaWithInlineClassesInFunctionalType.kt
 inlineClasses/checkLambdaWithInlineClassesInFunctionalTypeGeneric.kt
-inlineClasses/conformToComparableAndCallInterfaceMethod.kt
-inlineClasses/conformToComparableAndCallInterfaceMethodGeneric.kt
 inlineClasses/constructorCallableReference.kt
 inlineClasses/constructorCallableReferenceGeneric.kt
 inlineClasses/contextParameterPropertyDeserialization.kt
@@ -2621,7 +2613,6 @@ objects/useImportedMember.kt
 objects/useImportedMemberFromCompanion.kt
 operatorConventions/BoundedGenericValueInRangeCheck.kt
 operatorConventions/assignToDotQualifiedWithSideEffect.kt
-operatorConventions/compareTo/comparable.kt
 operatorConventions/compareTo/doubleInt.kt
 operatorConventions/compareTo/doubleLong.kt
 operatorConventions/compareTo/intDouble.kt
@@ -2678,7 +2669,6 @@ primitiveTypes/kt6590_identityEquals.kt
 primitiveTypes/kt711.kt
 primitiveTypes/kt79977.kt
 primitiveTypes/kt79977_withIncrementalCompilation.kt
-primitiveTypes/kt887.kt
 primitiveTypes/numberEqualsHashCodeToString.kt
 primitiveTypes/numberToChar/abstractMethodInSuperinterface.kt
 primitiveTypes/reassignDestructured.kt
@@ -2698,7 +2688,6 @@ properties/backingField/backingFieldInitializedInInit.kt
 properties/backingField/backingFieldWithSmartTypeParameters.kt
 properties/backingField/equalsHashCodeWithValueClassExplicitBackingFieldAndSupertype.kt
 properties/backingField/explicitFieldCallableReference.kt
-properties/backingField/genericSupertypeWithValueClassExplicitBackingField.kt
 properties/complexPropertyInitializer.kt
 properties/const/constPropertyAccessor.kt
 properties/const/intermoduleInlineConst.kt

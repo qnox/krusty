@@ -705,3 +705,13 @@ fn native_virtual_explicit_getter_exports_run_the_override() {
         "an open explicit getter must run the override"
     );
 }
+
+#[test]
+fn native_string_comparison_runs_the_whole_portable_program_through_klib() {
+    let source = include_str!("box_regressions/stringCompareTo.kt");
+    assert_eq!(
+        run_native_portable_box(source, "StringComparisonProgram"),
+        Outcome::Pass,
+        "the Native KLIB driver must run every comparison control"
+    );
+}
