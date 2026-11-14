@@ -552,7 +552,94 @@ impl<'a> KlibCalleeFacts<'a> {
                         selected.push(callable);
                     }
                 }
-                fact => *fact = IndexedKlibCallee::Ambiguous,
+                fact => {
+                    if let IndexedKlibCallee::Selected(selected) = fact {
+                        let first = selected[0];
+                        let mut differences = Vec::new();
+                        if first.accessor() != callable.accessor() {
+                            differences.push("accessor");
+                        }
+                        if first.name() != callable.name() {
+                            differences.push("name");
+                        }
+                        if first.kind() != callable.kind() {
+                            differences.push("kind");
+                        }
+                        if first.visibility() != callable.visibility() {
+                            differences.push("visibility");
+                        }
+                        if first.semantic_role() != callable.semantic_role() {
+                            differences.push("semantic_role");
+                        }
+                        if first.params() != callable.params() {
+                            differences.push("params");
+                        }
+                        if first.ret() != callable.ret() {
+                            differences.push("result");
+                        }
+                        if first.parameter_identities() != callable.parameter_identities() {
+                            differences.push("parameter_identities");
+                        }
+                        if first.context_count() != callable.context_count() {
+                            differences.push("context_count");
+                        }
+                        if first.vararg_index() != callable.vararg_index() {
+                            differences.push("vararg_index");
+                        }
+                        if first.parameter_defaults() != callable.parameter_defaults() {
+                            differences.push("parameter_defaults");
+                        }
+                        if first.generic_signature() != callable.generic_signature() {
+                            differences.push("generic_signature");
+                        }
+                        if first.type_parameters() != callable.type_parameters() {
+                            differences.push("type_parameters");
+                        }
+                        if first.reified_type_parameter_ordinals()
+                            != callable.reified_type_parameter_ordinals()
+                        {
+                            differences.push("reified_type_parameters");
+                        }
+                        if first.compiler_intrinsic() != callable.compiler_intrinsic() {
+                            differences.push("compiler_intrinsic");
+                        }
+                        if first.range_construction() != callable.range_construction() {
+                            differences.push("range_construction");
+                        }
+                        if first.declaration_modifiers() != callable.declaration_modifiers() {
+                            differences.push("declaration_modifiers");
+                        }
+                        if first.class_contract() != callable.class_contract() {
+                            differences.push("class_contract");
+                        }
+                        if first.singleton_classifier() != callable.singleton_classifier() {
+                            differences.push("singleton_classifier");
+                        }
+                        if first.singleton_dispatch() != callable.singleton_dispatch() {
+                            differences.push("singleton_dispatch");
+                        }
+                        if first.companion_receiver() != callable.companion_receiver() {
+                            differences.push("companion_receiver");
+                        }
+                        if first.declaration_owner() != callable.declaration_owner() {
+                            differences.push("declaration_owner");
+                        }
+                        if first.identity() != callable.identity() {
+                            differences.push("identity");
+                        }
+                        crate::trace_compiler!(
+                            "lower",
+                            "KLIB declaration contract conflict: identity={:?}, differences={:?}, first class={:?} singleton={:?}, next class={:?} singleton={:?}",
+                            callable.identity(),
+                            differences,
+                            first.class_contract(),
+                            first.singleton_classifier(),
+                            callable.class_contract(),
+                            callable.singleton_classifier()
+                        );
+                    }
+                    *fact = IndexedKlibCallee::Ambiguous;
+                }
             })
             .or_insert_with(|| IndexedKlibCallee::Selected(vec![callable]));
     }
