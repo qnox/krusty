@@ -1199,9 +1199,7 @@ impl CallLinker for Linker<'_, '_> {
         if self.sources.callees.target_represents(classifier) {
             return Ok(());
         }
-        Err(KlibBodyDeclineReason::UnsupportedOperation(
-            "an object value",
-        ))
+        Err(KlibBodyDeclineReason::UnsupportedObjectValue(classifier))
     }
 
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
