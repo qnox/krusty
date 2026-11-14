@@ -4071,8 +4071,7 @@ fn emit_placed_method(
     // still have a source-visible generic contract.
     // kotlinc maps a lambda literal's body without generics, and a compiler-synthesized lambda's;
     // an anonymous function's keeps them.
-    let synthesized = ir.lambda_class_provenance(fid)
-        == Some(krusty::ir::type_reflection::LambdaClassProvenance::SynthesizedAdapter);
+    let synthesized = crate::lambda_classes::erases_adapter_signature(ir, fid);
     let method_sig = (!ir.serialization_cache_methods.contains(&fid)
         && !ir.is_lambda_literal(fid)
         && !synthesized)

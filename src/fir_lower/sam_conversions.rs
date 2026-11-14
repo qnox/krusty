@@ -54,6 +54,28 @@ impl BodyLowering<'_> {
         let Ok(arity) = u8::try_from(arity) else {
             return;
         };
+        // A capture-free reference has a complete generated parameter frame; it can use the
+        // same typed SAM-class realization as a source lambda without inventing capture names.
+        if captures.is_empty() {
+            let identities = (0..arity)
+                .map(|ordinal| {
+                    crate::ir::IrParameterIdentity::generated(
+                        crate::ir::IrGeneratedParameterRole::ReferenceInvokeValue {
+                            ordinal: u32::from(ordinal),
+                        },
+                        None,
+                    )
+                })
+                .collect();
+            self.ir
+                .fn_params
+                .insert(impl_fn, crate::ir::FnParamInfo::identities(identities));
+            self.ir.lambda_own_params_from.insert(impl_fn, 0);
+            self.ir.record_lambda_class_provenance(
+                impl_fn,
+                crate::ir::type_reflection::LambdaClassProvenance::SynthesizedAdapter,
+            );
+        }
         self.ir.exprs[expression as usize] = IrExpr::Lambda {
             impl_fn,
             arity,
