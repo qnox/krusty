@@ -2,9 +2,10 @@
 
 use super::demo_package::{assert_unit_is_empty, demo, operator, T};
 use super::*;
-use crate::backend::{DependencyExportSignatures, ExportedConstructor};
+use crate::backend::DependencyExportSignatures;
 use crate::libraries::{KlibBodyClassContract, KlibBodyClassParameters, TypeKind};
-use crate::metadata::klib_ir::tree::{KlibIrClass, KlibIrField};
+use crate::metadata::id_signature::KlibAccessorIdSignature;
+use crate::metadata::klib_ir::tree::{KlibIrClass, KlibIrField, KlibIrProperty};
 use crate::metadata::semantic::KotlinModality;
 
 struct Fixture {
@@ -659,8 +660,11 @@ fn constructor_root_exports_allocation_with_exact_parameters_and_declared_self_t
     let [(identity, class)] = constructors.as_slice() else {
         panic!("one constructor")
     };
-    let (identity, class) = (identity.clone(), *class);
+    let (identity, constructor) = (identity.clone(), *class);
     assert_eq!(&identity, selected.identity());
+    // The class's primary constructor allocates it.
+    assert_eq!(constructor.secondary, None);
+    let class = constructor.class;
     let mut ir = unit.into_ir();
     let owner = type_name("demo/Act");
     assert_eq!(
@@ -688,9 +692,9 @@ fn constructor_root_exports_allocation_with_exact_parameters_and_declared_self_t
     }
     let mut exports = DependencyExportSignatures::default();
     exports.record_constructor(
-        ExportedConstructor {
-            class,
-            secondary: None,
+        crate::backend::ExportedConstructor {
+            class: constructor.class,
+            secondary: constructor.secondary,
         },
         identity.clone(),
     );
@@ -747,15 +751,16 @@ fn constructor_allocation_export_does_not_guess_a_missing_self_type() {
         &Default::default(),
     )
     .unwrap();
-    let (_, class) = unit.allocating_constructors().next().unwrap();
+    let (_, constructor) = unit.allocating_constructors().next().unwrap();
+    assert_eq!(constructor.secondary, None);
     let mut ir = unit.into_ir();
     ir.restore_declared_class_self_type_owners(&Default::default());
     let before = (ir.exprs.len(), ir.functions.len());
     let mut exports = DependencyExportSignatures::default();
     exports.record_constructor(
-        ExportedConstructor {
-            class,
-            secondary: None,
+        crate::backend::ExportedConstructor {
+            class: constructor.class,
+            secondary: constructor.secondary,
         },
         selected.identity().clone(),
     );
@@ -891,6 +896,69 @@ fn rollback_preserves_a_preexisting_self_type_without_class_storage() {
         Some(Ty::obj_name(retained))
     );
     assert_eq!(ir.declared_class_self_type(appended), None);
+}
+
+/// An accessor overriding an interface property is a member the class dispatches like any
+/// other override, so the class is realized with it.
+#[test]
+fn an_interface_property_override_is_dispatched_with_its_class() {
+    let f = fixture_with_members(false, RootCase::Known, |members, arena| {
+        let int = arena.push_type(T::Int.klib());
+        let value = arena.push_expr(Some(int), KlibIrExprKind::Const(KlibIrConstant::Int(1)));
+        let property = operator(&["demo"], Some("Shape"), "size", &[]).0;
+        let getter_symbol = KlibIrSymbol {
+            kind: KlibIrSymbolKind::Function,
+            signature: KlibIrSignature::Accessor(KlibAccessorIdSignature::new(
+                operator(&["demo"], Some("Act"), "size", &[]).0,
+                "<get-size>".to_owned(),
+                1,
+                0,
+            )),
+        };
+        let mut getter = function(
+            getter_symbol,
+            "<get-size>",
+            Vec::new(),
+            int,
+            Some(vec![KlibIrStatement::Expression(value)]),
+        );
+        getter.overridden = vec![KlibIrSymbol {
+            kind: KlibIrSymbolKind::Function,
+            signature: KlibIrSignature::Accessor(KlibAccessorIdSignature::new(
+                property,
+                "<get-size>".to_owned(),
+                2,
+                0,
+            )),
+        }];
+        let getter = arena.push_function(getter);
+        members.push(KlibIrMember::Property(KlibIrProperty {
+            base: base(public_symbol(
+                KlibIrSymbolKind::Property,
+                operator(&["demo"], Some("Act"), "size", &[]).0,
+            )),
+            name: "size".to_owned(),
+            backing_field: None,
+            getter: Some(getter),
+            setter: None,
+        }));
+    });
+    let selected = f.constructor.klib_body_callable().unwrap();
+    let facts = KlibCalleeFacts::new([selected]);
+    assert_eq!(
+        facts
+            .constructor_initialization_callees(selected.identity(), &f.bodies)
+            .unwrap(),
+        Some(vec![KlibDependencyCallable {
+            module: "demo".to_owned(),
+            declaration: KlibDeclarationSignature::Accessor(KlibAccessorIdSignature::new(
+                operator(&["demo"], Some("Act"), "size", &[]).0,
+                "<get-size>".to_owned(),
+                1,
+                0,
+            )),
+        }])
+    );
 }
 
 #[path = "constructor_exports/shape_gating.rs"]

@@ -124,13 +124,28 @@ fn build_runtime_checkout(root: &Path, target: &Path, marker: &str) {
     );
 }
 
+/// The build script's generated runtime. Cargo before 1.100 puts a build script's output at
+/// `build/<package>-<hash>/out`; Cargo 1.100's build-dir layout puts it at
+/// `build/<package>/<hash>/out`. Both are searched, and exactly one output must exist.
 fn generated_runtime(target: &Path) -> PathBuf {
-    let files = fs::read_dir(target.join("debug/build"))
+    let build = target.join("debug/build");
+    let unit_directories = fs::read_dir(&build)
         .unwrap()
-        .map(|entry| entry.unwrap().path().join("out/prebuilt_runtime.rs"))
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_dir())
+        .flat_map(|package| {
+            let hashes = fs::read_dir(&package)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.is_dir())
+                .collect::<Vec<_>>();
+            std::iter::once(package).chain(hashes)
+        });
+    let files = unit_directories
+        .map(|unit| unit.join("out/prebuilt_runtime.rs"))
         .filter(|path| path.is_file())
         .collect::<Vec<_>>();
-    assert_eq!(files.len(), 1);
+    assert_eq!(files.len(), 1, "{files:?}");
     files[0].clone()
 }
 

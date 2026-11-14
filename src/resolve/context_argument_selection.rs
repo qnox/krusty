@@ -9,13 +9,35 @@
 
 use super::scope::{ContextValue, Ns};
 use super::{
-    arg_assignable_simple, selected_context_values, CheckerScope, ContextBinding,
-    ImplicitReceiverSelection, Local, MissingContextParameter, ReceiverDeclarationRole,
-    ReceiverFnValueOrigin, ResolvedContextArgument, SelectedContextSources,
+    arg_assignable_simple, selected_context_values, CheckerScope, ImplicitReceiverSelection, Local,
+    MissingContextParameter, ReceiverDeclarationRole, ReceiverFnValueOrigin,
+    SelectedContextSources,
 };
 use crate::ast::ExprId;
 use crate::fx_hash::HashSet;
 use crate::types::Ty;
+
+use crate::context_parameters::ContextBindingSource;
+
+/// The lexical binding a named context receiver is also visible as.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextBinding {
+    pub name: String,
+    pub source: ContextBindingSource,
+    /// Flow identity recorded at selection; synthetic checked-FIR reads carry none.
+    pub flow_identity: Option<u32>,
+}
+
+/// Runtime identity of a value selected for an implicit context parameter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResolvedContextArgument {
+    Binding {
+        name: String,
+        source: ContextBindingSource,
+        flow_identity: Option<u32>,
+    },
+    ImplicitReceiver(ImplicitReceiverSelection),
+}
 
 impl super::Checker<'_> {
     /// Resolve each context-parameter type to one semantic scope value. The implicit-receiver tower is
@@ -55,16 +77,14 @@ impl super::Checker<'_> {
         };
         let mut out = Vec::with_capacity(ctx_types.len());
         for (index, &want) in ctx_types.iter().enumerate() {
-            // `if (this is Scope)` changes the semantic type of the current receiver without
-            // changing its runtime identity. The scope tower deliberately stores the declared
-            // receiver type, so consult the checker's flow-aware receiver view before the raw
-            // context-value walk. Multiple equal context parameters may select this same value.
-            if let Some(actual) = self
-                .actual_this_narrow(scope)
-                .filter(|actual| matches(*actual, want))
-            {
+            // A narrowed receiver keeps its actual receiver-path identity. A lexical context
+            // parameter with an escaped `this` name must not become that receiver's flow proof.
+            let narrowed_receiver = self
+                .this_narrow
+                .or_else(|| self.lookup_path_narrowing(scope, &self.current_receiver_path(scope)?));
+            if let Some(actual) = narrowed_receiver.filter(|actual| matches(*actual, want)) {
                 let receiver = self
-                    .implicit_receivers(scope)
+                    .declared_implicit_receivers(scope)
                     .into_iter()
                     .find(|receiver| receiver.current)
                     .ok_or(MissingContextParameter { index, ty: want })?;
@@ -130,13 +150,19 @@ impl super::Checker<'_> {
                     // capture the named alias. Reclassifying it as an ordinary local loses the
                     // receiver when Pass 2 reconstructs a lambda scope.
                     // The alias is the binding at the coordinate just selected in this scope.
-                    let context_binding = context_name.map(|name| ContextBinding {
-                        flow_identity: scope
-                            .shadowed_binding(Ns::Value, &name, context_shadow_depth)
-                            .and_then(|binding| Some(binding.value()?.flow_identity)),
-                        name,
-                        shadow_depth: context_shadow_depth,
-                    });
+                    let receiver_role = self
+                        .implicit_receivers(scope)
+                        .into_iter()
+                        .find(|receiver| receiver.receiver_depth == receiver_depth)
+                        .ok_or(MissingContextParameter { index, ty: want })?
+                        .receiver_role;
+                    let context_binding = context_receiver_binding(
+                        scope,
+                        context_name,
+                        context_shadow_depth,
+                        receiver_role,
+                    )
+                    .map_err(|()| MissingContextParameter { index, ty: want })?;
                     let argument =
                         ResolvedContextArgument::ImplicitReceiver(ImplicitReceiverSelection {
                             ty,
@@ -145,11 +171,7 @@ impl super::Checker<'_> {
                             classifier: None,
                             context_binding,
                             singleton: self.implicit_singleton_value(ty, current),
-                            context_parameter: self
-                                .implicit_receivers(scope)
-                                .into_iter()
-                                .find(|receiver| receiver.receiver_depth == receiver_depth)
-                                .and_then(|receiver| receiver.receiver_role)
+                            context_parameter: receiver_role
                                 .is_some_and(ReceiverDeclarationRole::is_context_parameter),
                             construction_sites:
                                 super::constructor_receiver_frames::scoped_construction_sites(
@@ -160,43 +182,19 @@ impl super::Checker<'_> {
                         });
                     (argument, ty)
                 }
-                ContextValue::Binding { name, shadow_depth } => {
-                    let ty = self
-                        .lookup(scope, &name)
-                        .ok_or(MissingContextParameter { index, ty: want })?
-                        .ty;
-                    let argument = if name == "this" {
-                        let receiver = self
-                            .implicit_receivers(scope)
-                            .into_iter()
-                            .find(|receiver| receiver.current)
-                            .ok_or(MissingContextParameter { index, ty: want })?;
-                        ResolvedContextArgument::ImplicitReceiver(ImplicitReceiverSelection {
-                            // Keep the smart-cast result selected from the lexical shadow. Runtime
-                            // identity still comes from the receiver rung, not a nonexistent local
-                            // slot named `this`.
-                            ty,
-                            current: receiver.current,
-                            receiver_depth: receiver.receiver_depth,
-                            classifier: None,
-                            context_binding: Some(ContextBinding {
-                                name,
-                                shadow_depth,
-                                flow_identity: selected_identity,
-                            }),
-                            singleton: self.implicit_singleton_value(ty, receiver.current),
-                            // The binding was selected as a context parameter.
-                            context_parameter: true,
-                            construction_sites: self
-                                .implicit_receiver_selection(receiver)
-                                .construction_sites,
-                        })
-                    } else {
-                        ResolvedContextArgument::Binding {
-                            name,
-                            shadow_depth,
-                            flow_identity: selected_identity,
-                        }
+                ContextValue::Binding { name } => {
+                    let identity =
+                        selected_identity.ok_or(MissingContextParameter { index, ty: want })?;
+                    let (local, source) = selected_context_binding(scope, &name, identity)
+                        .ok_or(MissingContextParameter { index, ty: want })?;
+                    let ty = local.ty;
+                    // A selected lexical binding keeps its own certified storage, including an
+                    // escaped source name such as `this`. Receiver aliases enter through the
+                    // implicit-receiver arm and its declaration-role authority instead.
+                    let argument = ResolvedContextArgument::Binding {
+                        name,
+                        source,
+                        flow_identity: selected_identity,
                     };
                     (argument, ty)
                 }
@@ -242,7 +240,7 @@ impl super::Checker<'_> {
             })
             .chain(direct_receivers.into_iter().filter_map(receiver_binding))
             .filter_map(|(name, identity)| {
-                let local = binding_by_flow_identity(scope, &name, identity)?;
+                let (local, _) = selected_context_binding(scope, &name, identity)?;
                 Some((name, local))
             })
             .collect()
@@ -300,17 +298,79 @@ pub(super) struct CapturedLocals {
     pub(super) shadow_depths: Vec<u32>,
 }
 
-/// The value binding `name` in `scope` whose flow identity is `identity`.
-fn binding_by_flow_identity(scope: &CheckerScope<'_>, name: &str, identity: u32) -> Option<Local> {
-    scope.ancestors().find_map(|rung| {
-        let mut found = None;
-        rung.own_bindings(Ns::Value, |bound, binding| {
-            if found.is_none() && bound == name {
-                found = binding
-                    .value()
-                    .filter(|local| local.flow_identity == identity);
+/// A receiver declaration role certifies nonlexical receiver storage. Any other named alias
+/// requires its actual selected lexical binding; a missing certificate is not a receiver fallback.
+fn context_receiver_binding(
+    scope: &CheckerScope<'_>,
+    name: Option<String>,
+    shadow_depth: usize,
+    receiver_role: Option<ReceiverDeclarationRole>,
+) -> Result<Option<ContextBinding>, ()> {
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    if matches!(
+        receiver_role,
+        Some(ReceiverDeclarationRole::Lambda { .. } | ReceiverDeclarationRole::Extension(_))
+    ) {
+        return Ok(None);
+    }
+    let local = scope
+        .shadowed_binding(Ns::Value, &name, shadow_depth)
+        .and_then(|binding| binding.value())
+        .ok_or(())?;
+    let (local, source) = selected_context_binding(scope, &name, local.flow_identity).ok_or(())?;
+    Ok(Some(ContextBinding {
+        name,
+        source,
+        flow_identity: Some(local.flow_identity),
+    }))
+}
+
+/// Find the actual selected value, recording whether its lexical source crosses a class
+/// boundary. The class certificate is positive scope evidence, not a failed capture lookup.
+fn selected_context_binding(
+    scope: &CheckerScope<'_>,
+    name: &str,
+    identity: u32,
+) -> Option<(Local, ContextBindingSource)> {
+    let mut crossed_class = false;
+    let mut seen = HashSet::default();
+    let mut shadow_depth = 0;
+    for rung in scope.ancestors() {
+        let mut bindings = Vec::new();
+        rung.own_bindings(Ns::Value, |candidate_name, binding| {
+            if candidate_name == name {
+                if let Some(local) = binding.value() {
+                    bindings.push(local);
+                }
             }
         });
-        found
-    })
+        for local in bindings.into_iter().rev() {
+            if !seen.insert(local.flow_identity) {
+                continue;
+            }
+            if local.flow_identity == identity {
+                let source = if crossed_class
+                    || matches!(local.origin, ReceiverFnValueOrigin::ClassStorage(_))
+                {
+                    ContextBindingSource::RequiredClassCapture {
+                        lexical_binding: local.lexical_capture_identity?,
+                    }
+                } else {
+                    ContextBindingSource::ProvenLocalDepth {
+                        shadow_depth,
+                        lexical_binding: local.lexical_capture_identity,
+                    }
+                };
+                return Some((local, source));
+            }
+            shadow_depth += 1;
+        }
+        crossed_class |= matches!(rung.kind(), super::scope::ScopeKind::Class { .. });
+    }
+    None
 }
+
+#[cfg(test)]
+mod tests;

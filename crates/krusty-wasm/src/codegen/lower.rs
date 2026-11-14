@@ -31,16 +31,21 @@ mod function_values;
 mod generated_members;
 mod intrinsic_operations;
 pub(super) mod library_members;
+mod local_delegates;
 mod objects;
 mod scalar_instructions;
 mod scalar_value_classes;
 mod shared_cells;
+mod string_builders;
+pub(super) use shared_cells::cell_reference;
+pub(super) use string_builders::{declared_by_string_builder, is_string_builder};
 mod string_conversion;
 mod type_of;
 
 #[cfg(test)]
 use tests::lower_alone;
 
+pub(super) use exceptions::runtime_lays_out;
 pub(super) use scalar_instructions::is_scalar_operation;
 pub(super) use shared_cells::parameter_carrier;
 
@@ -64,7 +69,7 @@ use krusty::backend::class_tables::module_slots::ModuleSlotPlan;
 use krusty::backend::class_tables::AnyMember;
 use krusty::backend::{CheckedBackendCallables, DependencyExportSignatures};
 use krusty::ir::{Callee, ClassId, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp};
-use krusty::types::{EqualityMode, Ty, TyKind};
+use krusty::types::{EqualityMode, Ty, TyKind, TypeName};
 
 use super::super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
 use super::super::numeric_conversions;
@@ -93,6 +98,8 @@ pub(super) struct LoweredFile {
 
 /// One file's checked IR and the facts frozen beside it.
 pub(super) struct FileInput<'a> {
+    /// The module's Pass-1 facts, which certify a declaration another file of it realizes.
+    pub(super) module_facts: &'a krusty::backend::BackendModuleFacts,
     pub(super) array_range_checks: bool,
     pub(super) classifiers: &'a dyn krusty::backend::BackendClassifierSource,
     pub(super) ir: &'a IrFile,
@@ -112,6 +119,8 @@ pub(super) struct ModuleState<'a> {
     pub(super) properties: &'a mut PropertyRegistry,
     /// The classes earlier files of the source module laid out; this file's join them.
     pub(super) classes: &'a mut LaidOutClasses,
+    /// The table types of the classes the module plan covers.
+    pub(super) tables: &'a mut super::module_tables::ModuleTables,
 }
 
 /// Lower every function and class of `file` into the program.
@@ -120,6 +129,7 @@ pub(super) fn lower_file(
     state: ModuleState<'_>,
 ) -> Result<LoweredFile, Unsupported> {
     let FileInput {
+        module_facts,
         array_range_checks,
         classifiers,
         ir,
@@ -135,6 +145,7 @@ pub(super) fn lower_file(
         callables: callable_registry,
         properties: property_registry,
         classes: laid_out_classes,
+        tables: module_tables,
     } = state;
     for property in &ir.statics {
         if property.owner.is_some() {
@@ -179,12 +190,13 @@ pub(super) fn lower_file(
         let results = carrier(function.ret)?.into_iter().collect::<Vec<_>>();
         signatures.push(Some(module.func_type(params, results)));
     }
-    let indices = callable_registry.declare_file(ir, module)?;
+    let instance_entries = callable_registry.link_instances(dependency_exports, module)?;
+    let indices = callable_registry.declare_file(ir, module, &instance_entries)?;
     let reference_file =
         runtime
             .callable_references
             .begin_file(module_name, ir, dependency_exports)?;
-    let call_targets = callable_registry.file_calls(ir, callables, module)?;
+    let call_targets = callable_registry.file_calls(ir, callables, module_facts, module)?;
     let inert_singleton_bindings = krusty::backend::inert_staged_singleton_bindings(
         ir,
         |expression| {
@@ -216,6 +228,7 @@ pub(super) fn lower_file(
             &indices,
             properties,
             super::classes::BeyondFile {
+                module_tables: &mut *module_tables,
                 classifiers,
                 plan,
                 laid_out: laid_out_classes,
@@ -239,13 +252,17 @@ pub(super) fn lower_file(
         )?;
         Some(classes)
     };
+    let planned_tables = planned_tables(ir, plan, module_tables, module, &runtime.objects);
     let reach = std::cell::RefCell::new(FileReach::default());
+    let delegates = local_delegates::prepare(ir, module, runtime);
     let context = FileContext {
         array_range_checks,
         classifiers,
         module_name,
         reference_file,
         numbers: plan.interfaces(),
+        plan,
+        planned_tables: &planned_tables,
         ir,
         functions: &indices,
         globals: &globals,
@@ -255,7 +272,9 @@ pub(super) fn lower_file(
         inert_singleton_bindings: &inert_singleton_bindings,
         properties: property_registry,
         reach: &reach,
+        delegates: &delegates,
     };
+    local_delegates::define(&context, module, runtime)?;
     for (id, function) in ir.functions.iter().enumerate() {
         let (Some(index), Some(signature)) = (indices[id], signatures[id]) else {
             if !ir.inline_only_fns.contains(&(id as FunId)) {
@@ -281,7 +300,7 @@ pub(super) fn lower_file(
         };
         let mut parameters = Vec::new();
         if let Some(owner) = function.dispatch_receiver {
-            parameters.push(Ty::obj_name(owner));
+            parameters.push(super::classes::receiver_type(owner));
         }
         parameters.extend(function.params.iter().copied());
         let mut body = Body::new(
@@ -293,6 +312,7 @@ pub(super) fn lower_file(
             function.ret,
         );
         body.scope = krusty::ir::IrEnclosure::Function(id as FunId);
+        body.initializers = ir.single_assignment_initializers(root);
         body.shared_cell_parameters(id as FunId)?;
         match body.function_body(root, function.ret) {
             Ok(()) => {
@@ -348,7 +368,7 @@ pub(super) fn lower_file(
             module,
             runtime,
         )?;
-        for (name, record) in classes.records(ir, &indices, &signatures) {
+        for (name, record) in classes.records(module, ir, &indices, &signatures) {
             laid_out_classes.insert(name, record);
         }
     } else if !member_property_definitions.is_empty() {
@@ -403,6 +423,36 @@ pub(super) fn lower_file(
     })
 }
 
+/// The module table of every class another file declares whose member a body of `ir` calls
+/// virtually, built before any body is emitted.
+fn planned_tables(
+    ir: &IrFile,
+    plan: &ModuleSlotPlan,
+    tables: &mut super::module_tables::ModuleTables,
+    module: &mut Module,
+    objects: &super::super::objects::ObjectRoot,
+) -> HashMap<TypeName, Result<super::module_tables::ModuleTable, Unsupported>> {
+    let mut planned = HashMap::default();
+    for expression in krusty::ir::emitted_body_roots(ir)
+        .into_iter()
+        .flat_map(|root| krusty::ir::value_namespace_expressions(ir, root))
+    {
+        let IrExpr::Call { callee, .. } = ir.expr(expression) else {
+            continue;
+        };
+        let Callee::Virtual { owner, .. } = &**callee else {
+            continue;
+        };
+        if ir.class_id_by_name(*owner).is_some() || planned.contains_key(owner) {
+            continue;
+        }
+        if let Some(table) = tables.table(plan, *owner, module, objects) {
+            planned.insert(*owner, table);
+        }
+    }
+    planned
+}
+
 /// What every body of one file reads: the file, and where its functions, properties and classes
 /// went in the module.
 struct FileContext<'a> {
@@ -413,6 +463,11 @@ struct FileContext<'a> {
     reference_file: u32,
     /// The module-wide numbers of the module's interface members.
     numbers: &'a ModuleInterfaces,
+    /// The module-wide numbering of the module's class tables.
+    plan: &'a ModuleSlotPlan,
+    /// The table of each class another file declares that a body of this file calls a member
+    /// of, or why it has none.
+    planned_tables: &'a HashMap<TypeName, Result<super::module_tables::ModuleTable, Unsupported>>,
     ir: &'a IrFile,
     /// The Wasm function of each emitted function, by `FunId`.
     functions: &'a [Option<u32>],
@@ -428,6 +483,8 @@ struct FileContext<'a> {
     properties: &'a PropertyRegistry,
     /// What the file's bodies record for the module about calls through `kotlin.Any`'s slots.
     reach: &'a std::cell::RefCell<FileReach>,
+    /// Local delegated-property accessors and the one object each property's convention receives.
+    delegates: &'a local_delegates::Prepared,
 }
 
 /// The wasm value a Kotlin type is carried as; `None` for a type with no value (`Unit`,
@@ -572,7 +629,32 @@ fn expression_type(
             let function = ir.classes[*class as usize].methods[*index as usize];
             ir.functions[function as usize].ret
         }
+        // The accessor template is the value of a read and `Unit` for a write. A synthesized
+        // property argument has no checked type of its own; it is the reference the convention
+        // receives, so it is carried as one.
+        IrExpr::LocalDelegateAccess(access) if ir.checked_type(id).is_none() => {
+            let plan = ir
+                .local_delegate_plans
+                .get(access.plan as usize)
+                .ok_or_else(|| {
+                    "a local delegated-property access without its checked plan".to_string()
+                })?;
+            if access.value.is_some() {
+                Ty::Unit
+            } else {
+                plan.getter.result
+            }
+        }
+        IrExpr::LocalPropertyReference(_) if ir.checked_type(id).is_none() => Ty::obj("kotlin/Any"),
         IrExpr::PropertyRead { ty, .. } if ir.checked_type(id).is_none() => *ty,
+        // A `when` without an `else` branch, such as a guard a counted loop's lowering adds, is a
+        // statement: no branch's value can be its own.
+        IrExpr::When { branches }
+            if ir.checked_type(id).is_none()
+                && branches.iter().all(|(condition, _)| condition.is_some()) =>
+        {
+            Ty::Unit
+        }
         // A top-level property read has its storage's declared type.
         IrExpr::GetStatic(index) if ir.checked_type(id).is_none() => ir.statics[*index as usize].ty,
         // A shared cell's element is read, and a write evaluates to what it stored, at the
@@ -641,6 +723,8 @@ struct Body<'a> {
     module_name: &'a str,
     reference_file: u32,
     numbers: &'a ModuleInterfaces,
+    plan: &'a ModuleSlotPlan,
+    planned_tables: &'a HashMap<TypeName, Result<super::module_tables::ModuleTable, Unsupported>>,
     ir: &'a IrFile,
     module: &'a mut Module,
     runtime: &'a mut Runtime,
@@ -656,6 +740,7 @@ struct Body<'a> {
     properties: &'a PropertyRegistry,
     /// What this file's bodies record for the module about calls through `kotlin.Any`'s slots.
     reach: &'a std::cell::RefCell<FileReach>,
+    delegates: &'a local_delegates::Prepared,
     code: Code,
     /// Locals beyond the parameters, in index order.
     locals: Vec<ValType>,
@@ -670,6 +755,9 @@ struct Body<'a> {
     /// is emitted: a block's type is its value's, and that value can be a variable the block
     /// itself declares (`n++` is `{ val old = n; n = old + 1; old }`).
     declared: HashMap<u32, Ty>,
+    /// The initializer of each variable of the body that nothing assigns again; empty where the
+    /// body's variables are not inventoried.
+    initializers: HashMap<u32, krusty::ir::ExprId>,
     result: Ty,
     /// How many structured instructions enclose the current position.
     depth: u32,
@@ -710,6 +798,8 @@ impl<'a> Body<'a> {
             array_range_checks: context.array_range_checks,
             classifiers: context.classifiers,
             numbers: context.numbers,
+            plan: context.plan,
+            planned_tables: context.planned_tables,
             ir: context.ir,
             module,
             runtime,
@@ -721,6 +811,7 @@ impl<'a> Body<'a> {
             inert_singleton_bindings: context.inert_singleton_bindings,
             properties: context.properties,
             reach: context.reach,
+            delegates: context.delegates,
             code: Code::default(),
             locals: Vec::new(),
             next_local: parameters.len() as u32,
@@ -732,6 +823,7 @@ impl<'a> Body<'a> {
             unit_values: HashSet::default(),
             cells: HashMap::default(),
             declared,
+            initializers: HashMap::default(),
             result,
             depth: 0,
             loops: Vec::new(),
@@ -816,11 +908,18 @@ impl<'a> Body<'a> {
         numeric_conversions::convert(&mut self.code, source_ty, target_ty)
     }
 
-    /// Whether a cast of `arg` to `target` reads a scalar out of a reference: the operand is
-    /// carried as a reference and the target as a scalar.
-    fn is_unboxing_cast(&self, arg: u32, target: Ty) -> bool {
+    /// Whether a cast of `arg` to `target` checks a reference against a scalar's box: the operand
+    /// is carried as a reference and the target is a scalar-carried type or its nullable form.
+    /// Every such scalar's box is keyed by its own classifier, so `UInt?` checks against the
+    /// `UInt` box, never the `Int` one.
+    fn is_primitive_cast(&self, arg: u32, target: Ty) -> bool {
+        let scalar =
+            |ty: Ty| matches!(carrier(ty), Ok(Some(ty)) if !matches!(ty, ValType::Ref { .. }));
         matches!(self.carrier_of(arg), Ok(Some(ValType::Ref { .. })))
-            && matches!(carrier(target), Ok(Some(target)) if !matches!(target, ValType::Ref { .. }))
+            && match target.kind() {
+                TyKind::Nullable(inner) => scalar(inner),
+                _ => scalar(target),
+            }
     }
 
     fn carrier_of(&self, id: u32) -> Result<Option<ValType>, Unsupported> {
@@ -1218,6 +1317,21 @@ impl<'a> Body<'a> {
             }
             IrExpr::Call {
                 callee: ref call_callee,
+                dispatch_receiver: Some(receiver),
+                args,
+            } if let Callee::External {
+                target, defaults, ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self
+                    .callables
+                    .callable(*target)
+                    .is_some_and(string_builders::declared_by_string_builder) =>
+            {
+                self.string_builder_call(*target, receiver, &args)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
                 dispatch_receiver,
                 args,
             } if let Callee::External {
@@ -1249,13 +1363,13 @@ impl<'a> Body<'a> {
             {
                 self.cast(arg, type_operand, op == IrTypeOp::CastNonNull)?
             }
-            // `as Int` on a reference reads the value out of its box once the cast has checked it.
+            // `as Int` and `as Int?` on a reference check it against the primitive's box.
             IrExpr::TypeOp {
                 op: IrTypeOp::Cast | IrTypeOp::CastNonNull,
                 arg,
                 type_operand,
-            } if self.is_unboxing_cast(arg, type_operand) => {
-                self.checked_unbox_cast(arg, type_operand)?
+            } if self.is_primitive_cast(arg, type_operand) => {
+                self.checked_primitive_cast(arg, type_operand)?
             }
             IrExpr::TypeOp {
                 op: op @ (IrTypeOp::Cast | IrTypeOp::CastNonNull),
@@ -1415,7 +1529,11 @@ impl<'a> Body<'a> {
             IrExpr::EnumEntry { classifier, name } => {
                 let entry = self
                     .calls
-                    .dependency_enum_constant(classifier, &name)
+                    .instance(
+                        &krusty::backend::instance_links::InstanceEntry::EnumConstant(
+                            krusty::backend::EnumConstant { classifier, name },
+                        ),
+                    )
                     .ok_or_else(|| {
                         // Boundary conversion for a diagnostic.
                         format!(
@@ -1536,6 +1654,21 @@ impl<'a> Body<'a> {
                 self.intrinsic(IrIntrinsic::StringLength, Some(*receiver), &[])?;
             }
             IrExpr::Checked(ref checked_op)
+                if let krusty::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch: krusty::ir::IrPropertyDispatch::Ordinary,
+                    receiver: Some(receiver),
+                    arguments,
+                    parameters,
+                    ..
+                } = &**checked_op
+                    && parameters.is_empty()
+                    && arguments.is_empty()
+                    && self.is_string_builder_property(*target) =>
+            {
+                self.string_builder_property(*target, *receiver)?;
+            }
+            IrExpr::Checked(ref checked_op)
                 if let krusty::ir::IrCheckedOperation::PropertyWrite {
                     target,
                     dispatch_receiver,
@@ -1599,6 +1732,10 @@ impl<'a> Body<'a> {
             IrExpr::KClassLiteral {
                 classifier, value, ..
             } => self.class_literal(id, classifier, value)?,
+            IrExpr::LocalDelegateAccess(access) => self.local_delegate_access(access)?,
+            IrExpr::LocalPropertyReference(reference) => {
+                self.local_property_reference(&reference)?
+            }
             IrExpr::Call { callee, .. } => {
                 return Err(format!("a call to {}", callee_kind(&callee)));
             }
@@ -1739,12 +1876,24 @@ impl<'a> Body<'a> {
         }
         self.code.block(BlockType::Empty);
         let next = self.open();
-        self.loops.push(Loop { label, exit, next });
+        self.loops.push(Loop {
+            label: label.clone(),
+            exit,
+            next,
+        });
         self.statement(body)?;
         self.loops.pop();
         self.close();
         if let Some(update) = update {
+            // The update is still the loop's own code: a counted loop over an inclusive bound
+            // leaves from it before stepping past the last value.
+            self.loops.push(Loop {
+                label,
+                exit,
+                next: top,
+            });
             self.statement(update)?;
+            self.loops.pop();
         }
         if post_test {
             self.value(cond, Ty::Boolean)?;
@@ -2114,6 +2263,7 @@ mod tests {
         );
         lower_file(
             FileInput {
+                module_facts: &module_facts,
                 array_range_checks: super::super::super::array_access::default_range_checks(),
                 classifiers: &classifiers,
                 ir,
@@ -2129,6 +2279,7 @@ mod tests {
                 callables: &mut started.callables,
                 properties: &mut started.properties,
                 classes: &mut started.classes,
+                tables: &mut started.tables,
             },
         )
     }

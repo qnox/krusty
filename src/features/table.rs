@@ -32,6 +32,9 @@ releases! {
     V2_5_0_RC => "2.5.0-RC",
 }
 
+/// Features later releases split or renamed, by the older feature that stands for them.
+const RENAMED_FEATURES: &str = include_str!("renamed_features.tsv");
+
 /// The vendored table text a supported release reads, for comparison with a fresh dump.
 pub fn vendored_table(version: KotlinVersion) -> Option<&'static str> {
     RELEASES.get(version).copied()
@@ -220,6 +223,30 @@ impl FeatureTable {
         self.by_name.get(name).map(|&index| &self.features[index])
     }
 
+    /// The name this release knows `name` by: `name` itself, or the older feature a later release
+    /// split it from ([`RENAMED_FEATURES`]) when this release's table lacks it.
+    pub fn spelling_in_release<'a>(&self, name: &'a str) -> &'a str {
+        if self.get(name).is_some() {
+            return name;
+        }
+        RENAMED_FEATURES
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .filter_map(|line| line.split_once('\t'))
+            .find(|&(current, older)| current == name && self.get(older).is_some())
+            .map_or(name, |(_, older)| older)
+    }
+
+    /// The `-XXLanguage:` argument for one `// LANGUAGE:` token (`+Name` or `-Name`) under this
+    /// release.
+    pub fn language_argument(&self, token: &str) -> String {
+        let (sign, name) = match token.as_bytes().first() {
+            Some(b'+' | b'-') => token.split_at(1),
+            _ => ("", token),
+        };
+        format!("-XXLanguage:{sign}{}", self.spelling_in_release(name))
+    }
+
     /// The features `-progressive` enables, in declaration order.
     pub fn progressive(&self) -> impl Iterator<Item = &LanguageFeature> {
         self.features.iter().filter(|feature| feature.progressive)
@@ -314,6 +341,27 @@ mod tests {
         assert_eq!(feature.presentable_name, "context parameters");
         assert_eq!(feature.flag.as_deref(), Some("-Xcontext-parameters"));
         assert_eq!(table.get("TypeAliases").unwrap().flag, None);
+    }
+
+    #[test]
+    fn a_feature_a_later_release_split_keeps_its_older_spelling_here() {
+        let table = FeatureTable::for_version(KotlinVersion::V2_4_20).unwrap();
+        assert_eq!(
+            table.language_argument("+CompanionBlocks"),
+            "-XXLanguage:+CompanionBlocksAndExtensions"
+        );
+        assert_eq!(
+            table.language_argument("-CompanionExtensions"),
+            "-XXLanguage:-CompanionBlocksAndExtensions"
+        );
+        assert_eq!(
+            table.language_argument("+ContextParameters"),
+            "-XXLanguage:+ContextParameters"
+        );
+        assert_eq!(
+            table.language_argument("+NoSuchFeature"),
+            "-XXLanguage:+NoSuchFeature"
+        );
     }
 
     /// Measured with kotlinc 2.4.20: `-XXLanguage:+CompanionBlocksAndExtensions` warns that it

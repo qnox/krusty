@@ -239,6 +239,11 @@ impl FileLowering<'_> {
             .keys()
             .map(|member| member.module.as_str())
             .collect();
+        let mut root = class;
+        while let Some(parent) = self.model.layout(root).superclass {
+            root = parent;
+        }
+        let inherits_record = self.laid_out_superclass(root).is_some();
         let mut current = Some(class);
         while let Some(owner) = current {
             let name = self.ir.classes[owner as usize].fq_name_id();
@@ -286,6 +291,13 @@ impl FileLowering<'_> {
                 }
                 let implementation = match edge.implementation {
                     ResolvedFunctionOverrideTarget::Module(callable) => Some(callable),
+                    // A dependency class's member a class here inherits: the record of the
+                    // superclass an earlier file laid out answers it below.
+                    ResolvedFunctionOverrideTarget::External(_)
+                        if edge.implementation_function.is_none() && inherits_record =>
+                    {
+                        continue;
+                    }
                     ResolvedFunctionOverrideTarget::External(_) => None,
                 };
                 // An interface of this module implementing the member stands at its own number

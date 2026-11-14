@@ -436,6 +436,7 @@ pub(super) fn class_table(
         vtable,
         slots,
         interface_bridges,
+        direct_methods: Default::default(),
     })
 }
 

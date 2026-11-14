@@ -894,8 +894,9 @@ pub fn prepare_sources(
     target: TestTarget,
 ) -> Result<Vec<(String, String)>, Outcome> {
     let prepared = krusty::conformance::prepare_test_source(source, target);
-    let mut sources = if source.contains("// FILE:") {
-        let (kotlin, java) = krusty::conformance::split_files(&prepared);
+    let mut sources = if krusty::conformance::contains_directive(source, "FILE") {
+        let (kotlin, java) =
+            krusty::conformance::split_files(&prepared).map_err(Outcome::Harness)?;
         if !java.is_empty() {
             return Err(Outcome::NotApplicable(
                 "contains Java source blocks unavailable to this target",
@@ -909,10 +910,10 @@ pub fn prepare_sources(
         vec![(fallback_stem.to_string(), prepared)]
     };
     if krusty::conformance::directive(source, "WITH_COROUTINES") {
-        sources.push((
-            "CoroutineUtil".to_string(),
-            krusty::conformance::COROUTINE_HELPERS.to_string(),
-        ));
+        let helpers =
+            krusty::conformance::coroutine_sources(source, krusty::conformance::COROUTINE_HELPERS)
+                .map_err(Outcome::Harness)?;
+        sources.extend(helpers);
     }
     Ok(sources)
 }
@@ -1071,16 +1072,28 @@ fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path, source: &str) -> Outcom
     if let Some(reason) = lane.harness_limitation(&source) {
         return Outcome::Harness(reason.to_string());
     }
-    if source.contains("// MODULE:") {
+    let source = match lane.test_target() {
+        TestTarget::WasmJs | TestTarget::WasmWasi => {
+            match krusty::conformance::with_wasm_additional_sources(&source, file) {
+                Ok(prepared) => prepared,
+                Err(error) => return Outcome::Harness(error),
+            }
+        }
+        TestTarget::Jvm | TestTarget::Native => source,
+    };
+    if krusty::conformance::contains_directive(&source, "MODULE") {
         let prepared = krusty::conformance::prepare_test_source(&source, lane.test_target());
         let Some(mut modules) = krusty::conformance::split_modules(&prepared) else {
             return Outcome::Harness("unsupported // MODULE: shape".to_string());
         };
         if krusty::conformance::directive(&source, "WITH_COROUTINES") {
-            krusty::conformance::inject_support_module(
+            if let Err(error) = krusty::conformance::inject_coroutine_support(
                 &mut modules,
+                &source,
                 krusty::conformance::COROUTINE_HELPERS,
-            );
+            ) {
+                return Outcome::Harness(error);
+            }
         }
         let units = krusty::conformance::module_units(&modules);
         if units.iter().any(|unit| !unit.java_files.is_empty()) {

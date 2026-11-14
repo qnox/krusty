@@ -1,6 +1,7 @@
 //! Gradle project-model provider using an injected init script.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -9,9 +10,13 @@ use super::model::{
     Module, ModuleId, ModuleOutput, ProjectModel, ProviderKind, SourceRoot, SourceRootKind,
 };
 use super::provider::{ProbeError, ProjectProvider};
-use super::runner::{Command, CommandRunner, GRADLE};
+use super::runner::{Command, CommandRunner, BUILD_TOOL_TIMEOUT, GRADLE, SCAN_PROBE_TIMEOUT};
 
 const PROBE_VERSION: &str = "6";
+/// Cold `krustyModel` configuration of a repository the size of the Kotlin compiler. Used only by
+/// the offline model and parity probes. The editor probe keeps the ordinary 120-second ceiling:
+/// it runs on the analysis thread, and a hung Gradle sync must not stall analysis for this long.
+pub(crate) const PROBE_TIMEOUT: Duration = SCAN_PROBE_TIMEOUT;
 const SENTINEL: &str = "KRUSTY_MODEL_JSON ";
 const TASK: &str = "krustyModel";
 const MAX_FAILURE_DETAILS: usize = 8;
@@ -272,10 +277,21 @@ pub struct GradleProvider {
     root: PathBuf,
     gradle: PathBuf,
     init_script: PathBuf,
+    probe_timeout: Duration,
 }
 
 impl GradleProvider {
+    /// Editor probe. The command keeps the ordinary 120-second ceiling.
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self::with_probe_timeout(root, BUILD_TOOL_TIMEOUT)
+    }
+
+    /// Offline model and parity probe. The command may run for [`PROBE_TIMEOUT`].
+    pub fn for_scan(root: impl Into<PathBuf>) -> Self {
+        Self::with_probe_timeout(root, PROBE_TIMEOUT)
+    }
+
+    fn with_probe_timeout(root: impl Into<PathBuf>, probe_timeout: Duration) -> Self {
         let root = root.into();
         let gradle = GRADLE.resolve(&root);
         let init_script = init_script_path(&root);
@@ -283,6 +299,7 @@ impl GradleProvider {
             root,
             gradle,
             init_script,
+            probe_timeout,
         }
     }
 
@@ -291,15 +308,17 @@ impl GradleProvider {
     }
 
     pub fn command(&self) -> Command {
-        Command::new(self.gradle.clone(), self.root.clone()).args([
-            "--quiet".to_string(),
-            "--console=plain".to_string(),
-            // Gradle's configuration cache rejects the probe's execution-time project access.
-            "--no-configuration-cache".to_string(),
-            "--init-script".to_string(),
-            self.init_script.to_string_lossy().into_owned(),
-            TASK.to_string(),
-        ])
+        Command::new(self.gradle.clone(), self.root.clone())
+            .args([
+                "--quiet".to_string(),
+                "--console=plain".to_string(),
+                // Gradle's configuration cache rejects the probe's execution-time project access.
+                "--no-configuration-cache".to_string(),
+                "--init-script".to_string(),
+                self.init_script.to_string_lossy().into_owned(),
+                TASK.to_string(),
+            ])
+            .with_timeout(self.probe_timeout)
     }
 
     fn write_init_script(&self) -> Result<(), ProbeError> {
@@ -415,6 +434,7 @@ fn parse_model(root: &Path, stdout: &str) -> Result<ProjectModel, ProbeError> {
         kind: ProviderKind::Gradle,
         jdk_home,
         modules,
+        repository_libraries: Vec::new(),
     })
 }
 
@@ -648,6 +668,10 @@ mod tests {
         assert_eq!(command.args[2], "--no-configuration-cache");
         assert_eq!(command.args[3], "--init-script");
         assert_eq!(command.args[5], TASK);
+        assert_eq!(
+            command.timeout, BUILD_TOOL_TIMEOUT,
+            "the editor probe runs on the analysis thread and keeps the short ceiling"
+        );
 
         let script = std::fs::read_to_string(&command.args[4]).unwrap();
         assert!(script.contains("lenient = true"), "{script}");
@@ -663,6 +687,21 @@ mod tests {
         );
         assert!(!script.contains("set.allSource?.srcDirs"), "{script}");
         assert!(!tree.path(".krusty").exists());
+    }
+
+    #[test]
+    fn the_scan_probe_uses_the_long_ceiling() {
+        let tree = TempTree::new("gradle-scan-timeout");
+        tree.write("settings.gradle.kts", "");
+        tree.write("gradlew", "#!/bin/sh\n");
+        let provider = GradleProvider::for_scan(tree.root());
+        let runner = FakeRunner::new(vec![FakeRunner::stdout(&recorded_output())]);
+
+        provider.probe(&runner).unwrap();
+
+        assert_eq!(runner.command(0).timeout, PROBE_TIMEOUT);
+        assert_eq!(runner.command(0).program, tree.path("gradlew"));
+        assert_eq!(runner.command(0).args[5], TASK);
     }
 
     #[test]

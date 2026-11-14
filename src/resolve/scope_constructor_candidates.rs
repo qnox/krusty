@@ -31,9 +31,12 @@ impl Checker<'_> {
             return Vec::new();
         }
         let mut declarations = self.constructor_declarations(internal, &classifier);
-        if declarations.is_empty() {
+        let origin = if declarations.is_empty() {
             declarations.extend(self.sam_constructor_declaration(internal));
-        }
+            crate::libraries::ConstructorOrigin::FunctionalInterface
+        } else {
+            crate::libraries::ConstructorOrigin::Declared
+        };
         declarations
             .into_iter()
             .map(|declaration| {
@@ -41,6 +44,7 @@ impl Checker<'_> {
                     internal,
                     &classifier,
                     declaration,
+                    origin,
                 );
                 if let Some(signature) = candidate
                     .generic_sig
@@ -80,4 +84,40 @@ impl Checker<'_> {
             String::new(),
         ))
     }
+
+    /// Whether this provider family contains the annotation-defined fallback constructor tier.
+    pub(super) fn has_low_priority_constructor(
+        &self,
+        internal: TypeName,
+        classifier: &crate::libraries::LibraryType,
+    ) -> bool {
+        classifier
+            .constructors
+            .iter()
+            .chain(
+                self.checked_local_constructors
+                    .get(&internal)
+                    .into_iter()
+                    .flatten(),
+            )
+            .any(|constructor| is_low_priority_in_overload_resolution(&constructor.annotations))
+    }
+
+    /// Whether a selected constructor yields to the implicit-receiver rungs.
+    pub(super) fn is_low_priority_constructor(
+        &self,
+        selected: &crate::libraries::FunctionInfo,
+    ) -> bool {
+        is_low_priority_in_overload_resolution(&selected.callable.annotations)
+    }
+}
+
+/// Whether a constructor annotated with `annotations` is `@LowPriorityInOverloadResolution`: the
+/// one check both a selected scope constructor and a classifier with no selected winner read.
+pub(super) fn is_low_priority_in_overload_resolution(
+    annotations: &[crate::types::TypeName],
+) -> bool {
+    annotations.contains(&crate::types::type_name(
+        "kotlin/internal/LowPriorityInOverloadResolution",
+    ))
 }

@@ -122,22 +122,49 @@ impl Body<'_> {
         Ok(())
     }
 
-    /// `a.compareTo(b)` on two integral values: `-1`, `0` or `1`. A floating-point `compareTo` is a
-    /// total order (`NaN` greatest, `-0.0` below `0.0`), not this, and declines.
+    /// `a.compareTo(b)` on two integral or floating values: `-1`, `0` or `1`. A floating value is
+    /// ordered as `Float.compare`/`Double.compare` order it: a total order with `-0.0` below `0.0`
+    /// and every `NaN` equal to and above all else.
     fn compare(&mut self, operand: Ty, lhs: u32, rhs: u32) -> Result<(), Unsupported> {
         let value = ordinary_numeric_carrier(operand)?;
-        let (greater, less) = match value {
-            Some(ValType::I32) => (GT_S32, LT_S32),
-            Some(ValType::I64) => (GT_S64, LT_S64),
+        let (value, greater, less) = match value {
+            Some(ValType::I32) => (ValType::I32, GT_S32, LT_S32),
+            Some(ValType::I64) => (ValType::I64, GT_S64, LT_S64),
+            // The canonical bits, with the magnitude bits of a negative value flipped, order as
+            // signed integers exactly as the values do.
+            Some(ValType::F32) => (ValType::I32, GT_S32, LT_S32),
+            Some(ValType::F64) => (ValType::I64, GT_S64, LT_S64),
             _ => return Err(format!("`compareTo` on `{}`", describe(operand))),
         };
-        let value = value.expect("matched above");
         let left = self.local(value);
         let right = self.local(value);
-        self.value(lhs, operand)?;
-        self.code.local_set(left);
-        self.value(rhs, operand)?;
-        self.code.local_set(right);
+        for (operand_id, local) in [(lhs, left), (rhs, right)] {
+            self.value(operand_id, operand)?;
+            if self
+                .runtime
+                .hashing
+                .emit_float_bits(&mut self.code, operand)
+            {
+                self.code.local_tee(local).local_get(local);
+                match value {
+                    ValType::I32 => self
+                        .code
+                        .i32_const(31)
+                        .op(SHR_S32)
+                        .i32_const(1)
+                        .op(SHR_U32)
+                        .op(XOR32),
+                    _ => self
+                        .code
+                        .i64_const(63)
+                        .op(SHR_S64)
+                        .i64_const(1)
+                        .op(SHR_U64)
+                        .op(XOR64),
+                };
+            }
+            self.code.local_set(local);
+        }
         self.code
             .local_get(left)
             .local_get(right)

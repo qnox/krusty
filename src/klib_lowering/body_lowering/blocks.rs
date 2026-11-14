@@ -23,16 +23,13 @@ impl BodyLowering<'_> {
     /// The function's body. Checked FIR lowering lowers a block body as the source block, typed
     /// by its checked type, inside the callable's own block; both are the callable's scope. A
     /// function whose result is not `Unit` must not reach the end of its body: the body is typed
-    /// `Nothing`, or, as the checker's missing-return check accepts, ends in a `while (true)` or
-    /// `do`-`while (true)` loop, which source lowering keeps a `Unit` statement. One that can reach
-    /// its end declines.
+    /// `Nothing`, or leaves the function on every path as the checker's missing-return check reads
+    /// it ([`Self::statements_terminate`]). One that can reach its end declines.
     pub(in super::super) fn body(mut self, statements: &[KlibIrStatement]) -> Lowered<ExprId> {
         let source = self.block(statements)?;
         if self.header.result() != Ty::Unit
             && self.lowered_type(source) != Ty::Nothing
-            && !statements
-                .last()
-                .is_some_and(|statement| self.loops_forever(statement))
+            && !self.statements_terminate(statements)
         {
             return Err(KlibBodyDeclineReason::MissingReturn);
         }
@@ -94,14 +91,48 @@ pub(in super::super) fn publish_parameter_defaults(
 }
 
 impl BodyLowering<'_> {
-    /// Whether `statement` is a loop whose condition is the constant `true` and whose lowered
+    /// Whether a block of `statements` leaves the function on every path, as the checker's
+    /// missing-return check reads a source block: one of its statements does.
+    fn statements_terminate(&self, statements: &[KlibIrStatement]) -> bool {
+        statements.iter().any(|statement| match statement {
+            KlibIrStatement::Expression(expression) => self.terminates(*expression),
+            _ => false,
+        })
+    }
+
+    /// Whether the statement or value `expression` leaves the function on every path: it
+    /// diverges, is a loop that never ends, is a block whose statements terminate, or is an `if`
+    /// with an `else` all of whose branches terminate.
+    fn terminates(&self, expression: KlibIrExprId) -> bool {
+        if self.diverges(expression) || self.loops_forever(expression) {
+            return true;
+        }
+        match &self.arena.expr(expression).kind {
+            KlibIrExprKind::TypeOperator {
+                operator: KlibIrTypeOperator::ImplicitCoercionToUnit,
+                argument,
+                ..
+            } => self.terminates(*argument),
+            KlibIrExprKind::Block {
+                statements,
+                origin: None,
+            } => self.statements_terminate(statements),
+            KlibIrExprKind::When {
+                branches,
+                origin: Some(origin),
+            } if origin == "IF" => {
+                self.has_else(branches)
+                    && branches.iter().all(|branch| self.terminates(branch.result))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `expression` is a loop whose condition is the constant `true` and whose lowered
     /// body contains no `break` naming that loop.
-    fn loops_forever(&self, statement: &KlibIrStatement) -> bool {
-        let KlibIrStatement::Expression(expression) = statement else {
-            return false;
-        };
+    fn loops_forever(&self, expression: KlibIrExprId) -> bool {
         let (KlibIrExprKind::While(serialized) | KlibIrExprKind::DoWhile(serialized)) =
-            &self.arena.expr(*expression).kind
+            &self.arena.expr(expression).kind
         else {
             return false;
         };

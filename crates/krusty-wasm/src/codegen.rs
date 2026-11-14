@@ -11,6 +11,7 @@ mod classes;
 mod interface_members;
 mod laid_out_classes;
 mod lower;
+mod module_tables;
 mod property_registry;
 
 use krusty::backend::{Artifact, Backend, CheckedIrFile, Entry, BOX_RESULT_FRAME};
@@ -90,6 +91,7 @@ struct Started {
     callables: callable_registry::CallableRegistry,
     properties: property_registry::PropertyRegistry,
     classes: laid_out_classes::LaidOutClasses,
+    tables: module_tables::ModuleTables,
 }
 
 impl Started {
@@ -107,6 +109,7 @@ impl Started {
             callables: Default::default(),
             properties: Default::default(),
             classes: Default::default(),
+            tables: Default::default(),
         }
     }
 }
@@ -125,8 +128,24 @@ impl Backend for WasmBackend {
         true
     }
 
+    fn lowers_coroutines_on_common_ir(&self) -> bool {
+        true
+    }
+
     fn numbers_slots(&self) -> bool {
         true
+    }
+
+    /// The runtime lays out text, its builders and its exception classes itself: a library
+    /// body of one of their members reads a layout this target does not have, and a library
+    /// class extending one of the exceptions delegates to the runtime's constructor.
+    fn represents_dependency_classifier(
+        &self,
+        classifier: krusty::backend::DependencyClassifier,
+    ) -> bool {
+        classifier == krusty::types::wk::string()
+            || lower::is_string_builder(classifier)
+            || lower::runtime_lays_out(classifier)
     }
 
     fn realizes_dependency_intrinsic(
@@ -205,6 +224,8 @@ impl Backend for WasmBackend {
             started.callables.enter_source_module(file.module_name);
             started.properties.enter_source_module(file.module_name);
             started.classes.enter_source_module(file.module_name);
+        } else {
+            started.classes.enter_dependency_support();
         }
         if state
             .slot_plan
@@ -213,10 +234,13 @@ impl Backend for WasmBackend {
         {
             let plan = classes::module_plan(file.classifiers.module().classes(), &file.classifiers);
             state.slot_plan = Some((file.module_name.to_owned(), plan));
+            // The table types are built from the plan, so they are that module's too.
+            started.tables = Default::default();
         }
         let plan = &state.slot_plan.as_ref().expect("planned just above").1;
         let lowered = match lower::lower_file(
             lower::FileInput {
+                module_facts: file.classifiers.module(),
                 ir: &file.ir,
                 properties: &properties,
                 callables: &file.callables,
@@ -232,6 +256,7 @@ impl Backend for WasmBackend {
                 callables: &mut started.callables,
                 properties: &mut started.properties,
                 classes: &mut started.classes,
+                tables: &mut started.tables,
             },
         ) {
             Ok(lowered) => lowered,
@@ -273,17 +298,20 @@ impl Backend for WasmBackend {
     }
 
     fn check_module(&self, state: &Self::State, diags: &mut DiagSink) {
-        if let Some(construct) = state
-            .started
-            .as_ref()
-            .filter(|_| !state.declined)
-            .and_then(|started| started.runtime.objects.interfaces.declined())
-        {
-            diags.error(
-                krusty::diag::Span::new(0, 0),
-                format!("{DECLINE_PREFIX}{construct} yet"),
-            );
-            return;
+        if let Some(started) = state.started.as_ref().filter(|_| !state.declined) {
+            if let Some(construct) = started.runtime.objects.interfaces.declined() {
+                diags.error(
+                    krusty::diag::Span::new(0, 0),
+                    format!("{DECLINE_PREFIX}{construct} yet"),
+                );
+                return;
+            }
+            if let Err(error) = started.callables.check_links() {
+                diags.error(
+                    krusty::diag::Span::new(0, 0),
+                    format!("{DECLINE_PREFIX}{error} yet"),
+                );
+            }
         }
         if state.started.is_some() && !state.declined && state.entry.is_none() {
             diags.error(
@@ -480,6 +508,42 @@ mod tests {
         }
     }
 
+    /// A `val` of type `Any` holds the string its initializer computed, so rendering it cannot
+    /// reach the function value the file also creates.
+    #[test]
+    fn an_erased_to_string_of_a_val_renders_its_initializer() {
+        let source = "fun box(): String { val supplier = { 1 }\n\
+                      val message: Any = \"O\"\n\
+                      return if (supplier() == 1) \"$message\" + \"K\" else \"fail\" }";
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(target, source);
+            assert_eq!(diagnostics, Vec::<String>::new(), "{target:?}");
+            assert!(!outputs.is_empty(), "{target:?}");
+        }
+    }
+
+    /// A `var` can be assigned anything after its initializer, so rendering it still declines
+    /// while the file creates a function value.
+    #[test]
+    fn an_erased_to_string_of_a_reassigned_var_declines() {
+        let source = "fun box(): String { val supplier = { 1 }\n\
+                      var message: Any = \"O\"\n\
+                      if (supplier() == 2) message = supplier\n\
+                      return \"$message\" + \"K\" }";
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(target, source);
+            assert_eq!(
+                diagnostics,
+                vec![format!(
+                    "{}a `toString` of `kotlin.Any` reaching a runtime object this target cannot \
+                     print yet",
+                    super::DECLINE_PREFIX
+                )]
+            );
+            assert!(outputs.is_empty());
+        }
+    }
+
     /// Another file's local classes and anonymous objects print, so an erased `toString` reaching
     /// them is lowered.
     #[test]
@@ -489,6 +553,17 @@ mod tests {
         let other = "fun local(): String { class Local; return show(Local()) + show(object {}) }";
         for target in WasmTarget::ALL {
             let (outputs, diagnostics) = compile_program(target, Entry::Box, &[show, other]);
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(outputs.len(), 2);
+        }
+    }
+
+    #[test]
+    fn a_published_inline_reader_compiles_with_its_shared_capture() {
+        let source =
+            include_str!("../../../tests/box_regressions/PublishedInlineCaptureBindings.kt");
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(target, source);
             assert_eq!(diagnostics, Vec::<String>::new());
             assert_eq!(outputs.len(), 2);
         }

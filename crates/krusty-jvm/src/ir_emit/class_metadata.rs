@@ -119,6 +119,15 @@ pub(super) fn build_class_metadata_with_facts(
     if mentions_undescribed_value_class(ir, c, record) {
         return None;
     }
+    if opts.annotation_defaults_in_metadata() {
+        if let Some(parameter) = record.missing_annotation_default() {
+            run.set_emit_error(format!(
+                "cannot encode annotation default metadata for {}.{parameter}: missing normalized element value",
+                c.fq_name_id().render()
+            ));
+            return None;
+        }
+    }
     let signature_formatter = JvmSignatureFormatter::with_symbols(ir, signature_symbols, run);
     let realization = JvmClassRealization {
         ir,
@@ -129,7 +138,8 @@ pub(super) fn build_class_metadata_with_facts(
     };
     let signatures = realization.signatures(record, opts, locals);
     let approximate_intersection = |ty| signature_formatter.declaration_approximation(ty);
-    let inner_classifier = |classifier| signature_formatter.inner_classifier(classifier);
+    let classifier_application =
+        |classifier| signature_formatter.classifier_application(classifier);
     // The JVM lists the primary constructor's annotations in its classfile order: the runtime-
     // visible ones first.
     let primary_ctor_annotations = krusty::metadata::MetadataAnnotations::with_records(
@@ -149,6 +159,7 @@ pub(super) fn build_class_metadata_with_facts(
             // older source-language level keeps the HAS_ANNOTATIONS flags but writes no records.
             // The physical metadata stamp is deliberately not consulted here.
             annotations_in_metadata: opts.annotations_in_metadata,
+            annotation_defaults_in_metadata: opts.annotation_defaults_in_metadata(),
             // Kotlin 1.4 introduced JVM default methods without compatibility holders. Older
             // consumers must reject this metadata instead of assuming the legacy `$DefaultImpls`
             // realization, so kotlinc attaches a compiler-version requirement to every interface.
@@ -158,7 +169,7 @@ pub(super) fn build_class_metadata_with_facts(
                     krusty::metadata::version_requirements::VersionRequirement::compiler(1, 4, 0),
                 ),
             intersection: Some(&approximate_intersection),
-            inner_classifiers: &inner_classifier,
+            classifier_applications: &classifier_application,
             primary_ctor_annotations: Some(&primary_ctor_annotations),
         },
         &secondary_ctors,
@@ -209,6 +220,43 @@ pub(super) fn build_class_metadata_with_facts(
         d1,
         d2,
     })
+}
+
+/// `@Metadata` of an anonymous object regenerated at an inline call. kotlinc keeps the declaration
+/// class's record and appends the origin extension; the copy's own `xi` follows the caller.
+pub(super) fn regenerated_anonymous_metadata(
+    ir: &IrFile,
+    class_id: krusty::ir::ClassId,
+    copy: &krusty::ir::IrClass,
+    opts: &EmitOptions,
+    env: &EmitEnv<'_>,
+) -> Option<KotlinMetadata> {
+    let specialization = ir.specialized_anonymous_classes.get(&class_id)?;
+    let source = ir.classes.get(specialization.source as usize)?;
+    let mut metadata = build_class_metadata(ir, source, opts, env)?;
+    let origin = source.fq_name();
+    let recorded = krusty::jvm::metadata::anonymous_origin::record_origin_name(
+        metadata.k,
+        &krusty::jvm::metadata::anonymous_origin::MetadataStrings {
+            d1: metadata.d1,
+            d2: metadata.d2,
+        },
+        &origin,
+    );
+    let recorded = match recorded {
+        Ok(Some(recorded)) => recorded,
+        Ok(None) => return None,
+        Err(error) => {
+            env.run.set_emit_error(format!(
+                "cannot record an anonymous object's origin: {error:?}"
+            ));
+            return None;
+        }
+    };
+    metadata.d1 = recorded.d1;
+    metadata.d2 = recorded.d2;
+    metadata.xi = super::metadata_policy::class_xi(ir, copy);
+    Some(metadata)
 }
 
 /// Whether a member of `c` would describe itself in terms of a value class a downstream

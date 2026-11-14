@@ -23,6 +23,8 @@ use crate::module_symbols::ModuleSymbols;
 use crate::symbol_source::{CompositeSource, SymbolSource};
 use crate::types::{Ty, TypeName, Visibility};
 
+mod dependency_superclasses;
+
 fn declarations_by_target<T, Target>(
     declarations: impl IntoIterator<Item = T>,
     target_of: impl Fn(&T) -> Option<Target>,
@@ -804,7 +806,9 @@ fn publish_inherited_interface_property_plans(
 struct PropertyImplementation<'a> {
     owner: crate::types::TypeName,
     name: &'a str,
-    id: crate::fir::PropertyId,
+    /// The overriding declaration: a module property, or a dependency class's property whose
+    /// override plan a module class's dependency superclass needs.
+    target: ResolvedPropertyOverrideTarget,
     ty: ResolvedTy,
     formals: Vec<crate::types::TyParamName>,
     formal_bounds: Vec<Vec<Ty>>,
@@ -826,7 +830,7 @@ fn property_implementation<'a>(
     Some(PropertyImplementation {
         owner,
         name,
-        id: property.id,
+        target: ResolvedPropertyOverrideTarget::Module(property.id),
         ty: signature.result,
         formals: declaration_formals(index, declaration),
         formal_bounds: declaration_formal_bounds(index, declaration),
@@ -851,7 +855,7 @@ fn append_property_override_edges(
 ) {
     let implementation_owner = implementation.owner;
     let name = implementation.name;
-    let implementation_id = implementation.id;
+    let implementation_target = implementation.target;
     let implementation_type = implementation.ty;
     let implementation_receiver = implementation.receiver;
     let implementation_mutable = implementation.mutable;
@@ -939,7 +943,7 @@ fn append_property_override_edges(
                 continue;
             }
             overrides.push(ResolvedPropertyOverride {
-                implementation: ResolvedPropertyOverrideTarget::Module(implementation_id),
+                implementation: implementation_target,
                 implementation_owner,
                 overridden,
                 overridden_owner: supertype.classifier,
@@ -1077,7 +1081,11 @@ fn property_override_plans(
 /// The overriding side of an override edge: one module declaration's own formals, input shape
 /// (context parameters, then the extension receiver, then value parameters) and result.
 struct OverridingFunction {
-    callable: crate::fir::CallableId,
+    /// The overriding declaration: a module function, or a dependency class's function whose
+    /// override plan a module class's dependency superclass needs.
+    target: ResolvedFunctionOverrideTarget,
+    /// Its parameter identities, parallel to `parameters`.
+    parameter_identities: Box<[crate::fir::ResolvedParameterIdentity]>,
     formals: Vec<crate::types::TyParamName>,
     formal_bounds: Vec<Vec<Ty>>,
     parameters: Vec<Ty>,
@@ -1105,7 +1113,8 @@ impl OverridingFunction {
             parameters.insert(context_count.min(parameters.len()), receiver.get());
         }
         Self {
-            callable: callable.id,
+            target: ResolvedFunctionOverrideTarget::Module(callable.id),
+            parameter_identities: module_parameter_identities(index, callable.id, parameters.len()),
             formals: declaration_formals(index, declaration),
             formal_bounds: declaration_formal_bounds(index, declaration),
             parameters,
@@ -1204,7 +1213,7 @@ fn append_function_override_edges(
                 overridden_declaration_signature(source, declared, overridden);
             let declared_parameter_count = declared_parameters.len();
             overrides.push(ResolvedFunctionOverride {
-                implementation: ResolvedFunctionOverrideTarget::Module(implementation.callable),
+                implementation: implementation.target,
                 implementation_owner,
                 overridden,
                 overridden_owner: supertype.classifier,
@@ -1226,11 +1235,7 @@ fn append_function_override_edges(
                     implementation.parameters.iter().copied(),
                     "overriding function parameters",
                 ),
-                implementation_parameter_identities: module_parameter_identities(
-                    index,
-                    implementation.callable,
-                    implementation.parameters.len(),
-                ),
+                implementation_parameter_identities: implementation.parameter_identities.clone(),
                 overridden_parameter_identities: overridden_parameter_identities(
                     index,
                     overridden,
@@ -1946,7 +1951,7 @@ fn publish_inherited_function_defaults(
 }
 
 pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &mut SymbolTable) {
-    let (plans, preorders, inherited_defaults) = {
+    let (plans, preorders, inherited_defaults, dependency_superclasses) = {
         let module = ModuleSymbols::new(table);
         let source =
             CompositeSource::new(vec![&module as &dyn SymbolSource, table.libraries.as_ref()]);
@@ -1995,8 +2000,25 @@ pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &mu
                 classifier_inherited_defaults(index, &source, *classifier, properties, functions)
             })
             .collect::<Vec<_>>();
-        (plans, preorders, inherited_defaults)
+        let module_classes = plans
+            .iter()
+            .map(|(classifier, _, _)| *classifier)
+            .filter(|classifier| index.classifier_header(*classifier).is_some())
+            .collect::<Vec<_>>();
+        let dependency_superclasses = dependency_superclasses::dependency_superclasses(
+            index,
+            &source,
+            &module_classes,
+            |name| table.class_by_type_name(name).is_some(),
+        );
+        (
+            plans,
+            preorders,
+            inherited_defaults,
+            dependency_superclasses,
+        )
     };
+    index.publish_dependency_superclasses(dependency_superclasses);
     let function_edges = plans
         .iter()
         .flat_map(|(_, _, functions)| functions.iter().cloned())

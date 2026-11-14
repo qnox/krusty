@@ -4,7 +4,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::jdk::{is_jdk_home, SystemEnvironment};
-use super::model::{Module, ModuleId, ModuleOutput, ProjectModel, ProviderKind, SourceRoot};
+use super::model::{
+    ExcludedMavenArtifact, Module, ModuleId, ModuleOutput, ProjectModel, ProviderKind,
+    RepositoryLibrary, SourceRoot,
+};
 use super::provider::{ProbeError, ProjectProvider};
 use super::runner::CommandRunner;
 use super::xml;
@@ -84,8 +87,17 @@ fn parse_xml(path: &Path, contents: &str) -> Result<xml::Element, ProbeError> {
         .ok_or_else(|| ProbeError::Parse(format!("{}: malformed XML", path.display())))
 }
 
-/// `library name -> resolved CLASSES jar paths` for every `.idea/libraries/*.xml`.
-fn parse_library_table(root: &Path) -> Result<HashMap<String, Vec<PathBuf>>, ProbeError> {
+/// One `.idea` library: its class roots, and the Maven mapping when it is a
+/// repository library.
+#[derive(Debug, PartialEq, Eq)]
+struct JpsLibrary {
+    classpath: Vec<PathBuf>,
+    repository: Option<RepositoryLibrary>,
+}
+
+/// `library name -> class roots and optional Maven mapping` for every
+/// `.idea/libraries/*.xml`.
+fn parse_library_table(root: &Path) -> Result<HashMap<String, JpsLibrary>, ProbeError> {
     let mut table = HashMap::new();
     let directory = root.join(".idea").join("libraries");
     let entries = match std::fs::read_dir(&directory) {
@@ -103,25 +115,113 @@ fn parse_library_table(root: &Path) -> Result<HashMap<String, Vec<PathBuf>>, Pro
             let Some(name) = library.attr("name") else {
                 continue;
             };
-            let classpath = library_class_roots(library, root);
-            table.entry(name.to_string()).or_insert(classpath);
+            table
+                .entry(name.to_string())
+                .or_insert_with(|| jps_library(library, root, root));
         }
     }
     Ok(table)
 }
 
-/// Resolve every `CLASSES/root[@url]` under a `<library>` element. `module_dir`
-/// is irrelevant for project-level libraries, so the project root is passed for
-/// both — project libraries never reference `$MODULE_DIR$`.
-fn library_class_roots(library: &xml::Element, project_dir: &Path) -> Vec<PathBuf> {
+fn jps_library(library: &xml::Element, project_dir: &Path, module_dir: &Path) -> JpsLibrary {
+    JpsLibrary {
+        classpath: library_class_roots(library, project_dir, module_dir),
+        repository: repository_library(library, project_dir, module_dir),
+    }
+}
+
+/// A repository library's `<properties maven-id>` is the coordinate. The
+/// `CLASSES` roots are the artifacts that coordinate maps to, one or many.
+/// A library with no `maven-id` is not given a coordinate invented from a path.
+fn repository_library(
+    library: &xml::Element,
+    project_dir: &Path,
+    module_dir: &Path,
+) -> Option<RepositoryLibrary> {
+    let name = library.attr("name")?;
+    let properties = library.child("properties")?;
+    let maven_id = properties.attr("maven-id")?;
+    let (group, artifact, version) = parse_maven_coordinate(maven_id)?;
+    let packaging = properties
+        .attr("packaging")
+        .filter(|packaging| !packaging.is_empty())
+        .unwrap_or("jar");
+    let include_transitive = match properties.attr("include-transitive-deps") {
+        Some(value) => value.eq_ignore_ascii_case("true"),
+        None => true,
+    };
+    Some(RepositoryLibrary {
+        name: name.to_string(),
+        group,
+        artifact,
+        version,
+        packaging: packaging.to_string(),
+        include_transitive,
+        excluded: excluded_dependencies(properties),
+        jars: library_class_roots(library, project_dir, module_dir),
+    })
+}
+
+/// `group:artifact:version`, the same three fields IntelliJ's `maven-id` keeps.
+fn parse_maven_coordinate(maven_id: &str) -> Option<(String, String, String)> {
+    let mut parts = maven_id.split(':');
+    let group = parts.next().filter(|part| !part.is_empty())?;
+    let artifact = parts.next().filter(|part| !part.is_empty())?;
+    let version = parts.next().filter(|part| !part.is_empty())?;
+    Some((group.to_string(), artifact.to_string(), version.to_string()))
+}
+
+/// An exclusion is `group:artifact`. A version, when present, is ignored.
+fn excluded_dependencies(properties: &xml::Element) -> Vec<ExcludedMavenArtifact> {
+    let Some(exclude) = properties.child("exclude") else {
+        return Vec::new();
+    };
+    exclude
+        .children_named("dependency")
+        .filter_map(|dependency| dependency.attr("maven-id"))
+        .filter_map(|maven_id| {
+            let mut parts = maven_id.split(':');
+            let group = parts.next().filter(|part| !part.is_empty())?;
+            let artifact = parts.next().filter(|part| !part.is_empty())?;
+            Some(ExcludedMavenArtifact {
+                group: group.to_string(),
+                artifact: artifact.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Resolve every `CLASSES/root[@url]` under a `<library>` element.
+fn library_class_roots(
+    library: &xml::Element,
+    project_dir: &Path,
+    module_dir: &Path,
+) -> Vec<PathBuf> {
     let Some(classes) = library.child("CLASSES") else {
         return Vec::new();
     };
     classes
         .children_named("root")
         .filter_map(|root| root.attr("url"))
-        .filter_map(|url| url_to_path(url, project_dir, project_dir))
+        .filter_map(|url| url_to_path(url, project_dir, module_dir))
         .collect()
+}
+
+fn push_repository_library(libraries: &mut Vec<RepositoryLibrary>, library: RepositoryLibrary) {
+    if let Some(existing) = libraries.iter_mut().find(|existing| {
+        existing.name == library.name
+            && existing.group == library.group
+            && existing.artifact == library.artifact
+            && existing.version == library.version
+    }) {
+        for jar in library.jars {
+            if !existing.jars.contains(&jar) {
+                existing.jars.push(jar);
+            }
+        }
+        return;
+    }
+    libraries.push(library);
 }
 
 fn language_level_to_target(level: &str) -> Option<String> {
@@ -157,7 +257,7 @@ struct ExportedDeps {
 fn parse_module(
     iml_path: &Path,
     project_dir: &Path,
-    libraries: &HashMap<String, Vec<PathBuf>>,
+    libraries: &HashMap<String, JpsLibrary>,
     project_out: Option<&Path>,
     project_target: Option<&str>,
 ) -> Result<Vec<Module>, ProbeError> {
@@ -169,17 +269,17 @@ fn parse_module(
         project_target,
         &KotlinSettings::default(),
     )
-    .map(|(modules, _)| modules)
+    .map(|(modules, _, _)| modules)
 }
 
 fn parse_module_with_exports(
     iml_path: &Path,
     project_dir: &Path,
-    libraries: &HashMap<String, Vec<PathBuf>>,
+    libraries: &HashMap<String, JpsLibrary>,
     project_out: Option<&Path>,
     project_target: Option<&str>,
     project_kotlin: &KotlinSettings,
-) -> Result<(Vec<Module>, ExportedDeps), ProbeError> {
+) -> Result<(Vec<Module>, ExportedDeps, Vec<RepositoryLibrary>), ProbeError> {
     // Listed modules may be absent from partial checkouts.
     let Some(document) = read_optional_xml(iml_path)? else {
         return Ok(Default::default());
@@ -234,6 +334,7 @@ fn parse_module_with_exports(
 
     // Order entries, partitioned by scope.
     let mut entries = Vec::new();
+    let mut module_libraries = Vec::new();
     for order in manager.children_named("orderEntry") {
         // Runtime-only entries are not part of either compilation classpath.
         if order.attr("scope") == Some("RUNTIME") {
@@ -253,27 +354,25 @@ fn parse_module_with_exports(
                 }
             }
             Some("library") => {
-                if let Some(classpath) = order.attr("name").and_then(|name| libraries.get(name)) {
+                if let Some(library) = order.attr("name").and_then(|name| libraries.get(name)) {
                     entries.push(OrderEntry {
                         test_only,
                         exported,
                         module: None,
-                        classpath: classpath.clone(),
+                        classpath: library.classpath.clone(),
                     });
                 }
             }
             Some("module-library") => {
-                let classpath = order
-                    .child("library")
-                    .and_then(|library| library.child("CLASSES"))
-                    .map(|classes| {
-                        classes
-                            .children_named("root")
-                            .filter_map(|root| root.attr("url"))
-                            .filter_map(|url| url_to_path(url, project_dir, module_dir))
-                            .collect::<Vec<_>>()
-                    })
+                let library = order.child("library");
+                let classpath = library
+                    .map(|library| library_class_roots(library, project_dir, module_dir))
                     .unwrap_or_default();
+                if let Some(mapped) =
+                    library.and_then(|library| repository_library(library, project_dir, module_dir))
+                {
+                    module_libraries.push(mapped);
+                }
                 entries.push(OrderEntry {
                     test_only,
                     exported,
@@ -366,7 +465,7 @@ fn parse_module_with_exports(
 
     let has_test = !test_roots.is_empty() || entries.iter().any(|e| e.test_only);
     if !has_test {
-        return Ok((vec![main], exports));
+        return Ok((vec![main], exports, module_libraries));
     }
 
     // Test module: compile + test-scoped.
@@ -386,7 +485,7 @@ fn parse_module_with_exports(
     test.jvm_target = jvm_target;
     test.kotlinc_args = kotlinc_args;
 
-    Ok((vec![main, test], exports))
+    Ok((vec![main, test], exports, module_libraries))
 }
 
 fn expand_exported_deps(modules: &mut [Module], exported: &HashMap<ModuleId, ExportedDeps>) {
@@ -808,10 +907,14 @@ impl JpsProvider {
     fn probe_with_jdk_tables(&self, jdk_tables: &[PathBuf]) -> Result<ProjectModel, ProbeError> {
         let settings = project_settings(&self.root)?;
         let libraries = parse_library_table(&self.root)?;
+        let mut repository_libraries = libraries
+            .values()
+            .filter_map(|library| library.repository.clone())
+            .collect::<Vec<_>>();
         let mut modules = Vec::new();
         let mut exported = HashMap::new();
         for iml in iml_paths(&self.root)? {
-            let (parsed, exports) = parse_module_with_exports(
+            let (parsed, exports, module_libraries) = parse_module_with_exports(
                 &iml,
                 &self.root,
                 &libraries,
@@ -819,12 +922,16 @@ impl JpsProvider {
                 settings.jvm_target.as_deref(),
                 &settings.kotlin,
             )?;
+            for library in module_libraries {
+                push_repository_library(&mut repository_libraries, library);
+            }
             if let Some(id) = parsed.first().and_then(|module| module.id.clone()) {
                 exported.insert(id, exports);
             }
             modules.extend(parsed);
         }
         expand_exported_deps(&mut modules, &exported);
+        repository_libraries.sort_by(|left, right| left.name.cmp(&right.name));
         let jdk_home = settings
             .sdk_name
             .as_deref()
@@ -834,6 +941,7 @@ impl JpsProvider {
             kind: ProviderKind::Jps,
             jdk_home,
             modules,
+            repository_libraries,
         })
     }
 }
@@ -877,6 +985,13 @@ mod tests {
     use super::*;
     use crate::project::model::{ModuleId, ModuleOutput, SourceRoot};
 
+    fn classpath_library(jars: Vec<PathBuf>) -> JpsLibrary {
+        JpsLibrary {
+            classpath: jars,
+            repository: None,
+        }
+    }
+
     fn app_iml() -> &'static str {
         r#"<module type="JAVA_MODULE" version="4">
              <component name="NewModuleRootManager" inherit-compiler-output="true" LANGUAGE_LEVEL="JDK_17">
@@ -906,12 +1021,15 @@ mod tests {
         let mut libraries = HashMap::new();
         libraries.insert(
             "kotlin-stdlib".to_string(),
-            vec![PathBuf::from("/m2/kotlin-stdlib.jar")],
+            classpath_library(vec![PathBuf::from("/m2/kotlin-stdlib.jar")]),
         );
-        libraries.insert("junit".to_string(), vec![PathBuf::from("/m2/junit.jar")]);
+        libraries.insert(
+            "junit".to_string(),
+            classpath_library(vec![PathBuf::from("/m2/junit.jar")]),
+        );
         libraries.insert(
             "runtime".to_string(),
-            vec![PathBuf::from("/m2/runtime.jar")],
+            classpath_library(vec![PathBuf::from("/m2/runtime.jar")]),
         );
         let project_out = tree.path("out");
 
@@ -1039,7 +1157,7 @@ mod tests {
         let mut libraries = HashMap::new();
         libraries.insert(
             "kotlin-stdlib".to_string(),
-            vec![PathBuf::from("/m2/kotlin-stdlib.jar")],
+            classpath_library(vec![PathBuf::from("/m2/kotlin-stdlib.jar")]),
         );
         let project_out = tree.path("out");
 
@@ -1931,7 +2049,132 @@ mod tests {
         );
 
         let table = parse_library_table(tree.root()).unwrap();
-        assert_eq!(table.get("kotlin-stdlib"), Some(&vec![expected]));
+        assert_eq!(
+            table.get("kotlin-stdlib").map(|library| &library.classpath),
+            Some(&vec![expected])
+        );
+        assert!(table.get("kotlin-stdlib").unwrap().repository.is_none());
         assert_eq!(table.get("Kotlin_stdlib"), None);
+    }
+
+    /// One `maven-id` maps onto every class jar. A jar path is not itself a coordinate.
+    #[test]
+    fn a_named_repository_library_maps_one_coordinate_onto_every_class_jar() {
+        let tree = crate::project::testing::TempTree::new("jps-repository-library");
+        tree.write(
+            ".idea/modules.xml",
+            r#"<project version="4">
+                 <component name="ProjectModuleManager">
+                   <modules>
+                     <module fileurl="file://$PROJECT_DIR$/app/app.iml" filepath="$PROJECT_DIR$/app/app.iml" />
+                   </modules>
+                 </component>
+               </project>"#,
+        );
+        tree.write(
+            ".idea/libraries/fleet_logback_classic.xml",
+            r#"<component name="libraryTable">
+                 <library name="fleet:logback-classic" type="repository">
+                   <properties maven-id="ch.qos.logback:logback-classic:1.3.14">
+                     <exclude>
+                       <dependency maven-id="org.slf4j:slf4j-api" />
+                       <dependency maven-id="com.sun.mail:javax.mail" />
+                     </exclude>
+                   </properties>
+                   <CLASSES>
+                     <root url="jar://$MAVEN_REPOSITORY$/ch/qos/logback/logback-classic/1.3.14/logback-classic-1.3.14.jar!/" />
+                     <root url="jar://$MAVEN_REPOSITORY$/ch/qos/logback/logback-core/1.3.14/logback-core-1.3.14.jar!/" />
+                   </CLASSES>
+                 </library>
+               </component>"#,
+        );
+        tree.write(
+            ".idea/libraries/local_util.xml",
+            r#"<component name="libraryTable">
+                 <library name="local-util">
+                   <CLASSES>
+                     <root url="jar://$PROJECT_DIR$/libs/util.jar!/" />
+                   </CLASSES>
+                 </library>
+               </component>"#,
+        );
+        tree.write(
+            "app/app.iml",
+            r#"<module>
+                 <component name="NewModuleRootManager">
+                   <content url="file://$MODULE_DIR$">
+                     <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+                   </content>
+                   <orderEntry type="library" name="fleet:logback-classic" level="project" />
+                   <orderEntry type="library" name="local-util" level="project" />
+                   <orderEntry type="module-library">
+                     <library name="debugger-agent" type="repository">
+                       <properties maven-id="org.jetbrains.intellij.deps:debugger-agent:1.9" include-transitive-deps="false" packaging="jar" />
+                       <CLASSES>
+                         <root url="jar://$MAVEN_REPOSITORY$/org/jetbrains/intellij/deps/debugger-agent/1.9/debugger-agent-1.9.jar!/" />
+                       </CLASSES>
+                     </library>
+                   </orderEntry>
+                 </component>
+               </module>"#,
+        );
+        let home = home_directory().unwrap_or_default();
+        let repository = home.join(".m2/repository");
+        let classic =
+            repository.join("ch/qos/logback/logback-classic/1.3.14/logback-classic-1.3.14.jar");
+        let core = repository.join("ch/qos/logback/logback-core/1.3.14/logback-core-1.3.14.jar");
+        let agent = repository
+            .join("org/jetbrains/intellij/deps/debugger-agent/1.9/debugger-agent-1.9.jar");
+
+        let model = JpsProvider::new(tree.root())
+            .probe_with_jdk_tables(&[])
+            .unwrap();
+        assert_eq!(
+            model.repository_libraries.len(),
+            2,
+            "{:?}",
+            model.repository_libraries
+        );
+        let logback = model
+            .repository_libraries
+            .iter()
+            .find(|library| library.name == "fleet:logback-classic")
+            .unwrap();
+        assert_eq!(logback.group, "ch.qos.logback");
+        assert_eq!(logback.artifact, "logback-classic");
+        assert_eq!(logback.version, "1.3.14");
+        assert!(logback.include_transitive);
+        assert_eq!(
+            logback.excluded,
+            vec![
+                ExcludedMavenArtifact {
+                    group: "org.slf4j".to_string(),
+                    artifact: "slf4j-api".to_string(),
+                },
+                ExcludedMavenArtifact {
+                    group: "com.sun.mail".to_string(),
+                    artifact: "javax.mail".to_string(),
+                },
+            ]
+        );
+        assert_eq!(logback.jars, vec![classic.clone(), core.clone()]);
+        let agent_library = model
+            .repository_libraries
+            .iter()
+            .find(|library| library.name == "debugger-agent")
+            .unwrap();
+        assert_eq!(agent_library.artifact, "debugger-agent");
+        assert!(!agent_library.include_transitive);
+        assert_eq!(agent_library.jars, vec![agent.clone()]);
+        assert!(model
+            .repository_libraries
+            .iter()
+            .all(|library| library.name != "local-util"));
+
+        let app = model.module(&ModuleId::new("app", "main")).unwrap();
+        assert_eq!(
+            app.classpath,
+            vec![classic, core, tree.path("libs/util.jar"), agent]
+        );
     }
 }

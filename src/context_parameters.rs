@@ -24,3 +24,34 @@ pub enum CapturedContextKind {
     /// Legacy `context(Box)`.
     LegacyReceiver,
 }
+
+/// The selected storage of a context binding. The resolver certifies this while the exact
+/// selected value and every crossed classifier boundary are still in scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContextBindingSource {
+    ProvenLocalDepth {
+        shadow_depth: usize,
+        /// Absent only for genuine nonlexical receiver aliases or reconstructed synthetic reads.
+        lexical_binding: Option<u32>,
+    },
+    RequiredClassCapture {
+        lexical_binding: u32,
+    },
+}
+
+impl ContextBindingSource {
+    /// Normalize a lexical coordinate across a nested callable. A required class capture is
+    /// already an exact lexical identity and has no depth to reinterpret.
+    pub(crate) fn outside_nested_bindings(self, count: usize) -> Option<Self> {
+        match self {
+            Self::ProvenLocalDepth {
+                shadow_depth,
+                lexical_binding,
+            } => Some(Self::ProvenLocalDepth {
+                shadow_depth: shadow_depth.checked_sub(count)?,
+                lexical_binding,
+            }),
+            Self::RequiredClassCapture { .. } => Some(self),
+        }
+    }
+}

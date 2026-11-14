@@ -171,6 +171,7 @@ impl Runtime {
             booleans,
         };
         self.boxes.forms.insert(identity, form);
+        self.box_instances(form);
         self.implement_box_members(module, form)?;
         Ok(Some(form))
     }

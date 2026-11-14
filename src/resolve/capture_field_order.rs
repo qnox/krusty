@@ -7,6 +7,7 @@
 //! The final check records kotlinc's first-use order and which captures need storage. No pending
 //! semantic type may reach checked FIR.
 
+use super::capture_storage::local_class_capture_expressions;
 use super::context_capture::context_argument_sites;
 use super::scope::PathRoot;
 use super::CheckerScope;
@@ -158,10 +159,11 @@ pub(super) fn order_receivers_by_first_use(
 /// not a use of a captured `b`.
 ///
 /// Field identities do not change: `order[position]` is the capture field kotlinc puts at that
-/// position of the constructor prefix and the field table. Receivers keep their positions. A
-/// capture without a use means the class body was not completely checked in this visit; such a
-/// visit publishes no order, and checked FIR rejects a local class whose captures never received
-/// one.
+/// position of the constructor prefix and the field table. An implicit receiver the body uses
+/// takes its place in that order, beside the values. An enclosing instance, and an implicit
+/// receiver this visit did not see used, keeps its field. A value capture without a use means
+/// the class body was not completely checked in this visit; such a visit publishes no order, and
+/// checked FIR rejects a local class whose captures never received one.
 ///
 /// The same walk decides storage. kotlinc's constructor code (the primary constructor's defaults and
 /// super-constructor arguments, the property initializers and `init` blocks, and each secondary
@@ -228,7 +230,7 @@ impl super::Checker<'_> {
             return false;
         }
         if let Some(mut captures) = self.discovered_anonymous_captures.remove(&declaration) {
-            self.extend_anonymous_superclass_captures(scope, declaration, &mut captures);
+            self.extend_anonymous_selected_captures(scope, declaration, &mut captures);
             self.discovered_anonymous_captures
                 .insert(declaration, captures);
         }
@@ -289,8 +291,8 @@ impl super::Checker<'_> {
         layouts.stored.insert(declaration, stored);
     }
 
-    /// Anonymous classes use the same checked storage demands while retaining their established
-    /// capture order. They have a declaration identity, not a local-declaration statement.
+    /// Anonymous classes use the same checked storage demands and the same first-use constructor
+    /// order as local classes. They have a declaration identity, not a local-declaration statement.
     pub(super) fn publish_anonymous_capture_layout(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -320,13 +322,14 @@ impl super::Checker<'_> {
             );
             return;
         }
-        if first_use_order(captures, &uses.fields).is_none() {
-            return;
-        }
+        // A capture with no recorded use keeps its field position. The construction was checked
+        // against this vector, so that vector is the order when first use cannot place every value.
+        let order = first_use_order(captures, &uses.fields).unwrap_or_else(|| {
+            (0..captures.len())
+                .map(|field| u32::try_from(field).expect("too many anonymous captures"))
+                .collect()
+        });
         let stored = stored_captures(class, captures, &uses.stored);
-        let order = (0..captures.len())
-            .map(|field| u32::try_from(field).expect("too many captures"))
-            .collect();
         let construction_reads = uses.construction_reads;
         let layouts = &mut self.class_capture_uses.layouts;
         layouts.construction_reads.extend(construction_reads);
@@ -368,7 +371,10 @@ impl super::Checker<'_> {
             })
             .collect::<Vec<_>>();
         let span = self.file.stmt_spans[statement.0 as usize];
-        let context_uses = self.context_argument_captures(function, &delegated);
+        let context_uses = self.context_argument_captures(
+            &callable_roots(&function.params, &function.body),
+            &delegated,
+        );
         let mut uses = FirstUses {
             checker: self,
             statement: Some(statement),
@@ -383,6 +389,8 @@ impl super::Checker<'_> {
             fields: Vec::new(),
             included: std::iter::once(Inclusion::LocalFunction(statement)).collect(),
             context_uses,
+            receiver_expression_uses: HashMap::default(),
+            delegate_reads: HashMap::default(),
             unordered: None,
             construction: false,
             stored: HashSet::default(),
@@ -412,15 +420,14 @@ impl super::Checker<'_> {
             .insert(statement, order);
     }
 
-    /// The captures of `function` that each expression in it passes as an implicit context
-    /// argument or receiver. `delegated` maps a capture's binding (flow identity) to the capture;
-    /// each passed value is the flow identity the checker recorded when it selected the value.
+    /// The captures that each expression under `roots` passes as an implicit context argument or
+    /// receiver. `delegated` maps a capture's binding (flow identity) to the capture; each passed
+    /// value is the flow identity the checker recorded when it selected the value.
     fn context_argument_captures(
         &self,
-        function: &FunDecl,
+        roots: &[ExprId],
         delegated: &[(u32, u32)],
     ) -> HashMap<ExprId, Vec<u32>> {
-        let roots = callable_roots(&function.params, &function.body);
         let sources = SelectedContextSources {
             expr_types: &self.expr_types,
             implicit_receiver_selections: &self.implicit_receiver_selections,
@@ -430,7 +437,7 @@ impl super::Checker<'_> {
             stmt_lowers: &self.stmt_lowers,
         };
         let mut uses = HashMap::<ExprId, Vec<u32>>::default();
-        for (site, identity) in context_argument_sites(self.file, sources, &roots) {
+        for (site, identity) in context_argument_sites(self.file, sources, roots) {
             if let Some(&(_, capture)) = delegated.iter().find(|(binding, _)| *binding == identity)
             {
                 uses.entry(site).or_default().push(capture);
@@ -552,14 +559,22 @@ enum StorageUse {
 }
 
 fn first_use_order(captures: &[AnonymousObjectCapture], uses: &[u32]) -> Option<Box<[u32]>> {
-    let values = captures
+    // Value captures and the implicit receivers this walk actually met share one order. An
+    // enclosing instance, and a receiver the walk did not meet, stays in its field.
+    let movable = captures
         .iter()
         .enumerate()
-        .filter(|(_, capture)| is_value_capture(capture))
+        .filter(|(field, capture)| {
+            is_value_capture(capture)
+                || (matches!(
+                    capture.source,
+                    AnonymousObjectCaptureSource::ImplicitReceiver { .. }
+                ) && uses.iter().any(|used| *used as usize == *field))
+        })
         .map(|(field, _)| field)
         .collect::<Vec<_>>();
-    let mut ranked = Vec::with_capacity(values.len());
-    for &field in &values {
+    let mut ranked = Vec::with_capacity(movable.len());
+    for &field in &movable {
         let first_use = uses.iter().position(|used| *used as usize == field)?;
         ranked.push((first_use, field));
     }
@@ -567,7 +582,7 @@ fn first_use_order(captures: &[AnonymousObjectCapture], uses: &[u32]) -> Option<
     let mut order = (0..captures.len())
         .map(|field| u32::try_from(field).expect("too many local-class captures"))
         .collect::<Box<[u32]>>();
-    for (&position, (_, field)) in values.iter().zip(ranked) {
+    for (&position, (_, field)) in movable.iter().zip(ranked) {
         order[position] = u32::try_from(field).expect("too many local-class captures");
     }
     Some(order)
@@ -617,6 +632,9 @@ enum Closure<'w> {
     Construction(Vec<ExprId>, CaptureReadNamespace),
     /// A local function or classifier, included where it is used.
     Included(Inclusion),
+    /// Dispatch receiver of a local delegated-property accessor. The accessor is a local
+    /// function: its captures follow the enclosing closure's own reads, as kotlinc's do.
+    DelegateDispatch(u32),
 }
 
 /// Whose captures a walk orders.
@@ -662,6 +680,13 @@ struct FirstUses<'w, 'c> {
     included: HashSet<Inclusion>,
     /// The captures each expression passes as an implicit context argument or receiver.
     context_uses: HashMap<ExprId, Vec<u32>>,
+    /// Implicit-receiver captures read directly at an expression, by the receiver's declaration
+    /// role. A local delegate's dispatch receiver is not here: that accessor is included at the
+    /// property read.
+    receiver_expression_uses: HashMap<ExprId, Vec<u32>>,
+    /// Local delegated-property reads in this class, and the dispatch-receiver capture the
+    /// accessor passes.
+    delegate_reads: HashMap<ExprId, u32>,
     /// An included local function whose captures have no complete first-use order.
     unordered: Option<UnorderedCapture>,
     /// Whether the walk is in the local class's own constructor code, outside any nested closure.
@@ -728,6 +753,44 @@ impl<'w, 'c> FirstUses<'w, 'c> {
                 Some((local.flow_identity, u32::try_from(field).ok()?))
             })
             .collect();
+        // An implicit context argument passes a captured value without spelling it; the checker
+        // recorded the binding it selected, which identifies the capture.
+        let mut captured_flows = captures
+            .iter()
+            .zip(bindings)
+            .enumerate()
+            .filter(|(_, (capture, _))| {
+                capture.source == AnonymousObjectCaptureSource::LexicalValue
+            })
+            .filter_map(|(field, (capture, binding))| {
+                let (local, _) =
+                    checker.lexical_binding_by_identity(scope, &capture.name, (*binding)?)?;
+                Some((local.flow_identity, u32::try_from(field).ok()?))
+            })
+            .collect::<Vec<_>>();
+        // A context parameter captured as a receiver has a flow identity on its value binding.
+        // The calls that pass it name that identity, not the receiver role.
+        for (field, capture) in captures.iter().enumerate() {
+            let AnonymousObjectCaptureSource::ImplicitReceiver { .. } = capture.source else {
+                continue;
+            };
+            let Some(super::ReceiverDeclarationRole::ContextParameter(declaration)) =
+                capture.receiver_role
+            else {
+                continue;
+            };
+            let Some(identity) = checker.context_parameter_flow_identity(scope, declaration) else {
+                continue;
+            };
+            let Some(field) = u32::try_from(field).ok() else {
+                continue;
+            };
+            captured_flows.push((identity, field));
+        }
+        let context_uses = checker
+            .context_argument_captures(&local_class_capture_expressions(class), &captured_flows);
+        let receiver_expression_uses = receiver_expression_uses(checker, scope, captures);
+        let delegate_reads = delegated_dispatch_reads(checker.file, checker, class, captures);
         Self {
             checker,
             statement,
@@ -741,7 +804,9 @@ impl<'w, 'c> FirstUses<'w, 'c> {
             lexical_reads,
             fields: Vec::new(),
             included: HashSet::default(),
-            context_uses: HashMap::default(),
+            context_uses,
+            receiver_expression_uses,
+            delegate_reads,
             unordered: None,
             construction: false,
             stored: HashSet::default(),
@@ -784,6 +849,7 @@ impl<'w, 'c> FirstUses<'w, 'c> {
                     }
                 }
             }
+            Closure::DelegateDispatch(field) => self.stored_use(field, &mut closure_uses),
         }
         closure_uses.nested.sort_by_key(|(position, _)| *position);
         for field in closure_uses.direct {
@@ -1218,10 +1284,27 @@ impl<'w, 'c> FirstUses<'w, 'c> {
                 (None, _) => {}
             }
         }
-        // An implicit context argument is a use of the value it passes, where the call is.
+        // An implicit context argument is a use of the value it passes, where the call is. In
+        // constructor code it reads the constructor parameter, like a direct read of the name.
         let context = self.context_uses.get(&expression).cloned();
         for capture in context.into_iter().flatten() {
-            self.stored_use(capture, uses);
+            if self.construction {
+                uses.direct.push(capture);
+            } else {
+                self.stored_use(capture, uses);
+            }
+        }
+        let receivers = self.receiver_expression_uses.get(&expression).cloned();
+        for capture in receivers.into_iter().flatten() {
+            if self.construction {
+                uses.direct.push(capture);
+            } else {
+                self.stored_use(capture, uses);
+            }
+        }
+        if let Some(&field) = self.delegate_reads.get(&expression) {
+            uses.nested
+                .push((position, Closure::DelegateDispatch(field)));
         }
         let function = match checker.expr_lowers.get(&expression) {
             Some(
@@ -1303,4 +1386,162 @@ impl<'w, 'c> FirstUses<'w, 'c> {
             self.expression(child, uses);
         }
     }
+}
+
+/// Implicit-receiver reads whose declaration role is one of `captures`, at the expression that
+/// reads the receiver. A local delegate's `by` expression is the accessor's body, not a direct
+/// read of the enclosing closure, so its dispatch receiver is left out.
+fn receiver_expression_uses(
+    checker: &super::Checker<'_>,
+    scope: &CheckerScope<'_>,
+    captures: &[AnonymousObjectCapture],
+) -> HashMap<ExprId, Vec<u32>> {
+    let mut uses: HashMap<ExprId, Vec<u32>> = HashMap::default();
+    for (&expression, &identity) in &checker.implicit_receiver_identities {
+        let Some(role) = scope.implicit_receiver_role(identity) else {
+            continue;
+        };
+        if delegate_dispatch_matches(checker, expression, captures, Some(role)) {
+            continue;
+        }
+        let Some(field) = captures.iter().position(|capture| {
+            matches!(
+                capture.source,
+                AnonymousObjectCaptureSource::ImplicitReceiver { .. }
+            ) && capture.receiver_role == Some(role)
+        }) else {
+            continue;
+        };
+        let Some(field) = u32::try_from(field).ok() else {
+            continue;
+        };
+        uses.entry(expression).or_default().push(field);
+    }
+    uses
+}
+
+/// Property reads of a local delegated property whose accessor's dispatch receiver is a capture
+/// of `captures`. The read is where the accessor is included.
+fn delegated_dispatch_reads(
+    file: &crate::ast::File,
+    checker: &super::Checker<'_>,
+    class: &ClassDecl,
+    captures: &[AnonymousObjectCapture],
+) -> HashMap<ExprId, u32> {
+    let mut delegates = Vec::new();
+    let mut names = Vec::new();
+    for root in local_class_capture_expressions(class) {
+        scan_delegate_sites(file, root, &mut delegates, &mut names);
+    }
+    let mut reads: HashMap<ExprId, u32> = HashMap::default();
+    for (expression, name, span) in names {
+        let Some((_, delegate, _)) = delegates
+            .iter()
+            .filter(|(property, _, declaration)| *property == name && declaration.hi <= span.lo)
+            .max_by_key(|(_, _, declaration)| declaration.lo)
+        else {
+            continue;
+        };
+        let Some(field) = delegate_dispatch_field(checker, *delegate, captures) else {
+            continue;
+        };
+        reads.insert(expression, field);
+    }
+    reads
+}
+
+fn scan_delegate_sites(
+    file: &crate::ast::File,
+    expression: ExprId,
+    delegates: &mut Vec<(String, ExprId, Span)>,
+    names: &mut Vec<(ExprId, String, Span)>,
+) {
+    if let (Expr::Name(name), Some(span)) = (file.expr(expression), file.expr_span(expression)) {
+        names.push((expression, name.clone(), span));
+    }
+    let mut children = Vec::new();
+    let mut statements = Vec::new();
+    file.any_child_expr(
+        expression,
+        &mut |child| {
+            children.push(child);
+            false
+        },
+        &mut |statement| {
+            statements.push(statement);
+            false
+        },
+    );
+    for statement in statements {
+        if let Stmt::LocalDelegate { name, delegate, .. } = file.stmt(statement) {
+            delegates.push((
+                name.clone(),
+                *delegate,
+                file.stmt_spans[statement.0 as usize],
+            ));
+        }
+        let mut nested = Vec::new();
+        file.any_child_stmt(statement, &mut |child| {
+            nested.push(child);
+            false
+        });
+        for child in nested {
+            scan_delegate_sites(file, child, delegates, names);
+        }
+    }
+    for child in children {
+        scan_delegate_sites(file, child, delegates, names);
+    }
+}
+
+fn delegate_dispatch_matches(
+    checker: &super::Checker<'_>,
+    expression: ExprId,
+    captures: &[AnonymousObjectCapture],
+    role: Option<super::ReceiverDeclarationRole>,
+) -> bool {
+    let Some(target) = checker.delegate_getvalue_targets.get(&expression) else {
+        return false;
+    };
+    let super::delegated_properties::DelegateGetValueTarget::MemberExtension {
+        dispatch_receiver_role,
+        dispatch_declaration,
+        ..
+    } = target
+    else {
+        return false;
+    };
+    captures.iter().any(|capture| {
+        delegate_dispatch_capture(capture, dispatch_declaration, dispatch_receiver_role)
+            && role.is_none_or(|role| capture.receiver_role == Some(role))
+    })
+}
+
+fn delegate_dispatch_field(
+    checker: &super::Checker<'_>,
+    delegate: ExprId,
+    captures: &[AnonymousObjectCapture],
+) -> Option<u32> {
+    let target = checker.delegate_getvalue_targets.get(&delegate)?;
+    let super::delegated_properties::DelegateGetValueTarget::MemberExtension {
+        dispatch_receiver_role,
+        dispatch_declaration,
+        ..
+    } = target
+    else {
+        return None;
+    };
+    let field = captures.iter().position(|capture| {
+        delegate_dispatch_capture(capture, dispatch_declaration, dispatch_receiver_role)
+    })?;
+    u32::try_from(field).ok()
+}
+
+fn delegate_dispatch_capture(
+    capture: &AnonymousObjectCapture,
+    declaration: &Option<super::ReceiverDeclarationRole>,
+    role: &crate::fir::FirCapturedReceiver,
+) -> bool {
+    declaration.is_some_and(|declaration| capture.receiver_role == Some(declaration))
+        || capture.receiver.as_ref() == Some(role)
 }

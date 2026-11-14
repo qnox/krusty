@@ -510,7 +510,9 @@ kotlinc, `javac`, and `java` that the suite runs on every test are pooled. A cac
 start kotlinc. A miss uses a persistent compiler JVM (`KRUSTY_SERVER_POOL` caps the pool). `box()`
 and Java drivers use persistent `BoxRunner` and `JavaRunner` JVMs; `javac` runs once per runner
 source to compile that helper, then in-process. The conformance box runner is a separate persistent
-JVM per test thread, also compiled once.
+JVM per test thread, also compiled once. `BoxRunner` gives one `box()` call
+`KRUSTY_BOX_TIMEOUT_MS` (10s by default), and the conformance box runner gives one case
+`KRUSTY_BOX_CASE_TIMEOUT_MS` (2s by default).
 
 The `bytecode_parity_e2e` batch compares normalized disassembly for its named fixtures. Each
 fixture receives its own package on both compiler inputs, so independent declarations such as
