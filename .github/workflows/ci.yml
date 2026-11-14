@@ -45,11 +45,15 @@ jobs:
         echo "KRUSTY_DEPS_CACHE=$GITHUB_WORKSPACE/target/cache/krusty-deps" >> "$GITHUB_ENV"
         echo "KRUSTY_CLASS_DUMP_COMPILE_MISSING=1" >> "$GITHUB_ENV"
     - name: check exact machine source and test compilation
+      timeout-minutes: 30
       run: |
         set -euo pipefail
         git diff --exit-code 9a990eaff HEAD -- . ':!.github/workflows/ci.yml'
         git rev-parse HEAD > compiler-source.txt
-        cargo check --profile gate -p krusty --lib --tests 2>&1 | tee machine-check.log
+        {
+          cargo check --profile gate -p krusty --lib --tests
+          cargo test --profile gate -p krusty --test conformance --no-run
+        } 2>&1 | tee machine-check.log
     - name: upload compiler diagnostics
       if: always()
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -60,17 +64,17 @@ jobs:
           compiler-source.txt
         if-no-files-found: error
     - name: run complete JVM coroutine fixtures
-      timeout-minutes: 11
+      timeout-minutes: 6
       continue-on-error: true
       run: |
         mkdir -p target/coroutine-target-results
         set +e
-        timeout --signal=TERM --kill-after=15s 600s env KRUSTY_BOX_ONLY=suspendStateMachine cargo test --profile gate -p krusty --test conformance -- --exact kotlin_box_ir_jvm_conformance::kotlin_codegen_box_conformance --test-threads=1 2>&1 | tee target/coroutine-target-results/jvm.log
+        timeout --signal=TERM --kill-after=15s 300s env KRUSTY_BOX_ONLY=suspendStateMachine cargo test --profile gate -p krusty --test conformance -- --exact kotlin_box_ir_jvm_conformance::kotlin_codegen_box_conformance --test-threads=1 2>&1 | tee target/coroutine-target-results/jvm.log
         status=${PIPESTATUS[0]}
         printf '%s\n' "$status" > target/coroutine-target-results/jvm.exit
         exit 0
     - name: run complete Native coroutine fixtures
-      timeout-minutes: 11
+      timeout-minutes: 6
       continue-on-error: true
       env:
         KRUSTY_NATIVE_BOX_ONLY: suspendStateMachine
@@ -79,12 +83,12 @@ jobs:
       run: |
         mkdir -p target/coroutine-target-results
         set +e
-        timeout --signal=TERM --kill-after=15s 600s cargo test --profile gate -p krusty --test conformance -- --exact kotlin_box_native_conformance::kotlin_codegen_box_native_conformance --test-threads=1 2>&1 | tee target/coroutine-target-results/native.log
+        timeout --signal=TERM --kill-after=15s 300s cargo test --profile gate -p krusty --test conformance -- --exact kotlin_box_native_conformance::kotlin_codegen_box_native_conformance --test-threads=1 2>&1 | tee target/coroutine-target-results/native.log
         status=${PIPESTATUS[0]}
         printf '%s\n' "$status" > target/coroutine-target-results/native.exit
         exit 0
     - name: run complete wasm-js coroutine fixtures
-      timeout-minutes: 11
+      timeout-minutes: 6
       continue-on-error: true
       env:
         KRUSTY_WASM_JS_BOX_ONLY: suspendStateMachine
@@ -93,12 +97,12 @@ jobs:
       run: |
         mkdir -p target/coroutine-target-results
         set +e
-        timeout --signal=TERM --kill-after=15s 600s cargo test --profile gate -p krusty --test conformance -- --exact kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_js_conformance --test-threads=1 2>&1 | tee target/coroutine-target-results/wasm-js.log
+        timeout --signal=TERM --kill-after=15s 300s cargo test --profile gate -p krusty --test conformance -- --exact kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_js_conformance --test-threads=1 2>&1 | tee target/coroutine-target-results/wasm-js.log
         status=${PIPESTATUS[0]}
         printf '%s\n' "$status" > target/coroutine-target-results/wasm-js.exit
         exit 0
     - name: run complete wasm-wasi coroutine fixtures
-      timeout-minutes: 11
+      timeout-minutes: 6
       continue-on-error: true
       env:
         KRUSTY_WASM_WASI_BOX_ONLY: suspendStateMachine
@@ -107,7 +111,7 @@ jobs:
       run: |
         mkdir -p target/coroutine-target-results
         set +e
-        timeout --signal=TERM --kill-after=15s 600s cargo test --profile gate -p krusty --test conformance -- --exact kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_wasi_conformance --test-threads=1 2>&1 | tee target/coroutine-target-results/wasm-wasi.log
+        timeout --signal=TERM --kill-after=15s 300s cargo test --profile gate -p krusty --test conformance -- --exact kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_wasi_conformance --test-threads=1 2>&1 | tee target/coroutine-target-results/wasm-wasi.log
         status=${PIPESTATUS[0]}
         printf '%s\n' "$status" > target/coroutine-target-results/wasm-wasi.exit
         exit 0
