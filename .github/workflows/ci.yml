@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 6ac93d65417cbc28a844e6a12dd9ab97aed58f53
+          ref: cba56d6a25f42bedbebd6bd69791adb2d761a046
           fetch-depth: 1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
@@ -41,7 +41,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence
-          source=6ac93d65417cbc28a844e6a12dd9ab97aed58f53
+          source=cba56d6a25f42bedbebd6bd69791adb2d761a046
           actual=$(git rev-parse HEAD)
           test "$actual" = "$source"
           git diff --exit-code "$source" HEAD -- .
