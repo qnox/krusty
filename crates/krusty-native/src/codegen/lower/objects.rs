@@ -2641,9 +2641,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         {
             return self.runtime_call(symbol, &[], any(), &[]);
         }
-        if super::super::super::intrinsics::is_stateless_runtime_object(classifier) {
-            return Ok(Some(self.builder.ins().iconst(types::I64, 0)));
-        }
         // Another file's object is read through the entry its file exports.
         if self.file.ir.class_id_by_name(classifier).is_none() {
             let instance = krusty::backend::instance_links::InstanceEntry::Object(classifier);

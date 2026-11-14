@@ -154,6 +154,8 @@ pub struct Lowered {
     pub abi: Vec<super::super::c_abi::Record>,
     /// What a later file of the module extending a class of this one reads of it.
     pub laid_out: Vec<(TypeName, LaidOutClass)>,
+    /// Canonical object declarations whose actual exported getter symbol was defined.
+    pub defined_objects: Vec<krusty::backend::instance_links::ObjectDeclaration>,
 }
 
 /// Build the ISA for `target`. Non-PIC, because the output is a static executable at a fixed
@@ -429,6 +431,35 @@ pub fn lower_file(
     let records = lowering.laid_out_records()?;
     let comdat_objects = std::mem::take(&mut lowering.comdat_objects);
     let mut product = module.finish();
+    let mut defined_objects = Vec::new();
+    for declaration in dependency_signatures.object_declarations() {
+        let instance =
+            krusty::backend::instance_links::InstanceEntry::Object(declaration.classifier);
+        let Some((_, entry)) = dependency_signatures
+            .instance_entries()
+            .iter()
+            .find(|(key, _)| key == &instance)
+        else {
+            continue;
+        };
+        let Some(export) = dependency_exports.get(entry) else {
+            continue;
+        };
+        if !export.signature.parameters().is_empty()
+            || export.signature.result() != Ty::obj_name(declaration.classifier)
+        {
+            continue;
+        }
+        let Some(symbol) = product.object.symbol_id(export.symbol.as_bytes()) else {
+            continue;
+        };
+        if matches!(
+            product.object.symbol(symbol).section,
+            cranelift_object::object::write::SymbolSection::Section(_)
+        ) {
+            defined_objects.push(declaration.clone());
+        }
+    }
     for data in comdat_objects {
         use cranelift_object::object::write::{Comdat, SymbolSection};
         let symbol = product.data_symbol(data);
@@ -449,6 +480,7 @@ pub fn lower_file(
         defines_entry,
         abi,
         laid_out: records,
+        defined_objects,
     })
 }
 

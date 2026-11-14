@@ -11,6 +11,7 @@ use crate::klib_libraries::{KlibCalleeOrigin, KlibDeclarationBodies};
 use crate::libraries::{
     KlibBodyCallable, KlibClassStorage, KlibDeclarationSignature, KlibDependencyCallable, TypeKind,
 };
+use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{
     KlibIrArguments, KlibIrBody, KlibIrExprId, KlibIrExprKind, KlibIrField, KlibIrFunction,
     KlibIrMember, KlibIrStatement,
@@ -379,18 +380,7 @@ fn initialization_callees(
     plan: &ClassInitialization<'_, '_>,
     bodies: &KlibDeclarationBodies,
 ) -> Vec<KlibDependencyCallable> {
-    let mut roots = Vec::new();
-    if let Some(superclass) = &plan.superclass {
-        roots.extend(superclass.arguments.iter().copied());
-    }
-    for step in &plan.steps {
-        match step {
-            InitializationStep::Field { value, .. } => roots.push(*value),
-            InitializationStep::Block(statements) => {
-                roots.extend(plan.header.arena.statement_expression_roots(statements));
-            }
-        }
-    }
+    let roots = initialization_roots(plan);
     let superclass = plan
         .superclass
         .as_ref()
@@ -400,7 +390,6 @@ fn initialization_callees(
         .arena
         .emitted_callable_symbols_from(roots, super::EMITTED_CALL_FORMS)
         .into_iter()
-        // The class's dispatched members are always emitted with it, as dispatch reaches them.
         .chain(plan.dispatched.iter().map(|function| &function.base.symbol))
         .filter_map(|symbol| match &symbol.signature {
             KlibIrSignature::Public(signature) => {
@@ -417,9 +406,60 @@ fn initialization_callees(
                 KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
             }
         })
-        // A materialized superclass is initialized first, through its own constructor.
         .chain(superclass)
         .collect()
+}
+
+/// Object reads of the exact same admitted ordinary constructor initialization.
+pub(super) fn constructor_initialization_objects(
+    selected: KlibBodyCallable<'_>,
+    bodies: &KlibDeclarationBodies,
+    callees: &super::KlibCalleeFacts<'_>,
+) -> Result<Vec<KlibPublicIdSignature>, KlibBodyDeclineReason> {
+    Ok(plan(selected, bodies, callees)?
+        .map(|plan| initialization_objects(&plan))
+        .unwrap_or_default())
+}
+
+pub(super) fn object_initialization_objects(
+    class: &crate::libraries::KlibBodyClassContract,
+    bodies: &KlibDeclarationBodies,
+    callees: &super::KlibCalleeFacts<'_>,
+) -> Result<Vec<KlibPublicIdSignature>, KlibBodyDeclineReason> {
+    let Some(plan) = object_plan(class, bodies, callees)? else {
+        return Ok(Vec::new());
+    };
+    Ok(initialization_objects(&plan))
+}
+
+fn initialization_objects(plan: &ClassInitialization<'_, '_>) -> Vec<KlibPublicIdSignature> {
+    plan.header
+        .arena
+        .emitted_object_symbols_from(initialization_roots(plan), super::EMITTED_CALL_FORMS)
+        .into_iter()
+        .filter_map(|symbol| match &symbol.signature {
+            KlibIrSignature::Public(signature) if symbol.kind == KlibIrSymbolKind::Class => {
+                Some(signature.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn initialization_roots(plan: &ClassInitialization<'_, '_>) -> Vec<KlibIrExprId> {
+    let mut roots = Vec::new();
+    if let Some(superclass) = &plan.superclass {
+        roots.extend(superclass.arguments.iter().copied());
+    }
+    for step in &plan.steps {
+        match step {
+            InitializationStep::Field { value, .. } => roots.push(*value),
+            InitializationStep::Block(statements) => {
+                roots.extend(plan.header.arena.statement_expression_roots(statements));
+            }
+        }
+    }
+    roots
 }
 
 /// The superclass constructor the primary constructor `identity` serializes a delegation to,

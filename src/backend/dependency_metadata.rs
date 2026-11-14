@@ -215,6 +215,7 @@ pub struct DependencyExportSignatures {
     /// The entry a target realized answering each object instance and enum constant of this
     /// file (see `super::instance_links`).
     instance_entries: Vec<(super::instance_links::InstanceEntry, FunId)>,
+    object_declarations: Vec<super::instance_links::ObjectDeclaration>,
 }
 
 /// One constant of an enum class, as a read of it names it: the enum and the constant's name.
@@ -241,6 +242,29 @@ pub(crate) enum ExportedPropertyAccessor {
 }
 
 impl DependencyExportSignatures {
+    pub(crate) fn record_object_declaration(
+        &mut self,
+        declaration: super::instance_links::ObjectDeclaration,
+    ) -> Result<(), &'static str> {
+        if let Some(old) = self
+            .object_declarations
+            .iter()
+            .find(|old| old.classifier == declaration.classifier)
+        {
+            return if old == &declaration {
+                Ok(())
+            } else {
+                Err("conflicting object class declarations")
+            };
+        }
+        self.object_declarations.push(declaration);
+        Ok(())
+    }
+
+    pub fn object_declarations(&self) -> &[super::instance_links::ObjectDeclaration] {
+        &self.object_declarations
+    }
+
     pub(crate) fn property_accessors(
         &self,
     ) -> &[(ExportedPropertyAccessor, KlibDependencyCallable)] {
@@ -497,6 +521,37 @@ mod tests {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         }
+    }
+
+    #[test]
+    fn object_declarations_do_not_promise_an_instance_definition_or_allocation() {
+        let classifier = type_name("demo/Object");
+        let declaration = super::super::instance_links::ObjectDeclaration {
+            classifier,
+            identity: crate::libraries::KlibClassIdentity {
+                module: "producer".into(),
+                signature: crate::metadata::id_signature::KlibPublicIdSignature::classifier(
+                    classifier,
+                ),
+            },
+        };
+        let mut exports = super::DependencyExportSignatures::default();
+        exports
+            .record_object_declaration(declaration.clone())
+            .unwrap();
+        exports
+            .record_object_declaration(declaration.clone())
+            .unwrap();
+        assert_eq!(exports.object_declarations(), &[declaration.clone()]);
+        assert!(exports.instance_entries().is_empty());
+        assert!(exports.constructors().is_empty());
+        assert!(exports.callables().is_empty());
+        let mut conflicting = declaration;
+        conflicting.identity.module = "other-producer".into();
+        assert_eq!(
+            exports.record_object_declaration(conflicting),
+            Err("conflicting object class declarations")
+        );
     }
 
     #[test]

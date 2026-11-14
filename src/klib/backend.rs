@@ -644,6 +644,26 @@ fn record_class_function_exports(
             classes: &chain,
             native_interop_library: false,
         };
+        if source.is_object || source.is_companion {
+            let (class, parents) = chain
+                .split_last()
+                .ok_or("an object without its metadata class")?;
+            exports
+                .record_object_declaration(crate::backend::instance_links::ObjectDeclaration {
+                    classifier: source.fq_name_id(),
+                    identity: crate::libraries::KlibClassIdentity {
+                        module: module_name.to_owned(),
+                        signature: crate::metadata::id_signature::metadata_class_signature(
+                            MetadataContainer {
+                                classes: parents,
+                                ..container
+                            },
+                            *class,
+                        ),
+                    },
+                })
+                .map_err(str::to_owned)?;
+        }
         for (declaration, origin) in class.functions.iter().zip(&record.method_origins) {
             if declaration.visibility == crate::types::Visibility::Private {
                 continue;

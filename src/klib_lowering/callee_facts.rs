@@ -26,6 +26,9 @@ pub struct KlibCalleeFacts<'a> {
     target_classifiers: Option<&'a dyn Fn(crate::types::TypeName) -> bool>,
     /// The call edge facts of members realized outside the unit, by declaration.
     member_edges: HashMap<KlibDependencyCallable, CallEdge>,
+    /// Exact object declarations admitted by the emitted-use closure before lowering begins.
+    objects: HashMap<crate::types::TypeName, &'a crate::libraries::KlibBodyClassContract>,
+    published_objects: HashSet<(crate::types::TypeName, crate::libraries::KlibClassIdentity)>,
 }
 
 #[derive(Clone)]
@@ -55,6 +58,43 @@ pub(crate) struct CallEdge {
 }
 
 impl<'a> KlibCalleeFacts<'a> {
+    pub(crate) fn with_objects(
+        mut self,
+        objects: impl IntoIterator<Item = &'a crate::libraries::KlibBodyClassContract>,
+        published: impl IntoIterator<
+            Item = (crate::types::TypeName, crate::libraries::KlibClassIdentity),
+        >,
+    ) -> Result<Self, super::decline::KlibBodyDeclineReason> {
+        for object in objects {
+            if self
+                .objects
+                .insert(object.classifier, object)
+                .is_some_and(|old| old != object)
+            {
+                return Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
+                    "conflicting exact object declarations".into(),
+                ));
+            }
+        }
+        self.published_objects.extend(published);
+        Ok(self)
+    }
+
+    pub(super) fn object_is_published(
+        &self,
+        object: &crate::libraries::KlibBodyClassContract,
+    ) -> bool {
+        self.published_objects
+            .contains(&(object.classifier, object.identity()))
+    }
+
+    pub(super) fn object(
+        &self,
+        classifier: crate::types::TypeName,
+    ) -> Option<&'a crate::libraries::KlibBodyClassContract> {
+        self.objects.get(&classifier).copied()
+    }
+
     /// The call edge facts of the members realized outside the unit, frozen with its closure.
     pub(crate) fn with_member_edges(
         mut self,
@@ -228,6 +268,21 @@ impl<'a> KlibCalleeFacts<'a> {
         )
     }
 
+    pub(crate) fn constructor_initialization_objects(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<
+        Vec<crate::metadata::id_signature::KlibPublicIdSignature>,
+        super::decline::KlibBodyDeclineReason,
+    > {
+        super::class_initialization::constructor_initialization_objects(
+            self.initialized_class_member(identity)?,
+            bodies,
+            self,
+        )
+    }
+
     fn initialized_class_member(
         &self,
         identity: &KlibDependencyCallable,
@@ -288,6 +343,17 @@ impl<'a> KlibCalleeFacts<'a> {
         bodies: &crate::klib_libraries::KlibDeclarationBodies,
     ) -> Result<Option<Vec<KlibDependencyCallable>>, super::decline::KlibBodyDeclineReason> {
         super::class_initialization::object_initialization_callees(class, bodies, self)
+    }
+
+    pub(crate) fn object_initialization_objects(
+        &self,
+        class: &crate::libraries::KlibBodyClassContract,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<
+        Vec<crate::metadata::id_signature::KlibPublicIdSignature>,
+        super::decline::KlibBodyDeclineReason,
+    > {
+        super::class_initialization::object_initialization_objects(class, bodies, self)
     }
 
     /// The members dispatch reaches of the object `class`.

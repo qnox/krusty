@@ -295,7 +295,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             object,
             operands,
             answer,
-            |body, object, index, references| {
+            |body, _object, index, references| {
                 let function = runtime[index].1;
                 let produced =
                     body.runtime_call(function, &vec![any(); references.len()], any(), references)?;

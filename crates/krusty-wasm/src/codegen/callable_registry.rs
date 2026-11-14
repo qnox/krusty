@@ -20,6 +20,15 @@ use krusty::ir::{Callee, ExprId, IrExpr, IrFile};
 use super::super::encode::Module;
 use super::lower::Unsupported;
 
+fn object_getter_is_defined(module: &Module, function: u32) -> bool {
+    module
+        .defined_function_type(function)
+        .and_then(|signature| module.func_signature(signature))
+        .is_some_and(|(params, results)| {
+            params.is_empty() && results == [super::super::objects::REFERENCE]
+        })
+}
+
 /// Whether checked common IR authenticated a singleton *member* call edge. The receiver
 /// expression's syntax is deliberately irrelevant: generated dependency support may forward the
 /// singleton through a parameter or local while retaining the exact per-expression fact. The
@@ -51,6 +60,7 @@ pub(super) struct CallableRegistry {
     /// The entry answering each object's instance and each enum constant, linked by the
     /// instance (see `krusty::backend::instance_links`).
     instances: ModuleLinks<InstanceEntry, u32>,
+    defined_objects: HashMap<krusty::backend::instance_links::ObjectDeclaration, u32>,
 }
 
 pub(super) struct FileCallTargets {
@@ -71,6 +81,42 @@ pub(super) struct FileCallTargets {
 }
 
 impl CallableRegistry {
+    pub(super) fn record_defined_objects(
+        &mut self,
+        exports: &DependencyExportSignatures,
+        module: &Module,
+    ) {
+        for declaration in exports.object_declarations() {
+            let instance = InstanceEntry::Object(declaration.classifier);
+            // A previous module's getter cannot turn a header-only declaration in this file
+            // into a newly published producer. The defining file must export the real entry.
+            if !exports
+                .instance_entries()
+                .iter()
+                .any(|(entry, _)| entry == &instance)
+            {
+                continue;
+            }
+            if let Some(function) = self
+                .instances
+                .defined(&InstanceEntry::Object(declaration.classifier))
+            {
+                if object_getter_is_defined(module, function) {
+                    self.defined_objects.insert(declaration.clone(), function);
+                }
+            }
+        }
+    }
+
+    pub(super) fn has_defined_object(
+        &self,
+        declaration: &krusty::backend::instance_links::ObjectDeclaration,
+        module: &Module,
+    ) -> bool {
+        self.defined_objects
+            .get(declaration)
+            .is_some_and(|&function| object_getter_is_defined(module, function))
+    }
     /// Begin (or continue) one source module. `CallableId` belongs to one analysis and therefore
     /// cannot cross this boundary; exact module-qualified KLIB identities remain program-wide.
     pub(super) fn enter_source_module(&mut self, module_name: &str) {
@@ -661,6 +707,75 @@ mod tests {
     };
     use krusty::metadata::semantic::KotlinType;
     use krusty::types::{type_name, Ty};
+
+    #[test]
+    fn object_publication_requires_a_defined_getter_with_the_exact_frame_and_identity() {
+        let mut module = Module::default();
+        let mut registry = CallableRegistry::default();
+        let KlibDeclarationSignature::Public(class_signature) = signature("Object") else {
+            unreachable!()
+        };
+        let declaration = krusty::backend::instance_links::ObjectDeclaration {
+            classifier: type_name("demo/Object"),
+            identity: krusty::libraries::KlibClassIdentity {
+                module: "producer".into(),
+                signature: class_signature,
+            },
+        };
+        assert!(!registry.has_defined_object(&declaration, &module));
+        let function = module.declare();
+        registry
+            .defined_objects
+            .insert(declaration.clone(), function);
+        assert!(!registry.has_defined_object(&declaration, &module));
+        let ty = module.func_type(Vec::new(), vec![crate::objects::REFERENCE]);
+        let mut code = Code::default();
+        code.unreachable().end();
+        module.define(
+            function,
+            Function {
+                ty,
+                locals: Vec::new(),
+                code,
+            },
+        );
+        assert!(registry.has_defined_object(&declaration, &module));
+        let mut foreign = declaration.clone();
+        foreign.identity.module = "other-producer".into();
+        assert!(!registry.has_defined_object(&foreign, &module));
+        let wrong = module.declare();
+        let ty = module.func_type(
+            vec![crate::objects::REFERENCE],
+            vec![crate::objects::REFERENCE],
+        );
+        let mut code = Code::default();
+        code.unreachable().end();
+        module.define(
+            wrong,
+            Function {
+                ty,
+                locals: Vec::new(),
+                code,
+            },
+        );
+        assert!(!object_getter_is_defined(&module, wrong));
+        let wrong_result = module.declare();
+        let ty = module.func_type(Vec::new(), Vec::new());
+        let mut code = Code::default();
+        code.end();
+        module.define(
+            wrong_result,
+            Function {
+                ty,
+                locals: Vec::new(),
+                code,
+            },
+        );
+        assert!(!object_getter_is_defined(&module, wrong_result));
+        // Merely repeating declaration metadata cannot publish a preexisting getter.
+        registry.record_defined_objects(&DependencyExportSignatures::default(), &module);
+        assert!(!registry.has_defined_object(&foreign, &module));
+    }
 
     #[test]
     fn a_recorded_singleton_member_edge_does_not_require_literal_receiver_syntax() {

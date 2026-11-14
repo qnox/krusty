@@ -302,6 +302,15 @@ impl Module {
         *slot = Some(function);
     }
 
+    /// A reserved index or an import is not a defined producer body.
+    pub(super) fn defined_function_type(&self, index: u32) -> Option<u32> {
+        let local = (index as usize).checked_sub(self.imports.len())?;
+        self.functions
+            .get(local)?
+            .as_ref()
+            .map(|function| function.ty)
+    }
+
     /// Whether a reserved function index already has its physical body. Imported functions are
     /// complete by definition; a local declaration remains incomplete until [`Module::define`].
     pub(super) fn function_is_defined(&self, index: u32) -> bool {

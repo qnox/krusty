@@ -9,12 +9,23 @@ use crate::libraries::{
     SemanticPlatform,
 };
 use std::collections::VecDeque;
+mod object_uses;
+pub(super) use object_uses::source_objects;
+use object_uses::{ObjectClosure, ObjectObligations};
 
 /// The declarations a unit's closure freezes, and the call edge facts of its members realized
 /// outside the unit.
 pub(super) struct FrozenClosure {
     pub(super) declarations: Vec<(crate::fir::ExternalCallableId, ExternalCallableRealization)>,
     pub(super) member_edges: HashMap<KlibDependencyCallable, crate::klib_lowering::CallEdge>,
+    pub(super) objects: Vec<crate::libraries::KlibBodyClassContract>,
+    pub(super) published_objects:
+        Vec<(crate::types::TypeName, crate::libraries::KlibClassIdentity)>,
+}
+
+pub(super) struct Roots<'a> {
+    pub(super) callables: &'a [KlibBodyCallable<'a>],
+    pub(super) objects: &'a [crate::libraries::KlibBodyClassContract],
 }
 
 /// Freeze declaration contracts along the exact producer graph before ordinary body lowering.
@@ -24,13 +35,14 @@ pub(super) fn declarations(
     platform: &dyn SemanticPlatform,
     bodies: &KlibDeclarationBodies,
     intrinsics: &KlibIntrinsicFacts,
-    roots: &[KlibBodyCallable<'_>],
+    roots: Roots<'_>,
     externals: &HashMap<KlibDependencyCallable, super::EmittedDependencyCallable>,
     capabilities: &super::DependencyLeafCapabilities<'_>,
     requires_ordinary: bool,
 ) -> Result<FrozenClosure, String> {
     // Each callee, with the materialized class whose member's body calls it.
     let mut pending = roots
+        .callables
         .iter()
         .map(|root| (root.identity().clone(), None))
         .collect::<VecDeque<_>>();
@@ -40,10 +52,24 @@ pub(super) fn declarations(
     // Declaration-only evidence already pushed, which the closure never walks.
     let mut declared = HashSet::default();
     // The objects whose initialization the closure already walks.
-    let mut objects = HashSet::default();
+    let mut objects = ObjectClosure::default();
     // Members of a materialized class that dispatch reaches: their bodies are emitted even where
     // a call of one folds to a common operation, as a virtual call runs the body.
     let mut dispatched = HashSet::default();
+    for class in roots.objects {
+        objects.admit(
+            class.clone(),
+            platform,
+            bodies,
+            capabilities,
+            &mut ObjectObligations {
+                pending: &mut pending,
+                dispatched: &mut dispatched,
+                declarations: &mut declarations,
+                declared: &mut declared,
+            },
+        )?;
+    }
     while let Some((identity, member_class)) = pending.pop_front() {
         if !visited.insert(identity.clone()) {
             continue;
@@ -57,6 +83,18 @@ pub(super) fn declarations(
                 && !externals.contains_key(&identity)
                 && crate::klib_lowering::is_private_class_member(bodies, &identity, class)
         }) {
+            objects.body(
+                &identity,
+                platform,
+                bodies,
+                capabilities,
+                &mut ObjectObligations {
+                    pending: &mut pending,
+                    dispatched: &mut dispatched,
+                    declarations: &mut declarations,
+                    declared: &mut declared,
+                },
+            )?;
             pending.extend(
                 bodies
                     .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
@@ -68,6 +106,18 @@ pub(super) fn declarations(
         // A top-level function private to its file has no provider declaration either; only a
         // body of its own module calls it, and it is emitted with that body.
         if let crate::libraries::KlibDeclarationSignature::FileLocal { .. } = identity.declaration {
+            objects.body(
+                &identity,
+                platform,
+                bodies,
+                capabilities,
+                &mut ObjectObligations {
+                    pending: &mut pending,
+                    dispatched: &mut dispatched,
+                    declarations: &mut declarations,
+                    declared: &mut declared,
+                },
+            )?;
             pending.extend(
                 bodies
                     .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
@@ -101,6 +151,18 @@ pub(super) fn declarations(
         {
             Some(declaration) => declaration,
             None if raw_header_capability && known_target.is_none() => {
+                objects.body(
+                    &identity,
+                    platform,
+                    bodies,
+                    capabilities,
+                    &mut ObjectObligations {
+                        pending: &mut pending,
+                        dispatched: &mut dispatched,
+                        declarations: &mut declarations,
+                        declared: &mut declared,
+                    },
+                )?;
                 pending.extend(
                     bodies
                         .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
@@ -144,6 +206,23 @@ pub(super) fn declarations(
                         .into_iter()
                         .map(|callee| (callee, member_class.clone())),
                 );
+            }
+            for signature in facts
+                .constructor_initialization_objects(&identity, bodies)
+                .map_err(|reason| format!("an invalid class initializer object read: {reason:?}"))?
+            {
+                objects.serialized(
+                    (&identity.module, &signature),
+                    platform,
+                    bodies,
+                    capabilities,
+                    &mut ObjectObligations {
+                        pending: &mut pending,
+                        dispatched: &mut dispatched,
+                        declarations: &mut declarations,
+                        declared: &mut declared,
+                    },
+                )?;
             }
             dispatched.extend(
                 facts
@@ -227,6 +306,18 @@ pub(super) fn declarations(
             return Err(format!("a transitive KLIB body has no supported ordinary declaration contract: {identity:?}"));
         }
         if emits_body {
+            objects.body(
+                &identity,
+                platform,
+                bodies,
+                capabilities,
+                &mut ObjectObligations {
+                    pending: &mut pending,
+                    dispatched: &mut dispatched,
+                    declarations: &mut declarations,
+                    declared: &mut declared,
+                },
+            )?;
             // A member of an ordinary class is called on an instance its primary constructor
             // created, which materializes the class.
             if let Some(primary) = selected
@@ -245,39 +336,19 @@ pub(super) fn declarations(
             // A member of an object reads the instance the object's own initialization created,
             // which materializes the object once with every member dispatch reaches.
             if let Some(class) = member_object(platform, &identity) {
-                if objects.insert(class.classifier) {
-                    if let Some(initialization) =
-                        object_initialization(platform, bodies, &facts, &class)?
-                    {
-                        pending.extend(
-                            initialization
-                                .into_iter()
-                                .map(|callee| (callee, Some(class.clone()))),
-                        );
-                        dispatched.extend(
-                            facts
-                                .object_dispatched_members(&class, bodies)
-                                .map_err(|reason| {
-                                    format!("an invalid object member: {reason:?}")
-                                })?,
-                        );
-                        for overridden in facts
-                            .object_overridden_declarations(&class, bodies)
-                            .map_err(|reason| format!("an invalid object override: {reason:?}"))?
-                        {
-                            if declared.insert(overridden.clone()) {
-                                declarations.push(
-                                    platform.external_callable_by_dependency(&overridden).ok_or_else(
-                                        || {
-                                            format!(
-                                                "an overridden KLIB declaration has no provider: {overridden:?}"
-                                            )
-                                        },
-                                    )?,
-                                );
-                            }
-                        }
-                    }
+                if !objects.classes.iter().any(|known| known == &class) {
+                    objects.admit(
+                        class.clone(),
+                        platform,
+                        bodies,
+                        capabilities,
+                        &mut ObjectObligations {
+                            pending: &mut pending,
+                            dispatched: &mut dispatched,
+                            declarations: &mut declarations,
+                            declared: &mut declared,
+                        },
+                    )?;
                 }
             }
             let member_class = selected
@@ -296,6 +367,8 @@ pub(super) fn declarations(
     Ok(FrozenClosure {
         declarations,
         member_edges,
+        objects: objects.classes,
+        published_objects: objects.published,
     })
 }
 

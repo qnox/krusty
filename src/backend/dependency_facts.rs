@@ -623,6 +623,7 @@ pub enum DependencyFactError {
     UnknownProperty(ExternalPropertyId),
     InvalidPropertyConstant(ExternalPropertyId),
     InvalidSingletonDispatch(crate::ir::ExprId),
+    InvalidObjectDeclaration(TypeName),
     /// Two plugin selections of one runtime declaration append different parameters to it.
     PluginRuntimeAbi(ExternalCallableId),
 }
@@ -642,12 +643,22 @@ pub struct CheckedBackendCallables {
     properties: HashMap<ExternalPropertyId, BackendPropertyFact>,
     singleton_dispatches: HashMap<crate::ir::ExprId, SingletonDispatch>,
     singleton_selections: HashMap<ExternalCallableId, Vec<SingletonEdge>>,
+    /// Declaration evidence for object values, including reads which select no member.
+    /// Only the emitted-use walk may turn one of these facts into an initialization root.
+    object_declarations: HashMap<TypeName, crate::libraries::KlibBodyClassContract>,
     /// The runtime declarations native plugins selected at the handoff for their generated code,
     /// with the parameters a plugin's transform appended to each.
     plugin_runtime: HashMap<ExternalCallableId, Box<[Ty]>>,
 }
 
 impl CheckedBackendCallables {
+    pub(crate) fn object_declaration(
+        &self,
+        classifier: TypeName,
+    ) -> Option<&crate::libraries::KlibBodyClassContract> {
+        self.object_declarations.get(&classifier)
+    }
+
     /// Whether native plugins selected `identity` at the handoff for the code they generate.
     pub fn is_plugin_runtime_callable(&self, identity: ExternalCallableId) -> bool {
         self.plugin_runtime.contains_key(&identity)
@@ -723,6 +734,16 @@ impl CheckedBackendCallables {
     ) -> Result<Self, DependencyFactError> {
         let referenced = references::referenced_dependencies(ir);
         let mut facts = Self::default();
+        for expression in &ir.exprs {
+            if let crate::ir::IrExpr::SingletonValue { classifier } = expression {
+                if let Some(contract) = provider.klib_body_class_contract(*classifier) {
+                    if contract.classifier != *classifier || !contract.is_object() {
+                        return Err(DependencyFactError::InvalidObjectDeclaration(*classifier));
+                    }
+                    facts.object_declarations.insert(*classifier, contract);
+                }
+            }
+        }
         let mut callable = |identity| provider.external_callable(identity);
         for property in referenced.properties {
             let realization = provider

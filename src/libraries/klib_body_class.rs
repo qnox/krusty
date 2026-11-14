@@ -31,6 +31,12 @@ pub struct KlibBodyClassContract {
 }
 
 impl KlibBodyClassContract {
+    pub(crate) fn identity(&self) -> super::KlibClassIdentity {
+        super::KlibClassIdentity {
+            module: self.module.clone(),
+            signature: self.signature.clone(),
+        }
+    }
     /// Whether this frozen class contract names the supplied module-qualified owner.
     pub fn matches_owner(&self, module: &str, classifier: TypeName) -> bool {
         self.module == module && self.classifier == classifier

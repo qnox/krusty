@@ -512,7 +512,7 @@ impl ClassModel {
                     .itable
                     .iter()
                     .enumerate()
-                    .find(|(index, slot)| self.slot_is_callable_name(slot, ir))
+                    .find(|(_, slot)| self.slot_is_callable_name(slot, ir))
                     .map(|(index, _)| CallableNameSlot::Interface(index as u32))
             })
     }

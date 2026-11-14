@@ -188,32 +188,7 @@ impl KlibDeclarationBodies {
         signature: &KlibPublicIdSignature,
         role: Option<crate::libraries::KlibAccessorRole>,
     ) -> Result<Option<KlibClassMember<'_>>, &'static str> {
-        let Some(&library) = self.modules.get(&identity.module) else {
-            return Ok(None);
-        };
-        let mut found = None;
-        for tree in self.libraries[library].trees() {
-            let mut pending = vec![&tree.declaration];
-            while let Some(member) = pending.pop() {
-                let class = match member {
-                    KlibIrMember::Class(id) => tree.arena.class(*id),
-                    KlibIrMember::EnumEntry(entry) => {
-                        let Some(id) = entry.class else { continue };
-                        tree.arena.class(id)
-                    }
-                    _ => continue,
-                };
-                pending.extend(class.members.iter());
-                if class.base.symbol.signature != KlibIrSignature::Public(signature.clone()) {
-                    continue;
-                }
-                if found.is_some() {
-                    return Err("duplicate serialized class headers");
-                }
-                found = Some((&tree.arena, class));
-            }
-        }
-        let Some((arena, class)) = found else {
+        let Some((arena, class)) = self.class_header(&identity.module, signature)? else {
             return Ok(None);
         };
         let target = ir_signature(&identity.declaration);
@@ -257,6 +232,71 @@ impl KlibDeclarationBodies {
             class,
             function: arena.function(*function),
         }))
+    }
+
+    /// A class declaration is resolved in the same manifest graph as a body call, without
+    /// treating a class signature as a callable identity. A declaration in the body module wins;
+    /// otherwise there must be exactly one producer of that class in the dependency closure.
+    pub(crate) fn class_origin(
+        &self,
+        body_module: &str,
+        signature: &KlibPublicIdSignature,
+    ) -> Result<Option<crate::libraries::KlibClassIdentity>, &'static str> {
+        if self.class_header(body_module, signature)?.is_some() {
+            return Ok(Some(crate::libraries::KlibClassIdentity {
+                module: body_module.to_owned(),
+                signature: signature.clone(),
+            }));
+        }
+        let mut origin = None;
+        for module in self.body_provider_modules(body_module) {
+            if module == body_module {
+                continue;
+            }
+            if self.class_header(&module, signature)?.is_some() {
+                let candidate = crate::libraries::KlibClassIdentity {
+                    module,
+                    signature: signature.clone(),
+                };
+                if origin.replace(candidate).is_some() {
+                    return Err("several producer modules declare one class");
+                }
+            }
+        }
+        Ok(origin)
+    }
+
+    fn class_header(
+        &self,
+        module: &str,
+        signature: &KlibPublicIdSignature,
+    ) -> Result<Option<(&KlibIrArena, &KlibIrClass)>, &'static str> {
+        let Some(&library) = self.modules.get(module) else {
+            return Ok(None);
+        };
+        let mut found = None;
+        for tree in self.libraries[library].trees() {
+            let mut pending = vec![&tree.declaration];
+            while let Some(member) = pending.pop() {
+                let class = match member {
+                    KlibIrMember::Class(id) => tree.arena.class(*id),
+                    KlibIrMember::EnumEntry(entry) => {
+                        let Some(id) = entry.class else { continue };
+                        tree.arena.class(id)
+                    }
+                    _ => continue,
+                };
+                pending.extend(class.members.iter());
+                if class.base.symbol.signature != KlibIrSignature::Public(signature.clone()) {
+                    continue;
+                }
+                if found.is_some() {
+                    return Err("duplicate serialized class headers");
+                }
+                found = Some((&tree.arena, class));
+            }
+        }
+        Ok(found)
     }
 
     /// The class that declares the enum entry `entry` read by a body of `body_module`, resolved
@@ -687,27 +727,7 @@ impl KlibDeclarationBodies {
         identity: &KlibDependencyCallable,
         forms: crate::metadata::klib_ir::tree::EmittedCallForms,
     ) -> Vec<KlibDependencyCallable> {
-        let Some((trees, arena, function)) = self.function_with_trees(identity) else {
-            return Vec::new();
-        };
-        let mut symbols = arena.emitted_callable_symbols(function, forms);
-        // A file-local class the body constructs, an object literal's among them, is
-        // materialized with the body, every member included, since dispatch can run any of them.
-        // A private class of the same file is its own declaration tree, so its members are read
-        // in the arena that serializes the class.
-        let mut classes = crate::fx_hash::HashSet::default();
-        let mut next = 0;
-        while let Some(symbol) = symbols.get(next).copied() {
-            next += 1;
-            if let Some((class_arena, class)) = constructed_local_class(trees, symbol) {
-                if classes.insert(&class.base.symbol) {
-                    symbols.extend(class_arena.emitted_callable_symbols_from(
-                        class_arena.class_member_roots(class),
-                        forms,
-                    ));
-                }
-            }
-        }
+        let (symbols, _) = self.emitted_body_uses(identity, forms);
         symbols
             .into_iter()
             .filter_map(|symbol| declaration_signature(&symbol.signature))
@@ -718,6 +738,55 @@ impl KlibDeclarationBodies {
                 },
             )
             .collect()
+    }
+
+    /// Class symbols read by the structurally emitted body. These are declaration uses, never
+    /// callable identities or allocation promises.
+    pub(crate) fn emitted_body_objects(
+        &self,
+        identity: &KlibDependencyCallable,
+        forms: crate::metadata::klib_ir::tree::EmittedCallForms,
+    ) -> Vec<KlibPublicIdSignature> {
+        self.emitted_body_uses(identity, forms)
+            .1
+            .into_iter()
+            .filter_map(|symbol| match (&symbol.kind, &symbol.signature) {
+                (
+                    crate::metadata::klib_ir::KlibIrSymbolKind::Class,
+                    KlibIrSignature::Public(class),
+                ) => Some(class.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn emitted_body_uses<'a>(
+        &'a self,
+        identity: &KlibDependencyCallable,
+        forms: crate::metadata::klib_ir::tree::EmittedCallForms,
+    ) -> (Vec<&'a KlibIrSymbol>, Vec<&'a KlibIrSymbol>) {
+        let Some((trees, arena, function)) = self.function_with_trees(identity) else {
+            return (Vec::new(), Vec::new());
+        };
+        let (mut symbols, mut objects) = arena.emitted_function_uses(function, forms);
+        // A file-local class the body constructs, an object literal's among them, is
+        // materialized with the body, every member included, since dispatch can run any of them.
+        // A private class of the same file is its own declaration tree, so its members are read
+        // in the arena that serializes the class.
+        let mut classes = crate::fx_hash::HashSet::default();
+        let mut next = 0;
+        while let Some(symbol) = symbols.get(next).copied() {
+            next += 1;
+            if let Some((class_arena, class)) = constructed_local_class(trees, symbol) {
+                if classes.insert(&class.base.symbol) {
+                    let (calls, reads) = class_arena
+                        .emitted_uses_from_roots(class_arena.class_member_roots(class), forms);
+                    symbols.extend(calls);
+                    objects.extend(reads);
+                }
+            }
+        }
+        (symbols, objects)
     }
 
     /// Whether `identity` is an executable dependency-support root: its own serialized body has a
@@ -1140,6 +1209,81 @@ mod tests {
                 KlibIrStatement::Expression(initialize),
             ])),
         }
+    }
+
+    fn object_trees() -> KlibIrModuleTrees {
+        let mut arena = KlibIrArena::default();
+        let class = arena.push_class(KlibIrClass {
+            base: KlibIrDeclarationBase {
+                symbol: class_symbol("fixture", "Object"),
+                origin: "DEFINED".into(),
+                flags: 0,
+                annotations: Vec::new(),
+            },
+            name: "Object".into(),
+            this_receiver: None,
+            type_parameters: Vec::new(),
+            supertypes: Vec::new(),
+            members: Vec::new(),
+            value_class_representation: None,
+            sealed_subclasses: Vec::new(),
+        });
+        KlibIrModuleTrees::from_trees(vec![crate::metadata::klib_ir::KlibIrDeclarationTree {
+            arena,
+            declaration: KlibIrMember::Class(class),
+        }])
+        .unwrap()
+    }
+
+    #[test]
+    fn object_class_origins_are_exact_and_manifest_scoped() {
+        let KlibIrSignature::Public(signature) = class_symbol("fixture", "Object").signature else {
+            unreachable!()
+        };
+        let bodies = |own: bool, dependencies: Vec<String>| {
+            KlibDeclarationBodies::from_body_libraries(vec![
+                KlibBodyLibrary::new(
+                    "body".into(),
+                    dependencies,
+                    if own {
+                        object_trees()
+                    } else {
+                        KlibIrModuleTrees::default()
+                    },
+                ),
+                KlibBodyLibrary::new("first".into(), Vec::new(), object_trees()),
+                KlibBodyLibrary::new("second".into(), Vec::new(), object_trees()),
+            ])
+            .unwrap()
+        };
+        assert_eq!(
+            bodies(false, vec!["first".into()])
+                .class_origin("body", &signature)
+                .unwrap(),
+            Some(crate::libraries::KlibClassIdentity {
+                module: "first".into(),
+                signature: signature.clone()
+            })
+        );
+        assert_eq!(
+            bodies(false, Vec::new())
+                .class_origin("body", &signature)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            bodies(false, vec!["first".into(), "second".into()]).class_origin("body", &signature),
+            Err("several producer modules declare one class")
+        );
+        assert_eq!(
+            bodies(true, vec!["first".into(), "second".into()])
+                .class_origin("body", &signature)
+                .unwrap(),
+            Some(crate::libraries::KlibClassIdentity {
+                module: "body".into(),
+                signature
+            })
+        );
     }
 
     #[test]
