@@ -517,6 +517,20 @@ mod tests {
         let text = fs::read_to_string(&path).expect("read KLIB body handoff");
         assert!(text.contains("record_checked"));
         assert!(!text.contains("record_dependency_support"));
+
+        let roots = source_path("src/compiler/dependency_body_emission/emitted_roots.rs");
+        let text = fs::read_to_string(&roots).expect("read KLIB emitted roots");
+        assert!(text.contains("klib_dependency_member_call_edge"));
+        for forbidden in [
+            "SymbolResolver",
+            "symbol_resolver::",
+            "member_declarations_in_hierarchy(",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "KLIB body planning must consume checked member edge facts: {forbidden}"
+            );
+        }
     }
 
     #[test]
