@@ -60,6 +60,7 @@ enum CheckedApplicationSite {
 /// header list by ordinal.
 #[derive(Debug, Default, PartialEq)]
 pub(super) struct CheckedAnnotationApplications {
+    retentions: HashMap<TypeName, crate::types::AnnotationRetention>,
     sites: HashMap<CheckedApplicationSite, Box<[crate::types::ResolvedAnnotation]>>,
     /// The folded defaults of a source annotation class's elements, by class declaration, in
     /// declaration order. An element without a default has no entry.
@@ -90,7 +91,7 @@ impl CheckedAnnotationApplications {
     }
 
     pub(super) fn is_empty(&self) -> bool {
-        self.sites.is_empty() && self.element_defaults.is_empty()
+        self.sites.is_empty() && self.element_defaults.is_empty() && self.retentions.is_empty()
     }
 
     pub(super) fn storage_payload_bytes(&self) -> usize {
@@ -112,7 +113,11 @@ impl CheckedAnnotationApplications {
                     + std::mem::size_of_val::<[(String, crate::types::AnnotationValue)]>(defaults)
             })
             .sum::<usize>();
-        sites + defaults
+        sites
+            + defaults
+            + self.retentions.len()
+                * (std::mem::size_of::<TypeName>()
+                    + std::mem::size_of::<crate::types::AnnotationRetention>())
     }
 }
 
@@ -369,6 +374,33 @@ impl ResolvedModuleIndex {
         self.type_aliases
             .values_mut()
             .map(|header| &mut header.expansion_spelling)
+    }
+
+    /// Retention already selected by annotation checking, including dependency annotation classes.
+    pub(crate) fn publish_checked_annotation_retention(
+        &mut self,
+        classifier: TypeName,
+        retention: crate::types::AnnotationRetention,
+    ) {
+        let existing = self
+            .checked_annotation_applications
+            .retentions
+            .entry(classifier)
+            .or_insert(retention);
+        assert_eq!(
+            *existing, retention,
+            "checked applications of one annotation agree on retention"
+        );
+    }
+
+    pub(crate) fn checked_annotation_retention(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::types::AnnotationRetention> {
+        self.checked_annotation_applications
+            .retentions
+            .get(&classifier)
+            .copied()
     }
 
     pub fn declaration_annotations(&self, declaration: DeclarationId) -> &[TypeName] {

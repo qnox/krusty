@@ -249,8 +249,7 @@ fn forwarders(ir: &IrFile, c: &krusty::ir::IrClass, env: &EmitEnv) -> Vec<Inheri
                 env.dependency_callables,
                 crate::declared_jvm_default::of_class(c, env.jvm_default),
             )?;
-            forwarder.annotations =
-                declaration_annotations::selected(ir, default, &forwarder, env)?;
+            forwarder.annotations = declaration_annotations::selected(default, env)?;
             Some(forwarder)
         })
         .collect()

@@ -63,6 +63,9 @@ pub(crate) fn publish_checked_declaration_annotations(
             fragment: SourceFragmentMode::DeclarationAnnotations,
             streamed_cache: None,
         });
+        for (classifier, retention) in info.applied_annotations.retention_facts() {
+            index.publish_checked_annotation_retention(classifier, retention);
+        }
         let mut checked = Vec::new();
         for &(internal, declaration) in &declarations {
             let Decl::Class(class) = file.decl(declaration) else {

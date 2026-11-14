@@ -25,6 +25,7 @@ pub mod module_links;
 pub mod property_entries;
 pub mod range_constructions;
 mod source_class_members;
+pub use source_class_members::SourceMemberAnnotations;
 pub mod value_classes;
 
 pub use constructor_selection::selected_constructor;

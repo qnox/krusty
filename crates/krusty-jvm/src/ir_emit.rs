@@ -486,6 +486,7 @@ pub(super) struct EmitEnv<'a> {
     /// `Signature` attributes. Declaration-site variance is a Kotlin fact; spelling it as JVM
     /// use-site wildcards is owned entirely by this emitter.
     signature_symbols: &'a dyn BackendClassifierSource,
+    source_member_annotations: &'a krusty::backend::SourceMemberAnnotations,
     /// Provider-normalized JVM facts for dependency identities already selected into common IR.
     dependency_callables: &'a krusty::backend::CheckedBackendCallables,
     /// Exact invocation-owner facts for both the stable module/dependency model and classifiers
@@ -1006,44 +1007,10 @@ pub(crate) fn emit_all_with_checked_classifiers(
     opts: &EmitOptions,
     run: &EmitRun,
 ) -> Option<Vec<(String, Vec<u8>)>> {
-    let env = EmitEnv {
-        facade_class,
-        multifile_facade: opts.multifile_facade.as_deref(),
-        bodies: &bytecode_inline_call::ModuleClassBodies::new(bodies, run),
-        run,
-        continuation_metadata: facts.metadata.continuations,
-        emit_time_machines: facts.metadata.emit_time_machines,
-        suspended_result_returns: facts.metadata.suspended_result_returns,
-        intrinsic_probe_continuations: facts.metadata.intrinsic_probe_continuations,
-        bridge_adaptations: facts.metadata.bridge_adaptations,
-        function_argument_arrays: facts.metadata.function_argument_arrays,
-        override_results: facts.metadata.override_results,
-        collection_method_entry_barriers: facts.metadata.collection_method_entry_barriers,
-        collection_members: facts.metadata.collection_members,
-        signature_symbols: facts.signature_symbols,
-        dependency_callables: facts.dependency_callables,
-        dispatch_classifiers: std::rc::Rc::new(
-            crate::member_dispatch::CheckedDispatchClassifiers::new(ir, facts.signature_symbols),
-        ),
-        jvm_default: opts.jvm_default,
-        lambda_modes: opts.lambda_modes,
-        java_parameters: opts.java_parameters,
-        inline_string_concat: opts.inline_string_concat,
-        inline_scopes_numbers: opts.inline_scopes_numbers,
-        metadata_stamp: opts.metadata_stamp(),
-        property_realizations: facts.property_realizations,
-        property_reference_realizations: facts.property_reference_realizations,
-        sam_wrapper_realizations: facts.sam_wrapper_realizations,
-        local_delegate_access: facts.local_delegate_access,
-        default_call_operands: facts.default_call_operands,
-        inner_classes: crate::inner_classes::InnerClasses::new(
-            ir,
-            facts.metadata.override_results,
-            facade,
-            opts.lambda_modes,
-        ),
-    };
-    emit_all_with_class_meta(ir, facade, &env, facts.metadata.facade, opts, &|_| None)
+    let metadata = facts.metadata.facade;
+    let bodies = bytecode_inline_call::ModuleClassBodies::new(bodies, run);
+    let env = facts.environment(ir, (facade_class, facade), &bodies, opts, run);
+    emit_all_with_class_meta(ir, facade, &env, metadata, opts, &|_| None)
 }
 
 /// `class_meta` may supply per-class `@kotlin.Metadata` keyed by the class's internal name. This
@@ -2897,7 +2864,7 @@ fn emit_interface_class(
             continue;
         }
         let f = &ir.functions[fid as usize];
-        if !bodies_on_interface
+        if emits_default_impls
             && default_impls::emit_annotation_carrier(
                 ir,
                 fid,
@@ -6522,6 +6489,7 @@ mod invariant_tests {
                     intrinsic_probe_continuations,
                 },
                 signature_symbols: &super::metadata_name_tests::DeclarationNames(ir),
+                source_member_annotations: &Default::default(),
                 dependency_callables: &dependency_callables,
                 property_realizations: &property_realizations,
                 property_reference_realizations: &property_reference_realizations,
