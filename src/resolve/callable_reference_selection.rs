@@ -89,6 +89,16 @@ pub(super) fn maximal_adapted_references(
     }
 }
 
+/// A declaration's value parameters as overload specificity compares them: each of its own type
+/// parameters erased to its upper bound.
+pub(super) fn erased_declared_parameters(parameters: &[Ty]) -> Vec<Ty> {
+    let unbound = crate::fx_hash::HashMap::<String, Ty>::default();
+    parameters
+        .iter()
+        .map(|parameter| parameter.substitute_erased(&unbound))
+        .collect()
+}
+
 fn adaptation_specificity_shape(params: &[Ty], plan: &[AdaptedRefArgument]) -> Vec<Ty> {
     let mut shape = Vec::new();
     for (index, argument) in plan.iter().enumerate() {
