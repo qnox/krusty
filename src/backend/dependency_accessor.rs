@@ -85,6 +85,12 @@ impl CheckedBackendCallables {
 }
 
 impl DependencyAccessor<'_> {
+    /// Declaration-owned accessor type arguments selected by checked FIR. Specialized target
+    /// member paths that do not instantiate a generic signature must decline when this is nonempty.
+    pub fn substitutions(&self) -> &[crate::ir::IrCheckedSubstitution] {
+        self.substitutions
+    }
+
     /// Whether the operation writes the property, through its setter.
     pub fn writes(&self) -> bool {
         self.write

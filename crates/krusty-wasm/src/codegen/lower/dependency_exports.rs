@@ -2,7 +2,7 @@
 //! Checked instantiation proves operand roles; the stored export signature owns physical carriers.
 
 use krusty::backend::{
-    DependencyCallShape, DependencyExportCall, instantiate_dependency_signature,
+    instantiate_dependency_signature, DependencyCallShape, DependencyExportCall,
 };
 use krusty::ir::IrCheckedOperation;
 

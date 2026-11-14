@@ -45,20 +45,32 @@ pub(super) fn realize(ir: &mut IrFile, callables: &CheckedBackendCallables) {
             receiver: Some(receiver),
             arguments,
             result,
+            substitutions,
             ..
         } = &**checked
         else {
             continue;
         };
-        if !arguments.is_empty() {
+        // A provider-selected generic accessor has a checked external-call path which carries its
+        // declaration substitutions. The intrinsic rewrite below has no generic-call frame, so
+        // leave those operations intact for that path.
+        if !arguments.is_empty() || !substitutions.is_empty() {
             continue;
         }
         let Some(property) = callables.property(*target) else {
             continue;
         };
-        let operation = callables
-            .callable(property.getter)
-            .and_then(|getter| getter.compiler_operation());
+        let Some(getter) = callables.callable(property.getter) else {
+            continue;
+        };
+        if getter
+            .generic_sig
+            .as_ref()
+            .is_some_and(|signature| !signature.formals.is_empty())
+        {
+            continue;
+        }
+        let operation = getter.compiler_operation();
         let receiver = *receiver;
         let ty = *result;
         let intrinsic = |operation| IrExpr::Call {
