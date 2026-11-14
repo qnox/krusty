@@ -204,7 +204,7 @@ impl ModuleTables {
             supertype: Some(
                 parent
                     .as_ref()
-                    .map_or(objects.any_table, |parent| parent.table_type),
+                    .map_or(objects.function_table, |parent| parent.table_type),
             ),
             open: true,
         });
