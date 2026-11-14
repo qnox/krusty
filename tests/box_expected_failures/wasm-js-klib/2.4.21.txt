@@ -2525,7 +2525,6 @@ objects/kt32351.kt
 objects/kt32749.kt
 objects/localFunctionInObjectInitializer_kt4516.kt
 objects/objectInLocalAnonymousObject.kt
-objects/objectVsClassInitialization_kt5291.kt
 objects/receiverInConstructor.kt
 objects/useAnonymousObjectFunction.kt
 objects/useImportedMember.kt
