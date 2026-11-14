@@ -85,18 +85,13 @@ use crate::libraries::{
     PropertyInfo, PropertyProducer, PropertySet, ReturnInfo, Visibility,
 };
 use crate::runtime::{PlatformRangeCtor, RangeConstruction};
-use crate::symbol_resolver::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
-use crate::types::{type_name, SemanticCallableOwner, Ty, TyKind, TypeName, TypeNameList};
+use crate::types::{
+    ty_subst, ty_subst_all, ty_subst_keep_unbound, type_name, SemanticCallableOwner, Ty, TyKind,
+    TypeName, TypeNameList,
+};
 
 use java_operator_convention::java_method_has_operator_convention;
-
-fn effective_class_access(class: &super::classreader::ClassInfo) -> u16 {
-    class
-        .inner_class_self()
-        .map(|entry| entry.access)
-        .unwrap_or(class.access)
-}
 
 /// The JVM platform's contribution to Kotlin's default imports. The language-level `kotlin.*` set is
 /// composed with this list in the import-level builder and in the seed filter, so neither list is duplicated.
@@ -2423,6 +2418,7 @@ impl JvmLibraries {
             let own_type_parameter_count = application_header.own_count;
             let type_parameters = application_header.parameters;
             Some(LibraryType {
+                klib_identity: None,
                 runtime_exception: None,
                 declaration_name: if ci.this_class == internal_name {
                     classifier_facts::classifier_declaration_name(&ci)
@@ -2431,20 +2427,7 @@ impl JvmLibraries {
                 },
                 is_kotlin: has_kotlin_metadata,
                 is_data: ci.meta.is_data,
-                access: if let Some(visibility) = ci.meta.class_visibility {
-                    visibility.into()
-                } else {
-                    let access = effective_class_access(&ci);
-                    if access & 0x0001 != 0 {
-                        crate::libraries::ClassifierAccess::Public
-                    } else if access & 0x0004 != 0 {
-                        crate::libraries::ClassifierAccess::Protected
-                    } else if access & 0x0002 != 0 {
-                        crate::libraries::ClassifierAccess::Private
-                    } else {
-                        crate::libraries::ClassifierAccess::PackagePrivate
-                    }
-                },
+                access: classifier_facts::classifier_access(&ci),
                 source_file: None,
                 stable_declaration: None,
                 is_nested: ci.inner_class_self().is_some(),

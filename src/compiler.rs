@@ -512,8 +512,26 @@ fn emit_analyzed_into<B: Backend>(
         if diags.has_errors() {
             continue;
         }
-        backend
-            .lower_ir_file(file, state, diags)
+        let initializer_requests = if backend.emits_dependency_support() {
+            match crate::backend::initializer_declarations(&file) {
+                Ok(requests) => requests,
+                Err(reason) => {
+                    diags.error(Span::new(0, 0), format!("internal error: {reason}"));
+                    continue;
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let outputs = backend.lower_ir_file(file, state, diags);
+        if !diags.has_errors() {
+            for declaration in &initializer_requests {
+                if backend.emitted_constructor_initializer(state, declaration) {
+                    dependency_support.record_initializer(declaration);
+                }
+            }
+        }
+        outputs
             .into_iter()
             .for_each(|artifact| artifacts(ArtifactOrigin::Source(raw_source), artifact));
     }

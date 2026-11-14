@@ -9,6 +9,7 @@
 //! the interfaces it extends, so its members can be numbered once for the module. Nothing here is a
 //! target decision.
 
+use super::member_keys::PlanKey;
 use crate::fx_hash::{HashMap, HashSet};
 
 use crate::fir::{
@@ -101,7 +102,7 @@ pub(crate) enum ModuleInterfaceMember {
 #[derive(Clone, Debug)]
 pub(crate) enum ModuleMember {
     Function {
-        callable: ResolvedFunctionOverrideTarget,
+        callable: PlanKey,
         parameters: Box<[Ty]>,
         result: Ty,
         /// A `suspend` function, which takes its caller's continuation after `parameters`.
@@ -109,6 +110,8 @@ pub(crate) enum ModuleMember {
     },
     Property {
         property: ResolvedPropertyOverrideTarget,
+        getter_key: PlanKey,
+        setter_key: Option<PlanKey>,
         /// What its accessors take after the dispatch receiver: its context parameters, then a
         /// member extension's receiver. A setter takes `value` after them.
         accessor_parameters: Box<[Ty]>,
@@ -127,7 +130,7 @@ pub(crate) enum ModuleMember {
 /// A function override edge of a class's own member.
 #[derive(Clone, Debug)]
 pub(crate) struct ModuleFunctionOverride {
-    pub(crate) implementation: ResolvedFunctionOverrideTarget,
+    pub(crate) implementation: PlanKey,
     pub(crate) overridden_owner: TypeName,
     pub(crate) overridden: ResolvedFunctionOverrideTarget,
     pub(crate) overridden_is_interface: bool,
@@ -138,6 +141,8 @@ pub(crate) struct ModuleFunctionOverride {
 #[derive(Clone, Debug)]
 pub(crate) struct ModulePropertyOverride {
     pub(crate) implementation: ResolvedPropertyOverrideTarget,
+    pub(crate) getter_key: PlanKey,
+    pub(crate) setter_key: Option<PlanKey>,
     pub(crate) overridden: ResolvedPropertyOverrideTarget,
     pub(crate) overridden_is_interface: bool,
     pub(crate) declared_type: Ty,
@@ -223,6 +228,185 @@ impl ModuleClasses {
         })
     }
 
+    /// Project one anonymous IR class and its already-frozen override edges into the shared
+    /// planner's input shape. These records are current-file only and must never be published.
+    pub(crate) fn from_file_class(ir: &crate::ir::IrFile, id: crate::ir::ClassId) -> Option<Self> {
+        let class = ir.classes.get(id as usize)?;
+        if !class.is_anonymous_object {
+            return None;
+        }
+        let function_edges = ir
+            .function_overrides
+            .get(&class.fq_name)
+            .map_or(&[][..], |e| &e[..]);
+        let property_edges = ir
+            .property_overrides
+            .get(&class.fq_name)
+            .map_or(&[][..], |e| &e[..]);
+        if !function_edges
+            .iter()
+            .any(|edge| edge.implementation_function.is_some())
+            && !property_edges.iter().any(|edge| {
+                edge.implementation_getter.is_some() || edge.implementation_setter.is_some()
+            })
+        {
+            return None;
+        }
+
+        let mut members = Vec::new();
+        let mut function_overrides = Vec::new();
+        for edge in function_edges {
+            let Some(function) = edge.implementation_function else {
+                continue;
+            };
+            let implementation = &ir.functions[function as usize];
+            if implementation.dispatch_receiver != Some(class.fq_name)
+                || !class.methods.contains(&function)
+            {
+                return None;
+            }
+            let key = PlanKey::FileFunction(function);
+            if !members.iter().any(|member: &ModuleMember| {
+                matches!(member, ModuleMember::Function { callable, .. } if *callable == key)
+            }) {
+                members.push(ModuleMember::Function {
+                    callable: key,
+                    parameters: implementation.params.clone().into_boxed_slice(),
+                    result: implementation.ret,
+                    suspend: edge.suspend,
+                });
+            }
+            function_overrides.push(ModuleFunctionOverride {
+                implementation: key,
+                overridden_owner: edge.overridden_owner,
+                overridden: edge.overridden,
+                overridden_is_interface: edge.overridden_is_interface,
+                overridden_role: edge.overridden_semantic_role,
+            });
+        }
+
+        let mut property_overrides = Vec::new();
+        for edge in property_edges {
+            let getter_key = edge
+                .implementation_getter
+                .map(|function| PlanKey::FileGetter {
+                    property: edge.implementation,
+                    function,
+                })
+                .unwrap_or_else(|| PlanKey::accessor(edge.implementation, false));
+            let setter_key = edge
+                .implementation_setter
+                .map(|function| PlanKey::FileSetter {
+                    property: edge.implementation,
+                    function,
+                })
+                .or_else(|| {
+                    edge.implementation_mutable
+                        .then(|| PlanKey::accessor(edge.implementation, true))
+                });
+            for function in [edge.implementation_getter, edge.implementation_setter]
+                .into_iter()
+                .flatten()
+            {
+                let implementation = &ir.functions[function as usize];
+                if implementation.dispatch_receiver != Some(class.fq_name)
+                    || !class.methods.contains(&function)
+                {
+                    return None;
+                }
+            }
+            if !members.iter().any(|member| {
+                matches!(member, ModuleMember::Property { getter_key: key, .. } if *key == getter_key)
+            }) {
+                let getter = edge.implementation_getter.map(|fid| &ir.functions[fid as usize]);
+                let setter = edge.implementation_setter.map(|fid| &ir.functions[fid as usize]);
+                let accessor_parameters = getter.map_or_else(
+                    || {
+                        setter
+                            .map(|function| {
+                                function
+                                    .params
+                                    .iter()
+                                    .copied()
+                                    .take(function.params.len().saturating_sub(1))
+                                    .collect::<Box<[_]>>()
+                            })
+                            .unwrap_or_default()
+                    },
+                    |function| function.params.clone().into_boxed_slice(),
+                );
+                let value = getter.map_or(edge.implementation_type, |function| function.ret);
+                let setter_value = setter
+                    .and_then(|function| function.params.last().copied())
+                    .unwrap_or(value);
+                members.push(ModuleMember::Property {
+                    property: edge.implementation,
+                    getter_key,
+                    setter_key,
+                    accessor_parameters,
+                    value: setter_value,
+                    getter_value: value,
+                    getter: true,
+                    setter: edge.implementation_mutable,
+                });
+            }
+            property_overrides.push(ModulePropertyOverride {
+                implementation: edge.implementation,
+                getter_key,
+                setter_key,
+                overridden: edge.overridden,
+                overridden_is_interface: edge.overridden_is_interface,
+                declared_type: edge.declared_type,
+                implementation_type: edge.implementation_type,
+                declared_receiver: edge.declared_receiver,
+                implementation_receiver: edge.implementation_receiver,
+                depth: edge.depth,
+            });
+        }
+
+        members.sort_by_key(|member| match member {
+            ModuleMember::Function {
+                callable: PlanKey::FileFunction(function),
+                ..
+            }
+            | ModuleMember::Property {
+                getter_key: PlanKey::FileGetter { function, .. },
+                ..
+            } => class
+                .methods
+                .iter()
+                .position(|method| method == function)
+                .unwrap_or(usize::MAX),
+            ModuleMember::Property {
+                setter_key: Some(PlanKey::FileSetter { function, .. }),
+                ..
+            } => class
+                .methods
+                .iter()
+                .position(|method| method == function)
+                .unwrap_or(usize::MAX),
+            _ => usize::MAX,
+        });
+
+        let module_class = ModuleClass {
+            dependency: false,
+            superclass: (class.superclass != crate::types::wk::any()).then_some(class.superclass),
+            function_type_arities: class
+                .supertypes
+                .iter()
+                .filter_map(|ty| match ty.non_null().kind() {
+                    crate::types::TyKind::Fun(signature) => Some(signature.params.len()),
+                    _ => None,
+                })
+                .collect(),
+            members: members.into_boxed_slice(),
+            function_overrides: function_overrides.into_boxed_slice(),
+            property_overrides: property_overrides.into_boxed_slice(),
+            forwarders: Box::default(),
+        };
+        Self::from_support_classes([(class.fq_name, module_class)]).ok()
+    }
+
     /// Merge compiler-owned additions for one checked support unit before slot planning.
     /// Existing current-module declaration facts always win; duplicate dependency shapes are
     /// stable provider facts and need only one module-wide copy.
@@ -262,6 +446,14 @@ impl ModuleClasses {
 
     pub fn iter(&self) -> impl Iterator<Item = (TypeName, &ModuleClass)> {
         self.classes.iter().map(|(name, class)| (*name, class))
+    }
+
+    /// The named class and interface classifier identities this module's plan covers.
+    pub fn classifier_names(&self) -> impl Iterator<Item = TypeName> + '_ {
+        self.classes
+            .keys()
+            .copied()
+            .chain(self.interfaces.iter().map(|(name, _)| *name))
     }
 
     /// The named classes of the module whose declared superclass is `superclass`.
@@ -409,7 +601,7 @@ fn dependency_class(superclass: &crate::fir::ResolvedDependencySuperclass) -> Mo
                 result,
                 suspend,
             } => ModuleMember::Function {
-                callable: ResolvedFunctionOverrideTarget::External(*callable),
+                callable: PlanKey::DependencyCallable(*callable),
                 parameters: parameters.iter().map(|parameter| parameter.get()).collect(),
                 result: result.get(),
                 suspend: *suspend,
@@ -422,6 +614,8 @@ fn dependency_class(superclass: &crate::fir::ResolvedDependencySuperclass) -> Mo
             } => {
                 ModuleMember::Property {
                     property: ResolvedPropertyOverrideTarget::External(*getter),
+                    getter_key: PlanKey::DependencyGetter(*getter),
+                    setter_key: (*setter).then_some(PlanKey::DependencySetter(*getter)),
                     accessor_parameters: accessor_parameters
                         .iter()
                         .map(|parameter| parameter.get())
@@ -457,7 +651,7 @@ fn dependency_class(superclass: &crate::fir::ResolvedDependencySuperclass) -> Mo
 
 fn function_override(edge: &crate::fir::ResolvedFunctionOverride) -> ModuleFunctionOverride {
     ModuleFunctionOverride {
-        implementation: edge.implementation,
+        implementation: PlanKey::function(edge.implementation),
         overridden_owner: edge.overridden_owner,
         overridden: edge.overridden,
         overridden_is_interface: edge.overridden_is_interface,
@@ -468,6 +662,10 @@ fn function_override(edge: &crate::fir::ResolvedFunctionOverride) -> ModuleFunct
 fn property_override(edge: &crate::fir::ResolvedPropertyOverride) -> ModulePropertyOverride {
     ModulePropertyOverride {
         implementation: edge.implementation,
+        getter_key: PlanKey::accessor(edge.implementation, false),
+        setter_key: edge
+            .implementation_mutable
+            .then_some(PlanKey::accessor(edge.implementation, true)),
         overridden: edge.overridden,
         overridden_is_interface: edge.overridden_is_interface,
         declared_type: edge.declared_type.get(),
@@ -565,7 +763,7 @@ fn members(
                 let callable = index.callable_for_declaration(declaration)?;
                 let (parameters, result) = index.callable_carriers(callable.id)?;
                 members.push(ModuleMember::Function {
-                    callable: ResolvedFunctionOverrideTarget::Module(callable.id),
+                    callable: PlanKey::Callable(callable.id),
                     parameters: parameters.into_boxed_slice(),
                     result,
                     suspend: flags.has(DeclarationFlags::SUSPEND),
@@ -608,6 +806,8 @@ fn members(
                 };
                 members.push(ModuleMember::Property {
                     property: ResolvedPropertyOverrideTarget::Module(property),
+                    getter_key: PlanKey::Getter(property),
+                    setter_key: mutable.then_some(PlanKey::Setter(property)),
                     accessor_parameters: parameters.into_boxed_slice(),
                     value,
                     getter_value,

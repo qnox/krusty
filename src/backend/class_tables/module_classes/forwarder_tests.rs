@@ -66,7 +66,7 @@ fn function_plan(parameters: Vec<Ty>, result: Ty) -> ModuleSlotPlan {
     let target = ResolvedFunctionOverrideTarget::External(ExternalCallableId::from_raw(42));
     plan(
         vec![ModuleMember::Function {
-            callable: target,
+            callable: super::super::module_slots::PlanKey::function(target),
             parameters: vec![Ty::obj("kotlin/Any")].into_boxed_slice(),
             result: Ty::obj("kotlin/Any"),
             suspend: false,
@@ -118,7 +118,7 @@ fn a_forwarder_cannot_choose_between_distinct_inherited_class_slots() {
         targets
             .iter()
             .map(|&callable| ModuleMember::Function {
-                callable,
+                callable: super::super::module_slots::PlanKey::function(callable),
                 parameters: Box::default(),
                 result: Ty::String,
                 suspend: false,
@@ -143,6 +143,8 @@ fn property_plan(receiver: Ty, getter: Ty, setter: Ty) -> ModuleSlotPlan {
     plan(
         vec![ModuleMember::Property {
             property: target,
+            getter_key: PlanKey::accessor(target, false),
+            setter_key: Some(PlanKey::accessor(target, true)),
             accessor_parameters: vec![Ty::String].into_boxed_slice(),
             value: Ty::obj("kotlin/Any"),
             getter_value: Ty::obj("kotlin/Any"),

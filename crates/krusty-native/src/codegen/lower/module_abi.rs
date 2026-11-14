@@ -10,9 +10,9 @@
 //! A plan that is not supported is a decline in the using file and no export in the defining one,
 //! for the same reason in both.
 
-mod constructors;
 mod extended_classes;
 mod properties;
+mod published_descriptors;
 mod value_boxes;
 
 pub(super) use extended_classes::{exported_classes, ExtensionEntries};

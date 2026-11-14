@@ -1,7 +1,7 @@
-//! The bodies of the representation bridges a class table holds (see `Slot::Bridge` and
-//! `Slot::AccessorBridge`): a function of the overridden member's signature that converts each
-//! operand to the override's carrier, forwards through the override's own slot, and converts the
-//! result back.
+//! The bodies of the representation bridges a class table holds (see `Slot::Bridge`,
+//! `Slot::AccessorBridge`, and `Slot::FunctionBridge`): a function of the erased or overridden
+//! member's signature that converts each operand to the implementation's carrier, forwards
+//! through the implementation's own slot, and converts the result back.
 //!
 //! Forwarding by dispatch rather than by calling the override is what keeps a further override
 //! reachable through the base: that subclass replaces the target slot, not the bridge.
@@ -22,17 +22,26 @@ pub(super) fn define_override_bridges(
     runtime: &mut Runtime,
 ) -> Result<(), Unsupported> {
     let ir = context.ir;
-    for &(bridge, function, ty) in &classes.bridges {
-        let OverrideBridge { class, member } = bridge;
+    for (bridge, &function, &ty) in &classes.bridges {
+        let OverrideBridge { class, member } = bridge.clone();
         let (declared, implemented, target_slot, direct) = match member {
             BridgedMember::Method {
                 declared,
                 target_slot,
                 target,
             } => {
-                let base = &ir.functions[declared as usize];
                 let implementation = &ir.functions[target as usize];
-                if base.params.len() != implementation.params.len() {
+                let (base_parameters, base_result) = match declared {
+                    krusty::backend::class_tables::BridgeDeclaration::Function(function) => {
+                        let base = &ir.functions[function as usize];
+                        (base.params.clone(), base.ret)
+                    }
+                    krusty::backend::class_tables::BridgeDeclaration::Signature {
+                        parameters,
+                        result,
+                    } => (parameters.into_vec(), result),
+                };
+                if base_parameters.len() != implementation.params.len() {
                     return Err(format!(
                         "an override bridge whose operands disagree with the member it overrides \
                          (`{}`)",
@@ -40,10 +49,33 @@ pub(super) fn define_override_bridges(
                     ));
                 }
                 (
-                    (base.params.clone(), base.ret),
+                    (base_parameters, base_result),
                     (implementation.params.clone(), implementation.ret),
                     target_slot,
                     Some(target),
+                )
+            }
+            BridgedMember::Function {
+                arity,
+                target_slot,
+                target,
+            } => {
+                let implementation = &ir.functions[target as usize];
+                let owner = ir.classes[class as usize].fq_name_id();
+                if implementation.params.len() != arity
+                    || implementation.dispatch_receiver != Some(owner)
+                {
+                    return Err(format!(
+                        "a function bridge whose target does not match its class or arity (`{}`)",
+                        implementation.name
+                    ));
+                }
+                let erased = Ty::obj_name(krusty::types::wk::any());
+                (
+                    (vec![erased; arity], erased),
+                    (implementation.params.clone(), implementation.ret),
+                    Some(target_slot),
+                    None,
                 )
             }
             BridgedMember::Accessor {

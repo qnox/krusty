@@ -108,6 +108,9 @@ impl CallableRegistry {
                 "an object (`{}`) without its declaring file's entry",
                 classifier.render().replace('/', ".")
             )),
+            Some(InstanceEntry::Constructor { .. }) => {
+                Err("a constructor without its declaring file's entry".to_owned())
+            }
             None => Ok(()),
         }
     }
@@ -204,6 +207,8 @@ impl CallableRegistry {
         ir: &IrFile,
         callables: &CheckedBackendCallables,
         module_facts: &krusty::backend::BackendModuleFacts,
+        classifiers: &dyn krusty::backend::BackendClassifierSource,
+        classes: &super::laid_out_classes::LaidOutClasses,
         wasm: &mut Module,
     ) -> Result<FileCallTargets, Unsupported> {
         let mut targets = FileCallTargets {
@@ -217,12 +222,22 @@ impl CallableRegistry {
             member_receivers: HashMap::default(),
             singleton_member_receivers: HashMap::default(),
             singleton_extension_unread_receivers: HashMap::default(),
-            instances: krusty::backend::instance_links::link_reads(
-                ir,
-                module_facts,
-                &mut self.instances,
-                || wasm.declare(),
-            ),
+            instances: {
+                let mut reads = krusty::backend::instance_links::link_reads(
+                    ir,
+                    module_facts,
+                    &mut self.instances,
+                    || wasm.declare(),
+                );
+                reads.extend(krusty::backend::instance_links::link_constructor_reads(
+                    ir,
+                    self.source_module.as_deref().unwrap_or_default(),
+                    module_facts,
+                    &mut self.instances,
+                    || wasm.declare(),
+                ));
+                reads
+            },
         };
         for expression in krusty::ir::emitted_body_roots(ir)
             .into_iter()
@@ -263,6 +278,33 @@ impl CallableRegistry {
                     let Some(access) = callables.dependency_accessor(operation) else {
                         continue;
                     };
+                    if access.receiver.is_some()
+                        && access.dispatches()
+                        && !access.callable.is_member_extension()
+                        && !super::lower::library_members::target_owns_call(
+                            ir,
+                            callables,
+                            expression,
+                            access.callable,
+                        )
+                    {
+                        let role = if access.writes() {
+                            super::lower::library_members::MemberRole::Setter
+                        } else {
+                            super::lower::library_members::MemberRole::Getter
+                        };
+                        if let Some(member) = super::lower::library_members::published_class::select(
+                            access.callable,
+                            role,
+                            || access.callee().map_err(str::to_owned),
+                            classifiers,
+                            classes,
+                            wasm,
+                        ) {
+                            member?;
+                            continue;
+                        }
+                    }
                     if !access
                         .callable
                         .dependency_callable
@@ -299,6 +341,7 @@ impl CallableRegistry {
                     target,
                     default_provider,
                     params,
+                    ret,
                     defaults,
                     extension_receiver_parameter,
                     ..
@@ -327,14 +370,28 @@ impl CallableRegistry {
                         // `typeOf` keeps its checked call, and emission makes the `KType` it names.
                         continue;
                     }
-                    if super::lower::declared_by_string_builder(callable) {
-                        // The runtime lays `StringBuilder` out and realizes its members.
+                    if super::lower::library_members::target_owns_call(
+                        ir, callables, expression, callable,
+                    ) {
+                        // The same positive runtime ownership check precedes class dispatch
+                        // during both dependency prewalking and body emission.
                         continue;
                     }
-                    if super::lower::any_members::call_member(ir, callables, expression).is_some() {
-                        // `kotlin.Any`'s members, and the declarations overriding them, are
-                        // realized through the receiver's own representation.
-                        continue;
+                    if dispatch_receiver.is_some()
+                        && extension_receiver_parameter.is_none()
+                        && defaults.is_empty()
+                    {
+                        if let Some(member) = super::lower::library_members::published_class::select(
+                            callable,
+                            super::lower::library_members::MemberRole::Function,
+                            || Ok(callee.clone()),
+                            classifiers,
+                            classes,
+                            wasm,
+                        ) {
+                            member?;
+                            continue;
+                        }
                     }
                     // A published exact export owns even a specialized generic call. Its actual
                     // operand roles are authenticated from checked substitutions during emission,
@@ -418,7 +475,18 @@ impl CallableRegistry {
                             callable.ret,
                             callable.overridden_declarations,
                         );
-                        "a dependency callable whose target code was not emitted".to_string()
+                        format!(
+                            "a dependency callable whose target code was not emitted: `{}`; selected declaration {identity:?}; owner {:?}; kind {:?}; realization {:?}; checked parameters {params:?}; checked result {ret:?}; provider parameters {:?}; provider result {:?}; declared parameters {:?}; declared result {:?}; compiler operation {:?}",
+                            callable.name,
+                            callable.declaration_owner,
+                            callable.kind,
+                            callable.member_realization,
+                            callable.params,
+                            callable.ret,
+                            callable.declared_params,
+                            callable.declared_ret,
+                            callable.compiler_operation(),
+                        )
                     })?;
                     targets.external.insert(*target, index);
                     if let Some(entry) = default_entry {
@@ -643,6 +711,16 @@ impl FileCallTargets {
 
 #[cfg(test)]
 mod tests {
+    struct NoClassifiers;
+    impl krusty::backend::BackendClassifierSource for NoClassifiers {
+        fn classifier(
+            &self,
+            _: krusty::types::TypeName,
+        ) -> Option<std::sync::Arc<krusty::backend::BackendClassifierFact>> {
+            None
+        }
+    }
+
     fn no_facts() -> krusty::backend::BackendModuleFacts {
         krusty::backend::BackendModuleFacts::from_classifiers([], [])
             .expect("an empty module has valid facts")
@@ -960,6 +1038,8 @@ mod tests {
                 &ir,
                 &CheckedBackendCallables::default(),
                 &no_facts(),
+                &NoClassifiers,
+                &super::super::laid_out_classes::LaidOutClasses::default(),
                 &mut wasm,
             )
             .expect("a dead inline template cannot affect emitted calls");
@@ -997,6 +1077,8 @@ mod tests {
                 &ir,
                 &CheckedBackendCallables::default(),
                 &no_facts(),
+                &NoClassifiers,
+                &super::super::laid_out_classes::LaidOutClasses::default(),
                 &mut wasm,
             )
             .expect("a supported constructor initializer has registered calls");
@@ -1080,6 +1162,8 @@ mod tests {
                 &caller,
                 &CheckedBackendCallables::default(),
                 &no_facts(),
+                &NoClassifiers,
+                &super::super::laid_out_classes::LaidOutClasses::default(),
                 &mut wasm,
             )
             .expect("the inherited provider reserves its exact entry");

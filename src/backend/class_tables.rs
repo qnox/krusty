@@ -44,6 +44,7 @@ mod class_vtable;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fixtures;
 mod hierarchy;
+mod member_keys;
 mod members;
 pub mod module_classes;
 pub mod module_interfaces;
@@ -126,7 +127,7 @@ pub enum Slot {
     /// actually is.
     Bridge {
         /// The base method whose signature this entry wears.
-        declared: FunId,
+        declared: BridgeDeclaration,
         /// The slot to forward through, and the method whose carriers that slot expects.
         ///
         /// `None` where there is no slot to forward through: an INTERFACE's own bridge stands in
@@ -185,6 +186,15 @@ pub enum Slot {
     /// overrides, so it has no function to name. The target reads it off the table that file built.
     /// It names its number because an interface table copies the entry to another index.
     Inherited { slot: u32 },
+}
+
+/// The declaration frame a representation bridge preserves. A function identity is used when
+/// the declaring function is in this IR file; a typed frame is used for a producer-laid-out
+/// method whose declaration body is intentionally absent from the current file.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum BridgeDeclaration {
+    Function(FunId),
+    Signature { parameters: Box<[Ty]>, result: Ty },
 }
 
 /// The identity of a virtual member, independent of which class's implementation fills it.
@@ -344,6 +354,7 @@ fn class_tables(
     let mut tables: Vec<Option<ClassTable>> = vec![None; ir.classes.len()];
     for &id in &order {
         let class = &ir.classes[id as usize];
+        let file_plan = plan.with_file_class(ir, id, representation)?;
         let superclass = ir.class_id_by_name(class.superclass);
         let table = {
             let parent = superclass.map(|parent| {
@@ -359,7 +370,7 @@ fn class_tables(
                     .get_key_value(&class.superclass)
                     .map(|(name, table)| (*name, table)),
             };
-            match plan.table(class.fq_name) {
+            match file_plan.table(class.fq_name) {
                 Some(Ok(planned)) => planned_vtable::planned_class_table(
                     representation,
                     ir,
@@ -370,7 +381,7 @@ fn class_tables(
                         laid_out,
                     },
                     planned,
-                    plan.interfaces(),
+                    file_plan.interfaces(),
                 )?,
                 _ if laid_out.is_some() => {
                     return Err(format!(
@@ -384,7 +395,7 @@ fn class_tables(
                     id,
                     superclass,
                     parent,
-                    plan.interfaces(),
+                    file_plan.interfaces(),
                 )?,
             }
         };

@@ -3,6 +3,7 @@
 use crate::backend::class_tables::module_classes::{
     ModuleClass, ModuleFunctionOverride, ModuleMember, ModulePropertyOverride,
 };
+use crate::backend::class_tables::module_slots::PlanKey;
 use crate::fir::{ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget};
 use crate::types::{Ty, TypeName};
 
@@ -199,7 +200,7 @@ impl PublishedDependencyClassShape {
                         return Err(self.classifier);
                     };
                     members.push(ModuleMember::Function {
-                        callable: ResolvedFunctionOverrideTarget::External(implementation_id),
+                        callable: PlanKey::DependencyCallable(implementation_id),
                         parameters: implementation_callable.params().to_vec().into_boxed_slice(),
                         result: implementation_callable.ret(),
                         suspend: modifiers.is_suspend,
@@ -230,9 +231,7 @@ impl PublishedDependencyClassShape {
                             return Err(self.classifier);
                         }
                         function_overrides.push(ModuleFunctionOverride {
-                            implementation: ResolvedFunctionOverrideTarget::External(
-                                implementation_id,
-                            ),
+                            implementation: PlanKey::DependencyCallable(implementation_id),
                             overridden_owner: edge.overridden_owner,
                             overridden: ResolvedFunctionOverrideTarget::External(overridden_id),
                             overridden_is_interface: edge.overridden_is_interface,
@@ -305,6 +304,10 @@ impl PublishedDependencyClassShape {
                     };
                     members.push(ModuleMember::Property {
                         property: ResolvedPropertyOverrideTarget::External(getter_id),
+                        getter_key: PlanKey::DependencyGetter(getter_id),
+                        setter_key: resolved_setter_id
+                            .is_some()
+                            .then_some(PlanKey::DependencySetter(getter_id)),
                         accessor_parameters: accessor_parameters.into_boxed_slice(),
                         value,
                         getter_value: value,
@@ -368,9 +371,7 @@ impl PublishedDependencyClassShape {
                             return Err(self.classifier);
                         }
                         function_overrides.push(ModuleFunctionOverride {
-                            implementation: ResolvedFunctionOverrideTarget::External(
-                                implementation_id,
-                            ),
+                            implementation: PlanKey::DependencyCallable(implementation_id),
                             overridden_owner: edge.overridden_owner,
                             overridden: ResolvedFunctionOverrideTarget::External(overridden_id),
                             overridden_is_interface: edge.overridden_is_interface,
@@ -416,6 +417,10 @@ impl PublishedDependencyClassShape {
                         let implementation_receiver = extension_receiver(getter_callable);
                         property_overrides.push(ModulePropertyOverride {
                             implementation: ResolvedPropertyOverrideTarget::External(getter_id),
+                            getter_key: PlanKey::DependencyGetter(getter_id),
+                            setter_key: resolved_setter_id
+                                .is_some()
+                                .then_some(PlanKey::DependencySetter(getter_id)),
                             overridden: ResolvedPropertyOverrideTarget::External(overridden_id),
                             overridden_is_interface: edge.overridden_is_interface,
                             declared_type: overridden_callable.ret(),

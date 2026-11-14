@@ -135,18 +135,26 @@ impl FileLowering<'_> {
             .get(slot as usize)
             .cloned()
             .ok_or_else(|| format!("a walk through slot {slot}, which no table has"))?;
-        let fid = match entry {
+        let parameters = match entry {
             // A value class's own member wears its own signature behind the bridge that unboxes
             // the receiver.
-            Slot::Function(fid) | Slot::ValueBridge { function: fid, .. } => fid,
-            Slot::Bridge { declared, .. } => declared,
+            Slot::Function(fid) | Slot::ValueBridge { function: fid, .. } => {
+                self.ir.functions[fid as usize].params.clone()
+            }
+            Slot::Bridge { declared, .. } => match declared {
+                krusty::backend::class_tables::BridgeDeclaration::Function(fid) => {
+                    self.ir.functions[fid as usize].params.clone()
+                }
+                krusty::backend::class_tables::BridgeDeclaration::Signature {
+                    parameters, ..
+                } => parameters.into_vec(),
+            },
             other => return Err(declined!("a walk through the vtable entry {other:?}")),
         };
-        match self.ir.functions[fid as usize].params.as_slice() {
+        match parameters.as_slice() {
             [parameter] => Ok(*parameter),
             _ => Err(declined!(
-                "a walk through `{}`, which takes no one operand",
-                self.ir.functions[fid as usize].name
+                "a walk through a bridge frame, which takes no one operand"
             )),
         }
     }
@@ -167,7 +175,14 @@ impl FileLowering<'_> {
             }
             // A stand-in for a base whose signature has another representation wears that base's,
             // which is what a caller reading the slot gets.
-            Slot::Bridge { declared, .. } => Ok(self.ir.functions[declared as usize].ret),
+            Slot::Bridge { declared, .. } => Ok(match declared {
+                krusty::backend::class_tables::BridgeDeclaration::Function(fid) => {
+                    self.ir.functions[fid as usize].ret
+                }
+                krusty::backend::class_tables::BridgeDeclaration::Signature { result, .. } => {
+                    result
+                }
+            }),
             other => Err(declined!("a walk through the vtable entry {other:?}")),
         }
     }

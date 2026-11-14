@@ -51,6 +51,7 @@ impl WasmLane {
         scratch: &Path,
         stem: &str,
         suffix: &str,
+        source: &str,
         program: box_lane::CompiledProgram,
     ) -> Outcome {
         if !program.native_imports.is_empty() {
@@ -80,6 +81,12 @@ impl WasmLane {
             Command::new("node")
                 .arg("--no-warnings")
                 .arg(directory.join("box.mjs")),
+        );
+        let outcome = box_lane::retain_failure(
+            &format!("{}-{stem}-{suffix}", self.target.name()),
+            source,
+            &artifacts,
+            outcome,
         );
         let _ = std::fs::remove_dir_all(&directory);
         outcome
@@ -179,7 +186,7 @@ impl Lane for WasmLane {
             Ok(program) => program,
             Err(outcome) => return outcome,
         };
-        self.run_artifacts(scratch, stem, "single", program)
+        self.run_artifacts(scratch, stem, "single", directive_source, program)
     }
 
     fn compile_modules_and_run(
@@ -224,7 +231,7 @@ impl Lane for WasmLane {
             Ok(program) => program,
             Err(outcome) => return outcome,
         };
-        self.run_artifacts(scratch, stem, "modules", program)
+        self.run_artifacts(scratch, stem, "modules", directive_source, program)
     }
 }
 
@@ -563,7 +570,20 @@ import kotlin.math.pow
 fun box(): String = if (2.0.pow(3.0) == 8.0) "OK" else "pow"
 "#,
         "wasmUnmodelledInstructionWrapper",
-        "a dependency callable whose target code was not emitted",
+        concat!(
+            r#"a dependency callable whose target code was not emitted: `pow`; "#,
+            r#"selected declaration KlibDependencyCallable { module: "kotlin", declaration: Public(KlibPublicIdSignature { package: KlibNamePath { segments: ["kotlin", "math"] }, declaration: KlibNamePath { segments: ["pow"] }, member_id: Some(15712335000106601333), mask: 0 }) }; "#,
+            r#"owner Some(Package(TypeName("kotlin/math"))); "#,
+            r#"kind Extension; "#,
+            r#"realization Dispatch; "#,
+            r#"checked parameters [Obj(TypeName("kotlin/Double"), [])]; "#,
+            r#"checked result Obj(TypeName("kotlin/Double"), []); "#,
+            r#"provider parameters [Obj(TypeName("kotlin/Double"), []), Obj(TypeName("kotlin/Double"), [])]; "#,
+            r#"provider result Obj(TypeName("kotlin/Double"), []); "#,
+            r#"declared parameters Some([Obj(TypeName("kotlin/Double"), []), Obj(TypeName("kotlin/Double"), [])]); "#,
+            r#"declared result None; "#,
+            r#"compiler operation None"#,
+        ),
     );
 }
 
@@ -766,6 +786,66 @@ fn wasm_class_properties_export_their_checked_accessors() {
     }
 }
 
+#[test]
+fn wasm_source_library_superclasses_keep_their_layout_and_dispatch() {
+    let source = include_str!("box_regressions/multimodule/sourceLibraryClassLayout.kt");
+    let stem = "sourceLibraryClassLayout";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the whole source superclass module graph");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        assert_eq!(
+            lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            Outcome::Pass,
+            "source superclass layout and inherited dispatch on {}",
+            target.name()
+        );
+    }
+}
+
+#[test]
+fn wasm_source_library_generic_superclasses_keep_constructor_and_call_frames() {
+    let source = include_str!("box_regressions/multimodule/sourceLibraryGenericClassDispatch.kt");
+    let stem = "sourceLibraryGenericClassDispatch";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the complete generic superclass module graph");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        assert_eq!(
+            lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            Outcome::Pass,
+            "generic superclass constructor and super-call frames on {}",
+            target.name()
+        );
+    }
+}
+
+#[test]
+fn wasm_source_library_inherits_unboxed_function_parameter_adapters() {
+    let source = include_str!("box_regressions/multimodule/sourceLibraryUnboxedFunctionBridge.kt");
+    let stem = "sourceLibraryUnboxedFunctionBridge";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the whole unboxed function bridge module graph");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        assert_eq!(
+            lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            Outcome::Pass,
+            "source layout preserves exact function parameter adapters on {}",
+            target.name()
+        );
+    }
+}
+
 // PLATFORM-SPECIFIC: Wasm's checked-access default and host trap are independent of the portable
 // reference-array value/identity/effect-order case in the shared box inventory.
 const REFERENCE_ARRAY_BOUNDS: &str = r#"fun captured(index: Int): Throwable? {
@@ -948,7 +1028,7 @@ fn expect_reference_array_bounds(source: &str, name: &str) {
 "#.to_vec()));
             }
             assert_eq!(
-                lane.run_artifacts(&std::env::temp_dir(), &stem, "bounds", program),
+                lane.run_artifacts(&std::env::temp_dir(), &stem, "bounds", source, program),
                 Outcome::Pass,
                 "{stem} on {}",
                 target.name()

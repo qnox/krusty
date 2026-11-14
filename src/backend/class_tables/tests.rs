@@ -95,7 +95,7 @@ fn an_override_carried_differently_takes_its_own_slot_and_bridges_the_base_slot(
             Slot::AnyMember(AnyMember::ToString),
             Slot::Abstract,
             Slot::Bridge {
-                declared,
+                declared: super::BridgeDeclaration::Function(declared),
                 target_slot: Some(6),
                 target: narrowed,
             },

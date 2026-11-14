@@ -262,7 +262,7 @@ pub(super) enum Slot {
     FieldSetter { class: ClassId, field: u32 },
     /// See [`class_tables::Slot::Bridge`].
     Bridge {
-        declared: FunId,
+        declared: krusty::backend::class_tables::BridgeDeclaration,
         target_slot: Option<u32>,
         target: FunId,
     },
@@ -405,8 +405,26 @@ fn any_member_symbol(root: &IrClass, member: AnyMember) -> &'static str {
 pub(super) fn module_plan(
     classes: &krusty::backend::class_tables::module_classes::ModuleClasses,
     values: &ValueClassInventory,
+    declarations: &krusty::backend::CheckedBackendCallables,
+    classifiers: &dyn krusty::backend::BackendClassifierSource,
+    laid_out: &LaidOutClasses,
 ) -> ModuleSlotPlan {
-    ModuleSlotPlan::build(classes, &NativeRepresentation(values))
+    ModuleSlotPlan::build_with_published_slots(
+        classes,
+        &NativeRepresentation(values),
+        declarations,
+        &|name| {
+            let Some(identity) = classifiers
+                .classifier(name)
+                .and_then(|fact| fact.klib_identity.clone())
+            else {
+                return Ok(None);
+            };
+            Ok(laid_out
+                .published_layout(&identity)?
+                .map(|layout| layout.slots.clone()))
+        },
+    )
 }
 
 /// How Native carries values, as the shared tables ask it.
@@ -980,7 +998,7 @@ mod tests {
         assert_eq!(
             model.layouts[b as usize].vtable[base_slot as usize],
             Slot::Bridge {
-                declared: a_f,
+                declared: krusty::backend::class_tables::BridgeDeclaration::Function(a_f),
                 target_slot: Some(own_slot),
                 target: b_f,
             },
