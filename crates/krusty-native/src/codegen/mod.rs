@@ -58,6 +58,9 @@ struct DependencyExportDefinition {
     member_receiver: Option<krusty::backend::DependencyMemberReceiver>,
     default_entry: Option<String>,
     dispatch_entry: Option<String>,
+    /// Further symbols the same body is exported under: the instance link of an entry that is
+    /// also a KLIB-published callable (a constructor's entry serves both).
+    aliases: Vec<String>,
 }
 
 /// The symbol every program object must define for the runtime's `_start` to call.
@@ -266,6 +269,11 @@ impl Backend for CraneliftBackend {
             );
             return Vec::new();
         }
+        krusty::backend::construction_entries::publish_constructors(
+            &mut file.ir,
+            (file.module_name, file.classifiers.module()),
+            &mut file.dependency_exports,
+        );
         krusty::backend::construction_entries::realize(&mut file.ir, &mut file.dependency_exports);
         if let Err(error) =
             krusty::backend::property_entries::realize(&mut file.ir, &mut file.dependency_exports)
@@ -353,7 +361,8 @@ impl Backend for CraneliftBackend {
             file.module_name,
             file.kind != krusty::backend::CheckedIrUnitKind::Source,
         );
-        let mut dependency_exports = krusty::fx_hash::HashMap::default();
+        let mut dependency_exports: krusty::fx_hash::HashMap<_, DependencyExportDefinition> =
+            krusty::fx_hash::HashMap::default();
         let mut exports = file.dependency_exports.callables().collect::<Vec<_>>();
         // `DependencyExportSignatures` is a lookup map; target symbol allocation must not inherit
         // its randomized iteration order or identical inputs would produce different objects.
@@ -439,6 +448,7 @@ impl Backend for CraneliftBackend {
                     member_receiver: file.dependency_exports.member_receiver(callable),
                     default_entry,
                     dispatch_entry,
+                    aliases: Vec::new(),
                 },
             );
         }
@@ -473,18 +483,23 @@ impl Backend for CraneliftBackend {
                     return Vec::new();
                 }
             };
-            dependency_exports.insert(
-                entry,
-                DependencyExportDefinition {
-                    symbol,
-                    signature,
-                    member_receiver: None,
-                    default_entry: None,
-                    dispatch_entry: None,
-                },
-            );
+            match dependency_exports.entry(entry) {
+                std::collections::hash_map::Entry::Occupied(mut exported) => {
+                    exported.get_mut().aliases.push(symbol);
+                }
+                std::collections::hash_map::Entry::Vacant(vacant) => {
+                    vacant.insert(DependencyExportDefinition {
+                        symbol,
+                        signature,
+                        member_receiver: None,
+                        default_entry: None,
+                        dispatch_entry: None,
+                        aliases: Vec::new(),
+                    });
+                }
+            }
         }
-        let instance_reads = krusty::backend::instance_links::link_reads(
+        let mut instance_reads = krusty::backend::instance_links::link_reads(
             &file.ir,
             file.classifiers.module(),
             &mut state.instances,
@@ -494,6 +509,17 @@ impl Backend for CraneliftBackend {
                 symbol
             },
         );
+        instance_reads.extend(krusty::backend::instance_links::link_constructor_reads(
+            &file.ir,
+            file.module_name,
+            file.classifiers.module(),
+            &mut state.instances,
+            || {
+                let symbol = format!("kt_klib_instance_{}", state.next_dependency_symbol);
+                state.next_dependency_symbol += 1;
+                symbol
+            },
+        ));
         let lowered = match lower::lower_file(
             lower::FileInput {
                 ir: &file.ir,
@@ -556,6 +582,9 @@ impl Backend for CraneliftBackend {
             let missing = match instance {
                 krusty::backend::instance_links::InstanceEntry::Object(classifier) => {
                     format!("an object (`{}`)", classifier.render().replace('/', "."))
+                }
+                krusty::backend::instance_links::InstanceEntry::Constructor { .. } => {
+                    "a constructor".to_owned()
                 }
                 krusty::backend::instance_links::InstanceEntry::EnumConstant(constant) => {
                     format!(

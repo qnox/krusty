@@ -344,6 +344,7 @@ impl FileClasses {
         ir: &IrFile,
         functions: &[Option<u32>],
         signatures: &[Option<u32>],
+        exports: &krusty::backend::DependencyExportSignatures,
     ) -> Vec<(TypeName, LaidOutClass)> {
         let callables: HashMap<FunId, CallableId> = ir
             .checked_callable_functions
@@ -400,6 +401,17 @@ impl FileClasses {
                 params.extend(secondary.params.iter().copied());
                 constructors.push(Some((function, params)));
             }
+            let mut constructor_identities = vec![None; constructors.len()];
+            for (exported, identity) in exports.constructors() {
+                if exported.class != id {
+                    continue;
+                }
+                let ordinal = exported.secondary.map_or(0, |secondary| secondary + 1);
+                let Some(slot) = constructor_identities.get_mut(ordinal) else {
+                    continue;
+                };
+                *slot = Some(identity.clone());
+            }
             let mut activation = self
                 .laid_out_superclass(id)
                 .map(|superclass| superclass.activation.clone())
@@ -449,6 +461,16 @@ impl FileClasses {
                     entries: self.entries[id as usize].clone(),
                     ancestors: self.ancestors[id as usize].clone(),
                     constructors,
+                    constructor_entries: std::iter::once(self.forms[id as usize].constructor)
+                        .chain(
+                            self.forms[id as usize]
+                                .secondaries
+                                .iter()
+                                .copied()
+                                .map(Some),
+                        )
+                        .collect(),
+                    constructor_identities,
                     methods,
                     activation,
                     table: LaidOutSuperclass {
