@@ -40,7 +40,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence
-          source=4fde42114304830c7ae788978d2959b2c74006a5
+          source=2367dc67339be54836e41ccc1fdc602832f16172
           git diff --exit-code "$source" HEAD -- . ':!.github/workflows/ci.yml'
           git rev-parse "$source" > evidence/source-commit.txt
           sha256sum \
@@ -48,6 +48,7 @@ jobs:
             tests/box_regressions/multimodule/suspendStateMachineExternalCps.kt \
             tests/box_regressions/suspendLambdaRetainedInlineObject.kt \
             tests/box_regressions/suspendLambdaRetainedInlineObjectCaptures.kt \
+            tests/box_regressions/librarySuspendCoroutine.kt \
             tests/box_regressions/resultCompanionIdentity.kt \
             src/klib_lowering/tests/accessor_calls.rs \
             crates/krusty-jvm/src/external_calls.rs \
@@ -120,6 +121,7 @@ jobs:
             multimodule/suspendStateMachineExternalCps.kt \
             suspendLambdaRetainedInlineObject.kt \
             suspendLambdaRetainedInlineObjectCaptures.kt \
+            librarySuspendCoroutine.kt \
             resultCompanionIdentity.kt; do
             run_case JVM "$fixture" kotlin_codegen_box_conformance "jvm-$(basename "$fixture" .kt)"
             run_case NATIVE "$fixture" kotlin_codegen_box_native_conformance "native-$(basename "$fixture" .kt)"
