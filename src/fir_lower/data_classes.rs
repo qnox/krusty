@@ -349,19 +349,11 @@ fn synthesize_to_string(
         // A NULLABLE array field renders its contents too — `A(x=[0, 1])` for an `Array<Int>?`
         // holding one, `A(x=null)` for one holding null. Asking `is_array` of the declared type
         // answers `false` for `Array<Int>?`, so the nullable field used to render by identity.
-        // An unsigned array is a value class with its own `toString`, not a primitive array, so
-        // it renders as that class (`UIntArray(storage=[1, 2])`) through the ordinary string
-        // conversion of its value.
-        let unsigned_array = !field.ty.non_null().is_reference_array()
-            && field
-                .ty
-                .non_null()
-                .array_elem()
-                .is_some_and(|element| element.is_unsigned());
-        if field.ty.non_null().is_array() && !unsigned_array {
+        // An unsigned array is a value class, rendered through its own `toString`.
+        if field.ty.renders_array_contents() {
             value = intrinsic(
                 ir,
-                crate::ir::IrIntrinsic::DataClassArrayToString { ty: field.ty },
+                crate::ir::IrIntrinsic::GeneratedPropertyArrayToString { ty: field.ty },
                 vec![value],
                 Ty::String,
             );
