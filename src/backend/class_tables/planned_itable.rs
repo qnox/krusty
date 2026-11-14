@@ -287,6 +287,10 @@ impl Filler<'_> {
             }
         };
         match declaration.member {
+            PlanKey::Forwarder { .. } => Err(format!(
+                "an interface member realized by a class's forwarder (`{}`)",
+                interface()
+            )),
             PlanKey::Callable(callable) => {
                 let Some(&fid) = ir.checked_callable_functions.get(&callable) else {
                     if !reaches {

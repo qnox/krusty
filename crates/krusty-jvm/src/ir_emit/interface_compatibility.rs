@@ -21,7 +21,8 @@ pub(super) fn emit_inherited_default_surface(
     opts: &EmitOptions,
 ) {
     let fq_name = c.fq_name();
-    let disable = opts.jvm_default == JvmDefaultMode::Disable;
+    let disable =
+        crate::declared_jvm_default::of_class(c, opts.jvm_default) == JvmDefaultMode::Disable;
     for default in ir.inherited_defaults.get(&c.fq_name).into_iter().flatten() {
         let interface = default.declaring_interface;
         let types = match &default.body {

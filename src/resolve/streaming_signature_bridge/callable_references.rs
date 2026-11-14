@@ -4,6 +4,7 @@
 //! type-alias constructor references against the same constructor/SAM declarations and callable
 //! adaptation plan used by checked bodies, then returns only the contextual function type.
 
+use super::super::callable_reference_selection::{self as reference_selection, AdaptedRefArgument};
 use super::super::extension_reference_selection::{
     select_extension_reference, ExtensionReferenceChoice, ExtensionReferenceRules,
 };
@@ -47,6 +48,7 @@ impl ProductionSignatureSemantics<'_> {
         let rules = SignatureReferenceRules {
             oracle: crate::symbol_resolver::SourceOracle(&source),
             context: crate::assignable::TyCtx::new(),
+            binds_reference_contexts: self.headers.scopes.binds_reference_contexts(scope.source),
         };
         let ExtensionReferenceChoice::Selected(selected) = select_extension_reference(
             &source,
@@ -64,7 +66,7 @@ impl ProductionSignatureSemantics<'_> {
             let context_count = function.context_count.min(parameters.len());
             parameters.insert(context_count, receiver.get());
         }
-        let shape = super::super::callable_reference_selection::realize_expected_shape(
+        let shape = reference_selection::realize_expected_shape(
             expected,
             &parameters,
             function.callable.ret,
@@ -140,49 +142,44 @@ impl ProductionSignatureSemantics<'_> {
         ]);
         let oracle = crate::symbol_resolver::SourceOracle(&source);
         let context = crate::assignable::TyCtx::new();
+        let binds_contexts = self.headers.scopes.binds_reference_contexts(scope.source);
+        let subtype = |a, b| crate::assignable::is_subtype(&context, &oracle, a, b);
         let selected = candidates_with_finalized_signatures
             .into_iter()
             .filter(|candidate| !candidate.callable.suspend || expected.suspend)
             .filter_map(|mut candidate| {
-                let specialized = super::super::callable_reference_selection::specialize_candidate(
+                let bound_contexts = candidate.context_count * usize::from(binds_contexts);
+                let specialized = reference_selection::specialize_candidate(
                     &source,
                     &mut candidate,
+                    bound_contexts,
                     None,
                     Some(&expected.params),
                     Some(expected.ret),
-                    |actual, bound| {
-                        crate::assignable::is_subtype(&context, &oracle, actual, bound)
-                    },
+                    subtype,
                 );
-                if specialized
-                    != super::super::callable_reference_selection::CallableRefSpecialization::Specialized
-                {
+                if specialized != reference_selection::CallableRefSpecialization::Specialized {
                     return None;
                 }
-                super::super::callable_reference_selection::parameter_plan(
+                reference_selection::parameter_plan(
                     &candidate.callable.params,
                     &candidate.call_sig,
+                    bound_contexts,
                     &expected.params,
-                    |actual, target| {
-                        crate::assignable::is_subtype(&context, &oracle, actual, target)
-                    },
+                    subtype,
                 )?;
-                if !super::super::callable_reference_selection::is_compatible(
+                if !reference_selection::is_compatible(
                     &expected.params,
                     candidate.callable.ret,
                     candidate.callable.suspend,
                     expected,
                     true,
-                    |actual, target| {
-                        crate::assignable::is_subtype(&context, &oracle, actual, target)
-                    },
+                    subtype,
                 ) {
                     return None;
                 }
                 let mut parameters = expected.params.clone();
-                for (parameter, declared) in
-                    parameters.iter_mut().zip(&candidate.callable.params)
-                {
+                for (parameter, declared) in parameters.iter_mut().zip(&candidate.callable.params) {
                     if parameter.non_null().is_ty_param() {
                         *parameter = *declared;
                     }
@@ -450,7 +447,7 @@ impl ProductionSignatureSemantics<'_> {
             *parameter = crate::symbol_resolver::ty_subst_keep_unbound(*parameter, &alias_bindings);
         }
 
-        let plan = super::super::callable_reference_selection::parameter_plan(
+        let plan = reference_selection::plain_parameter_plan(
             &parameters,
             &call_sig,
             &expected_function.params,
@@ -459,14 +456,14 @@ impl ProductionSignatureSemantics<'_> {
         for (parameter, argument) in plan.iter().enumerate() {
             let declared = *parameters.get(parameter)?;
             match argument {
-                super::super::callable_reference_selection::AdaptedRefArgument::Value(value) => {
+                AdaptedRefArgument::Value(value) => {
                     crate::symbol_resolver::unify_ty(
                         declared,
                         *expected_function.params.get(*value)?,
                         &mut alias_bindings,
                     );
                 }
-                super::super::callable_reference_selection::AdaptedRefArgument::Vararg {
+                AdaptedRefArgument::Vararg {
                     values,
                     whole_array,
                 } => {
@@ -483,7 +480,7 @@ impl ProductionSignatureSemantics<'_> {
                         );
                     }
                 }
-                super::super::callable_reference_selection::AdaptedRefArgument::Default => {}
+                AdaptedRefArgument::Context | AdaptedRefArgument::Default => {}
             }
         }
         if !expected_function.ret.is_ty_param() {
@@ -500,7 +497,7 @@ impl ProductionSignatureSemantics<'_> {
             return None;
         }
         let result = crate::symbol_resolver::ty_subst_keep_unbound(expansion, &alias_bindings);
-        let contextual = super::super::callable_reference_selection::realize_expected_shape(
+        let contextual = reference_selection::realize_expected_shape(
             expected_function,
             &parameters,
             result,
@@ -769,6 +766,7 @@ impl ProductionSignatureSemantics<'_> {
 struct SignatureReferenceRules<'s> {
     oracle: crate::symbol_resolver::SourceOracle<'s>,
     context: crate::assignable::TyCtx,
+    binds_reference_contexts: bool,
 }
 
 impl ExtensionReferenceRules for SignatureReferenceRules<'_> {
@@ -782,6 +780,10 @@ impl ExtensionReferenceRules for SignatureReferenceRules<'_> {
 
     fn accessible(&self, _function: &crate::libraries::FunctionInfo) -> bool {
         true
+    }
+
+    fn binds_reference_contexts(&self) -> bool {
+        self.binds_reference_contexts
     }
 
     fn at_least_as_specific(&self, left: &[Ty], right: &[Ty]) -> bool {

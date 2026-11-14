@@ -347,9 +347,7 @@ fn materialize_delegation(
                         overridden_parameter_identities: overridden.parameter_identities.to_vec(),
                         implementation_result: member.call.result.get(),
                         suspend: member.call.suspend,
-                        // A delegation forwarder implements an interface obligation no superclass
-                        // declaration of this class overrides.
-                        has_kotlin_superclass_override: false,
+                        has_kotlin_superclass_override: overridden.has_kotlin_superclass_override,
                         depth: 0,
                     });
                 }

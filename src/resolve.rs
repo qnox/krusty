@@ -34,10 +34,12 @@ use scope::{ContextReceiver, ContextReceiverKind, FlowExclusion, NarrowPath, Ns}
 
 mod abstract_obligations;
 mod argument_parameter_mapping;
+mod builtin_implementation;
 use argument_parameter_mapping::{
     call_argument_parameter_indices, call_argument_parameter_indices_result,
     named_whole_array_varargs,
 };
+pub(crate) use builtin_implementation::for_checked_external_members;
 mod call_site_publication;
 mod constructor_references;
 mod implicit_source_member_lambda;
@@ -59,6 +61,7 @@ mod anonymous_object_capture;
 mod backing_field_binding;
 mod boolean_implications;
 mod dependency_annotation_defaults;
+mod dependency_body_call_edges;
 use anonymous_object_capture::{
     record_anonymous_construction_captures, AnonymousCaptureCandidate,
     SelectedLocalCallableCaptures,
@@ -102,6 +105,7 @@ mod class_literal_type_arguments;
 mod class_names_aliases;
 mod expression_finalization;
 mod reference_array_spread;
+mod reference_context_arguments;
 mod star_projected_classifier;
 use candidate_display::{
     ambiguous_classifier_message, classifier_access_display_from_shape,
@@ -170,6 +174,7 @@ pub use enum_entry_properties::EnumEntryProperty;
 use enum_entry_properties::{EnumEntryPropertyBinding, EnumEntryStorage};
 mod enum_entry_method_owner;
 pub(crate) use enum_entry_method_owner::owns_storage as enum_entry_storage_owner_matches;
+mod callable_reference_result;
 mod explicit_backing_fields;
 mod explicit_property_write;
 mod explicit_receiver_levels;
@@ -255,6 +260,7 @@ mod named_class_constructors;
 pub(crate) mod operator_calls;
 mod operator_declarations;
 mod opt_in_usage;
+mod primitive_reference;
 use operator_calls::{
     range_operator, OperatorOperand, ResolvedInRangeComparison, SelectedBuiltinOperatorAccess,
 };
@@ -414,6 +420,7 @@ use context_sensitive_resolution::{expected_nested_classifier, parameterized_cla
 use delegated_properties::{
     select_delegate_operator, select_delegate_operator_return, DelegateConventionSite,
 };
+pub(crate) use dependency_body_call_edges::klib_dependency_member_call_edge;
 pub(crate) use dependency_platform::DependencyPlatform;
 pub(crate) use diagnostic_selection::unresolved_member_message;
 use extension_reference_selection::ExtensionReferenceChoice;
@@ -7268,6 +7275,9 @@ pub struct TypeInfo {
     /// [`ResolvedCall`] for the target kinds and the typed accessors ([`Self::resolved_member`],
     /// [`Self::resolved_top_level_call`], …).
     pub resolved_calls: HashMap<ExprId, ResolvedCall>,
+    /// Builtin override implementations selected for external members in this checked unit.
+    /// Common lowering carries these facts into IR; backend handoff does not reopen the hierarchy.
+    pub(crate) builtin_implementations: builtin_implementation::Facts,
     /// The exact semantic receiver selected for an unqualified member access through the implicit-receiver
     /// stack. This is deliberately separate from [`Self::resolved_calls`]: the selected callable says
     /// what to invoke, while this map says which runtime object supplies its dispatch/extension
@@ -31756,6 +31766,18 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     c.narrow_script_template_receivers();
     c.publish_member_declaring_receivers();
     let enhanced_values = c.enhanced_value_heads();
+    let builtin_implementations = match builtin_implementation::for_checked_unit(&c) {
+        Ok(implementations) => implementations,
+        Err(identity) => {
+            c.diags.error(
+                Span::new(0, 0),
+                format!(
+                    "internal error: selected external member {identity:?} has no semantic owner"
+                ),
+            );
+            HashMap::default()
+        }
+    };
     let Checker {
         expr_types,
         callable_reference_types,
@@ -32105,6 +32127,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         generated_class_names,
         narrowed_this_member,
         resolved_calls,
+        builtin_implementations,
         implicit_receiver_selections,
         resolved_source_calls,
         inspection_source_declarations: std::sync::Arc::default(),
@@ -34021,24 +34044,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn callable_ref_is_compatible(
-        &self,
-        params: &[Ty],
-        ret: Ty,
-        suspend: bool,
-        expected: &'static crate::types::FnSig,
-        allow_unit_coercion: bool,
-    ) -> bool {
-        callable_reference_selection::is_compatible(
-            params,
-            ret,
-            suspend,
-            expected,
-            allow_unit_coercion,
-            |actual, target| self.receiver_is_assignable(actual, target),
-        )
-    }
-
     fn callable_ref_parameter_shape_at_least_as_specific(
         &self,
         left_params: &[Ty],
@@ -34052,29 +34057,6 @@ impl<'a> Checker<'a> {
             .iter()
             .zip(right_params)
             .all(|(left, right)| crate::assignable::is_subtype(&context, self, *left, *right))
-    }
-
-    /// Apply an expected callable shape to one generic declaration before reference adaptation.
-    /// The declaration origin and binding mode are irrelevant here: member, extension, and top-level
-    /// candidates all carry the same `FunctionInfo`/`GenericSig` structure. An extension additionally
-    /// contributes its already-selected receiver as inference evidence. Reference-shape construction
-    /// later places an unbound receiver according to the declaration's semantic parameter roles.
-    fn specialize_callable_ref_candidate(
-        &self,
-        function: &mut crate::libraries::FunctionInfo,
-        extension_receiver: Option<Ty>,
-        expected_params: Option<&[Ty]>,
-        expected_ret: Option<Ty>,
-    ) -> Result<Vec<Ty>, CallableRefSpecialization> {
-        let source = self.fed_source();
-        callable_reference_selection::specialize_candidate_with_type_arguments(
-            &source,
-            function,
-            extension_receiver,
-            expected_params,
-            expected_ret,
-            |actual, bound| self.generic_bound_admits(actual, bound),
-        )
     }
 
     fn selected_extension_ref(
@@ -34731,36 +34713,6 @@ impl<'a> Checker<'a> {
         ))
     }
 
-    /// Map an expected function value's parameters onto one declaration. Each target parameter is
-    /// supplied by one adapter value, its declared default, or a collected vararg. This is ordinary
-    /// callable applicability data: providers expose the parameter/default/vararg shape, while core
-    /// computes the one positional invocation plan independently of source or classpath origin.
-    fn callable_ref_argument_plan(
-        &self,
-        function: &crate::libraries::FunctionInfo,
-        expected: &'static crate::types::FnSig,
-    ) -> Option<Vec<AdaptedRefArgument>> {
-        self.callable_ref_parameter_plan(
-            &function.callable.params,
-            &function.call_sig,
-            &expected.params,
-        )
-    }
-
-    fn callable_ref_parameter_plan(
-        &self,
-        params: &[Ty],
-        call_sig: &crate::libraries::CallSig,
-        expected_params: &[Ty],
-    ) -> Option<Vec<AdaptedRefArgument>> {
-        extension_reference_selection::checked_parameter_plan(
-            params,
-            call_sig,
-            expected_params,
-            self,
-        )
-    }
-
     /// Whether a callable-reference expression can realize one exact function shape through the
     /// referenced declaration's defaults and vararg. This is a read-only applicability probe used
     /// while an enclosing overload is still being ranked; the selected path rechecks the reference
@@ -34876,6 +34828,7 @@ impl<'a> Checker<'a> {
             if callable_reference_selection::select_adapted_instance_candidate(
                 &source,
                 &candidates,
+                self.file.callable_references_to_contextual,
                 None,
                 expected,
                 |actual, target| self.receiver_is_assignable(actual, target),
@@ -35033,6 +34986,7 @@ impl<'a> Checker<'a> {
         let mut structurally_adaptable = Vec::new();
         let mut unavailable_default = None;
         let mut unresolved_type_arguments = false;
+        let mut context_parameter_candidate = None;
         let candidates = candidates
             .into_iter()
             .filter_map(|mut function| {
@@ -35052,6 +35006,12 @@ impl<'a> Checker<'a> {
                 // invalid. Suspension is a property of the selected declaration/signature, never
                 // inferred from a classifier name.
                 if function.callable.suspend && !expected.suspend {
+                    return None;
+                }
+                // Without `CallableReferencesToContextual` a declaration with context parameters
+                // cannot be referenced at all.
+                if function.context_count > 0 && !self.file.callable_references_to_contextual {
+                    context_parameter_candidate.get_or_insert_with(|| function.clone());
                     return None;
                 }
                 let accessible = crate::callable_access::source_callable_accessible(
@@ -35078,6 +35038,12 @@ impl<'a> Checker<'a> {
                 if structurally_fits {
                     structurally_adaptable.push(function.clone());
                 }
+                // Overload specificity compares the declarations, not their instantiation for this
+                // expected shape: `listOf(vararg elements: T)` takes `Array<out T>` where
+                // `listOf(element: T)` takes any `T`, whatever the expected array type binds.
+                let declared_shape = callable_reference_selection::erased_declared_parameters(
+                    &function.callable.params,
+                );
                 let specialization = self.specialize_callable_ref_candidate(
                     &mut function,
                     None,
@@ -35142,7 +35108,8 @@ impl<'a> Checker<'a> {
                         values,
                         whole_array: true,
                     } => values.as_slice() == [target],
-                    AdaptedRefArgument::Default
+                    AdaptedRefArgument::Context
+                    | AdaptedRefArgument::Default
                     | AdaptedRefArgument::Vararg {
                         whole_array: false,
                         ..
@@ -35190,10 +35157,14 @@ impl<'a> Checker<'a> {
                     argument_mapping,
                     type_arguments,
                     plan,
+                    declared_shape,
                 ))
             })
             .collect::<Vec<_>>();
         if candidates.is_empty() {
+            if let Some(function) = context_parameter_candidate {
+                return Some(self.report_context_parameter_reference(expression, name, &function));
+            }
             if unresolved_type_arguments {
                 self.diags.error(
                     self.member_name_span(expression, name),
@@ -35252,7 +35223,7 @@ impl<'a> Checker<'a> {
             .iter()
             .map(
                 |candidate| callable_reference_selection::AdaptedReferenceSpecificity {
-                    parameters: &candidate.0.callable.params,
+                    parameters: &candidate.7,
                     plan: &candidate.6,
                     is_vararg: candidate.0.call_sig.vararg_index.is_some(),
                 },
@@ -35287,6 +35258,7 @@ impl<'a> Checker<'a> {
             vararg_collect,
             argument_mapping,
             type_arguments,
+            _,
             _,
         ) = &candidates[*selected_index];
         self.replace_call_type_arguments(
@@ -37223,6 +37195,7 @@ impl<'a> Checker<'a> {
             callable_reference_selection::select_adapted_instance_candidate(
                 &source,
                 overloads,
+                self.file.callable_references_to_contextual,
                 None,
                 expected,
                 |actual, target| self.receiver_is_assignable(actual, target),
@@ -38340,8 +38313,11 @@ impl<'a> Checker<'a> {
             generic,
             &call_sig,
             receiver,
-            Some(expected_params),
-            Some(expected_ret),
+            callable_reference_selection::ReferenceExpectation {
+                params: Some(expected_params),
+                ret: Some(expected_ret),
+                bound_contexts: 0,
+            },
             |actual, bound| self.generic_bound_admits(actual, bound),
         )
         .ok()?;
@@ -48223,14 +48199,8 @@ impl<'a> Checker<'a> {
         if expected.is_erased_top() {
             return;
         }
-        // A primitive flowing into a reference supertype is checked through its boxed source type; the
-        // provider's type hierarchy decides whether that box implements `Number`, `Comparable`, etc.
-        if let (Some(TyKind::Obj(b, _)), TyKind::Obj(e, _)) =
-            (actual.boxed_ref().map(|ty| ty.kind()), expected.kind())
-        {
-            if self.obj_name_is_subtype(b, e) {
-                return;
-            }
+        if primitive_reference::reaches_reference(self, actual, expected) {
+            return;
         }
         // The dedicated `Ty::String` variant and its object form `Obj("kotlin/String")` denote the SAME
         // type (they share an erased key); a value of one flows into the other. A metadata-derived return
@@ -54568,6 +54538,7 @@ impl<'a> Checker<'a> {
                         callable_reference_selection::select_adapted_instance_candidate(
                             &source,
                             &candidates,
+                            self.file.callable_references_to_contextual,
                             None,
                             expected,
                             |actual, target| self.receiver_is_assignable(actual, target),
@@ -54842,6 +54813,11 @@ impl<'a> Checker<'a> {
             // `A::foo`). Keep the nullable application only for the extension rung below,
             // where `A?` is a semantically distinct extension receiver type.
             let receiver_candidates = self.callable_ref_candidates(receiver_ty, name);
+            let expected = self.natural_reference_expectation(
+                expected,
+                &receiver_candidates,
+                Some(receiver_ty),
+            );
             if let Some(property) = self.select_callable_property_ref(
                 receiver_candidates.property.as_ref(),
                 &[receiver_ty],
@@ -54861,6 +54837,7 @@ impl<'a> Checker<'a> {
                     callable_reference_selection::select_adapted_instance_candidate(
                         &source,
                         &receiver_candidates.overloads,
+                        self.file.callable_references_to_contextual,
                         Some(receiver_ty),
                         expected,
                         |actual, target| self.receiver_is_assignable(actual, target),
@@ -55005,7 +54982,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn callable_ref_function_type(
+    fn callable_ref_selected_type(
         &mut self,
         scope: &CheckerScope<'_>,
         e: ExprId,
@@ -55105,8 +55082,16 @@ impl<'a> Checker<'a> {
                         }
                         implicit_rungs::ImplicitRung::Receiver(receiver) => receiver,
                     };
+                    // A context parameter is not a receiver a bare reference binds to.
+                    if implicit_receiver
+                        .receiver_role
+                        .is_some_and(ReceiverDeclarationRole::is_context_parameter)
+                    {
+                        continue;
+                    }
                     let receiver = implicit_receiver.ty;
                     let candidates = self.callable_ref_candidates(receiver, &name);
+                    let expected = self.natural_reference_expectation(expected, &candidates, None);
                     if let Some(selection) = self.select_bound_callable_ref(&candidates, expected) {
                         if let Some(ty) = self.record_bound_callable_ref(
                             e,
@@ -55280,6 +55265,14 @@ impl<'a> Checker<'a> {
                         .filter(|candidate| candidate.kind == crate::libraries::FnKind::TopLevel)
                         .collect::<Vec<_>>();
                     if let [selected] = candidates.as_slice() {
+                        if selected.context_count > 0 && self.file.callable_references_to_contextual
+                        {
+                            if let Some(ty) =
+                                self.contextual_top_level_reference(e, &name, selected)
+                            {
+                                return self.set(e, ty);
+                            }
+                        }
                         let ty = if selected.callable.suspend {
                             Ty::fun_suspend(selected.callable.params.clone(), selected.callable.ret)
                         } else {
@@ -55470,6 +55463,7 @@ impl<'a> Checker<'a> {
                             InheritedNestedClassifier::NotFound => {}
                         }
                     }
+                    let expected = self.natural_reference_expectation(expected, candidates, None);
                     if let Some(selection) = self.select_bound_callable_ref(candidates, expected) {
                         if let Some(ty) = self.record_bound_callable_ref(
                             e,

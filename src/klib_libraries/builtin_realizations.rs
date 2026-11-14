@@ -49,7 +49,10 @@ pub(super) fn realize_member(
             .or_else(|| {
                 member_rules::unsigned_bitwise_intrinsic(&facts()).map(MemberRealization::Intrinsic)
             })
-            .or_else(|| member_rules::primitive_iterator_next(&facts())),
+            .or_else(|| member_rules::primitive_iterator_next(&facts()))
+            .or_else(|| {
+                member_rules::string_compare_intrinsic(&facts()).map(MemberRealization::Intrinsic)
+            }),
         realization => Some(realization),
     };
     let role = semantic_call_role(facts());

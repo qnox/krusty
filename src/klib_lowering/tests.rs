@@ -18,6 +18,7 @@ mod demo_package;
 mod elvis_blocks;
 mod enum_entries;
 mod for_loop_bindings;
+mod generic_receiver_hierarchy;
 mod inline_templates;
 mod object_literal_overrides;
 mod object_literals;

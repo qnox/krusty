@@ -35,6 +35,7 @@ use super::{carrier, Body, FileContext, Unsupported, STRING};
 pub(super) const STRING_HEAP: HeapType = HeapType::Concrete(1);
 
 mod override_bridges;
+mod root_any;
 mod unrealized_members;
 
 pub(super) use unrealized_members::holds_unprinted_values;
@@ -76,6 +77,9 @@ impl Body<'_> {
         class: ClassId,
         index: u32,
     ) -> Result<(), Unsupported> {
+        if let Some(read) = self.materialized_value_storage_read(receiver, class, index) {
+            return read;
+        }
         let structure = self.object(receiver, class)?;
         let field = self.file_classes()?.field(class, index);
         self.code.struct_get(structure, field);
@@ -120,8 +124,11 @@ impl Body<'_> {
         args: &[u32],
         selected: Option<&[Ty]>,
     ) -> Result<(), Unsupported> {
+        if let Some(constructed) = self.scalar_value_construction(internal, args, selected) {
+            return constructed;
+        }
         let Some(class) = self.classes.and(self.ir.class_id_by_name(internal)) else {
-            if let Some(constructed) = self.scalar_value_construction(internal, args, selected) {
+            if let Some(constructed) = self.cross_file_construction(site, internal, args) {
                 return constructed;
             }
             // Boundary conversion for a diagnostic.
@@ -185,6 +192,47 @@ impl Body<'_> {
         }
         self.code.call(constructor).local_get(object);
         Ok(())
+    }
+
+    /// `C(args)` of a class another file of the module declares: a call of the entry that file
+    /// realizes for the constructor the checker selected, which allocates and initializes the
+    /// instance. `None` when `internal` has no such constructor, so the library-class decline
+    /// applies.
+    fn cross_file_construction(
+        &mut self,
+        site: u32,
+        internal: krusty::types::TypeName,
+        args: &[u32],
+    ) -> Option<Result<(), Unsupported>> {
+        let constructor = *self.ir.module_constructions.selected.get(&site)?;
+        let function = self.calls.instance(
+            &krusty::backend::instance_links::InstanceEntry::Constructor {
+                module: self.module_name.into(),
+                declaration: constructor,
+            },
+        )?;
+        // What the entry takes: an inner class's enclosing instance, then the declared parameters.
+        let record = self.ir.module_constructions.records.get(&constructor)?;
+        let parameters: Vec<Ty> = record
+            .outer
+            .map(Ty::obj_name)
+            .into_iter()
+            .chain(record.parameters.iter().copied())
+            .collect();
+        Some((|| {
+            if parameters.len() != args.len() {
+                // Boundary conversion for a diagnostic.
+                return Err(format!(
+                    "a constructor call with omitted arguments (`{}`)",
+                    internal.render().replace('/', ".")
+                ));
+            }
+            for (argument, parameter) in args.iter().zip(parameters.iter()) {
+                self.value(*argument, *parameter)?;
+            }
+            self.code.call(function);
+            Ok(())
+        })())
     }
 
     /// Push a new instance of `class`: its identity hash, and every field at its default value.
@@ -1233,6 +1281,13 @@ impl Body<'_> {
                     self.runtime
                         .exception_class(self.module, self.classifiers, name)?;
                 self.code.ref_test(nullable, HeapType::Concrete(structure));
+            }
+            // Each array classifier is an object type of its own, so the test is its type's:
+            // `UIntArray` is not an `IntArray`, though one wraps the other's storage.
+            _ if tested.is_array() => {
+                let (form, _) = self.array_form(tested)?;
+                self.code
+                    .ref_test(nullable, HeapType::Concrete(form.object));
             }
             _ => match (self.interface_of_type(tested), self.class_of_type(tested)) {
                 (Some(interface), _) => self.interface_test(interface, nullable),

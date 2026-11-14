@@ -97,7 +97,7 @@ fn unsigned_decimal_intrinsics_require_the_exact_receiver_type_and_operand_frame
 }
 
 #[test]
-fn unsigned_decimal_support_does_not_admit_nullable_or_erased_unsigned_boxes() {
+fn ordinary_string_conversion_supports_nullable_and_erased_unsigned_boxes() {
     for target in WasmTarget::ALL {
         for ty in [Ty::UByte, Ty::UShort, Ty::UInt, Ty::ULong] {
             let mut ir = IrFile::default();
@@ -105,13 +105,7 @@ fn unsigned_decimal_support_does_not_admit_nullable_or_erased_unsigned_boxes() {
             ir.set_logical_type(null, Ty::nullable(ty));
             let value = ir.add_expr(IrExpr::StringConcat(vec![null]));
             ir.set_logical_type(value, Ty::String);
-            assert_eq!(
-                lower(ir, value, target),
-                Err(format!(
-                    "a `toString` of `{}` reaching a runtime object this target cannot print",
-                    super::super::describe(Ty::nullable(ty))
-                )),
-            );
+            assert_eq!(lower(ir, value, target), Ok(()),);
 
             let mut ir = IrFile::default();
             let scalar = receiver(&mut ir, ty);
@@ -123,13 +117,27 @@ fn unsigned_decimal_support_does_not_admit_nullable_or_erased_unsigned_boxes() {
             ir.set_logical_type(erased, Ty::obj_name(krusty::types::wk::any()));
             let value = ir.add_expr(IrExpr::StringConcat(vec![erased]));
             ir.set_logical_type(value, Ty::String);
-            assert_eq!(
-                lower(ir, value, target),
-                Err(format!(
-                    "a `toString` of `{}` reaching a runtime object this target cannot print",
-                    super::super::describe(Ty::obj_name(krusty::types::wk::any()))
-                )),
-            );
+            assert_eq!(lower(ir, value, target), Ok(()),);
+        }
+    }
+}
+
+#[test]
+fn unsigned_scalar_intrinsics_still_reject_nullable_and_erased_receivers() {
+    for target in WasmTarget::ALL {
+        for ty in [Ty::UByte, Ty::UShort, Ty::UInt, Ty::ULong] {
+            for actual in [Ty::nullable(ty), Ty::obj_name(krusty::types::wk::any())] {
+                let mut ir = IrFile::default();
+                let receiver = receiver(&mut ir, actual);
+                let value = conversion(&mut ir, ty, Some(receiver), Vec::new());
+                assert_eq!(
+                    lower(ir, value, target),
+                    Err(
+                        "an unsigned string conversion without its exact non-null scalar source"
+                            .into()
+                    )
+                );
+            }
         }
     }
 }

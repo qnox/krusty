@@ -170,6 +170,7 @@ const MODELED_FEATURES: &[&str] = &[
     "AllowEagerSupertypeAccessibilityChecks",
     "AnnotationsInMetadata",
     "BareArrayClassLiteral",
+    "CallableReferencesToContextual",
     "ContextParameters",
     "ContextReceivers",
     "ContextSensitiveResolutionUsingExpectedType",

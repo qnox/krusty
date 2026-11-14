@@ -118,15 +118,13 @@ fn every_primitive_compares_through_its_own_comparable_override() {
                 declaration.identity.params.as_ref(),
                 [implementation.receiver]
             );
-            // A string and an unsigned integer compare in a body of their own.
-            let has_body = matches!(
-                implementation.receiver,
-                Ty::String | Ty::UByte | Ty::UShort | Ty::UInt | Ty::ULong
-            );
-            assert_eq!(
-                operation(&declaration.callable),
-                (!has_body).then_some(CompilerIntrinsic::PrimitiveCompare)
-            );
+            let expected = match implementation.receiver {
+                Ty::String => Some(CompilerIntrinsic::StringCompare),
+                // Unsigned integers compare in their own library bodies.
+                Ty::UByte | Ty::UShort | Ty::UInt | Ty::ULong => None,
+                _ => Some(CompilerIntrinsic::PrimitiveCompare),
+            };
+            assert_eq!(operation(&declaration.callable), expected);
         }
     }
 }
@@ -191,6 +189,19 @@ fn a_string_reads_its_own_length_and_chars_through_char_sequence() {
             assert_eq!(operation(&declaration.callable), Some(intrinsic));
             assert_eq!(declaration.identity.params.as_ref(), params);
             assert_eq!(declaration.identity.ret, ret);
+
+            let facts = builtin_implementation_facts(&libraries, char_sequence, name, identity);
+            let [fact] = facts.as_ref() else {
+                panic!("the checked fact keeps the one represented String override");
+            };
+            assert_eq!(fact.receiver, Ty::String);
+            let declaration = fact
+                .declaration
+                .as_ref()
+                .expect("String provides its own CharSequence implementation");
+            assert_eq!(declaration.operation, Some(intrinsic));
+            assert_eq!(declaration.params.as_ref(), params);
+            assert_eq!(declaration.ret, ret);
         }
     }
 }

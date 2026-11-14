@@ -1115,7 +1115,7 @@ fn single_value_field(
     }
     let value = carrier(class.fields[0].ty)?
         .ok_or_else(|| format!("a `Unit`-typed value class field (`{}`)", class.fq_name()))?;
-    let field = 1 + bases[id as usize].fields() + tables.table(id).first_field;
+    let field = PREFIX_FIELDS + bases[id as usize].fields() + tables.table(id).first_field;
     Ok(Some(ValueStorage {
         structure: forms[id as usize]
             .structure

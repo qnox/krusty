@@ -1916,6 +1916,9 @@ pub struct File {
     /// `+ExplicitContextArguments`: named context parameters may be supplied at a call site instead
     /// of being selected from the implicit receiver and lexical scope.
     pub explicit_context_arguments: bool,
+    /// `+CallableReferencesToContextual`: a reference to a declaration with context parameters
+    /// selects those arguments from the reference site and exposes only the value parameters.
+    pub callable_references_to_contextual: bool,
     /// `+ContextSensitiveResolutionUsingExpectedType`: an otherwise-unbound simple classifier or
     /// classifier value may be selected from the expected type's nested classifier hierarchy.
     pub context_sensitive_resolution_using_expected_type: bool,

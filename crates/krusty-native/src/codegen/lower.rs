@@ -341,6 +341,7 @@ pub fn lower_file(
         string_objects: HashMap::default(),
         classes: Vec::new(),
         accessors: HashMap::default(),
+        dependency_bridges: 0,
         statics: Vec::new(),
         lambdas: HashMap::default(),
         local_delegate_helpers: HashMap::default(),
@@ -405,7 +406,6 @@ pub fn lower_file(
         }
     }
     lowering.define_property_entry_points(file_init)?;
-    lowering.define_constructor_entry_points(file_init)?;
     lowering.define_value_box_entry_points()?;
     lowering.define_extension_entries(file_init)?;
     let defines_entry = selected.is_some();
@@ -527,6 +527,9 @@ struct FileLowering<'a> {
     classes: Vec<objects::ClassItems>,
     /// Synthesized field accessors the vtables reference, by slot.
     accessors: HashMap<Slot, FuncId>,
+    /// How many bridges of dependency interface members this file has defined, which names the
+    /// next one.
+    dependency_bridges: usize,
     /// The global slot of each top-level property, parallel to `ir.statics`.
     statics: Vec<DataId>,
     /// The emitted pieces of each lambda, by the expression that creates it.

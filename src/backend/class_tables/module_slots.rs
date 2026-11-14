@@ -15,7 +15,7 @@
 
 use crate::fx_hash::{HashMap, HashSet};
 
-use super::module_classes::{ModuleClass, ModuleClasses, ModuleMember};
+use super::module_classes::{ForwardedMember, ModuleClass, ModuleClasses, ModuleMember};
 use super::module_interfaces::ModuleInterfaces;
 use crate::fir::{
     CallableId, ExternalCallableId, PropertyId, ResolvedFunctionOverrideTarget,
@@ -32,6 +32,11 @@ pub enum PlanKey {
     Callable(CallableId),
     Getter(PropertyId),
     Setter(PropertyId),
+    /// The `ordinal`-th forwarder `class`'s interface delegations generate.
+    Forwarder {
+        class: TypeName,
+        ordinal: u32,
+    },
     /// A member of a dependency class a module class extends, by its provider identity. A
     /// dependency property is keyed by its getter's identity.
     DependencyCallable(ExternalCallableId),
@@ -107,9 +112,6 @@ pub struct PlannedTable {
     pub(crate) dependency: bool,
     pub(crate) entries: Vec<PlannedSlot>,
     pub slots: HashMap<PlanKey, u32>,
-    /// Whether the declaring file appends interface-delegation forwarders after `entries`, which
-    /// the plan does not number yet.
-    pub appends_forwarders: bool,
 }
 
 /// Every named class's planned table, or why it has none. A class without one is numbered by its
@@ -145,17 +147,39 @@ impl ModuleSlotPlan {
 
     /// Plan every class of `classes`, superclasses first.
     pub fn build(classes: &ModuleClasses, representation: &dyn Representation) -> Self {
-        let carriers: HashMap<ResolvedFunctionOverrideTarget, (&[Ty], Ty)> = classes
+        let carriers: HashMap<PlanKey, (Box<[Ty]>, Ty)> = classes
             .iter()
             .flat_map(|(_, class)| class.members.iter())
-            .filter_map(|member| match member {
+            .flat_map(|member| match member {
                 ModuleMember::Function {
                     callable,
                     parameters,
                     result,
                     ..
-                } => Some((*callable, (&parameters[..], *result))),
-                ModuleMember::Property { .. } => None,
+                } => vec![(PlanKey::function(*callable), (parameters.clone(), *result))],
+                ModuleMember::Property {
+                    property,
+                    accessor_parameters,
+                    value,
+                    getter_value,
+                    ..
+                } => vec![
+                    (
+                        PlanKey::accessor(*property, false),
+                        (accessor_parameters.clone(), *getter_value),
+                    ),
+                    (
+                        PlanKey::accessor(*property, true),
+                        (
+                            accessor_parameters
+                                .iter()
+                                .copied()
+                                .chain([*value])
+                                .collect(),
+                            Ty::Unit,
+                        ),
+                    ),
+                ],
             })
             .collect();
         let mut planner = Planner {
@@ -182,19 +206,10 @@ impl ModuleSlotPlan {
                         result,
                         suspend,
                     } => {
-                        let signature = if *suspend {
-                            // The slot holds the function in the form every target that lowers
-                            // coroutines on common IR gives it.
-                            let (continuation, completed) =
-                                crate::types::continuation_passing(*result);
-                            (
-                                parameters.iter().copied().chain([continuation]).collect(),
-                                completed,
-                            )
-                        } else {
-                            (parameters.clone(), *result)
-                        };
-                        signatures.insert(PlanKey::function(*callable), signature);
+                        signatures.insert(
+                            PlanKey::function(*callable),
+                            carried(parameters, *result, *suspend),
+                        );
                     }
                     ModuleMember::Property {
                         property,
@@ -211,6 +226,17 @@ impl ModuleSlotPlan {
                         signatures.insert(PlanKey::accessor(*property, true), (setter, Ty::Unit));
                     }
                 }
+            }
+        }
+        for (name, class) in classes.iter() {
+            for (ordinal, forwarder) in class.forwarders.iter().enumerate() {
+                signatures.insert(
+                    PlanKey::Forwarder {
+                        class: name,
+                        ordinal: u32::try_from(ordinal).expect("too many forwarders"),
+                    },
+                    carried(&forwarder.parameters, forwarder.result, forwarder.suspend),
+                );
             }
         }
         Self {
@@ -281,7 +307,7 @@ impl ModuleSlotPlan {
 struct Planner<'c> {
     classes: &'c ModuleClasses,
     representation: &'c dyn Representation,
-    carriers: HashMap<ResolvedFunctionOverrideTarget, (&'c [Ty], Ty)>,
+    carriers: HashMap<PlanKey, (Box<[Ty]>, Ty)>,
     tables: HashMap<TypeName, Result<PlannedTable, Unsupported>>,
 }
 
@@ -389,13 +415,57 @@ impl Planner<'_> {
                 }
             }
         }
+        for (ordinal, forwarder) in class.forwarders.iter().enumerate() {
+            let key = PlanKey::Forwarder {
+                class: name,
+                ordinal: u32::try_from(ordinal).expect("too many forwarders"),
+            };
+            // A forwarder that also realizes a class member it inherits (`class E : B(), C by
+            // D()` where both declare `x`) takes that member's number, as an override would;
+            // one realizing interface members alone takes a new one.
+            let mut replaces = None;
+            for member in forwarder.realizes.iter() {
+                let member = match *member {
+                    ForwardedMember::Function(callable) => PlanKey::function(callable),
+                    ForwardedMember::Getter(property) => PlanKey::accessor(property, false),
+                    ForwardedMember::Setter(property) => PlanKey::accessor(property, true),
+                };
+                let Some(&slot) = slots.get(&member) else {
+                    continue;
+                };
+                let (parameters, result) = self
+                    .carriers
+                    .get(&member)
+                    .ok_or("a delegated class member with no module-wide signature")?;
+                if !self.same(
+                    (&forwarder.parameters, forwarder.result),
+                    (parameters, *result),
+                ) {
+                    return Err(format!(
+                        "a delegated member carried differently from the class member it \
+                         overrides (`{}`)",
+                        qualified()
+                    ));
+                }
+                if replaces
+                    .replace(slot)
+                    .is_some_and(|previous| previous != slot)
+                {
+                    return Err(format!(
+                        "a delegated member overriding class members at different slots (`{}`)",
+                        qualified()
+                    ));
+                }
+            }
+            let slot = place(&mut entries, replaces, PlannedSlot::Member(key));
+            slots.insert(key, slot);
+        }
         Ok(PlannedTable {
             superclass: planned_superclass,
             inherited,
             dependency: class.dependency,
             entries,
             slots,
-            appends_forwarders: class.delegates_interfaces,
         })
     }
 
@@ -442,8 +512,8 @@ impl Planner<'_> {
             };
             let declared = self
                 .carriers
-                .get(&overridden)
-                .copied()
+                .get(&PlanKey::function(overridden))
+                .map(|(parameters, result)| (&parameters[..], *result))
                 .ok_or("an override of a member with no module-wide layout")?;
             if self.same(carriers, declared) {
                 class_replaces = Some(slot);
@@ -563,6 +633,20 @@ impl PlannedTable {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+}
+
+/// What a slot holding a function of `parameters` answering `result` is typed by: a `suspend`
+/// one in the form every target that lowers coroutines on common IR gives it.
+fn carried(parameters: &[Ty], result: Ty, suspend: bool) -> (Box<[Ty]>, Ty) {
+    if suspend {
+        let (continuation, completed) = crate::types::continuation_passing(result);
+        (
+            parameters.iter().copied().chain([continuation]).collect(),
+            completed,
+        )
+    } else {
+        (parameters.into(), result)
     }
 }
 

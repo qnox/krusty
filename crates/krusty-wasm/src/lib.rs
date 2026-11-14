@@ -16,6 +16,7 @@ mod array_objects;
 mod boxes;
 mod builtin_instances;
 mod builtin_members;
+mod builtin_order;
 mod callable_references;
 mod class_tokens;
 mod codegen;
