@@ -494,6 +494,18 @@ mod tests {
     }
 
     #[test]
+    fn plugin_runtime_binding_uses_provider_declarations() {
+        let path = source_path("src/compiler/backend_handoff/plugin_handoff.rs");
+        let text = fs::read_to_string(&path).expect("read plugin runtime handoff");
+        for forbidden in ["SymbolResolver", "symbol_resolver::", "resolve_symbol("] {
+            assert!(
+                !text.contains(forbidden),
+                "plugin runtime declarations are provider-owned facts, not resolver candidates: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn backend_resolver_guard_keeps_scanning_after_test_modules() {
         let source = r###"
             #[cfg(test)]

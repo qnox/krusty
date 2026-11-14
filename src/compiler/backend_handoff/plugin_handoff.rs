@@ -6,12 +6,11 @@ use crate::backend::{BackendClassifierSource, CheckedBackendCallables};
 use crate::diag::Span;
 use crate::fir::{ExternalCallableId, ExternalPropertyId, OriginStore, SourceFileId};
 use crate::ir::{ExprId, IrFile};
-use crate::libraries::FnKind;
+use crate::libraries::{Callables, FnKind};
 use crate::plugins::runtime_declarations::{
     BoundRuntimeFunction, PluginClassifier, PluginRuntime, RuntimeDeclaration, RuntimeFunction,
 };
 use crate::plugins::{CheckedSourceFacts, DependencyCallableShape, DependencyDeclaration};
-use crate::symbol_resolver::declared_member_callables;
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{Ty, TypeName};
 
@@ -107,7 +106,14 @@ impl PluginRuntime for HandoffRuntime<'_> {
                 FnKind::TopLevel,
             ),
             RuntimeDeclaration::Member(owner) => (
-                declared_member_callables(self.source, Ty::obj_name(owner), function.name),
+                // The plugin contract names the declaring classifier, so read its normalized
+                // declaration table directly.
+                self.source
+                    .classifier(owner)
+                    .and_then(|classifier| {
+                        classifier.declared_callables.get(function.name).cloned()
+                    })
+                    .unwrap_or(crate::libraries::Callables::None),
                 FnKind::Member,
             ),
             // A classifier's static functions take no receiver: they live in its own namespace.
@@ -119,21 +125,7 @@ impl PluginRuntime for HandoffRuntime<'_> {
                 FnKind::TopLevel,
             ),
         };
-        let mut selected = declared.functions().iter().filter(|candidate| {
-            candidate.kind == kind
-                && candidate.callable.params == function.params
-                && candidate.callable.ret == function.ret
-        });
-        let (Some(candidate), None) = (selected.next(), selected.next()) else {
-            return Err(format!(
-                "the runtime on the classpath declares no single `{}`",
-                function.described()
-            ));
-        };
-        let target = candidate
-            .callable
-            .external_identity
-            .ok_or_else(|| format!("`{}` has no dependency identity", function.described()))?;
+        let target = select_runtime_callable(&declared, kind, function)?;
         self.bound
             .push((target, function.appended.clone().into_boxed_slice()));
         Ok(BoundRuntimeFunction {
@@ -160,5 +152,77 @@ impl PluginRuntime for HandoffRuntime<'_> {
             supertypes: fact.supertypes.to_vec(),
             annotations: fact.annotations.to_vec(),
         })
+    }
+}
+
+fn select_runtime_callable(
+    declared: &Callables,
+    kind: FnKind,
+    function: &RuntimeFunction,
+) -> Result<ExternalCallableId, String> {
+    let mut selected = declared.functions().iter().filter(|candidate| {
+        candidate.kind == kind
+            && !candidate.flags.deprecated_hidden
+            && candidate.callable.params == function.params
+            && candidate.callable.ret == function.ret
+    });
+    let (Some(candidate), None) = (selected.next(), selected.next()) else {
+        return Err(format!(
+            "the runtime on the classpath declares no single `{}`",
+            function.described()
+        ));
+    };
+    candidate
+        .callable
+        .external_identity
+        .ok_or_else(|| format!("`{}` has no dependency identity", function.described()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::libraries::{FunctionInfo, FunctionSet, LibraryCallable};
+
+    fn runtime(owner: TypeName, target: ExternalCallableId) -> (Callables, RuntimeFunction) {
+        let mut callable =
+            LibraryCallable::library(owner, "run", vec![Ty::Int], Ty::Unit, Ty::Unit, "(I)V");
+        callable.external_identity = Some(target);
+        let candidate = FunctionInfo::plain(FnKind::Member, Some(Ty::obj_name(owner)), callable);
+        (
+            Callables::Functions(FunctionSet {
+                overloads: vec![candidate],
+            }),
+            RuntimeFunction {
+                declaration: RuntimeDeclaration::Member(owner),
+                name: "run",
+                params: vec![Ty::Int],
+                ret: Ty::Unit,
+                appended: Vec::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn runtime_binding_uses_one_exact_declared_candidate() {
+        let owner = crate::types::type_name("example/Runtime");
+        let target = ExternalCallableId::from_raw(7);
+        let (declared, runtime) = runtime(owner, target);
+        assert_eq!(
+            select_runtime_callable(&declared, FnKind::Member, &runtime),
+            Ok(target)
+        );
+    }
+
+    #[test]
+    fn runtime_binding_rejects_ambiguous_exact_declarations() {
+        let owner = crate::types::type_name("example/Runtime");
+        let (mut declared, runtime) = runtime(owner, ExternalCallableId::from_raw(7));
+        let Callables::Functions(functions) = &mut declared else {
+            unreachable!()
+        };
+        let mut duplicate = functions.overloads[0].clone();
+        duplicate.callable.external_identity = Some(ExternalCallableId::from_raw(8));
+        functions.overloads.push(duplicate);
+        assert!(select_runtime_callable(&declared, FnKind::Member, &runtime).is_err());
     }
 }
