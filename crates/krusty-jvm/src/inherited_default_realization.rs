@@ -142,7 +142,14 @@ pub(crate) fn inherited_default_bridges(
     };
     let mut bridges = Vec::new();
     for default in defaults {
-        if default.suspend || forwarder_realization(default, callables, jvm_default).is_none() {
+        if default.suspend
+            || forwarder_realization(
+                default,
+                callables,
+                crate::declared_jvm_default::of_class(class, jvm_default),
+            )
+            .is_none()
+        {
             continue;
         }
         let declared = crate::value_classes::forwarded_member_types(ir, callables, default);
@@ -245,7 +252,14 @@ pub(crate) fn specialized_super_entry(
             .flatten()
             .find(|default| default.function == Some(declaration))
         {
-            if default.suspend || forwarder_realization(default, callables, jvm_default).is_none() {
+            if default.suspend
+                || forwarder_realization(
+                    default,
+                    callables,
+                    crate::declared_jvm_default::of_class(class, jvm_default),
+                )
+                .is_none()
+            {
                 return None;
             }
             let declared = crate::value_classes::forwarded_member_types(ir, callables, default);
