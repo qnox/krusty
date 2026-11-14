@@ -243,10 +243,19 @@ impl Backend for WasmBackend {
             .as_ref()
             .is_none_or(|(module, _)| module != file.module_name)
         {
-            let plan = classes::module_plan(file.classifiers.module().classes(), &file.classifiers);
+            let plan = classes::module_plan(
+                file.classifiers.module().classes(),
+                &file.classifiers,
+                &file.callables,
+                &started.classes,
+            );
             state.slot_plan = Some((file.module_name.to_owned(), plan));
             // The table types are built from the plan, so they are that module's too.
-            started.tables = Default::default();
+            started.tables = module_tables::ModuleTables::with_published(
+                file.classifiers.module().classes(),
+                &file.classifiers,
+                &started.classes,
+            );
         }
         let plan = &state.slot_plan.as_ref().expect("planned just above").1;
         let lowered = match lower::lower_file(

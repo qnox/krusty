@@ -401,8 +401,14 @@ pub(super) fn lower_file(
         None
     };
     if let Some(classes) = &classes {
-        for (name, record) in classes.records(module, ir, &indices, &signatures, dependency_exports)
-        {
+        for (name, record) in classes.records(
+            module,
+            ir,
+            &indices,
+            &signatures,
+            dependency_exports,
+            callables,
+        )? {
             laid_out_classes.insert(name, record);
         }
     }

@@ -713,16 +713,18 @@ fn record_class_function_exports(
             if source.type_params.is_empty() && source.captured_type_params.is_empty() {
                 declarations.record(function, signature.clone(), receiver);
             }
-            if source.is_interface && !declaration.is_static {
-                exports.record_interface_member(
-                    function,
-                    crate::libraries::KlibDependencyCallable {
-                        module: module_name.to_owned(),
-                        declaration: crate::libraries::KlibDeclarationSignature::Public(
-                            signature.clone(),
-                        ),
-                    },
-                );
+            if !declaration.is_static {
+                let identity = crate::libraries::KlibDependencyCallable {
+                    module: module_name.to_owned(),
+                    declaration: crate::libraries::KlibDeclarationSignature::Public(
+                        signature.clone(),
+                    ),
+                };
+                if source.is_interface {
+                    exports.record_interface_member(function, identity);
+                } else {
+                    exports.record_member_declaration(function, identity);
+                }
             }
             if !crate::backend::has_standalone_dependency_code(ir, function) {
                 continue;
