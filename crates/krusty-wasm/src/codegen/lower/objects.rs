@@ -1872,7 +1872,7 @@ impl Body<'_> {
                 .callables
                 .callable(external)
                 .ok_or("a selected superclass initializer without its frozen declaration")?;
-            if fact.kind != krusty::libraries::ExternalCallableKind::Constructor
+            if !fact.is_constructor()
                 || fact.declaration_owner
                     != Some(krusty::types::SemanticCallableOwner::Classifier(parent))
             {

@@ -1,8 +1,8 @@
 //! Rebind selected dependency declarations onto an already-emitted physical slot inventory.
 
+use super::super::super::interface_identity::{member_identity, property_member_identity};
+use super::super::super::CheckedBackendCallables;
 use super::*;
-use crate::backend::interface_identity::{member_identity, property_member_identity};
-use crate::backend::CheckedBackendCallables;
 
 /// Ty-free producer evidence. Unknown consumer declarations retain their physical inherited slots.
 #[derive(Clone, Debug)]
