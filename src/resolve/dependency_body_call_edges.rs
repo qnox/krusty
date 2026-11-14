@@ -111,11 +111,13 @@ pub(crate) fn for_checked_klib_bodies<'a>(
     }
     let type_hierarchy =
         klib_type_facts::freeze(source, classifier_roots, std::iter::empty(), semantic_types);
-    let mut facts = CheckedKlibDependencyFacts::new(
+    let facts = CheckedKlibDependencyFacts::new(
         builtin_implementations,
         member_edges,
         Some(type_hierarchy),
     );
+    #[cfg(test)]
+    let mut facts = facts;
     #[cfg(test)]
     for constructor in reached_constructors {
         facts.record_reached_constructor(constructor);

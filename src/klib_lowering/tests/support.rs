@@ -13,4 +13,5 @@ pub(super) fn checked_template_hierarchy(
         .expect("selected template body graph has checked facts")
         .type_hierarchy()
         .expect("the checker publishes a hierarchy snapshot")
+        .clone()
 }
