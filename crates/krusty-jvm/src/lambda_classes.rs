@@ -664,7 +664,11 @@ pub(super) fn realize(
                 has_receiver: target.has_receiver,
                 suspend: false,
             };
-            let lambda_origin = ir.lambda_origins.get(&fid).cloned();
+            let lambda_origin = if modes.sam_conversions == crate::ir_emit::LambdaMode::Class {
+                ir.lambda_origins.get(&fid).cloned()
+            } else {
+                None
+            };
             match class_shape(ir, fid, every_emitted_root, None, false, None) {
                 Ok((site, body, captures)) => realize_class(
                     ir,
@@ -674,9 +678,8 @@ pub(super) fn realize(
                     &signature,
                     &captures,
                     ClassRole {
-                        // This source lambda's implementation is emitted directly as the SAM
-                        // method. Preserve its lambda metadata even though the class extends
-                        // Object rather than Kotlin's `Lambda` runtime base.
+                        // Explicit class mode carries source reflection metadata. An indy
+                        // factory-conflict class keeps kotlinc's metadata-free realization.
                         lambda_origin,
                         sam: Some(target),
                         ..ClassRole::default()
