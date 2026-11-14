@@ -531,7 +531,16 @@ mod tests {
 
         let handoff = source_path("src/compiler/backend_handoff.rs");
         let text = fs::read_to_string(&handoff).expect("read checked backend handoff");
-        assert!(text.contains("record_klib_dependency_facts"));
+        let checked_facts = text
+            .find("record_klib_dependency_facts")
+            .expect("freeze KLIB body checker facts before backend emission");
+        let backend_facts = text
+            .find("super::builtin_implementations::record_checked")
+            .expect("finish checked callable facts at the handoff");
+        assert!(
+            checked_facts < backend_facts,
+            "KLIB body facts must be stored before checked callable completeness is enforced"
+        );
 
         let roots = source_path("src/compiler/dependency_body_emission/emitted_roots.rs");
         let text = fs::read_to_string(&roots).expect("read KLIB emitted roots");

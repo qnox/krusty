@@ -65,19 +65,6 @@ pub(super) fn checked_ir_file<'a>(
             return None;
         }
     };
-    if let Err(identity) = super::builtin_implementations::record_checked(
-        &mut callables,
-        &ir,
-        symbols.semantic_platform(),
-    ) {
-        diags.error(
-            Span::new(0, 0),
-            format!(
-                "internal error: checked IR has no builtin implementation facts for external member {identity:?}"
-            ),
-        );
-        return None;
-    }
     if let Some(dependency_bodies) = symbols.semantic_platform().klib_dependency_body_facts() {
         let checked = match crate::resolve::for_checked_klib_bodies(
             symbols.semantic_platform(),
@@ -104,6 +91,19 @@ pub(super) fn checked_ir_file<'a>(
             );
             return None;
         }
+    }
+    if let Err(identity) = super::builtin_implementations::record_checked(
+        &mut callables,
+        &ir,
+        symbols.semantic_platform(),
+    ) {
+        diags.error(
+            Span::new(0, 0),
+            format!(
+                "internal error: checked IR has no builtin implementation facts for external member {identity:?}"
+            ),
+        );
+        return None;
     }
     let file_name = module
         .stems

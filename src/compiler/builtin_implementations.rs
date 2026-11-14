@@ -14,10 +14,24 @@ pub(super) fn record_checked(
     ir: &crate::ir::IrFile,
     source: &dyn crate::symbol_source::SymbolSource,
 ) -> Result<(), crate::fir::ExternalCallableId> {
+    let mut implementations = ir.external_builtin_implementations.clone();
+    for (&identity, checked) in callables.klib_builtin_implementations() {
+        match implementations.entry(identity) {
+            std::collections::hash_map::Entry::Occupied(existing)
+                if existing.get() != checked =>
+            {
+                return Err(identity);
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {}
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(checked.clone());
+            }
+        }
+    }
     let implementations = crate::resolve::for_checked_external_members(
         source,
         callables.external_member_identities(),
-        &ir.external_builtin_implementations,
+        &implementations,
     )?;
     callables.record_checked_builtin_implementations(&implementations)
 }
