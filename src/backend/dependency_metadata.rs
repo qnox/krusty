@@ -5,6 +5,9 @@
 //! deliberately read-only: it records metadata and the exact public declaration identities before
 //! target representation mutates the file, without cloning or re-resolving the program.
 
+#[cfg(test)]
+mod member_declaration_tests;
+
 use crate::fx_hash::{HashMap, HashSet};
 
 use super::{Artifact, CheckedIrFile, CompilationTarget};
