@@ -61,3 +61,16 @@ fn string_plus_stays_string_builder_on_jvm8() {
         "1.8",
     );
 }
+
+/// A branching template part (`if`, `?:`, `when`) stays one `invokedynamic`: kotlinc evaluates
+/// each argument in turn, the branches merging with the earlier arguments still on the stack.
+#[test]
+fn a_branching_template_part_stays_indy_on_jvm9_plus() {
+    assert_byte_identical_at(
+        "spiBranchingPart",
+        "fun f(x: Boolean, s: String, n: String?) =\n\
+         \x20   \"a$s ${if (x) 1 else 2} b ${n ?: \"z\"} ${when { x -> s; else -> n }}\"\n",
+        "SpiBranchingPartKt",
+        "25",
+    );
+}
