@@ -680,26 +680,34 @@ impl<'a> FileLowering<'a> {
             // A file-level function, and a member another file calls directly, is reached across
             // the module by its `kt_mod_` symbol, which stays hidden. The public C name, when
             // there is one, is a separate export.
-            // A support unit keeps its functions to itself, except the methods of a dependency
-            // class a source file extends, which that file's tables inherit by symbol.
-            let linkage = match self.unit_kind {
-                krusty::backend::CheckedIrUnitKind::DependencySupport
-                    if self.exported.iter().any(|&class| {
-                        self.ir.classes[class as usize]
-                            .methods
-                            .contains(&(index as krusty::ir::FunId))
-                    }) =>
-                {
-                    Linkage::Hidden
+            let linkage = if self
+                .dependency_signatures
+                .is_property_accessor_entry(index as krusty::ir::FunId)
+            {
+                // Only the exact KLIB trampoline exports this generated implementation. Its
+                // per-file helper spelling can repeat in another file of the module.
+                Linkage::Local
+            } else {
+                match self.unit_kind {
+                    krusty::backend::CheckedIrUnitKind::DependencySupport
+                        if self.exported.iter().any(|&class| {
+                            self.ir.classes[class as usize]
+                                .methods
+                                .contains(&(index as krusty::ir::FunId))
+                        }) =>
+                    {
+                        // Source subclasses inherit a materialized dependency class's methods.
+                        Linkage::Hidden
+                    }
+                    krusty::backend::CheckedIrUnitKind::DependencySupport => Linkage::Local,
+                    krusty::backend::CheckedIrUnitKind::Source
+                        if super::super::c_abi::is_file_level(self.ir, index)
+                            || self.symbols.cross_file[index] =>
+                    {
+                        Linkage::Hidden
+                    }
+                    krusty::backend::CheckedIrUnitKind::Source => Linkage::Export,
                 }
-                krusty::backend::CheckedIrUnitKind::DependencySupport => Linkage::Local,
-                krusty::backend::CheckedIrUnitKind::Source
-                    if super::super::c_abi::is_file_level(self.ir, index)
-                        || self.symbols.cross_file[index] =>
-                {
-                    Linkage::Hidden
-                }
-                krusty::backend::CheckedIrUnitKind::Source => Linkage::Export,
             };
             let id = self
                 .module

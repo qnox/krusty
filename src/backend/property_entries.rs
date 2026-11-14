@@ -17,18 +17,58 @@ pub fn realize(
             ExportedPropertyAccessor::Getter(property) => (property, false),
             ExportedPropertyAccessor::Setter(property) => (property, true),
         };
-        let Some(IrLocalPropertyLayout::Member {
-            class,
-            owner,
-            backing_field: Some(_),
-            getter,
-            setter: declared_setter,
-            context_parameters,
-            mutable,
-            ..
-        }) = ir.local_property_layouts.get(&property).cloned()
-        else {
-            return Err("a default property export without checked member storage");
+        let Some(layout) = ir.local_property_layouts.get(&property).cloned() else {
+            return Err("a default property export without checked storage");
+        };
+        let (class, owner, getter, declared_setter, context_parameters, mutable) = match layout {
+            IrLocalPropertyLayout::Member {
+                class,
+                owner,
+                backing_field: Some(_),
+                getter,
+                setter,
+                context_parameters,
+                mutable,
+                ..
+            } => (
+                Some(class),
+                Some(owner),
+                getter,
+                setter,
+                context_parameters,
+                mutable,
+            ),
+            IrLocalPropertyLayout::TopLevelStorage {
+                storage,
+                getter,
+                setter: declared_setter,
+                qualifier: None,
+            } => {
+                let Some(storage) = ir.statics.get(storage as usize) else {
+                    return Err("a default package property export without checked storage");
+                };
+                let accessor = if setter {
+                    storage.accessors.setter
+                } else {
+                    storage.accessors.getter
+                };
+                if storage.owner.is_some()
+                    || storage.is_const
+                    || storage.property_delegate
+                    || accessor != crate::ir::IrStaticAccessor::Default
+                {
+                    return Err("a default package property export disagreeing with its storage");
+                }
+                (
+                    None,
+                    None,
+                    getter,
+                    declared_setter,
+                    Vec::new(),
+                    storage.is_var,
+                )
+            }
+            _ => return Err("a default property export without checked storage"),
         };
         if (setter && (!mutable || declared_setter.is_some())) || (!setter && getter.is_some()) {
             return Err("a default property export disagreeing with its checked accessor");
@@ -37,27 +77,35 @@ pub fn realize(
             .checked_properties
             .get(&property)
             .ok_or("a default property export without its checked declaration")?;
-        if declaration.class != Some(class) {
+        if declaration.class != class {
             return Err("a default property export with a different declaration owner");
         }
         let ty = declaration.ty;
-        let receiver_type = ir
-            .declared_class_self_type(owner)
-            .ok_or("a default property export without its declared receiver application")?;
-        let receiver = read(ir, 0, receiver_type);
+        let (dispatch_receiver, receiver_type) = if let Some(owner) = owner {
+            let receiver_type = ir
+                .declared_class_self_type(owner)
+                .ok_or("a default property export without its declared receiver application")?;
+            (Some(read(ir, 0, receiver_type)), Some(receiver_type))
+        } else {
+            if declaration.class.is_some() {
+                return Err("a default package property export with a class declaration");
+            }
+            (None, None)
+        };
+        let parameter_start = if dispatch_receiver.is_some() { 1 } else { 0 };
         let contexts = context_parameters
             .iter()
             .enumerate()
-            .map(|(index, &ty)| read(ir, index as u32 + 1, ty))
+            .map(|(index, &ty)| read(ir, parameter_start + index as u32, ty))
             .collect::<Vec<_>>();
         let mut parameters = context_parameters;
         let (operation, result) = if setter {
-            let value = read(ir, parameters.len() as u32 + 1, ty);
+            let value = read(ir, parameter_start + parameters.len() as u32, ty);
             parameters.push(ty);
             (
                 IrCheckedOperation::PropertyWrite {
                     target: property,
-                    dispatch_receiver: Some(receiver),
+                    dispatch_receiver,
                     extension_receiver: None,
                     context_arguments: contexts,
                     value,
@@ -69,7 +117,7 @@ pub fn realize(
             (
                 IrCheckedOperation::PropertyRead {
                     target: property,
-                    dispatch_receiver: Some(receiver),
+                    dispatch_receiver,
                     extension_receiver: None,
                     context_arguments: contexts,
                     substitutions: Vec::new(),
@@ -99,13 +147,16 @@ pub fn realize(
             params: parameters,
             ret: result,
             body: Some(body),
-            is_static: false,
-            dispatch_receiver: Some(owner),
+            is_static: owner.is_none(),
+            dispatch_receiver: owner,
             param_checks: Vec::new(),
         });
         ir.synthetic_methods.insert(function);
+        exports.record_property_accessor_entry(function, accessor);
         exports.record_callable(function, identity);
-        exports.record_member_receiver(function, receiver_type);
+        if let Some(receiver_type) = receiver_type {
+            exports.record_member_receiver(function, receiver_type);
+        }
     }
     Ok(())
 }
