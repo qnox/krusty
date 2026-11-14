@@ -1,0 +1,90 @@
+name: Reference compiler helper bootstrap validation
+on:
+  push:
+    branches: [ci/kotlinc-helper-bootstrap]
+permissions:
+  contents: read
+jobs:
+  helpers:
+    runs-on: [self-hosted, rust-4c-8gb]
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        version: ['2.4.0', '2.4.10', '2.4.20', '2.4.21', '2.5.0-RC']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: zulu
+          java-version: '17'
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/kotlinc/${{ matrix.version }}
+          key: kotlinc-${{ matrix.version }}
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: just
+      - name: compile the exact helper sources and use the live compiler protocol
+        env:
+          VERSION: ${{ matrix.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          test "$(git rev-parse HEAD^)" = 26d8d47fda9460e7860c327e2dc3455f18bd8721
+          git rev-parse HEAD^ > evidence/source-commit.txt
+          export PINNED_KOTLINC="$(just kotlinc "$VERSION")"
+          python3 - <<'PY'
+          import hashlib,json,os,re,struct,subprocess
+          from pathlib import Path
+          evidence=Path('evidence').resolve()
+          source=Path('tests/common/kotlinc_server.rs').read_text()
+          compiler=Path(os.environ['PINNED_KOTLINC']).resolve()
+          lib=compiler.parent.parent/'lib'
+          assert lib.joinpath('kotlin-compiler.jar').is_file()
+          files=[]
+          for constant,filename in [('KOTLINC_SERVER_SRC','KotlincServer.java'),('TYPED_LANGUAGE_SETTINGS_UPDATER_SRC','TypedLanguageSettingsUpdater.java')]:
+              match=re.search(r'const '+constant+r': &str = r#"(.*?)"#;',source,re.S)
+              assert match,constant
+              file=evidence/filename
+              file.write_text(match[1])
+              files.append(str(file))
+          baseline=evidence/'baseline';baseline.mkdir()
+          old=subprocess.run(['javac','-cp',str(lib/'*'),'-d',str(baseline),*files],capture_output=True,text=True,timeout=90)
+          (evidence/'baseline-javac.log').write_text(old.stdout+old.stderr)
+          fixed=evidence/'fixed';fixed.mkdir()
+          new=subprocess.run(['javac','-proc:none','-cp',str(lib/'*'),'-d',str(fixed),*files],capture_output=True,text=True,timeout=90)
+          (evidence/'fixed-javac.log').write_text(new.stdout+new.stderr)
+          assert new.returncode==0,new.stderr
+          assert all((fixed/name).is_file() for name in ['KotlincServer.class','TypedLanguageSettingsUpdater.class'])
+          probe=evidence/'BootstrapProbe.kt';probe.write_text('fun answer(): Int = 42\n')
+          output=evidence/'classes'
+          args=[str(probe),'-d',str(output),'-classpath',str(lib/'kotlin-stdlib.jar'),'-no-stdlib','-no-reflect']
+          language='2.5' if os.environ['VERSION']=='2.5.0-RC' else '2.4'
+          def string(value):
+              data=value.encode();return struct.pack('>H',len(data))+data
+          request=struct.pack('>i',len(args))+string(language)+string(language)+b''.join(map(string,args))
+          command=['java','-Xmx1g','-cp',str(fixed),'KotlincServer',str(lib),str(fixed),'org.jetbrains.kotlin.cli.jvm.K2JVMCompiler','org.jetbrains.kotlin.cli.pipeline.jvm.JvmConfigurationPipelinePhase']
+          run=subprocess.run(command,input=request,capture_output=True,timeout=120)
+          (evidence/'server-stderr.log').write_bytes(run.stderr)
+          assert run.returncode==0,run.stderr.decode(errors='replace')
+          assert len(run.stdout)>=8
+          code,length=struct.unpack('>ii',run.stdout[:8])
+          assert len(run.stdout)==8+length
+          response=run.stdout[8:].decode()
+          (evidence/'compiler-response.log').write_text(response)
+          assert code==0,response
+          assert (output/'BootstrapProbeKt.class').is_file()
+          proof={'version':os.environ['VERSION'],'java':subprocess.check_output(['java','-version'],stderr=subprocess.STDOUT,text=True),'baseline_exit':old.returncode,'fixed_exit':new.returncode,'compiler_exit':code,'compiler_jar_sha256':hashlib.sha256((lib/'kotlin-compiler.jar').read_bytes()).hexdigest()}
+          (evidence/'proof.json').write_text(json.dumps(proof,indent=2)+'\n')
+          print(json.dumps(proof,indent=2))
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: kotlinc-helper-${{ matrix.version }}
+          path: evidence/
+          if-no-files-found: error
