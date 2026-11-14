@@ -24,7 +24,11 @@ pub(super) fn bind(
         }
         match published(name) {
             Ok(Some(layout)) => {
-                tables.insert(name, table(class, representation, declarations, &layout));
+                tables.insert(
+                    name,
+                    lineage(classes, name, representation)
+                        .and_then(|lineage| table(&lineage, representation, declarations, &layout)),
+                );
             }
             Err(reason) => {
                 tables.insert(name, Err(reason));
@@ -40,8 +44,32 @@ pub(super) fn bind(
     tables
 }
 
+/// Rebind declarations already selected in every ancestor header, including members a direct
+/// parent merely inherits. Physical slot identities remain those published by that parent.
+fn lineage<'a>(
+    classes: &'a ModuleClasses,
+    mut name: TypeName,
+    representation: &dyn Representation,
+) -> Result<Vec<&'a ModuleClass>, Unsupported> {
+    let mut chain = Vec::new();
+    let mut seen = HashSet::default();
+    loop {
+        if !seen.insert(name) {
+            return Err("a cycle in published dependency class headers".into());
+        }
+        let class = classes
+            .class(name)
+            .ok_or("a published superclass without its selected header")?;
+        chain.push(class);
+        match class.superclass {
+            Some(parent) if !representation.owns_base(parent) => name = parent,
+            _ => return Ok(chain),
+        }
+    }
+}
+
 fn table(
-    class: &ModuleClass,
+    classes: &[&ModuleClass],
     representation: &dyn Representation,
     declarations: &CheckedBackendCallables,
     physical: &PublishedClassSlots,
@@ -57,7 +85,7 @@ fn table(
     }
     let mut slots = HashMap::default();
     let mut frames: HashMap<u32, (Box<[Ty]>, Ty)> = HashMap::default();
-    for member in &class.members {
+    for member in classes.iter().flat_map(|class| class.members.iter()) {
         let members = match member {
             ModuleMember::Function {
                 callable,
@@ -143,10 +171,12 @@ fn table(
                 frames.insert(slot, frame);
                 *entry = PlannedSlot::Member(key);
             }
-            if slots.insert(key, slot).is_some() {
-                return Err(
-                    "a dependency declaration assigned more than one inherited slot".into(),
-                );
+            if let Some(previous) = slots.insert(key, slot) {
+                if previous != slot {
+                    return Err(
+                        "a dependency declaration assigned conflicting inherited slots".into(),
+                    );
+                }
             }
         }
     }
@@ -197,7 +227,7 @@ mod tests {
             declarations: HashMap::default(),
         };
         let planned = table(
-            &imported_class(),
+            &[&imported_class()],
             &Exact,
             &CheckedBackendCallables::default(),
             &physical,
@@ -219,7 +249,7 @@ mod tests {
             declarations: HashMap::default(),
         };
         assert!(table(
-            &imported_class(),
+            &[&imported_class()],
             &Exact,
             &CheckedBackendCallables::default(),
             &physical
@@ -242,7 +272,7 @@ mod tests {
             declarations: HashMap::default(),
         };
         assert!(table(
-            &class,
+            &[&class],
             &Exact,
             &CheckedBackendCallables::default(),
             &physical

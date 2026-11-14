@@ -160,11 +160,6 @@ impl ModulePropertyOverride {
 }
 
 impl ModuleClass {
-    /// Whether this plan entry comes from selected dependency declarations.
-    pub fn is_dependency(&self) -> bool {
-        self.dependency
-    }
-
     /// Every type a member of this class carries, as a target asks how it represents them.
     pub(crate) fn carried_types(&self) -> impl Iterator<Item = Ty> + '_ {
         self.members
