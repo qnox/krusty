@@ -1144,8 +1144,7 @@ impl CallLinker for Linker<'_, '_> {
     }
 
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
-        // A support unit links no member of a generic class.
-        (sub.kotlin_class_internal() == Some(owner)).then_some(sub)
+        self.sources.callees.applied_supertype(sub, owner)
     }
 
     fn dependency_override(
