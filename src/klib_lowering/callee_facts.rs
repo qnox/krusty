@@ -10,6 +10,7 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 use crate::libraries::{KlibBodyCallable, KlibDependencyCallable};
+use crate::symbol_source::SymbolSource;
 
 /// Frozen dependency declarations by their exact module-qualified KLIB identity.
 #[derive(Clone, Default)]
