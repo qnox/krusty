@@ -60,6 +60,56 @@ fn a_value_class_over_an_array_hashes_its_contents() {
     every_backend_agrees_with_kotlinc("ValueClassArrayContentHash", source);
 }
 
+/// A value class over an array renders the array's contents, as a data class's array property
+/// does, through a primitive, a reference and a nullable array.
+#[test]
+fn a_value_class_renders_its_array_by_content() {
+    let source = "@JvmInline value class Bits(val raw: IntArray)\n\
+         @JvmInline value class Names(val raw: Array<String>)\n\
+         @JvmInline value class NBits(val raw: IntArray?)\n\
+         fun box(): String {\n\
+         \x20   if (Bits(intArrayOf(1, 2)).toString() != \"Bits(raw=[1, 2])\") return \"fail 1\"\n\
+         \x20   if (Names(arrayOf(\"a\")).toString() != \"Names(raw=[a])\") return \"fail 2\"\n\
+         \x20   if (NBits(intArrayOf(4)).toString() != \"NBits(raw=[4])\") return \"fail 3\"\n\
+         \x20   if (NBits(null).toString() != \"NBits(raw=null)\") return \"fail 4\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("ValueClassArrayRendering", source);
+}
+
+/// An unsigned array is itself a value class, so a generated `toString` renders it through the
+/// unsigned array's own `toString` — `UIntArray(storage=[1, -294967296])` under kotlinc — and not
+/// through the content rendering of its signed carrier (`[1, -294967296]`). kotlinc states the
+/// whole text; every backend must then render the property exactly as the array itself renders.
+/// That is all Native is held to here: its runtime does not yet render an unsigned array's own
+/// text (it prints the array's identity), which is a gap of that rendering, not of this one.
+#[test]
+fn an_unsigned_array_property_renders_through_its_own_to_string() {
+    let rendering = "@file:OptIn(ExperimentalUnsignedTypes::class)\n\
+         fun box(): String = uintArrayOf(1u, 4000000000u).toString()\n";
+    assert_eq!(
+        kotlinc_box_result(rendering),
+        "UIntArray(storage=[1, -294967296])",
+        "kotlinc's rendering of an unsigned array"
+    );
+    let source = "@file:OptIn(ExperimentalUnsignedTypes::class)\n\
+         @JvmInline value class UBits(val raw: UIntArray)\n\
+         @JvmInline value class Longs(val raw: ULongArray)\n\
+         data class Holder(val raw: UByteArray, val other: UShortArray?)\n\
+         fun box(): String {\n\
+         \x20   val raw = uintArrayOf(1u, 4000000000u)\n\
+         \x20   if (UBits(raw).toString() != \"UBits(raw=\" + raw + \")\") return \"fail 1\"\n\
+         \x20   val longs = ulongArrayOf(2uL)\n\
+         \x20   if (Longs(longs).toString() != \"Longs(raw=\" + longs + \")\") return \"fail 2\"\n\
+         \x20   val bytes = ubyteArrayOf(3u)\n\
+         \x20   val shorts = ushortArrayOf(4u)\n\
+         \x20   val holder = Holder(bytes, shorts).toString()\n\
+         \x20   if (holder != \"Holder(raw=\" + bytes + \", other=\" + shorts + \")\") return \"fail 3\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("UnsignedArrayPropertyRendering", source);
+}
+
 /// Into `Any`, a type parameter and generic storage, and back: each crossing boxes as `V`, not as
 /// the value inside, and a box read back out is the value again. The storage is the program's own
 /// generic classes, so nothing but the representation is under test: a stdlib collection would
