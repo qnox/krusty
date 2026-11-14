@@ -512,6 +512,20 @@ mod tests {
     }
 
     #[test]
+    fn coroutine_runtime_selection_is_stored_by_resolution() {
+        let handoff = source_path("src/compiler/backend_handoff.rs");
+        let text = fs::read_to_string(&handoff).expect("read checked backend handoff");
+        assert!(text.contains("symbols.coroutine_runtime()"));
+        assert!(!text.contains("coroutine_runtime::select"));
+
+        let checker = source_path("src/resolve/coroutine_runtime.rs");
+        assert!(
+            checker.exists(),
+            "the resolver owns runtime declaration selection"
+        );
+    }
+
+    #[test]
     fn klib_support_bodies_carry_checked_builtin_implementation_facts() {
         let path = source_path("src/compiler/dependency_body_emission.rs");
         let text = fs::read_to_string(&path).expect("read KLIB body handoff");
