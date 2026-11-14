@@ -8,8 +8,10 @@
 //! could reach one rather than emit a trap the program would run into.
 //!
 //! A value statically of a class of this file is an instance of that class's hierarchy; one of a
-//! `fun interface` of this file can also be a function value converted to it. Any other reference
-//! (`Any`, a type parameter, an interface declared elsewhere) is erased: it can be an instance of
+//! `fun interface` of this file can also be a function value converted to it. Authenticated runtime
+//! exception types can hold runtime exceptions or source exception subclasses, whose tables are
+//! checked separately. Other references (`Any`, a type parameter, an interface declared elsewhere)
+//! are erased: they can be an instance of
 //! every class here, or one of the runtime's objects this file creates, including a runtime
 //! exception this file constructs or catches. A `KType` value is narrower: the runtime's own
 //! object, or a class implementing `KType`. Either can also be an object another file of the
@@ -65,6 +67,23 @@ impl Body<'_> {
         }
         if !matches!(carrier(value)?, Some(ValType::Ref { .. })) {
             return Ok(false);
+        }
+        if value
+            .obj_internal()
+            .and_then(|owner| self.classifiers.classifier(owner))
+            .is_some_and(|fact| fact.runtime_exception.is_some())
+        {
+            // Authenticated exception storage cannot hold a floating box or function value.
+            // Runtime exception tables realize every Any member; source exception subclasses
+            // must still prove their own slots, including subclasses emitted by another file.
+            self.record_call(member, ty, Receiver::Classes);
+            let Some(classes) = self.classes else {
+                return Ok(false);
+            };
+            return Ok((0..self.ir.classes.len()).any(|class| {
+                let class = class as ClassId;
+                classes.exception_base(class).is_some() && !classes.realizes(class, member)
+            }));
         }
         if value.obj_internal() == Some(super::super::super::super::type_objects::ktype()) {
             // The runtime object answers every member. Another file's class can implement
