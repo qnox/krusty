@@ -154,6 +154,8 @@ pub struct Lowered {
     pub abi: Vec<super::super::c_abi::Record>,
     /// What a later file of the module extending a class of this one reads of it.
     pub laid_out: Vec<(TypeName, LaidOutClass)>,
+    /// Actual externally linkable descriptor definitions, signed by their producer class records.
+    pub class_descriptors: Vec<(krusty::libraries::KlibClassIdentity, String)>,
 }
 
 /// Build the ISA for `target`. Non-PIC, because the output is a static executable at a fixed
@@ -326,6 +328,7 @@ pub fn lower_file(
         laid_out,
         extended,
         exported,
+        class_descriptors: Vec::new(),
         extension_entries: HashMap::default(),
         extension_tables: HashMap::default(),
         module: &mut module,
@@ -420,6 +423,7 @@ pub fn lower_file(
     lowering.define_interface_identities()?;
 
     let records = lowering.laid_out_records()?;
+    let class_descriptors = std::mem::take(&mut lowering.class_descriptors);
     let comdat_objects = std::mem::take(&mut lowering.comdat_objects);
     let mut product = module.finish();
     for data in comdat_objects {
@@ -442,6 +446,7 @@ pub fn lower_file(
         defines_entry,
         abi,
         laid_out: records,
+        class_descriptors,
     })
 }
 
@@ -491,6 +496,7 @@ struct FileLowering<'a> {
     module_facts: &'a krusty::backend::BackendModuleFacts,
     /// The classes earlier files of the source module laid out.
     laid_out: &'a LaidOutClasses,
+    class_descriptors: Vec<(krusty::libraries::KlibClassIdentity, String)>,
     /// The classes of this file another file of the module extends.
     extended: krusty::fx_hash::HashSet<krusty::ir::ClassId>,
     /// The classes of `extended` and their superclasses here, whose table entries another file
