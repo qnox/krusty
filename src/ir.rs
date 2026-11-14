@@ -59,6 +59,7 @@ mod emitted_body_roots;
 mod enums;
 mod expect_actualization;
 mod expression_copy;
+pub(crate) use expression_copy::truncate_expression_facts;
 mod expression_provenance;
 pub use emitted_body_roots::{emitted_body_roots, emitted_declaration_roots, EmittedDeclaration};
 pub mod field_flags;
@@ -109,7 +110,9 @@ mod reified_markers;
 mod reified_templates;
 mod sam_target;
 mod type_tests;
-pub(crate) use type_tests::{admits_null_at_runtime, settled_instance_answer};
+pub(crate) use type_tests::admits_null_at_runtime;
+#[cfg(test)]
+pub(crate) use type_tests::settled_instance_answer;
 mod source_debug;
 pub(crate) use source_debug::SourceDebug;
 mod static_properties;
@@ -2257,6 +2260,11 @@ pub struct IrFile {
     /// return, before CPS erasure to `Object`), recorded from the checked FIR call target: the
     /// cross-unit complement of `suspend_funs`, for a callee in ANOTHER file or a dependency.
     pub suspend_calls: crate::fx_hash::HashMap<u32, Ty>,
+    /// A dependency suspend call after CPS rewriting → the exact checked source call application
+    /// before its physical continuation parameter and `Any?` result were added. The selected
+    /// declaration and substitutions remain available for provider authentication while targets
+    /// separately consume the transformed `Callee::External` as the physical call ABI.
+    pub suspend_call_declarations: crate::fx_hash::HashMap<ExprId, Callee>,
     /// Each suspend literal an emitted inline call binds to an inline parameter → where its body
     /// runs: in the caller's frame, in an object the callee constructs, or nowhere. Decided before
     /// coroutine lowering, from the callee's compiled body where the callee is spliced from one.
@@ -2872,7 +2880,7 @@ pub(crate) use clone::make_expression_children_unique;
 pub use clone::make_expression_children_unique_tracked;
 pub(crate) use clone::{
     clone_class_method, clone_expression_with_own_lambdas, clone_function_implementation,
-    clone_with_operands,
+    clone_with_operands, relocate_with_operands,
 };
 mod semantic_validation;
 pub use semantic_validation::{

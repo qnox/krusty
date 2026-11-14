@@ -146,7 +146,9 @@ impl Backend for WasmBackend {
         &self,
         classifier: krusty::backend::DependencyClassifier,
     ) -> bool {
-        classifier == krusty::types::wk::string()
+        classifier == krusty::types::wk::unit()
+            || classifier == crate::boxes::result_companion_classifier()
+            || classifier == krusty::types::wk::string()
             || lower::is_string_builder(classifier)
             || lower::runtime_lays_out(classifier)
     }

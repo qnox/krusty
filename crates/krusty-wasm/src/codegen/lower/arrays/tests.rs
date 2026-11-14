@@ -8,6 +8,7 @@ fn getter(source: Ty) -> IrCheckedOperation {
         arguments: Vec::new(),
         parameters: Vec::new(),
         result: Ty::Int,
+        substitutions: Vec::new(),
         source_receiver: Some(source),
     }
 }

@@ -117,7 +117,9 @@ pub(super) fn constructor_parameters(ir: &IrFile, class: ClassId) -> Vec<Ty> {
         .ctor_args
         .iter()
         .enumerate()
-        .map(|(index, argument)| captures::prefix_physical_ty(ir, class, index, argument.ty))
+        .map(|(index, argument)| {
+            captures::constructor_argument_physical_ty(ir, class, index, argument.ty)
+        })
         .collect()
 }
 
@@ -1702,8 +1704,12 @@ impl<'a> FileLowering<'a> {
                     next_field = field + 1;
                     let field_type =
                         model::field_storage_ty(body.file.values, body.file.ir, class, field)?;
-                    let argument_type =
-                        captures::prefix_physical_ty(body.file.ir, class, index, argument.ty);
+                    let argument_type = captures::constructor_argument_physical_ty(
+                        body.file.ir,
+                        class,
+                        index,
+                        argument.ty,
+                    );
                     let Some(value) =
                         body.convert(params[index + 1], Some(argument_type), field_type)?
                     else {
@@ -2608,9 +2614,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if classifier == krusty::types::wk::unit() {
             return self.runtime_call("kt_unit", &[], any(), &[]);
         }
-        // An object the runtime realizes entirely has no instance and needs none: every member of
-        // it is answered without reading the receiver. One provider materializes that receiver
-        // before the call reaches the table that says so, and this is what it materializes.
         // The companion object of a BUILT-IN type. Its members are constants the frontend folds,
         // so the object itself is only ever an identity — and that identity is asked about:
         // `o === Int.Companion` is a corpus case, and `Int` written as a value is the same object.

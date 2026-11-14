@@ -44,7 +44,10 @@ pub use dependency_metadata::{
     SingletonExtensionUnreadReceiver, SingletonMemberReceiver,
 };
 pub(crate) use dependency_metadata::{ExportedConstructor, ExportedPropertyAccessor};
-pub use dependency_signature::{instantiate_dependency_signature, DependencyFunctionSignature};
+pub use dependency_signature::{
+    authenticate_dependency_coroutine_call, instantiate_dependency_signature,
+    DependencyFunctionSignature,
+};
 
 /// The parameter form [`Entry::selected`] reports beside the selected function.
 pub use crate::ir::MainEntryParameters;

@@ -254,6 +254,16 @@ impl Body<'_> {
         &mut self,
         classifier: krusty::types::TypeName,
     ) -> Result<(), Unsupported> {
+        if classifier == krusty::types::wk::unit() {
+            let instance = self.runtime.unit_object(self.module);
+            self.code.global_get(instance);
+            return Ok(());
+        }
+        if classifier == crate::boxes::result_companion_classifier() {
+            let instance = self.runtime.result_companion_object(self.module);
+            self.code.global_get(instance);
+            return Ok(());
+        }
         if self.ir.class_id_by_name(classifier).is_none() {
             if let Some(entry) =
                 self.calls
@@ -1113,6 +1123,12 @@ impl Body<'_> {
 
     /// `x as C`: the value, cast to class `C` of this file or to an interface of the module.
     pub(super) fn cast(&mut self, arg: u32, target: Ty, non_null: bool) -> Result<(), Unsupported> {
+        if target.non_null().obj_internal() == Some(crate::boxes::result_companion_classifier()) {
+            self.value(arg, any())?;
+            let structure = self.runtime.result_companion_type(self.module);
+            self.code.ref_cast(!non_null, HeapType::Concrete(structure));
+            return Ok(());
+        }
         self.value(arg, any())?;
         if let Some(interface) = self.interface_of_type(target) {
             let value = self.local(REFERENCE);
@@ -1226,6 +1242,10 @@ impl Body<'_> {
             }
             TyKind::Obj(name, _) if name == krusty::types::wk::any() => {
                 self.code.ref_test(nullable, HeapType::Eq);
+            }
+            TyKind::Obj(name, _) if name == crate::boxes::result_companion_classifier() => {
+                let companion = self.runtime.result_companion_type(self.module);
+                self.code.ref_test(nullable, HeapType::Concrete(companion));
             }
             TyKind::Obj(name, _)
                 if self

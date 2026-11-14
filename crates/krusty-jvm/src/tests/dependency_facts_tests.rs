@@ -1014,6 +1014,7 @@ fn a_property_its_provider_cannot_answer_is_an_internal_error() {
             arguments: Vec::new(),
             parameters: Vec::new(),
             result: krusty::types::Ty::Int,
+            substitutions: Vec::new(),
             source_receiver: None,
         },
     )));
