@@ -1952,6 +1952,7 @@ mod tests {
             adapter: 0,
             captures: Vec::new(),
             bound_receiver: None,
+            bound_contexts: 0,
             function_type: source_ty,
             declaration_parameters: vec![source_ty].into_boxed_slice(),
             declaration_result: source_ty,
