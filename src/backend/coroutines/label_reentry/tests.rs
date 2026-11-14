@@ -218,6 +218,97 @@ fn each_suspension_takes_the_next_label_and_plain_runs_go_forward_only() {
         IrExpr::TypeOp { op: IrTypeOp::Cast, arg, .. } if matches!(ir.exprs[arg as usize], IrExpr::GetValue(11))));
 }
 
+/// A value-bearing block used as a statement still evaluates its terminal expression, after its
+/// statements, and discards the block value only at the enclosing statement boundary.
+#[test]
+fn a_statement_block_splits_its_terminal_value_after_its_statements() {
+    let (mut ir, leaf) = file();
+    let one = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+    let before = local(&mut ir, 3, one);
+    let terminal = call(&mut ir, leaf);
+    let nested = ir.add_expr(IrExpr::Block {
+        stmts: vec![before],
+        value: Some(terminal),
+    });
+
+    let (body, labels) = split(&mut ir, vec![nested]);
+
+    assert_eq!(labels, Ok(1));
+    let [rewritten] = stmts(&ir, body)[..] else {
+        panic!("one rewritten statement block");
+    };
+    let IrExpr::Block {
+        stmts: nested,
+        value: None,
+    } = &ir.exprs[rewritten as usize]
+    else {
+        panic!("the nested block preserves statement position and has no value");
+    };
+    assert_eq!(nested.len(), 2);
+    let (forward, run) = guarded(&ir, nested[0]);
+    assert!(is_label(&ir, forward, 0));
+    assert_eq!(stmts(&ir, run), [before]);
+    let [declared, step, complete] = stmts(&ir, nested[1])[..] else {
+        panic!("the terminal expression runs after the block statements");
+    };
+    assert!(matches!(
+        ir.exprs[declared as usize],
+        IrExpr::Variable { index: 10, .. }
+    ));
+    assert!(matches!(ir.exprs[step as usize], IrExpr::When { .. }));
+    let (guard, completed_terminal) = guarded(&ir, complete);
+    assert!(is_label(&ir, guard, 0));
+    assert_eq!(completed_terminal, terminal);
+    assert!(matches!(
+        ir.exprs[terminal as usize],
+        IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn a_value_block_in_a_statement_keeps_its_value_and_value_position_suspension_declines_untouched() {
+    let (mut ir, leaf) = file();
+    let one = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+    let retained_value = ir.add_expr(IrExpr::Block {
+        stmts: Vec::new(),
+        value: Some(one),
+    });
+    let terminal = call(&mut ir, leaf);
+    let after = local(&mut ir, 3, terminal);
+    let (body, labels) = split(&mut ir, vec![retained_value, after]);
+    assert_eq!(labels, Ok(1));
+    assert!(matches!(ir.exprs[retained_value as usize],
+        IrExpr::Block { value: Some(value), .. } if value == one));
+
+    let (mut ir, leaf) = file();
+    let value_call = call(&mut ir, leaf);
+    let value_block = ir.add_expr(IrExpr::Block {
+        stmts: Vec::new(),
+        value: Some(value_call),
+    });
+    let initializer = ir.add_expr(IrExpr::Variable {
+        index: 3,
+        ty: Ty::Int,
+        init: Some(value_block),
+        named: true,
+    });
+    let body = ir.add_expr(IrExpr::Block {
+        stmts: vec![initializer],
+        value: None,
+    });
+    let expressions_before = ir.exprs.clone();
+    let suspend_set = ir.suspend_funs.iter().copied().collect::<HashSet<_>>();
+
+    assert_eq!(
+        split_at_suspensions(&mut ir, body, &suspend_set, &Slots, 10),
+        Err(ReentryDecline::UnsupportedSuspension)
+    );
+    assert_eq!(ir.exprs, expressions_before);
+}
+
 /// `if (c) { leaf() } else { 2 }`: the suspending branch is taken by its condition on label 0 or
 /// by holding label 1, without testing the condition again; the plain branch only forward.
 #[test]
