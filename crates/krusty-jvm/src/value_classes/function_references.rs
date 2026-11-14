@@ -153,9 +153,12 @@ pub(super) fn realize(ir: &mut IrFile, callable_under: &Under, renamed_functions
                 // nullability. In particular, `Value` passed to `fun f(Value?)` stays the boxed
                 // `Value`: the nullable primitive-backed value class is itself the target JVM
                 // reference. Unboxing it would call `f(int)` although only `f(Value)` exists.
+                // A primitive-array value class keeps its semantic name through erasure, so the
+                // target still names the class although its physical parameter is the carrier.
                 (callable_under.contains_key(&fq)
-                    && logical != target
-                    && target.non_null().obj_internal() != Some(fq))
+                    && ((logical != target && target.non_null().obj_internal() != Some(fq))
+                        || representation::primitive_array_value_class(fq, callable_under)
+                            .is_some()))
                 .then_some(fq)
             })
             .collect();
@@ -171,8 +174,9 @@ pub(super) fn realize(ir: &mut IrFile, callable_under: &Under, renamed_functions
         fr.box_ret = fr.ret_ty.non_null().obj_internal().and_then(|fq| {
             (callable_under.contains_key(&fq)
                 && target_decl_ret.non_null().obj_internal() == Some(fq)
-                && fr.ret_ty != fr.target_ret_ty)
-                .then_some(fq)
+                && (fr.ret_ty != fr.target_ret_ty
+                    || representation::primitive_array_value_class(fq, callable_under).is_some()))
+            .then_some(fq)
         });
         fr.invoke_renamed = fr
             .invoke
