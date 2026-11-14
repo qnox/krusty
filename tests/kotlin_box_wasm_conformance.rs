@@ -1026,6 +1026,14 @@ fn wasm_suspend_function_values_are_function_values() {
     expect_wasm_box(src, "suspendFunctionValue");
 }
 
+/// The shared receiver-reuse program, including its non-suspending suspend lambda.
+#[test]
+fn wasm_apply_receiver_single_store_runs() {
+    let src = include_str!("box_regressions/applyReceiverSingleStore.kt");
+    expect_reference_box(src, "applyReceiverSingleStore");
+    expect_wasm_box(src, "applyReceiverSingleStore");
+}
+
 // A lambda or callable reference converted to a `fun interface` becomes an object of that
 // interface whose member forwards to the function value.
 #[test]
