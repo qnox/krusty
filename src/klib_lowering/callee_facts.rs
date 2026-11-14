@@ -24,6 +24,8 @@ pub struct KlibCalleeFacts<'a> {
     class_type_oracle: Option<&'a dyn crate::assignable::TypeOracle>,
     /// The classifiers whose representation the target owns, and so their singleton values too.
     target_classifiers: Option<&'a dyn Fn(crate::types::TypeName) -> bool>,
+    /// The call edge facts of members realized outside the unit, by declaration.
+    member_edges: HashMap<KlibDependencyCallable, CallEdge>,
 }
 
 #[derive(Clone)]
@@ -42,7 +44,30 @@ pub(super) enum KlibCalleeFact<'facts, 'callable> {
     Ambiguous,
 }
 
+/// The facts a call of a member realized outside a support unit carries beyond its callee, as the
+/// member hierarchy decorates a source call of the same declaration: its semantic role, inherited
+/// from a declaration it overrides when it has none of its own, and the declarations it
+/// overrides, through which a target recognizes a member it implements specially.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct CallEdge {
+    pub(crate) semantic_role: Option<crate::types::SemanticCallRole>,
+    pub(crate) overridden: Box<[crate::types::OverriddenDeclaration]>,
+}
+
 impl<'a> KlibCalleeFacts<'a> {
+    /// The call edge facts of the members realized outside the unit, frozen with its closure.
+    pub(crate) fn with_member_edges(
+        mut self,
+        edges: crate::fx_hash::HashMap<KlibDependencyCallable, CallEdge>,
+    ) -> Self {
+        self.member_edges = edges;
+        self
+    }
+
+    pub(crate) fn member_edge(&self, identity: &KlibDependencyCallable) -> Option<&CallEdge> {
+        self.member_edges.get(identity)
+    }
+
     pub(crate) fn with_reference_declarations(
         selected: impl IntoIterator<Item = KlibBodyCallable<'a>>,
         declarations: impl IntoIterator<Item = (crate::fir::ExternalCallableId, KlibBodyCallable<'a>)>,
@@ -61,6 +86,14 @@ impl<'a> KlibCalleeFacts<'a> {
             }
         }
         facts
+    }
+
+    /// The same-compilation declaration `identity` names, when the unit's closure froze one.
+    pub(super) fn reference_target(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Option<crate::fir::ExternalCallableId> {
+        self.reference_targets.get(identity).copied()
     }
 
     pub(super) fn reference_declaration(
@@ -133,6 +166,23 @@ impl<'a> KlibCalleeFacts<'a> {
         super::type_evidence::same_type(self.class_type_oracle, left, right)
     }
 
+    /// Apply a receiver to the declaring classifier through the calling compilation's explicit
+    /// class evidence. Without that evidence, only the receiver's own classifier is known.
+    pub(super) fn applied_supertype(
+        &self,
+        receiver: crate::types::Ty,
+        owner: crate::types::TypeName,
+    ) -> Option<crate::types::Ty> {
+        match self.class_type_oracle {
+            Some(classes) => crate::assignable::applied_supertype(
+                classes,
+                receiver,
+                crate::types::Ty::obj_name(owner),
+            ),
+            None => (receiver.kotlin_class_internal() == Some(owner)).then_some(receiver),
+        }
+    }
+
     pub(super) fn constructor(
         &self,
         identity: &KlibDependencyCallable,
@@ -190,6 +240,47 @@ impl<'a> KlibCalleeFacts<'a> {
         }
     }
 
+    /// The members dispatch reaches of the class `identity` constructs.
+    pub(crate) fn constructor_dispatched_members(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<Vec<KlibDependencyCallable>, super::decline::KlibBodyDeclineReason> {
+        match self.get(identity) {
+            Some(KlibCalleeFact::Selected(callables)) => {
+                super::class_initialization::constructor_dispatched_members(
+                    callables[0],
+                    bodies,
+                    self,
+                )
+            }
+            _ => Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
+                "an initializer has no unique selected constructor declaration".to_owned(),
+            )),
+        }
+    }
+
+    /// The declarations the initialization of the class `identity` constructs names without
+    /// emitting their bodies.
+    pub(crate) fn constructor_declaration_evidence(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<Vec<KlibDependencyCallable>, super::decline::KlibBodyDeclineReason> {
+        match self.get(identity) {
+            Some(KlibCalleeFact::Selected(callables)) => {
+                super::class_initialization::constructor_declaration_evidence(
+                    callables[0],
+                    bodies,
+                    self,
+                )
+            }
+            _ => Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
+                "an initializer has no unique selected constructor declaration".to_owned(),
+            )),
+        }
+    }
+
     /// Check graph-owned declarations even when the root operation emits no callee body/export.
     pub(super) fn validate_root_constructor(
         &self,
@@ -202,7 +293,7 @@ impl<'a> KlibCalleeFacts<'a> {
         use crate::libraries::KlibDeclarationSignature;
         let mismatch = |detail: &str| KlibBodyDeclineReason::SignatureMismatch(detail.to_owned());
         let declaration = KlibDeclarationSignature::Public(signature.clone());
-        let exact = match bodies.callee_origin(module, &declaration) {
+        let exact = match bodies.linked_origin(module, &declaration) {
             KlibCalleeOrigin::Ambiguous => {
                 return Err(mismatch("ambiguous root constructor producer"))
             }
@@ -340,6 +431,45 @@ impl<'a> KlibCalleeFacts<'a> {
         Option<super::primitive_calls::CommonPrimitiveCall>,
         super::decline::KlibBodyDeclineReason,
     > {
+        // A target that does not lay out the range class builds it by calling the declaration,
+        // as a source range construction on that target does.
+        Ok(self.primitive(identity, bodies)?.filter(|primitive| {
+            !matches!(
+                primitive.operation,
+                super::primitive_calls::CommonPrimitive::RangeConstruction(_)
+            ) || primitive
+                .ret
+                .kotlin_class_internal()
+                .is_some_and(|class| self.target_represents(class))
+        }))
+    }
+
+    /// The range construction `identity` performs, whatever the target lays out. A membership in
+    /// a range literal compares against its bounds, as kotlinc folds it, so it builds no range.
+    pub(crate) fn range_literal_bounds(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<
+        Option<super::primitive_calls::CommonPrimitiveCall>,
+        super::decline::KlibBodyDeclineReason,
+    > {
+        Ok(self.primitive(identity, bodies)?.filter(|primitive| {
+            matches!(
+                primitive.operation,
+                super::primitive_calls::CommonPrimitive::RangeConstruction(_)
+            )
+        }))
+    }
+
+    fn primitive(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<
+        Option<super::primitive_calls::CommonPrimitiveCall>,
+        super::decline::KlibBodyDeclineReason,
+    > {
         match self.get(identity) {
             Some(KlibCalleeFact::Ambiguous) => {
                 Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
@@ -410,42 +540,5 @@ impl<'a> KlibCalleeFacts<'a> {
             }
             IndexedKlibCallee::Ambiguous => Some(KlibCalleeFact::Ambiguous),
         }
-    }
-}
-
-/// The initialization edges of each class admitted with its members, by its declaring class, so
-/// a class reached through many of its constructors and members is prepared once. Each reached
-/// declaration is still authenticated as a member of the class it names before the class's edges
-/// answer for it.
-#[derive(Default)]
-pub(crate) struct ClassInitializations {
-    classes: HashMap<
-        (String, crate::metadata::id_signature::KlibPublicIdSignature),
-        Option<Vec<KlibDependencyCallable>>,
-    >,
-}
-
-impl ClassInitializations {
-    /// [`KlibCalleeFacts::constructor_initialization_callees`] of the class declaring `identity`.
-    pub(crate) fn callees(
-        &mut self,
-        facts: &KlibCalleeFacts<'_>,
-        identity: &KlibDependencyCallable,
-        bodies: &crate::klib_libraries::KlibDeclarationBodies,
-    ) -> Result<Option<Vec<KlibDependencyCallable>>, super::decline::KlibBodyDeclineReason> {
-        let selected = facts.initialized_class_member(identity)?;
-        let header = super::class_headers::authenticate(selected, bodies)?;
-        let key = (
-            header.contract.module.clone(),
-            header.contract.signature.clone(),
-        );
-        if let Some(edges) = self.classes.get(&key) {
-            return Ok(edges.clone());
-        }
-        let edges = super::class_initialization::constructor_initialization_callees(
-            selected, bodies, facts,
-        )?;
-        self.classes.insert(key, edges.clone());
-        Ok(edges)
     }
 }

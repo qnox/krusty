@@ -97,6 +97,8 @@ pub struct ClassDeclarationRecord {
     /// `secondary_ctors` describes.
     pub secondary_ordinals: Vec<usize>,
     ctor_param_defaults: Vec<bool>,
+    /// Closed annotation element values, aligned to the declared primary parameters.
+    annotation_param_defaults: Option<Vec<Option<crate::ir::AnnoValue>>>,
     ctor_param_tparams: Vec<Option<u32>>,
     ctor_param_annotations: Vec<MetadataAnnotations>,
     inline_underlying: Option<(String, Option<(Ty, crate::spelling::Spelled)>)>,
@@ -127,6 +129,7 @@ pub(crate) trait ClassifierRenaming {
     fn spelled(&self, spelled: &mut crate::spelling::Spelled);
     fn spellings(&self, spellings: &mut crate::spelling::DeclaredSpellings);
     fn annotation(&self, annotation: &mut crate::ir::AppliedAnnotation);
+    fn annotation_value(&self, value: &mut crate::ir::AnnoValue);
     fn type_parameters(&self, parameters: &mut [crate::ir::IrTypeParameter]);
 }
 
@@ -144,6 +147,11 @@ impl ClassDeclarationRecord {
         };
         self.class = renaming.name(self.class);
         named_types(&mut self.ctor_params);
+        if let Some(defaults) = &mut self.annotation_param_defaults {
+            for value in defaults.iter_mut().flatten() {
+                renaming.annotation_value(value);
+            }
+        }
         for property in &mut self.props {
             property.ty = renaming.ty(property.ty);
             property
@@ -348,16 +356,29 @@ enum CapturedParameters {
 pub struct ClassTailOptions<'a> {
     pub param_assertions: bool,
     pub annotations_in_metadata: bool,
+    pub annotation_defaults_in_metadata: bool,
     pub compiler_version_requirement:
         Option<crate::metadata::version_requirements::VersionRequirement>,
     pub intersection: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
-    pub inner_classifiers: crate::metadata::InnerClassifiers<'a>,
+    pub classifier_applications: crate::metadata::ClassifierApplications<'a>,
     /// The primary constructor's annotations in the order the target lists them; the record's own
     /// (source) order when `None`.
     pub primary_ctor_annotations: Option<&'a MetadataAnnotations>,
 }
 
 impl ClassDeclarationRecord {
+    /// A declared annotation default must have its normalized value before serialization.
+    pub fn missing_annotation_default(&self) -> Option<&str> {
+        let values = self.annotation_param_defaults.as_ref()?;
+        self.ctor_params
+            .iter()
+            .zip(&self.ctor_param_defaults)
+            .zip(values)
+            .find_map(|(((name, _), required), value)| {
+                (*required && value.is_none()).then_some(name.as_str())
+            })
+    }
+
     /// The record's class-level inputs.
     pub fn tail<'a>(
         &'a self,
@@ -367,7 +388,7 @@ impl ClassDeclarationRecord {
     ) -> ClassTail<'a> {
         ClassTail {
             intersection_approximation: options.intersection,
-            inner_classifiers: options.inner_classifiers,
+            classifier_applications: options.classifier_applications,
             spellings: self.spellings.clone(),
             supertype_spellings: &self.supertype_spellings,
             type_params: &self.type_params,
@@ -385,6 +406,10 @@ impl ClassDeclarationRecord {
             flags: self.flags,
             primary_ctor_flags: self.primary_ctor_flags,
             ctor_param_defaults: &self.ctor_param_defaults,
+            annotation_param_defaults: options
+                .annotation_defaults_in_metadata
+                .then_some(self.annotation_param_defaults.as_deref())
+                .flatten(),
             inline_underlying: self.inline_underlying.as_ref().map(|(name, ty)| {
                 (
                     name.as_str(),
@@ -887,6 +912,17 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         .iter()
         .map(|(_, _, has_default, _)| *has_default)
         .collect();
+    let annotation_param_defaults = c.is_annotation.then(|| {
+        let published = ir.annotation_element_defaults.get(&c.fq_name_id());
+        ctor_params
+            .iter()
+            .map(|(name, _)| {
+                published
+                    .and_then(|values| values.iter().find(|(element, _)| element == name))
+                    .map(|(_, value)| value.clone())
+            })
+            .collect()
+    });
     let ctor_param_tparams: Vec<Option<u32>> = ctor_params_with_defaults
         .iter()
         .map(|(_, _, _, type_param)| *type_param)
@@ -896,21 +932,6 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         .iter()
         .map(|(&callable, &function)| (function, callable))
         .collect();
-    let class_type_arguments = ir
-        .class_signature(&c.fq_name())
-        .map(|signature| {
-            signature
-                .type_params
-                .iter()
-                .map(crate::ir::IrTypeParameter::ty)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let class_ty = if class_type_arguments.is_empty() {
-        Ty::obj_name(c.fq_name)
-    } else {
-        Ty::obj_args_name(c.fq_name, &class_type_arguments)
-    };
     let declared_method_list = declared_fids
         .iter()
         .filter_map(|&fid| {
@@ -925,12 +946,7 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
     let declared_method_count = declared_method_list.len();
     let inferred_methods = if c.is_data {
         let mut methods = declared_method_list;
-        methods.extend(data_class_functions(
-            ir,
-            c,
-            &data_component_properties,
-            class_ty,
-        )?);
+        methods.extend(data_class_functions(ir, c, &data_component_properties)?);
         methods
     } else if c.is_value {
         let mut declared = declared_method_list;
@@ -1090,6 +1106,7 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         secondary_ctors,
         secondary_ordinals,
         ctor_param_defaults,
+        annotation_param_defaults,
         ctor_param_tparams,
         ctor_param_annotations,
         inline_underlying,
@@ -1291,6 +1308,7 @@ fn describe_function(ir: &IrFile, fid: u32) -> Option<FnMeta> {
         params_have_defaults: false,
         param_modifiers,
         vararg_index,
+        equality_bound: ir.declared_parameters(fid).equality_bound,
         context_count: member_context_count,
         context_parameter_kinds,
         // The declaration's own annotations, mirrored into the record. SOURCE-retained
@@ -1323,7 +1341,6 @@ fn data_class_functions(
     ir: &IrFile,
     c: &IrClass,
     components: &[&IrProperty],
-    class_ty: Ty,
 ) -> Option<Vec<(FnMeta, FunctionOrigin)>> {
     let owner = c.fq_name_id();
     let mut methods = Vec::new();
@@ -1343,6 +1360,11 @@ fn data_class_functions(
     // there is nothing to copy from and no primary-constructor property to destructure.
     if c.is_data && !c.is_singleton() {
         ir.data_class_member(owner, IrDataClassMemberRole::Copy)?;
+        // The class signature declares only this classifier's own parameters. Its checked self
+        // application also retains lexical captures, which the metadata encoder validates before
+        // applying the carrier's declaration policy. A class built without that fact has no
+        // record, like one missing a generated member, so a target reports the missing record.
+        let class_ty = ir.declared_class_self_type(owner)?;
         let mut record = FnMeta::plain(
             "copy".into(),
             components
@@ -1754,6 +1776,13 @@ fn secondary_constructor_flags(visibility: Visibility) -> u64 {
 }
 
 #[cfg(test)]
+#[path = "class_declarations/annotation_defaults_tests.rs"]
+mod annotation_defaults_tests;
+
+#[cfg(test)]
+mod copy_self_type_tests;
+
+#[cfg(test)]
 mod tests {
     use super::secondary_constructors;
     use super::{generated_function_flags, generated_functions, SecondaryConstructorRecord};
@@ -1829,7 +1858,7 @@ mod tests {
             &record.enum_entry_bodies,
             &record.anonymous_classifiers,
             None,
-            crate::metadata::MetadataTypeLookups::default().inner_classifiers,
+            crate::metadata::MetadataTypeLookups::default().classifier_applications,
         );
         assert_eq!(strings.class_id(renamed), 0);
         assert_eq!(

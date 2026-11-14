@@ -1993,7 +1993,8 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     for body_property_index in 0..body_property_count {
                         let bp = compact_headers
                             .is_none()
-                            .then(|| &c.body_props[body_property_index]);
+                            .then(|| c.body_props.get(body_property_index))
+                            .flatten();
                         let source_property_index =
                             u32::try_from(classifier_header.primary_parameters.len())
                                 .expect("too many constructor properties")
@@ -2536,7 +2537,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .as_ref()
                         .map_or_else(|| c.methods.len(), Vec::len);
                     for method_index in 0..member_callable_count {
-                        let method = compact_headers.is_none().then(|| &c.methods[method_index]);
+                        let method = compact_headers
+                            .is_none()
+                            .then(|| c.methods.get(method_index))
+                            .flatten();
                         let method_header = match compact_headers {
                             Some(headers) => streamed_callable_header_by_declaration(
                                 headers,
@@ -2921,12 +2925,6 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             .entry("copy".into())
                             .or_default()
                             .push(copy.signature());
-                    }
-                    if classifier_is_enum {
-                        table.enums.insert(
-                            internal,
-                            c.enum_entries.iter().map(|e| e.name.clone()).collect(),
-                        );
                     }
                     let mut resolve_super = |s: &str| -> String {
                         let resolved =
@@ -3437,6 +3435,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             declared_callable_order,
                             source_methods,
                             flags: classifier_flags,
+                            enum_entries: c.enum_entries.iter().map(|e| e.name.clone()).collect(),
                             inner_of: inner_of_ref,
                             companion_internal: companion_internal_ref,
                             lateinit_props,

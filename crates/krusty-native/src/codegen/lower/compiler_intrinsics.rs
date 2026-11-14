@@ -102,7 +102,7 @@ impl BodyLowering<'_, '_, '_> {
         self.value_hash(value, ty).map(Some)
     }
 
-    /// Realize an exact provider intrinsic reached through an ordinary member call.
+    /// Realize an exact provider operation reached through an ordinary member call.
     ///
     /// Returns `None` only when the selected declaration has no operation handled here, allowing
     /// the caller to continue through ordinary dependency realization.
@@ -116,8 +116,7 @@ impl BodyLowering<'_, '_, '_> {
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
         let extension_receiver_parameter = declared.extension_receiver_parameter;
-        if let Some(plan) = intrinsic.and_then(super::super::dependency_intrinsics::operation_plan)
-        {
+        if let Some(plan) = declared.operation {
             use super::super::dependency_intrinsics::DependencyOperation;
             return Some(match plan {
                 DependencyOperation::ListStorage(plan) => {
@@ -141,6 +140,17 @@ impl BodyLowering<'_, '_, '_> {
                         return Some(Err("a `String.plus` with a non-String result".into()));
                     }
                     self.string_plus(left, right, ret)
+                }
+                DependencyOperation::StringCompare => {
+                    let (Some(left), [right], None) =
+                        (receiver, args, extension_receiver_parameter)
+                    else {
+                        return Some(Err("a malformed `String.compareTo`".into()));
+                    };
+                    if ret != Ty::Int {
+                        return Some(Err("a `String.compareTo` with a non-Int result".into()));
+                    }
+                    self.string_compare(left, *right)
                 }
                 DependencyOperation::PrimitiveHashCode => {
                     let (Some(operand), [], None) = (receiver, args, extension_receiver_parameter)
@@ -421,6 +431,7 @@ impl BodyLowering<'_, '_, '_> {
 /// parameters, and the argument coordinate a serialized body keeps an extension receiver at.
 #[derive(Clone, Copy)]
 pub(super) struct DeclaredOperands<'a> {
+    pub(super) operation: Option<super::super::dependency_intrinsics::DependencyOperation>,
     pub(super) receiver: Option<Ty>,
     pub(super) params: &'a [Ty],
     pub(super) extension_receiver_parameter: Option<u32>,

@@ -1,6 +1,7 @@
 //! Direct classifier parents published from compact Pass-1 syntax, with the superclass kept in its
 //! written slot among the interfaces.
 
+use crate::fir::DeclarationFlags;
 use crate::fx_hash::{HashMap, HashSet};
 
 use super::{semantic_type_with_classifier_captures, ProductionSignatureSemantics};
@@ -127,16 +128,13 @@ pub(super) fn compact_classifier_parents(
         owner: declaration,
         source,
     };
+    let flags = headers.stub(declaration)?.flags;
+    let error_edge = (!flags.has(DeclarationFlags::LOCAL_CLASS)).then_some(Ty::Error);
     let explicit_base = resolved_local
         .and_then(|(base, _)| *base)
-        .or_else(|| base.and_then(|syntax| semantics.resolve_compact_header_type(scope, syntax)));
-    if base.is_some() && explicit_base.is_none() {
-        crate::trace_compiler!(
-            "signature",
-            "classifier parent resolution declaration={declaration:?} failed explicit base resolved_local={resolved_local:?}",
-        );
-        return None;
-    }
+        .or_else(|| base.and_then(|syntax| semantics.resolve_compact_header_type(scope, syntax)))
+        .or(base.and(error_edge));
+    (base.is_none() || explicit_base.is_some()).then_some(())?;
     if let (Some(callee), Some(superclass)) = (
         base_callee,
         explicit_base.and_then(|base| base.non_null().kotlin_class_internal()),
@@ -160,6 +158,7 @@ pub(super) fn compact_classifier_parents(
             resolved_local
                 .and_then(|(_, parents)| parents.get(ordinal).copied())
                 .or_else(|| semantics.resolve_compact_header_type(scope, *syntax))
+                .or(error_edge)
         })
         .collect::<Option<Vec<_>>>()?;
 
@@ -191,7 +190,7 @@ pub(super) fn compact_classifier_parents(
         .iter()
         .enumerate()
         .any(|(ordinal, parent)| {
-            parent_is_interface(*parent).is_none()
+            *parent != Ty::Error && parent_is_interface(*parent).is_none()
                 || parent_is_interface(*parent) == Some(false) && Some(ordinal) != source_superclass
         })
     {

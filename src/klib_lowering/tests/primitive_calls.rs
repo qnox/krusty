@@ -37,7 +37,7 @@ fn array_header_fixture(
         .class_member_header(
             selected.identity(),
             &contract.signature,
-            crate::libraries::KlibAccessorRole::Getter,
+            Some(crate::libraries::KlibAccessorRole::Getter),
         )
         .unwrap()
         .unwrap();
