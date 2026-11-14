@@ -2153,9 +2153,8 @@ KRef kt_rw_property_get_property(KRef self, KRef property) {
         return NULL;
     }
     if (!kt_is_instance(property, &kt_type_kproperty)) {
-        KT_FAIL_ON_DESCRIPTOR("krusty: a ReadWriteProperty read through a KProperty whose type "
-                             "is not a property reference: ",
-                             property->header.type);
+        KT_FAIL_ON_DESCRIPTOR("krusty: a ReadWriteProperty read through a KProperty whose type ",
+                              property->header.type, " is not a property reference\n");
         return NULL;
     }
     const KType *name_type = property->header.type;
@@ -2163,9 +2162,9 @@ KRef kt_rw_property_get_property(KRef self, KRef property) {
         name_type = name_type->super;
     }
     if (name_type == NULL) {
-        KT_FAIL_ON_DESCRIPTOR("krusty: a ReadWriteProperty read through a KProperty whose type "
-                             "does not publish a callable-name body: ",
-                             property->header.type);
+        KT_FAIL_ON_DESCRIPTOR("krusty: a ReadWriteProperty read through a KProperty whose type ",
+                              property->header.type,
+                              " does not publish a callable-name body\n");
         return NULL;
     }
     KRef name = name_type->callable_name(property);
