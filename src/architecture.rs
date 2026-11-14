@@ -370,7 +370,6 @@ mod tests {
                 check(&path, &allowed);
             } else if [
                 "src/jvm/jvm_libraries.rs",
-                "src/jvm/jvm_libraries/generic_signatures.rs",
                 "src/jvm/jvm_libraries/override_slots.rs",
                 "src/jvm/jvm_libraries/synthetic_properties.rs",
             ]
