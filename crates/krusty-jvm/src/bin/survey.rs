@@ -347,7 +347,7 @@ fn first_error_module(
     common_lowering_only: bool,
 ) -> Option<String> {
     static UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let Some(mut modules) = krusty::conformance::split_modules(src) else {
+    let Some(mut modules) = krusty::conformance::source_modules(src) else {
         return Some("module: unsupported // MODULE: shape".into());
     };
     // kotlinc's `// WITH_COROUTINES` helpers live in an implicit `support` module every module sees.
@@ -748,7 +748,7 @@ fn survey_file(
     let jdk = jdk_roots.select(&src);
     let jdk_modules = jdk.classpath_root();
     let compilation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if src.contains("// MODULE:") {
+        if krusty::conformance::contains_directive(&src, "MODULE") {
             first_error_module(
                 &src,
                 &base_jars,
@@ -765,12 +765,18 @@ fn survey_file(
                 .entry(cp_paths.clone())
                 .or_insert_with(|| Rc::new(Classpath::new(cp_paths)))
                 .clone();
-            if src.contains("// FILE:") || src.contains("// WITH_COROUTINES") {
-                let (mut blocks, java_blocks) = krusty::conformance::split_files(&src);
+            if krusty::conformance::contains_directive(&src, "FILE")
+                || krusty::conformance::directive(&src, "WITH_COROUTINES")
+            {
+                let (mut blocks, java_blocks) =
+                    match krusty::conformance::split_files_with_preamble(&src, stem) {
+                        Ok(files) => files,
+                        Err(error) => return Some(error),
+                    };
                 if blocks.is_empty() && java_blocks.is_empty() {
                     blocks.push((stem.to_string(), src.to_string()));
                 }
-                if src.contains("// WITH_COROUTINES") {
+                if krusty::conformance::directive(&src, "WITH_COROUTINES") {
                     blocks.push(("CoroutineUtil".to_string(), COROUTINE_HELPERS.to_string()));
                 }
                 if frontend_only {

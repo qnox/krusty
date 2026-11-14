@@ -1916,6 +1916,9 @@ pub struct File {
     /// `+ExplicitContextArguments`: named context parameters may be supplied at a call site instead
     /// of being selected from the implicit receiver and lexical scope.
     pub explicit_context_arguments: bool,
+    /// `+CallableReferencesToContextual`: a reference to a declaration with context parameters
+    /// selects those arguments from the reference site and exposes only the value parameters.
+    pub callable_references_to_contextual: bool,
     /// `+ContextSensitiveResolutionUsingExpectedType`: an otherwise-unbound simple classifier or
     /// classifier value may be selected from the expected type's nested classifier hierarchy.
     pub context_sensitive_resolution_using_expected_type: bool,
@@ -1981,6 +1984,9 @@ pub struct File {
     /// Exact per-compilation warning text for that transition. Releases before the diagnostic split
     /// leave this absent and report the construct as an ordinary error.
     pub inapplicable_operator_modifier_warning: Option<String>,
+    /// `+NormalizeNaNValuesInConstContext`: every NaN a compile-time constant evaluates to is the
+    /// canonical NaN of its type, whatever sign and payload the arithmetic produced.
+    pub normalize_nan_in_const_context: bool,
     /// `+CustomEqualsInValueClasses`: permit the typed `equals(Self)` convention in a value class
     /// whose selected representation is inline rather than full/boxed.
     pub custom_equals_in_value_classes: bool,

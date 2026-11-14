@@ -100,3 +100,48 @@ fn an_inherited_equality_bound_guards_the_overriding_body() {
 fn a_value_class_equality_bound_guards_only_the_type() {
     assert_ok("ValueClassBound", VALUE_CLASS);
 }
+
+/// The bound is part of the overridden parameter's declaration, so it crosses a module boundary
+/// in `@Metadata`: a consuming module's override without the annotation still reads `other` as
+/// the bound. The library is compiled by krusty and consumed by krusty; kotlinc 2.4 rejects `@EqualityBound`, so
+/// the kotlinc consumer runs on the 2.5 release.
+const LIBRARY_BOUND: &str = "\
+// LANGUAGE: +StrictEquals
+open class Base(val n: Int) {
+    override fun equals(@EqualityBound(Base::class) other: Any?): Boolean = n == other.n
+}
+";
+
+const CONSUMER_OVERRIDE: &str = "\
+// LANGUAGE: +StrictEquals
+class Overriding(n: Int) : Base(n) {
+    override fun equals(other: Any?): Boolean = n == other.n
+}
+
+fun box(): String {
+    if (Overriding(1) != Base(1)) return \"equal\"
+    if (Overriding(1) == Overriding(2)) return \"different\"
+    if (Overriding(1) == Any()) return \"an Any reached Overriding.equals\"
+    return \"OK\"
+}
+";
+
+#[test]
+fn a_library_equality_bound_reaches_a_consuming_override() {
+    // The library is built by krusty and consumed by krusty alone: the default library
+    // cross-check would compile it with kotlinc 2.4, which rejects `@EqualityBound`.
+    let library = common::compile_libs_build("LibraryBound", &[("Lib.kt", LIBRARY_BOUND)])
+        .expect("krusty builds the library module");
+    let jdk = common::jdk_modules();
+    assert_eq!(
+        common::compile_and_run_box(
+            CONSUMER_OVERRIDE,
+            "Consumer",
+            &[library.krusty_out().to_path_buf(), common::stdlib_jar()],
+            Some(jdk.as_path()),
+        )
+        .as_deref(),
+        Some("OK"),
+        "krusty reads the bound from its own metadata",
+    );
+}

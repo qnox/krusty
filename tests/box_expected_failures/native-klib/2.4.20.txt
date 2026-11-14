@@ -236,7 +236,6 @@ closures/closureOnTopLevel1.kt
 closures/closureOnTopLevel2.kt
 closures/crossinlineLocalDeclaration.kt
 closures/kt47894_inlineFunWithObjectWithNothing.kt
-collectionLiterals/array.kt
 collectionLiterals/primitiveArrays.kt
 collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
@@ -999,7 +998,6 @@ extensionFunctions/suspendConversionForExtensionFunAsASuperType.kt
 extensionProperties/contextPropertyInInterface.kt
 extensionProperties/extensionPropertyDifferentReceiver.kt
 extensionProperties/genericContextOverride.kt
-fakeOverride/fakeOverrideWithMissingClassInSignature.kt
 fakeOverride/internalFromFriendModule.kt
 fakeOverride/intersectionInLocal.kt
 fakeOverride/privateFakeOverrides0.kt
@@ -1255,7 +1253,6 @@ inlineClasses/contextParameterPropertyDeserialization.kt
 inlineClasses/crossinlineWithInlineClassInParameter.kt
 inlineClasses/crossinlineWithInlineClassInParameterGeneric.kt
 inlineClasses/crossinlineWithInlineClassInParameterGeneric2.kt
-inlineClasses/customIterator.kt
 inlineClasses/defaultParameterValues/kt26554.kt
 inlineClasses/dnnInValue.kt
 inlineClasses/funInterface/argumentResult.kt
@@ -1418,7 +1415,6 @@ ir/enumClass2.kt
 ir/enumClass3.kt
 ir/fileClassInitializers.kt
 ir/kt41765.kt
-ir/privateSignatures/enumEntryArguments.kt
 ir/serializationRegressions/anonFakeOverride.kt
 ir/serializationRegressions/innerClassInEnumEntryClass.kt
 ir/serializationRegressions/useImportedMember.kt
@@ -1568,7 +1564,6 @@ objects/companionObjectAccess/multipleCompanionsWithAccessors/fromAnonymousObjec
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlock.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlockOfNestedClass.kt
 objects/interfaceCompanionObjectReference.kt
-objects/kt52540.kt
 operatorConventions/compareTo/comparable.kt
 operatorConventions/kt20387.kt
 operatorConventions/kt44647.kt
@@ -1643,7 +1638,6 @@ ranges/contains/generated/uintDownTo.kt
 ranges/contains/generated/uintUntil.kt
 ranges/contains/generated/ulongDownTo.kt
 ranges/contains/generated/ulongUntil.kt
-ranges/contains/inArray.kt
 ranges/contains/inCharSequence.kt
 ranges/contains/inComparableRange.kt
 ranges/contains/inCustomObjectRange.kt
@@ -1656,7 +1650,6 @@ ranges/contains/inOptimizableFloatRange.kt
 ranges/contains/inOptimizableIntRange.kt
 ranges/contains/inOptimizableLongRange.kt
 ranges/contains/inPrimitiveProgression.kt
-ranges/contains/inRangeLiteralComposition.kt
 ranges/contains/inRangeWithCustomContains.kt
 ranges/contains/inRangeWithImplicitReceiver.kt
 ranges/contains/inRangeWithNonmatchingArguments.kt
@@ -2391,8 +2384,6 @@ sam/funInterfaceExtendsSuspendFunction.kt
 sam/funInterfaceExtendsSuspendFunction2.kt
 sam/kt59858.kt
 sam/kt64116.kt
-sealed/kt54028.kt
-sealed/kt54028_cursed.kt
 secondaryConstructors/enums.kt
 secondaryConstructors/innerClassesInheritance.kt
 secondaryConstructors/localClasses.kt
@@ -2514,7 +2505,6 @@ unsignedTypes/unsignedRangeIterator.kt
 unsignedTypes/varargsOfUnsignedTypes.kt
 vararg/inlineClassArraysAsNamedArgumentInVararg.kt
 vararg/kt37715.kt
-vararg/referenceToContainsFromVarargParameter.kt
 vararg/spreadCopiesArray.kt
 vararg/useSuspendFunResultAsVararg.kt
 vararg/varargInTailrec.kt
