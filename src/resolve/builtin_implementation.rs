@@ -8,10 +8,22 @@ use super::{CallableReferenceTarget, Checker, ExprLowering, ResolvedCall, StmtLo
 
 pub(super) type Facts = crate::fx_hash::HashMap<ExternalCallableId, Box<[BuiltinImplementation]>>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FactError {
+    Callable(ExternalCallableId),
+    Property(crate::fir::ExternalPropertyId),
+}
+
+impl From<ExternalCallableId> for FactError {
+    fn from(identity: ExternalCallableId) -> Self {
+        Self::Callable(identity)
+    }
+}
+
 /// Derive implementation facts while the checker still owns the normalized source provider.
 /// Backends receive the selected declaration identities and this result; they do not traverse
 /// the hierarchy or repeat the query.
-pub(super) fn for_checked_unit(checker: &Checker<'_>) -> Result<Facts, ExternalCallableId> {
+pub(super) fn for_checked_unit(checker: &Checker<'_>) -> Result<Facts, FactError> {
     let mut selected =
         crate::fx_hash::HashMap::<ExternalCallableId, (TypeName, Box<str>)>::default();
     let mut nonvirtual = checker
@@ -60,6 +72,18 @@ pub(super) fn for_checked_unit(checker: &Checker<'_>) -> Result<Facts, ExternalC
             if let ResolvedCall::Member(member) = call.as_ref() {
                 record_member(&mut selected, member)?;
             }
+        }
+    }
+
+    // Counted loops and indexed iteration lower to member reads selected by the checker but do
+    // not represent those reads in the ordinary source call tables. Freeze their exact property
+    // accessors alongside the iterator protocol targets.
+    for property in checker.iteration_plans.selected_member_properties() {
+        record_iteration_property(checker, &mut selected, property)?;
+    }
+    if let Some(indexing) = checker.iteration_plans.char_sequence() {
+        if let ResolvedCall::Member(member) = indexing.get.as_ref() {
+            record_member(&mut selected, member)?;
         }
     }
 
@@ -248,5 +272,31 @@ fn record_property_reference(
             .entry(identity)
             .or_insert_with(|| (owner, property.name.clone().into_boxed_str()));
     }
+    Ok(())
+}
+
+fn record_iteration_property(
+    checker: &Checker<'_>,
+    selected: &mut crate::fx_hash::HashMap<ExternalCallableId, (TypeName, Box<str>)>,
+    property: crate::fir::ExternalPropertyId,
+) -> Result<(), FactError> {
+    let property = checker
+        .libraries
+        .external_property(property)
+        .ok_or(FactError::Property(property))?;
+    let identity = property.getter;
+    let callable = checker
+        .libraries
+        .external_callable(identity)
+        .ok_or(FactError::Callable(identity))?;
+    if callable.kind != crate::libraries::ExternalCallableKind::Member {
+        return Ok(());
+    }
+    let Some(SemanticCallableOwner::Classifier(owner)) = callable.declaration_owner else {
+        return Err(FactError::Callable(identity));
+    };
+    selected
+        .entry(identity)
+        .or_insert_with(|| (owner, property.name.into_boxed_str()));
     Ok(())
 }

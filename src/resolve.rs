@@ -31776,11 +31776,11 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     let enhanced_values = c.enhanced_value_heads();
     let builtin_implementations = match builtin_implementation::for_checked_unit(&c) {
         Ok(implementations) => implementations,
-        Err(identity) => {
+        Err(error) => {
             c.diags.error(
                 Span::new(0, 0),
                 format!(
-                    "internal error: selected external member {identity:?} has no semantic owner"
+                    "internal error: selected external member has incomplete builtin implementation facts: {error:?}"
                 ),
             );
             HashMap::default()
