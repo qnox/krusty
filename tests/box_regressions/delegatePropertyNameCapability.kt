@@ -15,6 +15,7 @@ fun readLibraryDelegate(
 // MODULE: main(lib)
 import kotlin.properties.Delegates
 import kotlin.properties.ReadWriteProperty
+import kotlin.reflect.KCallable
 import kotlin.reflect.KProperty
 
 private var sample: String = ""
@@ -45,6 +46,9 @@ private fun readRuntimeDelegate(
 ): String = delegate.getValue(null, property)
 
 fun box(): String {
+    val function: KCallable<*> = ::box
+    if (function.name != "box") return "function reference name: ${function.name}"
+
     val property = NamedProperty(::sample, "runtimeName")
     val libraryName = readLibraryDelegate(LibraryNameDelegate(), property)
     if (libraryName != "runtimeName") return "library name: $libraryName"

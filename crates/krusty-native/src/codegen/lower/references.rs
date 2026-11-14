@@ -918,11 +918,12 @@ impl BodyLowering<'_, '_, '_> {
         Ok(Some(instance))
     }
 
-    /// A member of a property reference, answered through the object's own table.
+    /// A checked reflection member, answered through its selected receiver capability.
     ///
-    /// Returns `None` unless the selected declaration's provider attached an exact reflection
-    /// operation role. Native maps that checked role to its object ABI; it never reclassifies the
-    /// receiver or callable spelling.
+    /// `KCallable.name` uses the descriptor's authenticated name callback because source
+    /// `KProperty` implementations need not share generated-reference slot numbering. `get` and
+    /// `set` still use the generated reference object's fixed slots. Returns `None` unless the
+    /// selected declaration's provider attached the exact reflection operation role.
     pub(super) fn reference_member(
         &mut self,
         role: Option<krusty::types::SemanticCallRole>,
@@ -930,8 +931,30 @@ impl BodyLowering<'_, '_, '_> {
         args: &[u32],
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
+        if role == Some(krusty::types::SemanticCallRole::KotlinCallableReferenceName)
+            && args.is_empty()
+        {
+            return Some(self.callable_name(receiver, ret));
+        }
         let slot = reference_slot(role, args.len())?;
         Some(self.reference_call(slot, receiver, args, ret))
+    }
+
+    /// Read `KCallable.name` through the exact name body published by the receiver's descriptor.
+    ///
+    /// Generated property-reference objects and source classes implementing `KProperty` have
+    /// different class-table layouts, so the reference-object `NAME` slot is not a valid general
+    /// dispatch index. The descriptor callback is selected from the authenticated callable-name
+    /// role while the class model is built and follows the descriptor's superclass chain.
+    fn callable_name(&mut self, receiver: u32, ret: Ty) -> Result<Option<Value>, Unsupported> {
+        let object = self.reference(receiver)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let Some(name) = self.runtime_call("kt_kcallable_name", &[any()], any(), &[object])? else {
+            return Ok(None);
+        };
+        self.convert(name, Some(any()), ret)
     }
 
     /// Call a top-level extension accessor: the receiver, then the written value for a setter.
@@ -1113,7 +1136,6 @@ impl BodyLowering<'_, '_, '_> {
 fn reference_slot(role: Option<krusty::types::SemanticCallRole>, operands: usize) -> Option<u32> {
     use krusty::types::SemanticCallRole;
     match role? {
-        SemanticCallRole::KotlinCallableReferenceName if operands == 0 => Some(NAME),
         SemanticCallRole::KotlinPropertyReferenceGet(arity) if operands == usize::from(arity) => {
             Some(GET)
         }

@@ -2129,6 +2129,30 @@ KRef kt_rw_property_get(KRef self, KRef name) {
     return kt_not_null_var_get(value, name);
 }
 
+KRef kt_kcallable_name(KRef callable) {
+    if (callable == NULL) {
+        kt_null_receiver();
+        return NULL;
+    }
+    if (!kt_is_instance(callable, &kt_type_kcallable)) {
+        KT_FAIL_ON_DESCRIPTOR("krusty: KCallable.name on a ", callable->header.type,
+                              " whose type does not implement KCallable\n");
+        return NULL;
+    }
+
+    const KType *name_type = callable->header.type;
+    while (name_type != NULL && name_type->callable_name == NULL) {
+        name_type = name_type->super;
+    }
+    if (name_type == NULL) {
+        KT_FAIL_ON_DESCRIPTOR("krusty: KCallable.name on a ", callable->header.type,
+                              " whose type does not publish a callable-name body\n");
+        return NULL;
+    }
+    KRef name = name_type->callable_name(callable);
+    return kt_pending_exception() == NULL ? name : NULL;
+}
+
 KRef kt_rw_property_get_property(KRef self, KRef property) {
     if (self == NULL) {
         kt_null_receiver();
@@ -2157,17 +2181,7 @@ KRef kt_rw_property_get_property(KRef self, KRef property) {
                               property->header.type, " is not a property reference\n");
         return NULL;
     }
-    const KType *name_type = property->header.type;
-    while (name_type != NULL && name_type->callable_name == NULL) {
-        name_type = name_type->super;
-    }
-    if (name_type == NULL) {
-        KT_FAIL_ON_DESCRIPTOR("krusty: a ReadWriteProperty read through a KProperty whose type ",
-                              property->header.type,
-                              " does not publish a callable-name body\n");
-        return NULL;
-    }
-    KRef name = name_type->callable_name(property);
+    KRef name = kt_kcallable_name(property);
     /* The callable name is program code and may throw. Do not replace that exception with
        NotNullVar's uninitialized-property error. */
     if (kt_pending_exception() != NULL) {
