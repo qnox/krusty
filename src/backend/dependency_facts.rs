@@ -356,6 +356,38 @@ mod tests {
     }
 
     #[test]
+    fn dependency_accessor_calls_keep_their_property_slot_identity() {
+        use crate::backend::interface_identity::property_member_identity;
+        use crate::libraries::{KlibAccessorRole, KlibBodyAccessor};
+        use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
+        let mut fact = extension_fact();
+        let identity = KlibDependencyCallable {
+            module: "producer".into(),
+            declaration: KlibDeclarationSignature::Accessor(KlibAccessorIdSignature::new(
+                KlibPublicIdSignature::classifier(crate::types::type_name("sample/Owner.value")),
+                "physicalAccessor".into(),
+                11,
+                0,
+            )),
+        };
+        fact.dependency_callable = Some(identity.clone());
+        for (role, setter) in [
+            (KlibAccessorRole::Getter, false),
+            (KlibAccessorRole::Setter, true),
+        ] {
+            fact.klib_body_accessor = Some(KlibBodyAccessor {
+                property: ExternalPropertyId::from_raw(3),
+                role,
+                name: "value".into(),
+            });
+            assert_eq!(
+                fact.member_slot_identity(),
+                property_member_identity(&identity, setter)
+            );
+        }
+    }
+
+    #[test]
     fn dependency_extensions_keep_their_provider_receiver_coordinate() {
         let mut fact = extension_fact();
         let params = fact.params.clone();
