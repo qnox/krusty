@@ -11,8 +11,8 @@ use super::{base, local_symbol, public_symbol, validated, DependencyBodyUnit};
 use crate::ir::{IrConst, IrConstructorAccess, IrExpr};
 use crate::klib_libraries::{KlibBodyLibrary, KlibDeclarationBodies};
 use crate::metadata::id_signature::{
-    callable_signature, CallableShape, ClassScope, DeclarationContainer, KlibPublicIdSignature,
-    Placement,
+    callable_signature, class_signature, CallableShape, ClassScope, DeclarationContainer,
+    KlibPublicIdSignature, Placement,
 };
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrClass, KlibIrExprKind, KlibIrField,
@@ -244,27 +244,44 @@ fn hidden_class(supertype: T) -> KlibIrDeclarationTree {
 
 /// A non-generic class whose only store is the constant `value`, not a constructor parameter.
 fn counted_class(value: i32) -> KlibIrDeclarationTree {
-    counted_class_with(value, |_, _| Vec::new())
+    counted_class_with(
+        value,
+        (
+            class_symbol(),
+            file_local(KlibIrSymbolKind::Constructor, CONSTRUCTOR_SLOT),
+        ),
+        |_, _| Vec::new(),
+    )
 }
 
 /// [`counted_class`] with the further `members` it builds in the class's own arena, given the
 /// class type.
 fn counted_class_with(
     value: i32,
+    (symbol, constructor_symbol): (KlibIrSymbol, KlibIrSymbol),
     members: impl FnOnce(&mut KlibIrArena, KlibIrTypeId) -> Vec<KlibIrMember>,
 ) -> KlibIrDeclarationTree {
     let mut arena = KlibIrArena::default();
-    let symbol = class_symbol();
-    let class_ty = plain_hidden(&mut arena);
+    let class_ty = arena.push_type(KlibIrType::Simple {
+        classifier: symbol.clone(),
+        nullability: KlibIrNullability::NotSpecified,
+        arguments: Vec::new(),
+        annotations: Vec::new(),
+        abbreviation: None,
+    });
     let any = arena.push_type(T::Any.klib());
     let int = arena.push_type(T::Int.klib());
     let initializer = const_int(&mut arena, value);
     let constructor_body = delegation(&mut arena, &symbol);
     let constructor = arena.push_function(KlibIrFunction {
-        base: private(base(file_local(
-            KlibIrSymbolKind::Constructor,
-            CONSTRUCTOR_SLOT,
-        ))),
+        base: if matches!(
+            constructor_symbol.signature,
+            KlibIrSignature::FileLocal { .. }
+        ) {
+            private(base(constructor_symbol))
+        } else {
+            base(constructor_symbol)
+        },
         name: "<init>".to_owned(),
         constructor: true,
         type_parameters: Vec::new(),
@@ -280,7 +297,11 @@ fn counted_class_with(
     });
     let extra = members(&mut arena, class_ty);
     let class = arena.push_class(KlibIrClass {
-        base: private(base(symbol.clone())),
+        base: if matches!(symbol.signature, KlibIrSignature::FileLocal { .. }) {
+            private(base(symbol.clone()))
+        } else {
+            base(symbol.clone())
+        },
         name: "Hidden".to_owned(),
         this_receiver: Some(KlibIrParameter {
             base: base(file_local(KlibIrSymbolKind::ValueParameter, THIS_SLOT)),
@@ -1189,44 +1210,168 @@ fn one_module_cannot_hold_the_ordinary_and_the_prepared_component_together() {
 
 /// A private class whose member `read` calls the public function `helper`.
 fn helper_calling_class(helper: KlibPublicIdSignature) -> KlibIrDeclarationTree {
-    counted_class_with(3, |arena, class_ty| {
-        let int = arena.push_type(T::Int.klib());
-        let call = arena.push_expr(
-            Some(int),
-            KlibIrExprKind::Call {
-                access: KlibIrMemberAccess {
-                    symbol: public_symbol(KlibIrSymbolKind::Function, helper),
-                    arguments: KlibIrArguments::Flat(Vec::new()),
-                    type_arguments: Vec::new(),
-                    origin: None,
+    counted_class_with(
+        3,
+        (
+            class_symbol(),
+            file_local(KlibIrSymbolKind::Constructor, CONSTRUCTOR_SLOT),
+        ),
+        |arena, class_ty| {
+            let int = arena.push_type(T::Int.klib());
+            let call = arena.push_expr(
+                Some(int),
+                KlibIrExprKind::Call {
+                    access: KlibIrMemberAccess {
+                        symbol: public_symbol(KlibIrSymbolKind::Function, helper),
+                        arguments: KlibIrArguments::Flat(Vec::new()),
+                        type_arguments: Vec::new(),
+                        origin: None,
+                    },
+                    super_qualifier: None,
                 },
-                super_qualifier: None,
-            },
-        );
-        let member = arena.push_function(KlibIrFunction {
-            base: private(base(file_local(KlibIrSymbolKind::Function, MEMBER_SLOT))),
-            name: "read".to_owned(),
-            constructor: false,
+            );
+            let member = arena.push_function(KlibIrFunction {
+                base: private(base(file_local(KlibIrSymbolKind::Function, MEMBER_SLOT))),
+                name: "read".to_owned(),
+                constructor: false,
+                type_parameters: Vec::new(),
+                dispatch_receiver: Some(KlibIrParameter {
+                    base: base(file_local(
+                        KlibIrSymbolKind::ValueParameter,
+                        MEMBER_THIS_SLOT,
+                    )),
+                    name: "<this>".to_owned(),
+                    ty: class_ty,
+                    vararg_element_type: None,
+                    default_value: None,
+                }),
+                context_parameters: Vec::new(),
+                extension_receiver: None,
+                regular_parameters: Vec::new(),
+                return_type: int,
+                overridden: Vec::new(),
+                companion_extension_class: None,
+                prepared_inline_file: None,
+                body: Some(KlibIrBody::Block(vec![KlibIrStatement::Expression(call)])),
+            });
+            vec![KlibIrMember::Function(member)]
+        },
+    )
+}
+
+/// A reached public constructor's field and anonymous initializer have declaration facts even
+/// though neither effect occurs in its own serialized function body. This inventory is separate
+/// from the executable function-body edges used to select dependency-support roots.
+#[test]
+fn reached_constructor_class_facts_keep_field_and_init_edges_separate_from_body_roots() {
+    const FIELD: Shape = ("fieldEffect", &[], T::Int);
+    const INIT: Shape = ("initEffect", &[], T::Int);
+    let shapes = [FIELD, INIT];
+    let build = |_: &str, body: &mut super::demo_package::Body| {
+        let value = body.int(1);
+        Some(vec![body.ret(value)])
+    };
+    let signed = demo_with(&shapes, Vec::new(), build);
+    let field_key = signed.callable("fieldEffect").identity().clone();
+    let init_key = signed.callable("initEffect").identity().clone();
+    let public = |key: &crate::libraries::KlibDependencyCallable| match &key.declaration {
+        crate::libraries::KlibDeclarationSignature::Public(signature) => signature.clone(),
+        _ => panic!("public effect"),
+    };
+    let package = ["demo".to_owned()];
+    let owner = ClassScope::<KotlinType> {
+        name: "Hidden",
+        type_parameters: Vec::new(),
+        expect: false,
+    };
+    let container = DeclarationContainer {
+        package: &package,
+        classes: &[],
+        native_interop_library: false,
+    };
+    let class_key = class_signature(container, &owner);
+    let owners = [owner];
+    let constructor_key = callable_signature(
+        DeclarationContainer {
+            package: &package,
+            classes: &owners,
+            native_interop_library: false,
+        },
+        &CallableShape {
+            name: "<init>",
+            contexts: Vec::new(),
+            receiver: None,
+            params: Vec::new(),
+            vararg: None,
             type_parameters: Vec::new(),
-            dispatch_receiver: Some(KlibIrParameter {
-                base: base(file_local(
-                    KlibIrSymbolKind::ValueParameter,
-                    MEMBER_THIS_SLOT,
-                )),
-                name: "<this>".to_owned(),
-                ty: class_ty,
-                vararg_element_type: None,
-                default_value: None,
-            }),
-            context_parameters: Vec::new(),
-            extension_receiver: None,
-            regular_parameters: Vec::new(),
-            return_type: int,
-            overridden: Vec::new(),
-            companion_extension_class: None,
-            prepared_inline_file: None,
-            body: Some(KlibIrBody::Block(vec![KlibIrStatement::Expression(call)])),
-        });
-        vec![KlibIrMember::Function(member)]
-    })
+            expect: false,
+            placement: Placement::Ordinary,
+        },
+    )
+    .unwrap();
+    let class = counted_class_with(
+        0,
+        (
+            public_symbol(KlibIrSymbolKind::Class, class_key),
+            public_symbol(KlibIrSymbolKind::Constructor, constructor_key.clone()),
+        ),
+        |arena, _| {
+            let int = arena.push_type(T::Int.klib());
+            let mut call = |key: &crate::libraries::KlibDependencyCallable| {
+                arena.push_expr(
+                    Some(int),
+                    KlibIrExprKind::Call {
+                        access: KlibIrMemberAccess {
+                            symbol: public_symbol(KlibIrSymbolKind::Function, public(key)),
+                            arguments: KlibIrArguments::Flat(Vec::new()),
+                            type_arguments: Vec::new(),
+                            origin: None,
+                        },
+                        super_qualifier: None,
+                    },
+                )
+            };
+            let field_call = call(&field_key);
+            let init_call = call(&init_key);
+            vec![
+                KlibIrMember::Field(field(MARK_SLOT, "effect", int, field_call)),
+                KlibIrMember::AnonymousInitializer {
+                    base: base(file_local(KlibIrSymbolKind::Class, INITIALIZER_SLOT)),
+                    statements: vec![KlibIrStatement::Expression(init_call)],
+                },
+            ]
+        },
+    );
+    let demo = demo_with(&shapes, vec![class], build);
+    let constructor = crate::libraries::KlibDependencyCallable {
+        module: "demo".into(),
+        declaration: crate::libraries::KlibDeclarationSignature::Public(constructor_key),
+    };
+    let before = demo
+        .bodies
+        .emitted_body_callables(&constructor, crate::klib_lowering::EMITTED_CALL_FORMS);
+    let facts = demo
+        .bodies
+        .constructor_member_callables(&constructor, crate::klib_lowering::EMITTED_CALL_FORMS);
+    assert_eq!(
+        facts.into_iter().collect::<crate::fx_hash::HashSet<_>>(),
+        [field_key.clone(), init_key].into_iter().collect()
+    );
+    assert_eq!(
+        demo.bodies
+            .emitted_body_callables(&constructor, crate::klib_lowering::EMITTED_CALL_FORMS),
+        before
+    );
+    assert!(demo
+        .bodies
+        .constructor_member_callables(&field_key, crate::klib_lowering::EMITTED_CALL_FORMS)
+        .is_empty());
+    let foreign = crate::libraries::KlibDependencyCallable {
+        module: "foreign".into(),
+        ..constructor
+    };
+    assert!(demo
+        .bodies
+        .constructor_member_callables(&foreign, crate::klib_lowering::EMITTED_CALL_FORMS)
+        .is_empty());
 }
