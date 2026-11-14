@@ -35,7 +35,7 @@ jobs:
         timeout-minutes: 20
         run: |
           set -euo pipefail
-          tools/krusty-gradle/gradlew --no-daemon -p tools/krusty-gradle -PkrustyPluginVersion=0.0.0-verification --write-verification-metadata sha256 clean test publishAllPublicationsToReleaseRepository > evidence/metadata-generation.log 2>&1
+          tools/krusty-gradle/gradlew --no-daemon -p tools/krusty-gradle -PkrustyPluginVersion=0.0.0-verification --write-verification-metadata sha256 --write-locks clean test publishAllPublicationsToReleaseRepository > evidence/metadata-generation.log 2>&1
           cat evidence/metadata-generation.log
       - name: validate portable distribution with strict dependency verification
         timeout-minutes: 15
@@ -47,7 +47,8 @@ jobs:
         if: always()
         run: |
           cp tools/krusty-gradle/gradle/verification-metadata.xml evidence/verification-metadata.xml
-          cp tools/krusty-gradle/gradle.lockfile evidence/gradle.lockfile
+          mkdir -p evidence/locks
+          for file in tools/krusty-gradle/*lockfile; do cp "$file" evidence/locks/; done
           cp -R tools/krusty-gradle/build/test-results evidence/test-results 2>/dev/null || true
           git diff -- tools/krusty-gradle > evidence/product.diff
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
