@@ -409,10 +409,13 @@ mod tests {
             "kotlin/CharSequence",
         )));
         assert!(fact.builtin_implementations.is_empty());
-        let mut graph = crate::fir::CheckedKlibDependencyFacts::default();
-        graph
-            .builtin_implementations
-            .insert(identity, expected.clone());
+        let mut graph_implementations = HashMap::default();
+        graph_implementations.insert(identity, expected.clone());
+        let graph = crate::ir::CheckedKlibDependencyFacts::new(
+            graph_implementations,
+            HashMap::default(),
+            None,
+        );
         callables
             .record_klib_dependency_facts(graph)
             .expect("an uninitialized frozen slot is not contradictory evidence");
@@ -442,10 +445,8 @@ mod tests {
             callables.callables[&identity].builtin_implementations,
             expected
         );
-        let conflicting_graph = crate::fir::CheckedKlibDependencyFacts {
-            builtin_implementations: selected,
-            ..crate::fir::CheckedKlibDependencyFacts::default()
-        };
+        let conflicting_graph =
+            crate::ir::CheckedKlibDependencyFacts::new(selected, HashMap::default(), None);
         assert_eq!(
             callables.record_klib_dependency_facts(conflicting_graph),
             Err(identity)
@@ -731,7 +732,7 @@ pub struct CheckedBackendCallables {
     callables: HashMap<ExternalCallableId, BackendCallableFact>,
     properties: HashMap<ExternalPropertyId, BackendPropertyFact>,
     /// The checker-owned immutable snapshot of this file's reached KLIB declarations.
-    klib_dependency_facts: crate::fir::CheckedKlibDependencyFacts,
+    klib_dependency_facts: crate::ir::CheckedKlibDependencyFacts,
     singleton_dispatches: HashMap<crate::ir::ExprId, SingletonDispatch>,
     singleton_selections: HashMap<ExternalCallableId, Vec<SingletonEdge>>,
     /// The runtime declarations native plugins selected at the handoff for their generated code,
@@ -745,12 +746,12 @@ impl CheckedBackendCallables {
     /// Source-vs-graph consistency is checked when actual selected implementations are recorded.
     pub(crate) fn record_klib_dependency_facts(
         &mut self,
-        facts: crate::fir::CheckedKlibDependencyFacts,
+        facts: crate::ir::CheckedKlibDependencyFacts,
     ) -> Result<(), ExternalCallableId> {
-        for (&identity, implementations) in &facts.builtin_implementations {
+        for (&identity, implementations) in facts.builtin_implementations() {
             if self
                 .klib_dependency_facts
-                .builtin_implementations
+                .builtin_implementations()
                 .get(&identity)
                 .is_some_and(|previous| previous != implementations)
             {
@@ -764,15 +765,15 @@ impl CheckedBackendCallables {
     pub(crate) fn klib_builtin_implementations(
         &self,
     ) -> &HashMap<ExternalCallableId, Box<[BuiltinImplementation]>> {
-        &self.klib_dependency_facts.builtin_implementations
+        self.klib_dependency_facts.builtin_implementations()
     }
 
-    pub(crate) fn klib_dependency_facts(&self) -> &crate::fir::CheckedKlibDependencyFacts {
+    pub(crate) fn klib_dependency_facts(&self) -> &crate::ir::CheckedKlibDependencyFacts {
         &self.klib_dependency_facts
     }
 
-    pub(crate) fn klib_type_hierarchy(&self) -> Option<&crate::fir::CheckedKlibTypeFacts> {
-        self.klib_dependency_facts.type_hierarchy.as_ref()
+    pub(crate) fn klib_type_hierarchy(&self) -> Option<&crate::ir::CheckedKlibTypeFacts> {
+        self.klib_dependency_facts.type_hierarchy()
     }
 
     /// Whether native plugins selected `identity` at the handoff for the code they generate.
@@ -947,7 +948,7 @@ impl CheckedBackendCallables {
             };
             if self
                 .klib_dependency_facts
-                .builtin_implementations
+                .builtin_implementations()
                 .get(&identity)
                 .is_some_and(|graph| graph != selected)
             {
