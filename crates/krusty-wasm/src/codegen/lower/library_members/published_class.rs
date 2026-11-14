@@ -42,6 +42,14 @@ pub(in crate::codegen) fn select(
     }
     let owner = library_member_owner(fact)?;
     let identity = classifiers.classifier(owner)?.klib_identity.clone()?;
+    let Some(modifiers) = fact.klib_body_declaration_modifiers else {
+        return Some(Err(
+            "a selected class member without its authenticated declaration modality".into(),
+        ));
+    };
+    if !modifiers.is_overridable() {
+        return None;
+    }
     let layout = match layouts.published_layout(&identity) {
         Ok(Some(layout)) => layout,
         Ok(None) => {
