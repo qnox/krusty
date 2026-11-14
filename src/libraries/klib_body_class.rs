@@ -31,6 +31,16 @@ pub struct KlibBodyClassContract {
 }
 
 impl KlibBodyClassContract {
+    /// Whether this frozen class contract names the supplied module-qualified owner.
+    pub fn matches_owner(&self, module: &str, classifier: TypeName) -> bool {
+        self.module == module && self.classifier == classifier
+    }
+
+    /// Whether the authenticated declaration is an object rather than a class or interface.
+    pub fn is_object(&self) -> bool {
+        self.kind == super::TypeKind::Object
+    }
+
     /// Whether the common type model carries this class's instances as one of its builtin types,
     /// as it does an unsigned integer, rather than as an instance of a class.
     pub(crate) fn is_builtin_type(&self) -> bool {
@@ -70,6 +80,21 @@ impl KlibBodyClassContract {
     /// This class applied to its declared formals. A non-generic class is the bare classifier.
     pub(crate) fn self_type(&self) -> Ty {
         Ty::obj_args_name(self.classifier, &self.parameters.formals)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_fixture::generic_member_declaration;
+    use crate::types::type_name;
+
+    #[test]
+    fn class_contract_matches_its_module_qualified_owner() {
+        let (contract, identity) = generic_member_declaration();
+
+        assert!(contract.matches_owner(&identity.module, type_name("sample/Owner")));
+        assert!(!contract.matches_owner("other", type_name("sample/Owner")));
+        assert!(!contract.matches_owner(&identity.module, type_name("sample/Other")));
     }
 }
 

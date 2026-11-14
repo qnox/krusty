@@ -18,6 +18,11 @@ pub struct KlibBodyDeclarationModifiers {
 }
 
 impl KlibBodyDeclarationModifiers {
+    /// Whether the authenticated declaration uses Kotlin's suspend calling convention.
+    pub fn is_suspend(self) -> bool {
+        self.is_suspend
+    }
+
     pub(crate) fn permits_ordinary_body(self) -> bool {
         !self.is_inline
             && !self.is_suspend

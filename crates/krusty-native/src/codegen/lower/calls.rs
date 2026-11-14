@@ -373,79 +373,6 @@ impl BodyLowering<'_, '_, '_> {
                 {
                     return self.type_of(*target, substitutions);
                 }
-                // The runtime's exact companion realization takes precedence over a dependency
-                // body export. In particular, emitting `Delegates.notNull` from its stdlib body
-                // would require materializing the external `Delegates` class as a local class.
-                // The selected runtime operation is declaration-keyed, so evaluate the receiver
-                // and operands here, then call the operation that realizes this declaration.
-                let owner = super::super::super::intrinsics::DeclarationOwner::callable(
-                    realization.physical_owner,
-                    realization.declaration_owner,
-                );
-                let name = realization
-                    .reflection_name
-                    .clone()
-                    .unwrap_or_else(|| realization.name.clone());
-                let generic_signature = realization.generic_sig.as_deref();
-                let declared_params = if let Some(signature) = generic_signature {
-                    std::borrow::Cow::Borrowed(signature.params.as_slice())
-                } else {
-                    let parameters = realization
-                        .declared_params
-                        .as_deref()
-                        .unwrap_or(&realization.params);
-                    if realization.is_extension() && parameters.len() > realization.context_count {
-                        let mut parameters = parameters.to_vec();
-                        parameters.remove(realization.context_count);
-                        std::borrow::Cow::Owned(parameters)
-                    } else {
-                        std::borrow::Cow::Borrowed(parameters)
-                    }
-                };
-                let declared_ret = generic_signature
-                    .map(|signature| signature.ret)
-                    .or(realization.declared_ret)
-                    .unwrap_or(realization.ret);
-                let signature = super::super::super::intrinsics::FunctionSignature::new(
-                    owner,
-                    &name,
-                    declared_params.as_ref(),
-                    declared_ret,
-                )
-                .with_receiver(
-                    generic_signature
-                        .and_then(|signature| signature.receiver)
-                        .or(realization.source_receiver),
-                )
-                .with_overridden(&realization.overridden_declarations);
-                if args.len() == params.len() && defaults.is_empty() {
-                    if let Some(symbol) = super::super::super::intrinsics::runtime_companion_member(
-                        signature.owner,
-                        signature.name,
-                        signature.params,
-                    ) {
-                        if let Some(receiver) = dispatch_receiver {
-                            let _ = self.reference(receiver)?;
-                            if self.terminated {
-                                return Ok(None);
-                            }
-                            let mut arguments = Vec::with_capacity(args.len());
-                            for argument in args {
-                                arguments.push(self.reference(*argument)?);
-                                if self.terminated {
-                                    return Ok(None);
-                                }
-                            }
-                            let runtime_params = vec![any(); arguments.len()];
-                            let produced =
-                                self.runtime_call(symbol, &runtime_params, any(), &arguments)?;
-                            let Some(produced) = produced else {
-                                return Ok(None);
-                            };
-                            return self.convert(produced, Some(any()), *ret);
-                        }
-                    }
-                }
                 let symbols = self.file.dependency_symbols;
                 let export_of = |realization: &krusty::backend::BackendCallableFact| {
                     realization
@@ -530,16 +457,55 @@ impl BodyLowering<'_, '_, '_> {
                 ) {
                     return realized;
                 }
+                let owner = super::super::super::intrinsics::DeclarationOwner::callable(
+                    realization.physical_owner,
+                    realization.declaration_owner,
+                );
                 // The Kotlin name the declaration PUBLISHES, not the spelling it is realized under.
                 // A physical name is an emit handle: a JVM realization may RENAME a member, and
                 // where the signature mentions a value class kotlinc appends a hash of the erasure
                 // (`UInt.compareTo` is realized as `compareTo-WZ4Q5Ns`). Neither is recoverable
                 // from the spelling, and neither has to be: the contract carries the Kotlin name
                 // beside it. Where it does not, the member declines rather than being guessed at.
+                let name = realization
+                    .reflection_name
+                    .clone()
+                    .unwrap_or_else(|| realization.name.clone());
                 // Intrinsic identity is the declaration's signature, not the types produced by
                 // call-site substitution. `compareTo<String>(...)`, for example, still names the
                 // declaration whose parameter is `T`; using the specialized `params`/`ret` here
                 // would make one declaration acquire a different intrinsic key at every call.
+                let generic_signature = realization.generic_sig.as_deref();
+                let declared_receiver = generic_signature
+                    .and_then(|signature| signature.receiver)
+                    .or(realization.source_receiver);
+                let declared_params = if let Some(signature) = generic_signature {
+                    std::borrow::Cow::Borrowed(signature.params.as_slice())
+                } else {
+                    let parameters = realization
+                        .declared_params
+                        .as_deref()
+                        .unwrap_or(&realization.params);
+                    if realization.is_extension() && parameters.len() > realization.context_count {
+                        let mut parameters = parameters.to_vec();
+                        parameters.remove(realization.context_count);
+                        std::borrow::Cow::Owned(parameters)
+                    } else {
+                        std::borrow::Cow::Borrowed(parameters)
+                    }
+                };
+                let declared_ret = generic_signature
+                    .map(|signature| signature.ret)
+                    .or(realization.declared_ret)
+                    .unwrap_or(realization.ret);
+                let signature = super::super::super::intrinsics::FunctionSignature::new(
+                    owner,
+                    &name,
+                    declared_params.as_ref(),
+                    declared_ret,
+                )
+                .with_receiver(declared_receiver)
+                .with_overridden(&realization.overridden_declarations);
                 if realization.owner_is_interface
                     && signature
                         .owner
@@ -877,6 +843,28 @@ impl BodyLowering<'_, '_, '_> {
                                 return Ok(None);
                             };
                             return self.convert(produced, Some(answer), *ret);
+                        }
+                        // A companion member the runtime realizes takes its arguments alone:
+                        // the receiver is an object carrying nothing, and it is not evaluated.
+                        if let Some(symbol) =
+                            super::super::super::intrinsics::runtime_companion_member(
+                                owner, &name, params,
+                            )
+                        {
+                            let mut arguments = Vec::with_capacity(args.len());
+                            for argument in args {
+                                arguments.push(self.reference(*argument)?);
+                            }
+                            if self.terminated {
+                                return Ok(None);
+                            }
+                            let signature = vec![any(); arguments.len()];
+                            let produced =
+                                self.runtime_call(symbol, &signature, any(), &arguments)?;
+                            let Some(produced) = produced else {
+                                return Ok(None);
+                            };
+                            return self.convert(produced, Some(any()), *ret);
                         }
                         let Some(symbol) =
                             super::super::super::intrinsics::runtime_member(signature)
