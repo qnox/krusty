@@ -32,6 +32,9 @@ on:
 permissions:
   contents: read
 
+env:
+  KRUSTY_TEST_FAILURE_DIR: ${{ github.workspace }}/test-failures
+
 # One run per queue branch (each is unique). Every master run uses a unique group and remains
 # authoritative evidence even when a newer one is started.
 concurrency:
@@ -504,6 +507,14 @@ jobs:
   # rows' critical path; no row waits for it, and it checks every release's exact Native and Wasm
   # stdlib in one pass. The full cfg(test) unit harness exceeded the 8 GB self-hosted runners
   # before, so it stays on hosted capacity.
+      - name: upload failed program evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-failures
+          path: test-failures/
+          if-no-files-found: ignore
+
   klib-implementation-coverage:
     runs-on: ubuntu-latest
     steps:
@@ -546,6 +557,8 @@ jobs:
             rm -rf "$PWD/target/cache/kotlin-native/$version"
             echo "::endgroup::"
           done
+
+
 
   build-tool-bins:
     runs-on: [self-hosted, rust-4c-8gb]
@@ -1012,6 +1025,14 @@ jobs:
         with:
           path: target/cache/box-corpus/${{ matrix.version }}
           key: ${{ steps.box-corpus.outputs.cache-primary-key }}
+      - name: upload failed program evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: conformance-failures-${{ matrix.version }}-${{ matrix.target }}
+          path: test-failures/
+          if-no-files-found: ignore
+
 
   # The one check a ruleset requires: its context does not change with either matrix. A required
   # check that is skipped counts as passing, so this job is always scheduled and fails itself unless

@@ -51,6 +51,7 @@ impl WasmLane {
         scratch: &Path,
         stem: &str,
         suffix: &str,
+        source: &str,
         program: box_lane::CompiledProgram,
     ) -> Outcome {
         if !program.native_imports.is_empty() {
@@ -80,6 +81,12 @@ impl WasmLane {
             Command::new("node")
                 .arg("--no-warnings")
                 .arg(directory.join("box.mjs")),
+        );
+        let outcome = box_lane::retain_failure(
+            &format!("{}-{stem}-{suffix}", self.target.name()),
+            source,
+            &artifacts,
+            outcome,
         );
         let _ = std::fs::remove_dir_all(&directory);
         outcome
@@ -179,7 +186,7 @@ impl Lane for WasmLane {
             Ok(program) => program,
             Err(outcome) => return outcome,
         };
-        self.run_artifacts(scratch, stem, "single", program)
+        self.run_artifacts(scratch, stem, "single", directive_source, program)
     }
 
     fn compile_modules_and_run(
@@ -224,7 +231,7 @@ impl Lane for WasmLane {
             Ok(program) => program,
             Err(outcome) => return outcome,
         };
-        self.run_artifacts(scratch, stem, "modules", program)
+        self.run_artifacts(scratch, stem, "modules", directive_source, program)
     }
 }
 

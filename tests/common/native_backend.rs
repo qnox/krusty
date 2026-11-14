@@ -383,6 +383,31 @@ pub fn run_native_image(
         }
         child.wait_with_output()
     });
+    let failure = match &output {
+        Ok(output) if !output.status.success() => Some(format!(
+            "native execution: {:?}; arguments {arguments:?}; status {}; stdout {:?}; stderr {:?}",
+            executable,
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )),
+        Err(error) => Some(format!(
+            "native execution: {:?}; arguments {arguments:?}; could not run: {error}",
+            executable
+        )),
+        _ => None,
+    };
+    if let Some(report) = failure {
+        let mut files: Vec<(&str, &[u8])> = vec![("program.elf", image), ("stdin", input)];
+        if let Ok(output) = &output {
+            files.push(("stdout", &output.stdout));
+            files.push(("stderr", &output.stderr));
+        }
+        match crate::failure_evidence::retain(stem, &report, &files) {
+            Ok(path) => eprintln!("{report}; failure artifacts: {}", path.display()),
+            Err(error) => eprintln!("{report}; could not preserve failure artifacts: {error}"),
+        }
+    }
     let _ = std::fs::remove_file(&executable);
     let _ = std::fs::remove_dir(&directory);
     output.map_err(|error| NativeBox::Failed(format!("running it: {error}")))
