@@ -23,6 +23,17 @@ use super::*;
 
 pub(in crate::codegen) mod published_class;
 
+/// Positive checked operations whose runtime realization owns the call in both phases.
+pub(in crate::codegen) fn target_owns_call(
+    ir: &IrFile,
+    callables: &CheckedBackendCallables,
+    expression: u32,
+    fact: &BackendCallableFact,
+) -> bool {
+    super::declared_by_string_builder(fact)
+        || super::any_members::call_member(ir, callables, expression).is_some()
+}
+
 /// How a library member is reached.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::codegen) enum MemberRole {
@@ -136,6 +147,9 @@ impl Body<'_> {
             _ => return None,
         };
         let fact = self.callables.callable(target)?;
+        if target_owns_call(self.ir, self.callables, id, fact) {
+            return None;
+        }
         if let IrExpr::Call { callee, .. } = node {
             if let Some(member) = published_class::select(
                 fact,
