@@ -2198,6 +2198,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 }
             }
             IrExpr::Checked(ref checked_op)
+                if matches!(
+                    &**checked_op,
+                    IrCheckedOperation::ExternalPropertyRead { .. }
+                        | IrCheckedOperation::ExternalPropertyWrite { .. }
+                ) =>
+            {
+                self.dependency_interface_property(checked_op)
+                    .unwrap_or_else(|| Err(self.describe_declined(self.file.ir.expr(id)).into()))
+            }
+            IrExpr::Checked(ref checked_op)
                 if let IrCheckedOperation::PropertyRead {
                     target,
                     dispatch_receiver,

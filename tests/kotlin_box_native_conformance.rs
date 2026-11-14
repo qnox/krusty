@@ -357,6 +357,28 @@ fn native_class_properties_export_their_checked_accessors() {
     }
 }
 
+#[test]
+fn native_dependency_interface_properties_dispatch_their_exact_accessor_roles() {
+    for (source, stem) in [
+        (
+            include_str!("box_regressions/delegatedLibraryClassMembers.kt"),
+            "delegatedLibraryClassMembers",
+        ),
+        (
+            include_str!("box_regressions/multimodule/dependencyInterfacePropertyCalls.kt"),
+            "dependencyInterfacePropertyCalls",
+        ),
+    ] {
+        super::box_reference_classes::checked_box(source, stem)
+            .expect("pinned kotlinc must run the whole interface property module graph");
+        assert_eq!(
+            run_native_abi_case(source, stem),
+            Outcome::Pass,
+            "interface getters and setters must use their exact property dispatch identities"
+        );
+    }
+}
+
 /// A required inline dependency function whose body cannot become a template rejects its caller:
 /// it is never compiled as a direct call of the dependency function.
 // PLATFORM-SPECIFIC: Native expands required KLIB inline bodies in common IR; JVM uses bytecode.
