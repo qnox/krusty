@@ -1,0 +1,97 @@
+name: SAM reflection ABI binary reuse
+on:
+  push:
+    branches: [ci/sam-reflection-abi-reuse]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  abi:
+    runs-on: [self-hosted, rust-4c-8gb]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: f5271a2f924f3cef6bef03abb47c47fc668f405a
+          fetch-depth: 1
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78
+        with:
+          distribution: zulu
+          java-version: '17'
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: target/cache/kotlinc/2.4.21
+          key: kotlinc-2.4.21
+      - name: look for installed just
+        id: just
+        run: if command -v just >/dev/null; then echo 'found=true' >> "$GITHUB_OUTPUT"; fi
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177
+        if: steps.just.outputs.found != 'true'
+        with:
+          tool: just
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: sam-reflection-mode-proof-43574220464
+          run-id: 43574220464
+          github-token: ${{ github.token }}
+          path: reused
+      - name: Authenticate the exact source and reused executable bytes
+        run: |
+          set -euo pipefail
+          mkdir evidence
+          test "$(git rev-parse HEAD)" = f5271a2f924f3cef6bef03abb47c47fc668f405a
+          cat > evidence/binary.sha256 <<'HASHES'
+          9f83a87a716d850bb289cddaee90f435df9e1bb7011905a465436ae0082469f6  reused/krusty-bin
+          ef1eb4edbfa2ed41c8ac670b3144e8c636dcdc28205f2f7ec5f32b9205286656  reused/e2e-bin
+          e4f30eea6aa54aaef0f8c356f2e46b92962071442a0e68a8d7234c01785937b5  reused/conformance-bin
+          HASHES
+          sha256sum -c evidence/binary.sha256
+          sha256sum -c reused/abi-test-source-sha256.txt
+          cp reused/abi-test-source-sha256.txt evidence/
+          cp reused/provenance.txt evidence/original-build-provenance.txt
+          chmod +x reused/krusty-bin reused/e2e-bin
+          echo "KRUSTY_BIN=$PWD/reused/krusty-bin" >> "$GITHUB_ENV"
+          echo "KRUSTY_KOTLINC=$(just kotlinc 2.4.21)" >> "$GITHUB_ENV"
+          {
+            printf 'source=%s\n' "$(git rev-parse HEAD)"
+            printf 'binary_run=43574220464\nbinary_artifact=14105653701\nabi_kotlin=2.4.21\n'
+            printf 'runner=%s\n' "$(uname -a)"
+            java -version 2>&1
+          } > evidence/provenance.txt
+          grep -E '^(inlineClasses/|delegatedProperty/).*=' reused/status.txt > evidence/combined-status.txt
+          test "$(wc -l < evidence/combined-status.txt)" -eq 6
+          if grep -Ev '=0$' evidence/combined-status.txt; then exit 1; fi
+      - name: Compare both whole ABI fixtures against the exact live oracle
+        env:
+          KRUSTY_LANGUAGE_VERSION: '2.4.21'
+          KRUSTY_CLASS_DUMP_COMPILE_MISSING: '1'
+          KRUSTY_CLASS_DUMP_WRITE: '0'
+        run: |
+          set -euo pipefail
+          unset KRUSTY_RECORD_CLASS_DUMPS KRUSTY_RECORD KRUSTY_BLESS_BOX_EXPECTATIONS KRUSTY_BOX_ONLY
+          test -n "$KRUSTY_BIN" && test -x "$KRUSTY_BIN"
+          "$KRUSTY_KOTLINC" -version > evidence/oracle-version.txt 2>&1
+          printf 'KRUSTY_BIN=%s\nCOMPILE_MISSING=1\WRITE=0\n' "$KRUSTY_BIN" > evidence/oracle-mode.txt
+          while IFS= read -r test_name; do
+            safe="${test_name//::/_}"
+            set +e
+            reused/e2e-bin "$test_name" --exact --test-threads 1 --nocapture > "evidence/abi-${safe}.log" 2>&1
+            status=$?
+            set -e
+            cat "evidence/abi-${safe}.log"
+            if ! grep -Eq 'test result: ok\. 1 passed; 0 failed' "evidence/abi-${safe}.log"; then status=1; fi
+            printf '%s=%s\n' "$test_name" "$status" >> evidence/combined-status.txt
+          done <<'TESTS'
+          fun_interface_value_class_e2e::factory_conflicting_conversions_are_kotlincs_classes
+          class_lambda_e2e::sam_lambda_class_holds_the_body_and_the_captured_value_like_kotlinc
+          TESTS
+          sha256sum -c evidence/abi-test-source-sha256.txt > evidence/test-source-after.txt
+          git diff --exit-code > evidence/product.diff
+          test "$(wc -l < evidence/combined-status.txt)" -eq 8
+          if grep -Ev '=0$' evidence/combined-status.txt; then exit 1; fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: sam-reflection-abi-reuse-${{ github.run_id }}
+          path: evidence/
+          if-no-files-found: error
