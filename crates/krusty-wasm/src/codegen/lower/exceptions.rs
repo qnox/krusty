@@ -192,6 +192,12 @@ impl Body<'_> {
             {
                 return self.string_builder_construction(target, args);
             }
+            let empty_array_list = external
+                .and_then(|target| self.callables.callable(target))
+                .is_some_and(super::lists::is_empty_array_list_constructor);
+            if empty_array_list {
+                return self.mutable_empty_list();
+            }
             if let Some(constructed) =
                 external.and_then(|target| self.dependency_construction(target, internal, args))
             {

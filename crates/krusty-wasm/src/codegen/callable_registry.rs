@@ -367,6 +367,12 @@ impl CallableRegistry {
                         // The member's implementations are reached through its library member.
                         continue;
                     }
+                    if defaults.is_empty()
+                        && extension_receiver_parameter.is_none()
+                        && super::lower::realized_without_dependency_body(callable)
+                    {
+                        continue;
+                    }
                     if callable
                         .compiler_operation()
                         .filter(|operation| {

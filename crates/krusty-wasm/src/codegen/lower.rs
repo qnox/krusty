@@ -31,6 +31,7 @@ mod function_values;
 mod generated_members;
 mod intrinsic_operations;
 pub(super) mod library_members;
+mod lists;
 mod local_delegates;
 mod objects;
 mod scalar_instructions;
@@ -46,6 +47,7 @@ mod type_of;
 use tests::lower_alone;
 
 pub(super) use exceptions::runtime_lays_out;
+pub(in crate::codegen) use lists::realized_without_dependency_body;
 pub(super) use scalar_instructions::is_scalar_operation;
 pub(super) use shared_cells::parameter_carrier;
 
@@ -61,7 +63,10 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         || operation == krusty::backend::BackendCompilerIntrinsic::StringCompare
         || matches!(
             operation,
-            krusty::backend::BackendCompilerIntrinsic::ClassName(_)
+            krusty::backend::BackendCompilerIntrinsic::ListStorageConstruction(
+                krusty::libraries::ListStorageConstruction::MutablePacked
+                    | krusty::libraries::ListStorageConstruction::MutableEmpty
+            ) | krusty::backend::BackendCompilerIntrinsic::ClassName(_)
         )
 }
 
@@ -1754,6 +1759,13 @@ impl<'a> Body<'a> {
                 params,
                 ret,
             } => self.invoke_function(func, &args, &params, ret)?,
+            IrExpr::Call {
+                callee,
+                dispatch_receiver,
+                args,
+            } if self.is_realized_list_call(&callee) => {
+                self.emit_realized_list_call(&callee, dispatch_receiver, &args)?;
+            }
             IrExpr::KClassLiteral {
                 classifier, value, ..
             } => self.class_literal(id, classifier, value)?,
