@@ -169,20 +169,17 @@ KT_ARRAY_TYPE(kt_type_boolean_array, "kotlin.", "BooleanArray", 1, 0)
 KT_ARRAY_TYPE(kt_type_float_array, "kotlin.", "FloatArray", 4, 0)
 KT_ARRAY_TYPE(kt_type_double_array, "kotlin.", "DoubleArray", 8, 0)
 
-/* An unsigned array is a value class over the signed array of the same width, so it takes that
-   array's STRIDE and its own NAME. Sharing the signed descriptor would read and write the same
-   bytes correctly and answer `is IntArray` with `true`, where the two are distinct classes. */
-KT_ARRAY_TYPE(kt_type_ubyte_array, "kotlin.", "UByteArray", 1, 0)
-KT_ARRAY_TYPE(kt_type_ushort_array, "kotlin.", "UShortArray", 2, 0)
-KT_ARRAY_TYPE(kt_type_uint_array, "kotlin.", "UIntArray", 4, 0)
-KT_ARRAY_TYPE(kt_type_ulong_array, "kotlin.", "ULongArray", 8, 0)
-
 /* A NEGATIVE length is `IllegalArgumentException`, which a program may catch, with the JVM's
    message, the length; no array is made and the NULL answered is never read, the caller checking
    the pending slot first. The type is Kotlin/Native's, whose array constructors allocate through
    `AllocArrayInstance` and its `ThrowIllegalArgumentException`, as `StringBuilder(-1)` does here
    too; Kotlin/JVM throws Java's `NegativeArraySizeException`, a type Kotlin does not declare. */
 KRef kt_array_new(const KType *type, kt_int length) {
+    const KType *carrier = kt_unsigned_array_carrier(type);
+    if (carrier != NULL) {
+        KRef storage = kt_array_new(carrier, length);
+        return storage == NULL ? NULL : kt_unsigned_array_wrap(type, storage);
+    }
     if (length < 0) {
         kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception,
                                   kt_to_string(kt_box_int(length))));
@@ -3105,6 +3102,8 @@ kt_int kt_array_copy_into(KRef destination, kt_int at, KRef source) {
         kt_null_receiver();
         return at;
     }
+    destination = kt_array_storage(destination);
+    source = kt_array_storage(source);
     /* Both are arrays of one kind — a spread into a `vararg` is a spread of the same type — or the
        lengths and stride read below would come from fields that are not there. */
     if (source->header.type != destination->header.type
