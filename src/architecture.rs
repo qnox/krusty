@@ -517,18 +517,33 @@ mod tests {
         let text = fs::read_to_string(&path).expect("read KLIB body handoff");
         assert!(text.contains("record_checked"));
         assert!(!text.contains("record_dependency_support"));
+        assert!(text.contains("checked_dependency_facts"));
+        for forbidden in [
+            "with_builtin_implementation_facts(platform)",
+            "symbol_resolver::",
+            "klib_dependency_member_call_edge(",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "KLIB body emission must consume facts stored before backend entry: {forbidden}"
+            );
+        }
+
+        let handoff = source_path("src/compiler/backend_handoff.rs");
+        let text = fs::read_to_string(&handoff).expect("read checked backend handoff");
+        assert!(text.contains("record_klib_dependency_facts"));
 
         let roots = source_path("src/compiler/dependency_body_emission/emitted_roots.rs");
         let text = fs::read_to_string(&roots).expect("read KLIB emitted roots");
-        assert!(text.contains("klib_dependency_member_call_edge"));
         for forbidden in [
             "SymbolResolver",
             "symbol_resolver::",
             "member_declarations_in_hierarchy(",
+            "klib_dependency_member_call_edge(",
         ] {
             assert!(
                 !text.contains(forbidden),
-                "KLIB body planning must consume checked member edge facts: {forbidden}"
+                "KLIB body planning must consume facts stored at checker handoff: {forbidden}"
             );
         }
     }

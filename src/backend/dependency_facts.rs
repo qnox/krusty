@@ -672,6 +672,10 @@ struct SingletonEdge {
 pub struct CheckedBackendCallables {
     callables: HashMap<ExternalCallableId, BackendCallableFact>,
     properties: HashMap<ExternalPropertyId, BackendPropertyFact>,
+    /// Checker-produced facts for the exact KLIB dependency-body graph selected by this file.
+    klib_builtin_implementations: HashMap<ExternalCallableId, Box<[BuiltinImplementation]>>,
+    klib_member_edges:
+        HashMap<crate::libraries::KlibDependencyCallable, crate::fir::CheckedMemberCallEdge>,
     singleton_dispatches: HashMap<crate::ir::ExprId, SingletonDispatch>,
     singleton_selections: HashMap<ExternalCallableId, Vec<SingletonEdge>>,
     /// The runtime declarations native plugins selected at the handoff for their generated code,
@@ -680,6 +684,38 @@ pub struct CheckedBackendCallables {
 }
 
 impl CheckedBackendCallables {
+    /// Store semantic facts checked for the reachable KLIB dependency bodies before backend
+    /// lowering. Conflicting records for one stable identity indicate a broken checker handoff.
+    pub(crate) fn record_klib_dependency_facts(
+        &mut self,
+        facts: crate::resolve::CheckedKlibDependencyFacts,
+    ) -> Result<(), ExternalCallableId> {
+        for (&identity, implementations) in &facts.builtin_implementations {
+            if self
+                .callables
+                .get(&identity)
+                .is_some_and(|callable| callable.builtin_implementations != *implementations)
+            {
+                return Err(identity);
+            }
+        }
+        self.klib_builtin_implementations = facts.builtin_implementations;
+        self.klib_member_edges = facts.member_edges;
+        Ok(())
+    }
+
+    pub(crate) fn klib_builtin_implementations(
+        &self,
+    ) -> &HashMap<ExternalCallableId, Box<[BuiltinImplementation]>> {
+        &self.klib_builtin_implementations
+    }
+
+    pub(crate) fn klib_member_edges(
+        &self,
+    ) -> &HashMap<crate::libraries::KlibDependencyCallable, crate::fir::CheckedMemberCallEdge> {
+        &self.klib_member_edges
+    }
+
     /// Whether native plugins selected `identity` at the handoff for the code they generate.
     pub fn is_plugin_runtime_callable(&self, identity: ExternalCallableId) -> bool {
         self.plugin_runtime.contains_key(&identity)
