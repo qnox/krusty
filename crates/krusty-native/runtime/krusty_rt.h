@@ -263,9 +263,9 @@ extern const KType kt_type_ushort;
 extern const KType kt_type_uint;
 extern const KType kt_type_ulong;
 
-/* Every array: the header, the length, then `element_size` bytes per element beginning at the
-   type's `instance_size`. One shape for `IntArray` and `Array<T>` alike — what differs is the
-   stride and whether the collector looks inside. */
+/* An owning array: the header, the length, then `element_size` bytes per element beginning at the
+   type's `instance_size`. Unsigned value-class views share this prefix, retaining an owning array
+   instead of inline elements. */
 typedef struct KArray {
     KObjectHeader header;
     kt_int length;
@@ -275,6 +275,13 @@ typedef struct KArray {
    kind Kotlin has here: `0`, `false`, `\u0000`, `0.0` and `null` are all zero bits. A negative
    length raises `IllegalArgumentException` and answers NULL, as Kotlin/Native's allocation does. */
 KRef kt_array_new(const KType *type, kt_int length);
+
+/* The owning signed/reference array, or the original signed array an unsigned value class wraps.
+   Ordinary arrays are returned unchanged. */
+KRef kt_array_storage(KRef array);
+
+/* Wrap the selected unsigned array's exact signed carrier without copying or retagging it. */
+KRef kt_unsigned_array_wrap(const KType *type, KRef storage);
 
 /* Copy `source`'s elements into `destination` at `at`, answering where the next element goes. What
    a spread needs: `f(a, *xs, b)` builds one array whose size only run time knows. */

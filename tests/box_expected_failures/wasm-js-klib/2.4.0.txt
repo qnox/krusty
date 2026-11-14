@@ -33,7 +33,6 @@ annotations/instances/nestedDefaults.kt
 annotations/instances/repeatableInstantiation.kt
 annotations/instances/typeAliasesAndGenericsInterop.kt
 annotations/instances/unsignedAndBooleanArrays.kt
-annotations/instances/varargInAnnotationParameterInstantiation.kt
 annotations/instances/withDefaults.kt
 annotations/selfReferentialAnnotation.kt
 annotations/typeAnnotations/checkingNotincorporatedInputTypes.kt
@@ -62,13 +61,7 @@ arrays/forInReversed/reversedArrayOriginalUpdatedInLoopBody.kt
 arrays/forInReversed/reversedArrayReversedArrayOriginalUpdatedInLoopBody.kt
 arrays/forInReversed/reversedOriginalUpdatedInLoopBody.kt
 arrays/forInReversed/reversedReversedOriginalUpdatedInLoopBody.kt
-arrays/forInUnsignedArray/forInUnsignedArray.kt
-arrays/forInUnsignedArray/forInUnsignedArrayIndices.kt
-arrays/forInUnsignedArray/forInUnsignedArrayIndicesReversed.kt
 arrays/forInUnsignedArray/forInUnsignedArrayReversed.kt
-arrays/forInUnsignedArray/forInUnsignedArrayWithIndex.kt
-arrays/forInUnsignedArray/forInUnsignedArrayWithIndexNoElementVar.kt
-arrays/forInUnsignedArray/forInUnsignedArrayWithIndexNoIndexVar.kt
 arrays/forInUnsignedArray/forInUnsignedArrayWithIndexReversed.kt
 arrays/hashMap.kt
 arrays/inProjectionOfList.kt
@@ -403,7 +396,6 @@ casts/functions/reifiedSafeAsFunKSmall.kt
 casts/functions/safeAsFunKBig.kt
 casts/functions/safeAsFunKSmall.kt
 casts/isNullablePrimitive.kt
-casts/kt22714.kt
 casts/kt50577.kt
 casts/kt53677.kt
 casts/kt54802.kt
@@ -470,7 +462,6 @@ closures/localFunctionInInitBlock.kt
 collectionLiterals/primitiveArrays.kt
 collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
-collectionLiterals/unsignedArrays.kt
 collections/addCollectionStubWithCovariantOverride.kt
 collections/clashWithInternalMapMethod.kt
 collections/inSetWithSmartCast.kt
@@ -540,10 +531,6 @@ controlStructures/forInArrayWithIndex/forInArrayOfObjectArrayWithIndex.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexContinuesAsUnmodified.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNameBasedDestructuringShortForm.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNotDestructured.kt
-controlStructures/forInArrayWithIndex/forInByteArrayWithIndexWithSmartCast.kt
-controlStructures/forInArrayWithIndex/forInGenericArrayOfIntsWithIndexWithSmartCast.kt
-controlStructures/forInArrayWithIndex/forInIntArrayWithIndexWithSmartCast.kt
-controlStructures/forInArrayWithIndex/forInShortArrayWithIndexWithSmartCast.kt
 controlStructures/forInCharSequence.kt
 controlStructures/forInCharSequenceMut.kt
 controlStructures/forInCharSequenceWithIndex/forInCharSeqWithIndexStops.kt
@@ -578,7 +565,6 @@ controlStructures/forInSequenceWithIndex/forInSequenceWithIndexNoElementVarCheck
 controlStructures/forInSequenceWithIndex/forInSequenceWithIndexNoIndexVar.kt
 controlStructures/forInSequenceWithIndex/forInSequenceWithIndexNoIndexVarCheckSideEffects.kt
 controlStructures/forInSequenceWithIndex/forInSequenceWithIndexWithExplicitlyTypedIndexVariable.kt
-controlStructures/forInSmartCastToArray.kt
 controlStructures/forNullableCharInString.kt
 controlStructures/kt3203_1.kt
 controlStructures/kt3203_2.kt
@@ -3795,7 +3781,6 @@ unsignedTypes/inUnsignedDownTo.kt
 unsignedTypes/inUnsignedRange.kt
 unsignedTypes/inUnsignedRangeLiteral.kt
 unsignedTypes/inUnsignedUntil.kt
-unsignedTypes/iterateOverArrayOfUnsignedValues.kt
 unsignedTypes/iterateOverListOfBoxedUnsignedValues.kt
 unsignedTypes/kt25784.kt
 unsignedTypes/kt43286.kt
@@ -3804,8 +3789,6 @@ unsignedTypes/kt61418.kt
 unsignedTypes/literalEqualsNullableUnsigned.kt
 unsignedTypes/nullableSmartcastUnsignedArray.kt
 unsignedTypes/nullableUnsignedEqualsLiteral.kt
-unsignedTypes/signedToUnsignedConversions.kt
-unsignedTypes/unsignedArraySize.kt
 unsignedTypes/unsignedIntCompare.kt
 unsignedTypes/unsignedIntDivide.kt
 unsignedTypes/unsignedIntRemainder.kt
@@ -3821,9 +3804,7 @@ unsignedTypes/varargsOfUnsignedTypes.kt
 unsignedTypes/whenByUnsigned.kt
 vararg/boxingArgumentsForVararg.kt
 vararg/doNotCopyImmediatelyCreatedArrays.kt
-vararg/emptyVarArg.kt
 vararg/evaluationOrder.kt
-vararg/inlineClassArraysAsNamedArgumentInVararg.kt
 vararg/kt10926.kt
 vararg/kt37715.kt
 vararg/kt581.kt
