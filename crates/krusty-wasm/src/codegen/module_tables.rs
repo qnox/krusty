@@ -42,8 +42,8 @@ impl ModuleTables {
         layouts: &super::laid_out_classes::LaidOutClasses,
     ) -> Self {
         let mut published = HashMap::default();
-        for (name, class) in classes.iter() {
-            if !class.is_dependency() {
+        for (name, _) in classes.iter() {
+            if !classes.is_dependency_class(name) {
                 continue;
             }
             let Some(identity) = classifiers
