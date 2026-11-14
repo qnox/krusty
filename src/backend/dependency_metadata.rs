@@ -6,6 +6,8 @@
 //! target representation mutates the file, without cloning or re-resolving the program.
 
 #[cfg(test)]
+mod constructor_declaration_tests;
+#[cfg(test)]
 mod member_declaration_tests;
 
 use crate::fx_hash::{HashMap, HashSet};
