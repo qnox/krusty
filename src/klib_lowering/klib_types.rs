@@ -9,7 +9,9 @@
 //! parameter is the semantic type parameter the declaration's provider record states for it
 //! ([`KlibTypeParameters`]); a body whose declaration binds none of its type parameters declines
 //! on the first use of one. Other type-use annotations carry no semantic type, as in metadata.
-//! Definitely non-null, dynamic, error, suspend and context function types decline by form.
+//! Definitely non-null, dynamic, error and context function types decline by form. Suspend
+//! function types retain their declared source shape; their continuation-bearing invocation is
+//! authenticated separately from an ordinary function invocation.
 
 use crate::fx_hash::HashMap;
 
@@ -70,7 +72,13 @@ fn class_type(
         if !function.is_reflective() {
             let ret = arguments.pop().expect("a function type has its result");
             let receiver = receiver && !arguments.is_empty();
-            return Ok(Ty::fun_with_shape(arguments, ret, 0, receiver, false));
+            return Ok(Ty::fun_with_shape(
+                arguments,
+                ret,
+                0,
+                receiver,
+                function.is_suspend(),
+            ));
         }
     }
     if receiver {
@@ -202,11 +210,6 @@ fn function_shape(
     arguments: usize,
 ) -> Result<Option<function_classifiers::FunctionClassifier>, KlibBodyDeclineReason> {
     if let Some(function) = function_classifiers::classifier(name) {
-        if function.is_suspend() {
-            return Err(KlibBodyDeclineReason::UnsupportedType(
-                "a suspend function type",
-            ));
-        }
         if !function.is_reflective() && arguments != function.arity() + 1 {
             return Err(mismatch(
                 "a function type has another number of arguments than its arity",
@@ -237,7 +240,7 @@ pub(super) fn closure_type_arity(arena: &KlibIrArena, id: KlibIrTypeId) -> Optio
     }
     let (name, _) = class_head(classifier, annotations, &|_| Ok(None)).ok()?;
     let function = function_shape(name, arguments.len()).ok()??;
-    (!function.is_reflective()).then(|| function.arity())
+    (!function.is_reflective() && !function.is_suspend()).then(|| function.arity())
 }
 
 /// One type argument, as the provider converts a metadata type argument.
@@ -280,20 +283,30 @@ fn annotation_classifier(annotation: &KlibIrAnnotation) -> Option<TypeName> {
 /// declaration's role, not the name, decides. Suspend and reflective classifiers are not invoked
 /// here.
 pub(super) fn function_invocation_arity(member: &KlibPublicIdSignature) -> Option<usize> {
-    invocation_arity(member, false)
+    invocation_arity(member, false, false)
+}
+
+/// The source arity of a declared `SuspendFunctionN.invoke`; its serialized call also carries
+/// the declaration's physical trailing continuation parameter.
+pub(super) fn suspend_function_invocation_arity(member: &KlibPublicIdSignature) -> Option<usize> {
+    invocation_arity(member, false, true)
 }
 
 /// A reflective function's inherited invocation, authenticated against the same builtins
 /// declaration as its ordinary function supertype. This grants no reflection-operation support.
 pub(super) fn reference_invocation_arity(member: &KlibPublicIdSignature) -> Option<usize> {
-    invocation_arity(member, true)
+    invocation_arity(member, true, false)
 }
 
-fn invocation_arity(member: &KlibPublicIdSignature, reflective: bool) -> Option<usize> {
+fn invocation_arity(
+    member: &KlibPublicIdSignature,
+    reflective: bool,
+    suspend: bool,
+) -> Option<usize> {
     let (name, class) = member.declaration().segments().split_last()?;
     let owner = declaration_name(member.package().segments(), class).ok()?;
     let function = function_classifiers::classifier(owner)?;
-    if function.is_suspend() || function.is_reflective() != reflective {
+    if function.is_suspend() != suspend || function.is_reflective() != reflective {
         return None;
     }
     let declaration = function_classifiers::synthetic(function.invocation_classifier());

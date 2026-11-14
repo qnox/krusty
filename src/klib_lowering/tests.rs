@@ -2380,7 +2380,7 @@ fn member_of(package: &[&str], class: &str, name: &str) -> KlibPublicIdSignature
 
 #[test]
 fn only_a_declared_function_invocation_has_invocation_semantics() {
-    use super::klib_types::function_invocation_arity;
+    use super::klib_types::{function_invocation_arity, suspend_function_invocation_arity};
     assert_eq!(
         function_invocation_arity(&member_of(&["kotlin"], "Function1", "invoke")),
         Some(1)
@@ -2403,6 +2403,14 @@ fn only_a_declared_function_invocation_has_invocation_semantics() {
             "invoke"
         )),
         None
+    );
+    assert_eq!(
+        suspend_function_invocation_arity(&member_of(
+            &["kotlin", "coroutines"],
+            "SuspendFunction1",
+            "invoke"
+        )),
+        Some(1)
     );
     assert_eq!(
         function_invocation_arity(&member_of(&["kotlin", "reflect"], "KFunction1", "invoke")),

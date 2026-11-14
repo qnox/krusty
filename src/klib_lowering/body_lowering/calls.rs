@@ -4,7 +4,7 @@
 //! call of it; a dependency function lowers as a call of its function in the same unit.
 
 use super::super::ir_builtins::{BuiltinCallDisposition, BuiltinOperator, BuiltinRelation};
-use super::super::klib_types::function_invocation_arity;
+use super::super::klib_types::{function_invocation_arity, suspend_function_invocation_arity};
 use super::{
     mismatch, unsupported, BodyLowering, LinkedAccessor, LinkedAccessorTarget, LinkedCallee,
     Lowered,
@@ -44,13 +44,21 @@ impl BodyLowering<'_> {
             }
             KlibIrSignature::Accessor(accessor) => return self.accessor_call(accessor, access, ty),
         };
+        if let Some(arity) = suspend_function_invocation_arity(callee) {
+            if !access.type_arguments.is_empty() {
+                return Err(mismatch(
+                    "a suspend function invocation is called with type arguments",
+                ));
+            }
+            return self.function_invocation(access, arity, ty, true);
+        }
         if let Some(arity) = function_invocation_arity(callee) {
             if !access.type_arguments.is_empty() {
                 return Err(mismatch(
                     "a function invocation is called with type arguments",
                 ));
             }
-            return self.function_invocation(access, arity, ty);
+            return self.function_invocation(access, arity, ty, false);
         }
         // A checked source call or retained external export needs the exact declaration edge.
         // Only a builtin without either obligation is folded into its common-IR operation.
@@ -440,12 +448,13 @@ impl BodyLowering<'_> {
         access: &KlibIrMemberAccess,
         arity: usize,
         ty: Ty,
+        suspend: bool,
     ) -> Lowered<ExprId> {
         let arguments = arguments(access);
         let Some((Some(function), arguments)) = arguments.split_first() else {
             return Err(mismatch("a function invocation has no function value"));
         };
-        if arguments.len() != arity {
+        if arguments.len() != arity + usize::from(suspend) {
             return Err(mismatch(
                 "a function invocation passes another number of arguments than its arity",
             ));
@@ -461,14 +470,20 @@ impl BodyLowering<'_> {
         }
         // A context or extension function type's parameters lead with its context parameters and
         // receiver, as the function class's invocation takes them.
-        if signature.params.len() != arity || signature.suspend {
+        if signature.params.len() != arity || signature.suspend != suspend {
             return Err(mismatch(
                 "a function invocation's value has another shape than its function class",
             ));
         }
+        if suspend && ty != Ty::nullable(Ty::obj_name(crate::types::wk::any())) {
+            return Err(mismatch(
+                "a suspend function invocation does not return its physical `Any?` carrier",
+            ));
+        }
         // An erased body uses the erasure of the function value's result, or the bound an
         // already expanded inline function's type parameter erased to.
-        if signature.ret != ty
+        if !suspend
+            && signature.ret != ty
             && self.header.erased(signature.ret) != ty
             && !self
                 .linker
@@ -478,8 +493,14 @@ impl BodyLowering<'_> {
                 "a function invocation is typed apart from its result",
             ));
         }
-        let params = signature.params.to_vec();
-        let mut args = Vec::with_capacity(arity);
+        let mut params = signature.params.to_vec();
+        if suspend {
+            params.push(Ty::obj_args(
+                "kotlin/coroutines/Continuation",
+                &[signature.ret],
+            ));
+        }
+        let mut args = Vec::with_capacity(arguments.len());
         for (argument, parameter) in arguments.iter().zip(&params) {
             let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
                 "a function invocation that omits an argument",
@@ -490,9 +511,13 @@ impl BodyLowering<'_> {
             func,
             args,
             params,
-            ret: signature.ret,
+            ret: if suspend {
+                Ty::nullable(Ty::obj_name(crate::types::wk::any()))
+            } else {
+                signature.ret
+            },
         });
-        Ok(if signature.ret == ty {
+        Ok(if suspend || signature.ret == ty {
             invocation
         } else {
             self.ir.set_logical_type(invocation, signature.ret);

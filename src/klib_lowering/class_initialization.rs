@@ -206,9 +206,20 @@ pub(super) fn plan<'a, 'b>(
         || !matches!(&header.arena.expr(*initialize).kind,
             KlibIrExprKind::InstanceInitializerCall(class) if class == &header.class.base.symbol)
     {
-        return Err(mismatch(
-            "an ordinary class does not delegate to its superclass and initialize its own instance",
-        ));
+        let initialized = match &header.arena.expr(*initialize).kind {
+            KlibIrExprKind::InstanceInitializerCall(class) => {
+                format!("instance initializer for {:?}", class.signature)
+            }
+            other => format!("initializer expression {other:?}"),
+        };
+        return Err(mismatch(&format!(
+            "ordinary KLIB class {:?} has invalid superclass initialization: delegation {:?} (kind {:?}, {} type arguments), {initialized}; expected a constructor with no type arguments and an initializer for {:?}",
+            contract.signature,
+            access.symbol.signature,
+            access.symbol.kind,
+            access.type_arguments.len(),
+            header.class.base.symbol.signature,
+        )));
     }
     let KlibIrSignature::Public(signature) = &access.symbol.signature else {
         return Ok(None);
