@@ -1,5 +1,56 @@
 //! Complete compiler rejection reports shared by corpus and in-process e2e compilation.
 
+use krusty::diag::{DiagSink, DiagnosticNames};
+use krusty::source::SourceKind;
+
+pub(crate) fn report_rejection<'a>(
+    module: &str,
+    sources: impl IntoIterator<Item = (SourceKind, &'a str, &'a str)>,
+    diagnostics: &DiagSink,
+) {
+    if let Some(report) = render_rejection(module, sources, diagnostics) {
+        // One locked stderr write keeps different corpus workers' complete reports together.
+        eprintln!("{report}");
+    }
+}
+
+fn render_rejection<'a>(
+    module: &str,
+    sources: impl IntoIterator<Item = (SourceKind, &'a str, &'a str)>,
+    diagnostics: &DiagSink,
+) -> Option<String> {
+    if !diagnostics.has_errors() {
+        return None;
+    }
+    let sources = sources.into_iter().collect::<Vec<_>>();
+    let names = sources
+        .iter()
+        .map(|(kind, stem, _)| {
+            let extension = match kind {
+                SourceKind::Kotlin => ".kt",
+                SourceKind::KotlinScript => ".kts",
+                SourceKind::Java => ".java",
+            };
+            if stem.ends_with(extension) {
+                (*stem).to_string()
+            } else {
+                format!("{stem}{extension}")
+            }
+        })
+        .collect::<Vec<_>>();
+    let named = names
+        .iter()
+        .zip(&sources)
+        .map(|(name, (_, _, source))| (name.as_str(), *source))
+        .collect::<Vec<_>>();
+    let thread = std::thread::current();
+    let test = thread.name().unwrap_or("unnamed worker");
+    Some(format!(
+        "compiler diagnostics [{module}] test={test}:\n{}",
+        diagnostics.render_all(&named, DiagnosticNames::Hidden)
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
