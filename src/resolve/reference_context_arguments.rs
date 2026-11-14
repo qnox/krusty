@@ -39,25 +39,28 @@ impl Checker<'_> {
         function: &crate::libraries::FunctionInfo,
         expected: &'static crate::types::FnSig,
     ) -> Option<Vec<AdaptedRefArgument>> {
-        self.callable_ref_parameter_plan(
+        extension_reference_selection::checked_parameter_plan(
             &function.callable.params,
             &function.call_sig,
             self.reference_bound_context_count(function),
             &expected.params,
+            self,
         )
     }
 
+    /// Map an expected function value's parameters onto a declaration with no bound context
+    /// parameters. Keep this entry point for callable-reference result adaptation, whose
+    /// three-argument call predates contextual callable references.
     pub(super) fn callable_ref_parameter_plan(
         &self,
         params: &[Ty],
         call_sig: &crate::libraries::CallSig,
-        context_count: usize,
         expected_params: &[Ty],
     ) -> Option<Vec<AdaptedRefArgument>> {
         extension_reference_selection::checked_parameter_plan(
             params,
             call_sig,
-            context_count,
+            0,
             expected_params,
             self,
         )

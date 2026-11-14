@@ -34754,7 +34754,7 @@ impl<'a> Checker<'a> {
                     vararg_index: signature.vararg_index,
                     ..CallSig::default()
                 };
-                self.callable_ref_parameter_plan(&params, &call_sig, 0, &expected.params)
+                self.callable_ref_parameter_plan(&params, &call_sig, &expected.params)
                     .is_some()
                     && self.callable_ref_is_compatible(
                         &expected.params,
