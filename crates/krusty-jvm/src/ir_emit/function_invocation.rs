@@ -174,19 +174,15 @@ impl Emitter<'_> {
                 Ty::obj("java/lang/Object"),
                 semantic_scalar_adapter(ret, rt),
             );
+        } else if let Some(classifier) = unsigned_array_class(ret) {
+            // The erased result is the unsigned array's box, although its descriptor also names
+            // the signed array carrier. The consumer reads that carrier through `unbox-impl`.
+            code.checkcast(self.cw.class_ref(&classifier));
         } else {
             match rt.kind() {
                 TyKind::Unit | TyKind::Nothing => code.pop(),
                 TyKind::STRING => {
                     let ci = self.cw.class_ref("java/lang/String");
-                    code.checkcast(ci);
-                }
-                // An unsigned array class and its signed carrier share one descriptor, but the
-                // erased result is the class's box: the carrier is read from it by `unbox-impl`.
-                _ if unsigned_array_class(ret).is_some() => {
-                    let ci = self
-                        .cw
-                        .class_ref(&unsigned_array_class(ret).unwrap_or_default());
                     code.checkcast(ci);
                 }
                 _ if rt.is_array() => {
