@@ -12,6 +12,8 @@ enum RawConstructorChange {
     ClassMask,
     ConstructorMask,
     MemberSlot,
+    ClassOnly,
+    DuplicateClass,
     SymbolKind,
     ConstructorFlag,
     ParameterKind,
@@ -142,14 +144,22 @@ fn constructor_header_fixture(
                 abbreviation: None,
             });
         }
-        C::None | C::ForeignModule | C::MemberSlot => {}
+        C::None | C::ForeignModule | C::MemberSlot | C::ClassOnly | C::DuplicateClass => {}
     }
-    let function = arena.push_function(function);
-    class.members = if matches!(change, C::MemberSlot) {
+    class.members = if matches!(change, C::ClassOnly) {
         Vec::new()
     } else {
-        vec![KlibIrMember::Function(function)]
+        let function = arena.push_function(function);
+        if matches!(change, C::MemberSlot) {
+            Vec::new()
+        } else {
+            vec![KlibIrMember::Function(function)]
+        }
     };
+    if matches!(change, C::DuplicateClass) {
+        let second = arena.push_class(class.clone());
+        class.members.push(KlibIrMember::Class(second));
+    }
     let class = arena.push_class(class);
     let module = if matches!(change, C::ForeignModule) {
         format!("{}-foreign", contract.module)
@@ -200,8 +210,11 @@ fn an_emitted_generic_initializer_authenticates_without_a_serialized_header() {
         RawConstructorChange::ClassMask,
         RawConstructorChange::ConstructorMask,
         RawConstructorChange::MemberSlot,
+        RawConstructorChange::ClassOnly,
+        RawConstructorChange::DuplicateClass,
         RawConstructorChange::SymbolKind,
         RawConstructorChange::ConstructorFlag,
+        RawConstructorChange::ParameterKind,
         RawConstructorChange::ParameterName,
         RawConstructorChange::DuplicateParameter,
         RawConstructorChange::ParameterCount,
@@ -238,6 +251,11 @@ fn an_emitted_generic_initializer_authenticates_without_a_serialized_header() {
     for changed in [
         {
             let mut bad = provider.clone();
+            bad.callable.name = "not-a-constructor".into();
+            bad
+        },
+        {
+            let mut bad = provider.clone();
             bad.callable.ret = Ty::String;
             bad
         },
@@ -249,6 +267,18 @@ fn an_emitted_generic_initializer_authenticates_without_a_serialized_header() {
         {
             let mut bad = provider.clone();
             bad.parameter_identities = Box::new([]);
+            bad
+        },
+        {
+            let mut bad = provider.clone();
+            let parameters = &mut bad.klib_body_class_contract.as_mut().unwrap().parameters;
+            parameters.formals[0] = Ty::String;
+            bad
+        },
+        {
+            let mut bad = provider.clone();
+            let parameters = &mut bad.klib_body_class_contract.as_mut().unwrap().parameters;
+            parameters.formals[1] = parameters.formals[0];
             bad
         },
         {
@@ -285,6 +315,8 @@ fn klib_constructor_rejects_malformed_raw_declaration_contracts() {
         C::ClassMask,
         C::ConstructorMask,
         C::MemberSlot,
+        C::ClassOnly,
+        C::DuplicateClass,
         C::SymbolKind,
         C::ConstructorFlag,
         C::ParameterKind,

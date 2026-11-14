@@ -215,6 +215,28 @@ impl<'a> KlibCalleeFacts<'a> {
             .map(|constructor| constructor.is_some())
     }
 
+    /// An actual emitted initializer remains a declaration edge when its producer has no raw IR.
+    /// Ambiguous provider buckets and every known malformed serialized header still decline.
+    pub(crate) fn authenticates_retained_constructor(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<bool, super::decline::KlibBodyDeclineReason> {
+        match self.get(identity) {
+            Some(KlibCalleeFact::Ambiguous) => {
+                Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
+                    "conflicting provider contracts for a constructor declaration".into(),
+                ))
+            }
+            Some(KlibCalleeFact::Selected(callables))
+                if callables[0].kind() == crate::libraries::ExternalCallableKind::Constructor =>
+            {
+                super::constructor_calls::authenticate_retained(callables[0], bodies).map(|_| true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     /// The initializer graph of the same positive ordinary-class capability used by lowering.
     pub(crate) fn constructor_initialization_callees(
         &self,
