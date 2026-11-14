@@ -51,7 +51,7 @@ pub struct ModuleClass {
 }
 
 /// One forwarder an interface delegation generates.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct ModuleForwarder {
     /// What it takes after the dispatch receiver and answers.
     pub(crate) parameters: Box<[Ty]>,

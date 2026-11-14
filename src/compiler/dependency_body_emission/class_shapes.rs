@@ -435,7 +435,7 @@ impl PublishedDependencyClassShape {
             members: members.into_boxed_slice(),
             function_overrides: function_overrides.into_boxed_slice(),
             property_overrides: property_overrides.into_boxed_slice(),
-            delegates_interfaces: false,
+            forwarders: Box::new([]),
         })
     }
 }
