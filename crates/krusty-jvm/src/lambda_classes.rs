@@ -512,18 +512,6 @@ fn default_argument_owner(ir: &IrFile, fid: FunId) -> Option<FunId> {
     })
 }
 
-/// Whether `function` declares a default lambda that its JVM `$default` stub must materialize.
-/// Lambda-class realization records the exact owner before it replaces the checked lambda
-/// expression; later emission consumes that relation and does not search the rewritten body.
-pub(crate) fn has_inline_default_lambda(ir: &IrFile, function: FunId) -> bool {
-    ir.classes.iter().any(|class| {
-        class
-            .lambda
-            .as_ref()
-            .is_some_and(|lambda| lambda.inline_default_owner == Some(function))
-    })
-}
-
 /// The lambda a default expression materializes, if it is one.
 fn default_expression_lambda(ir: &IrFile, expression: ExprId) -> Option<FunId> {
     match ir.exprs.get(expression as usize) {
@@ -1361,7 +1349,6 @@ fn declare_class(
             || inline_scope.is_some_and(|scope| scope.direct),
         requires_reification,
         extension_receiver_label,
-        inline_default_owner,
         default_stub_owner,
         invoke: fid,
         function_type: site.function_type,
@@ -1559,7 +1546,6 @@ mod method_domain_tests {
             requires_reification: false,
             extension_receiver_label: None,
             inline_origin: false,
-            inline_default_owner: None,
             default_stub_owner: None,
             invoke: 3,
             function_type: Ty::fun(vec![], Ty::Unit),
