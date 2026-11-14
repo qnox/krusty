@@ -26,10 +26,16 @@ interface Late {
         )
         .with_file_stem("Late"),
     ];
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+        crate::toolchain::jvm_classpath_jars_for("// WITH_STDLIB"),
+    ));
     let mut diagnostics = crate::diag::DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &sources,
-        crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
+        crate::frontend::PlatformProvider::jvm(Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        )),
         &crate::features::LangFeatures::new(),
         &mut diagnostics,
     );

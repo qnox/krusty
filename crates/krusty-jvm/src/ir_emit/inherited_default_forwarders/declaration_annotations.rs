@@ -116,6 +116,7 @@ mod tests {
                 body: InheritedDefaultBody::Module,
             }],
         );
+        krusty::metadata::class_declarations::record_all(&mut ir);
         let run = crate::ir_emit::EmitRun::default();
         assert!(crate::ir_emit::invariant_tests::emit_for_test_with_bodies(
             &ir,
