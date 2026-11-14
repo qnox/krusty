@@ -37,6 +37,7 @@ impl JvmLibraries {
                 )
             });
         member.external_identity = Some(identity);
+        member.declaration_owner = declaration_owner;
     }
 
     pub(super) fn register_external_callable(
@@ -122,6 +123,7 @@ impl JvmLibraries {
             Some(SemanticCallableOwner::Classifier(owner)),
         );
         member.external_identity = callable.external_identity;
+        member.declaration_owner = callable.declaration_owner;
     }
 
     pub(super) fn register_external_property(

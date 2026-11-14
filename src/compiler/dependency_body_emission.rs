@@ -424,7 +424,7 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         };
-        super::builtin_implementations::record(&mut callables, platform);
+        super::builtin_implementations::record_dependency_support(&mut callables, platform);
         let ordinal = support_state.emitted.len();
         let support_module = format!(
             "{}$klib_body${}${ordinal}",
