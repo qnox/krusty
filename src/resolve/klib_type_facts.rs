@@ -1,7 +1,7 @@
 //! Resolver-owned collection of the hierarchy frozen for selected KLIB bodies.
 
-use crate::fir::CheckedKlibTypeFacts;
-use crate::fx_hash::HashSet;
+use crate::fx_hash::{HashMap, HashSet};
+use crate::ir::CheckedKlibTypeFacts;
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TyKind, TypeName};
 
@@ -11,7 +11,10 @@ pub(super) fn freeze(
     type_variable_roots: impl IntoIterator<Item = String>,
     semantic_types: impl IntoIterator<Item = Ty>,
 ) -> CheckedKlibTypeFacts {
-    let mut facts = CheckedKlibTypeFacts::default();
+    let mut classifiers = HashMap::default();
+    let mut actualized_expects = HashMap::default();
+    let mut flexible_upper_bounds = HashMap::default();
+    let mut type_variable_bounds = HashMap::default();
     let mut pending = classifier_roots.into_iter().collect::<Vec<_>>();
     let mut visited = HashSet::default();
     let mut variables = type_variable_roots.into_iter().collect::<HashSet<_>>();
@@ -24,15 +27,15 @@ pub(super) fn freeze(
             continue;
         }
         if let Some(actual) = source.actualized_expect(identity) {
-            facts.actualized_expects.insert(identity, actual);
+            actualized_expects.insert(identity, actual);
             pending.push(actual);
         }
         let Some(classifier) = source.classifier(identity) else {
             continue;
         };
-        facts.classifiers.insert(identity, classifier.clone());
+        classifiers.insert(identity, classifier.clone());
         if let Some(actual) = source.actualized_expect(identity) {
-            facts.classifiers.insert(actual, classifier.clone());
+            classifiers.insert(actual, classifier.clone());
         }
         for parent in classifier.supertypes.iter_ids() {
             pending.push(parent);
@@ -50,19 +53,24 @@ pub(super) fn freeze(
             .kind()
         {
             if upper != identity {
-                facts.flexible_upper_bounds.insert(identity, upper);
+                flexible_upper_bounds.insert(identity, upper);
                 pending.push(upper);
             }
         }
     }
 
     for variable in variables {
-        facts.type_variable_bounds.insert(
+        type_variable_bounds.insert(
             variable.clone(),
             source.type_variable_bounds(&variable).into_boxed_slice(),
         );
     }
-    facts
+    CheckedKlibTypeFacts::from_records(
+        classifiers,
+        actualized_expects,
+        flexible_upper_bounds,
+        type_variable_bounds,
+    )
 }
 
 fn collect_type(ty: Ty, classifiers: &mut Vec<TypeName>, variables: &mut HashSet<String>) {

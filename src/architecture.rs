@@ -573,6 +573,12 @@ mod tests {
         let checked = source_path("src/backend/dependency_facts.rs");
         let text = fs::read_to_string(&checked).expect("read checked KLIB dependency facts");
         assert!(text.contains("klib_type_hierarchy"));
+        assert!(text.contains("crate::ir::CheckedKlibDependencyFacts"));
+        assert!(!text.contains("crate::fir::CheckedKlibDependencyFacts"));
+        let lowerer = source_path("src/klib_lowering/callee_facts.rs");
+        let text = fs::read_to_string(&lowerer).expect("read checked KLIB lowerer facts");
+        assert!(text.contains("crate::ir::CheckedKlibDependencyFacts"));
+        assert!(!text.contains("crate::fir::CheckedKlibDependencyFacts"));
         let checker = source_path("src/resolve/dependency_body_call_edges.rs");
         let text = fs::read_to_string(&checker).expect("read KLIB body hierarchy checker");
         assert!(text.contains("klib_type_facts::freeze"));

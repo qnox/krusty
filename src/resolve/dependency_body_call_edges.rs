@@ -3,7 +3,8 @@
 #[path = "klib_type_facts.rs"]
 mod klib_type_facts;
 
-use crate::fir::{CheckedKlibDependencyFacts, CheckedMemberCallEdge, ExternalCallableId};
+use crate::fir::ExternalCallableId;
+use crate::ir::{CheckedKlibDependencyFacts, CheckedMemberCallEdge};
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName};
 
@@ -15,7 +16,10 @@ pub(crate) fn for_checked_klib_bodies<'a>(
     bodies: &crate::klib_libraries::KlibDeclarationBodies,
     roots: impl IntoIterator<Item = crate::libraries::KlibBodyCallable<'a>>,
 ) -> Result<CheckedKlibDependencyFacts, ExternalCallableId> {
-    let mut facts = CheckedKlibDependencyFacts::default();
+    let mut builtin_implementations = crate::fx_hash::HashMap::default();
+    let mut member_edges = crate::fx_hash::HashMap::default();
+    #[cfg(test)]
+    let mut reached_constructors = crate::fx_hash::HashSet::default();
     let roots = roots.into_iter().collect::<Vec<_>>();
     let mut classifier_roots = Vec::new();
     let mut semantic_types = Vec::new();
@@ -61,7 +65,7 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         semantic_types.extend(selected.type_parameters().iter().copied());
         #[cfg(test)]
         if realization.kind == crate::libraries::ExternalCallableKind::Constructor {
-            facts.reached_constructors.insert(identity.clone());
+            reached_constructors.insert(identity.clone());
         }
         if realization.kind != crate::libraries::ExternalCallableKind::Member {
             continue;
@@ -86,7 +90,7 @@ pub(crate) fn for_checked_klib_bodies<'a>(
             implementation_name,
             external,
         );
-        match facts.builtin_implementations.entry(external) {
+        match builtin_implementations.entry(external) {
             std::collections::hash_map::Entry::Occupied(existing)
                 if existing.get() != &implementations =>
             {
@@ -102,15 +106,22 @@ pub(crate) fn for_checked_klib_bodies<'a>(
             crate::libraries::KlibDeclarationSignature::Accessor(_)
         ) {
             let edge = klib_dependency_member_call_edge(source, owner, selected.name(), external)?;
-            facts.member_edges.insert(identity, edge);
+            member_edges.insert(identity, edge);
         }
     }
-    facts.type_hierarchy = Some(klib_type_facts::freeze(
-        source,
-        classifier_roots,
-        std::iter::empty(),
-        semantic_types,
-    ));
+    let type_hierarchy =
+        klib_type_facts::freeze(source, classifier_roots, std::iter::empty(), semantic_types);
+    let facts = CheckedKlibDependencyFacts::new(
+        builtin_implementations,
+        member_edges,
+        Some(type_hierarchy),
+    );
+    #[cfg(test)]
+    let mut facts = facts;
+    #[cfg(test)]
+    for constructor in reached_constructors {
+        facts.record_reached_constructor(constructor);
+    }
     Ok(facts)
 }
 

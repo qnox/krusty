@@ -17,6 +17,11 @@
 use crate::kt_string::KtString;
 use crate::types::{Ty, TypeName, TypeNameList};
 
+mod checked_klib_facts;
+pub(crate) use checked_klib_facts::{CheckedKlibDependencyFacts, CheckedKlibTypeFacts};
+mod checked_member_call_edge;
+pub(crate) use checked_member_call_edge::CheckedMemberCallEdge;
+
 pub type ExprId = u32;
 pub type FunId = u32;
 pub type ClassId = u32;
