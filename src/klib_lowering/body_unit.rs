@@ -1013,18 +1013,7 @@ impl DependencyBodyUnit {
                             )
                             .body(body.statements),
                         None => lowering.body(body.statements),
-                    }
-                    .and_then(|lowered| {
-                        publish_parameter_defaults(
-                            body.arena,
-                            function,
-                            &body.header,
-                            &self.builtins,
-                            &mut self.ir,
-                            &mut linker,
-                        )
-                        .map(|()| lowered)
-                    }),
+                    },
                 }
             }
             .map_err(|reason| match reason {
