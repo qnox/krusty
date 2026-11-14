@@ -4,77 +4,11 @@
 
 use super::common;
 
-const CROSSINLINE_LAMBDA_IN_SUSPEND_LAMBDA: &str = r#"
-import kotlin.coroutines.*
+const CROSSINLINE_LAMBDA_IN_SUSPEND_LAMBDA: &str =
+    include_str!("box_regressions/suspendLambdaRetainedInlineObject.kt");
 
-abstract class Runner {
-    abstract suspend fun run(): String
-}
-
-suspend fun foo() {}
-
-inline fun makeRunner(crossinline f: () -> String) =
-    object : Runner() {
-        override suspend fun run(): String {
-            foo()
-            return f()
-        }
-    }
-
-object Done : Continuation<Unit> {
-    override val context: CoroutineContext get() = EmptyCoroutineContext
-    override fun resumeWith(result: Result<Unit>) { result.getOrThrow() }
-}
-
-fun builder(c: suspend () -> Unit) {
-    c.startCoroutine(Done)
-}
-
-fun box(): String {
-    var result = "fail"
-    builder {
-        result = makeRunner { "OK" }.run()
-    }
-    return result
-}
-"#;
-
-const TWO_LAMBDAS_IN_SUSPEND_LAMBDA: &str = r#"
-import kotlin.coroutines.*
-
-abstract class Runner {
-    abstract suspend fun run(): String
-}
-
-suspend fun foo() {}
-
-inline fun makeRunner(crossinline first: () -> String, crossinline second: () -> String) =
-    object : Runner() {
-        override suspend fun run(): String {
-            foo()
-            return first() + second()
-        }
-    }
-
-object Done : Continuation<Unit> {
-    override val context: CoroutineContext get() = EmptyCoroutineContext
-    override fun resumeWith(result: Result<Unit>) { result.getOrThrow() }
-}
-
-fun builder(c: suspend () -> Unit) {
-    c.startCoroutine(Done)
-}
-
-fun box(): String {
-    var result = "fail"
-    val suffix = "K"
-    builder {
-        val local = "O"
-        result = makeRunner({ local }, { suffix }).run()
-    }
-    return result
-}
-"#;
+const TWO_LAMBDAS_IN_SUSPEND_LAMBDA: &str =
+    include_str!("box_regressions/suspendLambdaRetainedInlineObjectCaptures.kt");
 
 #[test]
 fn a_lambda_kept_by_an_inlined_object_does_not_become_a_method_of_the_suspend_lambda() {
