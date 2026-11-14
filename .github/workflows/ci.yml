@@ -67,6 +67,8 @@ jobs:
             {
               date -Is
               free -h
+              printf '\n--- /proc/self/cgroup ---\n'
+              cat /proc/self/cgroup 2>/dev/null || true
               for path in /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.peak /sys/fs/cgroup/memory.events; do
                 if [ -r "$path" ]; then
                   printf '\n--- %s ---\n' "$path"
@@ -104,13 +106,20 @@ jobs:
             tail -n 1 "$logfile"
           }
           set -e
-          # The gate profile's optimized cfg(test) rustc process peaks near the 8 GiB
-          # self-hosted runner limit. Build only this library unit-test binary with the existing
-          # coverage profile (opt-level 1, debug info/LTO off); conformance stays on gate below.
+          # Experiment: keep coverage profile options and serialize Cargo, but partition krusty's
+          # cfg(test) codegen into 256 units to measure whether LLVM peak memory falls. This is a
+          # per-command profile override only; the product profile and conformance gate stay intact.
           snapshot
-          printf '%s\n' 'coverage' > "$EVIDENCE/compiler-unit-profile.txt"
+          printf '%s\n' 'coverage' 'profile.coverage.package.krusty.codegen-units=256' \
+            > "$EVIDENCE/compiler-unit-profile.txt"
+          cargo --version > "$EVIDENCE/cargo-version.txt"
+          rustc --version --verbose > "$EVIDENCE/rustc-version.txt"
+          printf '%s\n' \
+            "cargo --config 'profile.coverage.package.krusty.codegen-units=256' test --verbose --profile coverage --no-run -p krusty --lib --message-format=json" \
+            > "$EVIDENCE/compiler-unit-cargo-command.txt"
           unit_log="$EVIDENCE/compiler-unit-build.log"
-          cargo test --profile coverage --no-run -p krusty --lib --message-format=json \
+          cargo --config 'profile.coverage.package.krusty.codegen-units=256' \
+            test --verbose --profile coverage --no-run -p krusty --lib --message-format=json \
             > "$unit_log" 2>&1 &
           unit_pid=$!
           (
@@ -136,6 +145,8 @@ jobs:
             exit 1
           fi
           printf '%s\n' "$unitbin" > "$EVIDENCE/unit-binary.txt"
+          sha256sum "$unitbin" > "$EVIDENCE/unit-binary.sha256"
+          stat -c '%s' "$unitbin" > "$EVIDENCE/unit-binary.bytes"
           conformancebin="$(build_one conformance conformance-bin)"
           echo "$conformancebin" > "$EVIDENCE/conformance-binary.txt"
           echo "UNITBIN=$(realpath "$unitbin")" >> "$GITHUB_ENV"
