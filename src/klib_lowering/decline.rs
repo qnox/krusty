@@ -27,6 +27,8 @@ pub enum KlibBodyDeclineReason {
     UnsupportedDeclaration(&'static str),
     /// The body uses an expression or statement form lowering does not model, by its name.
     UnsupportedOperation(&'static str),
+    /// A singleton read names a provider object the target does not represent directly.
+    UnsupportedObjectValue(crate::types::TypeName),
     /// The body calls a declaration lowering cannot realize.
     UnsupportedCallee(Box<KlibPublicIdSignature>),
     /// No producer-reachable library serializes the declaration the body calls.
@@ -116,6 +118,13 @@ impl std::fmt::Display for KlibBodyDecline {
             }
             KlibBodyDeclineReason::UnsupportedOperation(what) => {
                 write!(formatter, "it uses {what}")
+            }
+            KlibBodyDeclineReason::UnsupportedObjectValue(classifier) => {
+                write!(
+                    formatter,
+                    "it reads object `{}` the target does not represent",
+                    classifier.render()
+                )
             }
             KlibBodyDeclineReason::UnsupportedCallee(callee) => {
                 write!(formatter, "it calls `")?;

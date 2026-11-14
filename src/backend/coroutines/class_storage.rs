@@ -2,13 +2,16 @@
 
 use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{
-    Callee, ClassId, ExprId, IrCheckedOperation, IrExpr, IrField, IrFile, IrPropertyDispatch,
-    for_each_child,
+    for_each_child, Callee, ClassId, ExprId, IrCheckedOperation, IrExpr, IrField, IrFile,
+    IrPropertyDispatch,
 };
-use crate::types::{Ty, continuation_passing, wk};
+use crate::types::{continuation_passing, wk, Ty};
 
 use super::label_reentry::{MachineStorage, ReentryDecline};
 use super::suspension_points::{recorded_suspension_result, suspend_call_fid};
+
+#[cfg(test)]
+mod tests;
 
 /// Put the value namespace of one suspend function in the generated machine's fields and rewrite
 /// its body to use those fields. A resume re-enters the body in a new activation, so even a value
@@ -354,6 +357,21 @@ impl MachineStorage for ContinuationFields {
                     unreachable!("a copied method call retains its node kind")
                 };
                 args.push(Some(completion));
+                copied
+            }
+            IrExpr::InvokeFunction { args, params, .. }
+                if ir.suspend_calls.contains_key(&call) && args.len() == params.len() =>
+            {
+                let copied = crate::ir::relocate_with_operands(ir, call, |operand| operand);
+                let IrExpr::InvokeFunction {
+                    args, params, ret, ..
+                } = &mut ir.exprs[copied as usize]
+                else {
+                    unreachable!("a copied function invocation retains its node kind")
+                };
+                args.push(completion);
+                params.push(continuation_ty);
+                *ret = any;
                 copied
             }
             _ => return Err(ReentryDecline::UnsupportedCallShape),

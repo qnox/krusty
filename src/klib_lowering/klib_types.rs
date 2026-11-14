@@ -277,17 +277,15 @@ fn annotation_classifier(annotation: &KlibIrAnnotation) -> Option<TypeName> {
     declaration_name(constructor.package().segments(), class).ok()
 }
 
-/// The arity of the invocation the public declaration `member` is, when the function classifier
-/// that owns it declares it with the Kotlin function invocation role. The member is joined to the
-/// builtins provider's declaration of its exact classifier by its serialized name; that
-/// declaration's role, not the name, decides. Suspend and reflective classifiers are not invoked
-/// here.
+/// The source arity of an ordinary invocation the public declaration `member` is, when its
+/// function classifier declares the Kotlin function invocation role. The member is joined to the
+/// compiler-owned declaration of its exact classifier; its role, not its name, decides.
 pub(super) fn function_invocation_arity(member: &KlibPublicIdSignature) -> Option<usize> {
     invocation_arity(member, false, false)
 }
 
-/// The source arity of a declared `SuspendFunctionN.invoke`; its serialized call also carries
-/// the declaration's physical trailing continuation parameter.
+/// The source arity of a declared `SuspendFunctionN.invoke`. Common CPS lowering supplies the
+/// physical trailing continuation after this semantic call has been recorded.
 pub(super) fn suspend_function_invocation_arity(member: &KlibPublicIdSignature) -> Option<usize> {
     invocation_arity(member, false, true)
 }

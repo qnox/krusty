@@ -1217,9 +1217,7 @@ impl CallLinker for Linker<'_, '_> {
         if self.sources.callees.target_represents(classifier) {
             return Ok(());
         }
-        Err(KlibBodyDeclineReason::UnsupportedOperation(
-            "an object value",
-        ))
+        Err(KlibBodyDeclineReason::UnsupportedObjectValue(classifier))
     }
 
     fn target_represents(&self, classifier: TypeName) -> bool {
