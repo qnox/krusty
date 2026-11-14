@@ -26,20 +26,7 @@ interface Late {
         )
         .with_file_stem("Late"),
     ];
-    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-        crate::toolchain::jvm_classpath_jars_for("// WITH_STDLIB"),
-    ));
-    let mut diagnostics = crate::diag::DiagSink::new();
-    let analysis = crate::frontend::analyze_source_set_with_features(
-        &sources,
-        crate::frontend::PlatformProvider::jvm(Box::new(
-            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
-                .expect("JVM provider initialization"),
-        )),
-        &crate::features::LangFeatures::new(),
-        &mut diagnostics,
-    );
-    assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+    let analysis = checked_annotation_sources(&sources);
     let index = analysis
         .streamed
         .as_ref()
@@ -136,4 +123,74 @@ fn registered_annotation_payload_requires_checked_retention() {
     assert!(matches!(checked_applications(&index, &[annotation]),
         Err(crate::backend::BackendFactError::IncompleteAnnotation(identity)) if identity == type_name("missing/Policy")));
     assert!(checked_applications(&index, &[]).unwrap().retains_none());
+}
+
+fn checked_annotation_sources(
+    sources: &[crate::frontend::SourceInput<'_>],
+) -> crate::frontend::SourceSetAnalysis {
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+        crate::toolchain::jvm_classpath_jars_for("// WITH_STDLIB"),
+    ));
+    let mut diagnostics = crate::diag::DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        sources,
+        crate::frontend::PlatformProvider::jvm(Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        )),
+        &crate::features::LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+    analysis
+}
+
+#[test]
+fn source_annotation_policies_precede_freezing_in_both_file_orders() {
+    for policy_first in [false, true] {
+        let mut sources = [
+            crate::frontend::SourceInput::kotlin(
+                "interface Use { @BinaryMark @SourceMark fun value(): String = \"OK\" }",
+            )
+            .with_file_stem("Use"),
+            crate::frontend::SourceInput::kotlin(
+                "@Retention(AnnotationRetention.BINARY) annotation class BinaryMark\n\
+                 @Retention(AnnotationRetention.SOURCE) annotation class SourceMark",
+            )
+            .with_file_stem("Policy"),
+        ];
+        if policy_first {
+            sources.swap(0, 1);
+        }
+        let analysis = checked_annotation_sources(&sources);
+        let index = analysis
+            .streamed
+            .as_ref()
+            .expect("streamed module")
+            .module
+            .index();
+        let class = index
+            .classifier_declaration(type_name("Use"))
+            .expect("source interface");
+        let declaration = index
+            .owned_declaration(class, crate::fir::DeclarationKind::Function, 0)
+            .expect("the exact source method header");
+        let method = index.callable_for_declaration(declaration).unwrap().id;
+        let facts = crate::backend::BackendModuleFacts::from_resolved_index(index).unwrap();
+        drop(analysis);
+        let annotations = facts
+            .source_member_annotations()
+            .function(method)
+            .expect("registered source method");
+        assert_eq!(
+            annotations
+                .iter()
+                .map(|application| (application.annotation.internal, application.retention,))
+                .collect::<Vec<_>>(),
+            [(type_name("BinaryMark"), AnnotationRetention::Binary)],
+            "policy_first={policy_first}"
+        );
+        assert!(annotations.has_source_application());
+        assert!(annotations.declares(type_name("SourceMark")));
+    }
 }

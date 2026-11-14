@@ -92,7 +92,22 @@ mod tests {
     fn an_unregistered_module_default_is_not_treated_as_unannotated() {
         let mut ir = IrFile::default();
         let interface = krusty::types::type_name("MissingInterface");
+        let mut interface_class = krusty::plugins::synthetic_class("MissingInterface");
+        interface_class.is_interface = true;
+        interface_class.is_abstract = true;
+        interface_class.is_source_declared = true;
+        interface_class.declaration_name =
+            Some(krusty::types::ClassifierDeclarationName::TopLevel {
+                package: krusty::types::type_name(""),
+                name: "MissingInterface".into(),
+            });
+        ir.add_class(interface_class);
         let mut class = krusty::plugins::synthetic_class("Consumer");
+        class.is_source_declared = true;
+        class.declaration_name = Some(krusty::types::ClassifierDeclarationName::TopLevel {
+            package: krusty::types::type_name(""),
+            name: "Consumer".into(),
+        });
         class.interfaces = vec![interface].into();
         let owner = class.fq_name_id();
         ir.add_class(class);
