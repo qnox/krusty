@@ -202,8 +202,8 @@ impl Emitter<'_> {
     /// kotlinc compiles a multi-part string template (and a synthesized `toString`) to a single
     /// `invokedynamic makeConcatWithConstants` when targeting JVM 9+ — a `StringConcatFactory`
     /// bootstrap with a recipe string, `` marking each dynamic argument and literal text inline.
-    /// Below JVM 9 (and for the branchy-operand shape, whose frame handling this doesn't model yet)
-    /// returns `false` so the caller keeps the `StringBuilder` form.
+    /// Below JVM 9 (and for a part that spills the operand stack) returns `false` so the caller
+    /// keeps the `StringBuilder` form.
     fn try_emit_indy_concat(&mut self, parts: &[u32], code: &mut CodeBuilder) -> bool {
         const TAG_ARG: char = '\u{1}';
         const TAG_CONST: char = '\u{2}';
@@ -212,9 +212,10 @@ impl Emitter<'_> {
         if self.cw.major() < 53 || self.inline_string_concat {
             return false;
         }
-        // A branchy part records a merge frame mid-build; matching kotlinc's operand-stack shape across
-        // that is the same open problem as elsewhere, so leave those on the StringBuilder path.
-        if parts.iter().any(|&part| self.emits_control_flow(part)) {
+        // A branchy part (`v == null ? "null" : …`) merges with the earlier arguments on the
+        // stack, as kotlinc's does. One that cannot carry the stack at all (a `try`, a branching
+        // spliced inline) is spilled first, which only the `StringBuilder` form models.
+        if parts.iter().any(|&part| self.spills_operand_prefix(part)) {
             return false;
         }
         // A `Unit` part is `Unit.INSTANCE` appended as an object. kotlinc builds that with
