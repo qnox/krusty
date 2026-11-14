@@ -92,8 +92,14 @@ impl BodyLowering<'_> {
             .collect::<Lowered<Vec<_>>>()?;
         let (declaration, external_target, local_access) = match &access.symbol.signature {
             KlibIrSignature::Public(callee) => {
-                let linked = self.linker.link_constructor(self.ir, callee)?;
-                (linked.declaration, Some(linked.target), None)
+                // A constructor of a class this unit materialized is the class's own construction,
+                // as `Pair.copy` calls `Pair.<init>`. It is not an external allocation.
+                if let Some(linked) = self.linker.installed_public_constructor(callee) {
+                    (linked.declaration, None, Some(linked.access))
+                } else {
+                    let linked = self.linker.link_constructor(self.ir, callee)?;
+                    (linked.declaration, Some(linked.target), None)
+                }
             }
             signature => {
                 let linked = self.linker.link_local_constructor(self.ir, signature)?;

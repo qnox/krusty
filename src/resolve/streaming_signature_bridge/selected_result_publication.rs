@@ -5,59 +5,27 @@
 //! projects the declaration interval without lookup or overload reselection.
 
 use super::ProductionSignatureSemantics;
-use crate::resolve::selected_result_publication::CompactSelectedResultPublication;
+use crate::resolve::selected_result_aliases::SelectionInputs;
+use crate::resolve::selected_result_publication::{
+    whole_array_arguments, CompactSelectedResultPublication,
+};
 use crate::types::{Ty, TyKind};
-
-fn whole_array_arguments(arguments: &[crate::fir::ResolvedSigCallArgument<'_>]) -> Box<[bool]> {
-    arguments
-        .iter()
-        .map(|argument| argument.spread || argument.name.is_some())
-        .collect()
-}
 
 impl ProductionSignatureSemantics<'_> {
     pub(super) fn forget_selected_result_publication(&self, origin: crate::fir::OriginId) {
         self.selected_calls.forget_publication(origin);
+        self.selected_aliases.record(origin, None);
     }
 
     pub(super) fn record_selected_result_publication(
         &self,
         origin: crate::fir::OriginId,
         publication: CompactSelectedResultPublication,
+        inputs: SelectionInputs<'_>,
     ) {
+        self.selected_aliases
+            .record_applied(origin, &publication, inputs, self.table);
         self.selected_calls.record_publication(origin, publication);
-    }
-
-    pub(super) fn selected_callable_publication(
-        &self,
-        callable: &crate::libraries::LibraryCallable,
-        parameter_by_argument: Box<[Option<u32>]>,
-        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
-        explicit_type_arguments: bool,
-    ) -> CompactSelectedResultPublication {
-        CompactSelectedResultPublication::callable(
-            callable,
-            parameter_by_argument,
-            whole_array_arguments(arguments),
-            explicit_type_arguments,
-        )
-    }
-
-    pub(super) fn selected_member_publication(
-        &self,
-        member: &crate::libraries::LibraryMember,
-        receiver: Option<Ty>,
-        parameter_by_argument: Box<[Option<u32>]>,
-        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
-        explicit_type_arguments: bool,
-    ) -> CompactSelectedResultPublication {
-        CompactSelectedResultPublication::member(
-            member,
-            receiver,
-            parameter_by_argument,
-            whole_array_arguments(arguments),
-            explicit_type_arguments,
-        )
     }
 
     pub(super) fn record_selected_constructor_publication(
@@ -67,7 +35,7 @@ impl ProductionSignatureSemantics<'_> {
         selected: Ty,
         parameter_by_argument: Box<[Option<u32>]>,
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
-        explicit_type_arguments: bool,
+        explicit_type_arguments: &[Ty],
     ) {
         let Some(owner) = selected.non_null().obj_internal() else {
             return;
@@ -98,9 +66,21 @@ impl ProductionSignatureSemantics<'_> {
                 parameter_by_argument,
                 declaration.declaration.call_sig.vararg_index,
                 whole_array_arguments(arguments),
-                explicit_type_arguments,
+                explicit_type_arguments.into(),
             ),
         );
+    }
+
+    pub(super) fn record_source_selected_publication(
+        &self,
+        origin: crate::fir::OriginId,
+        publication: CompactSelectedResultPublication,
+        signature: &crate::fir::ResolvedSignature,
+        result: crate::fir::ResolvedTy,
+        inputs: SelectionInputs<'_>,
+    ) {
+        let publication = publication.with_result_alias(signature.result_alias());
+        self.record_final_selected_publication(origin, publication, result, inputs);
     }
 
     pub(super) fn record_final_selected_publication(
@@ -108,9 +88,10 @@ impl ProductionSignatureSemantics<'_> {
         origin: crate::fir::OriginId,
         publication: CompactSelectedResultPublication,
         result: crate::fir::ResolvedTy,
+        inputs: SelectionInputs<'_>,
     ) {
-        self.selected_calls
-            .record_publication(origin, publication.with_selected(result.get()));
+        let publication = publication.with_selected(result.get());
+        self.record_selected_result_publication(origin, publication, inputs);
     }
 
     pub(super) fn finish_selected_member_publication(
@@ -131,6 +112,7 @@ impl ProductionSignatureSemantics<'_> {
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<crate::fir::ResolvedMemberCall, crate::fir::DiagnosticId> {
+        let inputs = SelectionInputs::new(Some(receiver.get()), &argument_types);
         if let Some(member) = member.as_ref() {
             if let Some(declaration) = member.stable_declaration {
                 if self
@@ -159,7 +141,13 @@ impl ProductionSignatureSemantics<'_> {
                         type_arguments,
                         expected.map(crate::fir::ResolvedTy::get),
                     )?;
-                    self.record_final_selected_publication(origin, publication, ty);
+                    self.record_source_selected_publication(
+                        origin,
+                        publication,
+                        &signature,
+                        ty,
+                        inputs,
+                    );
                     return Ok(crate::fir::ResolvedMemberCall {
                         ty: Some(ty),
                         declaration: Some(declaration),
@@ -189,7 +177,13 @@ impl ProductionSignatureSemantics<'_> {
                     type_arguments,
                     expected.map(crate::fir::ResolvedTy::get),
                 )?;
-                self.record_final_selected_publication(origin, publication, ty);
+                self.record_source_selected_publication(
+                    origin,
+                    publication,
+                    &signature,
+                    ty,
+                    inputs,
+                );
                 return Ok(crate::fir::ResolvedMemberCall {
                     ty: Some(ty),
                     declaration: member.stable_declaration,
@@ -221,7 +215,13 @@ impl ProductionSignatureSemantics<'_> {
                     type_arguments,
                     expected.map(crate::fir::ResolvedTy::get),
                 )?;
-                self.record_final_selected_publication(origin, publication, ty);
+                self.record_source_selected_publication(
+                    origin,
+                    publication,
+                    &signature,
+                    ty,
+                    inputs,
+                );
                 return Ok(crate::fir::ResolvedMemberCall {
                     ty: Some(ty),
                     declaration: source_declaration,
@@ -233,7 +233,7 @@ impl ProductionSignatureSemantics<'_> {
         if ty.is_none() && declaration.is_none() {
             return Err(Self::failure());
         }
-        self.record_selected_result_publication(origin, publication);
+        self.record_selected_result_publication(origin, publication, inputs);
         Ok(crate::fir::ResolvedMemberCall { ty, declaration })
     }
 }
@@ -243,7 +243,9 @@ impl crate::fir::SelectedResultPublicationSemantics for ProductionSignatureSeman
         &self,
         origin: crate::fir::OriginId,
     ) -> Option<crate::fir::ResolvedTypeAbbreviation> {
-        self.selected_calls.abbreviation(origin)
+        self.selected_calls
+            .abbreviation(origin)
+            .or_else(|| self.selected_aliases.abbreviation(origin))
     }
 
     fn published_call_result_abbreviation(
@@ -251,7 +253,9 @@ impl crate::fir::SelectedResultPublicationSemantics for ProductionSignatureSeman
         origin: crate::fir::OriginId,
         published: crate::fir::ResolvedTy,
     ) -> Option<crate::fir::ResolvedTypeAbbreviation> {
-        let abbreviation = self.selected_calls.abbreviation(origin)?;
+        let Some(abbreviation) = self.selected_calls.abbreviation(origin) else {
+            return self.selected_aliases.abbreviation(origin);
+        };
         let Some(inferred) = self.selected_calls.inferred_abbreviation(origin) else {
             return Some(abbreviation);
         };

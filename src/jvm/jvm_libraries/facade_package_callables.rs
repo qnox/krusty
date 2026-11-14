@@ -206,6 +206,7 @@ impl JvmLibraries {
                 // and a boxed generic result are both `Object`, and only this selected
                 // declaration fact tells value-class lowering which representation it received.
                 declared_ret,
+                result_alias: mf.ret_alias(),
                 context_count: mf.context_count(),
                 contract: mf.contract.clone(),
                 generic_sig: generic_sig.clone().map(Box::new),

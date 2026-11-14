@@ -13,6 +13,7 @@ mod classpath_annotation_classes;
 mod collection_canonicalization;
 mod declaration_headers;
 mod declared_members;
+mod default_impls_realization;
 mod facade_package_callables;
 mod symbol_source;
 use classpath_annotation_classes::{
@@ -91,6 +92,7 @@ use crate::types::{
     TypeName, TypeNameList,
 };
 
+use default_impls_realization::interface_holder_method;
 use java_operator_convention::java_method_has_operator_convention;
 
 fn effective_class_access(class: &super::classreader::ClassInfo) -> u16 {
@@ -486,6 +488,7 @@ impl JvmLibraries {
                 generic_sig: generic_sig_for_callable.clone().map(Box::new),
                 declared_params,
                 declared_ret,
+                result_alias: meta.ret_alias,
                 reified_type_parameter_ordinals: call_sig
                     .reified_type_parameter_ordinals
                     .clone()
@@ -908,15 +911,18 @@ impl JvmLibraries {
                 context_count: 0,
                 context_param_names: Vec::new(),
                 context_parameter_identities: Vec::new(),
-                getter: accessor(
-                    crate::names::property_getter_name(&property.name),
-                    &getter_sig.name,
-                    &getter_sig.desc,
-                    getter_params,
-                    property_ty,
-                    getter_ret,
-                    getter_inline,
-                ),
+                getter: crate::libraries::LibraryCallable {
+                    result_alias: property.ret_alias,
+                    ..accessor(
+                        crate::names::property_getter_name(&property.name),
+                        &getter_sig.name,
+                        &getter_sig.desc,
+                        getter_params,
+                        property_ty,
+                        getter_ret,
+                        getter_inline,
+                    )
+                },
                 setter: setter.map(Box::new),
                 setter_visibility: property.visibility,
                 setter_parameter_name: None,
@@ -1502,6 +1508,7 @@ impl JvmLibraries {
                     member.set_deprecated_hidden(self.function_hidden_at_api(declaration));
                     member.call_sig = declaration.member_call_sig();
                     member.declared_ret = metadata_declared_nonnull_return(declaration);
+                    member.result_alias = declaration.ret_alias();
                 } else if let Some(declaration) = constructor_declaration {
                     if declaration.params.types.contains(&Ty::Error) {
                         crate::trace_compiler!(
@@ -2640,42 +2647,6 @@ fn function_interface_signature(
     Some(Ty::fun(params.to_vec(), ret))
 }
 
-/// Exact nonvirtual realization of a legacy concrete interface declaration, if the classpath
-/// publishes one. Semantic selection stays on the metadata declaration; this only couples it to the
-/// matching receiver-first static method at the provider boundary.
-fn interface_holder_method(
-    cp: &crate::jvm::classpath::Classpath,
-    interface: TypeName,
-    name: &str,
-    descriptor: &str,
-) -> Option<Box<crate::libraries::NonvirtualCallRealization>> {
-    // `$DefaultImpls` also exists in compatibility mode, where the interface method itself is
-    // concrete and remains the dispatch target. Only the legacy shape has an ABSTRACT interface
-    // method whose implementation must be replaced by the receiver-first holder static. Keeping
-    // this representation test here makes functions and property accessors share one ABI rule.
-    let interface_class = cp.find_name(interface)?;
-    if !interface_class.methods.iter().any(|method| {
-        method.is_abstract() && method.name == name && method.descriptor == descriptor
-    }) {
-        return None;
-    }
-    let holder = crate::types::type_name_nested_child(interface, "DefaultImpls");
-    let class = cp.find_name(holder)?;
-    let method = class.methods.iter().find(|method| {
-        method.is_static()
-            && method.name == name
-            && crate::jvm::names::descriptor_prepends_classifier(
-                descriptor,
-                interface,
-                &method.descriptor,
-            )
-    })?;
-    Some(Box::new(crate::libraries::NonvirtualCallRealization {
-        owner: holder,
-        descriptor: method.descriptor.clone(),
-    }))
-}
-
 pub fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
     let (params, ret) = crate::jvm::names::parse_method_descriptor(desc)?;
     Some((
@@ -2889,6 +2860,7 @@ impl JvmLibraries {
                     getter.owner_is_interface = ci.is_interface();
                     getter.is_abstract = mp.is_abstract;
                     getter.inline = property_getter_inline(mp.getter_inline, getter_public);
+                    getter.result_alias = mp.ret_alias;
                     getter.semantic_role =
                         crate::libraries::builtin_declaration::semantic_call_role(
                             crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
@@ -3034,6 +3006,7 @@ impl JvmLibraries {
                 getter.owner_is_interface = ci.is_interface();
                 getter.is_abstract = mp.is_abstract;
                 getter.inline = property_getter_inline(mp.getter_inline, getter_public);
+                getter.result_alias = mp.ret_alias;
                 getter.nonvirtual_realization = interface_holder_method(
                     &self.cp,
                     cn,

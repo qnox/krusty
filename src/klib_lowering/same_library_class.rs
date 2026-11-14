@@ -135,6 +135,20 @@ pub(super) struct MemberOverride {
     pub(super) declared_result: Ty,
     pub(super) applied_parameters: Vec<Ty>,
     pub(super) applied_result: Ty,
+    /// The property whose accessor this implementation overrides. `None` for a function.
+    ///
+    /// A public interface property is serialized as an accessor signature, not a public function
+    /// signature. The edge is still that property: backends dispatch it through the property
+    /// override table, keyed by the accessor the provider published.
+    pub(super) property: Option<OverriddenProperty>,
+}
+
+/// The property side of [`MemberOverride`] when the overridden declaration is an accessor.
+#[derive(Clone)]
+pub(super) struct OverriddenProperty {
+    pub(super) name: String,
+    /// The implementation accessor is the property's setter. A getter leaves this false.
+    pub(super) setter: bool,
 }
 
 /// `parameters` and `result` after substituting each declaring type parameter in `formals` with
@@ -264,6 +278,8 @@ pub(super) fn realized_member_override(
         declared_result,
         applied_parameters,
         applied_result,
+        // Object literals publish the property edge themselves; this record is the signature.
+        property: None,
     })
 }
 
@@ -850,15 +866,25 @@ fn members_and_storage<'a>(
             KlibIrMember::Function(id) => {
                 let function = arena.function(*id);
                 if !function.constructor {
-                    members.push(prepare_member(arena, function, scope, false)?);
+                    members.push(prepare_member(arena, function, scope, None)?);
                 }
             }
             KlibIrMember::Property(property) => {
                 if let Some(id) = property.getter {
-                    members.push(prepare_member(arena, arena.function(id), scope, false)?);
+                    members.push(prepare_member(
+                        arena,
+                        arena.function(id),
+                        scope,
+                        Some((property.name.as_str(), false)),
+                    )?);
                 }
                 if let Some(id) = property.setter {
-                    members.push(prepare_member(arena, arena.function(id), scope, true)?);
+                    members.push(prepare_member(
+                        arena,
+                        arena.function(id),
+                        scope,
+                        Some((property.name.as_str(), true)),
+                    )?);
                 }
             }
             KlibIrMember::Field(_) | KlibIrMember::AnonymousInitializer { .. } => {}
@@ -883,7 +909,7 @@ fn prepare_member<'a>(
     arena: &'a KlibIrArena,
     function: &'a KlibIrFunction,
     scope: &MemberScope<'_>,
-    setter: bool,
+    property: Option<(&str, bool)>,
 ) -> Result<PreparedMember<'a>, KlibBodyDeclineReason> {
     let statements = match &function.body {
         Some(KlibIrBody::Block(statements)) => statements.as_slice(),
@@ -897,15 +923,16 @@ fn prepare_member<'a>(
         symbol: &function.base.symbol,
         statements,
         header: local_member_header(function, arena, scope.types, scope.self_type, scope.resolve)?,
-        overrides: member_overrides(function, scope)?,
+        overrides: member_overrides(function, scope, property)?,
         visibility: declaration_visibility(function.base.flags),
-        setter,
+        setter: property.is_some_and(|(_, setter)| setter),
     })
 }
 
 fn member_overrides(
     function: &KlibIrFunction,
     scope: &MemberScope<'_>,
+    property: Option<(&str, bool)>,
 ) -> Result<Vec<MemberOverride>, KlibBodyDeclineReason> {
     let mut overrides = Vec::with_capacity(function.overridden.len());
     for symbol in &function.overridden {
@@ -914,10 +941,30 @@ fn member_overrides(
                 "an override of a declaration other than a function",
             ));
         }
-        let KlibIrSignature::Public(signature) = &symbol.signature else {
-            return Err(unsupported("an override of a non-public declaration"));
+        // A public function is a public signature. A public property's getter or setter is an
+        // accessor signature: that is the declaration the interface publishes, not a file-local
+        // symbol. Only a file-local symbol is a non-public declaration.
+        let (declaration, overridden_property) = match (&symbol.signature, property) {
+            (KlibIrSignature::Public(signature), None) => {
+                (KlibDeclarationSignature::Public(signature.clone()), None)
+            }
+            (KlibIrSignature::Public(_), Some(_)) => {
+                return Err(mismatch("a property overrides a function"));
+            }
+            (KlibIrSignature::Accessor(signature), Some((name, setter))) => (
+                KlibDeclarationSignature::Accessor(signature.clone()),
+                Some(OverriddenProperty {
+                    name: name.to_owned(),
+                    setter,
+                }),
+            ),
+            (KlibIrSignature::Accessor(_), None) => {
+                return Err(mismatch("a function overrides a property"));
+            }
+            (KlibIrSignature::FileLocal { .. }, _) => {
+                return Err(unsupported("an override of a non-public declaration"));
+            }
         };
-        let declaration = KlibDeclarationSignature::Public(signature.clone());
         let identity = match scope.bodies.linked_origin(scope.module, &declaration) {
             KlibCalleeOrigin::Exact(identity) => identity,
             KlibCalleeOrigin::Missing => {
@@ -997,6 +1044,7 @@ fn member_overrides(
             declared_result: declared_signature.result,
             applied_parameters,
             applied_result,
+            property: overridden_property,
         });
     }
     Ok(overrides)

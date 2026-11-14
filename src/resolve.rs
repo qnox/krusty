@@ -120,6 +120,7 @@ mod checker_symbol_queries;
 mod class_body_bindings;
 mod classifier_associated;
 mod classifier_binding;
+mod classifier_capture_types;
 mod collection_literals;
 mod common_classifier_views;
 #[cfg(test)]
@@ -337,6 +338,7 @@ use source_type_resolution::{
 };
 mod scope;
 mod selected_argument_commitment;
+mod selected_result_aliases;
 mod selected_result_publication;
 use selected_argument_commitment::{
     indexed_operator_argument_parameters, indexed_operator_argument_slots, SelectedArgumentBinding,

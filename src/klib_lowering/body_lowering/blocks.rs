@@ -7,17 +7,15 @@
 //! statement of another type to `Unit`. This module rebuilds the source shape from the statement
 //! forms, so a block lowers to the block checked FIR lowering produces for its source.
 
-use super::{mismatch, unsupported, BodyLowering, CallLinker, Lowered, LoweredFunction};
-use crate::ir::{ExprId, IrExpr, IrFile};
+use super::{mismatch, unsupported, BodyLowering, Lowered};
+use crate::ir::{ExprId, IrExpr};
 use crate::metadata::klib_ir::tree::{
-    KlibIrArena, KlibIrBranch, KlibIrExprId, KlibIrExprKind, KlibIrStatement, KlibIrTypeOperator,
+    KlibIrBranch, KlibIrExprId, KlibIrExprKind, KlibIrStatement, KlibIrTypeOperator,
 };
 use crate::metadata::klib_ir::KlibIrConstant;
 use crate::types::Ty;
 
 use super::super::decline::KlibBodyDeclineReason;
-use super::super::function_lowering::FunctionHeader;
-use super::super::ir_builtins::IrBuiltinOperators;
 
 impl BodyLowering<'_> {
     /// The function's body. Checked FIR lowering lowers a block body as the source block, typed
@@ -39,6 +37,7 @@ impl BodyLowering<'_> {
         });
         self.ir.callable_scopes.insert(source);
         self.ir.callable_scopes.insert(body);
+        self.publish_defaults()?;
         Ok(body)
     }
 
@@ -48,7 +47,7 @@ impl BodyLowering<'_> {
     /// A default of a proper subtype of the parameter's type, such as `joinToString`'s `", "` for
     /// its `CharSequence` separator, carries the coercion to the declared type that checked FIR
     /// lowering places on a source default.
-    fn default_value(mut self, default: KlibIrExprId, declared: Ty) -> Lowered<ExprId> {
+    fn default_value(&mut self, default: KlibIrExprId, declared: Ty) -> Lowered<ExprId> {
         let lowered = self.expression(default)?;
         let actual = self.lowered_type(lowered);
         if actual != declared && actual != Ty::Nothing && self.is_supertype_of(declared, actual) {
@@ -57,37 +56,32 @@ impl BodyLowering<'_> {
         }
         self.declared_lowered(lowered, declared)
     }
-}
 
-/// Publish the serialized parameter defaults of `function`, each lowered in the function's own
-/// frame, as checked FIR lowering publishes a source declaration's: one slot per parameter, and
-/// only when the declaration has a default at all.
-pub(in super::super) fn publish_parameter_defaults(
-    arena: &KlibIrArena,
-    function: LoweredFunction<'_>,
-    header: &FunctionHeader,
-    builtins: &IrBuiltinOperators,
-    ir: &mut IrFile,
-    linker: &mut dyn CallLinker,
-) -> Lowered<()> {
-    if header.defaults().iter().all(Option::is_none) {
-        return Ok(());
+    pub(super) fn publish_defaults(&mut self) -> Lowered<()> {
+        if self.header.defaults().iter().all(Option::is_none) {
+            return Ok(());
+        }
+        let pairs = self
+            .header
+            .defaults()
+            .iter()
+            .copied()
+            .zip(self.header.params().iter().copied())
+            .collect::<Vec<_>>();
+        let mut defaults = Vec::with_capacity(pairs.len());
+        for (default, declared) in pairs {
+            defaults.push(match default {
+                Some(default) => Some(self.default_value(default, declared)?),
+                None => None,
+            });
+        }
+        self.ir
+            .fn_params
+            .get_mut(&self.function.function)
+            .expect("a declared function publishes its parameters")
+            .defaults = Some(defaults);
+        Ok(())
     }
-    let mut defaults = Vec::with_capacity(header.params().len());
-    for (default, &declared) in header.defaults().iter().zip(header.params()) {
-        defaults.push(match *default {
-            Some(default) => Some(
-                BodyLowering::new(arena, function, header, builtins, ir, linker)
-                    .default_value(default, declared)?,
-            ),
-            None => None,
-        });
-    }
-    ir.fn_params
-        .get_mut(&function.function)
-        .expect("a declared function publishes its parameters")
-        .defaults = Some(defaults);
-    Ok(())
 }
 
 impl BodyLowering<'_> {

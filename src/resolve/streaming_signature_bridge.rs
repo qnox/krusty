@@ -65,6 +65,7 @@ mod value_parameter_publication;
 mod value_selection;
 mod vararg_constructor_property;
 
+use super::classifier_capture_types::*;
 use bound_local_alias_templates::BoundLocalAliasTemplates;
 use implicit_context_candidates::SignatureImplicitReceiver;
 use value_selection::{SelectedEnumEntry, SelectedValue};
@@ -107,6 +108,7 @@ struct ProductionSignatureSemantics<'a> {
     /// What each selected top-level call recorded, by call origin: its contract and the typealias
     /// it constructed through.
     selected_calls: selected_call_facts::SelectedCallFacts,
+    selected_aliases: super::selected_result_aliases::SelectedResultAliases,
     /// Typealias provenance recorded by the compact type-resolution operation that selected it.
     selected_types: selected_type_facts::SelectedTypeFacts,
     bound_local_alias_templates: BoundLocalAliasTemplates,
@@ -2455,110 +2457,6 @@ impl ProductionSignatureSemantics<'_> {
     }
 }
 
-fn semantic_classifier_self(signature: &ClassSig) -> Ty {
-    let own = signature
-        .type_params
-        .iter()
-        .enumerate()
-        .map(|(ordinal, parameter)| {
-            Ty::ty_param(
-                parameter,
-                signature
-                    .type_param_bounds
-                    .get(ordinal)
-                    .copied()
-                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
-            )
-        });
-    let captured = signature
-        .captured_type_parameters
-        .type_params
-        .iter()
-        .enumerate()
-        .map(|(ordinal, parameter)| {
-            Ty::ty_param(
-                parameter,
-                signature
-                    .captured_type_parameters
-                    .type_param_bounds
-                    .get(ordinal)
-                    .copied()
-                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
-            )
-        });
-    let arguments = own.chain(captured).collect::<Vec<_>>();
-    Ty::obj_args_name(signature.internal, &arguments)
-}
-
-/// Complete source classifier applications emitted by the transitional checked-signature table.
-/// Source syntax writes only an inner/local classifier's own arguments; the stable semantic type
-/// carries captured declaration arguments after them. Compact explicit-header resolution will
-/// eventually be the sole producer, but every signature crossing this bridge must already obey the
-/// final representation invariant.
-fn semantic_type_with_classifier_captures(table: &SymbolTable, ty: Ty) -> Ty {
-    match ty.kind() {
-        TyKind::Obj(owner, arguments) => {
-            let mut arguments = arguments
-                .iter()
-                .copied()
-                .map(|argument| semantic_type_with_classifier_captures(table, argument))
-                .collect::<Vec<_>>();
-            if let Some(classifier) = table.class_by_type_name(owner) {
-                let own = classifier.type_params.len();
-                let captured = &classifier.captured_type_parameters;
-                if arguments.len() >= own && arguments.len() < own + captured.type_params.len() {
-                    arguments.extend(
-                        captured
-                            .type_params
-                            .iter()
-                            .enumerate()
-                            .skip(arguments.len().saturating_sub(own))
-                            .map(|(ordinal, parameter)| {
-                                Ty::ty_param(
-                                    parameter,
-                                    captured
-                                        .type_param_bounds
-                                        .get(ordinal)
-                                        .copied()
-                                        .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
-                                )
-                            }),
-                    );
-                }
-            }
-            Ty::obj_args_name(owner, &arguments)
-        }
-        TyKind::Fun(function) => Ty::fun_with_shape(
-            function
-                .params
-                .iter()
-                .copied()
-                .map(|parameter| semantic_type_with_classifier_captures(table, parameter))
-                .collect(),
-            semantic_type_with_classifier_captures(table, function.ret),
-            function.context_count,
-            function.has_receiver,
-            function.suspend,
-        ),
-        TyKind::Nullable(inner) => {
-            Ty::nullable(semantic_type_with_classifier_captures(table, inner))
-        }
-        TyKind::PlatformNullable(inner) => {
-            Ty::platform_nullable(semantic_type_with_classifier_captures(table, inner))
-        }
-        TyKind::InProjection(inner) => {
-            Ty::in_projection(semantic_type_with_classifier_captures(table, inner))
-        }
-        TyKind::OutProjection(inner) => {
-            Ty::out_projection(semantic_type_with_classifier_captures(table, inner))
-        }
-        TyKind::StarProjection(inner) => {
-            Ty::star_projection(semantic_type_with_classifier_captures(table, inner))
-        }
-        _ => ty,
-    }
-}
-
 /// Revalidate the completed semantic parent graph after body-local aliases have been expanded.
 /// The transitional collector cannot resolve a statement-local alias and therefore cannot see a
 /// cycle expressed through one; conversely, its unresolved spelling must not cause a valid compact
@@ -3291,6 +3189,7 @@ pub(crate) fn finalized_streamed_signature_index(
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_calls: selected_call_facts::SelectedCallFacts::default(),
+        selected_aliases: Default::default(),
         selected_types: selected_types.clone(),
         bound_local_alias_templates: bound_local_alias_templates.clone(),
         source_contracts: RefCell::new(HashMap::default()),
@@ -3935,7 +3834,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 backing_field_declarations.push(stub.id);
             }
         } else {
-            let Ok(signature) = crate::fir::ResolvedSignature::new(parameters, result) else {
+            let Ok(mut signature) = crate::fir::ResolvedSignature::new(parameters, result) else {
                 crate::trace_compiler!(
                     "fir",
                     "signature finalization declined {:?}: explicit signature is unpublishable",
@@ -3944,6 +3843,11 @@ pub(crate) fn finalized_streamed_signature_index(
                 failed.push(stub.id);
                 continue;
             };
+            signature.declared_result_alias = result_type.and_then(|syntax| {
+                super::type_spellings::written_alias_application(&headers.syntax, syntax, |ty| {
+                    explicit_type_semantics.selected_types.spelling(ty)
+                })
+            });
             inferred_parameters.insert(stub.id, signature.parameters.clone());
             explicit.push((stub.id, signature));
         }
@@ -4065,6 +3969,7 @@ pub(crate) fn finalized_streamed_signature_index(
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_calls: selected_call_facts::SelectedCallFacts::default(),
+        selected_aliases: Default::default(),
         selected_types,
         bound_local_alias_templates,
         source_contracts: RefCell::new(HashMap::default()),

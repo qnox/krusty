@@ -141,6 +141,77 @@ impl<'u, 's> Linker<'u, 's> {
         Ok(())
     }
 
+    /// Materialize the public class declaring `selected`, a constructor or member of it, once.
+    /// Answers whether this path materializes that class. A class this path does not materialize
+    /// is `Ok(false)`, not a decline: the call keeps its existing realization.
+    pub(super) fn materialize_declaring_class(
+        &mut self,
+        ir: &mut IrFile,
+        selected: KlibBodyCallable<'_>,
+    ) -> Result<bool, KlibBodyDeclineReason> {
+        let (module, primary) = {
+            let header = super::super::class_headers::authenticate(selected, self.sources.bodies)?;
+            let Some(primary) = header.contract.primary_constructor.clone() else {
+                return Ok(false);
+            };
+            (header.contract.module.clone(), primary)
+        };
+        let constructor = KlibDependencyCallable {
+            module,
+            declaration: crate::libraries::KlibDeclarationSignature::Public(primary),
+        };
+        if self.classes.contains_key(&constructor) {
+            return Ok(true);
+        }
+        let selected_constructor = {
+            let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(&constructor)
+            else {
+                return Ok(false);
+            };
+            let Some(selected_constructor) = callables.first().copied() else {
+                return Ok(false);
+            };
+            selected_constructor
+        };
+        self.materialize_class(ir, &constructor, selected_constructor)?;
+        Ok(self.classes.contains_key(&constructor))
+    }
+
+    /// Install the final class that declares `identity` when this path materializes it.
+    ///
+    /// The provider record is the declaration a checked call would use. A class the path does not
+    /// materialize, including a value class, a builtin and a class whose representation the target
+    /// owns, leaves the call on its existing path: a second layout of a class the target already
+    /// lays out would read the target's instances through fields they do not have.
+    pub(super) fn materialize_reached_member(
+        &mut self,
+        ir: &mut IrFile,
+        identity: &KlibDependencyCallable,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        let Some((_, realization)) = self
+            .sources
+            .declarations
+            .external_callable_by_dependency(identity)
+        else {
+            return Ok(());
+        };
+        let Some(callable) = realization.klib_body_callable() else {
+            return Ok(());
+        };
+        if callable.kind() != crate::libraries::ExternalCallableKind::Member {
+            return Ok(());
+        }
+        if !callable.class_contract().is_some_and(|class| {
+            !class.is_value
+                && !class.is_builtin_type()
+                && !self.sources.callees.target_represents(class.classifier)
+        }) {
+            return Ok(());
+        }
+        self.materialize_declaring_class(ir, callable)?;
+        Ok(())
+    }
+
     /// The class `plan` initializes, with its storage and its primary constructor's parameters
     /// when it has one.
     fn declare_materialized_class(

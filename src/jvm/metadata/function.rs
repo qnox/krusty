@@ -164,6 +164,8 @@ struct FunctionExtras {
     reified_type_parameter_ordinals: Vec<u32>,
     /// Compiler-known strict-equality parameter refinement decoded from fields 9/10.
     equality_bound: Option<Ty>,
+    /// The typealias the declared return type was spelled through (`fun f(): Names`).
+    ret_alias: Option<crate::libraries::DeclaredResultAlias>,
     /// `@SinceKotlin` version. A callable newer than the compilation's API level is not a candidate.
     since_kotlin: Option<LanguageVersion>,
     /// `@DeprecatedSinceKotlin(hiddenSince)` version. The declaration is no longer a candidate at
@@ -183,6 +185,7 @@ pub(super) struct DecodedFunction {
     pub flags: MfnFlags,
     pub receiver_class: Option<TypeName>,
     pub ret_class: Option<TypeName>,
+    pub ret_alias: Option<crate::libraries::DeclaredResultAlias>,
     pub value_params: Vec<MetaValueParam>,
     pub generic_sig: Option<GenericSig>,
     pub contract: Option<Arc<crate::contracts::Contract>>,
@@ -197,36 +200,19 @@ pub(super) struct DecodedFunction {
     pub hidden_since: Option<LanguageVersion>,
 }
 
-fn pack_extras(
-    context_params: Vec<MetaValueParam>,
-    context_parameter_kinds: Vec<ContextParameterKind>,
-    only_input_type_formals: Vec<String>,
-    reified_type_parameter_ordinals: Vec<u32>,
-    equality_bound: Option<Ty>,
-    since_kotlin: Option<LanguageVersion>,
-    hidden_since: Option<LanguageVersion>,
-) -> Option<Box<FunctionExtras>> {
-    if context_params.is_empty()
-        && context_parameter_kinds.is_empty()
-        && only_input_type_formals.is_empty()
-        && reified_type_parameter_ordinals.is_empty()
-        && equality_bound.is_none()
-        && since_kotlin.is_none()
-        && hidden_since.is_none()
-    {
-        None
-    } else {
-        Some(Box::new(FunctionExtras {
-            context_params,
-            context_parameter_kinds,
-            only_input_type_formals,
-            reified_type_parameter_ordinals,
-            equality_bound,
-            since_kotlin,
-            hidden_since,
-            deprecation: None,
-        }))
-    }
+/// The extras a function carries, or `None` when every one of them is empty, so a plain function
+/// pays for no allocation.
+fn pack_extras(extras: FunctionExtras) -> Option<Box<FunctionExtras>> {
+    let empty = extras.context_params.is_empty()
+        && extras.context_parameter_kinds.is_empty()
+        && extras.only_input_type_formals.is_empty()
+        && extras.reified_type_parameter_ordinals.is_empty()
+        && extras.equality_bound.is_none()
+        && extras.ret_alias.is_none()
+        && extras.since_kotlin.is_none()
+        && extras.hidden_since.is_none()
+        && extras.deprecation.is_none();
+    (!empty).then(|| Box::new(extras))
 }
 
 impl MetaFn {
@@ -244,15 +230,17 @@ impl MetaFn {
             contract: decoded.contract,
             return_value_status: decoded.return_value_status,
             annotations: decoded.annotations,
-            extras: pack_extras(
-                decoded.context_params,
-                decoded.context_parameter_kinds,
-                decoded.only_input_type_formals,
-                decoded.reified_type_parameter_ordinals,
-                decoded.equality_bound,
-                decoded.since_kotlin,
-                decoded.hidden_since,
-            ),
+            extras: pack_extras(FunctionExtras {
+                context_params: decoded.context_params,
+                context_parameter_kinds: decoded.context_parameter_kinds,
+                only_input_type_formals: decoded.only_input_type_formals,
+                reified_type_parameter_ordinals: decoded.reified_type_parameter_ordinals,
+                equality_bound: decoded.equality_bound,
+                ret_alias: decoded.ret_alias,
+                since_kotlin: decoded.since_kotlin,
+                hidden_since: decoded.hidden_since,
+                deprecation: None,
+            }),
         }
     }
 
@@ -319,6 +307,11 @@ impl MetaFn {
     #[inline]
     pub fn deprecated_hidden(&self) -> bool {
         self.flags.has(MfnFlags::DEPRECATED_HIDDEN)
+    }
+
+    /// The typealias this function's declared return type was spelled through, if any.
+    pub fn ret_alias(&self) -> Option<crate::libraries::DeclaredResultAlias> {
+        self.extras.as_ref().and_then(|extras| extras.ret_alias)
     }
 
     /// `@SinceKotlin` on this declaration. Absent means the callable is available at every API level.
@@ -481,6 +474,7 @@ pub(super) mod tests {
             flags: MfnFlags::default(),
             receiver_class: None,
             ret_class: None,
+            ret_alias: None,
             value_params: Vec::new(),
             generic_sig: None,
             contract: None,

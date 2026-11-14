@@ -12,8 +12,8 @@ use crate::fx_hash::{HashMap, HashSet};
 use std::collections::VecDeque;
 
 use super::body_lowering::{
-    publish_parameter_defaults, BodyLowering, CallLinker, LinkedAccessor, LinkedAccessorTarget,
-    LinkedCallableReference, LinkedCallee, LinkedConstructor, LoweredFunction,
+    BodyLowering, CallLinker, LinkedAccessor, LinkedAccessorTarget, LinkedCallableReference,
+    LinkedCallee, LinkedConstructor, LoweredFunction,
 };
 use super::callee_facts::{KlibCalleeFact, KlibCalleeFacts};
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
@@ -770,17 +770,6 @@ impl DependencyBodyUnit {
                         lowering.reading_local_fields(member).body(body.statements)
                     }
                 }
-                .and_then(|lowered| {
-                    publish_parameter_defaults(
-                        body.arena,
-                        function,
-                        &body.header,
-                        &self.builtins,
-                        &mut self.ir,
-                        &mut linker,
-                    )
-                    .map(|()| lowered)
-                })
             } else {
                 match (&body.initialization, &body.value_member) {
                     (Some((class, plan)), _) => lowering.initialize_class(*class, plan),
@@ -789,18 +778,7 @@ impl DependencyBodyUnit {
                             .reading_through(member.class, &member.fields, member.contract.is_value)
                             .body(body.statements),
                         None => lowering.body(body.statements),
-                    }
-                    .and_then(|lowered| {
-                        publish_parameter_defaults(
-                            body.arena,
-                            function,
-                            &body.header,
-                            &self.builtins,
-                            &mut self.ir,
-                            &mut linker,
-                        )
-                        .map(|()| lowered)
-                    }),
+                    },
                 }
             }
             .map_err(|reason| match reason {
@@ -1033,6 +1011,21 @@ impl CallLinker for Linker<'_, '_> {
         signature: &KlibIrSignature,
     ) -> Result<Option<TypeName>, KlibBodyDeclineReason> {
         super::same_library_class::classifier(self.sources.bodies, &self.active_module, signature)
+    }
+
+    /// The primary constructor of a class this unit has already materialized, when `callee` is it.
+    fn installed_public_constructor(
+        &self,
+        callee: &KlibPublicIdSignature,
+    ) -> Option<super::same_library_class::LocalConstructor> {
+        let wanted = KlibIrSignature::Public(callee.clone());
+        self.local_classes
+            .values()
+            .find(|class| class.constructor == wanted)
+            .map(|class| super::same_library_class::LocalConstructor {
+                declaration: class.declaration.clone(),
+                access: class.access,
+            })
     }
 
     fn link_local_constructor(
@@ -1298,6 +1291,8 @@ impl CallLinker for Linker<'_, '_> {
                 )))
             }
         };
+        // A property of a final class this path materializes, installed with that class.
+        self.materialize_reached_member(ir, &identity)?;
         // A materialized class's accessor was installed with its class.
         if let Some((linked, setter)) = self.installed_member(ir, &identity)? {
             let Callee::Local(function) = linked.callee else {
@@ -1583,6 +1578,13 @@ impl CallLinker for Linker<'_, '_> {
             {
                 return Ok(linked);
             }
+        }
+        // A final class's own member, such as `Pair.component2`, is installed with the class.
+        // An override of `kotlin.Any` stays with the target and does not keep the class from
+        // materializing. A class of another shape is left unchanged.
+        if declaration.dispatch_receiver.is_some() {
+            self.materialize_reached_member(ir, &identity)
+                .map_err(callee_declined)?;
         }
         if let Some((linked, _)) = self
             .installed_member(ir, &identity)
