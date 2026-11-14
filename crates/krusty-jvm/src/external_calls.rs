@@ -1094,6 +1094,7 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::Indices(_)
                 | krusty::libraries::CompilerIntrinsic::UnsignedCompare { .. }
                 | krusty::libraries::CompilerIntrinsic::PrimitiveIteratorNext
+                | krusty::libraries::CompilerIntrinsic::ResultFailureException
                 | krusty::libraries::CompilerIntrinsic::NumericConversion
                 | krusty::libraries::CompilerIntrinsic::PrimitiveUnary(_)
                 | krusty::libraries::CompilerIntrinsic::PrimitiveCompare
