@@ -14,8 +14,14 @@ use crate::symbol_source::SymbolSource;
 pub(super) fn record_checked(
     callables: &mut CheckedBackendCallables,
     ir: &crate::ir::IrFile,
+    source: &dyn crate::symbol_source::SymbolSource,
 ) -> Result<(), crate::fir::ExternalCallableId> {
-    callables.record_checked_builtin_implementations(&ir.external_builtin_implementations)
+    let implementations = crate::resolve::for_checked_external_members(
+        source,
+        callables.external_member_identities(),
+        &ir.external_builtin_implementations,
+    )?;
+    callables.record_checked_builtin_implementations(&implementations)
 }
 
 /// Record builtin implementations for generated KLIB support calls that have no source checker

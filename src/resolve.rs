@@ -39,6 +39,7 @@ use argument_parameter_mapping::{
     call_argument_parameter_indices, call_argument_parameter_indices_result,
     named_whole_array_varargs,
 };
+pub(crate) use builtin_implementation::for_checked_external_members;
 mod call_site_publication;
 mod constructor_references;
 mod implicit_source_member_lambda;

@@ -1025,6 +1025,24 @@ impl CheckedBackendCallables {
         self.callables.get(&identity)
     }
 
+    /// The exact external members referenced by this checked IR unit, in stable identity order.
+    pub(crate) fn external_member_identities(&self) -> Vec<ExternalCallableId> {
+        let mut identities = self
+            .callables
+            .iter()
+            .filter_map(|(&identity, callable)| {
+                (callable.kind == ExternalCallableKind::Member
+                    && matches!(
+                        callable.declaration_owner,
+                        Some(SemanticCallableOwner::Classifier(_))
+                    ))
+                .then_some(identity)
+            })
+            .collect::<Vec<_>>();
+        identities.sort_unstable_by_key(|identity| identity.raw());
+        identities
+    }
+
     /// The fact for a dependency property identity this file's IR holds. `None` means the identity
     /// is not one of this file's.
     pub fn property(&self, identity: ExternalPropertyId) -> Option<&BackendPropertyFact> {
