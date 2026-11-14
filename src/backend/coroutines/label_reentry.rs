@@ -161,6 +161,12 @@ impl Split<'_> {
                 let mut total = 0;
                 for &(condition, body) in branches {
                     if condition.is_some_and(|condition| self.suspends(ir, condition)) {
+                        crate::trace_compiler!(
+                            "suspend",
+                            "continuation splitter rejects suspension in when condition at statement={stmt} condition={condition:?} condition_node={:?} body={body} body_node={:?}",
+                            condition.map(|condition| ir.expr(condition)),
+                            ir.expr(body),
+                        );
                         return Err(ReentryDecline::UnsupportedSuspension);
                     }
                     total += self.count(ir, body)?;
@@ -171,11 +177,24 @@ impl Split<'_> {
                 cond, body, update, ..
             } => {
                 if self.suspends(ir, *cond) || update.is_some_and(|u| self.suspends(ir, u)) {
+                    crate::trace_compiler!(
+                        "suspend",
+                        "continuation splitter rejects suspension in while header at statement={stmt} condition={cond} condition_node={:?} update={update:?} update_node={:?} body={body} body_node={:?}",
+                        ir.expr(*cond),
+                        update.map(|update| ir.expr(update)),
+                        ir.expr(*body),
+                    );
                     return Err(ReentryDecline::UnsupportedSuspension);
                 }
                 self.count(ir, *body)
             }
-            _ => Err(ReentryDecline::UnsupportedSuspension),
+            node => {
+                crate::trace_compiler!(
+                    "suspend",
+                    "continuation splitter cannot classify suspension-bearing statement={stmt} node={node:?}",
+                );
+                Err(ReentryDecline::UnsupportedSuspension)
+            }
         }
     }
 
