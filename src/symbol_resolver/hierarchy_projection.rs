@@ -276,100 +276,14 @@ pub(super) fn projected_supertypes(
     classifier: &crate::libraries::LibraryType,
     ty: Ty,
 ) -> Vec<Ty> {
-    if !super::raw_member_view::is_raw_receiver(ty) || classifier.supertype_templates.is_empty() {
-        return direct_supertypes_from_classifier(classifier, ty);
-    }
-    let formals = classifier.type_params();
-    let arguments = ty.non_null().type_args();
-    let raw_argument = |argument: Ty| match argument.kind() {
-        TyKind::TyParam(name, _) | TyKind::Var(name, _) => formals
-            .iter()
-            .position(|formal| *formal == *name)
-            .and_then(|index| arguments.get(index).copied()),
-        _ => None,
-    };
-    classifier
-        .supertype_templates
-        .iter()
-        .zip(direct_supertypes_from_classifier(classifier, ty))
-        .map(|(template, applied)| match template.kind() {
-            // `Parent<C>` keeps `C`'s raw argument, so the inherited members read `C`'s erasure
-            // before they are erased in turn.
-            TyKind::Obj(name, template_arguments) if !template_arguments.is_empty() => {
-                match template_arguments
-                    .iter()
-                    .map(|argument| raw_argument(*argument))
-                    .collect::<Option<Vec<_>>>()
-                {
-                    Some(raw) => Ty::obj_args_name(name, &raw),
-                    None => super::raw_member_view::erase(source, applied),
-                }
-            }
-            _ => applied,
-        })
-        .collect()
-}
-
-pub(super) fn direct_supertypes_from_classifier(
-    classifier: &crate::libraries::LibraryType,
-    ty: Ty,
-) -> Vec<Ty> {
-    if classifier.supertype_templates.is_empty() {
-        return classifier.supertypes.iter_ids().map(Ty::obj_name).collect();
-    }
-    // Formals are a handful of declaration names. Scanning them keeps the applied argument and
-    // leaves an unbound lexical variable alone, without cloning those names into a map on every
-    // hierarchy step.
-    let formals = classifier.type_params();
-    let bounds = classifier.type_param_bounds();
-    let arguments = ty.type_args();
-    let any = Ty::obj_name(crate::types::wk::any());
-    let applied = classifier
-        .supertype_templates
-        .iter()
-        // A local/anonymous classifier's supertype may mention type variables owned by its
-        // enclosing declaration. Apply only this classifier's arguments; erasing every other
-        // symbolic variable loses the lexical type (`object : Converter<Box<T>, T>` became
-        // `Converter<Box<Any>, Any>` during the hierarchy walk).
-        // Applied arguments were already validated against this classifier's bounds when the type
-        // was FORMED, so re-narrowing them here only loses information. It lost nullability in
-        // particular — a Java class's type parameters carry a non-null upper bound (a Java type
-        // variable has no nullability), so projecting `HashMap<String, Any?>` onto its `Map<K, V>`
-        // template produced `Map<String, Any>` and every member reached through the supertype then
-        // rejected a nullable argument.
-        //
-        // A template occurrence that is non-null although its formal's declared bound admits null
-        // is a written `W & Any` (`open class B<W> : ColumnType<W & Any>()`), so it still reads the
-        // argument's definitely-non-null form: `B<String?>` is a `ColumnType<String>`.
-        .map(|supertype| {
-            crate::types::ty_subst_supertype_template(
-                *supertype,
-                |name| {
-                    formals
-                        .iter()
-                        .position(|formal| formal == name)
-                        .map(|index| arguments.get(index).copied().unwrap_or(any))
-                },
-                |name| {
-                    formals
-                        .iter()
-                        .position(|formal| formal == name)
-                        .and_then(|index| bounds.get(index))
-                        .is_some_and(|declared| {
-                            declared.iter().all(|bound| bound.upper_bound_admits_null())
-                        })
-                },
+    crate::assignable::classifier_supertypes(classifier, ty, &|owner| {
+        source.classifier(owner).map(|shape| {
+            (
+                shape.type_params().clone(),
+                shape.type_param_bounds().clone(),
             )
         })
-        .collect::<Vec<_>>();
-    crate::trace_compiler!(
-        "supertype",
-        "direct supertypes ty={ty:?} formals={:?} args={:?} templates={:?} applied={applied:?}",
-        classifier.type_params,
-        arguments,
-        classifier.supertype_templates,
-    );
-    applied
+    })
 }
 
 /// The nearest companion instance contributed by a classifier receiver tower. Kotlin constructor
@@ -608,7 +522,7 @@ mod tests {
         let applied = Ty::obj_args("sample/Box", &[Ty::String]);
 
         assert_eq!(
-            direct_supertypes_from_classifier(&classifier, applied),
+            crate::assignable::classifier_supertypes(&classifier, applied, &|_| None),
             vec![Ty::obj("kotlin/Any")]
         );
     }
@@ -628,7 +542,7 @@ mod tests {
         let applied = Ty::obj_args("java/util/HashMap", &[Ty::String, Ty::nullable(any)]);
 
         assert_eq!(
-            direct_supertypes_from_classifier(&classifier, applied),
+            crate::assignable::classifier_supertypes(&classifier, applied, &|_| None),
             vec![Ty::obj_args(
                 "java/util/Map",
                 &[Ty::String, Ty::nullable(any)]
@@ -648,7 +562,7 @@ mod tests {
         )];
 
         assert_eq!(
-            direct_supertypes_from_classifier(&classifier, Ty::obj("sample/Raw")),
+            crate::assignable::classifier_supertypes(&classifier, Ty::obj("sample/Raw"), &|_| None,),
             vec![Ty::obj_args("kotlin/collections/List", &[any])]
         );
     }
