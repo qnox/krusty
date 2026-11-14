@@ -714,3 +714,13 @@ fn native_generic_elvis_preserves_its_non_null_type_parameter() {
         .expect("pinned kotlinc must run the whole generic Elvis module graph");
     assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
 }
+
+#[test]
+fn native_string_comparison_runs_the_whole_portable_program_through_klib() {
+    let source = include_str!("box_regressions/stringCompareTo.kt");
+    assert_eq!(
+        run_native_portable_box(source, "StringComparisonProgram"),
+        Outcome::Pass,
+        "the Native KLIB driver must run every comparison control"
+    );
+}

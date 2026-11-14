@@ -97,7 +97,7 @@ fn may_supply_inherited_implementation(
 /// belong to a superclass (not an interface) which inherits the first one's owner. Such a
 /// superclass member itself overrides that declaration, so the declaration reaches the
 /// implementation through the superclass chain rather than first at the implementation.
-fn has_kotlin_superclass_override(
+pub(super) fn has_kotlin_superclass_override(
     source: &dyn SymbolSource,
     overridden: impl Iterator<Item = (crate::types::TypeName, bool)>,
 ) -> Vec<bool> {
@@ -309,7 +309,7 @@ pub(super) fn declared_functions(
 /// Declarations that may be the target of a source override. Keep this distinct from
 /// [`declared_functions`]: bridge planning also asks for an implementation's declaration, and an
 /// overriding implementation is final by default even though its own super target must be open.
-fn overridable_declared_functions(
+pub(super) fn overridable_declared_functions(
     source: &dyn crate::symbol_source::SymbolSource,
     receiver: Ty,
     name: &str,

@@ -2880,15 +2880,16 @@ fn emit_interface_class(
     env.inner_classes.register(&mut cw);
     let mut default_impls: Option<ClassWriter> = None;
     // Whether this compilation publishes the `<Iface>$DefaultImpls` compatibility holder at all.
-    let emits_default_impls = opts.jvm_default != JvmDefaultMode::NoCompatibility;
+    let jvm_default = crate::declared_jvm_default::of_class(c, opts.jvm_default);
+    let emits_default_impls = jvm_default != JvmDefaultMode::NoCompatibility;
     // `disable` puts NO body on the interface: every member is abstract and the bodies live on the
     // holder as statics taking the receiver as parameter 0. The other two modes emit the body here as
     // a JVM default method.
-    let bodies_on_interface = opts.jvm_default != JvmDefaultMode::Disable;
+    let bodies_on_interface = jvm_default != JvmDefaultMode::Disable;
     // `enable` additionally publishes the compatibility surface next to each default method: an
     // `access$<name>$jd` bridge on the interface (emitted after every member, kotlinc's order) and a
     // holder forward per non-private body.
-    let enable_compat = opts.jvm_default == JvmDefaultMode::Enable;
+    let enable_compat = jvm_default == JvmDefaultMode::Enable;
     let mut jd_bridge_fids: Vec<u32> = Vec::new();
     // kotlinc emits interface members in SOURCE order — a property's accessors sit at the
     // property's declared position among the functions — while lowering registers declared

@@ -118,15 +118,13 @@ fn every_primitive_compares_through_its_own_comparable_override() {
                 declaration.identity.params.as_ref(),
                 [implementation.receiver]
             );
-            // A string and an unsigned integer compare in a body of their own.
-            let has_body = matches!(
-                implementation.receiver,
-                Ty::String | Ty::UByte | Ty::UShort | Ty::UInt | Ty::ULong
-            );
-            assert_eq!(
-                operation(&declaration.callable),
-                (!has_body).then_some(CompilerIntrinsic::PrimitiveCompare)
-            );
+            let expected = match implementation.receiver {
+                Ty::String => Some(CompilerIntrinsic::StringCompare),
+                // Unsigned integers compare in their own library bodies.
+                Ty::UByte | Ty::UShort | Ty::UInt | Ty::ULong => None,
+                _ => Some(CompilerIntrinsic::PrimitiveCompare),
+            };
+            assert_eq!(operation(&declaration.callable), expected);
         }
     }
 }
