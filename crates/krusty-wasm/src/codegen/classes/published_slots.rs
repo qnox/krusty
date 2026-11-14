@@ -1,7 +1,7 @@
 //! Declaration-owned slot identities retained with a physical class layout.
 
 use krusty::backend::class_tables::{ClassTable, SlotKey};
-use krusty::backend::interface_identity::{member_identity, property_member_identity};
+use krusty::backend::interface_identity::property_member_identity;
 use krusty::backend::{CheckedBackendCallables, DependencyExportSignatures};
 use krusty::fir::ResolvedPropertyOverrideTarget;
 use krusty::fx_hash::HashMap;
@@ -21,9 +21,7 @@ pub(super) fn record(
     for (member, &slot) in &table.slots {
         let identity = match member {
             SlotKey::Any(_) => None,
-            SlotKey::Function(function) => {
-                exports.member_declaration(*function).map(member_identity)
-            }
+            SlotKey::Function(function) => exports.member_slot_identity(*function),
             SlotKey::Getter(property) | SlotKey::Setter(property) => {
                 let declaration = match property {
                     ResolvedPropertyOverrideTarget::Module(property) => {
