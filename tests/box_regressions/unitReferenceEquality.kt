@@ -15,5 +15,7 @@ fun box(): String {
     val absent: Unit? = null
     if (absent === unitValue("h")) return "null Unit"
     if (trace != "abcdefgh") return "null evaluation: $trace"
+    if (unitValue("i") == null || null == unitValue("j")) return "null guard"
+    if (trace != "abcdefghij") return "null guard evaluation: $trace"
     return "OK"
 }
