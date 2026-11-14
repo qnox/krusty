@@ -8,11 +8,11 @@ jobs:
     runs-on:
       - self-hosted
       - rust-4c-8gb
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: da3a393a04719c9346e5d3b3eacea1c4a8407157
+          ref: 997c481db3d604a45365f6e3087c15c1cd4455b6
           fetch-depth: 1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
@@ -41,7 +41,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence
-          source=da3a393a04719c9346e5d3b3eacea1c4a8407157
+          source=997c481db3d604a45365f6e3087c15c1cd4455b6
           actual=$(git rev-parse HEAD)
           test "$actual" = "$source"
           git diff --exit-code "$source" HEAD -- .
@@ -67,6 +67,18 @@ jobs:
             crates/krusty-native/runtime/krusty_lang.c \
             > evidence/native-runtime-c-preflight.log 2>&1
           cat evidence/native-runtime-c-preflight.log
+      - name: check all compiler library and test APIs
+        timeout-minutes: 35
+        run: |
+          set -uo pipefail
+          set +e
+          CARGO_BUILD_JOBS=1 cargo check \
+            -p krusty -p krusty-jvm -p krusty-native -p krusty-wasm \
+            --all-targets > evidence/compiler-api-check.log 2>&1
+          status=$?
+          printf '%s\n' "$status" > evidence/compiler-api-check.status
+          cat evidence/compiler-api-check.log
+          exit "$status"
       - name: build the conformance executable once
         timeout-minutes: 40
         run: |
