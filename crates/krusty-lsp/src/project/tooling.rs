@@ -511,7 +511,16 @@ fn is_tooling_api_jar(name: &str) -> bool {
 }
 
 fn maven_classpath_jars() -> io::Result<Vec<PathBuf>> {
-    jars_in(&maven_lib()?)
+    let lib = maven_lib()?;
+    let mut jars = jars_in(&lib)?;
+    // The embedder container loads plexus-classworlds from Maven's boot directory.
+    if let Some(home) = lib.parent() {
+        let boot = home.join("boot");
+        if boot.is_dir() {
+            jars.extend(jars_in(&boot)?);
+        }
+    }
+    Ok(jars)
 }
 
 fn maven_lib() -> io::Result<PathBuf> {
@@ -617,12 +626,17 @@ mod tests {
 
     #[test]
     fn the_maven_client_calls_the_resolver() {
-        assert!(MAVEN_CLIENT.contains("repositorySystem.resolveArtifact("));
+        assert!(MAVEN_CLIENT.contains("system.resolveArtifact("));
         assert!(MAVEN_CLIENT.contains("new ArtifactRequest("));
-        assert!(MAVEN_CLIENT.contains("repositorySystem.resolveDependencies("));
+        assert!(MAVEN_CLIENT.contains("system.resolveDependencies("));
         assert!(MAVEN_CLIENT.contains("new DependencyRequest("));
         assert!(MAVEN_CLIENT.contains("Maven3XServerEmbedder.resolveArtifacts"));
-        assert!(MAVEN_CLIENT.contains("system.newResolutionRepositories(session, added)"));
+        assert!(MAVEN_CLIENT.contains("DefaultRepositorySystemSessionFactory"));
+        assert!(MAVEN_CLIENT.contains("newRepositorySession"));
+        assert!(MAVEN_CLIENT.contains("populateFromSettings"));
+        assert!(MAVEN_CLIENT.contains("RepositoryUtils.toRepos"));
+        assert!(!MAVEN_CLIENT.contains("MavenRepositorySystemUtils.newSession"));
+        assert!(!MAVEN_CLIENT.contains("DefaultMirrorSelector"));
         assert!(!MAVEN_CLIENT.contains("ProcessBuilder"));
         assert!(!MAVEN_CLIENT.contains("mvn"));
         assert!(!MAVEN_CLIENT.contains("dependency:resolve"));
