@@ -612,6 +612,95 @@ pub(super) fn ordinary_roots<'a>(
     Ok(roots)
 }
 
+/// The dependency interface defaults the classes of `source` inherit without overriding, whose
+/// bodies implement those members for their instances. A default whose body lowering does not
+/// model is not support: a call through the member then declines, as one through a member the
+/// class implements with nothing does.
+pub(super) fn inherited_default_roots<'a>(
+    source: &'a CheckedIrFile<'_>,
+    superclass_defaults: &'a [crate::libraries::ExternalCallableRealization],
+    bodies: &KlibDeclarationBodies,
+) -> Result<Vec<KlibBodyCallable<'a>>, String> {
+    let mut defaults = source
+        .ir
+        .inherited_defaults
+        .values()
+        .flatten()
+        .filter_map(|default| match default.body {
+            crate::fir::InheritedDefaultBody::DependencyInterfaceMethod(declaration) => {
+                Some(declaration)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    defaults.sort_unstable_by_key(|target| target.raw());
+    defaults.dedup();
+    let mut roots = Vec::new();
+    for target in defaults {
+        let Some(selected) = source
+            .callables
+            .callable(target)
+            .ok_or("an inherited dependency default has no frozen fact")?
+            .klib_body_callable()
+        else {
+            continue;
+        };
+        if bodies.function_has_body(selected.identity()) == Some(true) {
+            roots.push(selected);
+        }
+    }
+    for realization in superclass_defaults {
+        let Some(selected) = realization.klib_body_callable() else {
+            continue;
+        };
+        if bodies.function_has_body(selected.identity()) == Some(true)
+            && !roots
+                .iter()
+                .any(|root| root.identity() == selected.identity())
+        {
+            roots.push(selected);
+        }
+    }
+    Ok(roots)
+}
+
+/// The defaults the dependency classes the classes of `source` extend inherit, as Pass 1 selected
+/// them: the support unit materializing such a class implements those members with them.
+pub(super) fn dependency_superclass_defaults(
+    platform: &dyn SemanticPlatform,
+    source: &CheckedIrFile<'_>,
+    module_facts: &crate::backend::BackendModuleFacts,
+) -> Result<Vec<crate::libraries::ExternalCallableRealization>, String> {
+    let mut seen = HashSet::default();
+    let mut targets = source
+        .ir
+        .classes
+        .iter()
+        .filter_map(|class| source.ir.classifier_hierarchies.get(&class.fq_name_id()))
+        .flatten()
+        .map(|ancestor| ancestor.classifier)
+        .filter(|&ancestor| module_facts.classifier(ancestor).is_none() && seen.insert(ancestor))
+        .filter_map(|ancestor| module_facts.inherited_defaults(ancestor))
+        .flatten()
+        .filter_map(|default| match default.body {
+            crate::fir::InheritedDefaultBody::DependencyInterfaceMethod(declaration) => {
+                Some(declaration)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    targets.sort_unstable_by_key(|target| target.raw());
+    targets.dedup();
+    targets
+        .into_iter()
+        .map(|target| {
+            platform
+                .external_callable(target)
+                .ok_or_else(|| "an inherited dependency default has no provider".to_owned())
+        })
+        .collect()
+}
+
 /// Whether `callable` is a member of a class which a support unit materializes and emits the
 /// member as a member of. A value class is materialized by its members; an ordinary class only by
 /// the admitted initialization of its primary constructor, the same plan lowering executes. A

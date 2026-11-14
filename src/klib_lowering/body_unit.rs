@@ -623,6 +623,18 @@ impl DependencyBodyUnit {
         }
     }
 
+    /// Record the interface defaults the materialized class `classifier` inherits without
+    /// overriding, which its instances implement those members with.
+    pub(crate) fn record_inherited_defaults(
+        &mut self,
+        classifier: TypeName,
+        defaults: &[crate::fir::ResolvedInheritedDefault],
+    ) {
+        self.ir
+            .inherited_defaults
+            .insert(classifier, defaults.to_vec());
+    }
+
     /// Consume the closed dependency-body unit after its roots and all reachable callees have
     /// lowered successfully.
     pub fn into_ir(self) -> IrFile {
@@ -2082,6 +2094,14 @@ impl<'s> Linker<'_, 's> {
             // A singleton edge reads the object it dispatches to, which its receiver proof
             // selects; no class is materialized for it.
             (Some(_), Some(selected)) if selected.singleton_dispatch().is_some() => None,
+            // An interface's default reads its receiver as whichever instance inherits it.
+            (Some(_), Some(selected))
+                if selected.class_contract().is_some_and(
+                    crate::libraries::KlibBodyClassContract::emits_default_members,
+                ) =>
+            {
+                None
+            }
             (Some(_), Some(selected)) => Some(self.materialize_member_class(ir, selected)?),
             (Some(_), None) => {
                 return Err(KlibBodyDeclineReason::SignatureMismatch(

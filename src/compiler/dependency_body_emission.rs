@@ -129,6 +129,32 @@ pub(super) fn emit_dependencies<B: Backend>(
             return Vec::new();
         }
     };
+    let superclass_defaults =
+        match emitted_roots::dependency_superclass_defaults(platform, source, module_facts) {
+            Ok(defaults) => defaults,
+            Err(error) => {
+                diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                return Vec::new();
+            }
+        };
+    let defaults =
+        match emitted_roots::inherited_default_roots(source, &superclass_defaults, bodies) {
+            Ok(defaults) => defaults,
+            Err(error) => {
+                diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                return Vec::new();
+            }
+        };
+    let mut default_roots = HashSet::default();
+    for default in defaults {
+        if !ordinary
+            .iter()
+            .any(|root| root.identity() == default.identity())
+        {
+            default_roots.insert(default.identity());
+            ordinary.push(default);
+        }
+    }
     // Category ownership is a declaration capability, not an emission-success test. An intrinsic
     // wrapper whose unsupported body transaction declines must not be retried as an ordinary body.
     let intrinsic_roots: HashSet<_> = roots.iter().map(|root| root.identity()).collect();
@@ -259,6 +285,13 @@ pub(super) fn emit_dependencies<B: Backend>(
                     crate::trace_compiler!("lower", "intrinsic support root declined: {decline}");
                     continue;
                 }
+                if default_roots.contains(callable.identity())
+                    && !decline.is_internal_inconsistency()
+                {
+                    // Likewise an inherited default: the backend declines a call through its member.
+                    crate::trace_compiler!("lower", "inherited default root declined: {decline}");
+                    continue;
+                }
                 diags.error(
                     Span::new(0, 0),
                     format!("cannot lower a selected KLIB dependency body: {decline}"),
@@ -311,6 +344,13 @@ pub(super) fn emit_dependencies<B: Backend>(
             .materialized_classes()
             .map(|(classifier, identity)| (classifier, identity.clone()))
             .collect::<Vec<_>>();
+        // A dependency class a module class extends implements the interface defaults Pass 1
+        // selected for it, as a source class does.
+        for (classifier, _) in &materialized {
+            if let Some(defaults) = module_facts.inherited_defaults(*classifier) {
+                unit.record_inherited_defaults(*classifier, defaults);
+            }
+        }
         for (classifier, identity) in &materialized {
             // Current-module representation facts take precedence in the checked backend view.
             // They cannot describe an unrelated imported class with the same unqualified key.

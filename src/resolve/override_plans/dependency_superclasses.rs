@@ -3,7 +3,8 @@
 //!
 //! A dependency class's members are numbered in every module that extends it, so its shape is
 //! read from its own declarations: its superclass, the members a subclass overrides or reaches by
-//! dispatch (open, abstract and overriding ones) in declaration order, and their override edges.
+//! dispatch (open, abstract and overriding ones) in declaration order, their override edges, and
+//! the interface defaults it inherits ([`super::inherited_defaults`]).
 //! The edges are selected by the rule that selects a module class's
 //! ([`super::append_function_override_edges`], [`super::append_property_override_edges`]), over
 //! the dependency class's own hierarchy applied to its own formals.
@@ -158,12 +159,45 @@ fn dependency_superclass(
     }
     function_overrides.sort_by_key(|edge| edge.depth);
     property_overrides.sort_by_key(|edge| edge.depth);
+    let interfaces = declaration
+        .supertypes
+        .iter()
+        .filter(|&supertype| {
+            source
+                .classifier(supertype)
+                .is_some_and(|record| record.is_interface())
+        })
+        .collect::<Vec<_>>();
+    let superclass_interfaces = superclass
+        .and_then(|superclass| {
+            hierarchy
+                .iter()
+                .find(|entry| entry.depth == 1 && entry.classifier == superclass)
+        })
+        .map_or_else(Vec::new, |entry| {
+            super::superclass_interfaces(source, entry.applied.get())
+        });
+    let inherited_defaults = super::inherited_defaults::inherited_defaults(
+        index,
+        source,
+        &super::inherited_defaults::ClassifierPlan {
+            classifier,
+            interfaces: &interfaces,
+            // A dependency class's delegations are members it declares.
+            delegations: &[],
+            hierarchy: &hierarchy,
+            superclass_interfaces: &superclass_interfaces,
+            functions: &function_overrides,
+            properties: &property_overrides,
+        },
+    );
     ResolvedDependencySuperclass {
         classifier,
         superclass,
         members: members.into_boxed_slice(),
         function_overrides: function_overrides.into_boxed_slice(),
         property_overrides: property_overrides.into_boxed_slice(),
+        inherited_defaults: inherited_defaults.into_boxed_slice(),
     }
 }
 

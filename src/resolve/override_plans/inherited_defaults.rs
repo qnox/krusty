@@ -21,7 +21,11 @@ use crate::types::{Ty, TypeName, Visibility};
 
 /// The override plan of one classifier, as its inherited defaults are selected from it.
 pub(super) struct ClassifierPlan<'a> {
-    pub(super) classifier: DeclarationId,
+    pub(super) classifier: TypeName,
+    /// Its declared direct superinterfaces, in declaration order.
+    pub(super) interfaces: &'a [TypeName],
+    /// The interfaces it implements by delegation (`interface I by delegate`).
+    pub(super) delegations: &'a [TypeName],
     pub(super) hierarchy: &'a [crate::fir::ResolvedAppliedClassifier],
     pub(super) superclass_interfaces: &'a [TypeName],
     pub(super) functions: &'a [ResolvedFunctionOverride],
@@ -34,15 +38,11 @@ pub(super) fn inherited_defaults(
     source: &dyn SymbolSource,
     plan: &ClassifierPlan<'_>,
 ) -> Vec<ResolvedInheritedDefault> {
-    let Some(header) = index.classifier_header(plan.classifier) else {
-        return Vec::new();
-    };
-    let owner = header.classifier;
-    let direct = header
+    let owner = plan.classifier;
+    let direct = plan
         .interfaces
         .iter()
-        .filter_map(|interface| interface.get().non_null().obj_internal())
-        .map(|interface| actualized(source, interface))
+        .map(|&interface| actualized(source, interface))
         .collect::<Vec<_>>();
     let closure = sorted_closure(source, &direct);
     if closure.is_empty() {
@@ -79,14 +79,7 @@ pub(super) fn inherited_defaults(
         }
     }
     // `interface I by delegate` implements every member of `I` and its ancestors by delegation.
-    let delegated = sorted_closure(
-        source,
-        &header
-            .interface_delegations
-            .iter()
-            .filter_map(|delegation| delegation.interface.get().non_null().obj_internal())
-            .collect::<Vec<_>>(),
-    );
+    let delegated = sorted_closure(source, plan.delegations);
     // A delegation also implements every slot of those interfaces that a sibling interface
     // redeclares with a body (`object : Base2, Base by delegate` where `Base2` overrides
     // `Base.test`): the delegate answers it.

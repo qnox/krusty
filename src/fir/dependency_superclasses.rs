@@ -3,8 +3,9 @@
 //! A module class whose superclass is a dependency class inherits that class's dispatch table, so a
 //! target that numbers slots itself numbers the dependency class too. Its shape is a semantic fact
 //! of the dependency declaration, the same for every module: its superclass, the members a subclass
-//! overrides or reaches by dispatch (open, abstract and overriding ones) in declaration order, and
-//! their override edges, selected by the same rule as a module class's. A backend reads it here and
+//! overrides or reaches by dispatch (open, abstract and overriding ones) in declaration order,
+//! their override edges, and the interface defaults it inherits, selected by the same rules as a
+//! module class's. A backend reads it here and
 //! never reopens the declaration provider.
 
 use super::{
@@ -24,6 +25,9 @@ pub struct ResolvedDependencySuperclass {
     /// The override edges of those members, whose implementations are this class's.
     pub function_overrides: Box<[ResolvedFunctionOverride]>,
     pub property_overrides: Box<[ResolvedPropertyOverride]>,
+    /// The interface defaults the class inherits without overriding beyond those its superclass
+    /// realizes, selected by the rule that selects a module class's.
+    pub inherited_defaults: Box<[super::ResolvedInheritedDefault]>,
 }
 
 /// A dispatched member of a dependency class, by its provider identity.

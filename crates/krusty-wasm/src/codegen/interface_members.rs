@@ -523,7 +523,18 @@ impl FileRecorder<'_, '_, '_> {
                 if !edge.overridden_is_interface {
                     continue;
                 }
-                let Some(member) = self.dependency_member(target, MemberRole::Function) else {
+                // An accessor overriding an interface property's implements that property's.
+                let role = match self
+                    .recording
+                    .callables
+                    .callable(target)
+                    .and_then(|fact| fact.klib_body_accessor.as_ref())
+                {
+                    Some(accessor) if accessor.is_setter() => MemberRole::Setter,
+                    Some(_) => MemberRole::Getter,
+                    None => MemberRole::Function,
+                };
+                let Some(member) = self.dependency_member(target, role) else {
                     continue;
                 };
                 let implemented = match self.function_edge_implementation(owner, edge, numbered) {

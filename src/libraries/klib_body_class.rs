@@ -53,6 +53,14 @@ impl KlibBodyClassContract {
             && self.parameters.formals.is_empty()
     }
 
+    /// Whether a support unit emits this classifier's members with a body as functions of their
+    /// receiver value: an interface, which lays out no instance of its own. Such a member is the
+    /// default a class inheriting it implements the interface member with, and a call of the
+    /// member still dispatches.
+    pub(crate) fn emits_default_members(&self) -> bool {
+        self.kind == super::TypeKind::Interface
+    }
+
     /// Whether a support unit materializes this class and emits its members as functions of the
     /// class it materializes: a value class, or a class or object without type parameters that
     /// is not sealed. A builtin type of the common type model is neither, and neither is

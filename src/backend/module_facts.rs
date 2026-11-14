@@ -562,6 +562,14 @@ impl BackendModuleFacts {
             );
             classifiers.insert(classifier.classifier, Arc::new(fact));
         }
+        // The dependency classes module classes extend are laid out where they are materialized,
+        // with the defaults Pass 1 selected for them.
+        for superclass in index.dependency_superclasses() {
+            if !superclass.inherited_defaults.is_empty() {
+                inherited_defaults
+                    .insert(superclass.classifier, superclass.inherited_defaults.clone());
+            }
+        }
         Ok(Self {
             classifiers,
             declaration_names,
@@ -718,8 +726,9 @@ impl BackendModuleFacts {
         &self.metadata_readable_value_classes
     }
 
-    /// The checked defaults `classifier` inherits without overriding, independent of which source
-    /// file is currently entering Pass 2.
+    /// The checked defaults `classifier`, a source classifier or a dependency class a module class
+    /// extends, inherits without overriding, independent of which source file is currently
+    /// entering Pass 2.
     pub fn inherited_defaults(
         &self,
         classifier: TypeName,
