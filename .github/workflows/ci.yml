@@ -46,7 +46,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence
-          source_pin=89da489ab366be7ff4eb5e773c34d7ee370f0e7e
+          source_pin=574077d937bc7390ed657db80c331f4a9cc57f2c
           test "$(git rev-parse HEAD^)" = "$source_pin"
           git diff --exit-code "$source_pin" HEAD -- . ':!.github/workflows/ci.yml'
           printf '%s\n' "$source_pin" > evidence/source-commit.txt
@@ -57,19 +57,6 @@ jobs:
             tests/box_regressions/libraryObjectMembers.kt \
             tests/box_regressions/multimodule/genericElvisNullProof.kt \
             > evidence/owned-fixtures.sha256
-      - name: build conformance executable once
-        timeout-minutes: 40
-        env:
-          CARGO_BUILD_JOBS: '1'
-        shell: bash
-        run: |
-          set -euo pipefail
-          CARGO_BUILD_JOBS=1 bash scripts/cargo-test-binary.sh conformance -p krusty --test conformance > evidence/build.log 2>&1
-          cat evidence/build.log
-          binary="$(tail -n 1 evidence/build.log)"
-          test -x "$binary"
-          cp "$binary" conformance-bin
-          sha256sum conformance-bin > evidence/conformance-binary.sha256
       - name: provision pinned Kotlin and target inputs
         shell: bash
         run: |
@@ -90,6 +77,53 @@ jobs:
             delegatedProperty/protectedVarWithPrivateSet.kt; do
             sha256sum "$(just box-corpus 2.4.0)/$fixture"
           done > evidence/upstream-fixtures.sha256
+      - name: syntax-check the Native runtime with build.rs target flags
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          compiler="${KRUSTY_RUNTIME_CC:-$(command -v clang)}"
+          common_flags=(
+            -std=c11 -ffreestanding -nostdlib -fno-pic -fno-stack-protector
+            -fno-asynchronous-unwind-tables -fno-unwind-tables -ffunction-sections -O2
+            -fsyntax-only
+          )
+          sources=(
+            krusty_rt.c krusty_unsigned_arrays.c krusty_collections.c krusty_maps.c
+            krusty_classes.c krusty_lang.c krusty_appendable.c krusty_fp.c krusty_gc.c
+            krusty_threads.c krusty_start.c krusty_posix_thread.c krusty_posix_io.c
+            krusty_posix_net.c krusty_posix_process.c krusty_posix_string.c
+          )
+          for arch in x86_64 aarch64 riscv64; do
+            triple="$arch-unknown-linux-gnu"
+            case "$arch" in
+              x86_64) arch_flags=(-mcmodel=small -fcf-protection=none) ;;
+              aarch64) arch_flags=(-mcmodel=small) ;;
+              riscv64) arch_flags=(-mno-relax) ;;
+            esac
+            for source in "${sources[@]}"; do
+              "$compiler" "--target=$triple" "${common_flags[@]}" "${arch_flags[@]}" \
+                -I runtime "runtime/$source" >> evidence/c-preflight.log 2>&1 || {
+                  cat evidence/c-preflight.log
+                  exit 1
+                }
+            done
+          done
+          printf 'syntax-checked %s runtime sources for x86_64, aarch64, and riscv64\n' "${#sources[@]}" \
+            | tee evidence/c-preflight-summary.txt
+      - name: build conformance executable once
+        timeout-minutes: 40
+        env:
+          CARGO_BUILD_JOBS: '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_BUILD_JOBS=1 bash scripts/cargo-test-binary.sh conformance -p krusty --test conformance > evidence/build.log 2>&1
+          cat evidence/build.log
+          binary="$(tail -n 1 evidence/build.log)"
+          test -x "$binary"
+          cp "$binary" conformance-bin
+          sha256sum conformance-bin > evidence/conformance-binary.sha256
       - name: run the prior 14 guards and the new fixture on all four lanes
         timeout-minutes: 70
         env:
