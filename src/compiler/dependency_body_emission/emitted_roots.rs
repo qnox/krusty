@@ -419,12 +419,7 @@ fn is_materialized_class_member(
     if crate::klib_lowering::is_receiver_member(callable, bodies, callees) {
         // Every target realizes one of `kotlin.Any`'s members from the receiver's own
         // representation, a builtin value included, so such a member stays the target's.
-        let (target, _) = platform
-            .external_callable_by_dependency(callable.identity())
-            .ok_or("a builtin-type member has no provider declaration")?;
-        return Ok(!realizes_any_member(&member_edge(
-            platform, target, callable,
-        )?));
+        return Ok(!realizes_any_member(&member_edge(callees, callable)?));
     }
     let Some(class) = callable
         .class_contract()

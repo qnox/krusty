@@ -17,10 +17,10 @@ pub(crate) struct CheckedKlibDependencyFacts {
 /// Check and freeze semantic facts for the body graph reachable from the source file's selected
 /// KLIB declarations. Backends may later choose a target-specific subset, but they never resolve
 /// member hierarchy edges or builtin implementations while doing so.
-pub(crate) fn for_checked_klib_bodies(
+pub(crate) fn for_checked_klib_bodies<'a>(
     source: &dyn SymbolSource,
     bodies: &crate::klib_libraries::KlibDeclarationBodies,
-    roots: impl IntoIterator<Item = crate::libraries::KlibBodyCallable<'_>>,
+    roots: impl IntoIterator<Item = crate::libraries::KlibBodyCallable<'a>>,
 ) -> Result<CheckedKlibDependencyFacts, ExternalCallableId> {
     let mut facts = CheckedKlibDependencyFacts::default();
     let mut pending = roots
