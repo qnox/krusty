@@ -583,16 +583,101 @@ fn check_supported(ir: &IrFile, id: ClassId) -> Result<(), Unsupported> {
     // Stored by-value captures use the same checked pre-super field transport.
     } else if !constructor_prefix::supported(ir, id) {
         "a class capturing its surroundings"
-    } else if class
-        .supertypes
-        .iter()
-        .any(|supertype| supertype.non_null().is_fun())
-    {
-        "a class implementing a function type"
     } else {
         return Ok(());
     };
     Err(format!("{construct} (`{name}`)"))
+}
+
+/// A function invocation override is accepted only when its frozen owner role, source arity,
+/// suspend bit, and semantic role all agree. Both arrow and nominal supertypes use this predicate.
+fn has_checked_function_invoke(
+    ir: &IrFile,
+    classifiers: &dyn BackendClassifierSource,
+    id: ClassId,
+    expected_owner: Option<TypeName>,
+    arity: usize,
+    suspend: bool,
+) -> bool {
+    let class = &ir.classes[id as usize];
+    let Ok(arity) = u8::try_from(arity) else {
+        return false;
+    };
+    let expected_role = if suspend {
+        krusty::types::ClassifierRole::SuspendFunctionOfArity(arity)
+    } else {
+        krusty::types::ClassifierRole::FunctionOfArity(arity)
+    };
+    ir.function_overrides
+        .get(&class.fq_name_id())
+        .into_iter()
+        .flatten()
+        .any(|edge| {
+            expected_owner.is_none_or(|owner| edge.overridden_owner == owner)
+                && classifiers
+                    .classifier(edge.overridden_owner)
+                    .is_some_and(|fact| fact.role == Some(expected_role))
+                && edge.overridden_is_interface
+                && matches!(
+                    edge.overridden,
+                    krusty::fir::ResolvedFunctionOverrideTarget::External(_)
+                )
+                && edge.overridden_semantic_role
+                    == Some(krusty::types::SemanticCallRole::KotlinFunctionInvoke)
+                && edge.declared_parameters.len() == usize::from(arity)
+                && edge.suspend == suspend
+        })
+}
+
+/// Require a checked invocation edge for every function-type supertype, whichever spelling the
+/// source used. The checked edge authenticates the implementation; the frozen classifier role
+/// authenticates the function family and its source arity.
+fn check_function_invocation_support(
+    ir: &IrFile,
+    classifiers: &dyn BackendClassifierSource,
+    id: ClassId,
+) -> Result<(), Unsupported> {
+    let class = &ir.classes[id as usize];
+    for supertype in &class.supertypes {
+        if let krusty::types::TyKind::Fun(signature) = supertype.non_null().kind() {
+            if !has_checked_function_invoke(
+                ir,
+                classifiers,
+                id,
+                None,
+                signature.params.len(),
+                signature.suspend,
+            ) {
+                return Err(format!(
+                    "a class implementing a function type without its checked invocation (`{}`)",
+                    class.fq_name()
+                ));
+            }
+            continue;
+        }
+        let Some(owner) = supertype.non_null().obj_internal() else {
+            continue;
+        };
+        let Some(fact) = classifiers.classifier(owner) else {
+            continue;
+        };
+        let (arity, suspend) = match fact.role {
+            Some(krusty::types::ClassifierRole::FunctionOfArity(arity)) => {
+                (usize::from(arity), false)
+            }
+            Some(krusty::types::ClassifierRole::SuspendFunctionOfArity(arity)) => {
+                (usize::from(arity), true)
+            }
+            _ => continue,
+        };
+        if !has_checked_function_invoke(ir, classifiers, id, Some(owner), arity, suspend) {
+            return Err(format!(
+                "a function classifier supertype without its checked invocation (`{}`)",
+                class.fq_name()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Reject a class overriding a runtime exception's property. Its message and cause are fields the
@@ -651,6 +736,7 @@ pub(super) fn declare(
     } = beyond;
     for class in 0..ir.classes.len() {
         check_supported(ir, class as ClassId)?;
+        check_function_invocation_support(ir, classifiers, class as ClassId)?;
         check_exception_storage(ir, classifiers, class as ClassId)?;
     }
     let tables = class_tables::build_numbered(
