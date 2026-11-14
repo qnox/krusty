@@ -63,6 +63,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn virtual_member_dispatch_requires_an_overridable_declaration() {
+        for (modality, expected) in [
+            (KotlinModality::Final, false), (KotlinModality::Open, true),
+            (KotlinModality::Abstract, true), (KotlinModality::Sealed, false),
+        ] {
+            let modifiers = KlibBodyDeclarationModifiers {
+                is_inline: false, is_suspend: false, is_external: false,
+                property_is_external: false, modality,
+            };
+            assert_eq!(modifiers.is_overridable(), expected, "{modality:?}");
+        }
+    }
+
+    #[test]
     fn ordinary_body_admission_requires_every_implementation_modifier() {
         let ordinary = KlibBodyDeclarationModifiers {
             is_inline: false,
