@@ -13,6 +13,10 @@
 //! members takes their fixed slots, and `invoke` over a function type the fixed function slot.
 //! Interface members are numbered in [`super::module_interfaces`].
 
+mod published_slots;
+
+pub use published_slots::PublishedClassSlots;
+
 use crate::fx_hash::{HashMap, HashSet};
 
 use super::module_classes::{ForwardedMember, ModuleClass, ModuleClasses, ModuleMember};
@@ -77,6 +81,8 @@ pub(crate) enum PlannedSlot {
     Any(AnyMember),
     /// The function slot, which nothing in the hierarchy implements.
     Reserved,
+    /// A physical producer slot whose declaration is not visible in this consumer inventory.
+    Inherited { slot: u32 },
     /// The member's implementation: its own, or the one it inherits.
     Member(PlanKey),
     /// See [`super::Slot::Bridge`].
@@ -147,6 +153,25 @@ impl ModuleSlotPlan {
 
     /// Plan every class of `classes`, superclasses first.
     pub fn build(classes: &ModuleClasses, representation: &dyn Representation) -> Self {
+        Self::build_with_tables(classes, representation, HashMap::default())
+    }
+
+    /// Plan against already-emitted dependency layouts by their exact declaration bindings.
+    pub fn build_with_published_slots(
+        classes: &ModuleClasses,
+        representation: &dyn Representation,
+        declarations: &super::super::CheckedBackendCallables,
+        published: &dyn Fn(TypeName) -> Result<Option<PublishedClassSlots>, Unsupported>,
+    ) -> Self {
+        let tables = published_slots::bind(classes, representation, declarations, published);
+        Self::build_with_tables(classes, representation, tables)
+    }
+
+    fn build_with_tables(
+        classes: &ModuleClasses,
+        representation: &dyn Representation,
+        tables: HashMap<TypeName, Result<PlannedTable, Unsupported>>,
+    ) -> Self {
         let carriers: HashMap<PlanKey, (Box<[Ty]>, Ty)> = classes
             .iter()
             .flat_map(|(_, class)| class.members.iter())
@@ -186,7 +211,7 @@ impl ModuleSlotPlan {
             classes,
             representation,
             carriers,
-            tables: HashMap::default(),
+            tables,
         };
         // Planning is a pure function of each class, so the order classes are visited in only
         // decides which table is computed first.
@@ -263,9 +288,9 @@ impl ModuleSlotPlan {
         };
         match table.entries.get(slot as usize)? {
             PlannedSlot::Any(any) => Some(PlannedSignature::Any(*any)),
-            PlannedSlot::Reserved | PlannedSlot::FunctionBridge { .. } => {
-                Some(PlannedSignature::Untyped)
-            }
+            PlannedSlot::Reserved
+            | PlannedSlot::Inherited { .. }
+            | PlannedSlot::FunctionBridge { .. } => Some(PlannedSignature::Untyped),
             PlannedSlot::Member(key) => member(key),
             PlannedSlot::Bridge { declared, .. } => member(&PlanKey::Callable(*declared)),
             PlannedSlot::AccessorBridge {
@@ -287,6 +312,20 @@ impl ModuleSlotPlan {
     /// The module-wide numbers of interface members.
     pub fn interfaces(&self) -> &ModuleInterfaces {
         &self.interfaces
+    }
+
+    /// The declaration keys that share one numbered interface slot: its introduced spelling and
+    /// every inherited/redeclared alias. A target persisting physical interface entries uses
+    /// these checked keys to record stable declaration identities instead of module-local numbers.
+    pub fn interface_member_keys(&self, number: u32) -> Option<Vec<PlanKey>> {
+        if number >= self.interfaces.count() {
+            return None;
+        }
+        let member = self.interfaces.member(number);
+        let mut keys = Vec::with_capacity(member.aliases.len() + 1);
+        keys.push(member.key);
+        keys.extend(member.aliases.iter().copied());
+        Some(keys)
     }
 
     /// Every class the plan covers, with its planned table or why it has none.

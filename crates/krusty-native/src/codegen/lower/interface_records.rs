@@ -184,7 +184,14 @@ impl FileLowering<'_> {
                     slot,
                     declared,
                     implemented,
-                } => Some(self.dependency_bridge(slot, &declared, &implemented)?),
+                } => {
+                    let function = self.dependency_bridge(class, slot, &declared, &implemented)?;
+                    if self.exported.contains(&class) {
+                        self.published_dependency_bridges
+                            .insert((class, identity.clone()), self.object_function(function));
+                    }
+                    Some(function)
+                }
             }
             .ok_or_else(|| {
                 declined!(
@@ -231,15 +238,20 @@ impl FileLowering<'_> {
     /// [`DependencyImplementation::Bridge`].
     fn dependency_bridge(
         &mut self,
+        class: ClassId,
         slot: u32,
         declared: &(Vec<Ty>, Ty),
         implemented: &(Vec<Ty>, Ty),
     ) -> Result<FuncId, Unsupported> {
         let mut params = vec![any()];
         params.extend(declared.0.iter().copied());
-        let name = format!("kt_dependency_bridge_{}", self.dependency_bridges);
+        let name = format!(
+            "kt_{}__dependency_bridge_{}",
+            self.class_base(class),
+            self.dependency_bridges
+        );
         self.dependency_bridges += 1;
-        let id = self.declare_local_function(&name, &params, declared.1)?;
+        let id = self.declare_class_function(class, &name, &params, declared.1)?;
         self.define_converting_bridge(
             (&declared.0, declared.1),
             (&implemented.0, implemented.1),

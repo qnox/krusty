@@ -6,9 +6,13 @@
 //! callable's or property's facts without asking the provider about it while it emits. It covers
 //! callables and properties only; dependency classifiers still reach a backend through
 //! `CheckedBackendClassifiers`, which asks the provider. It answers only for an identity the IR
-//! already holds: there is no lookup by name, owner, or signature.
+//! already holds or its immutable inherited class headers selected. Header-only identities remain
+//! separate from executable body roots. There is no lookup by name, owner, or signature.
 
 mod references;
+
+#[cfg(test)]
+mod declaration_identity_tests;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use references::referenced_dependencies;
@@ -117,6 +121,19 @@ pub struct BackendCallableFact {
 }
 
 impl BackendCallableFact {
+    /// The selected declaration's virtual slot identity, including its authenticated accessor
+    /// role when a serialized property accessor is represented as an ordinary IR call.
+    pub fn member_slot_identity(&self) -> Option<Vec<u8>> {
+        let identity = self.dependency_callable.as_ref()?;
+        match self.klib_body_accessor.as_ref() {
+            Some(accessor) => super::interface_identity::property_member_identity(
+                identity,
+                accessor.role == crate::libraries::KlibAccessorRole::Setter,
+            ),
+            None => Some(super::interface_identity::member_identity(identity)),
+        }
+    }
+
     /// The selected operation shared by declaration and member realization views.
     pub fn compiler_operation(&self) -> Option<crate::libraries::CompilerIntrinsic> {
         self.compiler_intrinsic
@@ -148,6 +165,11 @@ impl BackendCallableFact {
     /// Whether this selected callable has a source extension receiver parameter.
     pub fn is_extension(&self) -> bool {
         self.kind == ExternalCallableKind::Extension
+    }
+
+    /// Whether this exact dependency declaration initializes its declaring class.
+    pub fn is_constructor(&self) -> bool {
+        self.kind == ExternalCallableKind::Constructor
     }
 
     /// Whether this exact dependency declaration is an instance member.
@@ -349,6 +371,50 @@ mod tests {
             declares_parameter_defaults: false,
             annotations: Box::new([]),
         }
+    }
+
+    #[test]
+    fn dependency_accessor_calls_keep_their_property_slot_identity() {
+        use crate::backend::interface_identity::property_member_identity;
+        use crate::libraries::{KlibAccessorRole, KlibBodyAccessor};
+        use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
+        let mut fact = extension_fact();
+        let identity = KlibDependencyCallable {
+            module: "producer".into(),
+            declaration: KlibDeclarationSignature::Accessor(KlibAccessorIdSignature::new(
+                KlibPublicIdSignature::classifier(crate::types::type_name("sample/Owner.value")),
+                "physicalAccessor".into(),
+                11,
+                0,
+            )),
+        };
+        fact.dependency_callable = Some(identity.clone());
+        let mut slot_identities = Vec::new();
+        for (role, setter) in [
+            (KlibAccessorRole::Getter, false),
+            (KlibAccessorRole::Setter, true),
+        ] {
+            fact.klib_body_accessor = Some(KlibBodyAccessor {
+                property: ExternalPropertyId::from_raw(3),
+                role,
+                name: "value".into(),
+            });
+            assert_eq!(
+                fact.member_slot_identity(),
+                property_member_identity(&identity, setter)
+            );
+            assert_ne!(
+                fact.member_slot_identity(),
+                Some(super::super::interface_identity::member_identity(&identity))
+            );
+            slot_identities.push(fact.member_slot_identity());
+        }
+        assert_ne!(slot_identities[0], slot_identities[1]);
+        fact.klib_body_accessor = None;
+        assert_eq!(
+            fact.member_slot_identity(),
+            Some(super::super::interface_identity::member_identity(&identity))
+        );
     }
 
     #[test]
@@ -648,6 +714,8 @@ struct SingletonEdge {
 #[derive(Debug, Default)]
 pub struct CheckedBackendCallables {
     callables: HashMap<ExternalCallableId, BackendCallableFact>,
+    /// Header-only declaration identities never participate in executable dependency closure.
+    member_declarations: HashMap<ExternalCallableId, KlibDependencyCallable>,
     properties: HashMap<ExternalPropertyId, BackendPropertyFact>,
     singleton_dispatches: HashMap<crate::ir::ExprId, SingletonDispatch>,
     singleton_selections: HashMap<ExternalCallableId, Vec<SingletonEdge>>,
@@ -722,6 +790,70 @@ impl CheckedBackendCallables {
             if let Some(&dispatch) = self.singleton_dispatches.get(&original) {
                 self.singleton_dispatches.insert(copy, dispatch);
             }
+        }
+    }
+
+    /// Freeze declarations used to plan inherited slots without making their bodies roots.
+    pub(crate) fn freeze_with_class_declarations(
+        ir: &crate::ir::IrFile,
+        provider: &dyn SymbolSource,
+        classes: &super::class_tables::module_classes::ModuleClasses,
+    ) -> Result<Self, DependencyFactError> {
+        use super::class_tables::module_classes::ModuleMember;
+        use crate::fir::{ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget};
+        let mut facts = Self::freeze(ir, provider)?;
+        let identities = classes
+            .iter()
+            .flat_map(|(_, class)| class.members.iter())
+            .filter_map(|member| match member {
+                ModuleMember::Function {
+                    callable: ResolvedFunctionOverrideTarget::External(identity),
+                    ..
+                }
+                | ModuleMember::Property {
+                    property: ResolvedPropertyOverrideTarget::External(identity),
+                    ..
+                } => Some(*identity),
+                _ => None,
+            });
+        facts.freeze_declaration_identities(identities, |identity| {
+            provider
+                .external_callable(identity)
+                .map(|declaration| declaration.dependency_callable)
+                .ok_or(DependencyFactError::UnknownCallable(identity))
+        })?;
+        Ok(facts)
+    }
+
+    fn freeze_declaration_identities(
+        &mut self,
+        identities: impl IntoIterator<Item = ExternalCallableId>,
+        mut declaration: impl FnMut(
+            ExternalCallableId,
+        )
+            -> Result<Option<KlibDependencyCallable>, DependencyFactError>,
+    ) -> Result<(), DependencyFactError> {
+        for identity in identities {
+            if self.callables.contains_key(&identity)
+                || self.member_declarations.contains_key(&identity)
+            {
+                continue;
+            }
+            if let Some(key) = declaration(identity)? {
+                self.member_declarations.insert(identity, key);
+            }
+        }
+        Ok(())
+    }
+
+    /// An authenticated declaration key, independently of whether its body is emitted.
+    pub fn declaration_identity(
+        &self,
+        identity: ExternalCallableId,
+    ) -> Option<&KlibDependencyCallable> {
+        match self.callables.get(&identity) {
+            Some(callable) => callable.dependency_callable.as_ref(),
+            None => self.member_declarations.get(&identity),
         }
     }
 

@@ -1397,7 +1397,6 @@ extensionProperties/extensionProperyWithExtensionType.kt
 extensionProperties/genericContextOverride.kt
 extensionProperties/genericValForPrimitiveType.kt
 fakeOverride/fakeOverrideWithMissingClassInSignature.kt
-fakeOverride/internalFromFriendModule.kt
 fakeOverride/intersectionInLocal.kt
 fakeOverride/privateFakeOverrides0.kt
 fakeOverride/privateFakeOverrides1.kt
@@ -1408,7 +1407,6 @@ finally/kt4134.kt
 finally/notChainCatch.kt
 finally/someStuff.kt
 fir/functionsDifferInTypeParameterBounds.kt
-fir/inferenceWithTypeAliasFromOtherModule.kt
 fir/kt68806.kt
 fir/listAssignmentInWhen.kt
 fir/multipleDefaultsFalsePositiveDelegation.kt
@@ -2307,7 +2305,6 @@ ir/primitiveNumberComparisons/mixedNumberTypes.kt
 ir/recursiveGeneric.kt
 ir/recursiveGeneric2.kt
 ir/serializationRegressions/anonFakeOverride.kt
-ir/serializationRegressions/innerClassInEnumEntryClass.kt
 ir/serializationRegressions/useImportedMember.kt
 ir/serializationRegressions/varAsFunctionCall.kt
 javaInterop/notNullAssertions/mapPut.kt
@@ -2403,7 +2400,6 @@ multiDecl/forIterator/longIterator/MultiDeclForComponentExtensionsValCaptured.kt
 multiDecl/forIterator/longIterator/MultiDeclForComponentMemberExtensions.kt
 multiDecl/forIterator/longIterator/MultiDeclForComponentMemberExtensionsInExtensionFunction.kt
 multiDecl/kt9828_hashMap.kt
-multiplatform/k2/aliasSuperTypeInLazy.kt
 multiplatform/k2/annotations/expectAnnotationCallInLibrary.kt
 multiplatform/k2/anonymousObjectAndSpecificImplementationInDeserializedIr.kt
 multiplatform/k2/basic/contextInFakeOverride.kt
@@ -2446,22 +2442,12 @@ multiplatform/k2/exhaustiveness/commonSealedClass.kt
 multiplatform/k2/expectStatic.kt
 multiplatform/k2/expectValueClassWithNoPrimaryConstructor.kt
 multiplatform/k2/extensionPropertiesOverloads.kt
-multiplatform/k2/hmpp/abstractExpectedActual2-2.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt
-multiplatform/k2/hmpp/defaultImplsMultiInheritance.kt
-multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflictDefaults.kt
-multiplatform/k2/hmpp/expectActualGeneric2-2.kt
-multiplatform/k2/hmpp/expectActualGeneric3-3.kt
-multiplatform/k2/hmpp/expectActualGenericTwoLibs.kt
 multiplatform/k2/hmpp/expectActualInheritance2-2.kt
 multiplatform/k2/hmpp/expectActualInheritance3-3.kt
 multiplatform/k2/hmpp/expectActualInheritanceTwoLibs.kt
-multiplatform/k2/hmpp/expectActualOverload2-2.kt
 multiplatform/k2/hmpp/expectActualOverload3-3.kt
 multiplatform/k2/hmpp/expectActualOverloadTwoLibs.kt
-multiplatform/k2/hmpp/expectRefinement3-3.kt
-multiplatform/k2/hmpp/fakeOverrideExpectSuperType.kt
-multiplatform/k2/hmpp/fakeOverrideExpectSuperTypeFromLib.kt
 multiplatform/k2/hmpp/friendDependency.kt
 multiplatform/k2/hmpp/genericTypealiasSameNameTwoLibs.kt
 multiplatform/k2/hmpp/iheritanceFromExpected2-2.kt
@@ -2469,9 +2455,6 @@ multiplatform/k2/hmpp/inheritanceFromExpected2-3.kt
 multiplatform/k2/hmpp/inheritanceFromExpected3-3.kt
 multiplatform/k2/hmpp/inheritanceFromExpected3-4.kt
 multiplatform/k2/hmpp/inheritanceFromExpected4-4.kt
-multiplatform/k2/hmpp/inheritanceFromExpectedInApp2-2.kt
-multiplatform/k2/hmpp/inheritanceFromExpectedInApp2-3.kt
-multiplatform/k2/hmpp/inheritanceFromExpectedInApp3-3.kt
 multiplatform/k2/hmpp/inheritanceFromLibraryExpectClass.kt
 multiplatform/k2/hmpp/mutlipleExpectsForOneActual.kt
 multiplatform/k2/hmpp/overloadAlias3-3.kt
