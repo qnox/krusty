@@ -141,7 +141,7 @@ impl Split<'_> {
                 if let Some(value) = value {
                     // This block is itself in statement position. Its terminal expression still
                     // runs, but the surrounding statement discards the block's value.
-                    total += self.count(ir, value)?;
+                    total += self.count(ir, *value)?;
                 }
                 Ok(total)
             }
