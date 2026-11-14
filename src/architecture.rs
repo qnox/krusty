@@ -1604,7 +1604,7 @@ mod tests {
             let syn::Item::Mod(module) = item else {
                 continue;
             };
-            if module.ident.to_string() == name
+            if module.ident == name
                 && module.content.is_none()
                 && module_source_matches(parent_file, module, child_file)
             {
