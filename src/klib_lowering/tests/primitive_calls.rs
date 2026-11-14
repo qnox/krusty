@@ -455,9 +455,15 @@ fn checked_klib_property_facts_use_the_exact_property_name() {
     let identity = property.getter.external_identity.unwrap();
     let realization = libraries.external_callable(identity).unwrap();
     let selected = realization.klib_body_callable().unwrap();
-    let facts = KlibCalleeFacts::new([selected])
-        .with_builtin_implementation_facts(&libraries)
-        .unwrap();
+    let checked = super::checked_backend_klib_facts(
+        crate::resolve::for_checked_klib_bodies(
+            &libraries,
+            libraries.declaration_bodies(),
+            [selected],
+        )
+        .expect("selected property body has checked facts"),
+    );
+    let facts = KlibCalleeFacts::new([selected]).with_checked_dependency_facts(&checked);
     let [implementation] = facts.builtin_implementation_facts()[&identity].as_ref() else {
         panic!("CharSequence.length has one represented builtin implementation");
     };

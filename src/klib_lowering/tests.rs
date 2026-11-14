@@ -1642,6 +1642,16 @@ pub(super) fn non_overriding_edges<'a>(
         .collect()
 }
 
+pub(super) fn checked_backend_klib_facts(
+    facts: crate::resolve::CheckedKlibDependencyFacts,
+) -> CheckedBackendCallables {
+    let mut checked = CheckedBackendCallables::default();
+    checked
+        .record_klib_dependency_facts(facts)
+        .expect("test KLIB facts are consistent");
+    checked
+}
+
 // --- The Kotlin/Native stdlib -----------------------------------------------------------------
 
 pub(super) fn distribution_root() -> Option<PathBuf> {
