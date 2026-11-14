@@ -540,19 +540,29 @@ impl<'a> KlibCalleeFacts<'a> {
     fn record(&mut self, callable: KlibBodyCallable<'a>, call_edge: bool) {
         self.callables
             .entry(callable.identity())
-            .and_modify(|fact| match fact {
-                IndexedKlibCallee::Selected(selected)
-                    if selected[0].same_declaration_contract(callable) =>
-                {
-                    if call_edge
-                        && !selected.iter().any(|selected| {
-                            selected.singleton_dispatch() == callable.singleton_dispatch()
-                        })
-                    {
-                        selected.push(callable);
+            .and_modify(|fact| {
+                let conflicts = match fact {
+                    IndexedKlibCallee::Selected(selected) => {
+                        if !selected[0].same_declaration_contract(callable) {
+                            true
+                        } else if call_edge {
+                            if let Some(index) = selected.iter().position(|existing| {
+                                existing.singleton_dispatch() == callable.singleton_dispatch()
+                            }) {
+                                selected[index].class_contract() != callable.class_contract()
+                            } else {
+                                selected.push(callable);
+                                false
+                            }
+                        } else {
+                            false
+                        }
                     }
+                    IndexedKlibCallee::Ambiguous => false,
+                };
+                if conflicts {
+                    *fact = IndexedKlibCallee::Ambiguous;
                 }
-                fact => *fact = IndexedKlibCallee::Ambiguous,
             })
             .or_insert_with(|| IndexedKlibCallee::Selected(vec![callable]));
     }

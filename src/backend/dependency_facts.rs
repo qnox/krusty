@@ -256,9 +256,8 @@ impl BackendCallableFact {
     fn klib_body_callable_with_singleton<'a>(
         &'a self,
         singleton_dispatch: Option<SingletonDispatch>,
-        class_contract: Option<&'a crate::libraries::KlibBodyClassContract>,
+        singleton_class_contract: Option<&'a crate::libraries::KlibBodyClassContract>,
     ) -> Option<crate::libraries::KlibBodyCallable<'a>> {
-        let class_contract = self.edge_class_contract(class_contract);
         crate::libraries::KlibBodyCallable::new(
             crate::libraries::KlibBodyCallableShape {
                 name: &self.name,
@@ -277,7 +276,7 @@ impl BackendCallableFact {
                 compiler_intrinsic: self.compiler_operation(),
                 range_construction: self.member_realization.range_construction(),
                 declaration_modifiers: self.klib_body_declaration_modifiers,
-                class_contract,
+                class_contract: self.klib_body_class_contract.as_ref(),
                 accessor: self.klib_body_accessor.as_ref(),
             },
             singleton_dispatch,
@@ -285,15 +284,7 @@ impl BackendCallableFact {
             self.declaration_owner,
             self.dependency_callable.as_ref(),
         )
-    }
-
-    /// The class a singleton edge authenticates through: the class the provider recorded for
-    /// that singleton when it has one, otherwise the class of the member itself.
-    fn edge_class_contract<'a>(
-        &'a self,
-        provided: Option<&'a crate::libraries::KlibBodyClassContract>,
-    ) -> Option<&'a crate::libraries::KlibBodyClassContract> {
-        provided.or(self.klib_body_class_contract.as_ref())
+        .map(|callable| callable.with_singleton_class_contract(singleton_class_contract))
     }
 }
 
