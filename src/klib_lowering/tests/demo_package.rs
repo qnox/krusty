@@ -85,6 +85,10 @@ pub(super) enum T {
     S,
     /// `Array<P>` of [`T::PBesideS`].
     ArrayPBesideS,
+    /// `() -> Int`, serialized as `kotlin.Function0<Int>`.
+    Function0Int,
+    /// `CharSequence?`.
+    NullableCharSequence,
 }
 
 /// A generic `demo` function's type parameter: its spelling, metadata identity, serialized
@@ -124,7 +128,8 @@ impl T {
             | T::ArrayOutInt
             | T::ArrayPBoundingR
             | T::ArrayPBesideS => "Array",
-            T::CharSequence => "CharSequence",
+            T::CharSequence | T::NullableCharSequence => "CharSequence",
+            T::Function0Int => "Function0",
             T::P | T::Q | T::PBoundingR | T::R | T::PBesideS | T::S => {
                 unreachable!("a type parameter is not a class")
             }
@@ -152,6 +157,7 @@ impl T {
             T::ArrayOutInt => Some(T::Int),
             T::ArrayPBoundingR => Some(T::PBoundingR),
             T::ArrayPBesideS => Some(T::PBesideS),
+            T::Function0Int => Some(T::Int),
             _ => None,
         }
     }
@@ -227,6 +233,7 @@ impl T {
                 | T::NullableInt
                 | T::NullableString
                 | T::NullableNothing
+                | T::NullableCharSequence
         )
     }
 

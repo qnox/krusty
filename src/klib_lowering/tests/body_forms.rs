@@ -180,7 +180,7 @@ fn a_declining_callee_leaves_the_unit_as_it_was() {
         let a = body.param(0);
         let value = match name {
             "a" => body.call("b", vec![a], T::Int),
-            "b" => body.type_operator(KlibIrTypeOperator::SafeCast, a, T::Int),
+            "b" => body.type_operator(KlibIrTypeOperator::ImplicitNotNull, a, T::Int),
             _ => a,
         };
         Some(vec![body.ret(value)])
@@ -194,7 +194,7 @@ fn a_declining_callee_leaves_the_unit_as_it_was() {
         .expect_err("the callee declines");
     assert_eq!(
         decline.to_string(),
-        "the KLIB body of `demo.a` (it reaches the KLIB body of `demo.b` (it uses a safe cast))"
+        "the KLIB body of `demo.a` (it reaches the KLIB body of `demo.b` (it uses an implicit non-null assertion))"
     );
     assert_eq!(unit.ir().functions.len(), 1);
     assert_eq!(unit.ir().exprs.len(), expressions);
@@ -204,9 +204,9 @@ fn a_declining_callee_leaves_the_unit_as_it_was() {
     // own form.
     assert_eq!(
         demo.lower(&mut unit, "b", &[])
-            .expect_err("it casts safely")
+            .expect_err("it asserts non-null implicitly")
             .to_string(),
-        "the KLIB body of `demo.b` (it uses a safe cast)"
+        "the KLIB body of `demo.b` (it uses an implicit non-null assertion)"
     );
 }
 

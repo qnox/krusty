@@ -1319,6 +1319,7 @@ impl BodyFirChecker<'_> {
                             expression,
                             declaration,
                             &access.property,
+                            false,
                         )
                     },
                 )?;
@@ -1521,13 +1522,23 @@ impl BodyFirChecker<'_> {
         expression: ExprId,
         declaration: DeclarationId,
         selected: &crate::libraries::PropertyInfo,
+        setter: bool,
     ) -> Result<Box<[FirTypeSubstitution]>, BodyCheckFailure> {
-        self.selected_getter_substitutions(
+        let accessor = if setter {
+            let Some(setter) = selected.setter.as_ref() else {
+                return Ok(Box::new([]));
+            };
+            setter
+        } else {
+            &selected.getter
+        };
+        self.selected_accessor_substitutions(
             expression,
             declaration,
-            &selected.getter,
+            accessor,
             selected.receiver,
             selected.ty,
+            setter,
         )
     }
 
@@ -1542,14 +1553,44 @@ impl BodyFirChecker<'_> {
         selected_receiver: Option<Ty>,
         selected_type: Ty,
     ) -> Result<Box<[FirTypeSubstitution]>, BodyCheckFailure> {
-        let Some(generic) = getter.generic_sig.as_deref() else {
+        self.selected_accessor_substitutions(
+            expression,
+            declaration,
+            getter,
+            selected_receiver,
+            selected_type,
+            false,
+        )
+    }
+
+    fn selected_accessor_substitutions(
+        &self,
+        expression: ExprId,
+        declaration: DeclarationId,
+        accessor: &crate::libraries::LibraryCallable,
+        selected_receiver: Option<Ty>,
+        selected_type: Ty,
+        setter: bool,
+    ) -> Result<Box<[FirTypeSubstitution]>, BodyCheckFailure> {
+        let Some(generic) = accessor.generic_sig.as_deref() else {
             return Ok(Box::new([]));
         };
         let mut bindings = crate::symbol_resolver::GSigBinds::default();
         if let (Some(declared), Some(actual)) = (generic.receiver, selected_receiver) {
             crate::symbol_resolver::unify_inferred_ty(declared, actual, &mut bindings);
         }
-        crate::symbol_resolver::unify_inferred_ty(generic.ret, selected_type, &mut bindings);
+        let specialized = if setter {
+            generic.params.last().copied()
+        } else {
+            Some(generic.ret)
+        };
+        let Some(specialized) = specialized else {
+            return Err(self.failure(
+                self.file.expr_span(expression),
+                BodyCheckFailureKind::MissingStablePropertyTarget,
+            ));
+        };
+        crate::symbol_resolver::unify_inferred_ty(specialized, selected_type, &mut bindings);
         generic
             .formals
             .iter()
@@ -1590,7 +1631,10 @@ impl BodyFirChecker<'_> {
                     value,
                 )?;
                 Ok(FirTypeSubstitution {
-                    parameter: parameter.into(),
+                    parameter: accessor.external_identity.map_or_else(
+                        || parameter.into(),
+                        |callable| crate::fir::FirTypeParameterRef::External { callable, ordinal },
+                    ),
                     reified,
                     value,
                     reified_runtime: self.reified_substitution_runtime(reified, value, None),
@@ -2708,7 +2752,7 @@ impl BodyFirChecker<'_> {
             self.selected_value_conversion(value, checked_value, value_target, cause)?;
         let substitutions = match (declaration, selected_property.as_ref()) {
             (Some(declaration), Some(property)) => {
-                self.selected_property_substitutions(value, declaration, property)?
+                self.selected_property_substitutions(value, declaration, property, true)?
             }
             _ => Box::new([]),
         };

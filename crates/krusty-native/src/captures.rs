@@ -56,6 +56,22 @@ pub(crate) fn prefix_physical_ty(
         .map_or(declared, |field| physical_ty(ir, class, field, declared))
 }
 
+/// The physical type of one primary constructor argument that initializes an explicit field.
+/// Unlike a secondary constructor's forwarded prefix, a primary constructor may have generated
+/// value parameters after the capture prefix whose `field_index` owns a shared-cell holder.
+pub(crate) fn constructor_argument_physical_ty(
+    ir: &IrFile,
+    class: ClassId,
+    parameter: usize,
+    declared: Ty,
+) -> Ty {
+    ir.classes[class as usize]
+        .ctor_args
+        .get(parameter)
+        .and_then(|argument| argument.field_index)
+        .map_or(declared, |field| physical_ty(ir, class, field, declared))
+}
+
 /// The types a function's parameters are CARRIED as, which are not always the types it declares.
 ///
 /// A `var` that a closure captures is replaced by a holder, and what is passed to the lambda's body

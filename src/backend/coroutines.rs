@@ -21,10 +21,12 @@
 
 mod block_splicing;
 mod bottom_completion;
+mod class_storage;
 mod continuation_parameters;
 mod control_flow;
 mod hoisting;
 mod label_reentry;
+mod state_machine;
 mod statement_normalization;
 mod suspension_points;
 mod value_namespace;

@@ -99,6 +99,16 @@ pub(super) struct Boxes {
     forms: HashMap<TypeName, BoxForm>,
     /// The global holding `kotlin.Unit`, once something reads it as a reference.
     unit: Option<u32>,
+    /// The runtime-owned instance of `kotlin.Result.Companion`, which the Wasm target does not
+    /// materialize from the platform KLIB.
+    result_companion: Option<u32>,
+    /// Its actual GC heap type, used by `is`, `as?`, and class layout checks.
+    result_companion_type: Option<u32>,
+}
+
+/// The exact nested classifier of Kotlin's `Result.Companion` runtime object.
+pub(super) fn result_companion_classifier() -> TypeName {
+    krusty::types::type_name_nested_child(krusty::types::type_name("kotlin/Result"), "Companion")
 }
 
 impl Runtime {
@@ -223,6 +233,58 @@ impl Runtime {
         let unit = module.constant_global(ValType::reference(structure), init);
         self.boxes.unit = Some(unit);
         unit
+    }
+
+    /// The real runtime instance for the platform's `Result.Companion`. The KLIB identity has no
+    /// Wasm object entry, so the runtime supplies its own ordinary identified object: a GC struct,
+    /// a class TypeInfo, an Any table and one stable global singleton.
+    pub(super) fn result_companion_object(&mut self, module: &mut Module) -> u32 {
+        if let Some(companion) = self.boxes.result_companion {
+            return companion;
+        }
+        let classifier = result_companion_classifier();
+        let class_names = krusty::backend::class_names::member_class_names(classifier);
+        let to_string = self.identity_to_string(module, classifier, &class_names);
+        let identity = &self.identity;
+        let objects = &mut self.objects;
+        let structure = module.subtype(SubType {
+            composite: CompositeType::Struct(vec![
+                immutable(ValType::reference(objects.any_table)),
+                immutable(ValType::I32),
+            ]),
+            supertype: Some(identity.object),
+            open: false,
+        });
+        let (_, itable) = objects
+            .interfaces
+            .class(module, objects.itable, vec![structure]);
+        let info = objects.type_infos.global(module, classifier);
+        let mut init = Code::default();
+        for function in [objects.identity_equals, identity.hash_code, to_string] {
+            module.reference_function(function);
+            init.ref_func(function);
+        }
+        init.global_get(itable);
+        objects.push_type_info(&mut init, Some(info));
+        init.struct_new(objects.any_table);
+        let table = module.constant_global(ValType::reference(objects.any_table), init);
+        let mut init = Code::default();
+        init.global_get(table).i32_const(0).struct_new(structure);
+        let companion = module.constant_global(ValType::reference(structure), init);
+        self.boxes.result_companion = Some(companion);
+        self.boxes.result_companion_type = Some(structure);
+        companion
+    }
+
+    /// The GC heap type of the runtime-owned `Result.Companion` singleton.
+    pub(super) fn result_companion_type(&mut self, module: &mut Module) -> u32 {
+        if let Some(ty) = self.boxes.result_companion_type {
+            return ty;
+        }
+        self.result_companion_object(module);
+        self.boxes
+            .result_companion_type
+            .expect("constructing the Result companion records its concrete type")
     }
 }
 

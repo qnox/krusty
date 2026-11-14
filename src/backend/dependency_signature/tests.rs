@@ -24,6 +24,54 @@ fn the_emitted_signature_keeps_formals_even_with_scalar_upper_bounds() {
 }
 
 #[test]
+fn a_cps_export_authenticates_the_source_signature_and_appended_continuation() {
+    let mut ir = IrFile::default();
+    let source_params = vec![Ty::String];
+    let source_result = Ty::Int;
+    let (continuation, completed) = crate::types::continuation_passing(source_result);
+    let id = function(&mut ir, vec![Ty::String, continuation], completed);
+    ir.suspend_declared_sigs
+        .insert(id, (source_params.clone(), source_result));
+
+    let signature = DependencyFunctionSignature::from_ir(&ir, id, None).unwrap();
+    assert_eq!(signature.parameters(), [Ty::String, continuation]);
+    assert_eq!(signature.result(), completed);
+    assert!(signature.has_coroutine_abi());
+
+    let target = ExternalCallableId::from_raw(19);
+    let source = crate::ir::Callee::External {
+        target,
+        default_provider: None,
+        params: vec![Ty::String],
+        ret: source_result,
+        substitutions: Vec::new(),
+        defaults: Vec::new(),
+        extension_receiver_parameter: None,
+    };
+    let physical = crate::ir::Callee::External {
+        target,
+        default_provider: None,
+        params: vec![Ty::String, continuation],
+        ret: completed,
+        substitutions: Vec::new(),
+        defaults: Vec::new(),
+        extension_receiver_parameter: None,
+    };
+    assert_eq!(
+        authenticate_dependency_coroutine_call(&source, &physical, source_result, &signature),
+        Ok(())
+    );
+    assert!(authenticate_dependency_coroutine_call(&source, &source, source_result, &signature)
+        .is_err());
+
+    ir.functions[id as usize].params[1] = Ty::Long;
+    assert_eq!(
+        DependencyFunctionSignature::from_ir(&ir, id, None),
+        Err("a coroutine export whose CPS signature disagrees with its source declaration")
+    );
+}
+
+#[test]
 fn the_emitted_signature_authenticates_retained_member_dispatch() {
     let mut ir = IrFile::default();
     let id = function(&mut ir, vec![Ty::String], Ty::Long);

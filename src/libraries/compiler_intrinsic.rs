@@ -206,6 +206,9 @@ pub enum CompilerIntrinsic {
     },
     /// A fully normalized `Result` helper reached from an expanded library inline body.
     ResultFailure(ResultFailureIntrinsic),
+    /// The `exception` property getter on the compiler-builtin `Result.Failure` carrier. The
+    /// target owns that carrier's storage and reads it through its runtime ABI.
+    ResultFailureException,
     /// `next()` declared by a Kotlin primitive iterator (`kotlin.collections.IntIterator.next`).
     /// A target may call the iterator's unboxed element operation instead of the boxed
     /// `Iterator<T>.next` bridge (kotlinc's `IteratorNext` intrinsic); outside that target rule the

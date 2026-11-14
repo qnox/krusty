@@ -5,6 +5,7 @@
 //! because common IR deliberately preserves its provider-owned property identity instead of
 //! choosing a physical getter or setter.
 
+use krusty::fir::FirPropertyTarget;
 use krusty::ir::{ExprId, IrCheckedOperation, IrExpr, IrFile, IrFunction};
 use krusty::types::Ty;
 
@@ -40,10 +41,11 @@ pub(crate) struct DependencyProperty {
 /// site, and a site this cannot supply for is absent and declines by name as before.
 pub(crate) fn realize_properties(
     ir: &mut IrFile,
+    callables: &krusty::backend::CheckedBackendCallables,
 ) -> krusty::fx_hash::HashMap<ExprId, DependencyProperty> {
     let mut realized = krusty::fx_hash::HashMap::default();
     for index in 0..ir.exprs.len() {
-        let Ok(plan) = property_plan(ir, index as ExprId) else {
+        let Ok(plan) = property_plan(ir, index as ExprId, Some(callables)) else {
             continue;
         };
         realized.insert(index as ExprId, build_property(ir, plan));
@@ -58,7 +60,7 @@ pub(crate) fn realize_properties(
 /// says which shape it was rather than that the file did not declare the property, which every one
 /// of them has in common.
 pub(crate) fn property_decline(ir: &IrFile, id: ExprId) -> String {
-    match property_plan(ir, id) {
+    match property_plan(ir, id, None) {
         // The accessors were made and the declare pass records its own reason for every site it
         // then leaves out, so this arm is a fallback rather than a reason anything reaches; see
         // `codegen::lower::references::declare_dependency_property_references`.
@@ -86,6 +88,7 @@ struct AccessorPlan {
     receiver: Option<Ty>,
     parameters: Vec<Ty>,
     result: Ty,
+    substitutions: Vec<krusty::ir::IrCheckedSubstitution>,
 }
 
 /// Read one accessor's target, or say why it is not one this can reach.
@@ -93,6 +96,7 @@ fn accessor_plan(
     target: &krusty::fir::FirPropertyTarget,
     written: usize,
     which: &str,
+    substitutions: Vec<krusty::ir::IrCheckedSubstitution>,
 ) -> Result<AccessorPlan, String> {
     let krusty::fir::FirPropertyTarget::External {
         property,
@@ -140,7 +144,63 @@ fn accessor_plan(
         receiver: receiver.map(|receiver| receiver.get()),
         parameters: parameters.iter().map(|parameter| parameter.get()).collect(),
         result: result.get(),
+        substitutions,
     })
+}
+
+/// Move a checked property-reference substitution vector from the getter identity selected by
+/// FIR to the exact accessor identity emitted by the generated reference adapter. A property
+/// reference carries one instantiation for its property declaration; its read and write adapters
+/// use distinct callable identities, so each vector must be authenticated and keyed separately.
+fn reference_accessor_substitutions(
+    source: &[krusty::ir::IrCheckedSubstitution],
+    source_getter: krusty::fir::ExternalCallableId,
+    target: krusty::fir::ExternalCallableId,
+    fact: Option<&krusty::backend::BackendCallableFact>,
+) -> Result<Vec<krusty::ir::IrCheckedSubstitution>, String> {
+    let Some(fact) = fact else {
+        return Err("a dependency property reference without frozen accessor facts".to_string());
+    };
+    let formals = fact
+        .generic_sig
+        .as_deref()
+        .map_or(&[][..], |signature| signature.formals.as_slice());
+    rekey_reference_accessor_substitutions(source, source_getter, target, formals.len())
+}
+
+fn rekey_reference_accessor_substitutions(
+    source: &[krusty::ir::IrCheckedSubstitution],
+    source_getter: krusty::fir::ExternalCallableId,
+    target: krusty::fir::ExternalCallableId,
+    formal_count: usize,
+) -> Result<Vec<krusty::ir::IrCheckedSubstitution>, String> {
+    if formal_count != source.len() {
+        return Err(format!(
+            "a dependency property accessor with {} selected type arguments and {formal_count} declaration formals",
+            source.len()
+        ));
+    }
+    let mut result = Vec::with_capacity(source.len());
+    for (ordinal, substitution) in source.iter().enumerate() {
+        if substitution.parameter
+            != (krusty::fir::FirTypeParameterRef::External {
+                callable: source_getter,
+                ordinal: ordinal as u32,
+            })
+        {
+            return Err(
+                "a dependency property reference whose selected type arguments do not belong to its getter"
+                    .to_string(),
+            );
+        }
+        let mut substitution = substitution.clone();
+        substitution.parameter = krusty::fir::FirTypeParameterRef::External {
+            callable: target,
+            ordinal: ordinal as u32,
+        };
+        result.push(substitution);
+    }
+    Ok(result)
 }
 
 /// The plan a checked property-reference node yields.
@@ -148,7 +208,11 @@ fn accessor_plan(
 /// `Err(None)` where the node is no reference to a dependency property at all — every other node
 /// in the arena reaches here — and `Err(Some(reason))` where it is one and the shape is not
 /// realizable, so the decline can name it.
-fn property_plan(ir: &IrFile, id: ExprId) -> Result<PropertyPlan, Option<String>> {
+fn property_plan(
+    ir: &IrFile,
+    id: ExprId,
+    callables: Option<&krusty::backend::CheckedBackendCallables>,
+) -> Result<PropertyPlan, Option<String>> {
     let IrExpr::Checked(checked_op) = ir.expr(id) else {
         return Err(None);
     };
@@ -165,7 +229,7 @@ fn property_plan(ir: &IrFile, id: ExprId) -> Result<PropertyPlan, Option<String>
         dispatch_receiver,
         extension_receiver,
         mutable,
-        substitutions: _,
+        substitutions,
         adaptation,
     } = &**checked_op
     else {
@@ -175,6 +239,92 @@ fn property_plan(ir: &IrFile, id: ExprId) -> Result<PropertyPlan, Option<String>
     if adaptation.is_some() {
         return reason("an ADAPTED reference to a dependency property".to_string());
     }
+    let FirPropertyTarget::External {
+        property: property_id,
+        ..
+    } = getter.as_ref()
+    else {
+        return reason("a dependency property whose getter has no external identity".to_string());
+    };
+    let (getter_substitutions, setter_substitutions) = if let Some(callables) = callables {
+        let Some(property_fact) = callables.property(*property_id) else {
+            return reason(
+                "a dependency property reference without frozen property identities".to_string(),
+            );
+        };
+        let Some(getter_fact) = callables.callable(property_fact.getter) else {
+            return reason(
+                "a dependency property reference without frozen getter facts".to_string(),
+            );
+        };
+        let getter_substitutions = reference_accessor_substitutions(
+            substitutions,
+            property_fact.getter,
+            property_fact.getter,
+            Some(getter_fact),
+        )
+        .map_err(Some)?;
+        let setter_substitutions = match setter {
+            Some(setter)
+                if matches!(
+                    setter.as_ref(),
+                    FirPropertyTarget::External {
+                        property: setter_property,
+                        ..
+                    } if setter_property == property_id
+                ) =>
+            {
+                let Some(setter_target) = property_fact.setter else {
+                    return reason(
+                        "a mutable dependency property has no frozen setter identity".to_string(),
+                    );
+                };
+                let Some(setter_fact) = callables.callable(setter_target) else {
+                    return reason(
+                        "a dependency property reference without frozen setter facts".to_string(),
+                    );
+                };
+                let getter_formals = getter_fact
+                    .generic_sig
+                    .as_deref()
+                    .map_or(&[][..], |signature| signature.formals.as_slice());
+                let setter_formals = setter_fact
+                    .generic_sig
+                    .as_deref()
+                    .map_or(&[][..], |signature| signature.formals.as_slice());
+                if getter_formals != setter_formals {
+                    return reason(
+                        "a generic dependency property whose getter and setter formal order differs"
+                            .to_string(),
+                    );
+                }
+                Some(
+                    reference_accessor_substitutions(
+                        substitutions,
+                        property_fact.getter,
+                        setter_target,
+                        Some(setter_fact),
+                    )
+                    .map_err(Some)?,
+                )
+            }
+            Some(_) => {
+                return reason(
+                    "a mutable dependency property reference whose setter does not match its property identity"
+                        .to_string(),
+                )
+            }
+            None => None,
+        };
+        (getter_substitutions, setter_substitutions)
+    } else if substitutions.is_empty() {
+        (Vec::new(), setter.as_ref().map(|_| Vec::new()))
+    } else {
+        return reason(
+            "a generic dependency property reference without frozen accessor identities"
+                .to_string(),
+        );
+    };
     // The object carries at most ONE receiver, and which of the two it is does not matter to it;
     // BOTH at once is a member extension, whose accessor wants two.
     let bound = match (dispatch_receiver, extension_receiver) {
@@ -188,9 +338,17 @@ fn property_plan(ir: &IrFile, id: ExprId) -> Result<PropertyPlan, Option<String>
             )
         }
     };
-    let getter = accessor_plan(getter, 0, "getter").map_err(Some)?;
+    let getter = accessor_plan(getter, 0, "getter", getter_substitutions).map_err(Some)?;
     let setter = match setter {
-        Some(setter) => Some(accessor_plan(setter, 1, "setter").map_err(Some)?),
+        Some(setter) => Some(
+            accessor_plan(
+                setter,
+                1,
+                "setter",
+                setter_substitutions.expect("a setter target has substitutions"),
+            )
+            .map_err(Some)?,
+        ),
         None => None,
     };
     // Both accessors reach the same object, so they lead with the same receiver or with none.
@@ -244,6 +402,7 @@ fn build_property(ir: &mut IrFile, plan: PropertyPlan) -> DependencyProperty {
                 arguments: Vec::new(),
                 parameters: getter.parameters,
                 result: getter.result,
+                substitutions: getter.substitutions,
                 source_receiver: None,
             },
         )));
@@ -274,6 +433,7 @@ fn build_property(ir: &mut IrFile, plan: PropertyPlan) -> DependencyProperty {
                 arguments: vec![value],
                 parameters: setter.parameters.clone(),
                 result: setter.result,
+                substitutions: setter.substitutions.clone(),
                 source_receiver: None,
             },
         )));
@@ -303,5 +463,59 @@ fn build_property(ir: &mut IrFile, plan: PropertyPlan) -> DependencyProperty {
         ty,
         mutable,
         bound,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn substitution(
+        callable: krusty::fir::ExternalCallableId,
+        ordinal: u32,
+    ) -> krusty::ir::IrCheckedSubstitution {
+        krusty::ir::IrCheckedSubstitution {
+            parameter: krusty::fir::FirTypeParameterRef::External { callable, ordinal },
+            reified: false,
+            value: Ty::String,
+            reified_runtime: Ty::String,
+            additional_bounds: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn property_reference_accessor_arguments_are_rekeyed_by_exact_accessor_identity() {
+        let getter = krusty::fir::ExternalCallableId::from_raw(4);
+        let setter = krusty::fir::ExternalCallableId::from_raw(9);
+        let selected = [substitution(getter, 0)];
+
+        let rekeyed = rekey_reference_accessor_substitutions(&selected, getter, setter, 1)
+            .expect("the one selected property formal maps to the setter's corresponding formal");
+        assert_eq!(
+            rekeyed[0].parameter,
+            krusty::fir::FirTypeParameterRef::External {
+                callable: setter,
+                ordinal: 0,
+            }
+        );
+        assert_eq!(rekeyed[0].value, Ty::String);
+        assert!(rekey_reference_accessor_substitutions(&selected, getter, setter, 2).is_err());
+        assert!(rekey_reference_accessor_substitutions(
+            &[substitution(
+                krusty::fir::ExternalCallableId::from_raw(3),
+                0
+            )],
+            getter,
+            setter,
+            1,
+        )
+        .is_err());
+        assert!(rekey_reference_accessor_substitutions(
+            &[substitution(getter, 1)],
+            getter,
+            setter,
+            1
+        )
+        .is_err());
     }
 }

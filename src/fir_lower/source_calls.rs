@@ -124,6 +124,7 @@ pub(super) struct ExternalPropertyRequest<'a> {
     pub(super) dispatch_receiver: DispatchOperand,
     pub(super) extension_receiver: Option<ExprId>,
     pub(super) arguments: &'a [IrCheckedArgument],
+    pub(super) substitutions: &'a [crate::fir::FirTypeSubstitution],
     pub(super) write: bool,
 }
 
@@ -259,32 +260,7 @@ impl BodyLowering<'_> {
             return None;
         };
         let lambda = self.expression_with_conversion(*value, *conversion).ok()?;
-        let (implementation, capture_count, arity) = match self.ir.expr(lambda) {
-            IrExpr::Lambda {
-                impl_fn,
-                captures,
-                arity,
-                inline_body: Some(_),
-                ..
-            } => (*impl_fn, captures.len(), *arity),
-            _ => return None,
-        };
-        if arity != 1 {
-            return None;
-        }
-        let continuation_ty = *self
-            .ir
-            .functions
-            .get(implementation as usize)?
-            .params
-            .get(capture_count)?;
-        let continuation = self.ir.add_expr(IrExpr::CurrentContinuation);
-        let invocation = self.ir.add_expr(IrExpr::InvokeFunction {
-            func: lambda,
-            args: vec![continuation],
-            params: vec![continuation_ty],
-            ret: self.ir.functions.get(implementation as usize)?.ret,
-        });
+        let invocation = self.ir.invoke_with_current_continuation(lambda)?;
         // The unintercepted primitive is kotlinc's own inline intrinsic: the block it is given
         // opens a frame named after it.
         let crate::fir::FirIntrinsic::SuspendCoroutineUninterceptedOrReturn { callee } = operation
@@ -320,12 +296,8 @@ impl BodyLowering<'_> {
                 }
             }
         }
-        self.ir.intrinsic_suspension_points.insert(
-            invocation,
-            crate::ir::IrIntrinsicSuspensionPoint {
-                result: result.get(),
-            },
-        );
+        self.ir
+            .mark_unintercepted_suspension(invocation, result.get());
         Some(invocation)
     }
 
@@ -347,6 +319,7 @@ impl BodyLowering<'_> {
                 },
             extension_receiver,
             arguments,
+            substitutions,
             write,
         } = request;
         let source_receiver = dispatch_receiver
@@ -390,6 +363,7 @@ impl BodyLowering<'_> {
                 arguments,
                 parameters: parameter_types,
                 result: result.get(),
+                substitutions: super::checked::lower_substitutions(substitutions),
                 source_receiver,
             }
         } else {
@@ -407,6 +381,7 @@ impl BodyLowering<'_> {
                 arguments,
                 parameters: parameter_types,
                 result: result.get(),
+                substitutions: super::checked::lower_substitutions(substitutions),
                 source_receiver,
             }
         };

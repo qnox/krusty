@@ -229,6 +229,7 @@ extern const KType kt_type_boolean_companion;
 extern const KType kt_type_float_companion;
 extern const KType kt_type_double_companion;
 extern const KType kt_type_string_companion;
+extern const KType kt_type_result_companion;
 extern const KType kt_type_ubyte_companion;
 extern const KType kt_type_ushort_companion;
 extern const KType kt_type_uint_companion;
@@ -243,6 +244,7 @@ KRef kt_boolean_companion(void);
 KRef kt_float_companion(void);
 KRef kt_double_companion(void);
 KRef kt_string_companion(void);
+KRef kt_result_companion(void);
 KRef kt_ubyte_companion(void);
 KRef kt_ushort_companion(void);
 KRef kt_uint_companion(void);
@@ -1049,6 +1051,7 @@ KRef kt_throwable_new_defaulted(const KType *type);
 /* `kotlin.Result`'s failed state, and kotlin-test's `checkResultIsFailure` over one. */
 extern const KType kt_type_result_failure;
 KRef kt_result_failure_new(KRef exception);
+KRef kt_result_failure_exception(KRef failure);
 KRef kt_check_result_is_failure(KRef expected, KRef message, KRef result);
 /* A `Result` held where its class is not known statically, and the value back out of one. */
 extern const KType kt_type_result;

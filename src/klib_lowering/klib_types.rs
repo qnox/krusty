@@ -9,7 +9,8 @@
 //! parameter is the semantic type parameter the declaration's provider record states for it
 //! ([`KlibTypeParameters`]); a body whose declaration binds none of its type parameters declines
 //! on the first use of one. Other type-use annotations carry no semantic type, as in metadata.
-//! Definitely non-null, dynamic, error, suspend and context function types decline by form.
+//! A `kotlin.coroutines.SuspendFunctionN` type is the suspend function type it denotes. Dynamic,
+//! error and context function types decline by form.
 
 use crate::fx_hash::HashMap;
 
@@ -70,7 +71,13 @@ fn class_type(
         if !function.is_reflective() {
             let ret = arguments.pop().expect("a function type has its result");
             let receiver = receiver && !arguments.is_empty();
-            return Ok(Ty::fun_with_shape(arguments, ret, 0, receiver, false));
+            return Ok(Ty::fun_with_shape(
+                arguments,
+                ret,
+                0,
+                receiver,
+                function.is_suspend(),
+            ));
         }
     }
     if receiver {
@@ -202,11 +209,6 @@ fn function_shape(
     arguments: usize,
 ) -> Result<Option<function_classifiers::FunctionClassifier>, KlibBodyDeclineReason> {
     if let Some(function) = function_classifiers::classifier(name) {
-        if function.is_suspend() {
-            return Err(KlibBodyDeclineReason::UnsupportedType(
-                "a suspend function type",
-            ));
-        }
         if !function.is_reflective() && arguments != function.arity() + 1 {
             return Err(mismatch(
                 "a function type has another number of arguments than its arity",
@@ -237,7 +239,9 @@ pub(super) fn closure_type_arity(arena: &KlibIrArena, id: KlibIrTypeId) -> Optio
     }
     let (name, _) = class_head(classifier, annotations, &|_| Ok(None)).ok()?;
     let function = function_shape(name, arguments.len()).ok()??;
-    (!function.is_reflective()).then(|| function.arity())
+    // A suspend lambda's implementation also takes the continuation, which closure planning does
+    // not model yet.
+    (!function.is_reflective() && !function.is_suspend()).then(|| function.arity())
 }
 
 /// One type argument, as the provider converts a metadata type argument.
@@ -274,26 +278,34 @@ fn annotation_classifier(annotation: &KlibIrAnnotation) -> Option<TypeName> {
     declaration_name(constructor.package().segments(), class).ok()
 }
 
-/// The arity of the invocation the public declaration `member` is, when the function classifier
-/// that owns it declares it with the Kotlin function invocation role. The member is joined to the
-/// builtins provider's declaration of its exact classifier by its serialized name; that
-/// declaration's role, not the name, decides. Suspend and reflective classifiers are not invoked
-/// here.
+/// The source arity of an ordinary invocation the public declaration `member` is, when its
+/// function classifier declares the Kotlin function invocation role. The member is joined to the
+/// compiler-owned declaration of its exact classifier; its role, not its name, decides.
 pub(super) fn function_invocation_arity(member: &KlibPublicIdSignature) -> Option<usize> {
-    invocation_arity(member, false)
+    invocation_arity(member, false, false)
+}
+
+/// The source arity of a declared `SuspendFunctionN.invoke`. Common CPS lowering supplies the
+/// physical trailing continuation after this semantic call has been recorded.
+pub(super) fn suspend_function_invocation_arity(member: &KlibPublicIdSignature) -> Option<usize> {
+    invocation_arity(member, false, true)
 }
 
 /// A reflective function's inherited invocation, authenticated against the same builtins
 /// declaration as its ordinary function supertype. This grants no reflection-operation support.
 pub(super) fn reference_invocation_arity(member: &KlibPublicIdSignature) -> Option<usize> {
-    invocation_arity(member, true)
+    invocation_arity(member, true, false)
 }
 
-fn invocation_arity(member: &KlibPublicIdSignature, reflective: bool) -> Option<usize> {
+fn invocation_arity(
+    member: &KlibPublicIdSignature,
+    reflective: bool,
+    suspend: bool,
+) -> Option<usize> {
     let (name, class) = member.declaration().segments().split_last()?;
     let owner = declaration_name(member.package().segments(), class).ok()?;
     let function = function_classifiers::classifier(owner)?;
-    if function.is_suspend() || function.is_reflective() != reflective {
+    if function.is_suspend() != suspend || function.is_reflective() != reflective {
         return None;
     }
     let declaration = function_classifiers::synthetic(function.invocation_classifier());
@@ -426,5 +438,61 @@ mod tests {
             definitely_non_null(nullable_any),
             Ty::from(TyKind::DefinitelyNotNull(Ty::ty_param("T", nullable_any)))
         );
+    }
+
+    /// A class type `classifier<arguments>` as kotlinc serializes it.
+    fn class_application(
+        arena: &mut KlibIrArena,
+        classifier: &str,
+        arguments: &[KlibIrTypeId],
+    ) -> KlibIrTypeId {
+        arena.push_type(KlibIrType::Simple {
+            classifier: KlibIrSymbol {
+                kind: KlibIrSymbolKind::Class,
+                signature: KlibIrSignature::Public(KlibPublicIdSignature::classifier(
+                    crate::types::type_name(classifier),
+                )),
+            },
+            nullability: KlibIrNullability::NotSpecified,
+            arguments: arguments
+                .iter()
+                .map(|&ty| KlibIrTypeArgument::Type {
+                    variance: KlibIrVariance::Invariant,
+                    ty,
+                })
+                .collect(),
+            annotations: Vec::new(),
+            abbreviation: None,
+        })
+    }
+
+    /// kotlinc serializes the receiver of `startCoroutine`, `suspend () -> T`, as
+    /// `kotlin.coroutines.SuspendFunction0<T>`: the suspend function type checked source gives
+    /// the same declaration. Closure planning gives a suspend lambda no closure arity, since its
+    /// implementation also takes the continuation.
+    #[test]
+    fn a_suspend_function_classifier_is_the_suspend_function_type() {
+        let mut arena = KlibIrArena::default();
+        let int = class_application(&mut arena, "kotlin/Int", &[]);
+        let string = class_application(&mut arena, "kotlin/String", &[]);
+        let suspend = class_application(
+            &mut arena,
+            "kotlin/coroutines/SuspendFunction1",
+            &[int, string],
+        );
+        let plain = class_application(&mut arena, "kotlin/Function1", &[int, string]);
+        let parameters = KlibTypeParameters::default();
+        let int_ty = semantic_type(&arena, &parameters, int).expect("Int");
+        let string_ty = semantic_type(&arena, &parameters, string).expect("String");
+        assert_eq!(
+            semantic_type(&arena, &parameters, suspend).expect("a suspend function type"),
+            Ty::fun_with_shape(vec![int_ty], string_ty, 0, false, true)
+        );
+        assert_eq!(
+            semantic_type(&arena, &parameters, plain).expect("a function type"),
+            Ty::fun_with_shape(vec![int_ty], string_ty, 0, false, false)
+        );
+        assert_eq!(closure_type_arity(&arena, suspend), None);
+        assert_eq!(closure_type_arity(&arena, plain), Some(1));
     }
 }

@@ -277,6 +277,26 @@ fn kotlin_codegen_box_native_conformance() {
     box_lane::run(&NativeLane { target: host() });
 }
 
+fn expect_native_klib_box(source: &str, stem: &str) {
+    super::common::expect_box_ok_with_stdlib(source, &format!("{stem}Oracle"));
+    let target = host().expect("Native KLIB/runtime is required for this test");
+    let lane = NativeLane {
+        target: Some(target),
+    };
+    let outcome = lane.compile_and_run(
+        &std::env::temp_dir(),
+        stem,
+        &[(format!("{stem}.kt"), source.to_string())],
+        source,
+    );
+    assert_eq!(outcome, Outcome::Pass, "{stem}");
+}
+
+#[test]
+fn native_library_suspend_coroutine_runs() {
+    let source = include_str!("box_regressions/librarySuspendCoroutine.kt");
+    expect_native_klib_box(source, "nativeLibrarySuspendCoroutine");
+}
 fn run_native_abi_case(source: &str, stem: &str) -> Outcome {
     if let Some(reason) = not_applicable(source) {
         return Outcome::NotApplicable(reason);

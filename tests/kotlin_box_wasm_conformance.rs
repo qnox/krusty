@@ -1148,6 +1148,14 @@ fun box(): String {
 }
 
 #[test]
+fn wasm_library_suspend_coroutine_runs() {
+    expect_wasm_box(
+        include_str!("box_regressions/librarySuspendCoroutine.kt"),
+        "wasmLibrarySuspendCoroutine",
+    );
+}
+
+#[test]
 fn wasm_class_equality_and_rendering_use_the_class_own_members() {
     expect_wasm_box(
         r#"

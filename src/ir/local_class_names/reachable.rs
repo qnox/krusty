@@ -334,8 +334,12 @@ fn detach_lambda_impl(ir: &mut IrFile, source: FunId) -> FunId {
     // consumed. This detached implementation belongs to a newly copied site and must remain
     // available until that site's own representation pass either consumes or realizes it. Keeping
     // the source state can emit a continuation for the copy while dropping the method it re-enters.
-    ir.inline_only_fns.remove(&target);
-    ir.must_inline_lambdas.remove(&target);
+    // A source whose body an inline call already consumed has nothing to realize: its copy stays
+    // inline-only, as the source is, instead of becoming a method without a body.
+    if ir.functions[target as usize].body.is_some() {
+        ir.inline_only_fns.remove(&target);
+        ir.must_inline_lambdas.remove(&target);
+    }
     target
 }
 

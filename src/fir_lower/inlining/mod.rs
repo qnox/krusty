@@ -2064,18 +2064,23 @@ fn specialize_checked_operation(
         IrCheckedOperation::ExternalPropertyRead {
             parameters,
             result,
+            substitutions,
             source_receiver,
             ..
         }
         | IrCheckedOperation::ExternalPropertyWrite {
             parameters,
             result,
+            substitutions,
             source_receiver,
             ..
         } => {
             specialize_tys(parameters, bindings);
             specialize_ty(result, bindings);
             specialize_optional_ty(source_receiver, bindings);
+            for substitution in substitutions {
+                specialize_checked_substitution(substitution, bindings);
+            }
         }
         IrCheckedOperation::RangeConstruction {
             start_type,

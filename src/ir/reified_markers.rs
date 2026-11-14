@@ -26,4 +26,9 @@ impl InheritedFacts for ReifiedMarkers {
         catches.inherit(source, target);
         arrays.inherit(source, target);
     }
+
+    fn truncate_from(&mut self, first: ExprId) {
+        self.catches.truncate_from(first);
+        self.arrays.truncate_from(first);
+    }
 }

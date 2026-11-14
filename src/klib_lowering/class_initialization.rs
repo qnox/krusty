@@ -17,7 +17,7 @@ use crate::metadata::klib_ir::tree::{
 };
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbolKind};
 use crate::metadata::semantic::KotlinModality;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 pub(super) enum InitializationStep<'a> {
     Field { index: u32, value: KlibIrExprId },
@@ -202,13 +202,23 @@ pub(super) fn plan<'a, 'b>(
         ));
     };
     if access.symbol.kind != KlibIrSymbolKind::Constructor
-        || !access.type_arguments.is_empty()
         || !matches!(&header.arena.expr(*initialize).kind,
             KlibIrExprKind::InstanceInitializerCall(class) if class == &header.class.base.symbol)
     {
-        return Err(mismatch(
-            "an ordinary class does not delegate to its superclass and initialize its own instance",
-        ));
+        let initialized = match &header.arena.expr(*initialize).kind {
+            KlibIrExprKind::InstanceInitializerCall(class) => {
+                format!("instance initializer for {:?}", class.signature)
+            }
+            other => format!("initializer expression {other:?}"),
+        };
+        return Err(mismatch(&format!(
+            "ordinary KLIB class {:?} has invalid superclass initialization: delegation {:?} (kind {:?}, {} type arguments), {initialized}; expected a constructor paired with an initializer for {:?}",
+            contract.signature,
+            access.symbol.signature,
+            access.symbol.kind,
+            access.type_arguments.len(),
+            header.class.base.symbol.signature,
+        )));
     }
     let KlibIrSignature::Public(signature) = &access.symbol.signature else {
         return Ok(None);
@@ -230,15 +240,15 @@ pub(super) fn plan<'a, 'b>(
         callees.validate_root_constructor(&contract.module, signature, bodies)
     })?;
     let (superclass, declared_superclass) = if root {
-        if !arguments.is_empty() {
+        if !arguments.is_empty() || !access.type_arguments.is_empty() {
             return Err(mismatch(
-                "a delegation to `Any`'s constructor passes arguments",
+                "a delegation to `Any`'s constructor passes arguments or type arguments",
             ));
         }
         (None, Ty::obj_name(crate::types::wk::any()))
     } else {
         // The superclass constructor the delegation names, by its exact declaration.
-        let constructor = match bodies.linked_origin(
+        let constructor_identity = match bodies.linked_origin(
             &contract.module,
             &KlibDeclarationSignature::Public(signature.clone()),
         ) {
@@ -250,7 +260,7 @@ pub(super) fn plan<'a, 'b>(
             }
         };
         let Some(super::callee_facts::KlibCalleeFact::Selected(selected)) =
-            callees.get(&constructor)
+            callees.get(&constructor_identity)
         else {
             return Ok(None);
         };
@@ -262,19 +272,50 @@ pub(super) fn plan<'a, 'b>(
         else {
             return Err(mismatch("a superclass constructor has no declaring class"));
         };
-        let params = selected[0].params().to_vec();
+        let mut type_arguments = Vec::with_capacity(access.type_arguments.len());
+        for argument in &access.type_arguments {
+            let Some(argument) = *argument else {
+                return Ok(None);
+            };
+            type_arguments.push(semantic_type(header.arena, &header.types, argument)?);
+        }
+        let Some(declared_superclass) = supertypes.first().copied() else {
+            return Err(mismatch(
+                "a class with a delegated superclass has no declared supertype",
+            ));
+        };
+        let TyKind::Obj(declared_owner, declared_arguments) = declared_superclass.kind() else {
+            return Err(mismatch(
+                "a delegated superclass is not a declared class application",
+            ));
+        };
+        if declared_owner != owner || declared_arguments[..] != type_arguments[..] {
+            return Err(mismatch(
+                "a superclass constructor's type arguments disagree with the class's declared supertype",
+            ));
+        }
+        let constructor = super::constructor_calls::authenticate(selected[0], bodies)?;
+        if constructor.classifier != owner {
+            return Err(mismatch(
+                "a superclass constructor's authenticated class disagrees with its owner",
+            ));
+        }
+        let applied_params =
+            constructor.instantiate(&type_arguments, declared_superclass, |argument, bound| {
+                callees.constructor_bound(&header.types, argument, bound)
+            })?;
         if callees.target_represents(owner) {
             // The target lays the superclass out itself and builds it from the delegation's
             // arguments, as it does for a source class extending it.
             (
                 Some(SuperclassCall {
-                    constructor,
+                    constructor: constructor_identity,
                     arguments,
                     owner,
-                    params,
+                    params: applied_params,
                     materialized: false,
                 }),
-                Ty::obj_name(owner),
+                declared_superclass,
             )
         } else {
             let Some(superclass) = plan(selected[0], bodies, callees)? else {
@@ -285,13 +326,13 @@ pub(super) fn plan<'a, 'b>(
             }
             (
                 Some(SuperclassCall {
-                    constructor,
+                    constructor: constructor_identity,
                     arguments,
                     owner: superclass.header.contract.classifier,
-                    params,
+                    params: applied_params,
                     materialized: true,
                 }),
-                Ty::obj_name(superclass.header.contract.classifier),
+                declared_superclass,
             )
         }
     };

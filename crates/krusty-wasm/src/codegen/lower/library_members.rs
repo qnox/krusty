@@ -95,7 +95,7 @@ impl Body<'_> {
         id: u32,
         node: &IrExpr,
     ) -> Option<Result<(), Unsupported>> {
-        let (target, receiver, args, role) = match node {
+        let (target, receiver, args, role, generic_accessor, member_extension) = match node {
             IrExpr::Call {
                 callee,
                 dispatch_receiver: Some(receiver),
@@ -113,13 +113,25 @@ impl Body<'_> {
                 if !defaults.is_empty() {
                     return None;
                 }
-                (*target, *receiver, args.as_slice(), MemberRole::Function)
+                (
+                    *target,
+                    *receiver,
+                    args.as_slice(),
+                    MemberRole::Function,
+                    false,
+                    false,
+                )
             }
             IrExpr::Checked(operation) => {
                 let access = self.callables.dependency_accessor(operation)?;
                 let receiver = access.receiver?;
-                if !access.dispatches() || access.writes() || access.callable.is_member_extension()
-                {
+                let generic_accessor = !access.substitutions().is_empty()
+                    || access
+                        .callable
+                        .generic_sig
+                        .as_ref()
+                        .is_some_and(|signature| !signature.formals.is_empty());
+                if !access.dispatches() || access.writes() {
                     return None;
                 }
                 (
@@ -127,13 +139,34 @@ impl Body<'_> {
                     receiver,
                     access.arguments,
                     MemberRole::Getter,
+                    generic_accessor,
+                    access.callable.is_member_extension(),
                 )
             }
             _ => return None,
         };
         let fact = self.callables.callable(target)?;
+        if generic_accessor
+            && (member_extension
+                || (matches!(fact.kind, ExternalCallableKind::Member)
+                    && fact.member_realization == MemberRealization::Dispatch
+                    && fact.compiler_operation().is_none()))
+        {
+            // Whether an export exists must not decide virtual semantics. The direct dependency
+            // body path below cannot instantiate this generic accessor's virtual frame, so do not
+            // let it bypass a possible override.
+            return Some(Err(
+                "a generic dependency member getter whose instantiated virtual interface call is unsupported"
+                    .into(),
+            ));
+        }
+        if member_extension {
+            return None;
+        }
         let published = self.calls.external(target).is_some();
-        if !dispatches_through_library_member(self.ir, self.callables, id, fact, published) {
+        let dispatches =
+            dispatches_through_library_member(self.ir, self.callables, id, fact, published);
+        if !dispatches {
             return None;
         }
         // A function's identity names a function, and an accessor's a property.

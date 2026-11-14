@@ -257,7 +257,8 @@ impl Backend for CraneliftBackend {
         file.ir.realize_local_class_names_in_packages();
         // The accessors a reference to a DEPENDENCY property is reached through, which the
         // generator's own object is built from; see `native::dependency_references`.
-        let properties = super::dependency_references::realize_properties(&mut file.ir);
+        let properties =
+            super::dependency_references::realize_properties(&mut file.ir, &file.callables);
         if state.runtime_symbols.is_none() {
             match super::linker::runtime_symbols(self.target) {
                 Ok(symbols) => {
