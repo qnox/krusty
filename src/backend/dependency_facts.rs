@@ -278,9 +278,8 @@ impl BackendCallableFact {
     fn klib_body_callable_with_singleton<'a>(
         &'a self,
         singleton_dispatch: Option<SingletonDispatch>,
-        class_contract: Option<&'a crate::libraries::KlibBodyClassContract>,
+        singleton_class_contract: Option<&'a crate::libraries::KlibBodyClassContract>,
     ) -> Option<crate::libraries::KlibBodyCallable<'a>> {
-        let class_contract = self.edge_class_contract(class_contract);
         crate::libraries::KlibBodyCallable::new(
             crate::libraries::KlibBodyCallableShape {
                 name: &self.name,
@@ -299,7 +298,7 @@ impl BackendCallableFact {
                 compiler_intrinsic: self.compiler_operation(),
                 range_construction: self.member_realization.range_construction(),
                 declaration_modifiers: self.klib_body_declaration_modifiers,
-                class_contract,
+                class_contract: self.klib_body_class_contract.as_ref(),
                 accessor: self.klib_body_accessor.as_ref(),
             },
             singleton_dispatch,
@@ -307,15 +306,7 @@ impl BackendCallableFact {
             self.declaration_owner,
             self.dependency_callable.as_ref(),
         )
-    }
-
-    /// The class a singleton edge authenticates through: the class the provider recorded for
-    /// that singleton when it has one, otherwise the class of the member itself.
-    fn edge_class_contract<'a>(
-        &'a self,
-        provided: Option<&'a crate::libraries::KlibBodyClassContract>,
-    ) -> Option<&'a crate::libraries::KlibBodyClassContract> {
-        provided.or(self.klib_body_class_contract.as_ref())
+        .map(|callable| callable.with_singleton_class_contract(singleton_class_contract))
     }
 }
 
@@ -698,6 +689,7 @@ pub enum DependencyFactError {
     UnknownProperty(ExternalPropertyId),
     InvalidPropertyConstant(ExternalPropertyId),
     InvalidSingletonDispatch(crate::ir::ExprId),
+    InvalidObjectDeclaration(TypeName),
     /// Two plugin selections of one runtime declaration append different parameters to it.
     PluginRuntimeAbi(ExternalCallableId),
 }
@@ -719,12 +711,22 @@ pub struct CheckedBackendCallables {
     properties: HashMap<ExternalPropertyId, BackendPropertyFact>,
     singleton_dispatches: HashMap<crate::ir::ExprId, SingletonDispatch>,
     singleton_selections: HashMap<ExternalCallableId, Vec<SingletonEdge>>,
+    /// Declaration evidence for object values, including reads which select no member.
+    /// Only the emitted-use walk may turn one of these facts into an initialization root.
+    object_declarations: HashMap<TypeName, crate::libraries::KlibBodyClassContract>,
     /// The runtime declarations native plugins selected at the handoff for their generated code,
     /// with the parameters a plugin's transform appended to each.
     plugin_runtime: HashMap<ExternalCallableId, Box<[Ty]>>,
 }
 
 impl CheckedBackendCallables {
+    pub(crate) fn object_declaration(
+        &self,
+        classifier: TypeName,
+    ) -> Option<&crate::libraries::KlibBodyClassContract> {
+        self.object_declarations.get(&classifier)
+    }
+
     /// Whether native plugins selected `identity` at the handoff for the code they generate.
     pub fn is_plugin_runtime_callable(&self, identity: ExternalCallableId) -> bool {
         self.plugin_runtime.contains_key(&identity)
@@ -864,6 +866,16 @@ impl CheckedBackendCallables {
     ) -> Result<Self, DependencyFactError> {
         let referenced = references::referenced_dependencies(ir);
         let mut facts = Self::default();
+        for expression in &ir.exprs {
+            if let crate::ir::IrExpr::SingletonValue { classifier } = expression {
+                if let Some(contract) = provider.klib_body_class_contract(*classifier) {
+                    if contract.classifier != *classifier || !contract.is_object() {
+                        return Err(DependencyFactError::InvalidObjectDeclaration(*classifier));
+                    }
+                    facts.object_declarations.insert(*classifier, contract);
+                }
+            }
+        }
         let mut callable = |identity| provider.external_callable(identity);
         for property in referenced.properties {
             let realization = provider

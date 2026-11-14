@@ -273,8 +273,9 @@ impl FileLowering<'_> {
         class: ClassId,
     ) -> Result<Vec<(Vec<u8>, DependencyImplementation)>, Unsupported> {
         let mut implemented: Vec<(Vec<u8>, DependencyImplementation)> = Vec::new();
-        // Only a source module of this program calls a member through a stub; the members of a
-        // prebuilt library's interfaces need no records.
+        // A checked override or property edge carries its exact provider identity. Do not require
+        // that identity's callable body to have been imported into this module: the link joins
+        // implementation records with the interface identities its call stubs name.
         let source_modules: krusty::fx_hash::HashSet<&str> = self
             .dependency_symbols
             .keys()
@@ -299,11 +300,6 @@ impl FileLowering<'_> {
                     .callables
                     .callable(target)
                     .and_then(|fact| fact.dependency_callable.as_ref())
-                    .filter(|member| {
-                        source_modules.contains(member.module.as_str())
-                            || self.unit_kind
-                                == krusty::backend::CheckedIrUnitKind::DependencySupport
-                    })
                 else {
                     continue;
                 };
@@ -385,11 +381,7 @@ impl FileLowering<'_> {
                 };
                 implemented.push((identity, implementation));
             }
-            self.record_dependency_property_implementations(
-                owner,
-                &source_modules,
-                &mut implemented,
-            )?;
+            self.record_dependency_property_implementations(owner, &mut implemented)?;
             for default in self.ir.inherited_defaults.get(&name).into_iter().flatten() {
                 let krusty::fir::InheritedDefaultBody::DependencyInterfaceMethod(declaration) =
                     default.body
@@ -457,13 +449,12 @@ impl FileLowering<'_> {
 }
 
 impl FileLowering<'_> {
-    /// Add to `implemented` the getter and setter `owner` implements each property of another
-    /// source module's interface with, by the accessor's identity: its own override's slot in
+    /// Add to `implemented` the getter and setter `owner` implements each dependency-interface
+    /// property with, by the accessor's identity: its own override's slot in
     /// `tables.0`, or a default of this module's interface at that property's number in `tables.1`.
     fn record_dependency_property_implementations(
         &mut self,
         owner: ClassId,
-        source_modules: &krusty::fx_hash::HashSet<&str>,
         implemented: &mut Vec<(Vec<u8>, DependencyImplementation)>,
     ) -> Result<(), Unsupported> {
         let name = self.ir.classes[owner as usize].fq_name_id();
@@ -479,7 +470,6 @@ impl FileLowering<'_> {
                 .callables
                 .callable(target)
                 .and_then(|fact| fact.dependency_callable.as_ref())
-                .filter(|member| source_modules.contains(member.module.as_str()))
             else {
                 continue;
             };

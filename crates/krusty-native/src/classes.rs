@@ -499,7 +499,88 @@ pub(super) enum Dispatch {
     Interface(u32),
 }
 
+/// The table entry whose authenticated body answers `KCallable.name` for one class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CallableNameSlot {
+    Class(u32),
+    Interface(u32),
+}
+
 impl ClassModel {
+    /// The most-derived class or interface-table entry for the checked `KCallable.name` role.
+    /// An inherited entry with no locally selected getter role is omitted: the runtime follows
+    /// the class descriptor's exact superclass chain until it finds this checked callback.
+    pub(super) fn callable_name_slot(
+        &self,
+        class: ClassId,
+        ir: &krusty::ir::IrFile,
+    ) -> Option<CallableNameSlot> {
+        let layout = self.layout(class);
+        layout
+            .vtable
+            .iter()
+            .enumerate()
+            .find(|(index, slot)| {
+                self.slot_is_callable_name(slot, ir)
+                    || self.property_getter_is_callable_name(class, *index as u32, ir)
+            })
+            .map(|(index, _)| CallableNameSlot::Class(index as u32))
+            .or_else(|| {
+                layout
+                    .itable
+                    .iter()
+                    .enumerate()
+                    .find(|(_, slot)| self.slot_is_callable_name(slot, ir))
+                    .map(|(index, _)| CallableNameSlot::Interface(index as u32))
+            })
+    }
+
+    fn property_getter_is_callable_name(
+        &self,
+        class: ClassId,
+        index: u32,
+        ir: &krusty::ir::IrFile,
+    ) -> bool {
+        let Some(edges) = ir
+            .property_overrides
+            .get(&ir.classes[class as usize].fq_name)
+        else {
+            return false;
+        };
+        edges.iter().any(|edge| {
+            edge.overridden_getter_semantic_role
+                == Some(krusty::types::SemanticCallRole::KotlinCallableReferenceName)
+                && self.slot(class, &SlotKey::Getter(edge.implementation)) == Some(index)
+        })
+    }
+
+    fn slot_is_callable_name(&self, slot: &Slot, ir: &krusty::ir::IrFile) -> bool {
+        use krusty::types::SemanticCallRole;
+        let Some(callable) = (match slot {
+            Slot::Function(function)
+            | Slot::ValueBridge { function, .. }
+            | Slot::FunctionBridge {
+                target: function, ..
+            }
+            | Slot::Bridge {
+                declared: function, ..
+            } => self.callables.get(function).copied(),
+            Slot::ModuleFunction(callable) => Some(*callable),
+            Slot::Runtime(_)
+            | Slot::Abstract
+            | Slot::FieldGetter { .. }
+            | Slot::FieldSetter { .. }
+            | Slot::AnnotationMember { .. }
+            | Slot::AccessorBridge { .. }
+            | Slot::Inherited { .. }
+            | Slot::InheritedInterface { .. } => None,
+        }) else {
+            return false;
+        };
+        ir.callable_semantic_roles.get(&callable)
+            == Some(&SemanticCallRole::KotlinCallableReferenceName)
+    }
+
     /// Whether `function` is a method its class's table does not dispatch, which a call reaches
     /// directly.
     pub(super) fn is_direct(&self, function: FunId) -> bool {

@@ -312,7 +312,7 @@ fn invocation_arity(member: &KlibPublicIdSignature, reflective: bool) -> Option<
 /// Intern a classifier identity one signature segment at a time. Package segments are namespace
 /// children; declaration segments after the first are nested classifiers. No qualified spelling is
 /// rendered and parsed back into the name tree.
-pub(super) fn classifier_name(
+pub(crate) fn classifier_name(
     signature: &KlibPublicIdSignature,
 ) -> Result<TypeName, KlibBodyDeclineReason> {
     declaration_name(

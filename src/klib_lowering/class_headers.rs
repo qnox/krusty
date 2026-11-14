@@ -213,6 +213,60 @@ pub(super) fn authenticate_private_member<'a, 'b>(
     })
 }
 
+/// The raw header of the private primary constructor of the object `class`, which no provider
+/// records: an object's instance is created only by its own declaration. The constructor must be
+/// a direct member of that exact class header, private, and take no value.
+pub(super) fn authenticate_object_constructor<'a, 'b>(
+    class: &'a KlibBodyClassContract,
+    bodies: &'b KlibDeclarationBodies,
+) -> Result<Option<ClassMemberHeader<'a, 'b>>, KlibBodyDeclineReason> {
+    let Some(primary) = class
+        .primary_constructor
+        .as_ref()
+        .filter(|_| class.kind == crate::libraries::TypeKind::Object)
+    else {
+        return Ok(None);
+    };
+    if class.signature.member_id().is_some()
+        || classifier_name(&class.signature)? != class.classifier
+    {
+        return Err(mismatch(
+            "an object's identity disagrees with its classifier",
+        ));
+    }
+    let identity = crate::libraries::KlibDependencyCallable {
+        module: class.module.clone(),
+        declaration: crate::libraries::KlibDeclarationSignature::Public(primary.clone()),
+    };
+    // An object of a module compiled from source alongside has no serialized declaration: its
+    // own file lays it out, never a support unit.
+    let Some(member) = bodies
+        .class_member_header(&identity, &class.signature, Some(KlibAccessorRole::Getter))
+        .map_err(mismatch)?
+    else {
+        return Ok(None);
+    };
+    if member.class.base.symbol.kind != KlibIrSymbolKind::Class
+        || !member.function.constructor
+        || crate::metadata::semantic::declaration_visibility(member.function.base.flags)
+            != crate::types::Visibility::Private
+        || !member.function.regular_parameters.is_empty()
+    {
+        return Err(mismatch(
+            "an object's primary constructor is not its private constructor taking no value",
+        ));
+    }
+    let (types, formals) = bind_class_parameters(&class.parameters, member.arena, member.class)?;
+    Ok(Some(ClassMemberHeader {
+        contract: class,
+        arena: member.arena,
+        function: member.function,
+        class: member.class,
+        types,
+        formals,
+    }))
+}
+
 fn bind_class_parameters(
     parameters: &KlibBodyClassParameters,
     arena: &KlibIrArena,

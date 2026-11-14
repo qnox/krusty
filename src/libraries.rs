@@ -33,6 +33,7 @@ mod inline_kind;
 pub(crate) mod intrinsic_const_numeric;
 mod klib_body_accessor;
 mod klib_body_class;
+pub use class_identity::KlibClassIdentity;
 mod member_flags;
 mod member_records;
 mod metadata_normalization;

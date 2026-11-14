@@ -475,6 +475,7 @@ impl<'a> FileLowering<'a> {
                             superclass: any_type,
                             interfaces: &interfaces,
                             reference_target: marker,
+                            callable_name: None,
                             walk: super::objects::WalkMembers::default(),
                             qualified_name: None,
                             simple_name: None,
@@ -506,21 +507,22 @@ impl<'a> FileLowering<'a> {
                         None => None,
                     };
                     vtable.push(thunk);
-                    // A REFERENCE answers `KCallable.name` too, and a program reaches it through
-                    // a variable rather than through the written reference — so the answer is a
-                    // member of the object rather than a constant folded at the site. It takes
-                    // the same slot a property reference's does (`references::NAME`), which is
-                    // what lets one read through `KCallable`, the type both wear, dispatch
-                    // without knowing which of the two it has. The slot between is a property's
-                    // `set`, which no type a function reference wears declares; it is filled
-                    // rather than left short so the table has one shape.
-                    if let Some(declared) = self.reference_declaration_name(index as u32) {
+                    // A named function reference answers `KCallable.name` too. Keep the generated
+                    // reference object's NAME table entry for its established layout, and publish
+                    // the same function as its typed descriptor callback so checked name reads
+                    // work through the common KCallable path.
+                    let callable_name = if let Some(declared) =
+                        self.reference_declaration_name(index as u32)
+                    {
                         let name =
                             self.declare_local_function(&format!("{base}_name"), &[any()], any())?;
                         vtable.push(thunk);
                         vtable.push(name);
                         self.define_reference_name(name, &base, &declared)?;
-                    }
+                        Some(name)
+                    } else {
+                        None
+                    };
                     // `toString` on a function value prints this name, as `Function1` would on the
                     // JVM.
                     let kotlin_name = format!("kotlin.Function{arity}");
@@ -536,6 +538,9 @@ impl<'a> FileLowering<'a> {
                         markers.push(self.import_data(&format!("kt_type_function{arity}"))?);
                         markers.push(self.import_data("kt_type_function")?);
                     }
+                    if callable_name.is_some() {
+                        markers.push(self.import_data("kt_type_kcallable")?);
+                    }
                     self.define_type_descriptor(
                         descriptor,
                         &base,
@@ -549,6 +554,7 @@ impl<'a> FileLowering<'a> {
                             superclass: any_type,
                             interfaces: &markers,
                             reference_target: marker,
+                            callable_name,
                             walk: super::objects::WalkMembers::default(),
                             qualified_name: None,
                             simple_name: None,
@@ -910,6 +916,7 @@ impl<'a> FileLowering<'a> {
                 superclass: any_type,
                 interfaces: &[],
                 reference_target: None,
+                callable_name: None,
                 walk: super::objects::WalkMembers::default(),
                 qualified_name: None,
                 simple_name: None,

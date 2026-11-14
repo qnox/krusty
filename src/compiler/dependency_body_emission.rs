@@ -163,6 +163,14 @@ pub(super) fn emit_dependencies<B: Backend>(
             return Vec::new();
         }
     };
+    let mut object_roots =
+        match emitted_roots::source_objects(source, &target_represents_classifier) {
+            Ok(objects) => objects,
+            Err(reason) => {
+                diags.error(Span::new(0, 0), reason);
+                return Vec::new();
+            }
+        };
     // Category ownership is a declaration capability, not an emission-success test. An intrinsic
     // wrapper whose unsupported body transaction declines must not be retried as an ordinary body.
     let intrinsic_roots: HashSet<_> = roots.iter().map(|root| root.identity()).collect();
@@ -181,7 +189,12 @@ pub(super) fn emit_dependencies<B: Backend>(
     for (requires_intrinsic_link, mut roots) in [(true, roots), (false, ordinary)] {
         // Intrinsic support may have emitted an ordinary root transitively in the preceding unit.
         roots.retain(|root| !support_state.emitted.contains_key(root.identity()));
-        if roots.is_empty() {
+        let current_objects = if requires_intrinsic_link {
+            Vec::new()
+        } else {
+            std::mem::take(&mut object_roots)
+        };
+        if roots.is_empty() && current_objects.is_empty() {
             continue;
         }
         let Some(mut externals) = rebound_externals(platform, &support_state.emitted, diags) else {
@@ -192,6 +205,15 @@ pub(super) fn emit_dependencies<B: Backend>(
         let mut unit = DependencyBodyUnit::reading_realized_enums(
             support_state.materialized_classes.keys().copied(),
         );
+        let has_object_instance = |class: &crate::libraries::KlibBodyClassContract| {
+            backend.emitted_object_instance(
+                state,
+                &crate::backend::instance_links::ObjectDeclaration {
+                    classifier: class.classifier,
+                    identity: class.identity(),
+                },
+            )
+        };
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
             callees: &callees,
@@ -199,12 +221,16 @@ pub(super) fn emit_dependencies<B: Backend>(
             target_realizes_intrinsic: &target_realizes_intrinsic,
             target_realizes_getter: &target_realizes_getter,
             target_represents_classifier: &target_represents_classifier,
+            has_object_instance: &has_object_instance,
         };
         let closure = match emitted_roots::declarations(
             platform,
             bodies,
             intrinsics,
-            &roots,
+            emitted_roots::Roots {
+                callables: &roots,
+                objects: &current_objects,
+            },
             &externals,
             &capabilities,
             !requires_intrinsic_link,
@@ -221,6 +247,8 @@ pub(super) fn emit_dependencies<B: Backend>(
         let emitted_roots::FrozenClosure {
             declarations,
             member_edges,
+            objects,
+            published_objects,
         } = closure;
         let callees = KlibCalleeFacts::with_reference_declarations(
             selected.iter().copied(),
@@ -233,6 +261,16 @@ pub(super) fn emit_dependencies<B: Backend>(
         .with_member_edges(member_edges)
         .with_type_oracle(&type_oracle)
         .with_target_classifiers(&target_represents_classifier);
+        let callees = match callees.with_objects(&objects, published_objects) {
+            Ok(callees) => callees,
+            Err(reason) => {
+                diags.error(
+                    Span::new(0, 0),
+                    format!("invalid dependency object declarations: {reason:?}"),
+                );
+                return Vec::new();
+            }
+        };
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
             callees: &callees,
@@ -240,6 +278,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             target_realizes_intrinsic: &target_realizes_intrinsic,
             target_realizes_getter: &target_realizes_getter,
             target_represents_classifier: &target_represents_classifier,
+            has_object_instance: &has_object_instance,
         };
         if !prepare_bodyless_externals(
             platform,
@@ -250,6 +289,15 @@ pub(super) fn emit_dependencies<B: Backend>(
             &mut externals,
             diags,
         ) {
+            return Vec::new();
+        }
+        if let Err(reason) = unit.lower_objects_with_declarations(
+            &objects, bodies, &callees, intrinsics, &externals, platform,
+        ) {
+            diags.error(
+                Span::new(0, 0),
+                format!("cannot lower a dependency object: {reason}"),
+            );
             return Vec::new();
         }
         for callable in roots {
@@ -324,7 +372,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             }
         }
         let mut exports = DependencyExportSignatures::default();
-        if let Err(error) = class_declarations::record(&unit, platform, &mut exports) {
+        if let Err(error) = class_declarations::record(&unit, &objects, platform, &mut exports) {
             diags.error(
                 Span::new(0, 0),
                 format!("internal error: cannot publish materialized class declarations: {error}"),
@@ -631,6 +679,7 @@ struct DependencyLeafCapabilities<'a> {
     target_realizes_intrinsic: &'a dyn Fn(crate::libraries::CompilerIntrinsic) -> bool,
     target_realizes_getter: &'a dyn Fn(crate::backend::DependencyGetterSignature<'_>) -> bool,
     target_represents_classifier: &'a dyn Fn(crate::types::TypeName) -> bool,
+    has_object_instance: &'a dyn Fn(&crate::libraries::KlibBodyClassContract) -> bool,
 }
 
 impl DependencyLeafCapabilities<'_> {
@@ -715,6 +764,7 @@ fn prepare_bodyless_externals(
         } else {
             bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
         };
+        let mut edges = edges;
         // A member of a materialized class is lowered with the class its constructor creates.
         match emitted_roots::member_class_constructor(
             platform,
@@ -723,6 +773,21 @@ fn prepare_bodyless_externals(
             &identity,
         ) {
             Ok(Some(primary)) => pending.push_back(primary),
+            Ok(None) => {}
+            Err(error) => {
+                diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                return false;
+            }
+        }
+        // A member of a materialized object is lowered with the object its initialization
+        // creates, whose edges no constructor declaration carries.
+        match emitted_roots::member_object_initialization(
+            platform,
+            bodies,
+            capabilities.callees,
+            &identity,
+        ) {
+            Ok(Some(initialization)) => edges.extend(initialization),
             Ok(None) => {}
             Err(error) => {
                 diags.error(Span::new(0, 0), format!("internal error: {error}"));

@@ -22,7 +22,7 @@ use crate::ir::{
     ClassId, IrClass, IrConstructorAccess, IrConstructorTarget, IrCtorArg,
     IrCtorParameterProvenance, IrField,
 };
-use crate::klib_libraries::{KlibCalleeOrigin, KlibDeclarationBodies, LocatedClass, LocatedMember};
+use crate::klib_libraries::{KlibCalleeOrigin, KlibDeclarationBodies, LocatedClass};
 use crate::libraries::{
     KlibBodyClassParameters, KlibDeclarationSignature, KlibDependencyCallable, TypeKind,
 };
@@ -98,6 +98,7 @@ pub(super) enum LocalBody<'a> {
 /// The prepared class borrows only the library; the module name and the root check do not.
 pub(super) struct LocalClassSource<'bodies, 'call> {
     pub(super) bodies: &'bodies KlibDeclarationBodies,
+    pub(super) declarations: &'call dyn crate::symbol_source::SymbolSource,
     pub(super) module: &'call str,
     pub(super) validate_root:
         &'call dyn Fn(&KlibPublicIdSignature) -> Result<(), KlibBodyDeclineReason>,
@@ -135,6 +136,8 @@ pub(super) struct MemberOverride {
     pub(super) declared_result: Ty,
     pub(super) applied_parameters: Vec<Ty>,
     pub(super) applied_result: Ty,
+    pub(super) semantic_role: Option<crate::types::SemanticCallRole>,
+    pub(super) is_interface: bool,
 }
 
 /// `parameters` and `result` after substituting each declaring type parameter in `formals` with
@@ -236,11 +239,11 @@ pub(super) fn realized_member_override(
             "an override's declaration has no classifier owner",
         ));
     };
-    if realization
-        .klib_body_class_contract
-        .as_ref()
-        .is_some_and(|contract| contract.classifier != owner)
-    {
+    let contract = realization.klib_body_class_contract.as_ref();
+    if contract.is_some_and(|contract| {
+        contract.classifier != owner
+            || realization.callable.owner_is_interface != (contract.kind == TypeKind::Interface)
+    }) {
         return Err(mismatch("an override's class contract names another owner"));
     }
     let (declared_parameters, declared_result) = declared_member_signature(realization);
@@ -264,6 +267,8 @@ pub(super) fn realized_member_override(
         declared_result,
         applied_parameters,
         applied_result,
+        semantic_role: realization.callable.semantic_role,
+        is_interface: realization.callable.owner_is_interface,
     })
 }
 
@@ -692,6 +697,7 @@ fn prepare_class<'a>(
         bodies: source.bodies,
         module: source.module,
         interfaces: &interfaces,
+        declarations: source.declarations,
     };
     let StoredMembers {
         fields,
@@ -813,6 +819,7 @@ struct MemberScope<'a> {
     bodies: &'a KlibDeclarationBodies,
     module: &'a str,
     interfaces: &'a [AdmittedInterface],
+    declarations: &'a dyn crate::symbol_source::SymbolSource,
 }
 
 fn members_and_storage<'a>(
@@ -929,93 +936,107 @@ fn member_overrides(
                 return Err(mismatch("two libraries serialize one overridden function"))
             }
         };
-        let (owner_arena, owner, declared) =
-            match scope.bodies.function_owner(scope.module, &symbol.signature) {
-                LocatedMember::One {
-                    module: owner_module,
-                    arena,
-                    class,
-                    function,
-                } => {
-                    if owner_module != identity.module {
-                        return Err(mismatch("an overridden function is not in its class"));
-                    }
-                    (arena, class, function)
-                }
-                LocatedMember::Several => {
-                    return Err(mismatch("two classes serialize one overridden function"))
-                }
-                LocatedMember::Missing => {
-                    return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-                        "an override this library does not authenticate",
-                    ))
-                }
-            };
-        if class_kind(owner.base.flags) != TypeKind::Interface {
-            return Err(unsupported("an override of a class member"));
-        }
-        let Some(interface) = scope
-            .interfaces
-            .iter()
-            .find(|interface| interface.signature == owner.base.symbol.signature)
+        let KlibDeclarationSignature::Public(_) = &identity.declaration else {
+            return Err(unsupported("an override of a non-public declaration"));
+        };
+        let Some((_, realization)) = scope
+            .declarations
+            .external_callable_by_dependency(&identity)
         else {
             return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-                "an override of a supertype this library does not authenticate",
+                "an override this library does not authenticate",
             ));
         };
+        let Some(canonical) = realization.klib_body_callable() else {
+            return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                "an override this library does not authenticate",
+            ));
+        };
+        if canonical.identity() != &identity {
+            return Err(mismatch(
+                "an overridden function has another provider identity",
+            ));
+        }
+        let header = super::class_headers::authenticate(canonical, scope.bodies)?;
+        super::class_headers::authenticate_receiver(
+            header.contract,
+            header.arena,
+            header.function,
+        )?;
+        let contract = header.contract;
+        if !canonical.is_member()
+            || canonical.declaration_owner()
+                != Some(crate::types::SemanticCallableOwner::Classifier(
+                    contract.classifier,
+                ))
+            || contract.module != identity.module
+        {
+            return Err(mismatch(
+                "an overridden function has another declaration owner",
+            ));
+        }
+        let owner_name = contract.classifier;
+        let is_interface = class_kind(header.class.base.flags) == TypeKind::Interface;
+        if contract.kind != class_kind(header.class.base.flags) {
+            return Err(mismatch("an overridden class has another declared kind"));
+        }
+        let applied_arguments = if is_interface {
+            let interface = scope
+                .interfaces
+                .iter()
+                .find(|interface| interface.signature == header.class.base.symbol.signature)
+                .ok_or(KlibBodyDeclineReason::UnsupportedDeclaration(
+                    "an override of a supertype this library does not authenticate",
+                ))?;
+            if interface.name != owner_name {
+                return Err(mismatch("an overridden interface has another owner"));
+            }
+            Some(interface.arguments.as_slice())
+        } else if owner_name == crate::types::wk::any() {
+            // The enclosing class constructor was already authenticated to delegate to Any.
+            None
+        } else {
+            return Err(unsupported(
+                "an override of an unauthenticated class member",
+            ));
+        };
+        let declared = header.function;
         if !declared.type_parameters.is_empty() || declared.constructor {
             return Err(unsupported(
                 "an override of a generic or constructor declaration",
             ));
         }
-        let mut formals = Vec::new();
-        let declared_types = bind_interface_parameters(owner, |parameter| {
-            let formal = Ty::ty_param(
-                crate::types::metadata_type_parameter(&parameter.name),
-                Ty::nullable(Ty::obj("kotlin/Any")),
-            );
-            formals.push(formal);
-            Ok(formal)
-        })?;
         let declared_signature =
-            interface_signature(owner_arena, declared, &declared_types, scope.resolve)?;
+            interface_signature(header.arena, declared, &header.types, scope.resolve)?;
         if declared_signature.parameters.len() != function.regular_parameters.len() {
             return Err(unsupported(
                 "an override whose parameters differ from the interface member",
             ));
         }
-        let (applied_parameters, applied_result) = substitute_applied_signature(
-            &declared_signature.parameters,
-            declared_signature.result,
-            &formals,
-            &interface.arguments,
-        )?;
+        let (applied_parameters, applied_result) = match applied_arguments {
+            Some(arguments) => substitute_applied_signature(
+                &declared_signature.parameters,
+                declared_signature.result,
+                &contract.parameters.formals,
+                arguments,
+            )?,
+            None => (
+                declared_signature.parameters.clone(),
+                declared_signature.result,
+            ),
+        };
         overrides.push(MemberOverride {
             identity,
-            owner: interface.name,
+            owner: owner_name,
             declared_parameters: declared_signature.parameters,
             declared_result: declared_signature.result,
             applied_parameters,
             applied_result,
+            semantic_role: canonical.semantic_role(),
+            is_interface,
         });
     }
     Ok(overrides)
-}
-
-fn bind_interface_parameters(
-    owner: &KlibIrClass,
-    mut formal: impl FnMut(&KlibIrTypeParameter) -> Result<Ty, KlibBodyDeclineReason>,
-) -> Result<KlibTypeParameters, KlibBodyDeclineReason> {
-    let mut types = KlibTypeParameters::default();
-    for parameter in &owner.type_parameters {
-        if parameter.base.symbol.kind != KlibIrSymbolKind::TypeParameter {
-            return Err(mismatch("an interface type parameter has no symbol"));
-        }
-        if !types.bind(&parameter.base.symbol, formal(parameter)?) {
-            return Err(mismatch("an interface repeats a type parameter"));
-        }
-    }
-    Ok(types)
 }
 
 fn interface_signature(

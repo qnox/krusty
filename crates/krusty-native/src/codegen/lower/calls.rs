@@ -525,6 +525,20 @@ impl BodyLowering<'_, '_, '_> {
                 )
                 .with_receiver(declared_receiver)
                 .with_overridden(&realization.overridden_declarations);
+                if realization.owner_is_interface
+                    && signature
+                        .owner
+                        .semantic_classifier()
+                        .is_some_and(super::classifier_shapes::is_read_write_property)
+                {
+                    if let (Some(receiver), Some(identity)) =
+                        (dispatch_receiver, realization.dependency_callable.as_ref())
+                    {
+                        return self.dependency_read_write_property_member(
+                            identity, signature, receiver, args, params, *ret,
+                        );
+                    }
+                }
                 match dispatch_receiver {
                     // A member: the receiver is the runtime function's first argument, and
                     // everything crosses as a reference.

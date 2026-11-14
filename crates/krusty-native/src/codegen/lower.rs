@@ -154,6 +154,8 @@ pub struct Lowered {
     pub abi: Vec<super::super::c_abi::Record>,
     /// What a later file of the module extending a class of this one reads of it.
     pub laid_out: Vec<(TypeName, LaidOutClass)>,
+    /// Canonical object declarations whose actual exported getter symbol was defined.
+    pub defined_objects: Vec<krusty::backend::instance_links::ObjectDeclaration>,
     /// Actual externally linkable descriptor definitions, signed by their producer class records.
     pub class_descriptors: Vec<(krusty::backend::KlibClassIdentity, String)>,
 }
@@ -328,6 +330,12 @@ pub fn lower_file(
         laid_out,
         extended,
         exported,
+        runtime_companion_functions: super::dependency_intrinsics::runtime_companion_functions(
+            ir, callables, unit_kind,
+        )
+        .map_err(|()| {
+            declined!("a dependency body with more than one runtime companion declaration")
+        })?,
         class_descriptors: Vec::new(),
         extension_entries: HashMap::default(),
         extension_tables: HashMap::default(),
@@ -427,6 +435,35 @@ pub fn lower_file(
     let class_descriptors = std::mem::take(&mut lowering.class_descriptors);
     let comdat_objects = std::mem::take(&mut lowering.comdat_objects);
     let mut product = module.finish();
+    let mut defined_objects = Vec::new();
+    for declaration in dependency_signatures.object_declarations() {
+        let instance =
+            krusty::backend::instance_links::InstanceEntry::Object(declaration.classifier);
+        let Some((_, entry)) = dependency_signatures
+            .instance_entries()
+            .iter()
+            .find(|(key, _)| key == &instance)
+        else {
+            continue;
+        };
+        let Some(export) = dependency_exports.get(entry) else {
+            continue;
+        };
+        if !export.signature.parameters().is_empty()
+            || export.signature.result() != Ty::obj_name(declaration.classifier)
+        {
+            continue;
+        }
+        let Some(symbol) = product.object.symbol_id(export.symbol.as_bytes()) else {
+            continue;
+        };
+        if matches!(
+            product.object.symbol(symbol).section,
+            cranelift_object::object::write::SymbolSection::Section(_)
+        ) {
+            defined_objects.push(declaration.clone());
+        }
+    }
     for data in comdat_objects {
         use cranelift_object::object::write::{Comdat, SymbolSection};
         let symbol = product.data_symbol(data);
@@ -447,6 +484,7 @@ pub fn lower_file(
         defines_entry,
         abi,
         laid_out: records,
+        defined_objects,
         class_descriptors,
     })
 }
@@ -514,6 +552,8 @@ struct FileLowering<'a> {
     /// The classes of `extended` and their superclasses here, whose table entries another file
     /// links by symbol.
     exported: krusty::fx_hash::HashSet<krusty::ir::ClassId>,
+    /// Exact dependency-support methods whose checked declarations the runtime realizes.
+    runtime_companion_functions: HashMap<FunId, &'static str>,
     /// The entry points a later file's subclass of each class in `extended` calls.
     extension_entries: HashMap<krusty::ir::ClassId, module_abi::ExtensionEntries>,
     /// What the vtable and interface table of each class in `extended` hold.
@@ -638,7 +678,9 @@ impl<'a> FileLowering<'a> {
         let function = &self.ir.functions[id as usize];
         let mut params = Vec::with_capacity(function.params.len() + 1);
         if let Some(owner) = function.dispatch_receiver {
-            if self.ir.class_id_by_name(owner).is_none() {
+            if self.ir.class_id_by_name(owner).is_none()
+                && !self.runtime_companion_functions.contains_key(&id)
+            {
                 return Err(declined!(
                     "a method of `{}`, which is not declared in this file",
                     owner.render()
@@ -907,6 +949,64 @@ impl<'a> FileLowering<'a> {
                 "a `tailrec` function `{}` common lowering leaves recursive",
                 function.name
             ));
+        }
+        if let Some(symbol) = self
+            .runtime_companion_functions
+            .get(&(index as krusty::ir::FunId))
+            .copied()
+        {
+            let signature = self.function_signature(index as krusty::ir::FunId)?;
+            let mut slots: Vec<Ty> = Vec::with_capacity(function.params.len() + 1);
+            if let Some(owner) = function.dispatch_receiver {
+                slots.push(Ty::obj_name(owner));
+            }
+            slots.extend(super::super::captures::carried_parameters(
+                self.ir,
+                index as krusty::ir::FunId,
+            ));
+            let mut semantic_slots = Vec::with_capacity(function.params.len() + 1);
+            if let Some(owner) = function.dispatch_receiver {
+                semantic_slots.push(Ty::obj_name(owner));
+            }
+            semantic_slots.extend(function.params.iter().copied());
+            let name = function.name.clone();
+            let ret = function.ret;
+            return self.emit_function(id, signature, ret, &name, &mut |lowering, parameters| {
+                lowering.scope = krusty::ir::IrEnclosure::Function(index as krusty::ir::FunId);
+                lowering.record_semantic_slots(&semantic_slots);
+                for (slot, (value, ty)) in parameters.iter().zip(&slots).enumerate() {
+                    let variable = lowering.declare_value(slot as u32, *ty)?;
+                    lowering.builder.def_var(variable, *value);
+                }
+                let mut arguments = Vec::with_capacity(parameters.len().saturating_sub(1));
+                for (&value, &ty) in parameters.iter().zip(&slots).skip(1) {
+                    let Some(value) = lowering.convert(value, Some(ty), any())? else {
+                        return Ok(());
+                    };
+                    if lowering.terminated {
+                        return Ok(());
+                    }
+                    arguments.push(value);
+                }
+                let runtime_params = vec![any(); arguments.len()];
+                let Some(result) =
+                    lowering.runtime_call(symbol, &runtime_params, any(), &arguments)?
+                else {
+                    return Ok(());
+                };
+                if lowering.terminated {
+                    return Ok(());
+                }
+                let Some(result) = lowering.convert(result, Some(any()), ret)? else {
+                    return Ok(());
+                };
+                if lowering.terminated {
+                    return Ok(());
+                }
+                lowering.builder.ins().return_(&[result]);
+                lowering.terminate();
+                Ok(())
+            });
         }
         let signature = self.function_signature(index as krusty::ir::FunId)?;
         // `this`, when there is one, is value slot 0 and the parameters follow it.
@@ -2003,7 +2103,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     receiver: Some(receiver),
                     ..
                 } = &**checked_op
-                    && self.reads_reference_slot(*target) =>
+                    && self.reads_reference_member(*target) =>
             {
                 self.reference_property(*target, *receiver)
                     .expect("the selected getter role was checked by the guard")

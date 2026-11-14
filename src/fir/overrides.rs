@@ -93,6 +93,9 @@ pub struct ResolvedPropertyOverride {
     pub overridden: ResolvedPropertyOverrideTarget,
     pub overridden_owner: TypeName,
     pub overridden_is_interface: bool,
+    /// Exact language role of the overridden property's getter, when its provider published one.
+    /// A target can use this to project a checked property slot without classifying it by name.
+    pub overridden_getter_semantic_role: Option<crate::types::SemanticCallRole>,
     pub name: Box<str>,
     /// Declaration-side type before applying the implementing class's supertype arguments. A target
     /// backend erases this type according to its own representation rules.

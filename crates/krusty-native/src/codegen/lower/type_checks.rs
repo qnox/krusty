@@ -84,7 +84,21 @@ impl<'a> FileLowering<'a> {
             krusty::backend::CheckedIrUnitKind::Source => {
                 !self.ir.local_class_name_provenance.contains_key(&class)
             }
-            krusty::backend::CheckedIrUnitKind::DependencySupport => self.exported.contains(&class),
+            krusty::backend::CheckedIrUnitKind::DependencySupport => {
+                self.exported.contains(&class)
+                    || (self.ir.classes[class as usize].is_object
+                        && self
+                            .dependency_signatures
+                            .classifier(class)
+                            .is_some_and(|identity| {
+                                self.dependency_signatures.object_declarations().iter().any(
+                                    |object| {
+                                        object.classifier == self.ir.classes[class as usize].fq_name
+                                            && &object.identity == identity
+                                    },
+                                )
+                            }))
+            }
         };
         if !named {
             let descriptor = self.declare_local_data(&format!("kt_type_{base}"), false)?;

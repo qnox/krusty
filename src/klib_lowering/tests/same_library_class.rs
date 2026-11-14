@@ -651,6 +651,7 @@ interface View<T> {
 }
 private class Hidden(private val value: String) : View<CharSequence> {
     override fun get(): String = value
+    override fun toString(): String = \"value=$value\"
 }
 fun make(value: String): View<CharSequence> = Hidden(value)
 ";
@@ -935,6 +936,14 @@ fn applied_interface_signature_substitutes_the_supertype() {
     assert_ne!(edge.declared_result, edge.applied_result);
     assert!(edge.applied_parameters.is_empty());
     assert!(edge.declared_parameters.is_empty());
+    let to_string = declared_kotlin_any_to_string(&libraries);
+    let any_edge = override_edge(unit.ir(), to_string.id);
+    assert_eq!(any_edge.overridden_owner, crate::types::wk::any());
+    assert!(!any_edge.overridden_is_interface);
+    assert_eq!(
+        any_edge.overridden_semantic_role,
+        Some(crate::types::SemanticCallRole::KotlinAnyToString)
+    );
     let _ = std::fs::remove_dir_all(&directory);
 }
 
@@ -979,6 +988,33 @@ fn declared_member(
         .dependency_callable
         .clone()
         .unwrap_or_else(|| panic!("fixture.{owner}.{name} dependency identity"));
+    MarkIdentity { id, identity }
+}
+
+fn declared_kotlin_any_to_string(libraries: &crate::klib_libraries::KlibLibraries) -> MarkIdentity {
+    let symbols = libraries.symbols(
+        crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("kotlin")),
+        "Any",
+    );
+    let classifier = symbols.classifier.as_ref().expect("kotlin.Any");
+    let callables = classifier
+        .declared_callables
+        .get("toString")
+        .expect("kotlin.Any.toString");
+    let [function] = callables.functions() else {
+        panic!("one kotlin.Any.toString")
+    };
+    let id = function
+        .callable
+        .external_identity
+        .expect("kotlin.Any.toString identity");
+    let selected = libraries
+        .external_callable(id)
+        .expect("selected Any.toString");
+    let identity = selected
+        .dependency_callable
+        .clone()
+        .expect("Any.toString KLIB identity");
     MarkIdentity { id, identity }
 }
 
