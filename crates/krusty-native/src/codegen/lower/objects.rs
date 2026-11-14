@@ -804,7 +804,8 @@ impl<'a> FileLowering<'a> {
                 simple_name: simple_name.as_deref(),
                 class_names,
             },
-        )
+        )?;
+        self.record_published_descriptor(class, descriptor)
     }
 
     /// The names Kotlin reflection publishes for one declared classifier, from the declaration

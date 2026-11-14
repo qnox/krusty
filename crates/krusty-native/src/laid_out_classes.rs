@@ -86,6 +86,9 @@ pub(crate) enum DependencyImplementation {
 #[derive(Debug, Default)]
 pub(crate) struct LaidOutClasses {
     source_module: Option<String>,
+    /// Only descriptors actually defined by source producers survive their provider lifetime.
+    /// An occupied `None` records conflicting definitions and is never a usable binding.
+    published_descriptors: HashMap<krusty::libraries::KlibClassIdentity, Option<String>>,
     classes: HashMap<TypeName, LaidOutClass>,
     /// A dependency class is materialized once for the program, by provider identities, so its
     /// record outlives the source module whose file selected its support unit.
@@ -105,6 +108,30 @@ impl LaidOutClasses {
         }
     }
 
+    pub(crate) fn publish_descriptor(
+        &mut self,
+        identity: krusty::libraries::KlibClassIdentity,
+        symbol: String,
+    ) {
+        self.published_descriptors
+            .entry(identity)
+            .and_modify(|known| *known = None)
+            .or_insert(Some(symbol));
+    }
+
+    pub(crate) fn published_descriptor(
+        &self,
+        identity: &krusty::libraries::KlibClassIdentity,
+    ) -> Result<Option<&str>, String> {
+        match self.published_descriptors.get(identity) {
+            None => Ok(None),
+            Some(Some(symbol)) => Ok(Some(symbol.as_str())),
+            Some(None) => {
+                Err("a KLIB classifier with conflicting Native descriptor definitions".into())
+            }
+        }
+    }
+
     /// The record of `class`: a class of the current source module, or a dependency class.
     pub(crate) fn get(&self, class: TypeName) -> Option<&LaidOutClass> {
         self.classes
@@ -118,6 +145,76 @@ impl LaidOutClasses {
             self.dependencies.insert(class, laid_out);
         } else {
             self.classes.insert(class, laid_out);
+        }
+    }
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+    use krusty::libraries::KlibClassIdentity;
+    use krusty::metadata::id_signature::{
+        metadata_class_signature, MetadataClass, MetadataContainer,
+    };
+
+    fn identity(module: &str) -> KlibClassIdentity {
+        KlibClassIdentity {
+            module: module.into(),
+            signature: metadata_class_signature(
+                MetadataContainer {
+                    package: &["sample".into()],
+                    classes: &[],
+                    native_interop_library: false,
+                },
+                MetadataClass {
+                    name: "Owner",
+                    type_params: &[],
+                    expect: false,
+                },
+            ),
+        }
+    }
+
+    #[test]
+    fn published_descriptors_survive_modules_without_aliasing_equal_signatures() {
+        let mut layouts = LaidOutClasses::default();
+        layouts.enter_source_module("producer", false);
+        layouts.publish_descriptor(identity("first"), "first_descriptor".into());
+        layouts.enter_source_module("consumer", false);
+        assert_eq!(
+            layouts.published_descriptor(&identity("first")),
+            Ok(Some("first_descriptor"))
+        );
+        assert_eq!(layouts.published_descriptor(&identity("second")), Ok(None));
+        layouts.publish_descriptor(identity("second"), "second_descriptor".into());
+        assert_eq!(
+            layouts.published_descriptor(&identity("first")),
+            Ok(Some("first_descriptor"))
+        );
+        assert_eq!(
+            layouts.published_descriptor(&identity("second")),
+            Ok(Some("second_descriptor"))
+        );
+    }
+
+    #[test]
+    fn conflicting_descriptor_definitions_are_sticky_in_both_orders() {
+        for definitions in [["first", "second"], ["second", "first"]] {
+            let mut layouts = LaidOutClasses::default();
+            for symbol in definitions {
+                layouts.publish_descriptor(identity("producer"), symbol.into());
+            }
+            let expected =
+                Err("a KLIB classifier with conflicting Native descriptor definitions".into());
+            assert_eq!(
+                layouts.published_descriptor(&identity("producer")),
+                expected
+            );
+            layouts.publish_descriptor(identity("producer"), definitions[0].into());
+            assert_eq!(
+                layouts.published_descriptor(&identity("producer")),
+                expected
+            );
         }
     }
 }
