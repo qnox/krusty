@@ -8,7 +8,7 @@ use crate::types::{Ty, TyKind, TypeName, TypeVariance};
 use std::sync::Arc;
 
 /// Provider-normalized class facts reachable from the serialized types a checker selected.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct CheckedKlibTypeFacts {
     classifiers: HashMap<TypeName, Arc<LibraryType>>,
     actualized_expects: HashMap<TypeName, TypeName>,
