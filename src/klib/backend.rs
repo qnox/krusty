@@ -639,6 +639,26 @@ fn record_class_function_exports(
         let Some(chain) = metadata_class_chain(package, name, &decoded.classes)? else {
             continue;
         };
+        let (own, enclosing) = chain
+            .split_last()
+            .ok_or_else(|| format!("class {name} has no metadata class chain"))?;
+        let class_id = ir
+            .class_id_by_name(source.fq_name_id())
+            .ok_or_else(|| format!("class {name} has no checked IR declaration"))?;
+        exports.record_classifier(
+            class_id,
+            crate::libraries::KlibClassIdentity {
+                module: module_name.to_owned(),
+                signature: crate::metadata::id_signature::metadata_class_signature(
+                    MetadataContainer {
+                        package,
+                        classes: enclosing,
+                        native_interop_library: false,
+                    },
+                    *own,
+                ),
+            },
+        );
         let container = MetadataContainer {
             package,
             classes: &chain,

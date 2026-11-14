@@ -456,6 +456,7 @@ impl FileClasses {
             records.push((
                 class.fq_name,
                 LaidOutClass {
+                    class_identity: exports.classifier(id).cloned(),
                     structure,
                     table_type,
                     fields,

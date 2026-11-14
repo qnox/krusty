@@ -25,6 +25,14 @@ pub(super) fn classifier_record(
 ) -> Option<LibraryType> {
     let signed = inventory.classifier(identity)?;
     let mut shape = signed.shape.clone();
+    shape.klib_identity =
+        signed
+            .module
+            .as_ref()
+            .map(|module| crate::libraries::KlibClassIdentity {
+                module: module.clone(),
+                signature: signed.signature.clone(),
+            });
     for constructor in &signed.constructors {
         let member = published_constructor(identities, identity, signed, constructor);
         shape

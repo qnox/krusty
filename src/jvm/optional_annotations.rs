@@ -175,6 +175,7 @@ fn annotation_type(class: &OptionalAnnotationClass) -> LibraryType {
         });
     }
     LibraryType {
+        klib_identity: None,
         runtime_exception: None,
         declaration_name: Some(class.declaration_name.clone()),
         access: declaration.visibility.into(),

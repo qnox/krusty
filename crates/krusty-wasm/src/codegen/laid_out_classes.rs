@@ -4,10 +4,11 @@
 //! A class's struct repeats its superclass's fields and its table type its superclass's slot
 //! types; its table holds the superclass's functions wherever it overrides nothing; constructing it
 //! runs the superclass's constructor. Same-source-module records retain only that module's live
-//! declaration identities. Source classes exported to another module publish a second form under
-//! their exact constructor KLIB identities; it drops source-local CallableIds, types, and interface
-//! numbers, then is activated only by a matching current-provider constructor contract. Dependency
-//! support classes have their own program-wide records, keyed by the selected provider identity.
+//! declaration identities. Exported source layouts are program-owned physical records keyed by
+//! exact KLIB class identity, with no provider-local CallableIds, types, or interface numbers.
+//! Constructor identities index those records for authenticated current-provider frame binding;
+//! type checks consume the exact class identity independently. Dependency support classes retain
+//! their own program-wide records.
 
 use krusty::fx_hash::HashMap;
 
@@ -15,7 +16,7 @@ use krusty::backend::class_tables::LaidOutSuperclass;
 use krusty::backend::CheckedBackendCallables;
 use krusty::fir::CallableId;
 use krusty::ir::{ClassId, CtorDelegateTarget, IrFile};
-use krusty::libraries::{ExternalCallableKind, KlibDependencyCallable};
+use krusty::libraries::{ExternalCallableKind, KlibClassIdentity, KlibDependencyCallable};
 use krusty::types::SemanticCallableOwner;
 use krusty::types::{Ty, TypeName};
 
@@ -56,6 +57,7 @@ impl SignatureAdapters {
 /// One class an earlier file of the source module laid out.
 #[derive(Clone, Debug)]
 pub(super) struct LaidOutClass {
+    pub(super) class_identity: Option<KlibClassIdentity>,
     pub(super) structure: u32,
     pub(super) table_type: u32,
     /// Its struct's fields after the dispatch table, which a subclass's struct begins with.
@@ -108,15 +110,25 @@ pub(super) enum DependencyImplementation {
     Function(u32),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PublishedConstructor {
+    Layout {
+        class: KlibClassIdentity,
+        ordinal: usize,
+    },
+    Conflict,
+}
+
 /// The classes laid out so far in the current source module, and the dependency classes support
 /// units materialized for the whole program, by identity.
 #[derive(Default)]
 pub(super) struct LaidOutClasses {
     source_module: Option<String>,
     classes: HashMap<TypeName, LaidOutClass>,
-    /// Source classes only cross a module boundary under the exact constructor identity their
-    /// producer exported. Their live CallableIds and type handles are stripped before storage.
-    published_source: HashMap<KlibDependencyCallable, (TypeName, LaidOutClass)>,
+    /// Canonical program-owned source layouts, independent of constructor selections.
+    published_source: HashMap<KlibClassIdentity, LaidOutClass>,
+    /// Constructor linkage only indexes the canonical class layout and its producer ordinal.
+    published_constructors: HashMap<KlibDependencyCallable, PublishedConstructor>,
     /// Published source layouts authenticated by this file's exact selected super constructors.
     active_source: HashMap<TypeName, LaidOutClass>,
     /// A dependency class is materialized once for the program, by provider identities, so its
@@ -133,6 +145,7 @@ impl LaidOutClasses {
         module_name: &str,
         ir: &IrFile,
         callables: &CheckedBackendCallables,
+        classifiers: &dyn krusty::backend::BackendClassifierSource,
     ) {
         self.support = false;
         if self.source_module.as_deref() != Some(module_name) {
@@ -159,22 +172,27 @@ impl LaidOutClasses {
             {
                 continue;
             }
-            let Some((known_class, published)) = self.published_source.get(identity) else {
+            let Some(PublishedConstructor::Layout {
+                class: class_identity,
+                ordinal: parent_ordinal,
+            }) = self.published_constructors.get(identity)
+            else {
                 continue;
             };
-            if *known_class != parent {
+            if classifiers
+                .classifier(parent)
+                .and_then(|fact| fact.klib_identity.clone())
+                .as_ref()
+                != Some(class_identity)
+            {
                 continue;
             }
-            let Some(parent_ordinal) = published
-                .constructor_identities
-                .iter()
-                .position(|candidate| candidate.as_ref() == Some(identity))
-            else {
+            let Some(published) = self.published_source.get(class_identity) else {
                 continue;
             };
             let Some(function) = published
                 .constructor_entries
-                .get(parent_ordinal)
+                .get(*parent_ordinal)
                 .copied()
                 .flatten()
             else {
@@ -227,7 +245,7 @@ impl LaidOutClasses {
     /// record stands for it and a subclass of it declines.
     pub(super) fn insert(&mut self, class: TypeName, laid_out: LaidOutClass) {
         if !self.support {
-            self.publish_source(class, laid_out.clone());
+            self.publish_source(laid_out.clone());
         }
         let records = if self.support {
             &mut self.dependencies
@@ -246,23 +264,58 @@ impl LaidOutClasses {
 
     /// Record the exported form under its exact provider identities, never by a rendered class
     /// name alone. CallableIds and Ty values are local to the producing analysis.
-    fn publish_source(&mut self, class: TypeName, laid_out: LaidOutClass) {
-        for identity in laid_out.constructor_identities.iter().flatten() {
-            let mut portable = laid_out.clone();
-            portable.methods.clear();
-            portable.constructors.fill(None);
-            portable.interface_bodies.clear();
-            portable.table.interface_entries.clear();
-            match self.published_source.get_mut(identity) {
-                Some((_, known)) => {
-                    known.refusal = Some("a source class identity with conflicting layouts".into());
-                }
-                None => {
-                    self.published_source
-                        .insert(identity.clone(), (class, portable));
-                }
+    fn publish_source(&mut self, mut laid_out: LaidOutClass) {
+        let Some(identity) = laid_out.class_identity.clone() else {
+            return;
+        };
+        for (ordinal, constructor) in laid_out.constructor_identities.iter().enumerate() {
+            if let Some(constructor) = constructor {
+                self.publish_constructor(constructor.clone(), identity.clone(), ordinal);
             }
         }
+        laid_out.methods.clear();
+        laid_out.constructors.fill(None);
+        laid_out.interface_bodies.clear();
+        laid_out.table.interface_entries.clear();
+        match self.published_source.get_mut(&identity) {
+            Some(known) => {
+                known.refusal = Some("a source class identity with conflicting layouts".into());
+            }
+            None => {
+                self.published_source.insert(identity, laid_out);
+            }
+        }
+    }
+
+    fn publish_constructor(
+        &mut self,
+        constructor: KlibDependencyCallable,
+        class: KlibClassIdentity,
+        ordinal: usize,
+    ) {
+        let binding = PublishedConstructor::Layout { class, ordinal };
+        self.published_constructors
+            .entry(constructor)
+            .and_modify(|known| {
+                if known != &binding {
+                    *known = PublishedConstructor::Conflict;
+                }
+            })
+            .or_insert(binding);
+    }
+
+    /// Read only the physical layout authenticated by the selected classifier record.
+    pub(super) fn published_structure(
+        &self,
+        identity: &KlibClassIdentity,
+    ) -> Result<Option<u32>, String> {
+        let Some(layout) = self.published_source.get(identity) else {
+            return Ok(None);
+        };
+        if let Some(reason) = &layout.refusal {
+            return Err(reason.clone());
+        }
+        Ok(Some(layout.structure))
     }
 }
 
@@ -298,4 +351,57 @@ fn super_constructor_edges(ir: &IrFile) -> Vec<(ClassId, u32, krusty::fir::Exter
     ));
     selected.sort_unstable_by_key(|(class, ordinal, _)| (*class, *ordinal));
     selected
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use krusty::metadata::id_signature::{
+        metadata_class_signature, MetadataClass, MetadataContainer,
+    };
+
+    fn class(module: &str, name: &str) -> KlibClassIdentity {
+        KlibClassIdentity {
+            module: module.into(),
+            signature: metadata_class_signature(
+                MetadataContainer {
+                    package: &["sample".into()],
+                    classes: &[],
+                    native_interop_library: false,
+                },
+                MetadataClass {
+                    name,
+                    type_params: &[],
+                    expect: false,
+                },
+            ),
+        }
+    }
+
+    #[test]
+    fn conflicting_constructor_producers_never_bind_in_either_insertion_order() {
+        let first = class("first", "Owner");
+        let second = class("second", "Owner");
+        let constructor = KlibDependencyCallable {
+            module: "producer".into(),
+            declaration: krusty::libraries::KlibDeclarationSignature::Public(
+                first.signature.clone(),
+            ),
+        };
+        for producers in [[first.clone(), second.clone()], [second, first]] {
+            let mut layouts = LaidOutClasses::default();
+            for producer in &producers {
+                layouts.publish_constructor(constructor.clone(), producer.clone(), 0);
+            }
+            assert_eq!(
+                layouts.published_constructors.get(&constructor),
+                Some(&PublishedConstructor::Conflict)
+            );
+            layouts.publish_constructor(constructor.clone(), producers[0].clone(), 0);
+            assert_eq!(
+                layouts.published_constructors.get(&constructor),
+                Some(&PublishedConstructor::Conflict)
+            );
+        }
+    }
 }

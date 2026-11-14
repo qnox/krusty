@@ -1155,6 +1155,25 @@ impl Body<'_> {
         Ok(Some(storage))
     }
 
+    /// The physical class selected by a current-file identity or an exact frozen KLIB identity.
+    pub(super) fn class_structure(&self, ty: Ty) -> Result<Option<u32>, Unsupported> {
+        if self.interface_of_type(ty).is_some() {
+            return Ok(None);
+        }
+        if let Some(class) = self.class_of_type(ty) {
+            return Ok(Some(self.file_classes()?.structure(class)));
+        }
+        let Some(identity) = ty
+            .non_null()
+            .obj_internal()
+            .and_then(|name| self.classifiers.classifier(name))
+            .and_then(|fact| fact.klib_identity.clone())
+        else {
+            return Ok(None);
+        };
+        self.laid_out_classes.published_structure(&identity)
+    }
+
     /// `x as C`: the value, cast to class `C` of this file or to an interface of the module.
     pub(super) fn cast(&mut self, arg: u32, target: Ty, non_null: bool) -> Result<(), Unsupported> {
         self.value(arg, any())?;
@@ -1169,8 +1188,9 @@ impl Body<'_> {
                 .unreachable()
                 .end();
         } else {
-            let class = self.class_of_type(target).expect("checked by the caller");
-            let structure = self.file_classes()?.structure(class);
+            let structure = self
+                .class_structure(target)?
+                .ok_or_else(|| "a class cast without its selected physical layout".to_owned())?;
             self.code.ref_cast(!non_null, HeapType::Concrete(structure));
         }
         Ok(())
@@ -1296,9 +1316,14 @@ impl Body<'_> {
                     self.code
                         .ref_test(nullable, HeapType::Concrete(form.object));
                 }
-                _ => match (self.interface_of_type(tested), self.class_of_type(tested)) {
+                _ => match (
+                    self.interface_of_type(tested),
+                    self.class_structure(tested)?,
+                ) {
                     (Some(interface), _) => self.interface_test(interface, nullable),
-                    (None, Some(class)) => self.instance_test(class, nullable)?,
+                    (None, Some(structure)) => {
+                        self.code.ref_test(nullable, HeapType::Concrete(structure));
+                    }
                     (None, None) => match self.library_interface_of_type(tested) {
                         Some(interface) => self.library_interface_test(interface, nullable),
                         None => {
@@ -1329,19 +1354,6 @@ impl Body<'_> {
             }
             _ => {}
         }
-        Ok(())
-    }
-
-    /// Replace the reference on the stack with whether it is an instance of `class` — or null,
-    /// when `nullable`.
-    fn instance_test(&mut self, class: ClassId, nullable: bool) -> Result<(), Unsupported> {
-        let declaration = &self.ir.classes[class as usize];
-        if declaration.is_interface {
-            self.interface_test(declaration.fq_name, nullable);
-            return Ok(());
-        }
-        let structure = self.file_classes()?.structure(class);
-        self.code.ref_test(nullable, HeapType::Concrete(structure));
         Ok(())
     }
 
