@@ -839,7 +839,7 @@ dependencies = [
  "krusty-test-modules",
  "krusty-wasm",
  "libc",
- "object 0.40.0",
+ "object 0.41.0",
  "pprof",
  "rayon",
  "sha2",
@@ -856,7 +856,7 @@ dependencies = [
  "krusty",
  "krusty-test-support",
  "libc",
- "object 0.40.0",
+ "object 0.41.0",
  "once_cell",
 ]
 
@@ -910,7 +910,7 @@ dependencies = [
  "cranelift-module",
  "cranelift-object",
  "krusty",
- "object 0.40.0",
+ "object 0.41.0",
  "target-lexicon",
 ]
 
@@ -1101,6 +1101,18 @@ name = "object"
 version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd229a0361b9d0d4396176e02d65897f487eebeab7caa6d443855ee152ca0b9c"
+dependencies = [
+ "crc32fast",
+ "hashbrown 0.17.1",
+ "indexmap",
+ "memchr",
+]
+
+[[package]]
+name = "object"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11dbdb66876026054e4ffc8d757d862bdf5df5aebd5c0b95a41f17832a94f7d2"
 dependencies = [
  "crc32fast",
  "hashbrown 0.17.1",
