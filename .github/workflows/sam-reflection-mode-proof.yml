@@ -1,0 +1,225 @@
+name: SAM reflection mode proof
+
+on:
+  push:
+    branches: [ci/sam-reflection-mode-proof]
+
+permissions:
+  contents: read
+
+jobs:
+  sam-metadata:
+    runs-on: [self-hosted, rust-4c-8gb]
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      KRUSTY_LANGUAGE_VERSION: '2.4.20'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: f5271a2f924f3cef6bef03abb47c47fc668f405a
+          fetch-depth: 1
+      - name: Authenticate the exact product checkout
+        run: test "$(git rev-parse HEAD)" = f5271a2f924f3cef6bef03abb47c47fc668f405a
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: build-tool-bins
+          save-if: false
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: zulu
+          java-version: '17'
+      - name: Install just when absent
+        shell: bash
+        run: |
+          if ! command -v just >/dev/null; then
+            cargo install just --locked
+          fi
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: target/cache/kotlinc/2.4.20
+          key: kotlinc-2.4.20
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: target/cache/kotlinc/2.4.21
+          key: kotlinc-2.4.21
+      - name: Provision exact Kotlin oracles and record source identities
+        id: tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          kotlinc_path="$(just kotlinc 2.4.20)"
+          abi_kotlinc="$(just kotlinc 2.4.21)"
+          box_dir="$(just box-corpus 2.4.20)"
+          echo "kotlinc=$kotlinc_path" >> "$GITHUB_OUTPUT"
+          echo "box_dir=$box_dir" >> "$GITHUB_OUTPUT"
+          echo "abi_kotlinc=$abi_kotlinc" >> "$GITHUB_OUTPUT"
+          {
+            echo "commit=$(git rev-parse HEAD)"
+            echo "workflow_ref=$GITHUB_REF"
+            echo "language_version=2.4.20"
+            echo "kotlinc=$kotlinc_path"
+            echo "box_dir=$box_dir"
+            echo "runner=$(uname -a)"
+            "$kotlinc_path" -version 2>&1
+            "$abi_kotlinc" -version 2>&1
+            java -version 2>&1 || true
+            cargo --version
+            rustc --version --verbose
+            git status --short --branch
+          } > artifacts/provenance.txt
+          sha256sum tests/class_lambda_e2e.rs tests/fun_interface_value_class_e2e.rs > artifacts/abi-test-source-sha256.txt
+          git diff --exit-code > artifacts/product.diff
+          : > artifacts/upstream-fixture-sha256.txt
+          for case in \
+            inlineClasses/funInterface.kt \
+            delegatedProperty/local/kt78073.kt \
+            inlineClasses/funInterface/kt51121.kt \
+            inlineClasses/funInterface/kt51121_2.kt \
+            inlineClasses/funInterfaceDoubleSuffux.kt \
+            inlineClasses/funInterfaceDoubleSuffux2.kt; do
+            found=0
+            while IFS= read -r -d '' file; do
+              sha256sum "$file" >> artifacts/upstream-fixture-sha256.txt
+              found=1
+            done < <(find "$box_dir" -type f -path "*/$case" -print0)
+            if [ "$found" -ne 1 ]; then
+              echo "missing exactly selected corpus fixture: $case" >&2
+              exit 1
+            fi
+          done
+      - name: Build the CLI, e2e and JVM conformance executables once
+        id: build
+        env:
+          CARGO_BUILD_JOBS: '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --profile gate -p krusty-cli -p krusty --bin krusty --test e2e --test conformance --message-format=json \
+            | tee artifacts/cargo-build.json \
+            | python3 -c '
+          import json, sys
+          wanted = {"krusty", "e2e", "conformance"}
+          paths = {}
+          for line in sys.stdin:
+              try:
+                  item = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+              if item.get("reason") == "compiler-artifact" and item.get("executable"):
+                  name = item.get("target", {}).get("name")
+                  if name in wanted:
+                      paths[name] = item["executable"]
+          if set(paths) != wanted:
+              print(f"missing target executables: expected={sorted(wanted)} actual={sorted(paths)}", file=sys.stderr)
+              sys.exit(1)
+          for name, path in sorted(paths.items()):
+              print(f"{name}={path}")
+          ' > artifacts/binaries.txt
+          sha256sum "$(sed -n 's/^krusty=//p' artifacts/binaries.txt)" \
+            "$(sed -n 's/^e2e=//p' artifacts/binaries.txt)" \
+            "$(sed -n 's/^conformance=//p' artifacts/binaries.txt)" > artifacts/binary-sha256.txt
+          cli="$(sed -n 's/^krusty=//p' artifacts/binaries.txt)"
+          test -x "$cli"
+          echo "KRUSTY_BIN=$cli" >> "$GITHUB_ENV"
+          for name in krusty e2e conformance; do
+            source_bin="$(sed -n "s/^${name}=//p" artifacts/binaries.txt)"
+            cp "$source_bin" "artifacts/${name}-bin"
+          done
+          sha256sum artifacts/krusty-bin artifacts/e2e-bin artifacts/conformance-bin > artifacts/uploaded-binary-sha256.txt
+      - name: Execute both complete SAM ABI assertions with the actual CLI
+        id: sam_abi
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        env:
+          KRUSTY_KOTLINC: ${{ steps.tools.outputs.abi_kotlinc }}
+          KRUSTY_LANGUAGE_VERSION: '2.4.21'
+        shell: bash
+        run: |
+          set -uo pipefail
+          unset KRUSTY_BLESS_BOX_EXPECTATIONS KRUSTY_BOX_ONLY
+          test -n "$KRUSTY_BIN" && test -x "$KRUSTY_BIN"
+          printf 'KRUSTY_BIN=%s\n' "$KRUSTY_BIN" > artifacts/abi-cli.txt
+          sha256sum "$KRUSTY_BIN" >> artifacts/abi-cli.txt
+          bin="$(sed -n 's/^e2e=//p' artifacts/binaries.txt)"
+          while IFS= read -r test_name; do
+            safe="${test_name//::/_}"
+            set +e
+            "$bin" "$test_name" --exact --test-threads 1 --nocapture > "artifacts/abi-${safe}.log" 2>&1
+            status=$?
+            cat "artifacts/abi-${safe}.log"
+            if ! grep -Eq 'test result: ok\. 1 passed; 0 failed' "artifacts/abi-${safe}.log"; then status=1; fi
+            echo "$test_name=$status" >> artifacts/status.txt
+          done <<'TESTS'
+          fun_interface_value_class_e2e::factory_conflicting_conversions_are_kotlincs_classes
+          class_lambda_e2e::sam_lambda_class_holds_the_body_and_the_captured_value_like_kotlinc
+          TESTS
+          exit 0
+      - name: Run all six affected Kotlin 2.4.20 JVM box regressions
+        id: upstream_boxes
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        env:
+          KRUSTY_KOTLINC: ${{ steps.tools.outputs.kotlinc }}
+          KRUSTY_KOTLIN_BOX_DIR: ${{ steps.tools.outputs.box_dir }}
+          KRUSTY_LANGUAGE_VERSION: '2.4.20'
+        shell: bash
+        run: |
+          set -uo pipefail
+          unset KRUSTY_BLESS_BOX_EXPECTATIONS KRUSTY_BOX_ONLY
+          test -n "$KRUSTY_BIN" && test -x "$KRUSTY_BIN"
+          bin="$(sed -n 's/^conformance=//p' artifacts/binaries.txt)"
+          status=0
+          while IFS= read -r case; do
+            safe="${case//\//_}"
+            set +e
+            KRUSTY_BOX_ONLY="$case" "$bin" kotlin_box_ir_jvm_conformance::kotlin_codegen_box_conformance --exact --test-threads 1 --nocapture 2>&1 | tee "artifacts/box-${safe}.log"
+            result=${PIPESTATUS[0]}
+            set -e
+            if ! grep -q 'box setup: scheduled 1 cases' "artifacts/box-${safe}.log"; then result=1; fi
+            if ! grep -Eq 'test result: ok\. 1 passed; 0 failed' "artifacts/box-${safe}.log"; then result=1; fi
+            echo "$case=$result" | tee -a artifacts/status.txt
+            if [ "$result" -ne 0 ]; then status=1; fi
+          done <<'CASES'
+          inlineClasses/funInterface.kt
+          delegatedProperty/local/kt78073.kt
+          inlineClasses/funInterface/kt51121.kt
+          inlineClasses/funInterface/kt51121_2.kt
+          inlineClasses/funInterfaceDoubleSuffux.kt
+          inlineClasses/funInterfaceDoubleSuffux2.kt
+          CASES
+          exit "$status"
+      - name: Require the SAM oracle and every selected JVM case to pass
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s artifacts/status.txt
+          if grep -Ev '=(0)$' artifacts/status.txt; then
+            echo 'one or more focused validations failed' >&2
+            exit 1
+          fi
+          [ "$(grep -cE '^(inlineClasses/|delegatedProperty/)' artifacts/status.txt)" -eq 6 ]
+          [ "$(grep -cE '^(fun_interface_value_class_e2e|class_lambda_e2e)::.*=0$' artifacts/status.txt)" -eq 2 ]
+          [ "$(wc -l < artifacts/status.txt)" -eq 8 ]
+      - name: Capture test counts and artifact hashes
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          : > artifacts/test-summary.txt
+          for log in artifacts/abi-*.log artifacts/box-*.log; do
+            [ -f "$log" ] || continue
+            echo "--- $log ---" >> artifacts/test-summary.txt
+            grep -E 'test result:|running [0-9]+ tests?|box setup: scheduled|box cases:|Kotlin 2\.4\.20' "$log" >> artifacts/test-summary.txt
+          done
+          sha256sum artifacts/* > artifacts/artifact-sha256.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: sam-reflection-mode-proof-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: error
+          compression-level: 3
