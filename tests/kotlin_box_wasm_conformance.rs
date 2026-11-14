@@ -1363,6 +1363,9 @@ mod dependency_constructor_exports;
 #[path = "wasm_escaping_closures.rs"]
 mod escaping_closures;
 
+#[path = "wasm_default_identity_hash.rs"]
+mod default_identity_hash;
+
 #[path = "wasm_type_of.rs"]
 mod type_of;
 
@@ -1387,3 +1390,23 @@ mod unsigned_decimal;
 
 #[path = "wasm_enclosing_instances.rs"]
 mod enclosing_instances;
+
+#[test]
+fn wasm_generic_elvis_preserves_its_non_null_type_parameter() {
+    let source = include_str!("box_regressions/multimodule/genericElvisNullProof.kt");
+    let stem = "genericElvisNullProof";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the whole generic Elvis module graph");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        assert_eq!(
+            lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            Outcome::Pass,
+            "{stem} on {}",
+            target.name()
+        );
+    }
+}
