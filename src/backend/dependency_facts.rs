@@ -16,7 +16,7 @@ pub use references::referenced_dependencies;
 use crate::fx_hash::HashMap;
 use std::collections::hash_map::Entry;
 
-pub use crate::fir::{BuiltinImplementation, BuiltinOverrideDeclaration};
+pub use crate::fir::BuiltinImplementation;
 use crate::fir::{ExternalCallableId, ExternalPropertyId};
 pub use crate::libraries::CompilerIntrinsic as BackendCompilerIntrinsic;
 pub use crate::libraries::DependencyGetterSignature;
@@ -381,7 +381,8 @@ mod tests {
         fact.declaration_owner = Some(SemanticCallableOwner::Classifier(crate::types::type_name(
             "kotlin/CharSequence",
         )));
-        let implementations = HashMap::from([(identity, expected.clone())]);
+        let mut implementations = HashMap::default();
+        implementations.insert(identity, expected.clone());
 
         callables
             .record_checked_builtin_implementations(&implementations)
