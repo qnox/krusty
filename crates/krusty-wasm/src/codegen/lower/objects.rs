@@ -35,6 +35,7 @@ use super::{carrier, Body, FileContext, Unsupported, STRING};
 pub(super) const STRING_HEAP: HeapType = HeapType::Concrete(1);
 
 mod override_bridges;
+mod root_any;
 mod unrealized_members;
 
 pub(super) use unrealized_members::holds_unprinted_values;

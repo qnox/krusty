@@ -19,6 +19,8 @@
 mod exception_classes;
 mod object_equality;
 mod object_strings;
+mod root_any;
+mod string_order;
 
 pub(super) use object_strings::ObjectStrings;
 
@@ -94,6 +96,8 @@ pub(super) struct Runtime {
     pub(super) class_tokens: ClassTokens,
     /// Offsets of string constants already in the data segment.
     constants: HashMap<Vec<u16>, u32>,
+    /// Dispatch and type information for directly allocated root `Any` instances.
+    root_any_table: Option<u32>,
 }
 
 impl Runtime {
@@ -187,6 +191,7 @@ impl Runtime {
             callable_references,
             type_objects: TypeObjects::default(),
             constants: HashMap::default(),
+            root_any_table: None,
         };
         runtime.define_string_equals(module);
         runtime.define_object_equals(module);
