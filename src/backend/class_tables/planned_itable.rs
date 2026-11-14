@@ -287,6 +287,10 @@ impl Filler<'_> {
             }
         };
         match declaration.member {
+            PlanKey::Forwarder { .. } => Err(format!(
+                "an interface member realized by a class's forwarder (`{}`)",
+                interface()
+            )),
             PlanKey::Callable(callable) => {
                 let Some(&fid) = ir.checked_callable_functions.get(&callable) else {
                     if !reaches {
@@ -321,6 +325,11 @@ impl Filler<'_> {
                     }
                     Some(_) => unreachable!("a function is bridged from a function"),
                 }
+            }
+            PlanKey::DependencyCallable(_)
+            | PlanKey::DependencyGetter(_)
+            | PlanKey::DependencySetter(_) => {
+                Err("a dependency member numbered as a member of a module interface".to_owned())
             }
             PlanKey::Getter(property) | PlanKey::Setter(property) => {
                 let setter = matches!(declaration.member, PlanKey::Setter(_));

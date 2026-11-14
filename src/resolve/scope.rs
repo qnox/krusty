@@ -328,7 +328,6 @@ pub(crate) enum ContextValue {
     },
     Binding {
         name: String,
-        shadow_depth: usize,
     },
 }
 
@@ -864,27 +863,22 @@ impl<'p, B> Scope<'p, B> {
                 });
             }
         }
-        let mut same_name_depths = HashMap::<String, usize>::default();
         for scope in self.ancestors() {
             for binding in scope.bindings.borrow().iter().rev() {
                 if binding.ns != Ns::Value {
                     continue;
                 }
-                let shadow_depth = *same_name_depths.get(&binding.name).unwrap_or(&0);
                 if binding_matches(&binding.payload) {
                     return Some(ContextValue::Binding {
                         name: binding.name.clone(),
-                        shadow_depth,
                     });
                 }
-                *same_name_depths.entry(binding.name.clone()).or_default() += 1;
             }
         }
         None
     }
 
-    /// The `name` binding with `depth` nearer same-named bindings in front of it, the coordinate
-    /// [`Self::find_context_value`] reports.
+    /// The `name` binding with `depth` nearer same-named bindings in front of it.
     pub(crate) fn shadowed_binding(&self, ns: Ns, name: &str, depth: usize) -> Option<B>
     where
         B: Clone,
@@ -1659,7 +1653,7 @@ mod tests {
         let selected = parameters.find_context_value(|ty| ty == Ty::String, |value| *value == 1);
         assert!(matches!(
             selected,
-            Some(ContextValue::Binding { name, shadow_depth: 0 }) if name == "value"
+            Some(ContextValue::Binding { name }) if name == "value"
         ));
     }
 

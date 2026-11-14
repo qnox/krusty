@@ -443,7 +443,7 @@ fn wasm_property_reference_function_values_are_equal_across_files() {
     const STEM: &str = "wasmPropertyReferenceIdentityAcrossFiles";
     super::box_reference_classes::checked_box(SOURCE, STEM)
         .expect("the exact Kotlin compiler must run the whole fixture");
-    let (files, java) = krusty::conformance::split_files(SOURCE);
+    let (files, java) = krusty::conformance::split_files(SOURCE).expect("partition");
     assert!(java.is_empty());
     let files = files
         .into_iter()
@@ -842,7 +842,7 @@ fn explicit_array_checks_share_metadata_with_the_reference_compiler() {
     let options = krusty::conformance::WasmCompilerOptions::from_source(source)
         .expect("the original case's compilation metadata");
     assert_eq!(options.array_range_checks(), Some(true));
-    let (sources, java) = krusty::conformance::split_files(source);
+    let (sources, java) = krusty::conformance::split_files(source).expect("partition");
     assert!(java.is_empty());
     let [(stem, written_source)] = sources.as_slice() else {
         panic!("one complete array-store source")
@@ -1310,6 +1310,26 @@ fn wasm_callable_references_share_identity_across_independent_module_analyses() 
                 target.name(),
             );
         }
+    }
+}
+
+#[test]
+fn wasm_data_class_signed_array_members_are_lowered_from_the_library_klib() {
+    let source = include_str!("box_regressions/multimodule/dataClassSignedArrayMembers.kt");
+    let stem = "wasmDataClassSignedArrayMembers";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must run the complete signed-array KLIB module graph");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        assert_eq!(
+            lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            Outcome::Pass,
+            "{} must lower generated signed-array data-class members from the producer KLIB",
+            target.name(),
+        );
     }
 }
 

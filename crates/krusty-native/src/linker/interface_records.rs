@@ -5,7 +5,9 @@
 //! A module's own types record a member by its module-wide number, which names the stub directly.
 //! A type of a dependent module records a dependency's member by the member's KLIB identity, which
 //! the module declaring the member maps to its number; an identity no module maps is one no stub
-//! is called through, and is dropped.
+//! is called through, and is dropped. One member can have several stubs: the declaring module's
+//! own, and one in each dependent module that calls it through the dependency. The stubs of one
+//! identity are one member, so each reaches every implementation any of them has.
 
 use krusty::fx_hash::HashMap;
 
@@ -31,7 +33,7 @@ pub(super) type Implementations = HashMap<String, Vec<(Target, Target)>>;
 /// Read every implementation the objects `files` record.
 pub(super) fn read(files: &[Elf]) -> Result<Implementations, ProgramLinkError> {
     let mut implementations = Implementations::default();
-    let mut identities: HashMap<Vec<u8>, String> = HashMap::default();
+    let mut identities: HashMap<Vec<u8>, Vec<String>> = HashMap::default();
     let mut by_identity: Vec<(Vec<u8>, Target, Target)> = Vec::new();
     for (file_index, file) in files.iter().enumerate() {
         for section in file.sections() {
@@ -48,13 +50,14 @@ pub(super) fn read(files: &[Elf]) -> Result<Implementations, ProgramLinkError> {
         }
     }
     for (identity, ty, function) in by_identity {
-        if let Some(stub) = identities.get(&identity) {
+        for stub in identities.get(&identity).into_iter().flatten() {
             implementations
                 .entry(stub.clone())
                 .or_default()
-                .push((ty, function));
+                .push((ty.clone(), function.clone()));
         }
     }
+    share_between_stubs_of_one_member(&identities, &mut implementations);
     Ok(implementations)
 }
 
@@ -141,12 +144,33 @@ fn read_numbered(
     Ok(())
 }
 
+/// Give every stub of one member the implementations all of them have: a module's own types
+/// record under its own stub, and a dependent module's calls go through a stub of its own.
+fn share_between_stubs_of_one_member(
+    identities: &HashMap<Vec<u8>, Vec<String>>,
+    implementations: &mut Implementations,
+) {
+    for stubs in identities.values().filter(|stubs| stubs.len() > 1) {
+        let mut shared: Vec<(Target, Target)> = Vec::new();
+        for implementation in stubs.iter().filter_map(|stub| implementations.get(stub)) {
+            for pair in implementation {
+                if !shared.contains(pair) {
+                    shared.push(pair.clone());
+                }
+            }
+        }
+        for stub in stubs {
+            implementations.insert(stub.clone(), shared.clone());
+        }
+    }
+}
+
 /// The identity each member number of a module's interfaces stands for.
 fn read_identities(
     file_index: usize,
     section: &object::read::elf::ElfSection64<'_, '_, object::LittleEndian>,
     name: &str,
-    identities: &mut HashMap<Vec<u8>, String>,
+    identities: &mut HashMap<Vec<u8>, Vec<String>>,
 ) -> Result<(), ProgramLinkError> {
     let data = section_data(section)?;
     let mut at = 0;
@@ -164,17 +188,9 @@ fn read_identities(
             .ok()
             .and_then(|number| identified_stub(name, number))
             .ok_or_else(malformed)?;
-        match identities.get(identity) {
-            Some(known) if *known != stub => {
-                return Err(ProgramLinkError::Parse(format!(
-                    "input {file_index}: one interface member identity names both `{known}` and \
-                     `{stub}`"
-                )))
-            }
-            Some(_) => {}
-            None => {
-                identities.insert(identity.to_vec(), stub);
-            }
+        let stubs = identities.entry(identity.to_vec()).or_default();
+        if !stubs.contains(&stub) {
+            stubs.push(stub);
         }
         at = start + padded(length);
     }

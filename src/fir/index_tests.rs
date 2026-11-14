@@ -1150,3 +1150,92 @@ fn local_class_declarations_are_listed_by_the_index() {
         &[first_local, second_local]
     );
 }
+
+/// A dependency class a module class extends is published with its dispatch shape, selected while
+/// its provider is live: its own dispatched members and their override edges, by provider
+/// identity, so a target numbering slots never reopens the provider.
+#[test]
+fn dependency_superclass_publishes_its_dispatch_shape() {
+    let (Some(stdlib), Some(jdk)) = (
+        crate::toolchain::stdlib_jar(),
+        crate::toolchain::jdk_modules(),
+    ) else {
+        return;
+    };
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(vec![stdlib, jdk]));
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &[SourceInput::kotlin(
+            "import kotlin.coroutines.AbstractCoroutineContextElement\n\
+             import kotlin.coroutines.CoroutineContext\n\
+             class Name(val name: String) : AbstractCoroutineContextElement(Name) {\n\
+                 companion object Key : CoroutineContext.Key<Name>\n\
+             }\n",
+        )
+        .with_file_stem("DependencySuperclass")],
+        crate::frontend::PlatformProvider::jvm(Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
+                .expect("JVM provider initialization"),
+        )),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("Pass 1 must finalize")
+        .module
+        .index();
+    let superclasses = index.dependency_superclasses();
+    assert_eq!(superclasses.len(), 1, "{superclasses:?}");
+    let superclass = &superclasses[0];
+    assert_eq!(
+        superclass.classifier,
+        crate::types::type_name("kotlin/coroutines/AbstractCoroutineContextElement")
+    );
+    assert_eq!(superclass.superclass, None);
+    let name_of = |identity| {
+        classpath
+            .external_callable(identity)
+            .expect("a dependency member's realization")
+            .callable
+            .name
+            .clone()
+    };
+    let members = superclass
+        .members
+        .iter()
+        .map(|member| match member {
+            crate::fir::ResolvedDependencyMember::Function { callable, .. } => {
+                (name_of(*callable), None)
+            }
+            crate::fir::ResolvedDependencyMember::Property { getter, setter, .. } => {
+                (name_of(*getter), Some(*setter))
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(members, vec![("getKey".to_string(), Some(false))]);
+    assert!(superclass.function_overrides.is_empty());
+    let edges = superclass
+        .property_overrides
+        .iter()
+        .map(|edge| {
+            (
+                edge.implementation_owner,
+                edge.name.to_string(),
+                edge.overridden_owner,
+                edge.overridden_is_interface,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        edges,
+        vec![(
+            superclass.classifier,
+            "key".to_string(),
+            crate::types::type_name("kotlin/coroutines/CoroutineContext").nested_child("Element"),
+            true,
+        )]
+    );
+}

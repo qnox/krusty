@@ -29,9 +29,9 @@ use project_analysis_group::{
 
 use krusty::source::SourceKind;
 use krusty_lsp::{
-    detect, AnalysisWorker, DocumentAnalysis, DumpResult, DumpTarget, LibraryRef, LspOptions,
-    MaterializedDefinition, ProcessRunner, ProjectFeedback, ProjectMessageKind, ProjectSources,
-    ProjectSync, ProviderKind, RefreshOutcome,
+    detect, detect_for_scan, AnalysisWorker, DocumentAnalysis, DumpResult, DumpTarget, LibraryRef,
+    LspOptions, MaterializedDefinition, ProcessRunner, ProjectFeedback, ProjectMessageKind,
+    ProjectSources, ProjectSync, ProviderKind, RefreshOutcome,
 };
 
 #[cfg(unix)]
@@ -109,7 +109,7 @@ fn run_model_command(args: &[String]) {
         eprintln!("krusty-lsp: {}: {error}", command.root.display());
         std::process::exit(1);
     });
-    let provider = detect(&root, &[]);
+    let provider = detect_for_scan(&root, &[]);
     let model = match provider.probe(&ProcessRunner) {
         Ok(model) => model,
         Err(error) => {
@@ -369,7 +369,7 @@ fn run_parity_command(args: &[String]) -> bool {
         std::process::exit(1);
     });
     let started = Instant::now();
-    let provider = detect(&root, &[]);
+    let provider = detect_for_scan(&root, &[]);
     let model = provider.probe(&ProcessRunner).unwrap_or_else(|error| {
         eprintln!("krusty-lsp: cannot resolve project model: {error}");
         std::process::exit(1);
@@ -403,6 +403,19 @@ fn run_parity_command(args: &[String]) -> bool {
         plans.len(),
         started.elapsed()
     );
+    // Editor refresh does not download. Only this scan resolves a named JPS
+    // library through the Maven artifacts it maps to.
+    let fetched = krusty_lsp::project::maven_repository::ensure_repository_libraries(
+        model.kind,
+        &root,
+        &model.repository_libraries,
+    );
+    if fetched.installed > 0 || fetched.failed > 0 {
+        eprintln!(
+            "krusty-lsp parity: resolved {} named Maven libraries, {} still missing",
+            fetched.installed, fetched.failed
+        );
+    }
     let scratch = ParityScratch::create().unwrap_or_else(|error| {
         eprintln!("krusty-lsp: cannot create parity scratch directory: {error}");
         std::process::exit(1);
@@ -560,6 +573,8 @@ fn parity_failure_line(module: &str, status: &str, elapsed: Duration) -> String 
         "java_stub_failed": false,
         "missing_classpath_entries": 0,
         "open_complete": false,
+        "definition_query_us": null,
+        "references_query_us": null,
         "error_count": 0,
         "warning_count": 0,
         "diagnostics": [],
@@ -1242,6 +1257,8 @@ impl WorkerHost {
                     &classpath,
                     jdk_home.as_deref(),
                 );
+                // Missing repository jars stay missing. `ensure_maven_repository_jars` runs only
+                // from the parity command; this refresh is on the analysis thread.
                 let missing_classpath =
                     krusty_lsp::project::classpath_presence::missing_classpath_warning(
                         &classpath,
@@ -2196,6 +2213,10 @@ mod tests {
         assert_eq!(
             value["open_complete"], false,
             "a module that produced no analysis did not open completely"
+        );
+        assert!(
+            value["definition_query_us"].is_null() && value["references_query_us"].is_null(),
+            "a module that produced no analysis did not time a navigation query"
         );
         assert_eq!(value["truncated"], false);
         assert_eq!(value["java_stub_failed"], false);

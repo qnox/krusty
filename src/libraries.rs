@@ -66,7 +66,7 @@ pub use callable_scope_rung::CallableScopeRung;
 pub(crate) use classifier_callables::{
     constructor_declaration_signature, constructor_generic_signature, ConstructorAlias,
 };
-pub use classifier_callables::{BoundInnerConstructor, ConstructorCandidate};
+pub use classifier_callables::{BoundInnerConstructor, ConstructorCandidate, ConstructorOrigin};
 pub(crate) use classifier_declaration::type_alias_target_classifier;
 pub use classifier_declaration::{
     AliasExpansion, ClassifierDeclaration, ClassifierDeclarationKey, TypeAliasTemplate,
@@ -124,7 +124,9 @@ pub use inline_body::{
 };
 #[cfg(test)]
 pub(crate) use klib_body_class::test_fixture as klib_body_class_fixture;
-pub(crate) use klib_body_class::{KlibBodyClassContract, KlibBodyClassParameters, KlibStoredField};
+pub(crate) use klib_body_class::{
+    KlibBodyClassContract, KlibBodyClassParameters, KlibClassStorage, KlibStoredField,
+};
 pub use member_flags::LmFlags;
 pub(crate) use metadata_normalization::{
     associated_function_parameter_identities, associated_property_parameter_identities,
@@ -1913,6 +1915,10 @@ pub enum PropertyReadStability {
     Stable,
     /// An open default-getter `val`, stable only through a statically final receiver classifier.
     StableOnFinalReceiver,
+    /// A final default-getter `val` that is a component of a value class declared in another
+    /// module. kotlinc smart-casts it only under `AllowSmartCastsOnValueClassUnderlyingProperties`;
+    /// any other property of another module is unstable.
+    ValueClassComponentOfOtherModule,
 }
 
 impl PropertyReadStability {
@@ -1931,9 +1937,15 @@ impl PropertyReadStability {
         }
     }
 
-    pub(crate) fn permits(self, receiver_is_final: bool) -> bool {
+    pub(crate) fn permits(
+        self,
+        receiver_is_final: bool,
+        smart_cast_value_class_components: bool,
+    ) -> bool {
         matches!(self, Self::Stable)
             || (receiver_is_final && matches!(self, Self::StableOnFinalReceiver))
+            || (smart_cast_value_class_components
+                && matches!(self, Self::ValueClassComponentOfOtherModule))
     }
 }
 
@@ -2338,6 +2350,28 @@ impl LibraryType {
 
     pub fn type_params(&self) -> &Vec<String> {
         &self.type_parameters.type_params
+    }
+
+    /// `classifier`, this declaration, applied to its own formals, each bounded by its first
+    /// declared bound (`kotlin.Any?` when it declares none): the root its members are declared
+    /// against.
+    pub fn declared_self_type(&self, classifier: crate::types::TypeName) -> Ty {
+        let arguments = self
+            .type_params()
+            .iter()
+            .enumerate()
+            .map(|(index, parameter)| {
+                Ty::ty_param(
+                    parameter,
+                    self.type_param_bounds()
+                        .get(index)
+                        .and_then(|bounds| bounds.first())
+                        .copied()
+                        .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
+                )
+            })
+            .collect::<Vec<_>>();
+        Ty::obj_args_name(classifier, &arguments)
     }
 
     pub fn type_param_bounds(&self) -> &Vec<Vec<Ty>> {

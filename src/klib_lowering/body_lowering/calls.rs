@@ -3,7 +3,10 @@
 //! A built-in operator lowers as checked FIR lowers the source operator the KLIB serializes as a
 //! call of it; a dependency function lowers as a call of its function in the same unit.
 
-use super::super::ir_builtins::{BuiltinCallDisposition, BuiltinOperator, BuiltinRelation};
+use super::super::array_content_members;
+use super::super::ir_builtins::{
+    BuiltinCallDisposition, BuiltinOperator, BuiltinRelation, DataClassArrayMember,
+};
 use super::super::klib_types::function_invocation_arity;
 use super::{
     mismatch, unsupported, BodyLowering, LinkedAccessor, LinkedAccessorTarget, LinkedCallee,
@@ -11,7 +14,8 @@ use super::{
 };
 use crate::fir::FirTypeParameterRef;
 use crate::ir::{
-    Callee, ExprId, IrBinOp, IrCheckedOperation, IrCheckedSubstitution, IrExpr, IrPropertyDispatch,
+    Callee, ExprId, IrBinOp, IrCheckedOperation, IrCheckedSubstitution, IrExpr, IrIntrinsic,
+    IrPropertyDispatch,
 };
 use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::klib_ir::tree::{
@@ -81,6 +85,9 @@ impl BodyLowering<'_> {
             BuiltinOperator::Relation(relation) => self.relation(access, relation, ty),
             BuiltinOperator::Not => self.negation(access, ty),
             BuiltinOperator::IsNan { operand } => self.is_nan(access, operand, ty),
+            BuiltinOperator::DataClassArrayMember(member) => {
+                self.data_class_array_member(access, member, ty)
+            }
             BuiltinOperator::NumericConversion { from, to } => {
                 self.numeric_conversion(access, from, to, ty)
             }
@@ -149,6 +156,48 @@ impl BodyLowering<'_> {
                     },
                 )))
             }
+            // A numeric conversion, as checked FIR lowers the source conversion.
+            CommonPrimitive::Conversion => self.ir.add_expr(IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::ImplicitCoercion,
+                arg: receiver,
+                type_operand: primitive.ret,
+            }),
+            // `compareTo` of a builtin scalar, as checked FIR lowers a call of it: the comparison
+            // at the provider's common carrier, the operands promoted to a numeric carrier first.
+            CommonPrimitive::Compare { operand } => {
+                let (&[other], &[other_type]) =
+                    (operands.args.as_slice(), operands.params.as_slice())
+                else {
+                    return Err(mismatch(
+                        "a comparison is called with another shape than its declaration's",
+                    ));
+                };
+                let promote = |lowering: &mut Self, value, ty: Ty| {
+                    if ty == operand || matches!(ty, Ty::Char | Ty::Boolean) {
+                        value
+                    } else {
+                        lowering.coercion(value, operand)
+                    }
+                };
+                let receiver = promote(self, receiver, primitive.receiver);
+                let other = promote(self, other, other_type);
+                let relational_operator = matches!(
+                    access.origin.as_deref(),
+                    Some("LT" | "GT" | "LTEQ" | "GTEQ")
+                );
+                let compare = self.ir.add_expr(IrExpr::Call {
+                    callee: Box::new(Callee::Intrinsic {
+                        operation: IrIntrinsic::PrimitiveCompare {
+                            operand,
+                            relational_operator,
+                        },
+                        ret: Ty::Int,
+                    }),
+                    dispatch_receiver: Some(receiver),
+                    args: vec![other],
+                });
+                self.typed(compare, Ty::Int)
+            }
             // The source range operator over the receiver and the end bound, as checked FIR
             // lowers `start..end` once the provider's declaration fixed the range it builds.
             CommonPrimitive::RangeConstruction(operation) => {
@@ -166,6 +215,9 @@ impl BodyLowering<'_> {
                         end,
                         end_type,
                         result: primitive.ret,
+                        // A support body builds a range this way only on a target laying out
+                        // the range class itself: no declaration is called to build it.
+                        declaration: None,
                     },
                 )))
             }
@@ -191,6 +243,40 @@ impl BodyLowering<'_> {
             operand,
             check: crate::ir::NullCheck::Source,
         }))
+    }
+
+    /// A data class array member, as a call of the array's content extension on the operand.
+    /// The prewalk adds the same extension as the call's edge (`array_content_members`).
+    fn data_class_array_member(
+        &mut self,
+        access: &KlibIrMemberAccess,
+        member: DataClassArrayMember,
+        ty: Ty,
+    ) -> Lowered<ExprId> {
+        let Some(array) = array_content_members::operand(access) else {
+            return Err(mismatch(
+                "a data class array member is called with another shape than its declaration's",
+            ));
+        };
+        let Some(callee) = array_content_members::array_element(self.arena, array)
+            .and_then(|element| array_content_members::content_callee(member, element))
+        else {
+            return unsupported("a data class array member over a non-primitive array");
+        };
+        let KlibIrSignature::Public(signature) = &callee.signature else {
+            unreachable!("an array content extension is a public declaration");
+        };
+        let access = KlibIrMemberAccess {
+            symbol: callee.clone(),
+            arguments: KlibIrArguments::Split {
+                dispatch_receiver: None,
+                extension_receiver: Some(array),
+                values: Vec::new(),
+            },
+            type_arguments: Vec::new(),
+            origin: access.origin.clone(),
+        };
+        self.dependency_call(signature, &access, ty)
     }
 
     /// `Float.isNaN()` / `Double.isNaN()` as the IEEE fact `value != value`. The dependency body
@@ -309,7 +395,8 @@ impl BodyLowering<'_> {
                 | BuiltinOperator::Not
                 | BuiltinOperator::IsNan { .. }
                 | BuiltinOperator::NumericConversion { .. }
-                | BuiltinOperator::CheckNotNull,
+                | BuiltinOperator::CheckNotNull
+                | BuiltinOperator::DataClassArrayMember(_),
                 _,
             ) => {
                 unreachable!("only an equality operator is lowered as an equality")
@@ -502,11 +589,46 @@ impl BodyLowering<'_> {
         }
         let (dispatch_receiver, args) = (operands.receiver, operands.args);
         let singleton_dispatch = linked.singleton_dispatch;
-        let call = self.ir.add_expr(IrExpr::Call {
-            callee: Box::new(callee),
-            dispatch_receiver,
-            args,
-        });
+        let external = match &callee {
+            Callee::External { target, .. } => Some(*target),
+            _ => None,
+        };
+        // A member dispatch reaches on an instance of a class this unit materializes, which a
+        // subclass may override, is called through the class's dispatch table.
+        let overridable = match (&callee, dispatch_receiver) {
+            (Callee::Local(function), Some(receiver)) => self
+                .ir
+                .overridable_method(*function)
+                .map(|slot| (slot, receiver)),
+            (Callee::LocalWithDefaults { function, .. }, Some(_))
+                if self.ir.overridable_method(*function).is_some() =>
+            {
+                return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                    "a dispatched call leaving arguments to their defaults",
+                ));
+            }
+            _ => None,
+        };
+        let call = match overridable {
+            Some(((class, index), receiver)) => self.ir.add_expr(IrExpr::MethodCall {
+                class,
+                index,
+                receiver,
+                args: args.into_iter().map(Some).collect(),
+            }),
+            None => self.ir.add_expr(IrExpr::Call {
+                callee: Box::new(callee),
+                dispatch_receiver,
+                args,
+            }),
+        };
+        if let Some(role) = linked.edge.semantic_role {
+            self.ir.semantic_call_roles.insert(call, role);
+        }
+        if let Some(target) = external {
+            self.ir
+                .record_external_overridden_declarations(target, &linked.edge.overridden);
+        }
         if let Some(classifier) = singleton_dispatch {
             self.ir
                 .external_singleton_dispatches

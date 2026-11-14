@@ -1,5 +1,6 @@
 //! Resolver-backed evaluation of compact signature expressions.
 
+use super::super::callable_reference_selection as reference_selection;
 use super::callable_references::AppliedSourceAlias;
 use super::constructor_results::selected_sam_constructor_result;
 use super::top_level_call::SelectedTopLevelCall;
@@ -2745,7 +2746,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         .constructors
                         .iter()
                         .filter(|constructor| {
-                            super::super::callable_reference_selection::parameter_plan(
+                            reference_selection::plain_parameter_plan(
                                 &constructor.params,
                                 &constructor.call_sig,
                                 &constructor_arguments,
@@ -3046,31 +3047,28 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             ]);
             let oracle = crate::symbol_resolver::SourceOracle(&source);
             let context = crate::assignable::TyCtx::new();
-            let selected =
-                super::super::callable_reference_selection::select_adapted_instance_candidate(
-                    &source,
-                    &members,
-                    unbound.then(|| receiver.get()),
-                    expected_function,
-                    |actual, target| {
-                        crate::assignable::is_subtype(&context, &oracle, actual, target)
-                    },
-                    |left_params: &[Ty], right_params: &[Ty]| {
-                        left_params.len() == right_params.len()
-                            && left_params.iter().zip(right_params).all(|(left, right)| {
-                                crate::assignable::is_subtype(&context, &oracle, *left, *right)
-                            })
-                    },
-                );
+            let selected = reference_selection::select_adapted_instance_candidate(
+                &source,
+                &members,
+                self.headers.scopes.binds_reference_contexts(scope.source),
+                unbound.then(|| receiver.get()),
+                expected_function,
+                |actual, target| crate::assignable::is_subtype(&context, &oracle, actual, target),
+                |left_params: &[Ty], right_params: &[Ty]| {
+                    left_params.len() == right_params.len()
+                        && left_params.iter().zip(right_params).all(|(left, right)| {
+                            crate::assignable::is_subtype(&context, &oracle, *left, *right)
+                        })
+                },
+            );
             if let Some((selected, argument_mapping, _type_arguments)) = selected {
-                let (function, _) =
-                    super::super::callable_reference_selection::realize_adapted_instance_shape(
-                        expected_function,
-                        unbound.then(|| receiver.get()),
-                        &selected.semantic_params(),
-                        selected.callable.ret,
-                        &argument_mapping,
-                    );
+                let (function, _) = reference_selection::realize_adapted_instance_shape(
+                    expected_function,
+                    unbound.then(|| receiver.get()),
+                    &selected.semantic_params(),
+                    selected.callable.ret,
+                    &argument_mapping,
+                );
                 return crate::fir::ResolvedTy::new(function).map_err(|_| Self::failure());
             }
 
@@ -3304,7 +3302,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             }
             _ => receiver,
         };
-        if !unbound && !receiver.is_reference() && receiver.jvm_boxed_ref().is_none() {
+        if !unbound && !receiver.is_reference() && !receiver.is_builtin_scalar() {
             return Err(Self::failure());
         }
         let Some(base) = self.table.libraries.class_literal_type() else {

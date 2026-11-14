@@ -492,6 +492,26 @@ fn a_valued_body_ending_in_an_endless_loop_lowers_as_its_source_does() {
 }
 
 #[test]
+fn a_valued_body_whose_else_branch_loops_forever_lowers_as_its_source_does() {
+    // if (a) { return 1 } else { while (true) { } }
+    let demo = demo(&[("f", &[T::Boolean], T::Int)], |_, body| {
+        let a = body.param(0);
+        let one = body.int(1);
+        let returned = body.return_(one);
+        let then = body.block(vec![KlibIrStatement::Expression(returned)], T::Unit);
+        let empty = body.block(Vec::new(), T::Unit);
+        let forever = body.boolean(true);
+        let endless = body.loop_(1, forever, empty, false);
+        let otherwise = body.block(vec![endless], T::Unit);
+        let condition = body.otherwise();
+        let branches = body.branches("IF", vec![(a, then), (condition, otherwise)], T::Unit);
+        Some(vec![KlibIrStatement::Expression(branches)])
+    });
+    let source = "fun f(a: Boolean): Int {\n if (a) {\n  return 1\n } else {\n  while (true) {\n  }\n }\n}\n";
+    assert_eq!(lowered(&demo, "f", &[]), source_body(source, "f", 1));
+}
+
+#[test]
 fn a_valued_body_ending_in_a_constant_loop_that_can_break_declines() {
     for post_test in [false, true] {
         let demo = demo(&[("f", &[T::Boolean], T::Int)], move |_, body| {
@@ -755,7 +775,7 @@ fn while_loops_lower_as_the_source_loops_do() {
         let demo = if post_test {
             looping(|body, x| {
                 let decrement = decrement(body, x);
-                let block = body.block(vec![decrement], T::Unit);
+                let block = body.composite(vec![decrement], T::Unit);
                 let condition = above(body, x, 0);
                 body.loop_(1, condition, block, true)
             })
@@ -795,6 +815,65 @@ fn while_loops_lower_as_the_source_loops_do() {
         "scope {scope {val v1: Int = v0!: Int; while@L0(Gt(v1~: Int, Int(0): Int): Boolean) \
          {v1 = call dec(v1~: Int): Int: Unit}: Unit; return@Some(0) v1~: Int: Nothing}: Nothing}"
     );
+}
+
+#[test]
+fn a_loop_body_without_braces_lowers_as_the_braced_source_body_does() {
+    // A KLIB serializes `while (x > 0) x = dec(x)` with the assignment itself as the body.
+    for post_test in [false, true] {
+        fn unbraced(
+            body: &mut Body,
+            x: &crate::metadata::klib_ir::KlibIrSymbol,
+            post_test: bool,
+        ) -> KlibIrStatement {
+            let KlibIrStatement::Expression(decrement) = decrement(body, x) else {
+                unreachable!("an assignment is an expression");
+            };
+            let condition = above(body, x, 0);
+            body.loop_(1, condition, decrement, post_test)
+        }
+        let demo = if post_test {
+            looping(|body, x| unbraced(body, x, true))
+        } else {
+            looping(|body, x| unbraced(body, x, false))
+        };
+        let source = if post_test {
+            format!(
+                "{DEC_SOURCE}fun f(a: Int): Int {{\n var x = a\n do x = dec(x) while (x > 0)\n \
+                 return x\n}}\n"
+            )
+        } else {
+            format!(
+                "{DEC_SOURCE}fun f(a: Int): Int {{\n var x = a\n while (x > 0) x = dec(x)\n \
+                 return x\n}}\n"
+            )
+        };
+        assert_eq!(
+            lowered_loop(&demo),
+            source_body(&source, "f", 1),
+            "{post_test}"
+        );
+    }
+}
+
+#[test]
+fn a_do_while_condition_reads_a_variable_its_body_declares() {
+    // do { var y = dec(x); x = y } while (y > 0)
+    let demo = looping(|body, x| {
+        let read = body.get(x, T::Int);
+        let decremented = body.call("dec", vec![read], T::Int);
+        let (declaration, y) = body.var(T::Int, decremented);
+        let read = body.get(&y, T::Int);
+        let assignment = body.set(x, read);
+        let block = body.composite(vec![declaration, assignment], T::Unit);
+        let condition = above(body, &y, 0);
+        body.loop_(1, condition, block, true)
+    });
+    let source = format!(
+        "{DEC_SOURCE}fun f(a: Int): Int {{\n var x = a\n do {{\n  var y = dec(x)\n  x = y\n }} \
+         while (y > 0)\n return x\n}}\n"
+    );
+    assert_eq!(lowered_loop(&demo), source_body(&source, "f", 1));
 }
 
 #[test]
@@ -1027,6 +1106,66 @@ fn a_nullability_smart_cast_lowers_as_the_source_smart_cast_does() {
             "{source_type}"
         );
     }
+}
+
+/// `kotlin.text.appendElement` narrows its `element: T` by `is` checks to `CharSequence?` and to
+/// `Char`: a value of a type parameter narrows to any type it is checked against. A smart cast to
+/// a non-null reference type is a cast, and one to a nullable or primitive type a coercion.
+#[test]
+fn a_type_parameter_smart_cast_lowers_as_the_source_smart_cast_does() {
+    let cases: [(T, &str, &str); 3] = [
+        (T::String, "String", "\"\""),
+        (T::NullableString, "String?", "null"),
+        (T::Int, "Int", "0"),
+    ];
+    for (value, source_type, fallback) in cases {
+        let demo = demo(&[("f", &[T::P], value)], move |_, body| {
+            let a = body.param(0);
+            let operand = body.ty(value);
+            let checked = body.expr(
+                T::Boolean,
+                KlibIrExprKind::TypeOperator {
+                    operator: KlibIrTypeOperator::InstanceOf,
+                    operand,
+                    argument: a,
+                },
+            );
+            let a = body.param(0);
+            let narrowed = body.type_operator(KlibIrTypeOperator::ImplicitCast, a, value);
+            let returned = body.return_(narrowed);
+            let guard = body.branches("IF", vec![(checked, returned)], T::Unit);
+            let fallback = match value {
+                T::String => body.string(""),
+                T::NullableString => body.constant(T::NullableNothing, KlibIrConstant::Null),
+                _ => body.int(0),
+            };
+            Some(vec![KlibIrStatement::Expression(guard), body.ret(fallback)])
+        });
+        let source = format!(
+            "fun <P> f(a: P): {source_type} {{\n if (a is {source_type}) return a\n \
+             return {fallback}\n}}\n"
+        );
+        assert_eq!(
+            with_parameter_identities_erased(&lowered_f(&demo)),
+            with_parameter_identities_erased(&source_body(&source, "f", 1)),
+            "{source_type}"
+        );
+    }
+}
+
+/// `rendered` with each type parameter identity spelled `<P>`: a KLIB body names its function's
+/// type parameter by metadata identity, the source by its declaration, and both are `P`.
+fn with_parameter_identities_erased(rendered: &str) -> String {
+    let mut erased = String::new();
+    let mut rest = rendered;
+    while let Some(start) = rest.find("<\"\\0") {
+        erased.push_str(&rest[..start]);
+        let end = rest[start..].find("\">").expect("a closed identity") + start + 2;
+        erased.push_str("<P>");
+        rest = &rest[end..];
+    }
+    erased.push_str(rest);
+    erased
 }
 
 // --- The Kotlin/Native stdlib -------------------------------------------------------------------

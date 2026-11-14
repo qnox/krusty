@@ -13,7 +13,6 @@
 mod constructors;
 mod extended_classes;
 mod properties;
-mod singletons;
 mod value_boxes;
 
 pub(super) use extended_classes::{exported_classes, ExtensionEntries};

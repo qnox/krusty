@@ -8,7 +8,9 @@
 //! file of the same source module extends the class from the record
 //! (`krusty::backend::class_tables::LaidOutSuperclass`). A record does not outlive its source
 //! module: the module plan numbering the table is that module's, and so are the callable
-//! identities its implementations were chosen by.
+//! identities its implementations were chosen by. A dependency class a support unit materializes
+//! is the exception: the plan numbers it from its provider's declarations alike in every module,
+//! by provider identities, so its record serves the rest of the program.
 
 use krusty::fx_hash::HashMap;
 
@@ -71,36 +73,55 @@ pub(super) enum DependencyImplementation {
     Function(u32),
 }
 
-/// The classes laid out so far in the current source module, by identity.
+/// The classes laid out so far in the current source module, and the dependency classes support
+/// units materialized for the whole program, by identity.
 #[derive(Default)]
 pub(super) struct LaidOutClasses {
     source_module: Option<String>,
     classes: HashMap<TypeName, LaidOutClass>,
+    /// A dependency class is materialized once for the program, by provider identities, so its
+    /// record outlives the source module whose file selected its support unit.
+    dependencies: HashMap<TypeName, LaidOutClass>,
+    /// Whether the file being laid out is a dependency support unit.
+    support: bool,
 }
 
 impl LaidOutClasses {
     /// Begin (or continue) one source module, forgetting another module's classes.
     pub(super) fn enter_source_module(&mut self, module_name: &str) {
+        self.support = false;
         if self.source_module.as_deref() != Some(module_name) {
             self.source_module = Some(module_name.to_owned());
             self.classes.clear();
         }
     }
 
+    /// Begin a dependency support unit, whose classes every later file of the program extends.
+    pub(super) fn enter_dependency_support(&mut self) {
+        self.support = true;
+    }
+
     pub(super) fn get(&self, class: TypeName) -> Option<&LaidOutClass> {
-        self.classes.get(&class)
+        self.classes
+            .get(&class)
+            .or_else(|| self.dependencies.get(&class))
     }
 
     /// Record `class` as a file laid it out. A class an inline function's body declares is laid
     /// out again by every file its body is inlined into, each copy a type of its own, so no single
     /// record stands for it and a subclass of it declines.
     pub(super) fn insert(&mut self, class: TypeName, laid_out: LaidOutClass) {
-        match self.classes.get_mut(&class) {
+        let records = if self.support {
+            &mut self.dependencies
+        } else {
+            &mut self.classes
+        };
+        match records.get_mut(&class) {
             Some(known) => {
                 known.refusal = Some("a class more than one file lays out".to_string());
             }
             None => {
-                self.classes.insert(class, laid_out);
+                records.insert(class, laid_out);
             }
         }
     }

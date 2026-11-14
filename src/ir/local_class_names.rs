@@ -1189,6 +1189,10 @@ impl crate::metadata::class_declarations::ClassifierRenaming for RecordRenaming<
         annotation_application(value, self.0);
     }
 
+    fn annotation_value(&self, value: &mut super::AnnoValue) {
+        annotation_value(value, self.0);
+    }
+
     fn type_parameters(&self, value: &mut [super::IrTypeParameter]) {
         type_parameters(value, self.0);
     }
@@ -1948,6 +1952,7 @@ mod tests {
             adapter: 0,
             captures: Vec::new(),
             bound_receiver: None,
+            bound_contexts: 0,
             function_type: source_ty,
             declaration_parameters: vec![source_ty].into_boxed_slice(),
             declaration_result: source_ty,

@@ -331,6 +331,8 @@ impl CallArgKind {
         let Self::IntegerLiteral { ty, constant } = self else {
             return false;
         };
+        // A nullable parameter hosts the literal too: `Short?` takes `1`, `UShort?` takes `1u`.
+        let parameter = parameter.non_null();
         let family = matches!(
             (*ty, parameter),
             (Ty::Int, Ty::Byte | Ty::Short | Ty::Long)

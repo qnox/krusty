@@ -1033,7 +1033,7 @@ import java.util.concurrent.*;
 // threads keeps N calls in flight). Responses are written back tagged with their id — possibly out of
 // order — under a lock on the output stream. The Rust client demuxes replies by id.
 public class BoxRunner {
-    static final long TIMEOUT_MS = 10000;
+    static final long TIMEOUT_MS = Long.getLong("krusty.box.timeout.ms", 10000L);
     static final ExecutorService EXEC = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r);
         t.setDaemon(true);
@@ -1168,6 +1168,33 @@ fn setup_runner(java_home: &str) -> Option<PathBuf> {
         .clone()
 }
 
+/// Parse a millisecond deadline from the environment variable `name`, read as `raw`.
+///
+/// Unset or blank keeps `default_ms`. An explicit value must be an integer from 1 through
+/// `u32::MAX`, so the Java long and the client's added margin stay representable.
+pub fn timeout_ms_from(name: &str, raw: Option<&str>, default_ms: u64) -> u64 {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return default_ms;
+    };
+    match raw.parse::<u32>() {
+        Ok(value) if value > 0 => u64::from(value),
+        _ => panic!("{name} must be an integer from 1 through 4294967295, got {raw}"),
+    }
+}
+
+/// Milliseconds the shared `BoxRunner` waits for one `box()` call: `KRUSTY_BOX_TIMEOUT_MS`, 10s by
+/// default. Slower or busier hosts raise it; the runner JVM reads it at startup.
+pub fn box_timeout_ms() -> u64 {
+    static TIMEOUT: OnceLock<u64> = OnceLock::new();
+    *TIMEOUT.get_or_init(|| {
+        timeout_ms_from(
+            "KRUSTY_BOX_TIMEOUT_MS",
+            std::env::var("KRUSTY_BOX_TIMEOUT_MS").ok().as_deref(),
+            10_000,
+        )
+    })
+}
+
 /// A persistent JVM subprocess that runs `box()` calls CONCURRENTLY. Requests are tagged with an id
 /// and written under a short stdin lock; a background reader thread demuxes tagged responses back to
 /// the waiting caller by id. Many threads can therefore have box() calls in flight at once (bounded
@@ -1228,7 +1255,9 @@ impl BoxRunner {
         // C1-only JIT (-XX:TieredStopAtLevel=1) throttles the whole pool at every GC / starves hot loops
         // — that alone ballooned the suite from minutes to hours. The heap cap bounds footprint; G1 keeps
         // throughput.
-        cmd.args(["-Xmx512m", "-cp", cp, "BoxRunner"])
+        cmd.arg("-Xmx512m")
+            .arg(format!("-Dkrusty.box.timeout.ms={}", box_timeout_ms()))
+            .args(["-cp", cp, "BoxRunner"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped());
         // Under KRUSTY_JVM_GCLOG, keep the runner's stderr (a crash/OOM reason) instead of discarding it.
@@ -1322,7 +1351,10 @@ impl BoxRunner {
             stdin.flush()?;
         }
 
-        match rx.recv_timeout(Duration::from_secs(15)) {
+        // The runner answers a timed-out box() itself; this covers a JVM that stopped answering.
+        match rx.recv_timeout(Duration::from_millis(
+            box_timeout_ms().saturating_add(5_000),
+        )) {
             Ok(body) => Ok(String::from_utf8_lossy(&body).into_owned()),
             Err(_) => {
                 self.waiters.lock().unwrap().remove(&id);

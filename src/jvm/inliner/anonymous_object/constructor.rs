@@ -240,13 +240,17 @@ impl Constructor {
             }
         }
         self.body.local_variables = locals;
+        // A name two lambdas both capture (the call site's `this$0`) is one field, stored from the
+        // first parameter that carries it; the later parameter stays in the descriptor unread.
         let mut slot = kept_end;
         for (name, desc) in recaptured {
-            self.fields.push(CapturedField {
-                name: name.clone(),
-                desc: desc.clone(),
-                slot,
-            });
+            if !self.fields.iter().any(|field| field.name == *name) {
+                self.fields.push(CapturedField {
+                    name: name.clone(),
+                    desc: desc.clone(),
+                    slot,
+                });
+            }
             slot += descriptor_words(desc);
         }
         self.desc = format!(
@@ -413,6 +417,49 @@ mod tests {
             }]
         );
         assert_eq!(plan.body.nodes, constructor(Vec::new()).nodes);
+    }
+
+    #[test]
+    fn lambdas_recapturing_one_name_share_its_field_from_the_first_parameter() {
+        let declared = [
+            DeclaredCapture {
+                name: "$a",
+                desc: STRING,
+            },
+            DeclaredCapture {
+                name: "$b",
+                desc: STRING,
+            },
+        ];
+        let call = "(Ljava/lang/String;Ljava/lang/String;)V";
+        let mut plan = extract(
+            &constructor(vec![
+                var(ALOAD, 0),
+                var(ALOAD, 1),
+                put(OWNER, "$a"),
+                var(ALOAD, 0),
+                var(ALOAD, 2),
+                put(OWNER, "$b"),
+            ]),
+            OWNER,
+            &declared,
+            call,
+        )
+        .expect("extracts");
+        let this = ("this$0".to_string(), "LC;".to_string());
+        let fields = plan
+            .inline_lambdas(call, &[0, 1], &[this.clone(), this])
+            .expect("inlines");
+        assert_eq!(fields, ["$a", "$b"]);
+        assert_eq!(plan.desc, "(LC;LC;)V");
+        assert_eq!(
+            plan.fields,
+            [CapturedField {
+                name: "this$0".to_string(),
+                desc: "LC;".to_string(),
+                slot: 1,
+            }]
+        );
     }
 
     #[test]
