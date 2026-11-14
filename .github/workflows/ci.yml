@@ -1,4 +1,4 @@
-name: 3300 delegate property validation
+name: 3300 authenticated delegate implementation validation
 
 on:
   workflow_dispatch:
@@ -41,16 +41,19 @@ jobs:
         uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: just
-      - name: authenticate exact product source and owned fixtures
+      - name: checkout exact reviewed product source
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p evidence
-          source_pin=574077d937bc7390ed657db80c331f4a9cc57f2c
-          git merge-base --is-ancestor "$source_pin" HEAD
-          git diff --exit-code "$source_pin" HEAD -- . ':!.github/workflows/ci.yml'
+          workflow_commit=$(git rev-parse HEAD)
+          source_pin=7432b84417865af8441831d07af6af3c3ab8bc63
+          git fetch origin "$source_pin"
+          git checkout --detach "$source_pin"
+          test "$(git rev-parse HEAD)" = "$source_pin"
+          printf '%s\n' "$workflow_commit" > evidence/validation-workflow-commit.txt
           printf '%s\n' "$source_pin" > evidence/source-commit.txt
-          git rev-parse HEAD > evidence/validation-commit.txt
+          git rev-parse HEAD > evidence/product-commit.txt
           sha256sum \
             tests/box_regressions/delegatePropertyNameCapability.kt \
             tests/box_regressions/libraryDelegatesNotNullDispatch.kt \
@@ -68,7 +71,6 @@ jobs:
           echo "KRUSTY_KOTLIN_NATIVE=$(just kotlin-native 2.4.0)" >> "$GITHUB_ENV"
           echo "KRUSTY_KOTLIN_BOX_DIR=$(just box-corpus 2.4.0)" >> "$GITHUB_ENV"
           echo "KRUSTY_DEPS_CACHE=$GITHUB_WORKSPACE/target/cache/krusty-deps" >> "$GITHUB_ENV"
-          mkdir -p evidence
           for fixture in \
             delegatedProperty/delegateWithPrivateSet.kt \
             delegatedProperty/local/kt13557.kt \
@@ -77,12 +79,11 @@ jobs:
             delegatedProperty/protectedVarWithPrivateSet.kt; do
             sha256sum "$(just box-corpus 2.4.0)/$fixture"
           done > evidence/upstream-fixtures.sha256
-      - name: syntax-check the Native runtime with build.rs target flags
+      - name: syntax-check Native runtime with build.rs target flags
         working-directory: crates/krusty-native
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p ../../evidence
           compiler="${KRUSTY_RUNTIME_CC:-$(command -v clang)}"
           common_flags=(
             -std=c11 -ffreestanding -nostdlib -fno-pic -fno-stack-protector
@@ -127,107 +128,140 @@ jobs:
           cp "$binary" conformance-bin
           sha256sum conformance-bin > evidence/conformance-binary.sha256
           cp conformance-bin evidence/conformance-bin
-      - name: capture and diagnose the Native generated executable
-        timeout-minutes: 20
+      - name: run the previous 14 guards and full delegate fixture on all four lanes
+        timeout-minutes: 70
         env:
           KRUSTY_TEST_THREADS: '1'
           KRUSTY_REQUIRE_NATIVE_CONFORMANCE: '1'
+          KRUSTY_REQUIRE_WASM_JS_CONFORMANCE: '1'
+          KRUSTY_REQUIRE_WASM_WASI_CONFORMANCE: '1'
         shell: bash
         run: |
           set -uo pipefail
+          result=0
           mkdir -p evidence/native-tmp evidence/native-executables
-          tmpdir="$GITHUB_WORKSPACE/evidence/native-tmp"
-          printf '%s\n' "TMPDIR=$tmpdir" > evidence/native-diagnostic-environment.txt
-          cat /proc/sys/kernel/core_pattern > evidence/core-pattern-original.txt
-          cat evidence/core-pattern-original.txt >> evidence/native-diagnostic-environment.txt
-          cat /proc/sys/kernel/core_uses_pid >> evidence/native-diagnostic-environment.txt
-          ulimit -c unlimited
-          ulimit -c >> evidence/native-diagnostic-environment.txt
-          if command -v gdb >/dev/null; then
-            echo 'gdb=available' >> evidence/native-diagnostic-environment.txt
-          elif command -v lldb >/dev/null; then
-            echo 'lldb=available' >> evidence/native-diagnostic-environment.txt
-          else
-            echo 'native-debugger=unavailable' >> evidence/native-diagnostic-environment.txt
-          fi
-          python3 -u - "$tmpdir" evidence/native-executables <<'PY' > evidence/native-executable-watcher.log 2>&1 &
+          python3 -u - evidence/native-tmp evidence/native-executables <<'PY' > evidence/native-executable-watcher.log 2>&1 &
           import os, pathlib, shutil, sys, time
           root, output = map(pathlib.Path, sys.argv[1:])
           copied = set()
           while True:
               for path in root.rglob("*"):
                   try:
-                      if not path.is_file() or not os.stat(path).st_mode & 0o111:
-                          continue
-                      if path in copied:
+                      if not path.is_file() or not os.stat(path).st_mode & 0o111 or path in copied:
                           continue
                       with path.open("rb") as stream:
-                          magic = stream.read(4)
-                      if magic != b"\x7fELF":
-                          continue
+                          if stream.read(4) != b"\x7fELF":
+                              continue
                       destination = output / f"{path.name}.elf"
                       shutil.copy2(path, destination)
                       copied.add(path)
                       print(f"captured {path} -> {destination} bytes={destination.stat().st_size}", flush=True)
                   except FileNotFoundError:
                       pass
-              time.sleep(0.005)
+              time.sleep(0.01)
           PY
           watcher=$!
-          set +e
-          cd evidence
-          TMPDIR="$tmpdir" KRUSTY_BOX_ONLY=delegatePropertyNameCapability.kt timeout 600 ../conformance-bin \
-            --exact kotlin_box_ir_jvm_conformance::kotlin_codegen_box_conformance --nocapture --test-threads=1 \
-            > jvm-delegatePropertyNameCapability.log 2>&1
-          jvm_status=$?
-          printf 'jvm-delegatePropertyNameCapability\t%s\n' "$jvm_status" | tee -a status.tsv
-          cat jvm-delegatePropertyNameCapability.log
-          TMPDIR="$tmpdir" KRUSTY_REQUIRE_NATIVE_CONFORMANCE=1 \
-            timeout 600 ../conformance-bin \
-            --exact kotlin_box_native_conformance::native_runtime_and_library_delegates_receive_dynamic_property_names \
-            --nocapture --test-threads=1 > native-klib-module-harness.log 2>&1
-          native_status=$?
-          printf 'native-klib-module-harness\t%s\n' "$native_status" | tee -a status.tsv
-          cat native-klib-module-harness.log
-          kill "$watcher" 2>/dev/null
-          wait "$watcher" 2>/dev/null
-          set -e
-          find . -maxdepth 3 -type f -name 'core*' -print > core-files.txt
-          if [[ "$(cat core-pattern-original.txt)" == \|* ]] && command -v coredumpctl >/dev/null; then
-            coredumpctl list --no-pager > coredumpctl-list.txt 2>&1 || true
-          fi
-          result=0
-          for executable in native-executables/*.elf; do
-            [ -f "$executable" ] || continue
-            sha256sum "$executable" >> native-executables.sha256
-            if command -v file >/dev/null; then
-              file "$executable" > "$(basename "$executable").file.txt"
+          run_case() {
+            local lane="$1" fixture="$2" test_name="$3" key="$4" selector
+            case "$lane" in
+              JVM) selector=KRUSTY_BOX_ONLY ;;
+              *) selector="KRUSTY_${lane}_BOX_ONLY" ;;
+            esac
+            set +e
+            env "$selector=$fixture" TMPDIR="$GITHUB_WORKSPACE/evidence/native-tmp" timeout 600 \
+              ./conformance-bin --exact "$test_name" --nocapture --test-threads=1 \
+              > "evidence/$key.log" 2>&1
+            local status=$?
+            set -e
+            printf '%s\t%s\n' "$key" "$status" | tee -a evidence/status.tsv
+            cat "evidence/$key.log"
+            if [ "$status" -ne 0 ] || \
+              ! grep -q 'test result: ok. 1 passed; 0 failed;' "evidence/$key.log"; then
+              result=1
+            elif [ "$lane" = JVM ]; then
+              if ! grep -q 'cases: 1 .*box()=OK: 1 | FAIL: 0' "evidence/$key.log"; then
+                result=1
+              fi
+            elif ! grep -q 'scanned 1, passed 1' "evidence/$key.log"; then
+              result=1
             fi
-            if command -v readelf >/dev/null; then
-              readelf -h -Ws "$executable" > "$(basename "$executable").symbols.txt" 2>&1 || true
-            fi
-            if command -v gdb >/dev/null; then
-              env -i PATH="$PATH" gdb -q -batch -ex 'set pagination off' -ex run \
-                -ex 'thread apply all bt full' -ex 'info registers' -ex 'x/16i $pc-32' \
-                --args "$executable" > "gdb-run-$(basename "$executable").log" 2>&1 || true
-              for core in $(cat core-files.txt); do
-                gdb -q -batch -ex 'set pagination off' -ex 'thread apply all bt full' \
-                  -ex 'info registers' -ex 'x/16i $pc-32' "$executable" "$core" \
-                  > "gdb-$(basename "$core").log" 2>&1 || true
-              done
-            elif command -v lldb >/dev/null; then
-              env -i PATH="$PATH" lldb --batch -o run -o bt -o 'register read' \
-                -o 'disassemble --pc --count 16' "$executable" \
-                > "lldb-run-$(basename "$executable").log" 2>&1 || true
-            fi
+          }
+          native_test=kotlin_box_native_conformance::kotlin_codegen_box_native_conformance
+          wasm_js_test=kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_js_conformance
+          wasm_wasi_test=kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_wasi_conformance
+          jvm_test=kotlin_box_ir_jvm_conformance::kotlin_codegen_box_conformance
+          for fixture in \
+            delegatedProperty/delegateWithPrivateSet.kt \
+            delegatedProperty/local/kt13557.kt \
+            delegatedProperty/local/kt19690.kt \
+            delegatedProperty/local/kt23117.kt \
+            delegatedProperty/protectedVarWithPrivateSet.kt; do
+            run_case NATIVE "$fixture" "$native_test" "native-$(basename "$fixture" .kt)"
           done
-          test "$jvm_status" -eq 0 && grep -q 'test result: ok. 1 passed; 0 failed;' jvm-delegatePropertyNameCapability.log || result=1
-          test "$native_status" -eq 0 && grep -q 'test result: ok. 1 passed; 0 failed;' native-klib-module-harness.log || result=1
+          for fixture in libraryDelegatesNotNullDispatch.kt libraryObjectMembers.kt multimodule/genericElvisNullProof.kt; do
+            run_case NATIVE "$fixture" "$native_test" "native-$(basename "$fixture" .kt)"
+          done
+          for lane in WASM_JS WASM_WASI; do
+            if [ "$lane" = WASM_JS ]; then test_name="$wasm_js_test"; else test_name="$wasm_wasi_test"; fi
+            for fixture in libraryDelegatesNotNullDispatch.kt libraryObjectMembers.kt multimodule/genericElvisNullProof.kt; do
+              run_case "$lane" "$fixture" "$test_name" "${lane,,}-$(basename "$fixture" .kt)"
+            done
+          done
+          for lane_test in "JVM:$jvm_test" "NATIVE:$native_test" "WASM_JS:$wasm_js_test" "WASM_WASI:$wasm_wasi_test"; do
+            lane="${lane_test%%:*}"
+            test_name="${lane_test#*:}"
+            run_case "$lane" delegatePropertyNameCapability.kt "$test_name" "${lane,,}-delegatePropertyNameCapability"
+          done
+          kill "$watcher" 2>/dev/null || true
+          wait "$watcher" 2>/dev/null || true
+          find evidence/native-tmp -type f -name 'core*' -print > evidence/core-files.txt
+          find evidence/native-executables -type f -name '*.elf' -print0 | sort -z | xargs -0 -r sha256sum > evidence/native-executables.sha256
           exit "$result"
-      - name: upload full validation evidence
+      - name: run the dedicated Native KLIB module harness
+        if: ${{ always() && steps.build_conformance.outcome == 'success' }}
+        timeout-minutes: 10
+        env:
+          KRUSTY_REQUIRE_NATIVE_CONFORMANCE: '1'
+        shell: bash
+        run: |
+          set +e
+          mkdir -p evidence/native-tmp evidence/native-executables
+          python3 -u - evidence/native-tmp evidence/native-executables <<'PY' > evidence/native-klib-watcher.log 2>&1 &
+          import os, pathlib, shutil, sys, time
+          root, output = map(pathlib.Path, sys.argv[1:])
+          copied = set()
+          while True:
+              for path in root.rglob("*"):
+                  try:
+                      if not path.is_file() or not os.stat(path).st_mode & 0o111 or path in copied:
+                          continue
+                      with path.open("rb") as stream:
+                          if stream.read(4) != b"\x7fELF":
+                              continue
+                      destination = output / f"{path.name}.elf"
+                      shutil.copy2(path, destination)
+                      copied.add(path)
+                      print(f"captured {path} -> {destination} bytes={destination.stat().st_size}", flush=True)
+                  except FileNotFoundError:
+                      pass
+              time.sleep(0.01)
+          PY
+          watcher=$!
+          TMPDIR="$GITHUB_WORKSPACE/evidence/native-tmp" timeout 600 ./conformance-bin \
+            --exact kotlin_box_native_conformance::native_runtime_and_library_delegates_receive_dynamic_property_names \
+            --nocapture --test-threads=1 > evidence/native-klib-module-harness.log 2>&1
+          status=$?
+          printf 'native-klib-module-harness\t%s\n' "$status" | tee -a evidence/status.tsv
+          cat evidence/native-klib-module-harness.log
+          kill "$watcher" 2>/dev/null || true
+          wait "$watcher" 2>/dev/null || true
+          find evidence/native-tmp -type f -name 'core*' -print > evidence/core-files.txt
+          find evidence/native-executables -type f -name '*.elf' -print0 | sort -z | xargs -0 -r sha256sum > evidence/native-executables.sha256
+          test "$status" -eq 0 && grep -q 'test result: ok. 1 passed; 0 failed;' evidence/native-klib-module-harness.log
+      - name: upload complete validation evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: 3300-delegate-property-validation
+          name: 3300-authenticated-delegate-implementation
           path: evidence/
           if-no-files-found: error
