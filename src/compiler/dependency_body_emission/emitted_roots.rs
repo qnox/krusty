@@ -534,55 +534,6 @@ fn superclass_realizations(
     realizations
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ir::{IrFile, IrFunction};
-    use crate::types::Ty;
-
-    #[test]
-    fn intrinsic_scalar_roots_ignore_orphan_external_call_nodes() {
-        let mut ir = IrFile::default();
-        let live_target = crate::fir::ExternalCallableId::from_raw(17);
-        let orphan_target = crate::fir::ExternalCallableId::from_raw(23);
-        let call = |ir: &mut IrFile, target| {
-            ir.add_expr(IrExpr::Call {
-                callee: Box::new(Callee::External {
-                    target,
-                    default_provider: None,
-                    params: Vec::new(),
-                    ret: Ty::Unit,
-                    substitutions: Vec::new(),
-                    defaults: Vec::new(),
-                    extension_receiver_parameter: None,
-                }),
-                dispatch_receiver: None,
-                args: Vec::new(),
-            })
-        };
-        let body = call(&mut ir, live_target);
-        call(&mut ir, orphan_target);
-        ir.add_fun(IrFunction {
-            name: "emitted".to_owned(),
-            params: Vec::new(),
-            ret: Ty::Unit,
-            body: Some(body),
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-
-        let mut expected = HashSet::default();
-        expected.insert(live_target);
-        let actual = emitted_dependency_targets(&ir, |_, _| Ok(None))
-            .unwrap()
-            .into_iter()
-            .map(|(_, target, _)| target)
-            .collect::<HashSet<_>>();
-        assert_eq!(actual, expected);
-    }
-}
-
 /// `facts` with the declarations of `realizations`.
 fn with_realized_declarations<'a>(
     mut facts: crate::klib_lowering::KlibCalleeFacts<'a>,
@@ -708,4 +659,53 @@ fn is_outside_units(
 ) -> Result<bool, String> {
     Ok(callable.kind() == ExternalCallableKind::Member
         && !is_materialized_class_member(platform, bodies, callees, callable)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{IrFile, IrFunction};
+    use crate::types::Ty;
+
+    #[test]
+    fn intrinsic_scalar_roots_ignore_orphan_external_call_nodes() {
+        let mut ir = IrFile::default();
+        let live_target = crate::fir::ExternalCallableId::from_raw(17);
+        let orphan_target = crate::fir::ExternalCallableId::from_raw(23);
+        let call = |ir: &mut IrFile, target| {
+            ir.add_expr(IrExpr::Call {
+                callee: Box::new(Callee::External {
+                    target,
+                    default_provider: None,
+                    params: Vec::new(),
+                    ret: Ty::Unit,
+                    substitutions: Vec::new(),
+                    defaults: Vec::new(),
+                    extension_receiver_parameter: None,
+                }),
+                dispatch_receiver: None,
+                args: Vec::new(),
+            })
+        };
+        let body = call(&mut ir, live_target);
+        call(&mut ir, orphan_target);
+        ir.add_fun(IrFunction {
+            name: "emitted".to_owned(),
+            params: Vec::new(),
+            ret: Ty::Unit,
+            body: Some(body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+
+        let mut expected = HashSet::default();
+        expected.insert(live_target);
+        let actual = emitted_dependency_targets(&ir, |_, _| Ok(None))
+            .unwrap()
+            .into_iter()
+            .map(|(_, target, _)| target)
+            .collect::<HashSet<_>>();
+        assert_eq!(actual, expected);
+    }
 }
