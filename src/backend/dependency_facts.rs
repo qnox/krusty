@@ -395,6 +395,62 @@ mod tests {
     }
 
     #[test]
+    fn graph_builtin_facts_compare_only_after_selected_evidence_is_recorded() {
+        let identity = ExternalCallableId::from_raw(1);
+        let expected = vec![BuiltinImplementation {
+            receiver: Ty::obj("kotlin/String"),
+            declaration: None,
+        }]
+        .into_boxed_slice();
+        let mut callables = accessor_facts();
+        let fact = callables.callables.get_mut(&identity).unwrap();
+        fact.kind = ExternalCallableKind::Member;
+        fact.declaration_owner = Some(SemanticCallableOwner::Classifier(crate::types::type_name(
+            "kotlin/CharSequence",
+        )));
+        assert!(fact.builtin_implementations.is_empty());
+        let mut graph = crate::resolve::CheckedKlibDependencyFacts::default();
+        graph
+            .builtin_implementations
+            .insert(identity, expected.clone());
+        callables
+            .record_klib_dependency_facts(graph)
+            .expect("an uninitialized frozen slot is not contradictory evidence");
+        let mut selected = HashMap::default();
+        selected.insert(identity, expected.clone());
+        callables
+            .record_checked_builtin_implementations(&selected)
+            .unwrap();
+        assert_eq!(
+            callables.callables[&identity].builtin_implementations,
+            expected
+        );
+        // Both proofs are nonempty; retaining one real proof must never hide a conflicting one.
+        selected.insert(
+            identity,
+            vec![BuiltinImplementation {
+                receiver: Ty::obj("kotlin/Int"),
+                declaration: None,
+            }]
+            .into_boxed_slice(),
+        );
+        assert_eq!(
+            callables.record_checked_builtin_implementations(&selected),
+            Err(identity)
+        );
+        assert_eq!(
+            callables.callables[&identity].builtin_implementations,
+            expected
+        );
+        let mut conflicting_graph = crate::resolve::CheckedKlibDependencyFacts::default();
+        conflicting_graph.builtin_implementations = selected;
+        assert_eq!(
+            callables.record_klib_dependency_facts(conflicting_graph),
+            Err(identity)
+        );
+    }
+
+    #[test]
     fn checked_builtin_implementation_handoff_rejects_missing_identity() {
         let identity = ExternalCallableId::from_raw(1);
         let mut callables = accessor_facts();
