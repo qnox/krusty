@@ -298,6 +298,11 @@ impl Body<'_> {
         &mut self,
         classifier: krusty::types::TypeName,
     ) -> Result<(), Unsupported> {
+        if classifier == krusty::types::wk::unit() {
+            let instance = self.runtime.unit_object(self.module);
+            self.code.global_get(instance);
+            return Ok(());
+        }
         if self.ir.class_id_by_name(classifier).is_none() {
             if let Some(entry) =
                 self.calls
