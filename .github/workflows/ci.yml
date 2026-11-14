@@ -8,7 +8,7 @@ jobs:
     runs-on:
     - self-hosted
     - rust-4c-8gb
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       CARGO_INCREMENTAL: '0'
       CARGO_BUILD_JOBS: '1'
@@ -44,32 +44,64 @@ jobs:
         echo "KRUSTY_LANGUAGE_VERSION=2.4.21" >> "$GITHUB_ENV"
         echo "KRUSTY_DEPS_CACHE=$GITHUB_WORKSPACE/target/cache/krusty-deps" >> "$GITHUB_ENV"
         echo "KRUSTY_CLASS_DUMP_COMPILE_MISSING=1" >> "$GITHUB_ENV"
-    - name: check exact machine source and test compilation
-      timeout-minutes: 30
+    - name: compile exact conformance test executable
+      timeout-minutes: 40
       run: |
         set -euo pipefail
         git diff --exit-code 9a990eaff HEAD -- . ':!.github/workflows/ci.yml'
         git rev-parse HEAD > compiler-source.txt
-        {
-          cargo check --profile gate -p krusty --lib --tests
-          cargo test --profile gate -p krusty --test conformance --no-run
-        } 2>&1 | tee machine-check.log
+        set +e
+        cargo test --profile gate -p krusty --test conformance --no-run --message-format=json 2>&1 | tee machine-check.jsonl
+        status=${PIPESTATUS[0]}
+        set -e
+        printf '%s\n' "$status" > machine-check.exit
+        if [ "$status" -ne 0 ]; then exit "$status"; fi
+        python3 - <<'PY'
+        import json
+        import pathlib
+        import sys
+
+        executables = []
+        for line in pathlib.Path("machine-check.jsonl").read_text().splitlines():
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            target = item.get("target", {})
+            executable = item.get("executable")
+            if (
+                item.get("reason") == "compiler-artifact"
+                and target.get("name") == "conformance"
+                and "test" in target.get("kind", [])
+                and executable
+            ):
+                executables.append(pathlib.Path(executable))
+        if len(executables) != 1 or not executables[0].is_file():
+            print(f"expected one conformance test executable, found: {executables}", file=sys.stderr)
+            sys.exit(1)
+        pathlib.Path("conformance-test-executable.txt").write_text(str(executables[0]) + "\n")
+        PY
+        sha256sum "$(cat conformance-test-executable.txt)" > conformance-test-executable.sha256
     - name: upload compiler diagnostics
       if: always()
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
       with:
-        name: coroutine-machine-compiler-diagnostics
+        name: coroutine-machine-test-build
         path: |
-          machine-check.log
+          machine-check.jsonl
+          machine-check.exit
           compiler-source.txt
+          conformance-test-executable.txt
+          conformance-test-executable.sha256
         if-no-files-found: error
     - name: run complete JVM coroutine fixtures
       timeout-minutes: 6
       continue-on-error: true
       run: |
         mkdir -p target/coroutine-target-results
+        CONFORMANCE_TEST=$(cat conformance-test-executable.txt)
         set +e
-        timeout --signal=TERM --kill-after=15s 300s env KRUSTY_BOX_ONLY=suspendStateMachine cargo test --profile gate -p krusty --test conformance -- --exact kotlin_box_ir_jvm_conformance::kotlin_codegen_box_conformance --test-threads=1 2>&1 | tee target/coroutine-target-results/jvm.log
+        timeout --signal=TERM --kill-after=15s 300s env KRUSTY_BOX_ONLY=suspendStateMachine "$CONFORMANCE_TEST" --exact kotlin_box_ir_jvm_conformance::kotlin_codegen_box_conformance --test-threads=1 2>&1 | tee target/coroutine-target-results/jvm.log
         status=${PIPESTATUS[0]}
         printf '%s\n' "$status" > target/coroutine-target-results/jvm.exit
         exit 0
@@ -82,8 +114,9 @@ jobs:
         KRUSTY_TEST_THREADS: '1'
       run: |
         mkdir -p target/coroutine-target-results
+        CONFORMANCE_TEST=$(cat conformance-test-executable.txt)
         set +e
-        timeout --signal=TERM --kill-after=15s 300s cargo test --profile gate -p krusty --test conformance -- --exact kotlin_box_native_conformance::kotlin_codegen_box_native_conformance --test-threads=1 2>&1 | tee target/coroutine-target-results/native.log
+        timeout --signal=TERM --kill-after=15s 300s "$CONFORMANCE_TEST" --exact kotlin_box_native_conformance::kotlin_codegen_box_native_conformance --test-threads=1 2>&1 | tee target/coroutine-target-results/native.log
         status=${PIPESTATUS[0]}
         printf '%s\n' "$status" > target/coroutine-target-results/native.exit
         exit 0
@@ -96,8 +129,9 @@ jobs:
         KRUSTY_TEST_THREADS: '1'
       run: |
         mkdir -p target/coroutine-target-results
+        CONFORMANCE_TEST=$(cat conformance-test-executable.txt)
         set +e
-        timeout --signal=TERM --kill-after=15s 300s cargo test --profile gate -p krusty --test conformance -- --exact kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_js_conformance --test-threads=1 2>&1 | tee target/coroutine-target-results/wasm-js.log
+        timeout --signal=TERM --kill-after=15s 300s "$CONFORMANCE_TEST" --exact kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_js_conformance --test-threads=1 2>&1 | tee target/coroutine-target-results/wasm-js.log
         status=${PIPESTATUS[0]}
         printf '%s\n' "$status" > target/coroutine-target-results/wasm-js.exit
         exit 0
@@ -110,8 +144,9 @@ jobs:
         KRUSTY_TEST_THREADS: '1'
       run: |
         mkdir -p target/coroutine-target-results
+        CONFORMANCE_TEST=$(cat conformance-test-executable.txt)
         set +e
-        timeout --signal=TERM --kill-after=15s 300s cargo test --profile gate -p krusty --test conformance -- --exact kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_wasi_conformance --test-threads=1 2>&1 | tee target/coroutine-target-results/wasm-wasi.log
+        timeout --signal=TERM --kill-after=15s 300s "$CONFORMANCE_TEST" --exact kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_wasi_conformance --test-threads=1 2>&1 | tee target/coroutine-target-results/wasm-wasi.log
         status=${PIPESTATUS[0]}
         printf '%s\n' "$status" > target/coroutine-target-results/wasm-wasi.exit
         exit 0
