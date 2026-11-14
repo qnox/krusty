@@ -40,7 +40,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence
-          source=608c1fe084e3cd622e8110d75fc3a78644260872
+          source=7b8b53298978e39b088f0810400b8e36c7659ca9
           git diff --exit-code "$source" HEAD -- . ':!.github/workflows/ci.yml'
           git rev-parse "$source" > evidence/source-commit.txt
           sha256sum \
