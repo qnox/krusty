@@ -21,7 +21,7 @@ use krusty::types::SemanticCallableOwner;
 use krusty::types::{Ty, TypeName};
 
 use super::super::boxes::BoxAdapter;
-use super::super::encode::FieldType;
+use super::super::encode::{FieldType, Module};
 use super::super::interface_dispatch::MemberRef;
 use super::classes::OwnedBase;
 use super::interface_members::Signature;
@@ -66,8 +66,8 @@ pub(super) struct LaidOutClass {
     pub(super) ancestors: Vec<u32>,
     /// Each constructor by ordinal, the primary first: its function and the parameters it takes.
     pub(super) constructors: Vec<Option<(u32, Vec<Ty>)>>,
-    /// Constructor entries by ordinal, retained without provider-local types across modules.
-    pub(super) constructor_entries: Vec<Option<u32>>,
+    /// Constructor function and actual physical type by ordinal, with no provider-local types.
+    pub(super) constructor_entries: Vec<Option<(u32, u32)>>,
     /// Exact KLIB identities published for each constructor ordinal, when one is visible.
     pub(super) constructor_identities: Vec<Option<KlibDependencyCallable>>,
     /// Every method of it and its superclasses that has a body, by identity: its function and that
@@ -137,6 +137,7 @@ impl LaidOutClasses {
         ir: &IrFile,
         callables: &CheckedBackendCallables,
         classifiers: &dyn krusty::backend::BackendClassifierSource,
+        module: &mut Module,
     ) {
         self.support = false;
         if self.source_module.as_deref() != Some(module_name) {
@@ -156,10 +157,6 @@ impl LaidOutClasses {
             };
             if fact.kind != ExternalCallableKind::Constructor
                 || fact.declaration_owner != Some(SemanticCallableOwner::Classifier(parent))
-                || !fact
-                    .klib_body_class_contract
-                    .as_ref()
-                    .is_some_and(|contract| contract.matches_owner(&identity.module, parent))
             {
                 continue;
             }
@@ -181,7 +178,7 @@ impl LaidOutClasses {
             let Some(published) = self.published_source.get(class_identity) else {
                 continue;
             };
-            let Some(function) = published
+            let Some((function, signature)) = published
                 .constructor_entries
                 .get(*parent_ordinal)
                 .copied()
@@ -195,6 +192,13 @@ impl LaidOutClasses {
                 current.constructors.fill(None);
                 current
             });
+            let parameters = fact.declared_params.as_deref().unwrap_or(&fact.params);
+            if !constructor_frame_matches(module, parameters, signature) {
+                current.refusal = Some(
+                    "a selected constructor differing from its producer physical frame".into(),
+                );
+                continue;
+            }
             if !current
                 .constructor_identities
                 .iter()
@@ -211,7 +215,7 @@ impl LaidOutClasses {
             let Some(slot) = current.constructors.get_mut(selected_ordinal) else {
                 continue;
             };
-            *slot = Some((function, fact.params.clone()));
+            *slot = Some((function, parameters.to_vec()));
         }
     }
 
@@ -320,6 +324,19 @@ impl LaidOutClasses {
     }
 }
 
+/// Constructor bodies receive the allocated instance, followed by the complete declaration
+/// parameters (including any declaration-owned prefix), and return no value.
+fn constructor_frame_matches(module: &mut Module, parameters: &[Ty], signature: u32) -> bool {
+    let mut frame = vec![super::super::objects::REFERENCE];
+    for &parameter in parameters {
+        let Ok(Some(carrier)) = super::lower::carrier(parameter) else {
+            return false;
+        };
+        frame.push(carrier);
+    }
+    module.func_type(frame, Vec::new()) == signature
+}
+
 /// The actual checked super-constructor edges, with their current-provider parent ordinals.
 fn super_constructor_edges(ir: &IrFile) -> Vec<(ClassId, u32, krusty::fir::ExternalCallableId)> {
     let mut selected = Vec::new();
@@ -377,6 +394,47 @@ mod tests {
                 },
             ),
         }
+    }
+
+    #[test]
+    fn constructor_binding_checks_receiver_prefix_order_count_and_result() {
+        use super::super::super::encode::ValType;
+        use super::super::super::objects::REFERENCE;
+        let mut module = Module::default();
+        let physical = module.func_type(vec![REFERENCE, ValType::I32, ValType::I64], Vec::new());
+        assert!(constructor_frame_matches(
+            &mut module,
+            &[Ty::Int, Ty::Long],
+            physical
+        ));
+        assert!(!constructor_frame_matches(
+            &mut module,
+            &[Ty::Long, Ty::Int],
+            physical
+        ));
+        assert!(!constructor_frame_matches(
+            &mut module,
+            &[Ty::Long],
+            physical
+        ));
+        assert!(!constructor_frame_matches(
+            &mut module,
+            &[Ty::Int, Ty::Long, Ty::Unit],
+            physical
+        ));
+        let allocating =
+            module.func_type(vec![REFERENCE, ValType::I32, ValType::I64], vec![REFERENCE]);
+        assert!(!constructor_frame_matches(
+            &mut module,
+            &[Ty::Int, Ty::Long],
+            allocating
+        ));
+        let missing_receiver = module.func_type(vec![ValType::I32, ValType::I64], Vec::new());
+        assert!(!constructor_frame_matches(
+            &mut module,
+            &[Ty::Int, Ty::Long],
+            missing_receiver
+        ));
     }
 
     #[test]

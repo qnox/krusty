@@ -311,6 +311,16 @@ impl Module {
         self.functions.get(local).is_some_and(Option::is_some)
     }
 
+    /// The actual type of a defined local function. A reserved declaration is not evidence of
+    /// a physical frame; imported entries are owned by their separate import contract.
+    pub(super) fn defined_function_type(&self, index: u32) -> Option<u32> {
+        let local = (index as usize).checked_sub(self.imports.len())?;
+        self.functions
+            .get(local)?
+            .as_ref()
+            .map(|function| function.ty)
+    }
+
     pub(super) fn memory(&mut self, pages: u32) {
         self.memory_pages = Some(pages);
     }

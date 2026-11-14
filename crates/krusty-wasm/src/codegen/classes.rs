@@ -478,7 +478,12 @@ impl FileClasses {
                                 .copied()
                                 .map(Some),
                         )
-                        .collect(),
+                        .map(|entry| entry.map(|function| {
+                            module.defined_function_type(function)
+                                .map(|signature| (function, signature))
+                                .ok_or_else(|| "a published constructor without its defined physical frame".to_string())
+                        }).transpose())
+                        .collect::<Result<Vec<_>, Unsupported>>()?,
                     constructor_identities,
                     methods,
                     activation,

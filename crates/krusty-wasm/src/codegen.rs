@@ -233,6 +233,7 @@ impl Backend for WasmBackend {
                 &file.ir,
                 &file.callables,
                 &file.classifiers,
+                &mut started.module,
             );
         } else {
             started.classes.enter_dependency_support();
