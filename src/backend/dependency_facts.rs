@@ -384,6 +384,7 @@ mod tests {
             )),
         };
         fact.dependency_callable = Some(identity.clone());
+        let mut slot_identities = Vec::new();
         for (role, setter) in [
             (KlibAccessorRole::Getter, false),
             (KlibAccessorRole::Setter, true),
@@ -397,7 +398,18 @@ mod tests {
                 fact.member_slot_identity(),
                 property_member_identity(&identity, setter)
             );
+            assert_ne!(
+                fact.member_slot_identity(),
+                Some(super::super::interface_identity::member_identity(&identity))
+            );
+            slot_identities.push(fact.member_slot_identity());
         }
+        assert_ne!(slot_identities[0], slot_identities[1]);
+        fact.klib_body_accessor = None;
+        assert_eq!(
+            fact.member_slot_identity(),
+            Some(super::super::interface_identity::member_identity(&identity))
+        );
     }
 
     #[test]

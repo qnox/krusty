@@ -28,7 +28,7 @@ use krusty::fir::{
 use krusty::ir::{ClassId, IrFile, IrLocalPropertyLayout};
 use krusty::types::Ty;
 
-use super::super::boxes::{BoxAdapter, BoxForm};
+use super::super::boxes::BoxForm;
 use super::super::encode::{Code, Function, Module, ValType};
 use super::super::interface_dispatch::{ClassRef, MemberRef};
 use super::super::objects::REFERENCE;
