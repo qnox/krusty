@@ -37,6 +37,7 @@ fn continuation_factory_lowers_as_an_anonymous_object() {
         .external_identity
         .expect("the factory has a provider identity");
     let realization = libraries.external_callable(id).expect("realization");
+    let hierarchy = checked_template_hierarchy(&libraries, &realization);
     let mut ir = crate::ir::IrFile::default();
     let template = lower_inline_template(
         &mut ir,
@@ -46,7 +47,7 @@ fn continuation_factory_lowers_as_an_anonymous_object() {
             declarations: libraries.declaration_bodies(),
             references: libraries.reference_bindings(),
             source: &libraries,
-            type_hierarchy: None,
+            type_hierarchy: &hierarchy,
         },
     )
     .expect("a klib declaration")

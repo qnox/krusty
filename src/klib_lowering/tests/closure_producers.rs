@@ -114,6 +114,7 @@ fn official_serialized_closure_frames_keep_raw_and_prepared_ownership() {
         assert_frames(raw.ir(), capturer);
         if name == "inlineMake" {
             let mut prepared = IrFile::default();
+            let hierarchy = checked_template_hierarchy(&libraries, &selected);
             lower_inline_template(
                 &mut prepared,
                 &selected,
@@ -122,7 +123,7 @@ fn official_serialized_closure_frames_keep_raw_and_prepared_ownership() {
                     declarations: libraries.declaration_bodies(),
                     references: libraries.reference_bindings(),
                     source: &libraries,
-                    type_hierarchy: None,
+                    type_hierarchy: &hierarchy,
                 },
             )
             .unwrap()

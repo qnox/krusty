@@ -60,22 +60,17 @@ pub struct TemplateCallees<'a> {
     pub declarations: &'a KlibDeclarationBodies,
     /// Already normalized reference identities. Template lowering performs no hierarchy lookup.
     pub references: &'a KlibReferenceBindings,
-    /// The calling compilation's symbols: the provider identity of an exact serialized
-    /// declaration, its property and classifier records, and the class hierarchy that decides the
-    /// subtyping a body leaves implicit.
+    /// The calling compilation's normalized declaration records, used to authenticate exact
+    /// serialized references and validate classifier forms.
     pub source: &'a dyn crate::symbol_source::SymbolSource,
-    /// Checker-frozen hierarchy for the selected inline body and its reachable callees.
-    pub(crate) type_hierarchy: Option<&'a crate::resolve::CheckedKlibTypeFacts>,
+    /// Checker-frozen hierarchy for the selected inline body and its reachable callees. Required
+    /// so template type checks cannot fall back to provider queries.
+    pub(crate) type_hierarchy: &'a crate::resolve::CheckedKlibTypeFacts,
 }
 
 impl TemplateCallees<'_> {
     fn applied_supertype(&self, sub: Ty, owner: crate::types::TypeName) -> Option<Ty> {
-        match self.type_hierarchy {
-            Some(hierarchy) => {
-                crate::assignable::applied_supertype(hierarchy, sub, Ty::obj_name(owner))
-            }
-            None => (sub.kotlin_class_internal() == Some(owner)).then_some(sub),
-        }
+        crate::assignable::applied_supertype(self.type_hierarchy, sub, Ty::obj_name(owner))
     }
 
     fn is_subtype(
@@ -84,16 +79,11 @@ impl TemplateCallees<'_> {
         sub: Ty,
         sup: Ty,
     ) -> bool {
-        super::type_evidence::ordinary_subtype(
-            self.type_hierarchy.map(|facts| facts as _),
-            parameters,
-            sub,
-            sup,
-        )
+        super::type_evidence::ordinary_subtype(Some(self.type_hierarchy), parameters, sub, sup)
     }
 
     fn same_type(&self, left: Ty, right: Ty) -> bool {
-        super::type_evidence::same_type(self.type_hierarchy.map(|facts| facts as _), left, right)
+        super::type_evidence::same_type(Some(self.type_hierarchy), left, right)
     }
 
     fn constructor_bound(
@@ -102,12 +92,7 @@ impl TemplateCallees<'_> {
         argument: Ty,
         bound: Ty,
     ) -> bool {
-        super::type_evidence::satisfies(
-            self.type_hierarchy.map(|facts| facts as _),
-            parameters,
-            argument,
-            bound,
-        )
+        super::type_evidence::satisfies(Some(self.type_hierarchy), parameters, argument, bound)
     }
 }
 
