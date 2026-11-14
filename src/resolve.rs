@@ -40,7 +40,6 @@ use argument_parameter_mapping::{
     call_argument_parameter_indices, call_argument_parameter_indices_result,
     named_whole_array_varargs,
 };
-pub(crate) use builtin_implementation::for_checked_external_members;
 mod call_site_publication;
 mod constructor_references;
 mod implicit_source_member_lambda;
@@ -31777,11 +31776,11 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     let enhanced_values = c.enhanced_value_heads();
     let builtin_implementations = match builtin_implementation::for_checked_unit(&c) {
         Ok(implementations) => implementations,
-        Err(identity) => {
+        Err(error) => {
             c.diags.error(
                 Span::new(0, 0),
                 format!(
-                    "internal error: selected external member {identity:?} has no semantic owner"
+                    "internal error: selected external member has incomplete builtin implementation facts: {error:?}"
                 ),
             );
             HashMap::default()

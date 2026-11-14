@@ -2,17 +2,28 @@
 
 use crate::fir::{BuiltinImplementation, ExternalCallableId};
 use crate::symbol_resolver::{builtin_implementation_facts, ResolvedMember};
-use crate::symbol_source::SymbolSource;
 use crate::types::{SemanticCallableOwner, TypeName};
 
-use super::{Checker, ExprLowering, ResolvedCall, StmtLowering};
+use super::{CallableReferenceTarget, Checker, ExprLowering, ResolvedCall, StmtLowering};
 
 pub(super) type Facts = crate::fx_hash::HashMap<ExternalCallableId, Box<[BuiltinImplementation]>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FactError {
+    Callable(ExternalCallableId),
+    Property(crate::fir::ExternalPropertyId),
+}
+
+impl From<ExternalCallableId> for FactError {
+    fn from(identity: ExternalCallableId) -> Self {
+        Self::Callable(identity)
+    }
+}
 
 /// Derive implementation facts while the checker still owns the normalized source provider.
 /// Backends receive the selected declaration identities and this result; they do not traverse
 /// the hierarchy or repeat the query.
-pub(super) fn for_checked_unit(checker: &Checker<'_>) -> Result<Facts, ExternalCallableId> {
+pub(super) fn for_checked_unit(checker: &Checker<'_>) -> Result<Facts, FactError> {
     let mut selected =
         crate::fx_hash::HashMap::<ExternalCallableId, (TypeName, Box<str>)>::default();
     let mut nonvirtual = checker
@@ -64,6 +75,18 @@ pub(super) fn for_checked_unit(checker: &Checker<'_>) -> Result<Facts, ExternalC
         }
     }
 
+    // Counted loops and indexed iteration lower to member reads selected by the checker but do
+    // not represent those reads in the ordinary source call tables. Freeze their exact property
+    // accessors alongside the iterator protocol targets.
+    for property in checker.iteration_plans.selected_member_properties() {
+        record_iteration_property(checker, &mut selected, property)?;
+    }
+    if let Some(indexing) = checker.iteration_plans.char_sequence() {
+        if let ResolvedCall::Member(member) = indexing.get.as_ref() {
+            record_member(&mut selected, member)?;
+        }
+    }
+
     // The accessor identity is recorded as a callable, but override matching uses the Kotlin
     // property declaration name. The checked lowering already retains both identities.
     for lowering in checker.expr_lowers.values() {
@@ -77,6 +100,32 @@ pub(super) fn for_checked_unit(checker: &Checker<'_>) -> Result<Facts, ExternalC
             if let Some(identity) = accessor.external_identity {
                 selected.insert(identity, (*owner, name.clone().into_boxed_str()));
             }
+        }
+    }
+    // Callable references carry their selected member or property accessor in the lowering
+    // decision rather than the call tables. Freeze the same override facts for those identities;
+    // the backend must not reopen the member hierarchy when it realizes a reference.
+    for lowering in checker.expr_lowers.values() {
+        let target = match lowering {
+            ExprLowering::CallableReference { target, .. }
+            | ExprLowering::AdaptedCallableReference { target, .. } => target,
+            _ => continue,
+        };
+        match target {
+            CallableReferenceTarget::Classifier(member)
+            | CallableReferenceTarget::Member { member, .. } => {
+                record_library_member(&mut selected, member)?;
+            }
+            CallableReferenceTarget::ClassifierProperty { property, .. } => {
+                if let Some(getter) = &property.getter {
+                    record_library_member(&mut selected, getter)?;
+                }
+            }
+            CallableReferenceTarget::Property(property) => {
+                record_property_reference(&mut selected, property)?;
+            }
+            CallableReferenceTarget::Extension { .. }
+            | CallableReferenceTarget::TopLevelProperty(_) => {}
         }
     }
     // A property write selects its setter in the statement checker rather than in the call
@@ -158,49 +207,6 @@ pub(super) fn for_checked_unit(checker: &Checker<'_>) -> Result<Facts, ExternalC
     Ok(facts)
 }
 
-/// Complete builtin facts for every exact external member already present in finalized IR. Inline
-/// KLIB templates and compiler-generated checked operations can introduce member identities after
-/// ordinary source-body checking, so the checker closes the same contract at the checked backend
-/// handoff before emission starts.
-pub(crate) fn for_checked_external_members(
-    source: &dyn SymbolSource,
-    identities: impl IntoIterator<Item = ExternalCallableId>,
-    already_checked: &Facts,
-) -> Result<Facts, ExternalCallableId> {
-    let mut facts = Facts::default();
-    for identity in identities {
-        if let Some(checked) = already_checked.get(&identity) {
-            facts.insert(identity, checked.clone());
-            continue;
-        }
-        let realization = source.external_callable(identity).ok_or(identity)?;
-        if realization.callable.external_identity != Some(identity) {
-            return Err(identity);
-        }
-        if realization.kind != crate::libraries::ExternalCallableKind::Member {
-            continue;
-        }
-        let Some(SemanticCallableOwner::Classifier(owner)) = realization.declaration_owner else {
-            return Err(identity);
-        };
-        let name = match realization.callable.external_property_identity {
-            Some(property) => {
-                let property = source.external_property(property).ok_or(identity)?;
-                if property.getter != identity && property.setter != Some(identity) {
-                    return Err(identity);
-                }
-                property.name
-            }
-            None => realization.callable.name,
-        };
-        facts.insert(
-            identity,
-            builtin_implementation_facts(source, owner, &name, identity),
-        );
-    }
-    Ok(facts)
-}
-
 fn record_property_setter(
     checker: &Checker<'_>,
     selected: &mut crate::fx_hash::HashMap<ExternalCallableId, (TypeName, Box<str>)>,
@@ -232,49 +238,65 @@ fn record_member(
     selected: &mut crate::fx_hash::HashMap<ExternalCallableId, (TypeName, Box<str>)>,
     member: &ResolvedMember,
 ) -> Result<(), ExternalCallableId> {
-    let Some(identity) = member.member.external_identity else {
+    record_library_member(selected, &member.member)
+}
+
+fn record_library_member(
+    selected: &mut crate::fx_hash::HashMap<ExternalCallableId, (TypeName, Box<str>)>,
+    member: &crate::libraries::LibraryMember,
+) -> Result<(), ExternalCallableId> {
+    let Some(identity) = member.external_identity else {
         return Ok(());
     };
-    let Some(SemanticCallableOwner::Classifier(owner)) = member.member.declaration_owner else {
+    let Some(SemanticCallableOwner::Classifier(owner)) = member.declaration_owner else {
         return Err(identity);
     };
     selected
         .entry(identity)
-        .or_insert_with(|| (owner, member.member.name.clone().into_boxed_str()));
+        .or_insert_with(|| (owner, member.name.clone().into_boxed_str()));
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn checked_external_member_facts_cover_exact_ir_references() {
-        let source = crate::libraries::EmptySymbolSource;
-        let (functions, _) = crate::symbol_resolver::declared_member_declarations(
-            &source,
-            crate::types::Ty::obj_name(crate::types::wk::any()),
-            "toString",
-        )
-        .into_parts();
-        let [function] = functions.overloads.as_slice() else {
-            panic!("the common class model declares one Any.toString member");
+fn record_property_reference(
+    selected: &mut crate::fx_hash::HashMap<ExternalCallableId, (TypeName, Box<str>)>,
+    property: &crate::symbol_resolver::ResolvedPropertyRef,
+) -> Result<(), ExternalCallableId> {
+    for accessor in std::iter::once(&property.getter).chain(property.setter.iter()) {
+        let Some(identity) = accessor.external_identity else {
+            continue;
         };
-        let identity = function
-            .callable
-            .external_identity
-            .expect("the member has a provider identity");
-
-        let facts = for_checked_external_members(&source, [identity], &Facts::default())
-            .expect("the exact checked member has complete override facts");
-        assert!(facts.contains_key(&identity));
-        assert!(matches!(
-            for_checked_external_members(
-                &source,
-                [ExternalCallableId::from_raw(u32::MAX)],
-                &Facts::default(),
-            ),
-            Err(identity) if identity == ExternalCallableId::from_raw(u32::MAX)
-        ));
+        let Some(SemanticCallableOwner::Classifier(owner)) = accessor.declaration_owner else {
+            return Err(identity);
+        };
+        selected
+            .entry(identity)
+            .or_insert_with(|| (owner, property.name.clone().into_boxed_str()));
     }
+    Ok(())
+}
+
+fn record_iteration_property(
+    checker: &Checker<'_>,
+    selected: &mut crate::fx_hash::HashMap<ExternalCallableId, (TypeName, Box<str>)>,
+    property: crate::fir::ExternalPropertyId,
+) -> Result<(), FactError> {
+    let property = checker
+        .libraries
+        .external_property(property)
+        .ok_or(FactError::Property(property))?;
+    let identity = property.getter;
+    let callable = checker
+        .libraries
+        .external_callable(identity)
+        .ok_or(FactError::Callable(identity))?;
+    if callable.kind != crate::libraries::ExternalCallableKind::Member {
+        return Ok(());
+    }
+    let Some(SemanticCallableOwner::Classifier(owner)) = callable.declaration_owner else {
+        return Err(FactError::Callable(identity));
+    };
+    selected
+        .entry(identity)
+        .or_insert_with(|| (owner, property.name.into_boxed_str()));
+    Ok(())
 }

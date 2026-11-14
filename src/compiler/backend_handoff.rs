@@ -91,11 +91,7 @@ pub(super) fn checked_ir_file<'a>(
             return None;
         }
     }
-    if let Err(identity) = super::builtin_implementations::record_checked(
-        &mut callables,
-        &ir,
-        symbols.semantic_platform(),
-    ) {
+    if let Err(identity) = super::builtin_implementations::record_checked(&mut callables, &ir) {
         diags.error(
             Span::new(0, 0),
             format!(

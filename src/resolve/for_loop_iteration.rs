@@ -108,7 +108,29 @@ impl IterationPlans {
     pub fn indexed_value(&self) -> Option<IndexedValueProperties> {
         self.indexed_value
     }
+
+    /// Exact property identities that common lowering can read while realizing these checked
+    /// iteration plans. Their selected getters are absent from ordinary source call tables.
+    pub(super) fn selected_member_properties(&self) -> Vec<ExternalPropertyId> {
+        let mut properties = self
+            .members
+            .values()
+            .flat_map(|plan| [plan.first.property, plan.last.property, plan.step.property])
+            .collect::<Vec<_>>();
+        properties.extend(self.char_sequence.iter().map(|plan| plan.length.property));
+        properties.extend(
+            self.indexed_value
+                .iter()
+                .flat_map(|properties| [properties.index, properties.value]),
+        );
+        properties.extend(self.indices.values().map(|indices| indices.size.property));
+        properties
+    }
 }
+
+#[cfg(test)]
+#[path = "for_loop_iteration_tests.rs"]
+mod tests;
 
 impl super::TypeInfo {
     pub fn progression_plan(&self, class: Ty) -> Option<&ProgressionPlan> {
