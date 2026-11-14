@@ -189,9 +189,21 @@ impl Split<'_> {
                 self.count(ir, *body)
             }
             node => {
+                let mut pending = vec![stmt];
+                let mut seen = HashSet::default();
+                let mut expression_tree = Vec::new();
+                while let Some(expression) = pending.pop() {
+                    if !seen.insert(expression) || expression_tree.len() >= 64 {
+                        continue;
+                    }
+                    expression_tree.push((expression, ir.expr(expression).clone()));
+                    crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+                        pending.push(child);
+                    });
+                }
                 crate::trace_compiler!(
                     "suspend",
-                    "continuation splitter cannot classify suspension-bearing statement={stmt} node={node:?}",
+                    "continuation splitter cannot classify suspension-bearing statement={stmt} node={node:?} expression_tree={expression_tree:?}",
                 );
                 Err(ReentryDecline::UnsupportedSuspension)
             }
