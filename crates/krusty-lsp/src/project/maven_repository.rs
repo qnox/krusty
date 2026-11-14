@@ -1,11 +1,12 @@
 //! Resolve named JPS repository libraries with Maven.
 //!
 //! A repository library maps one `maven-id` onto the jars in its `CLASSES` roots.
-//! Those extra jars are the transitive closure of that coordinate, recorded after
-//! IntelliJ resolved it. They are not coordinates of their own. Transitives are
-//! therefore requested unless the library sets `include-transitive-deps="false"`
-//! (every such library in the IntelliJ model lists only its own jar). Named
-//! `<exclude>` entries are the only other dependencies left out.
+//! The root coordinate keeps its transitive closure unless the library sets
+//! `include-transitive-deps="false"`. Each other `CLASSES` jar is a coordinate of
+//! its own: it is the version IntelliJ recorded, and a fresh resolve of the root
+//! can install a different version at a different path. Named `<exclude>` entries
+//! still apply to the root. A pinned jar excludes every transitive of its own, so
+//! the file at the recorded path is what gets installed.
 //!
 //! One `mvn`/`mvnw` invocation resolves every library that still has a missing jar,
 //! with the user's settings, mirrors, and credentials. Editor refresh does not call
@@ -76,6 +77,43 @@ fn module_pom(index: usize, library: &RepositoryLibrary) -> String {
     } else {
         format!("      <exclusions>\n{exclusions}      </exclusions>\n")
     };
+    let mut dependencies = format!(
+        r#"    <dependency>
+      <groupId>{group}</groupId>
+      <artifactId>{artifact}</artifactId>
+      <version>{version}</version>
+      <type>{packaging}</type>
+{exclusions}    </dependency>
+"#,
+        group = xml_text(&library.group),
+        artifact = xml_text(&library.artifact),
+        version = xml_text(&library.version),
+        packaging = xml_text(&library.packaging),
+    );
+    for pin in pinned_jars(library) {
+        let classifier = pin.classifier.as_ref().map_or(String::new(), |classifier| {
+            format!("      <classifier>{}</classifier>\n", xml_text(classifier))
+        });
+        dependencies.push_str(&format!(
+            r#"    <dependency>
+      <groupId>{group}</groupId>
+      <artifactId>{artifact}</artifactId>
+      <version>{version}</version>
+      <type>{packaging}</type>
+{classifier}      <exclusions>
+        <exclusion>
+          <groupId>*</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+"#,
+            group = xml_text(&pin.group),
+            artifact = xml_text(&pin.artifact),
+            version = xml_text(&pin.version),
+            packaging = xml_text(&pin.packaging),
+        ));
+    }
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <project>
@@ -84,20 +122,84 @@ fn module_pom(index: usize, library: &RepositoryLibrary) -> String {
   <artifactId>library-{index}</artifactId>
   <version>1</version>
   <dependencies>
-    <dependency>
-      <groupId>{group}</groupId>
-      <artifactId>{artifact}</artifactId>
-      <version>{version}</version>
-      <type>{packaging}</type>
-{exclusions}    </dependency>
-  </dependencies>
+{dependencies}  </dependencies>
 </project>
-"#,
-        group = xml_text(&library.group),
-        artifact = xml_text(&library.artifact),
-        version = xml_text(&library.version),
-        packaging = xml_text(&library.packaging),
+"#
     )
+}
+
+/// A `CLASSES` jar under `~/.m2/repository` whose filename is the Maven layout
+/// `{artifact}-{version}[-{classifier}].{ext}`.
+struct PinnedJar {
+    group: String,
+    artifact: String,
+    version: String,
+    classifier: Option<String>,
+    packaging: String,
+}
+
+fn pinned_jars(library: &RepositoryLibrary) -> Vec<PinnedJar> {
+    let mut pins = Vec::new();
+    for jar in &library.jars {
+        let Some(pin) = pinned_jar(jar) else {
+            continue;
+        };
+        let same_as_root = pin.classifier.is_none()
+            && pin.group == library.group
+            && pin.artifact == library.artifact
+            && pin.version == library.version
+            && pin.packaging == library.packaging;
+        if same_as_root {
+            continue;
+        }
+        if pins.iter().any(|existing: &PinnedJar| {
+            existing.group == pin.group
+                && existing.artifact == pin.artifact
+                && existing.version == pin.version
+                && existing.classifier == pin.classifier
+                && existing.packaging == pin.packaging
+        }) {
+            continue;
+        }
+        pins.push(pin);
+    }
+    pins
+}
+
+fn pinned_jar(jar: &Path) -> Option<PinnedJar> {
+    let text = jar.to_string_lossy();
+    let marker = "/.m2/repository/";
+    let relative = text.split_once(marker)?.1;
+    let mut parts = relative.split('/').collect::<Vec<_>>();
+    let filename = parts.pop()?;
+    let version = parts.pop()?.to_string();
+    let artifact = parts.pop()?.to_string();
+    if parts.is_empty() || version.is_empty() || artifact.is_empty() {
+        return None;
+    }
+    let group = parts.join(".");
+    let prefix = format!("{artifact}-{version}");
+    let rest = filename.strip_prefix(&prefix)?;
+    let (classifier, packaging) = if let Some(classified) = rest.strip_prefix('-') {
+        let (classifier, packaging) = classified.rsplit_once('.')?;
+        if classifier.is_empty() || packaging.is_empty() {
+            return None;
+        }
+        (Some(classifier.to_string()), packaging.to_string())
+    } else {
+        let packaging = rest.strip_prefix('.')?;
+        if packaging.is_empty() || packaging.contains('.') {
+            return None;
+        }
+        (None, packaging.to_string())
+    };
+    Some(PinnedJar {
+        group,
+        artifact,
+        version,
+        classifier,
+        packaging,
+    })
 }
 
 fn aggregator_pom(modules: &str) -> String {
@@ -239,10 +341,10 @@ mod tests {
     }
 
     #[test]
-    fn a_library_with_several_artifacts_is_one_dependency_and_keeps_transitives() {
+    fn a_library_pins_every_recorded_jar_and_keeps_the_root_transitive() {
         let tree = crate::project::testing::TempTree::new("maven-library-reactor");
         tree.write("mvnw", "#!/bin/sh\n");
-        let repository = tree.directory("m2");
+        let repository = tree.root().join(".m2/repository");
         let classic =
             repository.join("ch/qos/logback/logback-classic/1.3.14/logback-classic-1.3.14.jar");
         let core = repository.join("ch/qos/logback/logback-core/1.3.14/logback-core-1.3.14.jar");
@@ -278,7 +380,7 @@ mod tests {
         let with_transitives = std::fs::read_to_string(reactor.join("m0/pom.xml")).unwrap();
         assert_eq!(
             with_transitives.matches("<dependency>").count(),
-            1,
+            2,
             "{with_transitives}"
         );
         assert!(
@@ -286,11 +388,27 @@ mod tests {
             "{with_transitives}"
         );
         assert!(
-            !with_transitives.contains("logback-core"),
+            with_transitives.contains("<artifactId>logback-core</artifactId>"),
             "{with_transitives}"
         );
         assert!(
-            !with_transitives.contains("<groupId>*</groupId>"),
+            with_transitives.contains("<version>1.3.14</version>"),
+            "{with_transitives}"
+        );
+        let classic_at = with_transitives
+            .find("<artifactId>logback-classic</artifactId>")
+            .unwrap();
+        let core_at = with_transitives
+            .find("<artifactId>logback-core</artifactId>")
+            .unwrap();
+        let root_dependency = &with_transitives[..core_at];
+        let pinned = &with_transitives[classic_at.max(core_at)..];
+        assert!(
+            !root_dependency.contains("<groupId>*</groupId>"),
+            "{with_transitives}"
+        );
+        assert!(
+            pinned.contains("<groupId>*</groupId>"),
             "{with_transitives}"
         );
         assert!(
@@ -348,6 +466,30 @@ mod tests {
                 && !arg.contains("excludeTransitive")
         }));
         assert_eq!(command.timeout, SCAN_PROBE_TIMEOUT);
+    }
+
+    #[test]
+    fn a_pinned_transitive_keeps_the_version_in_its_repository_path() {
+        let tree = crate::project::testing::TempTree::new("maven-library-pin");
+        let repository = tree.root().join(".m2/repository");
+        let archive = repository.join(
+            "com/jetbrains/intellij/idea/idea-community-build-zip/252.11244/idea-community-build-zip-252.11244.jar",
+        );
+        let netty = repository.join("io/netty/netty-buffer/4.2.0.RC2/netty-buffer-4.2.0.RC2.jar");
+        let library = library(
+            "fleet:jetbrains.intellij.idea.community.build.zip",
+            "com.jetbrains.intellij.idea:idea-community-build-zip:252.11244",
+            vec![archive, netty],
+        );
+        let reactor = tree.directory("reactor");
+        write_resolution_reactor(&reactor, &[&library]).unwrap();
+        let pom = std::fs::read_to_string(reactor.join("m0/pom.xml")).unwrap();
+        assert!(
+            pom.contains("<artifactId>netty-buffer</artifactId>"),
+            "{pom}"
+        );
+        assert!(pom.contains("<version>4.2.0.RC2</version>"), "{pom}");
+        assert!(!pom.contains("4.2.18.Final"), "{pom}");
     }
 
     #[test]

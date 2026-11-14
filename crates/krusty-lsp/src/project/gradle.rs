@@ -521,6 +521,7 @@ fn parse_model(root: &Path, stdout: &str) -> Result<ProjectModel, ProbeError> {
             }
         }
     }
+    link_project_dependencies(&mut modules);
     Ok(ProjectModel {
         root: root.to_path_buf(),
         kind: ProviderKind::Gradle,
@@ -528,6 +529,68 @@ fn parse_model(root: &Path, stdout: &str) -> Result<ProjectModel, ProbeError> {
         modules,
         repository_libraries: Vec::new(),
     })
+}
+
+/// A project dependency is that project's production module. A plain JVM project calls it `main`.
+/// A Kotlin Multiplatform project calls the JVM one `jvm/main`, so linking every edge to `main`
+/// points at a module that was never created.
+fn link_project_dependencies(modules: &mut [Module]) {
+    let present = modules
+        .iter()
+        .filter_map(|module| module.id.as_ref().map(|id| id.as_str().to_string()))
+        .collect::<std::collections::HashSet<_>>();
+    for module in modules.iter_mut() {
+        let mut linked = Vec::new();
+        for dependency in &module.depends_on {
+            let id = production_dependency(dependency.as_str(), &present);
+            if !linked.iter().any(|existing: &ModuleId| existing == &id) {
+                linked.push(id);
+            }
+        }
+        let test_module = module
+            .source_roots
+            .iter()
+            .any(|root| root.kind == SourceRootKind::Test);
+        if test_module {
+            if let Some(project) = module
+                .id
+                .as_ref()
+                .and_then(|id| id.as_str().rsplit_once(':'))
+                .map(|(project, _)| project)
+            {
+                let production = production_module_id(project, &present);
+                if present.contains(production.as_str())
+                    && module.id.as_ref() != Some(&production)
+                    && !linked.iter().any(|existing| existing == &production)
+                {
+                    linked.push(production);
+                }
+            }
+        }
+        module.depends_on = linked;
+    }
+}
+
+fn production_dependency(
+    dependency: &str,
+    present: &std::collections::HashSet<String>,
+) -> ModuleId {
+    match dependency.rsplit_once(':') {
+        Some((project, "main")) => production_module_id(project, present),
+        _ => ModuleId::raw(dependency),
+    }
+}
+
+fn production_module_id(project: &str, present: &std::collections::HashSet<String>) -> ModuleId {
+    let main = ModuleId::new(project, "main");
+    if present.contains(main.as_str()) {
+        return main;
+    }
+    let jvm_main = ModuleId::new(project, "jvm/main");
+    if present.contains(jvm_main.as_str()) {
+        return jvm_main;
+    }
+    main
 }
 
 fn module_of(project: &GradleProject, source_set: &GradleSourceSet) -> Module {
@@ -1047,6 +1110,26 @@ Execution failed for task ':app:krustyModel'.
         assert!(model
             .module(&ModuleId::new(":shared", "linuxX64/main"))
             .is_none());
+        assert_eq!(test.depends_on, vec![ModuleId::new(":shared", "jvm/main")]);
+    }
+
+    #[test]
+    fn a_project_dependency_on_multiplatform_selects_the_jvm_compilation() {
+        let shared = concat!(
+            r#"{"path":":shared","name":"shared","projectDir":"/p/shared","javaHome":"/jdk21","jvmTarget":"17","kotlincArgs":[],"sourceSets":[],"kotlinCompilations":["#,
+            r#"{"target":"jvm","name":"main","platform":"jvm","roots":["/p/shared/src/jvmMain/kotlin"],"classpath":[],"output":["/p/shared/build/classes/kotlin/jvm/main"],"isTest":false,"associates":[],"jvmTarget":"17"}"#,
+            r#"],"androidVariants":[],"projectDeps":[]}"#,
+        );
+        let app = concat!(
+            r#"{"path":":app","name":"app","projectDir":"/p/app","javaHome":"/jdk21","jvmTarget":"17","kotlincArgs":[],"sourceSets":["#,
+            r#"{"name":"main","roots":["/p/app/src/main/kotlin"],"classpath":["/p/shared/build/libs/shared.jar"],"output":["/p/app/build/classes/kotlin/main"],"projectDeps":[":shared"]}"#,
+            r#"],"kotlinCompilations":[],"androidVariants":[],"projectDeps":[":shared"]}"#,
+        );
+        let output = format!("{SENTINEL}{shared}\n{SENTINEL}{app}\n");
+        let model = parse_model(Path::new("/p"), &output).unwrap();
+        let app = model.module(&ModuleId::new(":app", "main")).unwrap();
+        assert_eq!(app.depends_on, vec![ModuleId::new(":shared", "jvm/main")]);
+        assert!(model.module(&ModuleId::new(":shared", "main")).is_none());
     }
 
     #[test]
