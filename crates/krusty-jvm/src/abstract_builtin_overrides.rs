@@ -16,7 +16,9 @@ use crate::read_only_collection_stubs::{
     builtin_extends, classifier_closure, overridden_declaration_policy, parameter_descriptor,
     stub_barrier, StubBarrier,
 };
-use krusty::backend::{BackendClassifierSource, CheckedBackendClassifiers, SourceClassMembers};
+use krusty::backend::{
+    BackendClassifierSource, BackendModuleFacts, CheckedBackendClassifiers, SourceClassMembers,
+};
 use krusty::fx_hash::{HashMap, HashSet};
 use krusty::ir::{IrAppliedClassifier, IrClass, IrFile};
 use krusty::jvm::classpath::mapped_builtin_realizations::DecodedBuiltinMember;
@@ -28,11 +30,15 @@ use krusty::jvm::mapped_builtin_declarations::{
 use krusty::jvm::method_descriptors::{jvm_declared_ty, jvm_tys};
 use krusty::jvm::names::method_descriptor;
 use krusty::names::property_getter_name;
-use krusty::types::{ty_subst, Ty, TypeName, Visibility};
+use krusty::types::{ty_subst, ClassifierDeclarationKind, Ty, TypeName, Visibility};
 
 #[derive(Default)]
 pub(super) struct AbstractBuiltinOverrides {
+    /// The materializations each class of the active file writes.
     by_class: HashMap<TypeName, Vec<AbstractBuiltinOverride>>,
+    /// The materializations a named source superclass declared by another file writes there.
+    /// The active file writes none of them; its subclasses inherit their final bridges.
+    by_superclass: HashMap<TypeName, Vec<AbstractBuiltinOverride>>,
 }
 
 impl AbstractBuiltinOverrides {
@@ -41,10 +47,14 @@ impl AbstractBuiltinOverrides {
     }
 
     /// The `(name, descriptor)` of each final special bridge `class` writes, which its subclasses
-    /// inherit and must not declare again.
+    /// inherit and must not declare again: a class of the active file, or a named source
+    /// superclass of one that another file declares.
     pub(super) fn final_bridges(&self, class: TypeName) -> Vec<(String, String)> {
-        self.for_class(class)
-            .iter()
+        self.by_class
+            .get(&class)
+            .or_else(|| self.by_superclass.get(&class))
+            .into_iter()
+            .flatten()
             .flat_map(|member| {
                 let parameters = member.physical_parameters();
                 let result = member.physical_result();
@@ -113,40 +123,146 @@ pub(super) enum SpecialBridge {
     },
 }
 
-/// Select the materialized abstract builtin members of every abstract class.
+/// Select the materialized abstract builtin members of every abstract class of the active file,
+/// and of every named source superclass of one that another file declares. The same declaration
+/// record answers for a superclass whichever file declares it, so a subclass knows the final
+/// bridges it inherits without that file's IR.
 pub(super) fn select(
     ir: &IrFile,
     classpath: &Classpath,
     classifiers: &CheckedBackendClassifiers<'_>,
 ) -> Result<AbstractBuiltinOverrides, SkipReason> {
     let mut result = AbstractBuiltinOverrides::default();
+    let mut superclasses = Vec::new();
     for class_index in 0..ir.classes.len() {
         if !crate::override_results::realizes_overrides(ir, class_index) {
             continue;
         }
         let class = &ir.classes[class_index];
+        other_file_superclasses(
+            ir,
+            classifiers.module(),
+            class.superclass,
+            &mut superclasses,
+        );
         // Only an abstract class can leave a member abstract; an interface's member stays its own.
         if class.is_interface || class.is_annotation || !(class.is_abstract || class.is_sealed) {
             continue;
         }
-        let members = class_overrides(ir, classpath, classifiers, class)?;
+        let Some(hierarchy) = ir.classifier_hierarchies.get(&class.fq_name_id()) else {
+            continue;
+        };
+        let materializing = Materializing {
+            classifier: class.fq_name_id(),
+            superclass: class.superclass,
+            hierarchy,
+            own: Own::File(class),
+            inherited_defaults: ir
+                .inherited_defaults
+                .get(&class.fq_name_id())
+                .map_or(&[], Vec::as_slice),
+        };
+        let members = class_overrides(ir, classpath, classifiers, &materializing)?;
         if !members.is_empty() {
             result.by_class.insert(class.fq_name_id(), members);
         }
     }
+    let module = classifiers.module();
+    for superclass in superclasses {
+        if result.by_superclass.contains_key(&superclass) {
+            continue;
+        }
+        let declaration =
+            krusty::types::ClassifierFactSource::classifier_declaration(classifiers, superclass)
+                .ok_or_else(|| missing_record("declaration", superclass))?;
+        if !declaration.is_abstract
+            || matches!(
+                declaration.kind,
+                ClassifierDeclarationKind::Interface | ClassifierDeclarationKind::Annotation
+            )
+        {
+            continue;
+        }
+        let members = module
+            .source_class_members(superclass)
+            .ok_or_else(|| missing_record("members", superclass))?;
+        let materializing = Materializing {
+            classifier: superclass,
+            superclass: members.superclass.unwrap_or_else(krusty::types::wk::any),
+            hierarchy: members
+                .hierarchy
+                .as_deref()
+                .ok_or_else(|| missing_record("hierarchy", superclass))?,
+            own: Own::Module(members),
+            inherited_defaults: module.inherited_defaults(superclass).unwrap_or_default(),
+        };
+        let members = class_overrides(ir, classpath, classifiers, &materializing)?;
+        result.by_superclass.insert(superclass, members);
+    }
     Ok(result)
+}
+
+fn missing_record(what: &str, classifier: TypeName) -> SkipReason {
+    SkipReason::AbstractBuiltinOverrides(format!(
+        "missing module {what} record for source superclass {}",
+        classifier.render()
+    ))
+}
+
+/// The named source classes from `superclass` up that another file of the module declares. A
+/// class of the active file is followed through its IR; a dependency superclass ends the module's
+/// part of the chain.
+fn other_file_superclasses(
+    ir: &IrFile,
+    module: &BackendModuleFacts,
+    superclass: TypeName,
+    found: &mut Vec<TypeName>,
+) {
+    let mut seen = HashSet::default();
+    let mut current = Some(superclass);
+    while let Some(classifier) = current.filter(|&classifier| seen.insert(classifier)) {
+        current = match ir
+            .classes
+            .iter()
+            .find(|class| class.fq_name_id() == classifier)
+        {
+            Some(class) => Some(class.superclass),
+            None => module.source_class_members(classifier).and_then(|members| {
+                found.push(classifier);
+                members.superclass
+            }),
+        };
+    }
+}
+
+/// Where a materializing class's own members are read.
+enum Own<'a> {
+    /// A class of the active file.
+    File(&'a IrClass),
+    /// A named source class another file declares.
+    Module(&'a SourceClassMembers),
+}
+
+/// The class whose materializations are selected, read from the one source that owns it: the
+/// active file's IR for one of its own classes, or the module's declaration record for a named
+/// source superclass another file declares.
+struct Materializing<'a> {
+    classifier: TypeName,
+    superclass: TypeName,
+    /// Every classifier the class reaches, applied in its own type parameters, itself first.
+    hierarchy: &'a [IrAppliedClassifier],
+    own: Own<'a>,
+    inherited_defaults: &'a [krusty::fir::ResolvedInheritedDefault],
 }
 
 fn class_overrides(
     ir: &IrFile,
     classpath: &Classpath,
     classifiers: &CheckedBackendClassifiers<'_>,
-    class: &IrClass,
+    class: &Materializing<'_>,
 ) -> Result<Vec<AbstractBuiltinOverride>, SkipReason> {
-    let Some(hierarchy) = ir.classifier_hierarchies.get(&class.fq_name_id()) else {
-        return Ok(Vec::new());
-    };
-    let through_superclass = superclass_classifiers(ir, classpath, classifiers, class);
+    let hierarchy = class.hierarchy;
+    let through_superclass = superclass_classifiers(ir, classpath, classifiers, class.superclass);
     let builtins: Vec<&IrAppliedClassifier> = hierarchy
         .iter()
         .filter(|entry| {
@@ -182,7 +298,13 @@ fn class_overrides(
                 .applied;
             materialization(classpath, &member, applied)
         });
-    let ancestors = superclass_chain(ir, classifiers, classpath, class)?;
+    let ancestors = superclass_chain(
+        ir,
+        classifiers,
+        classpath,
+        class.superclass,
+        Some(hierarchy),
+    )?;
     let mut members = Vec::new();
     for candidate in candidates {
         if !implemented(ir, &ancestors, class, &candidate)? {
@@ -198,9 +320,8 @@ fn superclass_classifiers(
     ir: &IrFile,
     classpath: &Classpath,
     classifiers: &dyn BackendClassifierSource,
-    class: &IrClass,
+    superclass: TypeName,
 ) -> HashSet<TypeName> {
-    let superclass = class.superclass;
     if classpath.builtin_class_gsig_name(superclass).is_some() {
         return HashSet::default();
     }
@@ -347,19 +468,19 @@ struct Ancestor<'a> {
     declaring: Declaring<'a>,
 }
 
-/// The superclass chain above `class`, each class read from the source that declares it: the
-/// module's declaration record for a named source class, so the answer is the same whichever
-/// file declares it.
+/// The superclass chain from `superclass` up, each class read from the source that declares it:
+/// the module's declaration record for a named source class, so the answer is the same whichever
+/// file declares it. `hierarchy` applies each class in the class below the chain.
 fn superclass_chain<'a>(
     ir: &'a IrFile,
     classifiers: &'a CheckedBackendClassifiers<'_>,
     classpath: &Classpath,
-    class: &IrClass,
+    superclass: TypeName,
+    hierarchy: Option<&[IrAppliedClassifier]>,
 ) -> Result<Vec<Ancestor<'a>>, SkipReason> {
-    let hierarchy = ir.classifier_hierarchies.get(&class.fq_name_id());
     let mut chain = Vec::new();
     let mut seen = HashSet::default();
-    let mut current = Some(class.superclass);
+    let mut current = Some(superclass);
     while let Some(classifier) = current
         .filter(|&classifier| {
             classifier != krusty::types::wk::java_object() && classifier != krusty::types::wk::any()
@@ -415,7 +536,7 @@ fn superclass_chain<'a>(
 fn implemented(
     ir: &IrFile,
     ancestors: &[Ancestor<'_>],
-    class: &IrClass,
+    class: &Materializing<'_>,
     candidate: &AbstractBuiltinOverride,
 ) -> Result<bool, SkipReason> {
     let parameters = parameter_descriptor(&candidate.parameters);
@@ -431,20 +552,22 @@ fn implemented(
                 .iter()
                 .any(|property| property_getter_name(&property.name) == candidate.name))
     };
-    if declares(class) {
+    let own = match &class.own {
+        Own::File(source) => declares(source),
+        Own::Module(members) => module_declares(
+            class.classifier,
+            members,
+            class.hierarchy.first().map(|own| own.applied),
+            candidate,
+        )?,
+    };
+    if own {
         return Ok(true);
     }
-    let defaulted = ir
-        .inherited_defaults
-        .get(&class.fq_name_id())
-        .into_iter()
-        .flatten()
-        .any(|default| {
-            let name =
-                crate::inherited_default_realization::inherited_member_declared_name(default);
-            name == candidate.name
-                && parameter_descriptor(&default.applied_parameters) == parameters
-        });
+    let defaulted = class.inherited_defaults.iter().any(|default| {
+        let name = crate::inherited_default_realization::inherited_member_declared_name(default);
+        name == candidate.name && parameter_descriptor(&default.applied_parameters) == parameters
+    });
     if defaulted {
         return Ok(true);
     }
