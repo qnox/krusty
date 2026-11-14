@@ -1,26 +1,33 @@
 //! The annotations of the exact declaration an inherited default forwarder republishes.
 
 use super::*;
-use krusty::fir::{
-    InheritedMemberName, ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget,
-};
+use krusty::fir::{ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget};
 use krusty::ir::{DeclarationAnnotations, RetainedAnnotation};
 
 pub(super) fn selected(
     default: &krusty::fir::ResolvedInheritedDefault,
     env: &EmitEnv<'_>,
 ) -> Option<DeclarationAnnotations> {
-    let module = match (default.function, default.accessor) {
-        (Some(ResolvedFunctionOverrideTarget::Module(callable)), None) => {
+    use krusty::fir::InheritedDefaultAnnotationOrigin as Origin;
+    let Some(origin) = default.annotation_origin else {
+        env.run.set_emit_error(format!(
+            "inherited default declaration has no unique annotation origin: body={} {:?} {:?}",
+            default.declaring_interface.render(),
+            default.function,
+            default.accessor,
+        ));
+        return None;
+    };
+    let module = match origin {
+        Origin::Function(ResolvedFunctionOverrideTarget::Module(callable)) => {
             Some(env.source_member_annotations.function(callable))
         }
-        (None, Some(ResolvedPropertyOverrideTarget::Module(property))) => Some(
-            if matches!(default.name, InheritedMemberName::PropertySetter(_)) {
-                env.source_member_annotations.setter(property)
-            } else {
-                env.source_member_annotations.getter(property)
-            },
-        ),
+        Origin::Getter(ResolvedPropertyOverrideTarget::Module(property)) => {
+            Some(env.source_member_annotations.getter(property))
+        }
+        Origin::Setter(ResolvedPropertyOverrideTarget::Module(property)) => {
+            Some(env.source_member_annotations.setter(property))
+        }
         _ => None,
     };
     if let Some(annotations) = module {
@@ -28,20 +35,19 @@ pub(super) fn selected(
             Some(annotations) => Some(annotations.clone()),
             None => {
                 env.run.set_emit_error(format!(
-                    "inherited default declaration has no registered source annotation facts: {} {:?} {:?}",
+                    "inherited default declaration has no registered source annotation facts: origin={origin:?}; body={} {:?} {:?}",
                     default.declaring_interface.render(), default.function, default.accessor,
                 ));
                 None
             }
         };
     }
-    let external = match (default.function, default.accessor) {
-        (Some(ResolvedFunctionOverrideTarget::External(callable)), None)
-        | (None, Some(ResolvedPropertyOverrideTarget::External(callable))) => Some(callable),
-        _ => None,
+    let identity = match origin {
+        Origin::Function(ResolvedFunctionOverrideTarget::External(callable))
+        | Origin::Getter(ResolvedPropertyOverrideTarget::External(callable))
+        | Origin::Setter(ResolvedPropertyOverrideTarget::External(callable)) => callable,
+        _ => unreachable!("module annotation origins were handled above"),
     };
-    let identity =
-        external.expect("a checked inherited default names one module or dependency declaration");
     let fact = env
         .dependency_callables
         .callable(identity)
@@ -76,7 +82,9 @@ pub(super) fn selected(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krusty::fir::{CallableId, InheritedDefaultBody, ResolvedInheritedDefault};
+    use krusty::fir::{
+        CallableId, InheritedDefaultBody, InheritedMemberName, ResolvedInheritedDefault,
+    };
 
     struct NoSourceBytes;
     impl krusty::jvm::inline::MethodBodies for NoSourceBytes {
@@ -118,6 +126,9 @@ mod tests {
                 name: InheritedMemberName::Function("value".into()),
                 function: Some(target),
                 accessor: None,
+                annotation_origin: Some(krusty::fir::InheritedDefaultAnnotationOrigin::Function(
+                    target,
+                )),
                 declaring_interface: interface,
                 dispatch_interface: interface,
                 parameters: Box::new([]),
@@ -141,7 +152,22 @@ mod tests {
         )
         .is_none());
         assert_eq!(run.emit_error(), Some(format!(
-            "inherited default declaration has no registered source annotation facts: MissingInterface {:?} None", Some(target),
+            "inherited default declaration has no registered source annotation facts: origin={:?}; body=MissingInterface {:?} None", krusty::fir::InheritedDefaultAnnotationOrigin::Function(target), Some(target),
+        )));
+        ir.inherited_defaults
+            .get_mut(&owner)
+            .expect("owner defaults")[0]
+            .annotation_origin = None;
+        let run = crate::ir_emit::EmitRun::default();
+        assert!(crate::ir_emit::invariant_tests::emit_for_test_with_bodies(
+            &ir,
+            "TestKt",
+            &run,
+            &NoSourceBytes
+        )
+        .is_none());
+        assert_eq!(run.emit_error(), Some(format!(
+            "inherited default declaration has no unique annotation origin: body=MissingInterface {:?} None", Some(target),
         )));
     }
 }
