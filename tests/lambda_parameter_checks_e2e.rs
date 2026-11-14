@@ -71,3 +71,16 @@ fn unit_lambda_parameters_are_guarded_like_kotlinc() {
 fn destructured_lambda_parameters_are_guarded_like_kotlinc() {
     assert_identical("store/DestructuredChecks");
 }
+
+// PLATFORM-SPECIFIC: compare each JVM method's parameter guards and debug offsets. The shared
+// program stays on every lane.
+#[test]
+fn coroutine_owned_lambda_parameters_match_kotlinc_without_changing_ordinary_guards() {
+    let source = include_str!("box_regressions/suspendLambdaNestedLambdaParameters.kt");
+    let classes = common::classes_against_kotlinc_module(&[(
+        "SuspendLambdaNestedLambdaParameters.kt",
+        source,
+    )]);
+    assert_eq!(classes.differences(), Vec::<String>::new());
+    common::expect_box_same_as_kotlinc(source, "SuspendLambdaNestedLambdaParameters");
+}
