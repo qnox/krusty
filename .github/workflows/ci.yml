@@ -78,10 +78,11 @@ jobs:
             sha256sum "$(just box-corpus 2.4.0)/$fixture"
           done > evidence/upstream-fixtures.sha256
       - name: syntax-check the Native runtime with build.rs target flags
+        working-directory: crates/krusty-native
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p evidence
+          mkdir -p ../../evidence
           compiler="${KRUSTY_RUNTIME_CC:-$(command -v clang)}"
           common_flags=(
             -std=c11 -ffreestanding -nostdlib -fno-pic -fno-stack-protector
@@ -103,14 +104,14 @@ jobs:
             esac
             for source in "${sources[@]}"; do
               "$compiler" "--target=$triple" "${common_flags[@]}" "${arch_flags[@]}" \
-                -I runtime "runtime/$source" >> evidence/c-preflight.log 2>&1 || {
-                  cat evidence/c-preflight.log
+                -I runtime "runtime/$source" >> ../../evidence/c-preflight.log 2>&1 || {
+                  cat ../../evidence/c-preflight.log
                   exit 1
                 }
             done
           done
           printf 'syntax-checked %s runtime sources for x86_64, aarch64, and riscv64\n' "${#sources[@]}" \
-            | tee evidence/c-preflight-summary.txt
+            | tee ../../evidence/c-preflight-summary.txt
       - name: build conformance executable once
         id: build_conformance
         timeout-minutes: 40
