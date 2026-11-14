@@ -196,10 +196,10 @@ pub struct DependencyBodyUnit {
     builtins: IrBuiltinOperators,
 }
 
-/// The allocation a materialized class's constructor exports: the class, and the index of the
-/// secondary constructor that builds it, or `None` for its primary constructor.
+/// A constructor of an actually materialized class: its class and secondary ordinal, or `None`
+/// for its primary constructor. Allocation eligibility is a separate declaration capability.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct AllocatingConstructor {
+pub(crate) struct MaterializedClassConstructor {
     pub(crate) class: crate::ir::ClassId,
     pub(crate) secondary: Option<usize>,
 }
@@ -653,23 +653,27 @@ impl DependencyBodyUnit {
             .map(|(identity, &function)| (identity, function))
     }
 
-    /// Allocation exports are separate from their private instance initialization functions. An
-    /// abstract class has none: only its subclasses' constructors initialize it.
+    /// Actual constructor initializers materialized in this unit, including abstract classes.
+    pub(crate) fn initializing_constructors(
+        &self,
+    ) -> impl Iterator<Item = (&KlibDependencyCallable, MaterializedClassConstructor)> {
+        self.constructors.iter().map(|(identity, constructor)| {
+            (
+                identity,
+                MaterializedClassConstructor {
+                    class: self.classes[identity],
+                    secondary: constructor.secondary,
+                },
+            )
+        })
+    }
+
+    /// Allocation exports are separate from initializer declarations. Abstract classes have none.
     pub(crate) fn allocating_constructors(
         &self,
-    ) -> impl Iterator<Item = (&KlibDependencyCallable, AllocatingConstructor)> {
-        self.constructors
-            .iter()
-            .filter_map(|(identity, constructor)| {
-                let class = self.classes[identity];
-                (!self.ir.classes[class as usize].is_abstract).then_some((
-                    identity,
-                    AllocatingConstructor {
-                        class,
-                        secondary: constructor.secondary,
-                    },
-                ))
-            })
+    ) -> impl Iterator<Item = (&KlibDependencyCallable, MaterializedClassConstructor)> {
+        self.initializing_constructors()
+            .filter(|(_, constructor)| !self.ir.classes[constructor.class as usize].is_abstract)
     }
 
     /// A unit that reads the constants of `enums`, which earlier units materialized, through

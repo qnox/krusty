@@ -70,3 +70,38 @@ fn allocation_and_initializer_share_one_exact_declaration() {
     );
     assert_eq!(exports.constructors(), &[(constructor, identity)]);
 }
+
+#[test]
+fn one_constructor_key_cannot_identify_different_classes_or_ordinals() {
+    let primary = ExportedConstructor {
+        class: 7,
+        secondary: None,
+    };
+    for conflicting in [
+        ExportedConstructor {
+            class: 8,
+            secondary: None,
+        },
+        ExportedConstructor {
+            class: 7,
+            secondary: Some(0),
+        },
+    ] {
+        for (first, second) in [(primary, conflicting), (conflicting, primary)] {
+            let mut exports = DependencyExportSignatures::default();
+            let identity = declaration();
+            exports
+                .record_constructor_declaration(first, identity.clone())
+                .unwrap();
+            assert_eq!(
+                exports.record_constructor_declaration(second, identity.clone()),
+                Err("one constructor declaration identifies conflicting initializer ordinals")
+            );
+            exports
+                .record_constructor_declaration(first, identity.clone())
+                .unwrap();
+            assert_eq!(exports.constructor_declarations(), &[(first, identity)]);
+            assert!(exports.constructors().is_empty());
+        }
+    }
+}
