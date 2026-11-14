@@ -955,7 +955,7 @@ fn expect_reference_array_bounds(source: &str, name: &str) {
 "#.to_vec()));
             }
             assert_eq!(
-                lane.run_artifacts(&std::env::temp_dir(), &stem, "bounds", program),
+                lane.run_artifacts(&std::env::temp_dir(), &stem, "bounds", source, program),
                 Outcome::Pass,
                 "{stem} on {}",
                 target.name()
