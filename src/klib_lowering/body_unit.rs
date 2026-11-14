@@ -911,7 +911,7 @@ impl CallLinker for Linker<'_, '_> {
         &self,
         signature: &KlibDeclarationSignature,
     ) -> Result<Option<super::primitive_calls::CommonPrimitiveCall>, KlibBodyDeclineReason> {
-        self.primitive_at(signature, |facts, identity, bodies| {
+        self.primitive_at(signature, true, |facts, identity, bodies| {
             facts.common_primitive(identity, bodies)
         })
     }
@@ -920,7 +920,7 @@ impl CallLinker for Linker<'_, '_> {
         &self,
         signature: &KlibDeclarationSignature,
     ) -> Result<Option<super::primitive_calls::CommonPrimitiveCall>, KlibBodyDeclineReason> {
-        self.primitive_at(signature, |facts, identity, bodies| {
+        self.primitive_at(signature, false, |facts, identity, bodies| {
             facts.range_literal_bounds(identity, bodies)
         })
     }
@@ -2441,6 +2441,7 @@ impl Linker<'_, '_> {
     fn primitive_at(
         &self,
         signature: &KlibDeclarationSignature,
+        allow_target_property_read: bool,
         select: PrimitiveSelection,
     ) -> Result<Option<super::primitive_calls::CommonPrimitiveCall>, KlibBodyDeclineReason> {
         // Keep the existing public-call obligation and canonical ambiguity diagnostics. A
@@ -2463,14 +2464,34 @@ impl Linker<'_, '_> {
                 ))
             }
         };
-        let primitive = select(self.sources.callees, &identity, self.sources.bodies)?;
-        Ok(
-            if self.sources.externals.contains_key(&identity) || &identity == self.root.identity() {
-                None
-            } else {
-                primitive
-            },
-        )
+        let selected = select(self.sources.callees, &identity, self.sources.bodies)?;
+        let primitive = if let Some(external) = self.sources.externals.get(&identity) {
+            let property_read = external.target_intrinsic().filter(|operation| {
+                allow_target_property_read
+                    && matches!(
+                        operation,
+                        crate::libraries::CompilerIntrinsic::ArraySize
+                            | crate::libraries::CompilerIntrinsic::StringLength
+                    )
+            });
+            property_read
+                .map(|operation| {
+                    self.sources.callees.target_property_read(
+                        &identity,
+                        self.sources.bodies,
+                        operation,
+                    )
+                })
+                .transpose()?
+                .flatten()
+        } else {
+            selected
+        };
+        Ok(if &identity == self.root.identity() {
+            None
+        } else {
+            primitive
+        })
     }
 
     /// The top-level function private to the active body's file that `identity` names. No
