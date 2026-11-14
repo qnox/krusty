@@ -1,7 +1,7 @@
-name: root-any-outcomes
+name: root-any-js20-outcome
 on:
   push:
-    branches: [ci/root-any-outcomes]
+    branches: [ci/root-any-js20-outcome]
 permissions:
   contents: read
   actions: read
@@ -14,19 +14,12 @@ jobs:
       max-parallel: 2
       matrix:
         include:
-          - {version: '2.4.20', target: native}
-          - {version: '2.4.10', target: wasm-js}
           - {version: '2.4.20', target: wasm-js}
-          - {version: '2.4.21', target: wasm-js}
-          - {version: '2.4.0', target: wasm-wasi}
-          - {version: '2.4.10', target: wasm-wasi}
-          - {version: '2.4.20', target: wasm-wasi}
-          - {version: '2.4.21', target: wasm-wasi}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: eee6813aeb4b510320da8cf3512615320fb8c18b
-          fetch-depth: 0
+          fetch-depth: 1
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78
         with:
           distribution: zulu
