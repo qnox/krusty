@@ -48,15 +48,8 @@ pub(super) enum KlibCalleeFact<'facts, 'callable> {
     Ambiguous,
 }
 
-/// The facts a call of a member realized outside a support unit carries beyond its callee, as the
-/// member hierarchy decorates a source call of the same declaration: its semantic role, inherited
-/// from a declaration it overrides when it has none of its own, and the declarations it
-/// overrides, through which a target recognizes a member it implements specially.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct CallEdge {
-    pub(crate) semantic_role: Option<crate::types::SemanticCallRole>,
-    pub(crate) overridden: Box<[crate::types::OverriddenDeclaration]>,
-}
+/// Shared name retained for the checked member-call edge consumed by KLIB body lowering.
+pub(crate) type CallEdge = crate::fir::CheckedMemberCallEdge;
 
 impl<'a> KlibCalleeFacts<'a> {
     /// Derive builtin implementations for the selected KLIB member declarations while provider
