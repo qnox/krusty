@@ -78,6 +78,7 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::UnsignedDivide { .. }
         | CompilerIntrinsic::UnsignedRemainder { .. }
         | CompilerIntrinsic::ResultFailure(_)
+        | CompilerIntrinsic::ResultFailureException
         | CompilerIntrinsic::PrimitiveIteratorNext => return None,
     })
 }
