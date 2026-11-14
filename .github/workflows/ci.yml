@@ -8,7 +8,7 @@ jobs:
     runs-on:
     - self-hosted
     - rust-4c-8gb
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       CARGO_INCREMENTAL: '0'
       CARGO_BUILD_JOBS: '1'
@@ -60,24 +60,77 @@ jobs:
           compiler-source.txt
         if-no-files-found: error
     - name: run complete JVM coroutine fixtures
+      timeout-minutes: 11
+      continue-on-error: true
       run: |
-        set -euo pipefail
-        KRUSTY_BOX_ONLY=suspendStateMachine cargo test --profile gate -p krusty --test conformance -- --exact kotlin_box_ir_jvm_conformance::kotlin_codegen_box_conformance --test-threads=1
+        mkdir -p target/coroutine-target-results
+        set +e
+        timeout --signal=TERM --kill-after=15s 600s env KRUSTY_BOX_ONLY=suspendStateMachine cargo test --profile gate -p krusty --test conformance -- --exact kotlin_box_ir_jvm_conformance::kotlin_codegen_box_conformance --test-threads=1 2>&1 | tee target/coroutine-target-results/jvm.log
+        status=${PIPESTATUS[0]}
+        printf '%s\n' "$status" > target/coroutine-target-results/jvm.exit
+        exit 0
     - name: run complete Native coroutine fixtures
+      timeout-minutes: 11
+      continue-on-error: true
       env:
         KRUSTY_NATIVE_BOX_ONLY: suspendStateMachine
         KRUSTY_REQUIRE_NATIVE_CONFORMANCE: '1'
         KRUSTY_TEST_THREADS: '1'
-      run: cargo test --profile gate -p krusty --test conformance -- --exact kotlin_box_native_conformance::kotlin_codegen_box_native_conformance --test-threads=1
+      run: |
+        mkdir -p target/coroutine-target-results
+        set +e
+        timeout --signal=TERM --kill-after=15s 600s cargo test --profile gate -p krusty --test conformance -- --exact kotlin_box_native_conformance::kotlin_codegen_box_native_conformance --test-threads=1 2>&1 | tee target/coroutine-target-results/native.log
+        status=${PIPESTATUS[0]}
+        printf '%s\n' "$status" > target/coroutine-target-results/native.exit
+        exit 0
     - name: run complete wasm-js coroutine fixtures
+      timeout-minutes: 11
+      continue-on-error: true
       env:
         KRUSTY_WASM_JS_BOX_ONLY: suspendStateMachine
         KRUSTY_REQUIRE_WASM_JS_CONFORMANCE: '1'
         KRUSTY_TEST_THREADS: '1'
-      run: cargo test --profile gate -p krusty --test conformance -- --exact kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_js_conformance --test-threads=1
+      run: |
+        mkdir -p target/coroutine-target-results
+        set +e
+        timeout --signal=TERM --kill-after=15s 600s cargo test --profile gate -p krusty --test conformance -- --exact kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_js_conformance --test-threads=1 2>&1 | tee target/coroutine-target-results/wasm-js.log
+        status=${PIPESTATUS[0]}
+        printf '%s\n' "$status" > target/coroutine-target-results/wasm-js.exit
+        exit 0
     - name: run complete wasm-wasi coroutine fixtures
+      timeout-minutes: 11
+      continue-on-error: true
       env:
         KRUSTY_WASM_WASI_BOX_ONLY: suspendStateMachine
         KRUSTY_REQUIRE_WASM_WASI_CONFORMANCE: '1'
         KRUSTY_TEST_THREADS: '1'
-      run: cargo test --profile gate -p krusty --test conformance -- --exact kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_wasi_conformance --test-threads=1
+      run: |
+        mkdir -p target/coroutine-target-results
+        set +e
+        timeout --signal=TERM --kill-after=15s 600s cargo test --profile gate -p krusty --test conformance -- --exact kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_wasi_conformance --test-threads=1 2>&1 | tee target/coroutine-target-results/wasm-wasi.log
+        status=${PIPESTATUS[0]}
+        printf '%s\n' "$status" > target/coroutine-target-results/wasm-wasi.exit
+        exit 0
+    - name: summarize complete target fixture results
+      if: always()
+      run: |
+        set +e
+        failed=0
+        for lane in jvm native wasm-js wasm-wasi; do
+          result=target/coroutine-target-results/$lane.exit
+          if [ -f "$result" ]; then
+            status=$(cat "$result")
+          else
+            status=MISSING
+          fi
+          printf '%s: %s\n' "$lane" "$status"
+          if [ "$status" != 0 ]; then failed=1; fi
+        done
+        exit "$failed"
+    - name: upload complete target fixture results
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: coroutine-machine-target-results
+        path: target/coroutine-target-results/
+        if-no-files-found: warn
