@@ -135,9 +135,9 @@ impl Split<'_> {
         }
         match &ir.exprs[stmt as usize] {
             IrExpr::Block { stmts, value } => {
-                let mut total = stmts
-                    .iter()
-                    .try_fold(0, |total, &child| Ok(total + self.count(ir, child)?))?;
+                let mut total = stmts.iter().try_fold(0, |total, &child| {
+                    Ok::<u32, ReentryDecline>(total + self.count(ir, child)?)
+                })?;
                 if let Some(value) = value {
                     // This block is itself in statement position. Its terminal expression still
                     // runs, but the surrounding statement discards the block's value.
