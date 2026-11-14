@@ -351,6 +351,31 @@ extern const KType kt_type_function20;
 extern const KType kt_type_function21;
 extern const KType kt_type_function22;
 
+/* Semantic source-arity markers for Kotlin suspend function types. */
+extern const KType kt_type_suspend_function0;
+extern const KType kt_type_suspend_function1;
+extern const KType kt_type_suspend_function2;
+extern const KType kt_type_suspend_function3;
+extern const KType kt_type_suspend_function4;
+extern const KType kt_type_suspend_function5;
+extern const KType kt_type_suspend_function6;
+extern const KType kt_type_suspend_function7;
+extern const KType kt_type_suspend_function8;
+extern const KType kt_type_suspend_function9;
+extern const KType kt_type_suspend_function10;
+extern const KType kt_type_suspend_function11;
+extern const KType kt_type_suspend_function12;
+extern const KType kt_type_suspend_function13;
+extern const KType kt_type_suspend_function14;
+extern const KType kt_type_suspend_function15;
+extern const KType kt_type_suspend_function16;
+extern const KType kt_type_suspend_function17;
+extern const KType kt_type_suspend_function18;
+extern const KType kt_type_suspend_function19;
+extern const KType kt_type_suspend_function20;
+extern const KType kt_type_suspend_function21;
+extern const KType kt_type_suspend_function22;
+
 /* Kotlin's reflection hierarchy, as far as a PROPERTY REFERENCE wears it. Each reference object
    has a type of its own — one per property — so an `is` against `KProperty0` cannot ask about that
    type and asks about these instead. The whole chain is named on each descriptor, because

@@ -1282,3 +1282,114 @@ fn interface_delegate_prefix_requires_positive_role_and_unique_typed_storage() {
     }
     assert_eq!(check_supported(&original, class), Ok(()));
 }
+
+#[test]
+fn a_function_supertype_requires_its_exact_checked_invoke_edge() {
+    let mut ir = krusty::fir_lower::single_source_lowering::lower_single_source_with_jvm_stdlib(
+        "class Renderer : (Int) -> String { override fun invoke(value: Int): String = value.toString() }",
+        "FunctionClassLayout",
+    );
+    let class = ir
+        .classes
+        .iter()
+        .position(|class| class.fq_name == type_name("Renderer"))
+        .unwrap() as ClassId;
+    assert_eq!(check_supported(&ir, class), Ok(()));
+    let owner = ir.classes[class as usize].fq_name_id();
+    let invoke_owner = ir.function_overrides[&owner][0].overridden_owner;
+    let facts = FunctionOwnerRole {
+        owner: invoke_owner,
+        role: krusty::types::ClassifierRole::FunctionOfArity(1),
+    };
+    assert_eq!(
+        super::check_function_invocation_support(&ir, &facts, class),
+        Ok(())
+    );
+    for edge in ir.function_overrides.get_mut(&owner).into_iter().flatten() {
+        edge.overridden_semantic_role = None;
+    }
+    assert_eq!(
+        super::check_function_invocation_support(&ir, &facts, class),
+        Err(
+            "a class implementing a function type without its checked invocation (`Renderer`)"
+                .into()
+        )
+    );
+}
+
+#[test]
+fn a_nominal_function_supertype_requires_its_provider_role_and_checked_invoke_edge() {
+    let mut ir = krusty::fir_lower::single_source_lowering::lower_single_source_with_jvm_stdlib(
+        "class Renderer : Function1<Int, String> { override fun invoke(value: Int): String = value.toString() }",
+        "FunctionClassLayout",
+    );
+    let class = ir
+        .classes
+        .iter()
+        .position(|class| class.fq_name == type_name("Renderer"))
+        .unwrap() as ClassId;
+    let owner = ir.classes[class as usize].fq_name_id();
+    let invoke_owner = ir.function_overrides[&owner][0].overridden_owner;
+    let facts = FunctionOwnerRole {
+        owner: invoke_owner,
+        role: krusty::types::ClassifierRole::FunctionOfArity(1),
+    };
+    assert_eq!(
+        super::check_function_invocation_support(&ir, &facts, class),
+        Ok(())
+    );
+    assert_eq!(
+        super::check_function_invocation_support(
+            &ir,
+            &FunctionOwnerRole {
+                owner: invoke_owner,
+                role: krusty::types::ClassifierRole::FunctionOfArity(2),
+            },
+            class,
+        ),
+        Err("a function classifier supertype without its checked invocation (`Renderer`)".into())
+    );
+    for edge in ir.function_overrides.get_mut(&owner).into_iter().flatten() {
+        edge.overridden_semantic_role = None;
+    }
+    assert_eq!(
+        super::check_function_invocation_support(&ir, &facts, class),
+        Err("a function classifier supertype without its checked invocation (`Renderer`)".into())
+    );
+}
+
+struct FunctionOwnerRole {
+    owner: krusty::types::TypeName,
+    role: krusty::types::ClassifierRole,
+}
+
+impl krusty::backend::BackendClassifierSource for FunctionOwnerRole {
+    fn classifier(
+        &self,
+        classifier: krusty::types::TypeName,
+    ) -> Option<std::sync::Arc<krusty::backend::BackendClassifierFact>> {
+        (classifier == self.owner).then(|| {
+            std::sync::Arc::new(krusty::backend::BackendClassifierFact {
+                runtime_exception: None,
+                declaration_name: None,
+                access: krusty::libraries::ClassifierAccess::Public,
+                is_kotlin: true,
+                mapped_builtin: false,
+                source: false,
+                outer_instance: None,
+                kind: krusty::libraries::TypeKind::Interface,
+                is_abstract: true,
+                is_extensible: false,
+                supertypes: Box::new([]),
+                annotations: Box::new([]),
+                own_type_parameter_count: 0,
+                type_param_variances: Box::new([]),
+                value_underlying: None,
+                value_declaration: None,
+                role: Some(self.role),
+                companion: None,
+                enum_entries_accessor: None,
+            })
+        })
+    }
+}
