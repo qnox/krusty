@@ -1,0 +1,48 @@
+name: Astro site dependency validation
+on:
+  push:
+    branches: [ci/astro-7.4-site-check]
+permissions:
+  contents: read
+jobs:
+  site:
+    runs-on: [self-hosted, rust-4c-8gb]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.23.5
+      - name: authenticate dependency source
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          test "$(git rev-parse HEAD^)" = 3ca3c3e393f191f7c9cf5de3b7350a69aec6621d
+          git rev-parse HEAD^ > evidence/source-commit.txt
+          sha256sum site/package.json site/package-lock.json > evidence/dependencies.sha256
+      - name: install exact lockfile
+        id: install
+        working-directory: site
+        run: |
+          set -euo pipefail
+          npm ci 2>&1 | tee ../evidence/install.log
+      - name: build site
+        working-directory: site
+        run: |
+          set -euo pipefail
+          npm run build 2>&1 | tee ../evidence/build.log
+      - name: run existing site tests
+        if: always() && steps.install.outcome == 'success'
+        working-directory: site
+        run: |
+          set -euo pipefail
+          npm test 2>&1 | tee ../evidence/test.log
+      - name: upload validation logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: astro-site-check
+          path: evidence/
+          if-no-files-found: error
