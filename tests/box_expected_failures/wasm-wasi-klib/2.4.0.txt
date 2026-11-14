@@ -3783,7 +3783,6 @@ unsignedTypes/kt43286.kt
 unsignedTypes/kt47716.kt
 unsignedTypes/kt61418.kt
 unsignedTypes/literalEqualsNullableUnsigned.kt
-unsignedTypes/nullableSmartcastUnsignedArray.kt
 unsignedTypes/nullableUnsignedEqualsLiteral.kt
 unsignedTypes/unsignedIntCompare.kt
 unsignedTypes/unsignedIntDivide.kt
