@@ -188,7 +188,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             declarations,
             member_edges,
         } = closure;
-        let callees = KlibCalleeFacts::with_reference_declarations(
+        let callees = match KlibCalleeFacts::with_reference_declarations(
             selected.iter().copied(),
             declarations.iter().filter_map(|(target, declaration)| {
                 declaration
@@ -197,6 +197,19 @@ pub(super) fn emit_dependencies<B: Backend>(
             }),
         )
         .with_member_edges(member_edges)
+        .with_builtin_implementation_facts(platform)
+        {
+            Ok(callees) => callees,
+            Err(identity) => {
+                diags.error(
+                    Span::new(0, 0),
+                    format!(
+                        "internal error: selected KLIB member {identity:?} has no exact builtin implementation facts"
+                    ),
+                );
+                return Vec::new();
+            }
+        }
         .with_type_oracle(&type_oracle)
         .with_target_classifiers(&target_represents_classifier);
         let capabilities = DependencyLeafCapabilities {
@@ -412,6 +425,15 @@ pub(super) fn emit_dependencies<B: Backend>(
             }
             published.push((identity.clone(), PublishedDependency::AllocatingConstructor));
         }
+        if let Err(identity) = unit.record_builtin_implementation_facts(&callees) {
+            diags.error(
+                Span::new(0, 0),
+                format!(
+                    "internal error: checked KLIB body has conflicting builtin implementation facts for {identity:?}"
+                ),
+            );
+            return Vec::new();
+        }
         let mut callables = match CheckedBackendCallables::freeze(unit.ir(), platform) {
             Ok(callables) => callables,
             Err(error) => {
@@ -424,7 +446,17 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         };
-        super::builtin_implementations::record_dependency_support(&mut callables, platform);
+        if let Err(identity) =
+            super::builtin_implementations::record_checked(&mut callables, unit.ir(), platform)
+        {
+            diags.error(
+                Span::new(0, 0),
+                format!(
+                    "internal error: checked KLIB IR has no builtin implementation facts for external member {identity:?}"
+                ),
+            );
+            return Vec::new();
+        }
         let ordinal = support_state.emitted.len();
         let support_module = format!(
             "{}$klib_body${}${ordinal}",

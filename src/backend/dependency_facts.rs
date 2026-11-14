@@ -832,38 +832,6 @@ impl CheckedBackendCallables {
         Ok(facts)
     }
 
-    /// Record what each builtin class runs for every member of a library classifier this file
-    /// calls, as `implementations` answers it for the member's owner, name and identity. The
-    /// frontend answers it from the member hierarchy at the handoff; every other callable keeps
-    /// none.
-    pub fn record_builtin_implementations(
-        &mut self,
-        mut implementations: impl FnMut(
-            TypeName,
-            &str,
-            ExternalCallableId,
-        ) -> Box<[BuiltinImplementation]>,
-    ) {
-        // A getter is published under its accessor's name; its property's declared name is what
-        // the declarations overriding it are named.
-        let getter_properties = self
-            .properties
-            .values()
-            .map(|property| (property.getter, property.name.clone()))
-            .collect::<HashMap<_, _>>();
-        for (&identity, fact) in &mut self.callables {
-            let (ExternalCallableKind::Member, Some(SemanticCallableOwner::Classifier(owner))) =
-                (fact.kind, fact.declaration_owner)
-            else {
-                continue;
-            };
-            let name = getter_properties
-                .get(&identity)
-                .map_or(fact.name.as_str(), |name| name);
-            fact.builtin_implementations = implementations(owner, name, identity);
-        }
-    }
-
     /// Copy checker-produced builtin implementation facts for every selected external member.
     /// A missing identity is an incomplete frontend handoff and must fail closed.
     pub fn record_checked_builtin_implementations(

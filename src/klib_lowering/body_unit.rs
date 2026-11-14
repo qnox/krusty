@@ -593,6 +593,15 @@ impl DependencyBodyUnit {
         &self.ir
     }
 
+    /// Carry the selected declarations' builtin implementations into this checked body unit.
+    pub(crate) fn record_builtin_implementation_facts(
+        &mut self,
+        callees: &KlibCalleeFacts<'_>,
+    ) -> Result<(), crate::fir::ExternalCallableId> {
+        self.ir
+            .record_external_builtin_implementations(callees.builtin_implementation_facts())
+    }
+
     /// Singleton receiver of the exact call-edge variant which authenticated this emitted body.
     pub(crate) fn authenticated_singleton_dispatch(
         &self,
