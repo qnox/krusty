@@ -325,10 +325,11 @@ fn a_generic_extension_getter_keeps_its_selected_formal_through_body_lowering() 
         .external_callable(read_id)
         .expect("the provider realizes read");
     let mut unit = super::super::DependencyBodyUnit::default();
-    let externals = crate::fx_hash::HashMap::from([(
+    let mut externals = crate::fx_hash::HashMap::default();
+    externals.insert(
         selected_getter.identity().clone(),
         super::super::EmittedDependencyCallable::new(getter_id, None, None),
-    )]);
+    );
     let function = unit
         .lower_function_with_declarations(
             read.klib_body_callable().expect("signed read"),
