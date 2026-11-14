@@ -209,7 +209,6 @@ bridges/multipleModules1.kt
 bridges/noBridgeOnMutableCollectionInheritance.kt
 bridges/overridesTwoDeclarations/abstractDeclarationOverridesAbstractAndConcreteDeclarations.kt
 bridges/propertyDiamondFakeOverride.kt
-bridges/returnTypeSignature.kt
 bridges/special.kt
 bridges/specialGeneric.kt
 bridges/strListContains.kt
@@ -374,7 +373,6 @@ callableReference/property/simpleMutableExtension.kt
 callableReference/property/simpleMutableMember.kt
 callableReference/property/simpleMutableTopLevel.kt
 callableReference/property/simpleTopLevel.kt
-callableReference/starProjectionCallableReference.kt
 casts/asForConstants.kt
 casts/asSafeForConstants.kt
 casts/asToNothing.kt
@@ -1289,7 +1287,6 @@ delegation/ifWithCallableReferenceInLazy.kt
 delegation/kt30102_comparable.kt
 delegation/kt44199.kt
 delegation/withDefaultsMultipleFilesOrder.kt
-destructuringDeclInLambdaParam/generic.kt
 destructuringDeclInLambdaParam/lambdaInLambda.kt
 destructuringDeclInLambdaParam/stdlibUsages.kt
 destructuringDeclInLambdaParam/withIndexed.kt
@@ -1377,7 +1374,6 @@ extensionFunctions/extensionFunctionInValueClass.kt
 extensionFunctions/extensionFunctionWithExtensionAsAReceiver.kt
 extensionFunctions/extensionFunctionWithInlineModifier.kt
 extensionFunctions/kt23675.kt
-extensionFunctions/kt3285.kt
 extensionFunctions/kt475.kt
 extensionFunctions/kt865.kt
 extensionFunctions/memberExtensionEqualsHashCodeToStringInInterface.kt
@@ -1553,14 +1549,11 @@ increment/genericClassWithGetSet.kt
 increment/mutableListElement.kt
 increment/nullable.kt
 inference/builderInferenceLeakingVariable.kt
-inference/capturedTypesSubstitutionIntoAbbreviation.kt
 inference/integerLiteralTypeInLamdaReturnType.kt
 inference/kt35684.kt
 inference/kt39824.kt
 inference/lambdasWithExtensionFunctionType.kt
 inference/lastExpressionOfLambdaWithNothingConstraint.kt
-inference/mapCollectChainWithNullResult.kt
-inference/noCoercionToUnitWithEqualityConstraintForNullableReturnType.kt
 inference/overrideDefaultProperty.kt
 inference/overrideGenericDefaultMethod.kt
 inference/pcla/builderCallAsReturnTypeInLocalClass.kt
@@ -2290,7 +2283,6 @@ intrinsics/throwableParamOrder.kt
 intrinsics/tostring.kt
 intrinsics/trimMarginWithBlankString.kt
 invokedynamic/extensionFunInvoke.kt
-invokedynamic/lambdas/kt52875.kt
 ir/anonymousClassLeak.kt
 ir/anonymousObjectInForLoopIteratorAndBody.kt
 ir/classInitializers.kt
@@ -3694,7 +3686,6 @@ syntheticAccessors/protectedMemberReferenceAccessor/kt46597_property.kt
 toArray/kt3177-toTypedArray.kt
 toArray/returnToTypedArray.kt
 traits/diamondPropertyAccessors.kt
-traits/kt2399.kt
 traits/kt5393_property.kt
 traits/multiple.kt
 try/catch3.kt
