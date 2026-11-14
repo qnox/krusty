@@ -111,3 +111,23 @@ fn a_class_extends_a_runtime_exception_subclass_an_earlier_file_laid_out() {
         assert_eq!(outputs.len(), 2);
     }
 }
+
+#[test]
+fn root_any_construction_keeps_identity_and_interface_dispatch() {
+    let source = include_str!("../../../../../tests/box_regressions/runtimeAnyConstruction.kt");
+    for target in WasmTarget::ALL {
+        let path = krusty::toolchain::kotlin_stdlib_klib(
+            krusty::backend::Backend::compilation_target(&WasmBackend::new(target)),
+        )
+        .expect("the exact target stdlib must be provisioned");
+        let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
+            path,
+            KlibStdlibSemantics::Wasm,
+        )])
+        .unwrap();
+        let (outputs, diagnostics) =
+            compile_program_with_provider(target, Entry::Box, &[source], Box::new(libraries));
+        assert_eq!(diagnostics, Vec::<String>::new());
+        assert_eq!(outputs.len(), 1);
+    }
+}

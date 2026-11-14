@@ -107,7 +107,6 @@ basics/k42000_2.kt
 basics/k42000_crossmodule.kt
 basics/kt7972.kt
 basics/local_variable.kt
-basics/null_check.kt
 basics/spread_operator_0.kt
 basics/statements0.kt
 basics/superGetterCall.kt
@@ -301,7 +300,6 @@ callableReference/bound/simpleFunction.kt
 callableReference/bound/simpleProperty.kt
 callableReference/callableReferenceOfCompanionConst.kt
 callableReference/callableReferenceOfCompanionProperty.kt
-callableReference/callableReferenceOfKotlinNestedClass.kt
 callableReference/callableReferencetoInnerAndLocal.kt
 callableReference/equality/conversionCombinations.kt
 callableReference/equality/equalsOnNonCallable.kt
@@ -415,12 +413,10 @@ casts/mutableCollections/reifiedSafeAsWithMutable.kt
 casts/mutableCollections/safeAsWithMutable.kt
 casts/mutableCollections/weirdMutableCasts.kt
 casts/nullableSafeCastToTypeParameterWithInterfaceUpperBound.kt
-casts/parallelHierarchy.kt
 casts/unitNullableCast.kt
 casts/wasmCastMessages.kt
 checkcastOptimization/kt50215.kt
 classDelegation/multipleModules.kt
-classLiteral/bareArray.kt
 classLiteral/bound/primitives.kt
 classLiteral/classEquality.kt
 classes/comanionObjectFieldVsClassField.kt
@@ -1157,8 +1153,6 @@ defaultArguments/implementedByFake3.kt
 defaultArguments/kt36853_fibonacci.kt
 defaultArguments/kt47073_nested.kt
 defaultArguments/kt48391.kt
-defaultArguments/kt52702.kt
-defaultArguments/private/clashingNames.kt
 defaultArguments/protected.kt
 defaultArguments/useThisInLambda.kt
 delegatedProperty/DelegationByFunctionWithEnumUpperBound.kt
@@ -1592,8 +1586,6 @@ inference/pcla/issues/kt47052.kt
 inference/pcla/issues/kt47744.kt
 inference/pcla/issues/kt49887.kt
 inference/pcla/issues/kt51988.kt
-inference/pcla/issues/kt52838b.kt
-inference/pcla/issues/kt52838c.kt
 inference/pcla/issues/kt54400b.kt
 inference/pcla/issues/kt54767a.kt
 inference/pcla/issues/kt54767b.kt
@@ -3566,13 +3558,11 @@ regressions/Kt1619Test.kt
 regressions/Kt2495Test.kt
 regressions/collectionSizeInInlineBody.kt
 regressions/collectionSizeOrDefault.kt
-regressions/dataClassInInlineFunctionWithTypeParameters.kt
 regressions/dataClassInRegularFunctionWithTypeParameters.kt
 regressions/directInvokeDestructuring.kt
 regressions/directInvokeNameBasedDestructuring.kt
 regressions/floatingRangeContainsMixedWidths.kt
 regressions/generic.kt
-regressions/hashCodeNPE.kt
 regressions/inlineCallsInInitializerLambda.kt
 regressions/kt15196.kt
 regressions/kt1779.kt
@@ -3590,7 +3580,6 @@ regressions/kt5953.kt
 regressions/kt6434.kt
 regressions/kt6434_2.kt
 regressions/kt68727.kt
-regressions/kt71119.kt
 regressions/kt789.kt
 regressions/lambdaWithTypeParameters.kt
 regressions/lambdaWrongReturnType.kt
@@ -3637,7 +3626,6 @@ reified/multipleTypeParameters.kt
 reified/noValueParameters.kt
 reified/parameterSwap.kt
 reified/reifiedIntersectionType.kt
-reified/reifiedIntersectionTypeArgument.kt
 reified/reifiedIntersectionTypeArgumentCrossModule.kt
 reified/reifiedNullableNothing1.kt
 reified/reifiedNullableNothing2.kt
@@ -3748,7 +3736,6 @@ super/kt3492TraitProperty.kt
 super/traitproperty.kt
 super/unqualifiedSuper.kt
 super/unqualifiedSuperWithDeeperHierarchies.kt
-suppressions/suppressInvisible.kt
 suspendConversion/basicSuspendConversion.kt
 suspendConversion/basicSuspendConversionDefault.kt
 suspendConversion/chainedFunSuspendConversionForSimpleExpression.kt
