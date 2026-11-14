@@ -19,7 +19,10 @@ use super::class_vtable::{
 use super::members::{function_key, overridden_functions};
 use super::module_interfaces::ModuleInterfaces;
 use super::module_slots::{PlanKey, PlannedSlot, PlannedTable};
-use super::{AnyMember, ClassTable, LaidOutSuperclass, Representation, Slot, SlotKey, Unsupported};
+use super::{
+    AnyMember, BridgeDeclaration, ClassTable, LaidOutSuperclass, Representation, Slot, SlotKey,
+    Unsupported,
+};
 
 /// The class a planned table is filled for, and what it extends.
 pub(super) struct PlannedClass<'t> {
@@ -62,6 +65,17 @@ pub(super) fn planned_class_table(
     // Whether `slot` may hold what the superclass another file laid out holds there.
     let elsewhere = |slot: usize| laid_out.is_some_and(|(_, table)| (slot as u32) < table.slots);
     let lowered = |callable: CallableId| ir.checked_callable_functions.get(&callable).copied();
+    let lowered_key = |key: PlanKey| match key {
+        PlanKey::Callable(callable) => lowered(callable),
+        PlanKey::FileFunction(function) => Some(function),
+        PlanKey::FileGetter { function, .. } | PlanKey::FileSetter { function, .. } => {
+            Some(function)
+        }
+        PlanKey::DependencyCallable(callable)
+        | PlanKey::DependencyGetter(callable)
+        | PlanKey::DependencySetter(callable) => ir.dependency_methods.get(&callable).copied(),
+        PlanKey::Getter(_) | PlanKey::Setter(_) | PlanKey::Forwarder { .. } => None,
+    };
     let function = |callable: CallableId| {
         lowered(callable)
             .ok_or_else(|| format!("a planned member this file did not lower (`{qualified}`)"))
@@ -131,6 +145,9 @@ pub(super) fn planned_class_table(
                 None if elsewhere(slot) => Slot::Inherited { slot: slot as u32 },
                 None => method(function(callable)?),
             },
+            PlannedSlot::Member(PlanKey::FileFunction(function)) => method(function),
+            PlannedSlot::Member(PlanKey::FileGetter { function, .. })
+            | PlannedSlot::Member(PlanKey::FileSetter { function, .. }) => method(function),
             PlannedSlot::Member(PlanKey::Getter(property) | PlanKey::Setter(property))
                 if elsewhere(slot) && !ir.local_property_layouts.contains_key(&property) =>
             {
@@ -173,33 +190,44 @@ pub(super) fn planned_class_table(
             }
             PlannedSlot::Bridge {
                 declared,
+                signature,
                 target_slot,
                 target,
-            } => match (lowered(declared), lowered(target)) {
+            } => match (lowered_key(declared), lowered_key(target)) {
                 (None, None) if elsewhere(slot) => Slot::Inherited { slot: slot as u32 },
-                (None, Some(_)) if elsewhere(slot) => {
+                (declared, Some(target)) => Slot::Bridge {
+                    declared: declared.map_or_else(
+                        || BridgeDeclaration::Signature {
+                            parameters: signature.0,
+                            result: signature.1,
+                        },
+                        BridgeDeclaration::Function,
+                    ),
+                    target_slot: Some(target_slot),
+                    target,
+                },
+                (_, None) => {
                     return Err(format!(
-                        "an override carried differently from the member of another file it \
-                         overrides (`{qualified}`)"
+                        "a planned bridge target this file did not lower (`{qualified}`)"
                     ))
                 }
-                _ => Slot::Bridge {
-                    declared: function(declared)?,
-                    target_slot: Some(target_slot),
-                    target: function(target)?,
-                },
             },
             PlannedSlot::FunctionBridge {
                 arity,
                 target_slot,
                 target,
-            } => match lowered(target) {
+            } => match lowered_key(target) {
                 None if elsewhere(slot) => Slot::Inherited { slot: slot as u32 },
-                _ => Slot::FunctionBridge {
+                Some(target) => Slot::FunctionBridge {
                     arity,
                     target_slot,
-                    target: function(target)?,
+                    target,
                 },
+                None => {
+                    return Err(format!(
+                        "a planned function bridge target this file did not lower (`{qualified}`)"
+                    ))
+                }
             },
             PlannedSlot::AccessorBridge {
                 declared,
@@ -238,6 +266,9 @@ pub(super) fn planned_class_table(
                 continue
             }
             PlanKey::Callable(callable) => SlotKey::Function(function(callable)?),
+            PlanKey::FileFunction(function) => SlotKey::Function(function),
+            PlanKey::FileGetter { property, .. } => SlotKey::Getter(property),
+            PlanKey::FileSetter { property, .. } => SlotKey::Setter(property),
             PlanKey::Forwarder { class, ordinal } => match forwarder(ir, class, ordinal) {
                 Some(fid) => SlotKey::Function(fid),
                 // A forwarder of the superclass another file laid out.

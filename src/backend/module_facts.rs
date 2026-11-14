@@ -817,6 +817,8 @@ fn source_qualified_name(
 pub struct CheckedBackendClassifiers<'a> {
     module: &'a BackendModuleFacts,
     dependencies: &'a dyn SymbolSource,
+    /// Frozen module shapes plus checked compiler-owned additions for this IR unit.
+    classes: super::class_tables::module_classes::ModuleClasses,
 }
 
 impl<'a> CheckedBackendClassifiers<'a> {
@@ -824,11 +826,26 @@ impl<'a> CheckedBackendClassifiers<'a> {
         Self {
             module,
             dependencies,
+            classes: module.classes.clone(),
         }
     }
 
     pub fn module(&self) -> &BackendModuleFacts {
         self.module
+    }
+
+    /// Class layouts admitted for this IR unit before its target plan is frozen.
+    pub fn classes(&self) -> &super::class_tables::module_classes::ModuleClasses {
+        &self.classes
+    }
+
+    /// Merge compiler-owned class facts before backend planning. Callers construct additions from
+    /// checked IR or authenticated provider declarations, never from a name-only lookup.
+    pub(crate) fn merge_support_classes(
+        &mut self,
+        support: super::class_tables::module_classes::ModuleClasses,
+    ) -> Result<(), TypeName> {
+        self.classes.merge_support_classes(support)
     }
 }
 

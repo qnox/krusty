@@ -93,20 +93,22 @@ fn table(
                 result,
                 suspend,
             } => {
-                let ResolvedFunctionOverrideTarget::External(identity) = callable else {
+                let PlanKey::DependencyCallable(identity) = callable else {
                     return Err("a dependency table containing a source callable identity".into());
                 };
                 let declaration = declarations
                     .declaration_identity(*identity)
                     .ok_or("an inherited method without its frozen declaration identity")?;
                 vec![(
-                    PlanKey::function(*callable),
+                    *callable,
                     member_identity(declaration),
                     carried(parameters, *result, *suspend),
                 )]
             }
             ModuleMember::Property {
                 property,
+                getter_key,
+                setter_key,
                 accessor_parameters,
                 value,
                 getter_value,
@@ -121,16 +123,31 @@ fn table(
                     .ok_or("an inherited property without its frozen getter identity")?;
                 let mut members = Vec::new();
                 if *getter {
+                    let PlanKey::DependencyGetter(getter_key_identity) = getter_key else {
+                        return Err(
+                            "a dependency table containing a file-local getter identity".into()
+                        );
+                    };
+                    if *getter_key_identity != *identity {
+                        return Err(
+                            "a dependency getter key that disagrees with its property".into()
+                        );
+                    }
                     members.push((
-                        PlanKey::accessor(*property, false),
+                        *getter_key,
                         property_member_identity(declaration, false)
                             .ok_or("an inherited getter without accessor identity")?,
                         (accessor_parameters.clone(), *getter_value),
                     ));
                 }
                 if *setter {
+                    let Some(PlanKey::DependencySetter(_)) = setter_key else {
+                        return Err(
+                            "a dependency table containing a file-local setter identity".into()
+                        );
+                    };
                     members.push((
-                        PlanKey::accessor(*property, true),
+                        *setter_key.expect("validated setter key"),
                         property_member_identity(declaration, true)
                             .ok_or("an inherited setter without accessor identity")?,
                         (
@@ -192,6 +209,7 @@ fn table(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fir::ExternalCallableId;
 
     struct Exact;
     impl Representation for Exact {
@@ -261,7 +279,7 @@ mod tests {
     fn imported_member_cannot_bind_without_its_frozen_identity() {
         let mut class = imported_class();
         class.members = vec![ModuleMember::Function {
-            callable: ResolvedFunctionOverrideTarget::External(ExternalCallableId::from_raw(7)),
+            callable: PlanKey::DependencyCallable(ExternalCallableId::from_raw(7)),
             parameters: Box::default(),
             result: Ty::Unit,
             suspend: false,
@@ -278,5 +296,78 @@ mod tests {
             &physical
         )
         .is_err());
+    }
+
+    #[test]
+    fn file_local_function_keys_cannot_be_published_as_dependency_declarations() {
+        let mut class = imported_class();
+        class.members = vec![ModuleMember::Function {
+            callable: PlanKey::FileFunction(0),
+            parameters: Box::default(),
+            result: Ty::Unit,
+            suspend: false,
+        }]
+        .into_boxed_slice();
+        let physical = PublishedClassSlots {
+            count: 9,
+            declarations: HashMap::default(),
+        };
+        let error = table(
+            &[&class],
+            &Exact,
+            &CheckedBackendCallables::default(),
+            &physical,
+        )
+        .expect_err("a file-local function identity is never a provider declaration");
+        assert!(error.contains("source callable identity"));
+    }
+
+    #[test]
+    fn file_local_property_accessors_cannot_be_published_as_dependency_declarations() {
+        let getter = PlanKey::FileGetter {
+            property: crate::fir::ResolvedPropertyOverrideTarget::External(
+                ExternalCallableId::from_raw(8),
+            ),
+            function: 0,
+        };
+        let setter = PlanKey::FileSetter {
+            property: crate::fir::ResolvedPropertyOverrideTarget::External(
+                ExternalCallableId::from_raw(8),
+            ),
+            function: 1,
+        };
+        let class = ModuleClass {
+            superclass: None,
+            dependency: true,
+            function_type_arities: Box::default(),
+            members: vec![ModuleMember::Property {
+                property: crate::fir::ResolvedPropertyOverrideTarget::External(
+                    ExternalCallableId::from_raw(8),
+                ),
+                getter_key: getter,
+                setter_key: Some(setter),
+                accessor_parameters: Box::default(),
+                value: Ty::String,
+                getter_value: Ty::String,
+                getter: true,
+                setter: true,
+            }]
+            .into_boxed_slice(),
+            function_overrides: Box::default(),
+            property_overrides: Box::default(),
+            forwarders: Box::default(),
+        };
+        let physical = PublishedClassSlots {
+            count: 9,
+            declarations: HashMap::default(),
+        };
+        let error = table(
+            &[&class],
+            &Exact,
+            &CheckedBackendCallables::default(),
+            &physical,
+        )
+        .expect_err("file-local accessors are never producer declarations");
+        assert!(error.contains("file-local getter identity"));
     }
 }

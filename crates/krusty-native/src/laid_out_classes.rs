@@ -421,6 +421,7 @@ fn plan_key_identity(
                     .or_else(|| exports.member_declaration(*function))
             })
             .map(member_identity),
+        PlanKey::FileFunction(_) | PlanKey::FileGetter { .. } | PlanKey::FileSetter { .. } => None,
         PlanKey::Getter(property) | PlanKey::Setter(property) => exports
             .interface_property(property)
             .or_else(|| exports.property_declaration(property))

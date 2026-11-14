@@ -312,16 +312,26 @@ impl<'a> FileLowering<'a> {
             {
                 // The BASE's signature, which is the whole point of the entry: a caller reading
                 // this slot through the base reads what the base declares.
-                let base = &self.ir.functions[*declared as usize];
+                let (declared_name, declared_parameters, ret) = match declared {
+                    krusty::backend::class_tables::BridgeDeclaration::Function(function) => {
+                        let base = &self.ir.functions[*function as usize];
+                        (
+                            base.name.clone(),
+                            super::super::super::captures::carried_parameters(self.ir, *function),
+                            base.ret,
+                        )
+                    }
+                    krusty::backend::class_tables::BridgeDeclaration::Signature {
+                        parameters,
+                        result,
+                    } => ("producer_member".to_owned(), parameters.to_vec(), *result),
+                };
                 let mut params = vec![any()];
-                params.extend(super::super::super::captures::carried_parameters(
-                    self.ir, *declared,
-                ));
-                let ret = base.ret;
+                params.extend(declared_parameters);
                 let id = self.declare_local_function(
                     &match target_slot {
-                        Some(slot) => format!("kt_bridge_{declared}_{target}_{slot}"),
-                        None => format!("kt_bridge_{declared}_{target}_direct"),
+                        Some(slot) => format!("kt_bridge_{declared_name}_{target}_{slot}"),
+                        None => format!("kt_bridge_{declared_name}_{target}_direct"),
                     },
                     &params,
                     ret,
@@ -1251,7 +1261,7 @@ impl<'a> FileLowering<'a> {
             target,
         } = slot
         {
-            return self.define_bridge(*declared, *target_slot, *target, id);
+            return self.define_bridge(declared.clone(), *target_slot, *target, id);
         }
         if let Slot::FunctionBridge {
             arity,
@@ -2339,7 +2349,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     /// A call of a method its class's table does not dispatch: a member of a dependency class
     /// that no subclass can override, such as its constructor initializer or a final member.
-    fn direct_method_call(
+    pub(super) fn direct_method_call(
         &mut self,
         fid: FunId,
         receiver: u32,

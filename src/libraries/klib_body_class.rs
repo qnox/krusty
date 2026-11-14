@@ -64,9 +64,11 @@ impl KlibBodyClassContract {
     }
 
     /// Whether a support unit materializes this class and emits its members as functions of the
-    /// class it materializes: a value class, or a class without type parameters that is not
-    /// sealed. A builtin type of the common type model is neither, and neither is `kotlin.Any`,
-    /// the root of every class, which each target lays out itself.
+    /// class it materializes: a value class, or an ordinary non-sealed class, including one with
+    /// declared type parameters. Generic members keep the class's own formal types and storage;
+    /// applied call-site types are handled by the existing declaration bridge rules. A builtin
+    /// type of the common type model is neither, and neither is `kotlin.Any`, the root of every
+    /// class, which each target lays out itself.
     pub(crate) fn emits_members(&self) -> bool {
         if self.is_builtin_type() || self.classifier == crate::types::wk::any() {
             return false;
@@ -78,13 +80,24 @@ impl KlibBodyClassContract {
                     KotlinModality::Final | KotlinModality::Open | KotlinModality::Abstract
                 )
                 && !self.is_inner
-                && !self.is_expect
-                && self.parameters.formals.is_empty())
+                && !self.is_expect)
     }
 
     /// This class applied to its declared formals. A non-generic class is the bare classifier.
     pub(crate) fn self_type(&self) -> Ty {
         Ty::obj_args_name(self.classifier, &self.parameters.formals)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_fixture::generic_member_declaration;
+
+    #[test]
+    fn a_generic_ordinary_class_can_be_materialized_with_its_declared_formals() {
+        let (class, _) = generic_member_declaration();
+        assert!(!class.parameters.formals.is_empty());
+        assert!(class.emits_members());
     }
 }
 

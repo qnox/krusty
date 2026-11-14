@@ -20,6 +20,7 @@ use crate::types::{Ty, TyKind, TypeName};
 use std::collections::VecDeque;
 
 mod class_declarations;
+mod class_shapes;
 mod emitted_roots;
 
 /// Exact dependency support declarations already emitted into one target program.
@@ -31,7 +32,13 @@ mod emitted_roots;
 #[derive(Default)]
 pub(super) struct DependencySupportState {
     snapshot: Option<crate::libraries::DependencyBodySnapshot>,
+    /// Monotonic identity for each support module: a new unit can carry additional authenticated
+    /// superclass shapes even when it publishes no new callable exports.
+    next_support_unit: usize,
     emitted: HashMap<KlibDependencyCallable, PublishedDependency>,
+    /// Provider-independent shapes for ordinary classes already materialized into support units.
+    materialized_class_facts:
+        HashMap<KlibDependencyCallable, class_shapes::PublishedDependencyClassShape>,
     /// One physical realization per exact logical class; equal names cannot alias producers.
     materialized_classes: HashMap<TypeName, KlibDependencyCallable>,
 }
@@ -300,6 +307,92 @@ pub(super) fn emit_dependencies<B: Backend>(
             .materialized_classes()
             .map(|(classifier, identity)| (classifier, identity.clone()))
             .collect::<Vec<_>>();
+        let unit_support_shapes =
+            match class_shapes::PublishedDependencyClassShape::from_materialized_ir(
+                unit.ir(),
+                &unit.materialized_ordinary_classes(),
+                unit.materialized_class_members(),
+            ) {
+                Ok(classes) => classes,
+                Err(classifier) => {
+                    diags.error(
+                    Span::new(0, 0),
+                    format!(
+                        "internal error: a materialized dependency class `{}` has no checked class shape",
+                        classifier.render()
+                    ),
+                );
+                    return Vec::new();
+                }
+            };
+        let mut support_classes =
+            crate::backend::class_tables::module_classes::ModuleClasses::default();
+        for shape in support_state.materialized_class_facts.values() {
+            let Ok(class) = shape.materialize(platform) else {
+                diags.error(
+                    Span::new(0, 0),
+                    format!(
+                        "internal error: a previously emitted dependency class `{}` no longer has its exact provider declarations",
+                        shape.classifier.render()
+                    ),
+                );
+                return Vec::new();
+            };
+            let classes =
+                crate::backend::class_tables::module_classes::ModuleClasses::from_support_classes(
+                    [(shape.classifier, class)],
+                );
+            let Ok(classes) = classes else {
+                diags.error(
+                    Span::new(0, 0),
+                    "internal error: a prior support class shape contains duplicate classifier facts",
+                );
+                return Vec::new();
+            };
+            if let Err(classifier) = support_classes.merge_support_classes(classes) {
+                diags.error(
+                    Span::new(0, 0),
+                    format!(
+                        "internal error: a prior support class `{}` conflicts with a current layout",
+                        classifier.render()
+                    ),
+                );
+                return Vec::new();
+            }
+        }
+        for shape in &unit_support_shapes {
+            let Ok(class) = shape.materialize(platform) else {
+                diags.error(
+                    Span::new(0, 0),
+                    format!(
+                        "internal error: a materialized dependency class `{}` has no exact current provider shape",
+                        shape.classifier.render()
+                    ),
+                );
+                return Vec::new();
+            };
+            let classes =
+                crate::backend::class_tables::module_classes::ModuleClasses::from_support_classes(
+                    [(shape.classifier, class)],
+                );
+            let Ok(classes) = classes else {
+                diags.error(
+                    Span::new(0, 0),
+                    "internal error: a materialized support class shape contains duplicate classifier facts",
+                );
+                return Vec::new();
+            };
+            if let Err(classifier) = support_classes.merge_support_classes(classes) {
+                diags.error(
+                    Span::new(0, 0),
+                    format!(
+                        "internal error: materialized dependency class `{}` conflicts with an earlier support class",
+                        classifier.render()
+                    ),
+                );
+                return Vec::new();
+            }
+        }
         for (classifier, identity) in &materialized {
             // Current-module representation facts take precedence in the checked backend view.
             // They cannot describe an unrelated imported class with the same unqualified key.
@@ -508,17 +601,28 @@ pub(super) fn emit_dependencies<B: Backend>(
             }
         };
         super::builtin_implementations::record(&mut callables, platform);
-        let ordinal = support_state.emitted.len();
+        let ordinal = support_state.next_support_unit;
         let support_module = format!(
             "{}$klib_body${}${ordinal}",
             source.module_name,
             source.source.raw()
         );
+        let mut classifiers = CheckedBackendClassifiers::new(module_facts, platform);
+        if let Err(classifier) = classifiers.merge_support_classes(support_classes) {
+            diags.error(
+                Span::new(0, 0),
+                format!(
+                    "internal error: dependency support class `{}` conflicts with an existing class layout",
+                    classifier.render()
+                ),
+            );
+            return Vec::new();
+        }
         let support = CheckedIrFile {
             ir: unit.into_ir(),
             kind: CheckedIrUnitKind::DependencySupport,
             source: source.source,
-            classifiers: CheckedBackendClassifiers::new(module_facts, platform),
+            classifiers,
             callables,
             dependency_exports: exports,
             native_plugins: symbols.native_plugins(),
@@ -548,6 +652,12 @@ pub(super) fn emit_dependencies<B: Backend>(
                 }),
             _ => true,
         });
+        support_state.next_support_unit += 1;
+        for shape in unit_support_shapes {
+            support_state
+                .materialized_class_facts
+                .insert(shape.constructor_identity().clone(), shape);
+        }
         support_state.emitted.extend(published);
         support_state.materialized_classes.extend(materialized);
         artifacts.extend(outputs);

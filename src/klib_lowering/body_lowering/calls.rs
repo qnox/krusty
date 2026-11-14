@@ -37,9 +37,12 @@ impl BodyLowering<'_> {
         let callee = match &access.symbol.signature {
             KlibIrSignature::Public(callee) => callee,
             KlibIrSignature::FileLocal { .. } => {
-                let linked = self
-                    .linker
-                    .link_local_function(self.ir, &access.symbol.signature)?;
+                let linked = match self.object_members.get(&access.symbol.signature) {
+                    Some(member) => member.linked(),
+                    None => self
+                        .linker
+                        .link_local_function(self.ir, &access.symbol.signature)?,
+                };
                 return self.linked_call(linked, access, ty);
             }
             KlibIrSignature::Accessor(accessor) => return self.accessor_call(accessor, access, ty),

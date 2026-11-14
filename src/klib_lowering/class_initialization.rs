@@ -154,11 +154,8 @@ pub(super) fn plan<'a, 'b>(
             _ => return Ok(None),
         }
     }
-    // A materialized class carries every member dispatch reaches, so a class whose members the
-    // unit does not emit with it keeps its target boundary rather than losing its overrides.
-    if !dispatched.is_empty() && !contract.emits_members() {
-        return Ok(None);
-    }
+    // An admitted class carries every member dispatch reaches. Generic members retain the
+    // declaration's class formals here; call-site applied types are bridged separately.
     let primary = contract.primary_constructor.is_some();
     // A class with a primary constructor has only that one here; any secondary constructor
     // delegates to it and is not an initialization of its own. Without one, the selected secondary

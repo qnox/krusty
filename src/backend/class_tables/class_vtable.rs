@@ -12,7 +12,10 @@ use super::members::{
     overridden_properties, overridden_property_slot, property_accessor_key, property_type,
 };
 use super::module_interfaces::ModuleInterfaces;
-use super::{any_vtable, ClassTable, Representation, Slot, SlotKey, Unsupported, FUNCTION_SLOT};
+use super::{
+    any_vtable, BridgeDeclaration, ClassTable, Representation, Slot, SlotKey, Unsupported,
+    FUNCTION_SLOT,
+};
 
 /// Build the table of class `id`, whose superclass in this file (already tabled) is `parent`.
 pub(super) fn class_table(
@@ -311,7 +314,7 @@ pub(super) fn class_table(
         // subclass's override reachable through the same base.
         for (base_slot, declared) in bridged {
             vtable[base_slot as usize] = Slot::Bridge {
-                declared,
+                declared: BridgeDeclaration::Function(declared),
                 target_slot: Some(slot),
                 target: fid,
             };
@@ -501,7 +504,7 @@ pub(super) fn register_inherited_interface_members(
             interface_bridges
                 .entry(key.clone())
                 .or_insert(Slot::Bridge {
-                    declared: overridden,
+                    declared: BridgeDeclaration::Function(overridden),
                     target_slot: Some(slot),
                     target: implementation,
                 });
@@ -616,7 +619,7 @@ pub(super) fn register_interface_keys(
             interface_bridges
                 .entry(key.clone())
                 .or_insert(Slot::Bridge {
-                    declared,
+                    declared: BridgeDeclaration::Function(declared),
                     // An INTERFACE's entry is a default an implementor inherits, and this slot is
                     // the interface's own table index — not that implementor's.
                     target_slot: (!class.is_interface).then_some(slot),

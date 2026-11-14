@@ -48,7 +48,7 @@ pub struct NumberedInterface {
 }
 
 /// The module's interface member numbers.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ModuleInterfaces {
     numbers: HashMap<PlanKey, u32>,
     members: Vec<NumberedMember>,
@@ -107,7 +107,7 @@ impl ModuleInterfaces {
         let mut result = numbering.result;
         for (_, interface) in classes.interfaces() {
             for edge in interface.function_overrides.iter() {
-                if let (Some(slot), ResolvedFunctionOverrideTarget::Module(implementation)) =
+                if let (Some(slot), PlanKey::Callable(implementation)) =
                     (any_slot(edge.overridden_role), edge.implementation)
                 {
                     result.fixed.insert(implementation, slot);
@@ -278,9 +278,7 @@ impl Numbering<'_> {
                 let edges = interface
                     .function_overrides
                     .iter()
-                    .filter(|edge| {
-                        edge.implementation == ResolvedFunctionOverrideTarget::Module(*callable)
-                    })
+                    .filter(|edge| edge.implementation == PlanKey::Callable(*callable))
                     .collect::<Vec<_>>();
                 // A member standing in one of `kotlin.Any`'s fixed slots is numbered there, the
                 // same way for every object.

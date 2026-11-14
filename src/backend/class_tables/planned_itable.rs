@@ -18,7 +18,9 @@ use super::class_vtable::same_representation;
 use super::members::function_key;
 use super::module_interfaces::{MemberDeclaration, ModuleInterfaces};
 use super::module_slots::PlanKey;
-use super::{ClassTable, LaidOutSuperclass, Representation, Slot, SlotKey, Unsupported};
+use super::{
+    BridgeDeclaration, ClassTable, LaidOutSuperclass, Representation, Slot, SlotKey, Unsupported,
+};
 
 /// What one interface table entry holds.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -318,13 +320,19 @@ impl Filler<'_> {
                                     )
                                 })?;
                         Ok(Slot::Bridge {
-                            declared: *declared,
+                            declared: BridgeDeclaration::Function(*declared),
                             target_slot: None,
                             target: fid,
                         })
                     }
                     Some(_) => unreachable!("a function is bridged from a function"),
                 }
+            }
+            PlanKey::FileFunction(_) | PlanKey::FileGetter { .. } | PlanKey::FileSetter { .. } => {
+                Err(format!(
+                    "a file-local function cannot be an interface declaration (`{}`)",
+                    interface()
+                ))
             }
             PlanKey::DependencyCallable(_)
             | PlanKey::DependencyGetter(_)
@@ -461,7 +469,7 @@ impl Filler<'_> {
                                 Implementation::Slot(slot)
                             } else {
                                 Implementation::Bridged(Slot::Bridge {
-                                    declared,
+                                    declared: BridgeDeclaration::Function(declared),
                                     target_slot: Some(slot),
                                     target: implementation,
                                 })
@@ -478,15 +486,18 @@ impl Filler<'_> {
                                     .zip(&function.params)
                                     .all(|(a, b)| self.representation.same(*a, *b))
                                 && self.representation.same(result, function.ret);
-                            if !same {
-                                return Err(format!(
-                                    "an implementation of an interface member of another file \
-                                     that carries values differently (`{}.{}`)",
-                                    ir.classes[id as usize].fq_name(),
-                                    function.name
-                                ));
+                            if same {
+                                Implementation::Slot(slot)
+                            } else {
+                                Implementation::Bridged(Slot::Bridge {
+                                    declared: BridgeDeclaration::Signature {
+                                        parameters: parameters.to_vec().into_boxed_slice(),
+                                        result,
+                                    },
+                                    target_slot: Some(slot),
+                                    target: implementation,
+                                })
                             }
-                            Implementation::Slot(slot)
                         }
                     };
                     if own {
