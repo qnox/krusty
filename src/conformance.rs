@@ -131,6 +131,18 @@ pub fn contains_directive(src: &str, name: &str) -> bool {
         .any(|line| directive_payload(line, name).is_some())
 }
 
+/// The case-wide directive region before the first `// MODULE:` header.
+pub fn case_directive_region(src: &str) -> &str {
+    let mut offset = 0;
+    for line in src.split_inclusive('\n') {
+        if directive_payload(line, "MODULE").is_some() {
+            return &src[..offset];
+        }
+        offset += line.len();
+    }
+    ""
+}
+
 /// One partitioned file's text at the test data's line numbers, as kotlinc's runner keeps it: the
 /// file's own `FILE` marker line stays in place, every line outside the file is blank, and code
 /// before the first file stays on that first file.
@@ -141,16 +153,14 @@ struct FileText {
 }
 
 impl FileText {
-    /// Open a file whose first own line is source line `at` (0-based). `preamble` holds every
-    /// source line before the first file; the first file opened takes it when it contains code.
+    /// Open a file whose first own line is source line `at` (0-based). `preamble` holds the
+    /// source lines before the first file in this module; that file keeps the lines and directives.
     fn open(saw_file: &mut bool, preamble: &str, at: usize) -> Self {
         let mut file = Self::default();
         if !*saw_file {
             *saw_file = true;
-            if preamble_contains_code(preamble) {
-                file.text.push_str(preamble);
-                file.lines = preamble.lines().count();
-            }
+            file.text.push_str(preamble);
+            file.lines = preamble.lines().count();
         }
         while file.lines < at {
             file.text.push('\n');
@@ -169,36 +179,6 @@ impl FileText {
         self.lines = 0;
         std::mem::take(&mut self.text)
     }
-}
-
-fn preamble_contains_code(preamble: &str) -> bool {
-    let mut in_block = false;
-    for line in preamble.lines() {
-        let mut rest = line.trim_start();
-        if in_block {
-            if let Some(end) = rest.find("*/") {
-                in_block = false;
-                rest = rest[end + 2..].trim_start();
-            } else {
-                continue;
-            }
-        }
-        loop {
-            if rest.is_empty() || rest.starts_with("//") {
-                break;
-            }
-            if let Some(body) = rest.strip_prefix("/*") {
-                if let Some(end) = body.find("*/") {
-                    rest = body[end + 2..].trim_start();
-                    continue;
-                }
-                in_block = true;
-                break;
-            }
-            return true;
-        }
-    }
-    false
 }
 
 /// `.kt` is Kotlin, `.java` is Java, pinned runtime companions stay execution resources, and every
@@ -546,21 +526,22 @@ pub fn needs_unmodeled_compiler_flag(src: &str) -> bool {
         || needs_unmodeled_lambda_mode(src)
 }
 
-/// `// JVM_DEFAULT_MODE:` — the `-jvm-default` strategy a test pins, as the compiler models it.
-/// Absent, the test runs under kotlinc's own default (`enable`).
-pub fn jvm_default_mode(src: &str) -> crate::jvm::emit_modes::JvmDefaultMode {
+/// `// JVM_DEFAULT_MODE:` — the `-jvm-default` strategy a source pins, as the compiler models it,
+/// if it pins one; the last recognized directive counts. Absent everywhere, a unit runs under
+/// kotlinc's own default (`enable`).
+pub fn jvm_default_mode(src: &str) -> Option<crate::jvm::emit_modes::JvmDefaultMode> {
     src.lines()
         .filter_map(|l| l.trim().strip_prefix("// JVM_DEFAULT_MODE:"))
         .filter_map(|mode| {
             crate::jvm::emit_modes::JvmDefaultMode::parse(mode.split_whitespace().next()?)
         })
         .next_back()
-        .unwrap_or_default()
 }
 
-/// `// SAM_CONVERSIONS:` — the `-Xsam-conversions` strategy a test pins. Absent, the test runs
-/// under kotlinc's own default (`indy`). The corpus writes the value in uppercase.
-pub fn sam_conversion_mode(src: &str) -> crate::jvm::emit_modes::LambdaMode {
+/// `// SAM_CONVERSIONS:` — the `-Xsam-conversions` strategy a source pins, if it pins one; the
+/// last recognized directive counts. Absent everywhere, a unit runs under kotlinc's own default
+/// (`indy`). The corpus writes the value in uppercase.
+pub fn sam_conversion_mode(src: &str) -> Option<crate::jvm::emit_modes::LambdaMode> {
     src.lines()
         .filter_map(|line| line.trim().strip_prefix("// SAM_CONVERSIONS:"))
         .filter_map(|mode| match mode.split_whitespace().next() {
@@ -573,12 +554,12 @@ pub fn sam_conversion_mode(src: &str) -> crate::jvm::emit_modes::LambdaMode {
             _ => None,
         })
         .next_back()
-        .unwrap_or_default()
 }
 
-/// `// LAMBDAS:` — the `-Xlambdas` strategy a test pins. Absent, the test runs under kotlinc's
-/// own default (`indy`). The corpus writes the value in uppercase.
-pub fn lambda_mode(src: &str) -> crate::jvm::emit_modes::LambdaMode {
+/// `// LAMBDAS:` — the `-Xlambdas` strategy a source pins, if it pins one; the last recognized
+/// directive counts. Absent everywhere, a unit runs under kotlinc's own default (`indy`). The
+/// corpus writes the value in uppercase.
+pub fn lambda_mode(src: &str) -> Option<crate::jvm::emit_modes::LambdaMode> {
     src.lines()
         .filter_map(|line| line.trim().strip_prefix("// LAMBDAS:"))
         .filter_map(|mode| match mode.split_whitespace().next() {
@@ -591,7 +572,6 @@ pub fn lambda_mode(src: &str) -> crate::jvm::emit_modes::LambdaMode {
             _ => None,
         })
         .next_back()
-        .unwrap_or_default()
 }
 
 /// `// LAMBDAS:` values krusty does not model. `class` and `indy` are emitted; a missing or
@@ -694,52 +674,57 @@ pub fn split_modules(src: &str) -> Option<Vec<ModuleBlock>> {
 /// companions (`.def`, headers, JavaScript) decline here too: this view does not rewrite them into
 /// Kotlin, and the original fixture text is left unchanged for the runtime.
 pub fn source_modules(src: &str) -> Option<Vec<ModuleBlock>> {
-    let mut mods: Vec<ModuleBlock> = Vec::new();
-    let mut cur_file: Option<(String, bool)> = None; // (name, is_java)
-    let mut cur = FileText::default();
+    let mut modules: Vec<ModuleBlock> = Vec::new();
+    let mut current_file: Option<(String, bool)> = None;
+    let mut current = FileText::default();
     let mut preamble = String::new();
     let mut saw_file = false;
-    let flush =
-        |mods: &mut Vec<ModuleBlock>, cur_file: &mut Option<(String, bool)>, cur: &mut FileText| {
-            if let Some((fname, is_java)) = cur_file.take() {
-                if let Some(m) = mods.last_mut() {
-                    if is_java {
-                        m.java_files.push((fname, cur.take()));
-                    } else {
-                        m.files.push((fname, cur.take()));
-                    }
+    let flush = |modules: &mut Vec<ModuleBlock>,
+                 current_file: &mut Option<(String, bool)>,
+                 current: &mut FileText| {
+        if let Some((name, is_java)) = current_file.take() {
+            if let Some(module) = modules.last_mut() {
+                if is_java {
+                    module.java_files.push((name, current.take()));
+                } else {
+                    module.files.push((name, current.take()));
                 }
             }
-        };
+        }
+    };
+
     for (index, line) in src.lines().enumerate() {
-        let t = line.trim_start();
+        let trimmed = line.trim_start();
         if let Some(rest) = directive_payload(line, "MODULE") {
-            flush(&mut mods, &mut cur_file, &mut cur);
-            if !saw_file {
-                preamble.push('\n');
+            flush(&mut modules, &mut current_file, &mut current);
+            if !modules.is_empty() {
+                preamble = "\n".repeat(index);
+                saw_file = false;
             }
-            // Header: `name(dependencies)(friends)(dependsOn)` — kotlinc's test-module syntax.
+            preamble.push('\n');
+
             let header = rest.trim();
             if header.matches('(').count() > 3 {
                 return None;
             }
             let name_end = header.find('(').unwrap_or(header.len());
             let name = header[..name_end].trim().to_string();
-            let mut groups: Vec<Vec<String>> = Vec::new();
-            let mut restpart = &header[name_end..];
-            while let Some(open) = restpart.find('(') {
-                let close = restpart[open..].find(')')?;
+            let mut groups = Vec::new();
+            let mut remainder = &header[name_end..];
+            while let Some(open) = remainder.find('(') {
+                let close = remainder[open..].find(')')?;
                 groups.push(
-                    restpart[open + 1..open + close]
+                    remainder[open + 1..open + close]
                         .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect(),
+                        .map(str::trim)
+                        .filter(|part| !part.is_empty())
+                        .map(str::to_string)
+                        .collect::<Vec<_>>(),
                 );
-                restpart = &restpart[open + close + 1..];
+                remainder = &remainder[open + close + 1..];
             }
             let mut groups = groups.into_iter();
-            mods.push(ModuleBlock {
+            modules.push(ModuleBlock {
                 name,
                 deps: groups.next().unwrap_or_default(),
                 friends: groups.next().unwrap_or_default(),
@@ -748,37 +733,34 @@ pub fn source_modules(src: &str) -> Option<Vec<ModuleBlock>> {
                 java_files: Vec::new(),
             });
         } else if let Some(rest) = directive_payload(line, "FILE") {
-            flush(&mut mods, &mut cur_file, &mut cur);
-            cur = FileText::open(&mut saw_file, &preamble, index);
-            cur.push(line);
+            flush(&mut modules, &mut current_file, &mut current);
+            current = FileText::open(&mut saw_file, &preamble, index);
+            current.push(line);
             match explicit_file_kind(rest.trim()) {
-                ExplicitFileKind::Kotlin(stem) => cur_file = Some((stem, false)),
-                ExplicitFileKind::Java(leaf) => cur_file = Some((leaf, true)),
+                ExplicitFileKind::Kotlin(stem) => current_file = Some((stem, false)),
+                ExplicitFileKind::Java(leaf) => current_file = Some((leaf, true)),
                 ExplicitFileKind::Companion | ExplicitFileKind::Unsupported(_) => return None,
             }
-        } else if cur_file.is_some() {
-            cur.push(line);
-        } else if !mods.is_empty() && !t.is_empty() && !t.starts_with("//") {
-            // Implicit file body straight after a `// MODULE:` header (no `// FILE:`) — KOTLIN by
-            // kotlinc's test convention; Java sources always carry an explicit `// FILE: X.java`.
-            cur = FileText::open(&mut saw_file, &preamble, index);
-            cur_file = Some((mods.last().unwrap().name.clone(), false));
-            cur.push(line);
+        } else if current_file.is_some() {
+            current.push(line);
+        } else if !modules.is_empty() && !trimmed.is_empty() && !trimmed.starts_with("//") {
+            // An implicit file body immediately under a module header is Kotlin source.
+            current = FileText::open(&mut saw_file, &preamble, index);
+            current_file = Some((modules.last()?.name.clone(), false));
+            current.push(line);
         } else if !saw_file {
             preamble.push_str(line);
             preamble.push('\n');
         }
     }
-    flush(&mut mods, &mut cur_file, &mut cur);
-    // A source-less module is a legitimate hmpp intermediate source set (its dependents fold it in
-    // or depend on its representative); decline only when NO module has sources (a mis-parse).
-    if mods
+    flush(&mut modules, &mut current_file, &mut current);
+    if modules
         .iter()
-        .all(|m| m.files.is_empty() && m.java_files.is_empty())
+        .all(|module| module.files.is_empty() && module.java_files.is_empty())
     {
         return None;
     }
-    Some(mods)
+    Some(modules)
 }
 
 /// kotlinc's test infra compiles the `// WITH_COROUTINES` helpers as an implicit `support` module
@@ -863,13 +845,16 @@ pub fn kotlin_source_blocks(
                 });
             }
         };
+
         for (index, line) in src.lines().enumerate() {
             let trimmed = line.trim_start();
             if let Some(header) = directive_payload(line, "MODULE") {
                 flush(&mut blocks, &module, &mut file_name, &mut body);
-                if !saw_file {
-                    preamble.push('\n');
+                if module.is_some() {
+                    preamble = "\n".repeat(index);
+                    saw_file = false;
                 }
+                preamble.push('\n');
                 let header = header.trim();
                 let name_end = header.find('(').unwrap_or(header.len());
                 module = Some(header[..name_end].trim().to_string());
@@ -897,8 +882,6 @@ pub fn kotlin_source_blocks(
                 && !trimmed.is_empty()
                 && !trimmed.starts_with("//")
             {
-                // The testdata convention permits one implicit Kotlin file immediately under a
-                // module header. Name it after the module, just like `split_modules`.
                 file_name = module.clone();
                 body = FileText::open(&mut saw_file, &preamble, index);
                 body.push(line);
@@ -917,74 +900,73 @@ pub fn kotlin_source_blocks(
     }])
 }
 
-/// Split a `// FILE:`-partitioned (single-module) test into Kotlin `(stem, content)` and Java
-/// `(leaf name incl. .java, content)` blocks. A directives-only preamble belongs to no block. Code
-/// before the first marker stays on that first file, including Java. Pinned runtime companions stay
-/// in this execution inventory. Unsupported scripts and unknown kinds are rejected.
+/// Split a `// FILE:`-partitioned (single-module) test into Kotlin and Java source blocks.
+/// Leading source and directives join the first declared file while retaining its original line
+/// numbers. Runtime companion files remain in the execution inventory; unsupported file kinds fail.
 pub fn split_files(src: &str) -> Result<(Vec<SourceBlock>, Vec<SourceBlock>), String> {
     split_files_with_preamble(src, "main")
 }
 
-/// [`split_files`]. `preamble_stem` names the corpus file and is retained for callers that already
-/// pass it; leading code is attached to the first declared file rather than given its own stem.
+/// [`split_files`]. `preamble_stem` is retained for callers that already provide the corpus stem;
+/// leading text belongs to the first declared source file instead of a separate synthetic file.
 pub fn split_files_with_preamble(
     src: &str,
-    preamble_stem: &str,
+    _preamble_stem: &str,
 ) -> Result<(Vec<SourceBlock>, Vec<SourceBlock>), String> {
-    let _ = preamble_stem;
-    let mut blocks: Vec<SourceBlock> = Vec::new();
-    let mut java_blocks: Vec<SourceBlock> = Vec::new();
-    let mut cur_name: Option<(String, bool)> = None; // (name, is_java)
-    let mut cur = FileText::default();
+    let mut kotlin = Vec::new();
+    let mut java = Vec::new();
+    let mut current_name: Option<(String, bool)> = None;
+    let mut current = FileText::default();
     let mut preamble = String::new();
     let mut saw_file = false;
-    let mut flush = |name: Option<(String, bool)>, cur: &mut FileText| {
-        let text = cur.take();
-        if let Some((n, is_java)) = name {
+    let flush = |kotlin: &mut Vec<SourceBlock>,
+                 java: &mut Vec<SourceBlock>,
+                 current_name: &mut Option<(String, bool)>,
+                 current: &mut FileText| {
+        let text = current.take();
+        if let Some((name, is_java)) = current_name.take() {
             if is_java {
-                java_blocks.push((n, text));
+                java.push((name, text));
             } else {
-                blocks.push((n, text));
+                kotlin.push((name, text));
             }
         }
     };
+
     for (index, line) in src.lines().enumerate() {
         if let Some(rest) = directive_payload(line, "FILE") {
-            flush(cur_name.take(), &mut cur);
+            flush(&mut kotlin, &mut java, &mut current_name, &mut current);
             let kind = explicit_file_kind(rest.trim());
-            // A runtime companion keeps its own text; Kotlin and Java sources keep their lines.
             if matches!(kind, ExplicitFileKind::Companion) {
-                cur = FileText::open(&mut saw_file, &preamble, 0);
+                current = FileText::open(&mut saw_file, &preamble, 0);
             } else {
-                cur = FileText::open(&mut saw_file, &preamble, index);
-                cur.push(line);
+                current = FileText::open(&mut saw_file, &preamble, index);
+                current.push(line);
             }
             match kind {
-                ExplicitFileKind::Kotlin(name) => cur_name = Some((name, false)),
-                ExplicitFileKind::Java(name) => cur_name = Some((name, true)),
-                // Execution still receives the original companion. The compiler-only module view
-                // filters it; dropping it here would change the runtime resource inventory.
+                ExplicitFileKind::Kotlin(name) => current_name = Some((name, false)),
+                ExplicitFileKind::Java(name) => current_name = Some((name, true)),
                 ExplicitFileKind::Companion => {
-                    let leaf = rest
+                    let name = rest
                         .trim()
                         .rsplit(['/', '\\'])
                         .next()
                         .unwrap_or(rest.trim());
-                    cur_name = Some((leaf.to_string(), false));
+                    current_name = Some((name.to_string(), false));
                 }
                 ExplicitFileKind::Unsupported(name) => {
                     return Err(format!("unsupported explicit source file {name}"));
                 }
             }
-        } else if cur_name.is_some() {
-            cur.push(line);
+        } else if current_name.is_some() {
+            current.push(line);
         } else if !saw_file {
             preamble.push_str(line);
             preamble.push('\n');
         }
     }
-    flush(cur_name.take(), &mut cur);
-    Ok((blocks, java_blocks))
+    flush(&mut kotlin, &mut java, &mut current_name, &mut current);
+    Ok((kotlin, java))
 }
 
 /// Wasm box files Kotlin's `WasmAdditionalSourceProvider` adds to an eligible original module:
@@ -1670,7 +1652,7 @@ mod tests {
                 !needs_unmodeled_compiler_flag(&src),
                 "{directive} is modelled and must run"
             );
-            assert_eq!(jvm_default_mode(&src), expected);
+            assert_eq!(jvm_default_mode(&src), Some(expected));
         }
     }
 
@@ -1680,12 +1662,9 @@ mod tests {
         assert!(!needs_unmodeled_compiler_flag(src));
         assert_eq!(
             sam_conversion_mode(src),
-            crate::jvm::emit_modes::LambdaMode::Class
+            Some(crate::jvm::emit_modes::LambdaMode::Class)
         );
-        assert_eq!(
-            sam_conversion_mode("fun box() = \"OK\""),
-            crate::jvm::emit_modes::LambdaMode::Indy
-        );
+        assert_eq!(sam_conversion_mode("fun box() = \"OK\""), None);
         assert!(needs_unmodeled_compiler_flag(
             "// SAM_CONVERSIONS:\nfun box() = \"OK\""
         ));
@@ -1698,11 +1677,11 @@ mod tests {
     fn lambda_class_mode_is_modelled() {
         let src = "// LAMBDAS: CLASS\nfun box() = \"OK\"";
         assert!(!needs_unmodeled_compiler_flag(src));
-        assert_eq!(lambda_mode(src), crate::jvm::emit_modes::LambdaMode::Class);
         assert_eq!(
-            lambda_mode("fun box() = \"OK\""),
-            crate::jvm::emit_modes::LambdaMode::Indy
+            lambda_mode(src),
+            Some(crate::jvm::emit_modes::LambdaMode::Class)
         );
+        assert_eq!(lambda_mode("fun box() = \"OK\""), None);
         assert!(needs_unmodeled_compiler_flag(
             "// LAMBDAS:\nfun box() = \"OK\""
         ));
@@ -1713,8 +1692,9 @@ mod tests {
 
     #[test]
     fn a_test_without_the_directive_runs_under_kotlincs_own_default() {
+        assert_eq!(jvm_default_mode("fun box() = \"OK\""), None);
         assert_eq!(
-            jvm_default_mode("fun box() = \"OK\""),
+            crate::conformance::UnitCodegenModes::of_unit(["fun box() = \"OK\""]).jvm_default,
             crate::jvm::emit_modes::JvmDefaultMode::Enable
         );
     }
@@ -1732,7 +1712,7 @@ mod tests {
                 !needs_unmodeled_compiler_flag(&src),
                 "{directive} is emitted within a compilation and must run"
             );
-            assert_eq!(jvm_default_mode(&src), expected);
+            assert_eq!(jvm_default_mode(&src), Some(expected));
         }
         assert!(!needs_unmodeled_compiler_flag(
             "// JVM_DEFAULT_MODE: disable\n// MODULE: lib\nfun box() = \"OK\""
@@ -1820,6 +1800,52 @@ fun box(): String = \"OK\"
                 "main".to_string(),
                 "\n\n\n\n// FILE: main.kt\nfun box(): String = \"OK\"\n".to_string()
             )]
+        );
+    }
+
+    #[test]
+    fn module_leading_text_keeps_case_and_unit_modes_on_the_first_file() {
+        let src = "\
+// WITH_STDLIB
+// MODULE: lib
+// JVM_DEFAULT_MODE: disable
+// FILE: Library.java
+public class Library {}
+// FILE: api.kt
+interface Api
+// MODULE: main(lib)
+// JVM_DEFAULT_MODE: enable
+// FILE: main.kt
+fun box(): String = \"OK\"
+";
+        let modules = split_modules(src).expect("module sources should split");
+        assert_eq!(modules[0].java_files.len(), 1);
+        assert_eq!(
+            modules[0].java_files[0].1,
+            "// WITH_STDLIB\n\n// JVM_DEFAULT_MODE: disable\n// FILE: Library.java\npublic class Library {}\n"
+        );
+        assert_eq!(
+            modules[0].files[0].1,
+            "\n\n\n\n\n// FILE: api.kt\ninterface Api\n"
+        );
+        assert_eq!(
+            modules[1].files[0].1,
+            "\n\n\n\n\n\n\n\n// JVM_DEFAULT_MODE: enable\n// FILE: main.kt\nfun box(): String = \"OK\"\n"
+        );
+        let lib_sources = modules[0]
+            .files
+            .iter()
+            .chain(&modules[0].java_files)
+            .map(|(_, source)| source.as_str());
+        let main_sources = modules[1].files.iter().map(|(_, source)| source.as_str());
+        assert_eq!(case_directive_region(src), "// WITH_STDLIB\n");
+        assert_eq!(
+            UnitCodegenModes::of_unit_in_case(case_directive_region(src), lib_sources).jvm_default,
+            crate::jvm::emit_modes::JvmDefaultMode::Disable
+        );
+        assert_eq!(
+            UnitCodegenModes::of_unit_in_case(case_directive_region(src), main_sources).jvm_default,
+            crate::jvm::emit_modes::JvmDefaultMode::Enable
         );
     }
 
@@ -2008,7 +2034,7 @@ fun box(): String = \"OK\"
     }
 
     #[test]
-    fn split_files_kotlin_blocks_by_stem_preamble_excluded() {
+    fn split_files_kotlin_blocks_by_stem_with_the_leading_text_in_the_first() {
         let src = "\
 // WITH_STDLIB
 // FILE: a.kt
@@ -2020,7 +2046,7 @@ fun box(): String = \"OK\"
         assert!(java.is_empty());
         assert_eq!(kt.len(), 2);
         assert_eq!(kt[0].0, "a");
-        assert_eq!(kt[0].1, "\n// FILE: a.kt\nfun a() = 1\n");
+        assert_eq!(kt[0].1, "// WITH_STDLIB\n// FILE: a.kt\nfun a() = 1\n");
         assert_eq!(kt[1].0, "b");
         assert_eq!(kt[1].1, "\n\n\n// FILE: b.kt\nfun box(): String = \"OK\"\n");
     }
@@ -2106,7 +2132,11 @@ fun box(): String = \"OK\"
                     "common",
                     "// LANGUAGE: +MultiPlatformProjects\nval leading = 1\n\nexpect fun f(): String\n"
                 ),
-                (Some("main"), "main", "\n\n\n\n\n\nactual fun f() = \"OK\"\n"),
+                (
+                    Some("main"),
+                    "main",
+                    "\n\n\n\n\n// a comment\nactual fun f() = \"OK\"\n"
+                ),
             ]
         );
     }
@@ -2178,7 +2208,7 @@ fun box() = \"OK\"
                 KotlinSourceBlock {
                     module: None,
                     name: "first".into(),
-                    source: "\n// FILE: first.kt\nval first = 1\n".into(),
+                    source: "// TARGET_BACKEND: JS\n// FILE: first.kt\nval first = 1\n".into(),
                 },
                 KotlinSourceBlock {
                     module: None,
@@ -2186,6 +2216,25 @@ fun box() = \"OK\"
                     source: "\n\n\n\n\n// FILE: nested/second.kt\nval second = 2\n".into(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn kotlin_source_blocks_keep_java_first_file_preamble_out_of_kotlin() {
+        let src = "\
+// LAMBDAS: CLASS
+// FILE: Helper.java
+public class Helper {}
+// FILE: main.kt
+fun box(): String = \"OK\"
+";
+        assert_eq!(
+            kotlin_source_blocks(src, "fallback").unwrap(),
+            vec![KotlinSourceBlock {
+                module: None,
+                name: "main".into(),
+                source: "\n\n\n// FILE: main.kt\nfun box(): String = \"OK\"\n".into(),
+            }]
         );
     }
 

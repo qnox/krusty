@@ -13,6 +13,62 @@ use krusty::jvm::method_descriptors::jvm_declared_ty;
 use krusty::jvm::names::method_descriptor;
 use krusty::types::{Ty, TypeName};
 
+/// The compatibility holder shared by moved bodies, property annotation carriers and default stubs.
+pub(super) fn holder<'a>(
+    holder: &'a mut Option<ClassWriter>,
+    interface: &str,
+    opts: &super::EmitOptions,
+) -> &'a mut ClassWriter {
+    holder.get_or_insert_with(|| {
+        let mut writer = super::new_writer(
+            &format!("{interface}$DefaultImpls"),
+            "java/lang/Object",
+            opts,
+        );
+        writer.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
+        writer
+    })
+}
+
+/// Move only a recorded property annotation carrier onto a legacy holder. Its static frame
+/// belongs to the declaration itself; a moved instance body's synthetic receiver is absent.
+pub(super) fn emit_annotation_carrier(
+    ir: &IrFile,
+    function: u32,
+    interface: TypeName,
+    facade: &str,
+    writer: &mut Option<ClassWriter>,
+    env: &super::EmitEnv,
+    opts: &super::EmitOptions,
+) -> bool {
+    if !ir
+        .property_annotation_markers
+        .values()
+        .any(|&marker| marker == function)
+    {
+        return false;
+    }
+    let declaration = &ir.functions[function as usize];
+    assert!(
+        declaration.is_static && declaration.body.is_some(),
+        "a property annotation carrier has a static body"
+    );
+    let owner = interface.render();
+    super::emit_method(
+        ir,
+        function,
+        super::MethodSlot {
+            static_owner: super::StaticOwner::Class(interface),
+            instance: false,
+        },
+        &format!("{owner}$DefaultImpls"),
+        facade,
+        holder(writer, &owner, opts),
+        env,
+    );
+    true
+}
+
 pub(super) fn emit_default_stub_forward(ir: &IrFile, fid: u32, owner: &str, cw: &mut ClassWriter) {
     let f = &ir.functions[fid as usize];
     let ret = jvm_declared_ty(&f.ret);

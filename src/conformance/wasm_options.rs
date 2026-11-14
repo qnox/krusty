@@ -10,7 +10,8 @@ pub struct WasmCompilerOptions {
 
 impl WasmCompilerOptions {
     /// Read the original case before FILE/MODULE splitting. Carry this same configuration to
-    /// the reference compiler through its extra-arguments boundary, not through split file text.
+    /// the reference compiler through its extra-arguments boundary. A split file may still hold
+    /// the directive line as leading text, but that copy is a comment: it is never re-read.
     pub fn from_source(source: &str) -> Result<Self, String> {
         const DIRECTIVE: &str = "WASM_ENABLE_ARRAY_RANGE_CHECKS";
         let mut options = Self::default();

@@ -6,7 +6,7 @@
 //! translation from directives: ordinary settings become kotlinc arguments, while historical
 //! language/API levels use the typed channel which Kotlin's own test runner uses.
 
-use super::{directive, UnitCodegenModes};
+use super::{case_directive_region, directive, UnitCodegenModes};
 use crate::features::LanguageVersionPolicy;
 use crate::kotlin_version::KotlinVersion;
 use crate::language_version::LanguageVersion;
@@ -30,13 +30,13 @@ pub struct UnitCompilerConfiguration {
 
 /// The kotlinc arguments one compilation unit of a case compiles under: the case-wide arguments of
 /// [`case_kotlinc_arguments`], then the code-generation modes the unit's own Kotlin sources select
-/// ([`UnitCodegenModes::of_unit`]).
+/// ([`UnitCodegenModes::of_unit`]), or else the case selects for every module.
 pub fn unit_kotlinc_arguments<'a>(
     case: &str,
     unit: impl IntoIterator<Item = &'a str>,
 ) -> Result<Vec<String>, String> {
     let mut arguments = case_kotlinc_arguments(case)?;
-    arguments.extend(UnitCodegenModes::of_unit(unit).kotlinc_args());
+    arguments.extend(unit_codegen_modes(case, unit).kotlinc_args());
     Ok(arguments)
 }
 
@@ -49,8 +49,13 @@ pub fn unit_compiler_configuration<'a>(
     let mut configuration = case_compiler_configuration(case)?;
     configuration
         .arguments
-        .extend(UnitCodegenModes::of_unit(unit).kotlinc_args());
+        .extend(unit_codegen_modes(case, unit).kotlinc_args());
     Ok(configuration)
+}
+
+/// The modes one unit of `case` compiles under ([`UnitCodegenModes::of_unit_in_case`]).
+fn unit_codegen_modes<'a>(case: &str, unit: impl IntoIterator<Item = &'a str>) -> UnitCodegenModes {
+    UnitCodegenModes::of_unit_in_case(case_directive_region(case), unit)
 }
 
 fn case_compiler_configuration(src: &str) -> Result<UnitCompilerConfiguration, String> {
@@ -588,6 +593,51 @@ mod tests {
         assert_eq!(
             unit_kotlinc_arguments(case, ["fun b() {}\n"]).unwrap(),
             ["-XXLanguage:+ContextParameters"]
+        );
+    }
+
+    /// A mode set before the first `// MODULE:` header is every module's, as in
+    /// `box/compileKotlinAgainstKotlin/jvm8/defaults/superCall.kt`; a module's own directive wins.
+    #[test]
+    fn a_mode_before_the_first_module_applies_to_every_unit() {
+        let case = "// JVM_DEFAULT_MODE: disable\n// MODULE: lib\n// FILE: lib.kt\n\
+                    // MODULE: main(lib)\n// FILE: main.kt\n";
+        assert_eq!(
+            unit_kotlinc_arguments(case, ["fun b() {}\n"]).unwrap(),
+            ["-jvm-default", "disable"]
+        );
+        assert_eq!(
+            unit_kotlinc_arguments(case, ["// JVM_DEFAULT_MODE: no-compatibility\n"]).unwrap(),
+            ["-jvm-default", "no-compatibility"]
+        );
+    }
+
+    /// A module directive that names kotlinc's own default still overrides the case-wide mode.
+    #[test]
+    fn a_modules_explicit_default_mode_overrides_the_case_mode() {
+        let case = "// LAMBDAS: CLASS\n// SAM_CONVERSIONS: CLASS\n// JVM_DEFAULT_MODE: disable\n\
+                    // MODULE: lib\n// FILE: Lib.kt\n\
+                    // MODULE: main(lib)\n// FILE: Main.kt\n";
+        assert_eq!(
+            unit_kotlinc_arguments(case, ["fun a() {}\n"]).unwrap(),
+            [
+                "-jvm-default",
+                "disable",
+                "-Xlambdas=class",
+                "-Xsam-conversions=class"
+            ]
+        );
+        assert_eq!(
+            unit_kotlinc_arguments(
+                case,
+                ["// LAMBDAS: INDY\n// SAM_CONVERSIONS: INDY\n// JVM_DEFAULT_MODE: enable\n"]
+            )
+            .unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            unit_kotlinc_arguments(case, ["// LAMBDAS: INDY\n"]).unwrap(),
+            ["-jvm-default", "disable", "-Xsam-conversions=class"]
         );
     }
 }

@@ -32,6 +32,8 @@ mod dependency_registration;
 mod generic_signatures;
 mod inline_body_plan;
 mod inline_capability;
+mod interface_holders;
+use interface_holders::{attach_interface_holder, interface_holder_method};
 mod java_nullability;
 mod java_operator_convention;
 mod mapped_builtin_member_status;
@@ -2640,42 +2642,6 @@ fn function_interface_signature(
     Some(Ty::fun(params.to_vec(), ret))
 }
 
-/// Exact nonvirtual realization of a legacy concrete interface declaration, if the classpath
-/// publishes one. Semantic selection stays on the metadata declaration; this only couples it to the
-/// matching receiver-first static method at the provider boundary.
-fn interface_holder_method(
-    cp: &crate::jvm::classpath::Classpath,
-    interface: TypeName,
-    name: &str,
-    descriptor: &str,
-) -> Option<Box<crate::libraries::NonvirtualCallRealization>> {
-    // `$DefaultImpls` also exists in compatibility mode, where the interface method itself is
-    // concrete and remains the dispatch target. Only the legacy shape has an ABSTRACT interface
-    // method whose implementation must be replaced by the receiver-first holder static. Keeping
-    // this representation test here makes functions and property accessors share one ABI rule.
-    let interface_class = cp.find_name(interface)?;
-    if !interface_class.methods.iter().any(|method| {
-        method.is_abstract() && method.name == name && method.descriptor == descriptor
-    }) {
-        return None;
-    }
-    let holder = crate::types::type_name_nested_child(interface, "DefaultImpls");
-    let class = cp.find_name(holder)?;
-    let method = class.methods.iter().find(|method| {
-        method.is_static()
-            && method.name == name
-            && crate::jvm::names::descriptor_prepends_classifier(
-                descriptor,
-                interface,
-                &method.descriptor,
-            )
-    })?;
-    Some(Box::new(crate::libraries::NonvirtualCallRealization {
-        owner: holder,
-        descriptor: method.descriptor.clone(),
-    }))
-}
-
 pub fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
     let (params, ret) = crate::jvm::names::parse_method_descriptor(desc)?;
     Some((
@@ -2889,6 +2855,7 @@ impl JvmLibraries {
                     getter.owner_is_interface = ci.is_interface();
                     getter.is_abstract = mp.is_abstract;
                     getter.inline = property_getter_inline(mp.getter_inline, getter_public);
+                    attach_interface_holder(&self.cp, cn, &mut getter);
                     getter.semantic_role =
                         crate::libraries::builtin_declaration::semantic_call_role(
                             crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
@@ -2934,6 +2901,7 @@ impl JvmLibraries {
                         callable.context_count = context_count;
                         callable.owner_is_interface = ci.is_interface();
                         callable.is_abstract = mp.is_abstract;
+                        attach_interface_holder(&self.cp, cn, &mut callable);
                         if value_dispatch {
                             callable.member_realization =
                                 crate::libraries::MemberRealization::Direct {
@@ -3034,12 +3002,7 @@ impl JvmLibraries {
                 getter.owner_is_interface = ci.is_interface();
                 getter.is_abstract = mp.is_abstract;
                 getter.inline = property_getter_inline(mp.getter_inline, getter_public);
-                getter.nonvirtual_realization = interface_holder_method(
-                    &self.cp,
-                    cn,
-                    getter.physical_name(),
-                    &getter.descriptor,
-                );
+                attach_interface_holder(&self.cp, cn, &mut getter);
                 let getter_signature = self
                     .member_functions(recv, &getter.name)
                     .overloads
@@ -3096,12 +3059,7 @@ impl JvmLibraries {
                     setter.context_count = context_count;
                     setter.owner_is_interface = ci.is_interface();
                     setter.is_abstract = mp.is_abstract;
-                    setter.nonvirtual_realization = interface_holder_method(
-                        &self.cp,
-                        cn,
-                        setter.physical_name(),
-                        &setter.descriptor,
-                    );
+                    attach_interface_holder(&self.cp, cn, &mut setter);
                     Some(setter)
                 });
                 let mut property = PropertyInfo {

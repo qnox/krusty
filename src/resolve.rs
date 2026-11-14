@@ -9302,6 +9302,7 @@ struct FunctionLambdaShape<'a> {
 /// The candidate family a provider member call commits through, with the receiver its selection
 /// sees: a value's members, or a classifier's object/companion/static members.
 struct ProviderMemberFamily {
+    result_constraint: CallResultConstraint,
     receiver: Ty,
     members: Vec<crate::libraries::FunctionInfo>,
 }
@@ -14461,6 +14462,7 @@ impl<'a> Checker<'a> {
                             scope,
                             call,
                             ProviderMemberFamily {
+                                result_constraint: CallResultConstraint::direct(expected),
                                 receiver: classifier_receiver,
                                 members: candidates.clone(),
                             },
@@ -49081,191 +49083,11 @@ impl<'a> Checker<'a> {
                 self.member_level_constructor_candidates(receiver, name),
             );
         }
-        ProviderMemberFamily { receiver, members }
-    }
-
-    /// A lambda argument's expected shape at one parameter position of a semantic-provider
-    /// candidate: the
-    /// VALUE parameter types, plus the receiver type when the parameter is a receiver function
-    /// type (`Recv.() -> R`). The lambda checks against this shape so its implicit `this`/`it`
-    /// bind exactly as kotlinc binds them.
-    fn provider_member_lambda_expectations(
-        &self,
-        scope: &CheckerScope<'_>,
-        call: ExprId,
-        family: ProviderMemberFamily,
-        name: &str,
-        args_and_partial: (&[ExprId], &[Option<Ty>]),
-        type_args: &[Ty],
-    ) -> Option<ProviderLambdaShape> {
-        let (args, partial) = args_and_partial;
-        let ProviderMemberFamily { receiver, members } = family;
-        // This resolver exists only to postpone and shape lambda syntax. Ordinary arguments are
-        // already typed in `partial`; re-entering provider overload selection for them is both
-        // semantically pointless and quadratic on generated call-heavy sources.
-        if !args.iter().any(|&argument| {
-            matches!(
-                self.file.expr(argument),
-                Expr::Lambda { .. } | Expr::CallableRef { .. }
-            )
-        }) {
-            return None;
+        ProviderMemberFamily {
+            result_constraint: CallResultConstraint::None,
+            receiver,
+            members,
         }
-        let arg_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
-        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
-
-        // A functional argument remains postponed until a candidate supplies its declaration shape.
-        // Reuse the semantic slot mapper and partial-applicability predicate for every source form;
-        // positional calls need the same boundary as named/default/trailing-lambda calls, otherwise
-        // a callable reference is checked expectation-free before its provider member is selected.
-        let slot_mapped = members
-            .into_iter()
-            .filter_map(|candidate| {
-                let parameter_count = candidate.semantic_params().len();
-                let argument_parameters = call_argument_parameter_indices(
-                    args.len(),
-                    parameter_count,
-                    arg_names,
-                    trailing_lambda,
-                    &candidate.call_sig,
-                )?;
-                Some((candidate, argument_parameters))
-            })
-            .collect::<Vec<_>>();
-        let applicable = slot_mapped
-            .iter()
-            .filter(|(candidate, argument_parameters)| {
-                let whole_array =
-                    named_whole_array_varargs(argument_parameters, arg_names, &candidate.call_sig);
-                self.lambda_overload_partially_applicable(
-                    scope,
-                    candidate,
-                    None,
-                    (args, partial),
-                    (argument_parameters, &whole_array),
-                    ExplicitTypeArgumentProbe {
-                        arguments: type_args,
-                        bounds: ExplicitTypeArgumentBounds::Enforced,
-                    },
-                )
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        // When no candidate accepts the call's functional arguments, kotlinc still reports against
-        // the one candidate that maps every argument, and analyzes those arguments against its
-        // parameters: `take(B::g)` names the misfit reference, not the call. That shape is offered
-        // as not accepted; only the caller knows whether another source accepts the call first.
-        let accepted = !applicable.is_empty();
-        let mut mapped = match (accepted, slot_mapped.len()) {
-            (true, _) => applicable,
-            (false, 1) => slot_mapped,
-            (false, _) => return None,
-        };
-        // Member precedence is semantic receiver distance, not provider iteration order. Drop
-        // inherited candidates when a nearer declaration is applicable before deciding whether
-        // the postponed call is genuinely ambiguous.
-        if let Some(nearest) = mapped
-            .iter()
-            .map(|(candidate, _)| candidate.receiver_rank)
-            .min()
-        {
-            mapped.retain(|(candidate, _)| candidate.receiver_rank == nearest);
-        }
-        // Several candidates can still map the call while its lambdas are untyped. Choose among
-        // them with the selector the call finally commits through, its lambdas postponed, so a
-        // lambda is shaped by exactly the overload that resolution selects: kotlinc's postponed
-        // argument selection, including its preference for a candidate that needs no SAM
-        // conversion. A tie declines the expectation rather than leaking provider order.
-        let selected = match mapped.as_slice() {
-            [] => return None,
-            [_] => 0,
-            _ => {
-                let arg_tys = partial
-                    .iter()
-                    .map(|ty| ty.unwrap_or(Ty::Error))
-                    .collect::<Vec<_>>();
-                let selection = self.select_callable_candidate(
-                    scope,
-                    CallArgs {
-                        call,
-                        args,
-                        arg_tys: &arg_tys,
-                    },
-                    type_args,
-                    Some(receiver),
-                    CallResultConstraint::direct(None),
-                    mapped
-                        .iter()
-                        .map(|(candidate, _)| candidate.clone())
-                        .collect(),
-                );
-                let selected = selection
-                    .and_then(CallableCandidateSelection::available)
-                    .and_then(|selected| selected.candidate_index);
-                crate::trace_compiler!(
-                    "provider_lambda",
-                    "call={call:?} name={name} mapped_candidates={} selected={selected:?}",
-                    mapped.len(),
-                );
-                selected?
-            }
-        };
-        let (candidate, argument_parameters) = mapped.get(selected)?;
-        crate::trace_compiler!(
-                "provider_lambda",
-                "call={call:?} name={name} candidate={} params={:?} map={argument_parameters:?} marks={:?}",
-                candidate.callable.name,
-                candidate.semantic_params(),
-                candidate.call_sig.lambda_receiver_params,
-            );
-        let semantic = candidate.semantic_signature();
-        let binds = self.mapped_generic_call_bindings(
-            candidate,
-            None,
-            (args, partial),
-            argument_parameters,
-            &named_whole_array_varargs(argument_parameters, arg_names, &candidate.call_sig),
-            type_args,
-        );
-        let expectations: Vec<_> = argument_parameters
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(source_index, parameter_index)| {
-                if !matches!(
-                    self.file.expr(args[source_index]),
-                    Expr::Lambda { .. } | Expr::CallableRef { .. }
-                ) {
-                    return None;
-                }
-                let param =
-                    semantic.params.get(parameter_index).copied().map(|param| {
-                        crate::symbol_resolver::ty_subst_keep_unbound(param, &binds)
-                    })?;
-                functional_argument_expectation(
-                    self.libraries,
-                    &self.fed_source(),
-                    &candidate.call_sig,
-                    candidate.flags.inline.can_inline(),
-                    parameter_index,
-                    param,
-                    Some(&semantic),
-                )
-            })
-            .collect();
-        crate::trace_compiler!(
-            "provider_lambda",
-            "call={call:?} name={name} expectations={expectations:?}",
-        );
-        // An expectation whose parameter count cannot fit the lambda AS WRITTEN is not an
-        // expectation for this call, whichever caller asked. A destructuring parameter is ONE
-        // written parameter: the parser gives it a single synthetic name and destructures it in the
-        // body.
-        self.member_expectations_fit_written_lambdas(args, &expectations)
-            .then_some(ProviderLambdaShape {
-                expectations,
-                accepted,
-            })
     }
 
     /// The [`CallArgKind`] for an already-checked argument — pure, no checking side effects.
@@ -49610,7 +49432,10 @@ impl<'a> Checker<'a> {
                 self.provider_member_lambda_expectations(
                     scope,
                     call,
-                    self.value_member_family(receiver, name),
+                    ProviderMemberFamily {
+                        result_constraint,
+                        ..self.value_member_family(receiver, name)
+                    },
                     name,
                     (args, partial),
                     explicit_type_args,

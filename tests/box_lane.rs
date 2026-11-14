@@ -933,7 +933,8 @@ fn complete_program_output(stdout: String) -> ProgramOutput {
 }
 
 /// Expand runner-provided declarations and recover the Kotlin source set represented by one corpus
-/// file. The preamble stays the authoritative directive source; split blocks deliberately omit it.
+/// file. Case-wide directives are still read from the whole source; the text before the first
+/// `// FILE:` also stays in the first Kotlin block, as Kotlin's test infrastructure keeps it.
 pub fn prepare_sources(
     source: &str,
     fallback_stem: &str,

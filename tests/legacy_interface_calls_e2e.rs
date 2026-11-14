@@ -11,6 +11,12 @@ const LIBRARY: &str = "package legacy\n\
                        \x20   var label: Int\n\
                        \x20       get() = 0\n\
                        \x20       set(value) {}\n\
+                       }\n\
+                       interface Scaled {\n\
+                       \x20   val Int.twice: Int get() = this * 2\n\
+                       \x20   var String.tag: String\n\
+                       \x20       get() = this\n\
+                       \x20       set(value) {}\n\
                        }\n";
 
 fn legacy_library() -> std::path::PathBuf {
@@ -63,6 +69,23 @@ fn an_ordinary_write_dispatches_through_the_legacy_interface() {
         common::compile_with_kotlinc("Relabel", source, &[legacy_library()], &["RelabelKt"]);
     let (expected, actual) = &compared[0];
     assert!(actual == expected, "RelabelKt differs from kotlinc");
+}
+
+/// A class inheriting a legacy member-extension property forwards each accessor to its holder
+/// static, as it does for a member property; the interface accessor itself is abstract.
+#[test]
+fn an_inherited_member_extension_property_forwards_to_the_legacy_holder() {
+    let source = "import legacy.Scaled\n\
+                  class Doubler : Scaled\n";
+    let compared =
+        common::compile_with_kotlinc("Doubler", source, &[legacy_library()], &["Doubler"]);
+    let (expected, actual) = &compared[0];
+    assert!(
+        actual == expected,
+        "Doubler differs from kotlinc:\n{}\nkrusty:\n{}",
+        disassemble(expected),
+        disassemble(actual)
+    );
 }
 
 /// A `super` write to a legacy `var` names the holder's setter static.

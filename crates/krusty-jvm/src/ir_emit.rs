@@ -2891,18 +2891,25 @@ fn emit_interface_class(
     // holder forward per non-private body.
     let enable_compat = jvm_default == JvmDefaultMode::Enable;
     let mut jd_bridge_fids: Vec<u32> = Vec::new();
-    // kotlinc emits interface members in SOURCE order — a property's accessors sit at the
-    // property's declared position among the functions — while lowering registers declared
-    // functions before property accessors. Sort by the recorded source offset (stable, so a
-    // property's getter stays before its setter); synthesized members without one trail in
-    // registration order, kotlinc's placement for them too.
-    let mut member_fids: Vec<u32> = c.methods.clone();
-    member_fids.sort_by_key(|fid| ir.fn_source_order.get(fid).copied().unwrap_or(u32::MAX));
+    let member_fids = member_schedule::interface_functions(ir, c);
     for &fid in &member_fids {
         if standalone_method_is_elided(ir, fid, env) {
             continue;
         }
         let f = &ir.functions[fid as usize];
+        if !bodies_on_interface
+            && default_impls::emit_annotation_carrier(
+                ir,
+                fid,
+                c.fq_name,
+                facade,
+                &mut default_impls,
+                env,
+                opts,
+            )
+        {
+            continue;
+        }
         // A STATIC member of an interface is not a default method: a lambda synthetic
         // (`f$lambda$0`) is a private static helper that stays where it is. Moving it to the holder
         // prepended a receiver its body never reads, and published it abstract on the interface —
@@ -2942,12 +2949,7 @@ fn emit_interface_class(
                 && !ir.inline_only_fns.contains(&fid)
             {
                 jd_bridge_fids.push(fid);
-                let di = default_impls.get_or_insert_with(|| {
-                    let mut w =
-                        new_writer(&format!("{fq_name}$DefaultImpls"), "java/lang/Object", opts);
-                    w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
-                    w
-                });
+                let di = default_impls::holder(&mut default_impls, &fq_name, opts);
                 interface_compatibility::emit_own_member_forward(
                     ir,
                     c,
@@ -2962,12 +2964,7 @@ fn emit_interface_class(
             if f.body.is_some() && !f.is_static {
                 // `disable`: the body moves to the holder as a receiver-first static, and the
                 // interface keeps only the abstract declaration emitted below.
-                let di = default_impls.get_or_insert_with(|| {
-                    let mut w =
-                        new_writer(&format!("{fq_name}$DefaultImpls"), "java/lang/Object", opts);
-                    w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
-                    w
-                });
+                let di = default_impls::holder(&mut default_impls, &fq_name, opts);
                 emit_holder_method(ir, fid, c.fq_name, &fq_name, facade, di, env);
             }
             // A private member has NO interface-side declaration under `disable`: kotlinc writes
@@ -3004,12 +3001,7 @@ fn emit_interface_class(
             // would publish a holder class the build says does not exist — a downstream compilation
             // resolving against it links to a class kotlinc would never have produced.
             if emits_default_impls {
-                let di = default_impls.get_or_insert_with(|| {
-                    let mut w =
-                        new_writer(&format!("{fq_name}$DefaultImpls"), "java/lang/Object", opts);
-                    w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
-                    w
-                });
+                let di = default_impls::holder(&mut default_impls, &fq_name, opts);
                 if enable_compat {
                     // The interface owns the real default application; the holder's copy is a
                     // thin synthetic forward to it (kotlinc's `enable` shape).
@@ -4073,8 +4065,7 @@ fn emit_placed_method(
     // still have a source-visible generic contract.
     // kotlinc maps a lambda literal's body without generics, and a compiler-synthesized lambda's;
     // an anonymous function's keeps them.
-    let synthesized = ir.lambda_class_provenance(fid)
-        == Some(krusty::ir::type_reflection::LambdaClassProvenance::SynthesizedAdapter);
+    let synthesized = crate::lambda_classes::erases_adapter_signature(ir, fid);
     let method_sig = (!ir.serialization_cache_methods.contains(&fid)
         && !ir.is_lambda_literal(fid)
         && !synthesized)

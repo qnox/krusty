@@ -64,6 +64,10 @@ impl Checker<'_> {
             site,
         );
         let postpone_lambda_body = expected.is_none()
+            && signature
+                .params
+                .iter()
+                .any(|&input| !Self::type_is_lexically_fixed(scope, input))
             && self.postponed_argument_depth != 0
             && matches!(self.file.expr(*argument), Expr::Lambda { .. })
             && matches!(expected_callable.kind(), TyKind::Fun(shape) if self.contextual_lambda_accepts_function_shape(*argument, shape));

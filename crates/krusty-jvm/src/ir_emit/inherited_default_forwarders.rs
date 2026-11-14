@@ -10,6 +10,8 @@
 use super::*;
 use krusty::types::TyKind;
 
+mod declaration_annotations;
+
 /// How an implementing class's compatibility forwarder reaches the inherited interface body.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ForwarderDispatch {
@@ -53,6 +55,7 @@ struct InheritedForwarder {
     value_class_ret: Option<crate::bridge_adaptations::ValueClassAdapter>,
     /// The forwarder's generic `Signature`, when its substituted types have generic structure.
     signature: Option<ForwarderSignature>,
+    annotations: krusty::ir::DeclarationAnnotations,
     target_owner: String,
     target_descriptor: String,
     dispatch: ForwarderDispatch,
@@ -238,14 +241,17 @@ fn forwarders(ir: &IrFile, c: &krusty::ir::IrClass, env: &EmitEnv) -> Vec<Inheri
         .into_iter()
         .flatten()
         .filter_map(|default| {
-            forwarder(
+            let mut forwarder = forwarder(
                 ir,
                 &formatter,
                 &class_type_params,
                 default,
                 env.dependency_callables,
                 crate::declared_jvm_default::of_class(c, env.jvm_default),
-            )
+            )?;
+            forwarder.annotations =
+                declaration_annotations::selected(ir, default, &forwarder, env)?;
+            Some(forwarder)
         })
         .collect()
 }
@@ -352,6 +358,7 @@ fn forwarder(
         value_class_params,
         value_class_ret,
         signature,
+        annotations: Default::default(),
         target_owner,
         target_descriptor,
         dispatch,
@@ -550,7 +557,7 @@ fn write_forwarder(
         &desc,
         signature.as_deref(),
         &header_annotations,
-        &krusty::ir::DeclarationAnnotations::default(),
+        &forwarder.annotations,
         &reflected,
     );
     let argument_words = 1 + param_tys.iter().map(|t| slot_words(*t)).sum::<u16>();
@@ -594,6 +601,7 @@ fn write_forwarder(
         signature.as_deref(),
     );
     cw.set_method_parameters(name, &desc, &reflected);
+    function_annotations::emit_declared(cw, &forwarder.annotations, name, &desc);
     let mut locals = vec![("this".to_string(), format!("L{};", c.fq_name()), 0)];
     let mut slot = 1u16;
     for (parameter, parameter_name) in param_tys.iter().zip(forwarder.local_variable_names(site)) {
