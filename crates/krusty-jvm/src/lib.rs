@@ -50,6 +50,7 @@ mod inner_classes;
 mod internal_names;
 pub mod ir_emit;
 mod lambda_classes;
+mod lambda_offsets;
 mod lifted_declaration_ownership;
 mod lifted_names;
 mod line_numbers;
