@@ -819,3 +819,111 @@ esac
         assert_eq!(fs::read_to_string(&calls).unwrap(), expected);
     }
 }
+
+#[test]
+fn the_push_token_reaches_git_without_being_persisted() {
+    let remote = Remote::new("token");
+    let first = remote.push_commit("first");
+    let token = [("RELEASE_TOKEN", "release-token-for-tests")];
+
+    let acquire = remote.publisher(&first, &["acquire"], &token);
+    assert_eq!(acquire.status.code(), Some(0), "{acquire:?}");
+    assert_eq!(acquire.stderr, b"");
+    let lock = text(acquire.stdout).trim().to_owned();
+    let bind = remote.publisher(&first, &["bind-tag", "v1"], &token);
+    assert_eq!(bind.status.code(), Some(0), "{bind:?}");
+    assert_eq!(bind.stderr, b"");
+    let latest = remote.publisher(&first, &["acquire-latest"], &token);
+    assert_eq!(latest.status.code(), Some(0), "{latest:?}");
+    assert_eq!(latest.stderr, b"");
+    let latest_lock = text(latest.stdout).trim().to_owned();
+    let record = remote.publisher(&first, &["record"], &token);
+    assert_eq!(record.status.code(), Some(0), "{record:?}");
+    assert_eq!(record.stderr, b"");
+    let release_latest = remote.publisher(&first, &["release-latest", &latest_lock], &token);
+    assert_eq!(release_latest.status.code(), Some(0), "{release_latest:?}");
+    assert_eq!(release_latest.stderr, b"");
+    let release = remote.publisher(&first, &["release", &lock], &token);
+    assert_eq!(release.status.code(), Some(0), "{release:?}");
+    assert_eq!(release.stderr, b"");
+    assert_eq!(
+        remote.remote_ref(RELEASED_REF).as_deref(),
+        Some(first.as_str())
+    );
+    assert_eq!(
+        remote.remote_ref("refs/tags/v1").as_deref(),
+        Some(first.as_str())
+    );
+    assert_eq!(remote.remote_ref(&publication_lock(&first)), None);
+    assert_eq!(remote.remote_ref(LATEST_LOCK_REF), None);
+
+    let config = fs::read_to_string(remote.root.join("work/.git/config")).expect("read config");
+    assert!(
+        !config.contains("extraheader") && !config.contains("release-token-for-tests"),
+        "the token lives only in the publisher's environment: {config}"
+    );
+}
+
+#[test]
+fn release_job_holds_its_credentials_in_the_release_environment() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workflow = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
+    let job = release_job(&workflow);
+    assert!(
+        !workflow[..workflow.len() - job.len()].contains("secrets."),
+        "only the release job, which runs in the release environment, reads secrets"
+    );
+    assert!(
+        job.lines().any(|line| line == "    environment: release"),
+        "the publishing secrets are deployable to master only"
+    );
+
+    let steps = steps(job);
+    assert!(
+        steps[0].starts_with("uses: actions/checkout@")
+            && steps[0].contains("\n          persist-credentials: false\n"),
+        "the checkout leaves no token in .git/config for later steps: {}",
+        steps[0]
+    );
+    fn heading(step: &str) -> &str {
+        step.lines().next().unwrap().trim()
+    }
+    let with_token: Vec<&str> = steps
+        .iter()
+        .filter(|step| step.contains("github.token"))
+        .map(|step| heading(step))
+        .collect();
+    assert_eq!(
+        with_token,
+        [
+            "name: take the commit publication lock",
+            "name: publish",
+            "name: refresh the Bazel registry",
+            "name: take the latest promotion lock",
+            "name: record the promoted commit",
+            "name: promote the GitHub release",
+            "name: drop the latest promotion lock",
+            "name: drop the release lock",
+        ],
+        "only the steps that push or dispatch get the token"
+    );
+    for step in &steps {
+        let pushes = step.contains("release-publisher.sh acquire")
+            || step.contains("release-publisher.sh bind-tag")
+            || step.contains("release-publisher.sh record")
+            || step.contains("release-publisher.sh release");
+        let fetches = step.contains("release-publisher.sh check");
+        if pushes {
+            assert!(
+                step.contains("RELEASE_TOKEN: ${{ github.token }}"),
+                "a publisher push authenticates only through RELEASE_TOKEN: {step}"
+            );
+        }
+        if fetches && !pushes {
+            assert!(
+                !step.contains("github.token"),
+                "a publisher read of the public repository gets no token: {step}"
+            );
+        }
+    }
+}
