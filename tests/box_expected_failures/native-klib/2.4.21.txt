@@ -237,7 +237,6 @@ closures/closureOnTopLevel1.kt
 closures/closureOnTopLevel2.kt
 closures/crossinlineLocalDeclaration.kt
 closures/kt47894_inlineFunWithObjectWithNothing.kt
-collectionLiterals/array.kt
 collectionLiterals/primitiveArrays.kt
 collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
@@ -1255,7 +1254,6 @@ inlineClasses/contextParameterPropertyDeserialization.kt
 inlineClasses/crossinlineWithInlineClassInParameter.kt
 inlineClasses/crossinlineWithInlineClassInParameterGeneric.kt
 inlineClasses/crossinlineWithInlineClassInParameterGeneric2.kt
-inlineClasses/customIterator.kt
 inlineClasses/defaultParameterValues/kt26554.kt
 inlineClasses/dnnInValue.kt
 inlineClasses/funInterface/argumentResult.kt
@@ -1641,7 +1639,6 @@ ranges/contains/generated/uintDownTo.kt
 ranges/contains/generated/uintUntil.kt
 ranges/contains/generated/ulongDownTo.kt
 ranges/contains/generated/ulongUntil.kt
-ranges/contains/inArray.kt
 ranges/contains/inCharSequence.kt
 ranges/contains/inComparableRange.kt
 ranges/contains/inCustomObjectRange.kt
@@ -1654,7 +1651,6 @@ ranges/contains/inOptimizableFloatRange.kt
 ranges/contains/inOptimizableIntRange.kt
 ranges/contains/inOptimizableLongRange.kt
 ranges/contains/inPrimitiveProgression.kt
-ranges/contains/inRangeLiteralComposition.kt
 ranges/contains/inRangeWithCustomContains.kt
 ranges/contains/inRangeWithImplicitReceiver.kt
 ranges/contains/inRangeWithNonmatchingArguments.kt
@@ -2509,7 +2505,6 @@ unsignedTypes/kt47716.kt
 unsignedTypes/unsignedRangeIterator.kt
 unsignedTypes/varargsOfUnsignedTypes.kt
 vararg/kt37715.kt
-vararg/referenceToContainsFromVarargParameter.kt
 vararg/spreadCopiesArray.kt
 vararg/useSuspendFunResultAsVararg.kt
 vararg/varargInTailrec.kt

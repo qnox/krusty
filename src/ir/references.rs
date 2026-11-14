@@ -165,6 +165,11 @@ pub struct IrCallableReference {
     pub target: IrCallableReferenceTarget,
     pub adapter: FunId,
     pub captures: Vec<ExprId>,
+    /// How many of the leading `captures` are values the reference site bound for the declaration's
+    /// leading context parameters (`CallableReferencesToContextual`). They are ordinary captures
+    /// to every consumer; a target whose runtime keeps Kotlin's `boundContextArguments` stores
+    /// them there instead of in a field of its own.
+    pub bound_contexts: u32,
     pub bound_receiver: Option<ExprId>,
     pub function_type: Ty,
     pub declaration_parameters: Box<[Ty]>,
@@ -231,6 +236,11 @@ pub struct FuncRef {
     /// `FunInterfaceConstructorReference` and is constructed with that interface's `Class`.
     pub fun_interface_constructor: bool,
     pub bound: bool,
+    /// Leading adapter parameters bound at the reference site for the declaration's context
+    /// parameters. They reach the carrier as one `Object[]` the runtime base class keeps as
+    /// `boundContextArguments`, which both reflection and equality read. The carrier's own `invoke`
+    /// reads them back from it instead of from fields of its own.
+    pub bound_contexts: u32,
     /// Leading adapter parameters stored as subclass fields rather than in the runtime callable
     /// reference's semantic receiver slot. This is fixed by JVM realization from the common
     /// reference's explicit ordinary captures; emission never infers it from capture cardinality.
