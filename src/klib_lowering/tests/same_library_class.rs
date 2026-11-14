@@ -1382,7 +1382,7 @@ fn reached_constructor_class_facts_keep_field_and_init_edges_separate_from_body_
         .emitted_body_callables(&constructor, crate::klib_lowering::EMITTED_CALL_FORMS);
     let facts = demo
         .bodies
-        .constructor_member_callables(&constructor, crate::klib_lowering::EMITTED_CALL_FORMS);
+        .constructor_initializer_callables(&constructor, crate::klib_lowering::EMITTED_CALL_FORMS);
     assert_eq!(
         facts.into_iter().collect::<crate::fx_hash::HashSet<_>>(),
         [field_key.clone(), init_key].into_iter().collect()
@@ -1394,7 +1394,7 @@ fn reached_constructor_class_facts_keep_field_and_init_edges_separate_from_body_
     );
     assert!(demo
         .bodies
-        .constructor_member_callables(&field_key, crate::klib_lowering::EMITTED_CALL_FORMS)
+        .constructor_initializer_callables(&field_key, crate::klib_lowering::EMITTED_CALL_FORMS)
         .is_empty());
     let foreign = crate::libraries::KlibDependencyCallable {
         module: "foreign".into(),
@@ -1402,6 +1402,6 @@ fn reached_constructor_class_facts_keep_field_and_init_edges_separate_from_body_
     };
     assert!(demo
         .bodies
-        .constructor_member_callables(&foreign, crate::klib_lowering::EMITTED_CALL_FORMS)
+        .constructor_initializer_callables(&foreign, crate::klib_lowering::EMITTED_CALL_FORMS)
         .is_empty());
 }

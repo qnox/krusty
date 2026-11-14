@@ -265,20 +265,41 @@ impl KlibIrArena {
                     for accessor in property.getter.iter().chain(property.setter.iter()) {
                         push_function(*accessor, &mut roots);
                     }
-                    if let Some(field) = &property.backing_field {
-                        roots.extend(field.initializer);
-                    }
                 }
-                KlibIrMember::Field(field) => roots.extend(field.initializer),
-                KlibIrMember::AnonymousInitializer { statements, .. } => {
-                    push_statement_expressions(self, statements, &mut roots);
-                }
-                KlibIrMember::Class(_)
+                KlibIrMember::Field(_)
+                | KlibIrMember::AnonymousInitializer { .. }
+                | KlibIrMember::Class(_)
                 | KlibIrMember::EnumEntry(_)
                 | KlibIrMember::TypeAlias(_) => {}
             }
+            self.push_member_initializer_roots(member, &mut roots);
         }
         roots
+    }
+
+    /// Only the field and anonymous-initializer expressions run by class initialization. Ordinary
+    /// member/accessor bodies and their defaults are separate callable declarations.
+    pub(crate) fn class_initializer_roots(&self, class: &KlibIrClass) -> Vec<KlibIrExprId> {
+        let mut roots = Vec::new();
+        for member in &class.members {
+            self.push_member_initializer_roots(member, &mut roots);
+        }
+        roots
+    }
+
+    fn push_member_initializer_roots(&self, member: &KlibIrMember, roots: &mut Vec<KlibIrExprId>) {
+        match member {
+            KlibIrMember::Property(property) => {
+                if let Some(field) = &property.backing_field {
+                    roots.extend(field.initializer);
+                }
+            }
+            KlibIrMember::Field(field) => roots.extend(field.initializer),
+            KlibIrMember::AnonymousInitializer { statements, .. } => {
+                push_statement_expressions(self, statements, roots);
+            }
+            _ => {}
+        }
     }
 }
 

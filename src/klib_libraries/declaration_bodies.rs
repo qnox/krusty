@@ -773,9 +773,9 @@ impl KlibDeclarationBodies {
 
     /// Declaration facts of the class whose exact reached constructor is `identity`. Field and
     /// anonymous initializers live beside that constructor, not in its function body. Reuse the
-    /// same structural member walker as local-class preparation; this inventory freezes facts
+    /// same structural initializer walker as local-class preparation; this inventory freezes facts
     /// only and must not replace the initialization plan's executable root selection.
-    pub(crate) fn constructor_member_callables(
+    pub(crate) fn constructor_initializer_callables(
         &self,
         identity: &KlibDependencyCallable,
         forms: crate::metadata::klib_ir::tree::EmittedCallForms,
@@ -792,7 +792,7 @@ impl KlibDeclarationBodies {
             return Vec::new();
         };
         arena
-            .emitted_callable_symbols_from(arena.class_member_roots(class), forms)
+            .emitted_callable_symbols_from(arena.class_initializer_roots(class), forms)
             .into_iter()
             .filter_map(|symbol| declaration_signature(&symbol.signature))
             .filter_map(
