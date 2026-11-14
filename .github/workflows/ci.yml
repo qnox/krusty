@@ -84,7 +84,9 @@ jobs:
             } >> "$EVIDENCE/compiler-unit-memory.log" 2>&1
           }
           snapshot
-          just compiler-unit-tests > "$EVIDENCE/compiler-unit-build.log" 2>&1 &
+          printf '%s\n' 'coverage' > "$EVIDENCE/compiler-unit-profile.txt"
+          cargo test --profile coverage --no-run -p krusty --lib --message-format=json \
+            > "$EVIDENCE/compiler-unit-build.log" 2>&1 &
           build_pid=$!
           (
             while kill -0 "$build_pid" 2>/dev/null; do
@@ -103,8 +105,11 @@ jobs:
           cat "$EVIDENCE/compiler-unit-build.log"
           printf '%s\n' "$status" > "$EVIDENCE/compiler-unit-build.exit-code"
           if [ "$status" -ne 0 ]; then exit "$status"; fi
-          bin="$(tail -n 1 "$EVIDENCE/compiler-unit-build.log")"
-          if [ ! -x "$bin" ]; then bin="$(just compiler-unit-tests)"; fi
+          bin="$(jq -Rr 'fromjson? | select(.reason == "compiler-artifact" and .profile.test == true and .target.name == "krusty" and .executable != null) | .executable' "$EVIDENCE/compiler-unit-build.log" | tail -n 1)"
+          if [ ! -x "$bin" ]; then
+            echo "could not locate krusty library test binary in cargo artifact stream" >&2
+            exit 1
+          fi
           cp "$bin" compiler-unit-tests
           printf '%s\n' "$bin" > "$EVIDENCE/compiler-unit-binary.txt"
       - name: Probe Native KLIB stamps at language levels 2.0 through 2.7
