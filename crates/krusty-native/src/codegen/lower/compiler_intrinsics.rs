@@ -165,6 +165,31 @@ impl BodyLowering<'_, '_, '_> {
                 // The iteration protocol's own member: the member path realizes it through the
                 // receiver's runtime descriptor, exactly as it realizes a source call of it.
                 DependencyOperation::PrimitiveIteratorNext => return None,
+                DependencyOperation::ResultFailureException => {
+                    let (Some(failure), [], None) = (receiver, args, extension_receiver_parameter)
+                    else {
+                        return Some(Err("a malformed `Result.Failure.exception` getter".into()));
+                    };
+                    if ret != Ty::obj("kotlin/Throwable") {
+                        return Some(Err(
+                            "a `Result.Failure.exception` getter with a non-Throwable result"
+                                .into(),
+                        ));
+                    }
+                    let value = match self.reference(failure) {
+                        Ok(value) if !self.terminated => value,
+                        Ok(_) => return Some(Ok(None)),
+                        Err(error) => return Some(Err(error)),
+                    };
+                    if let Err(error) = self.null_check(value) {
+                        return Some(Err(error));
+                    }
+                    self.runtime_call("kt_result_failure_exception", &[any()], any(), &[value])
+                        .and_then(|value| match value {
+                            Some(value) => self.convert(value, Some(any()), ret),
+                            None => Ok(None),
+                        })
+                }
             });
         }
         if intrinsic == Some(krusty::backend::BackendCompilerIntrinsic::ReinterpretBits) {
