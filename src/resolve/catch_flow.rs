@@ -32,8 +32,8 @@ impl TryBodyWrites {
 
 impl Checker<'_> {
     /// The exact read type a completed assignment leaves behind, when Kotlin flow permits that
-    /// narrowing. A missing result means the binding must be read through its declared storage
-    /// type instead.
+    /// narrowing: a capturing closure that writes the binding must store only values of that type.
+    /// A missing result means the binding must be read through its declared storage type instead.
     pub(super) fn assignment_narrowing(
         &self,
         name: &str,
@@ -48,7 +48,7 @@ impl Checker<'_> {
         };
         (flow != storage
             && !matches!(actual, Ty::Error | Ty::Nothing)
-            && !self.closure_reassigned_before(name, site)
+            && self.closure_writes_conform(name, site, flow)
             && self.receiver_is_assignable(flow, storage))
         .then_some(flow)
     }
