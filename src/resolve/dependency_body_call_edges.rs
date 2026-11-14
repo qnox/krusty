@@ -59,6 +59,10 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         semantic_types.extend(selected.params().iter().copied());
         semantic_types.push(selected.ret());
         semantic_types.extend(selected.type_parameters().iter().copied());
+        #[cfg(test)]
+        if realization.kind == crate::libraries::ExternalCallableKind::Constructor {
+            facts.reached_constructors.insert(identity.clone());
+        }
         if realization.kind != crate::libraries::ExternalCallableKind::Member {
             continue;
         }

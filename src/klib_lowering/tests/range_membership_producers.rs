@@ -115,6 +115,13 @@ fn char_range_body_graph_freezes_its_exact_initializer_conversion_edge() {
         )
         .expect("the selected range graph has complete checked declarations");
         assert!(
+            facts
+                .reached_constructors
+                .contains(constructor.klib_body_callable().unwrap().identity()),
+            "the exact progression constructor is not reached from {:?}",
+            selected.identity()
+        );
+        assert!(
             facts.member_edges.contains_key(conversion.identity()),
             "the exact Int.toChar initializer edge is missing from {:?}",
             selected.identity()

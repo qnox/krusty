@@ -17,6 +17,10 @@ pub(crate) struct CheckedKlibDependencyFacts {
     pub(crate) member_edges:
         HashMap<crate::libraries::KlibDependencyCallable, super::CheckedMemberCallEdge>,
     pub(crate) type_hierarchy: Option<CheckedKlibTypeFacts>,
+    /// Owning tests observe exact constructor reachability without reimplementing the graph walk.
+    #[cfg(test)]
+    pub(crate) reached_constructors:
+        crate::fx_hash::HashSet<crate::libraries::KlibDependencyCallable>,
 }
 
 /// Provider-normalized class facts reachable from the serialized types a checker selected.
