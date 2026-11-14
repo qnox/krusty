@@ -16,6 +16,7 @@ import kotlin.properties.Delegates
 fun delegatesFromMiddle(): Any = Delegates
 fun resultCompanionFromMiddle(): Any = Result.Companion
 fun stateFromMiddle(): Any = State
+fun unitFromMiddle(): Any = Unit
 fun <T> keep(value: T): T = value
 
 // MODULE: main(lib, middle)
@@ -23,6 +24,7 @@ fun <T> keep(value: T): T = value
 val earlyDelegates: Any = delegatesFromMiddle()
 val earlyResult: Any = resultCompanionFromMiddle()
 val earlyState: Any = stateFromMiddle()
+val earlyUnit: Any = unitFromMiddle()
 
 // FILE: Main.kt
 import kotlin.properties.Delegates
@@ -32,6 +34,7 @@ fun box(): String {
     if (earlyDelegates !== Delegates || earlyResult !== Result.Companion) return "object identity"
     if (keep(delegatesFromMiddle()) !== earlyDelegates) return "generic delegates"
     if (keep(resultCompanionFromMiddle()) !== earlyResult) return "generic result"
+    if (earlyUnit !== Unit || keep(unitFromMiddle()) !== earlyUnit) return "unit identity"
     if (earlyDelegates === earlyResult || earlyDelegates === Unit || earlyResult === Int.Companion)
         return "distinct objects"
     if (earlyDelegates !is Delegates || earlyResult !is Result.Companion) return "object type"

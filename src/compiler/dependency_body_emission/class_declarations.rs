@@ -181,6 +181,64 @@ mod tests {
     }
 
     #[test]
+    fn materialized_object_class_keys_do_not_publish_private_constructors() {
+        use crate::symbol_source::SymbolSource;
+        let Some(root) = std::env::var_os("KRUSTY_KOTLIN_NATIVE").filter(|value| !value.is_empty())
+        else {
+            assert!(
+                std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none(),
+                "KRUSTY_REQUIRE_KLIB requires KRUSTY_KOTLIN_NATIVE"
+            );
+            return;
+        };
+        let libraries = crate::klib_libraries::KlibLibraries::open(&[
+            crate::klib_libraries::KlibLibraryInput::platform_stdlib(
+                std::path::PathBuf::from(root).join("klib/common/stdlib"),
+                crate::klib_libraries::KlibStdlibSemantics::Native,
+            ),
+        ])
+        .unwrap();
+        let objects = ["kotlin/properties/Delegates", "kotlin/Result$Companion"].map(|name| {
+            libraries
+                .klib_body_class_contract(crate::types::type_name(name))
+                .unwrap()
+        });
+        let facts = crate::klib_lowering::KlibCalleeFacts::default()
+            .with_objects(&objects, [])
+            .unwrap();
+        let mut unit = DependencyBodyUnit::default();
+        unit.lower_objects_with_declarations(
+            &objects,
+            libraries.declaration_bodies(),
+            &facts,
+            crate::klib_libraries::KlibIntrinsicFacts::empty(),
+            &Default::default(),
+            &libraries,
+        )
+        .unwrap();
+        let mut exports = DependencyExportSignatures::default();
+        record(&unit, &objects, &libraries, &mut exports).unwrap();
+        for object in &objects {
+            let class = unit.ir().class_id_by_name(object.classifier).unwrap();
+            assert_eq!(exports.classifier(class), Some(&object.identity()));
+        }
+        assert_eq!(exports.object_declarations().len(), 2);
+        assert!(exports.constructor_declarations().is_empty());
+        assert!(exports.constructors().is_empty());
+        assert!(exports.callables().next().is_none());
+        assert!(exports.instance_entries().is_empty());
+        let mut foreign = objects[0].clone();
+        foreign.module = "another-producer".into();
+        let mut rejected = DependencyExportSignatures::default();
+        assert_eq!(
+            record(&unit, &[foreign], &libraries, &mut rejected),
+            Err("a materialized object disagrees with its authenticated initializer")
+        );
+        assert!(rejected.object_declarations().is_empty());
+        assert!(rejected.callables().next().is_none());
+    }
+
+    #[test]
     fn several_authenticated_constructors_publish_one_class_declaration() {
         let mut exports = DependencyExportSignatures::default();
         let mut identities = crate::fx_hash::HashMap::default();
