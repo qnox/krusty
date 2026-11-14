@@ -442,8 +442,10 @@ mod tests {
             callables.callables[&identity].builtin_implementations,
             expected
         );
-        let mut conflicting_graph = crate::fir::CheckedKlibDependencyFacts::default();
-        conflicting_graph.builtin_implementations = selected;
+        let conflicting_graph = crate::fir::CheckedKlibDependencyFacts {
+            builtin_implementations: selected,
+            ..Default::default()
+        };
         assert_eq!(
             callables.record_klib_dependency_facts(conflicting_graph),
             Err(identity)
