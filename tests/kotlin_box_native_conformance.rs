@@ -348,7 +348,7 @@ fn native_class_properties_export_their_checked_accessors() {
 
 #[test]
 fn native_runtime_and_library_delegates_receive_dynamic_property_names() {
-    let source = include_str!("fixtures/native/delegatePropertyNameCapability.kt");
+    let source = include_str!("box_regressions/delegatePropertyNameCapability.kt");
     let stem = "delegatePropertyNameCapability";
     super::box_reference_classes::checked_box(source, stem)
         .expect("pinned kotlinc must run the complete property-name module graph");
