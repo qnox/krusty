@@ -58,6 +58,7 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySize
         || operation == krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
+        || operation == krusty::backend::BackendCompilerIntrinsic::StringCompare
         || matches!(
             operation,
             krusty::backend::BackendCompilerIntrinsic::ClassName(_)
@@ -196,7 +197,14 @@ pub(super) fn lower_file(
         runtime
             .callable_references
             .begin_file(module_name, ir, dependency_exports)?;
-    let call_targets = callable_registry.file_calls(ir, callables, module_facts, module)?;
+    let call_targets = callable_registry.file_calls(
+        ir,
+        callables,
+        module_facts,
+        classifiers,
+        laid_out_classes,
+        module,
+    )?;
     let inert_singleton_bindings = krusty::backend::inert_staged_singleton_bindings(
         ir,
         |expression| {
@@ -246,7 +254,7 @@ pub(super) fn lower_file(
             &mut classes,
             &mut super::interface_members::Destination {
                 module: &mut *module,
-                objects: &mut runtime.objects,
+                runtime: &mut *runtime,
                 callables: &mut *callable_registry,
             },
         )?;
@@ -267,6 +275,7 @@ pub(super) fn lower_file(
         functions: &indices,
         globals: &globals,
         classes: classes.as_ref(),
+        laid_out_classes,
         calls: &call_targets,
         callables,
         inert_singleton_bindings: &inert_singleton_bindings,
@@ -368,10 +377,6 @@ pub(super) fn lower_file(
             module,
             runtime,
         )?;
-        for (name, record) in classes.records(module, ir, &indices, &signatures, dependency_exports)
-        {
-            laid_out_classes.insert(name, record);
-        }
     } else if !member_property_definitions.is_empty() {
         return Err("a member property definition without its class layout".to_string());
     }
@@ -402,6 +407,18 @@ pub(super) fn lower_file(
     } else {
         None
     };
+    if let Some(classes) = &classes {
+        for (name, record) in classes.records(
+            module,
+            ir,
+            &indices,
+            &signatures,
+            dependency_exports,
+            callables,
+        )? {
+            laid_out_classes.insert(name, record);
+        }
+    }
     callable_registry.publish(ir, dependency_exports, &indices)?;
     let mut reach = reach.into_inner();
     if let Some(classes) = &classes {
@@ -475,6 +492,7 @@ struct FileContext<'a> {
     /// The global holding each of the file's top-level properties.
     globals: &'a [u32],
     classes: Option<&'a FileClasses>,
+    laid_out_classes: &'a LaidOutClasses,
     calls: &'a FileCallTargets,
     /// Provider facts frozen for exactly the dependency identities this file calls.
     callables: &'a CheckedBackendCallables,
@@ -733,6 +751,7 @@ struct Body<'a> {
     /// The global holding each of the file's top-level properties.
     globals: &'a [u32],
     classes: Option<&'a FileClasses>,
+    laid_out_classes: &'a LaidOutClasses,
     /// Exact source/dependency call targets registered before this body is emitted.
     calls: &'a FileCallTargets,
     /// Provider facts frozen for exactly the dependency identities this file calls.
@@ -807,6 +826,7 @@ impl<'a> Body<'a> {
             functions: context.functions,
             globals: context.globals,
             classes: context.classes,
+            laid_out_classes: context.laid_out_classes,
             calls: context.calls,
             callables: context.callables,
             inert_singleton_bindings: context.inert_singleton_bindings,
@@ -1300,6 +1320,30 @@ impl<'a> Body<'a> {
                 args,
             } if let Callee::External {
                 target,
+                defaults,
+                extension_receiver_parameter: None,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    fact.compiler_operation()
+                        == Some(krusty::backend::BackendCompilerIntrinsic::StringCompare)
+                }) =>
+            {
+                let (Some(receiver), [other]) = (dispatch_receiver, args.as_slice()) else {
+                    return Err("an authenticated string comparison with malformed operands".into());
+                };
+                self.value(receiver, Ty::String)?;
+                self.value(*other, Ty::String)?;
+                let function = self.runtime.string_compare(self.module);
+                self.code.call(function);
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver,
+                args,
+            } if let Callee::External {
+                target,
                 ret,
                 defaults,
                 ..
@@ -1359,7 +1403,7 @@ impl<'a> Body<'a> {
                 op: op @ (IrTypeOp::Cast | IrTypeOp::CastNonNull),
                 arg,
                 type_operand,
-            } if self.class_of_type(type_operand).is_some()
+            } if self.class_structure(type_operand)?.is_some()
                 || self.interface_of_type(type_operand).is_some() =>
             {
                 self.cast(arg, type_operand, op == IrTypeOp::CastNonNull)?

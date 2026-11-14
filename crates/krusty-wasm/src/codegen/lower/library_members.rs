@@ -8,16 +8,20 @@
 //! come from what checked FIR froze on the selected declaration (`crate::builtin_members`).
 //! A member of `kotlin.Any` is realized through the receiver's own representation instead
 //! (`super::any_members`), and a member whose body a dependency publishes is called through the
-//! entry its module exports.
+//! entry its module exports. A published class dispatches through its producer-owned class table
+//! even when a concrete member also has an executable export, preserving virtual overrides.
 
-use krusty::backend::interface_identity::{member_identity, property_member_identity};
+use krusty::backend::interface_identity::property_member_identity;
 use krusty::backend::{BackendCallableFact, CheckedBackendCallables};
 use krusty::libraries::ExternalCallableKind;
 use krusty::libraries::MemberRealization;
 use krusty::types::{SemanticCallableOwner, TypeName};
 
+use super::super::super::objects::{slot_field, REFERENCE};
 use super::super::interface_members::{accessor_types, member_signature, Signature};
 use super::*;
+
+pub(in crate::codegen) mod published_class;
 
 /// How a library member is reached.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,7 +39,7 @@ pub(in crate::codegen) fn library_member_identity(
 ) -> Option<Vec<u8>> {
     let identity = fact.dependency_callable.as_ref()?;
     match role {
-        MemberRole::Function => Some(member_identity(identity)),
+        MemberRole::Function => fact.member_slot_identity(),
         MemberRole::Getter => property_member_identity(identity, false),
         MemberRole::Setter => property_member_identity(identity, true),
     }
@@ -132,6 +136,21 @@ impl Body<'_> {
             _ => return None,
         };
         let fact = self.callables.callable(target)?;
+        if let IrExpr::Call { callee, .. } = node {
+            if let Some(member) = published_class::select(
+                fact,
+                role,
+                callee,
+                self.classifiers,
+                self.laid_out_classes,
+                self.module,
+            ) {
+                let fact = fact.clone();
+                return Some(member.and_then(|member| {
+                    self.published_class_call(id, &fact, member, receiver, args)
+                }));
+            }
+        }
         let published = self.calls.external(target).is_some();
         if !dispatches_through_library_member(self.ir, self.callables, id, fact, published) {
             return None;
@@ -139,6 +158,46 @@ impl Body<'_> {
         // A function's identity names a function, and an accessor's a property.
         let identity = library_member_identity(fact, role)?;
         Some(self.library_member_call(id, fact.clone(), identity, role, receiver, args))
+    }
+
+    fn published_class_call(
+        &mut self,
+        id: u32,
+        fact: &BackendCallableFact,
+        member: published_class::PublishedMember,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        let params = fact.declared_params.as_deref().unwrap_or(&fact.params);
+        let result = fact.declared_ret.unwrap_or(fact.ret);
+        if params.len() != args.len() {
+            return Err("a class member call whose arguments do not match its parameters".into());
+        }
+        let this = self.local(REFERENCE);
+        self.value(receiver, objects::any())?;
+        self.code.local_tee(this);
+        for ((&argument, &applied), &parameter) in args
+            .iter()
+            .zip(member.applied_parameters.iter())
+            .zip(params)
+        {
+            self.value(argument, applied)?;
+            self.coerce_emitted_value(applied, parameter)?;
+        }
+        self.code.local_get(this);
+        self.table_of_object();
+        self.code
+            .ref_cast(false, HeapType::Concrete(member.table))
+            .struct_get(member.table, slot_field(member.slot))
+            .call_ref(member.signature);
+        self.coerce_emitted_value(result, member.applied_result)?;
+        match self.type_of(id)? {
+            Some(ty) => self.coerce_emitted_value(member.applied_result, ty),
+            None => {
+                self.code.unreachable();
+                Ok(())
+            }
+        }
     }
 
     fn library_member_call(

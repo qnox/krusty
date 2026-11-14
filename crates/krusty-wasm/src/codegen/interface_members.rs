@@ -28,12 +28,14 @@ use krusty::fir::{
 use krusty::ir::{ClassId, IrFile, IrLocalPropertyLayout};
 use krusty::types::Ty;
 
+use super::super::boxes::BoxForm;
 use super::super::encode::{Code, Function, Module, ValType};
 use super::super::interface_dispatch::{ClassRef, MemberRef};
-use super::super::objects::{ObjectRoot, REFERENCE};
+use super::super::objects::REFERENCE;
+use super::super::runtime::Runtime;
 use super::callable_registry::CallableRegistry;
 use super::classes::{accessor_function, field_carrier, Accessor, FileClasses};
-use super::laid_out_classes::DependencyImplementation;
+use super::laid_out_classes::{DependencyImplementation, SignatureAdapters};
 use super::lower::library_members::{
     library_member_identity, library_member_owner, library_member_signature, MemberRole,
 };
@@ -71,10 +73,10 @@ pub(super) struct Recording<'a> {
     pub(super) exports: &'a DependencyExportSignatures,
 }
 
-/// Where a recording writes: the module, the object model and the callables of the program.
+/// Where a recording writes: the module, the runtime and the callables of the program.
 pub(super) struct Destination<'a> {
     pub(super) module: &'a mut Module,
-    pub(super) objects: &'a mut ObjectRoot,
+    pub(super) runtime: &'a mut Runtime,
     pub(super) callables: &'a mut CallableRegistry,
 }
 
@@ -89,6 +91,8 @@ struct Carried {
     declared: Signature,
     /// The implementation's parameters and result.
     implemented: Signature,
+    /// Exact box operations selected while the implementation's logical types were live.
+    adapters: SignatureAdapters,
 }
 
 /// A member of a dependency's interface a class implements.
@@ -169,6 +173,7 @@ fn publish_identities(
         let signature = member_signature(&declaration.params, declaration.ret)?;
         let member = numbered(recording, program, number, signature)?;
         program
+            .runtime
             .objects
             .interfaces
             .publish(member_identity(identity), member)?;
@@ -216,7 +221,11 @@ fn publish_identities(
                 _ => continue,
             };
             let member = numbered(recording, program, number, signature)?;
-            program.objects.interfaces.publish(identity, member)?;
+            program
+                .runtime
+                .objects
+                .interfaces
+                .publish(identity, member)?;
         }
     }
     Ok(())
@@ -228,10 +237,12 @@ fn numbered(
     number: u32,
     signature: Signature,
 ) -> Result<MemberRef, Unsupported> {
-    program
-        .objects
-        .interfaces
-        .numbered(program.module, recording.module_name, number, signature)
+    program.runtime.objects.interfaces.numbered(
+        program.module,
+        recording.module_name,
+        number,
+        signature,
+    )
 }
 
 /// The recording of one class.
@@ -265,6 +276,7 @@ impl FileRecorder<'_, '_, '_> {
             )?;
             if let Some(record) = self.record {
                 self.program
+                    .runtime
                     .objects
                     .interfaces
                     .implement(record, member, function)?;
@@ -279,6 +291,7 @@ impl FileRecorder<'_, '_, '_> {
                         slot,
                         declared: signature.clone(),
                         implemented: signature.clone(),
+                        adapters: SignatureAdapters::none(signature.0.len()),
                     },
                     None => DependencyImplementation::Function(function),
                 };
@@ -438,7 +451,10 @@ impl FileRecorder<'_, '_, '_> {
     }
 
     /// `implementation`, which takes `implemented`, as a function taking `declared`: itself when
-    /// both are carried alike, else a thunk casting each operand the member carries more broadly.
+    /// both are carried alike, else a thunk adapting each operand the member carries as a
+    /// reference: a narrower reference is cast, and a scalar the implementation carries itself
+    /// (`next(): Int` implementing `Iterator<T>.next(): T`) is read out of its box, or boxed as the
+    /// result.
     fn thunk(
         &mut self,
         declared: (&[Ty], Ty),
@@ -446,30 +462,105 @@ impl FileRecorder<'_, '_, '_> {
         (function, carried): Placed,
     ) -> Result<Placed, Unsupported> {
         let signature = member_signature(declared.0, declared.1)?;
-        let implemented = member_signature(implemented.0, implemented.1)?;
-        self.thunk_signatures(signature, implemented, (function, carried))
+        let implementation_signature = member_signature(implemented.0, implemented.1)?;
+        let placed = (function, carried);
+        let adapters = self.adapters_for_placed(
+            declared,
+            implemented,
+            &signature,
+            &implementation_signature,
+            &placed,
+        )?;
+        self.emit_thunk(signature, implementation_signature, adapters, placed)
     }
 
-    /// Bridge already lowered signatures without retaining source-analysis type handles.
-    fn thunk_signatures(
+    /// Select exact boxes while the selected implementation's logical types are available.
+    /// Only their program-owned module identities are retained for later physical emission.
+    fn thunk_adapters(
+        &mut self,
+        declared: (&[Ty], Ty),
+        implemented: (&[Ty], Ty),
+        signature: &Signature,
+        implemented_signature: &Signature,
+    ) -> Result<SignatureAdapters, Unsupported> {
+        if declared.0.len() != implemented.0.len()
+            || signature.0.len() != implemented_signature.0.len()
+        {
+            return Err(self.declined("an interface member with incompatible adaptation arity"));
+        }
+        let mut adapters = SignatureAdapters::none(signature.0.len());
+        let class = self.recording.ir.classes[self.id as usize].fq_name();
+        let unadapted =
+            || format!("an interface member implemented with a value it cannot adapt (`{class}`)");
+        for local in 1..signature.0.len() {
+            let (wide, narrow) = (&signature.0[local], &implemented_signature.0[local]);
+            match (wide, narrow) {
+                (ValType::Ref { .. }, scalar) if !matches!(scalar, ValType::Ref { .. }) => {
+                    let ty = *implemented.0.get(local - 1).ok_or_else(unadapted)?;
+                    adapters.parameters[local] =
+                        Some(self.box_of(ty, *scalar)?.ok_or_else(unadapted)?.adapter());
+                }
+                (ValType::Ref { .. }, ValType::Ref { .. }) => {}
+                (left, right) if left == right => {}
+                _ => return Err(unadapted()),
+            }
+        }
+        match (&signature.1[..], &implemented_signature.1[..]) {
+            ([ValType::Ref { .. }], [ValType::Ref { .. }]) => {}
+            ([wide @ ValType::Ref { .. }], [scalar]) if *wide == REFERENCE => {
+                adapters.result = Some(
+                    self.box_of(implemented.1, *scalar)?
+                        .ok_or_else(unadapted)?
+                        .adapter(),
+                );
+            }
+            (declared, implementation) if declared == implementation => {}
+            _ => return Err(unadapted()),
+        }
+        Ok(adapters)
+    }
+
+    /// Preserve the direct-slot path; otherwise authenticate the physical function before
+    /// selecting boxes from the current logical signature.
+    fn adapters_for_placed(
+        &mut self,
+        declared: (&[Ty], Ty),
+        implemented: (&[Ty], Ty),
+        signature: &Signature,
+        implemented_signature: &Signature,
+        placed: &Placed,
+    ) -> Result<SignatureAdapters, Unsupported> {
+        if signature == &placed.1 {
+            return Ok(SignatureAdapters::none(signature.0.len()));
+        }
+        if implemented_signature != &placed.1 {
+            return Err(self.declined("an interface member implemented with other carriers"));
+        }
+        self.thunk_adapters(declared, implemented, signature, implemented_signature)
+    }
+
+    /// Emit one bridge from frozen physical signatures and exact program-owned box operations.
+    fn emit_thunk(
         &mut self,
         signature: Signature,
         implemented: Signature,
+        adapters: SignatureAdapters,
         (function, carried): Placed,
     ) -> Result<Placed, Unsupported> {
         if signature == carried {
             return Ok((function, carried));
         }
-        let unboxed = || {
-            format!(
-                "an interface member implemented with a value it would have to box (`{}`)",
-                self.recording.ir.classes[self.id as usize].fq_name()
-            )
-        };
-        if signature.0.len() != carried.0.len() || implemented != carried {
-            return Err(unboxed());
+        let class = self.recording.ir.classes[self.id as usize].fq_name();
+        let unadapted =
+            || format!("an interface member implemented with a value it cannot adapt (`{class}`)");
+        if signature.0.len() != carried.0.len()
+            || implemented != carried
+            || adapters.parameters.len() != signature.0.len()
+        {
+            return Err(unadapted());
         }
         let mut code = Code::default();
+        let mut locals = Vec::new();
         for (local, (wide, narrow)) in signature.0.iter().zip(&carried.0).enumerate() {
             code.local_get(local as u32);
             if wide == narrow {
@@ -479,29 +570,43 @@ impl FileRecorder<'_, '_, '_> {
                 (ValType::Ref { .. }, ValType::Ref { nullable, heap }) => {
                     code.ref_cast(*nullable, *heap);
                 }
-                _ => return Err(unboxed()),
+                (ValType::Ref { .. }, _) => {
+                    adapters.parameters[local]
+                        .ok_or_else(unadapted)?
+                        .emit_unbox(&mut code);
+                }
+                _ => return Err(unadapted()),
             }
         }
-        // A result is widened by subtyping alone: every reference this form carries is an `eq`.
+        code.call(function);
+        // A reference result is widened by subtyping alone: every reference this form carries is
+        // an `eq`.
         match (&signature.1[..], &carried.1[..]) {
             ([wide], [narrow]) if wide == narrow => {}
             ([wide], [ValType::Ref { .. }]) if *wide == REFERENCE => {}
+            ([wide], [scalar]) if *wide == REFERENCE => {
+                let form = adapters.result.ok_or_else(unadapted)?;
+                let scratch = form.needs_scratch().then(|| {
+                    locals.push(*scalar);
+                    signature.0.len() as u32
+                });
+                form.emit_box(&mut code, scratch);
+            }
             ([], []) => {}
-            _ => return Err(unboxed()),
+            _ => return Err(unadapted()),
         }
-        code.call(function);
         let module = &mut *self.program.module;
         let ty = module.func_type(signature.0.clone(), signature.1.clone());
         let thunk = module.declare();
-        module.define(
-            thunk,
-            Function {
-                ty,
-                locals: Vec::new(),
-                code,
-            },
-        );
+        module.define(thunk, Function { ty, locals, code });
         Ok((thunk, signature))
+    }
+
+    /// The box of `ty`'s values, which are carried as `value`.
+    fn box_of(&mut self, ty: Ty, value: ValType) -> Result<Option<BoxForm>, Unsupported> {
+        self.program
+            .runtime
+            .box_form(self.program.module, ty.non_null(), value)
     }
 
     /// Record, by identity, what the class implements each member of a dependency's interface
@@ -526,6 +631,9 @@ impl FileRecorder<'_, '_, '_> {
                 let Some(member) = self.dependency_member(target, MemberRole::Function) else {
                     continue;
                 };
+                if self.implements(member.member) {
+                    continue;
+                }
                 let implemented = match self.function_edge_implementation(owner, edge, numbered) {
                     Ok(carried) => self.implement_carried(member.member, carried),
                     Err(reason) => Err(reason),
@@ -586,6 +694,7 @@ impl FileRecorder<'_, '_, '_> {
                     slot,
                     declared,
                     implemented,
+                    adapters,
                 } => {
                     let placed = self.slot_function(slot)?;
                     self.implement_carried(
@@ -595,6 +704,7 @@ impl FileRecorder<'_, '_, '_> {
                             slot: Some(slot),
                             declared,
                             implemented,
+                            adapters,
                         },
                     )?;
                 }
@@ -649,14 +759,22 @@ impl FileRecorder<'_, '_, '_> {
                 (self.slot_function(slot)?, Some(slot))
             }
         };
+        let declared = member_signature(&edge.declared_parameters, edge.declared_result)?;
+        let implemented =
+            member_signature(&edge.implementation_parameters, edge.implementation_result)?;
+        let adapters = self.adapters_for_placed(
+            (&edge.declared_parameters, edge.declared_result),
+            (&edge.implementation_parameters, edge.implementation_result),
+            &declared,
+            &implemented,
+            &placed,
+        )?;
         Ok(Carried {
             placed,
             slot,
-            declared: member_signature(&edge.declared_parameters, edge.declared_result)?,
-            implemented: member_signature(
-                &edge.implementation_parameters,
-                edge.implementation_result,
-            )?,
+            declared,
+            implemented,
+            adapters,
         })
     }
 
@@ -687,6 +805,9 @@ impl FileRecorder<'_, '_, '_> {
                 let Some(member) = self.dependency_member(target, role) else {
                     continue;
                 };
+                if self.implements(member.member) {
+                    continue;
+                }
                 let implemented =
                     match self.property_edge_implementation(owner, edge, setter, numbered) {
                         Ok(carried) => self.implement_carried(member.member, carried),
@@ -731,18 +852,25 @@ impl FileRecorder<'_, '_, '_> {
                 }
             }
         };
+        let declared_types = accessor_types(edge.declared_type, setter);
+        let implemented_types = accessor_types(edge.implementation_type, setter);
+        let declared = member_signature(&declared_types.0, declared_types.1)?;
+        let implemented = member_signature(&implemented_types.0, implemented_types.1)?;
+        let placed = placed
+            .ok_or_else(|| self.declined("a dependency's interface property with no slot"))?;
+        let adapters = self.adapters_for_placed(
+            (&declared_types.0, declared_types.1),
+            (&implemented_types.0, implemented_types.1),
+            &declared,
+            &implemented,
+            &placed,
+        )?;
         Ok(Carried {
-            placed: placed
-                .ok_or_else(|| self.declined("a dependency's interface property with no slot"))?,
+            placed,
             slot,
-            declared: {
-                let (params, result) = accessor_types(edge.declared_type, setter);
-                member_signature(&params, result)?
-            },
-            implemented: {
-                let (params, result) = accessor_types(edge.implementation_type, setter);
-                member_signature(&params, result)?
-            },
+            declared,
+            implemented,
+            adapters,
         })
     }
 
@@ -756,7 +884,7 @@ impl FileRecorder<'_, '_, '_> {
     ) -> Option<DependencyMember> {
         let fact = self.recording.callables.callable(target)?;
         let identity = library_member_identity(fact, role)?;
-        let interfaces = &mut self.program.objects.interfaces;
+        let interfaces = &mut self.program.runtime.objects.interfaces;
         if let Some(member) = interfaces.identified(&identity) {
             return Some(DependencyMember {
                 member,
@@ -785,6 +913,7 @@ impl FileRecorder<'_, '_, '_> {
         match implemented {
             Err(reason) if member.library => {
                 self.program
+                    .runtime
                     .objects
                     .interfaces
                     .unimplementable(member.member, reason);
@@ -798,9 +927,13 @@ impl FileRecorder<'_, '_, '_> {
     /// it, or the module's own numbering did.
     fn implements(&self, member: MemberRef) -> bool {
         self.implemented.iter().any(|(known, _)| *known == member)
-            || self
-                .record
-                .is_some_and(|record| self.program.objects.interfaces.implements(record, member))
+            || self.record.is_some_and(|record| {
+                self.program
+                    .runtime
+                    .objects
+                    .interfaces
+                    .implements(record, member)
+            })
     }
 
     /// Record what `carried` implements `member` with, unless a more derived class of the chain
@@ -813,18 +946,23 @@ impl FileRecorder<'_, '_, '_> {
             slot,
             declared,
             implemented,
+            adapters,
         }: Carried,
     ) -> Result<(), Unsupported> {
         if self.implements(member) {
             return Ok(());
         }
-        let (function, signature) =
-            self.thunk_signatures(declared.clone(), implemented.clone(), placed)?;
+        let (function, signature) = self.emit_thunk(
+            declared.clone(),
+            implemented.clone(),
+            adapters.clone(),
+            placed,
+        )?;
         let ty = self
             .program
             .module
             .func_type(signature.0.clone(), signature.1.clone());
-        if ty != self.program.objects.interfaces.ty(member) {
+        if ty != self.program.runtime.objects.interfaces.ty(member) {
             return Err(
                 self.declined("a dependency's interface member implemented with other carriers")
             );
@@ -834,6 +972,7 @@ impl FileRecorder<'_, '_, '_> {
                 slot,
                 declared,
                 implemented,
+                adapters,
             },
             None => DependencyImplementation::Function(function),
         };
@@ -854,6 +993,7 @@ impl FileRecorder<'_, '_, '_> {
         match self.record {
             Some(record) => self
                 .program
+                .runtime
                 .objects
                 .interfaces
                 .implement(record, member, function),
@@ -879,6 +1019,7 @@ impl FileRecorder<'_, '_, '_> {
             .map(|applied| applied.classifier);
         for interface in module.chain(hierarchy).chain(class.interfaces.iter()) {
             self.program
+                .runtime
                 .objects
                 .interfaces
                 .instance_of(record, interface);

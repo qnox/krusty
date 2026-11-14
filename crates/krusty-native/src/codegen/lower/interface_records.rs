@@ -207,6 +207,11 @@ impl FileLowering<'_> {
                 DependencyImplementation::Function(function) => {
                     Some(self.import_object_function(&function)?)
                 }
+                DependencyImplementation::Bridge {
+                    slot,
+                    declared,
+                    implemented,
+                } => Some(self.dependency_bridge(slot, &declared, &implemented)?),
             }
             .ok_or_else(|| {
                 declined!(
@@ -246,6 +251,30 @@ impl FileLowering<'_> {
             .define_data(id, &description)
             .map_err(|error| format!("defining `kt_itfdep_{base}` ({error})"))?;
         Ok(())
+    }
+
+    /// A bridge standing for the member a dependency's interface declares as `declared`, which
+    /// the override at `slot` implements as `implemented`; see
+    /// [`DependencyImplementation::Bridge`].
+    fn dependency_bridge(
+        &mut self,
+        slot: u32,
+        declared: &(Vec<Ty>, Ty),
+        implemented: &(Vec<Ty>, Ty),
+    ) -> Result<FuncId, Unsupported> {
+        let mut params = vec![any()];
+        params.extend(declared.0.iter().copied());
+        let name = format!("kt_dependency_bridge_{}", self.dependency_bridges);
+        self.dependency_bridges += 1;
+        let id = self.declare_local_function(&name, &params, declared.1)?;
+        self.define_converting_bridge(
+            (&declared.0, declared.1),
+            (&implemented.0, implemented.1),
+            super::object_entries::BridgeTarget::Slot(slot),
+            &format!("bridge to slot {slot}"),
+            id,
+        )?;
+        Ok(id)
     }
 
     /// How an instance of `class` implements each member of another source module's interface,
@@ -308,14 +337,6 @@ impl FileLowering<'_> {
                             model::representation(self.values, *declared)
                                 == model::representation(self.values, *implementation)
                         });
-                if !carried_alike {
-                    return Err(declined!(
-                        "a member of a dependency's interface implemented with other carriers \
-                         (`{}.{}`)",
-                        self.kotlin_name(owner),
-                        edge.name
-                    ));
-                }
                 let implementation = match edge.implementation {
                     ResolvedFunctionOverrideTarget::Module(callable) => Some(callable),
                     // A dependency class's member a class here inherits: the record of the
@@ -329,8 +350,9 @@ impl FileLowering<'_> {
                 };
                 // An interface of this module implementing the member stands at its own number
                 // of the type's interface table; a class's implementation, at its slot.
+                // A bridge dispatches through a slot, so only a class's implementation is bridged.
                 if let Some(number) = implementation
-                    .filter(|_| edge.implementation_function.is_none())
+                    .filter(|_| carried_alike && edge.implementation_function.is_none())
                     .and_then(|callable| {
                         self.slot_plan
                             .interfaces()
@@ -364,7 +386,19 @@ impl FileLowering<'_> {
                         edge.name
                     )
                 })?;
-                implemented.push((identity, DependencyImplementation::Slot(slot)));
+                let implementation = if carried_alike {
+                    DependencyImplementation::Slot(slot)
+                } else {
+                    DependencyImplementation::Bridge {
+                        slot,
+                        declared: (edge.declared_parameters.clone(), edge.declared_result),
+                        implemented: (
+                            edge.implementation_parameters.clone(),
+                            edge.implementation_result,
+                        ),
+                    }
+                };
+                implemented.push((identity, implementation));
             }
             self.record_dependency_property_implementations(
                 owner,

@@ -500,6 +500,19 @@ fn native_generic_class_members_instantiate_their_declared_dependency_exports() 
     );
 }
 
+#[test]
+fn native_data_class_signed_array_members_are_lowered_from_the_library_klib() {
+    let source = include_str!("box_regressions/multimodule/dataClassSignedArrayMembers.kt");
+    let stem = "dataClassSignedArrayMembers";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must run the complete signed-array KLIB module graph");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "Native must lower generated signed-array data-class members from the producer KLIB"
+    );
+}
+
 /// Run a portable one-file program on the KLIB Native lane, after the pinned JVM compiler ran it
 /// to `OK`, which is the answer the Native program must give.
 fn run_native_portable_box(source: &str, stem: &str) -> Outcome {
@@ -723,5 +736,24 @@ fn native_virtual_explicit_getter_exports_run_the_override() {
         run_native_abi_case(source, stem),
         Outcome::Pass,
         "an open explicit getter must run the override"
+    );
+}
+
+#[test]
+fn native_generic_elvis_preserves_its_non_null_type_parameter() {
+    let source = include_str!("box_regressions/multimodule/genericElvisNullProof.kt");
+    let stem = "genericElvisNullProof";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the whole generic Elvis module graph");
+    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
+}
+
+#[test]
+fn native_string_comparison_runs_the_whole_portable_program_through_klib() {
+    let source = include_str!("box_regressions/stringCompareTo.kt");
+    assert_eq!(
+        run_native_portable_box(source, "StringComparisonProgram"),
+        Outcome::Pass,
+        "the Native KLIB driver must run every comparison control"
     );
 }
