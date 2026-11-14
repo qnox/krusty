@@ -6,6 +6,8 @@ use krusty::libraries::{CompilerIntrinsic, ListStorageConstruction};
 pub(super) enum DependencyOperation {
     ListStorage(ListStorageConstruction),
     StringPlus,
+    /// `String.compareTo(String)`, the lexicographic order of the two strings' UTF-16 units.
+    StringCompare,
     /// A builtin scalar's own `hashCode()`, which Kotlin fixes per scalar type.
     PrimitiveHashCode,
     /// A primitive iterator's own `next()` (`IntIterator.next(): Int`). The runtime's iteration
@@ -19,11 +21,29 @@ pub(super) fn operation_plan(operation: CompilerIntrinsic) -> Option<DependencyO
             Some(DependencyOperation::ListStorage(plan))
         }
         CompilerIntrinsic::StringPlus => Some(DependencyOperation::StringPlus),
+        CompilerIntrinsic::StringCompare => Some(DependencyOperation::StringCompare),
         CompilerIntrinsic::PrimitiveHashCode => Some(DependencyOperation::PrimitiveHashCode),
         CompilerIntrinsic::PrimitiveIteratorNext => {
             Some(DependencyOperation::PrimitiveIteratorNext)
         }
         _ => None,
+    }
+}
+
+/// The operation of a selected dependency declaration. Platform providers can preserve an
+/// ordinary physical call while publishing its language role for targets with their own values.
+pub(super) fn declaration_operation(
+    intrinsic: Option<CompilerIntrinsic>,
+    role: Option<krusty::types::SemanticCallRole>,
+) -> Option<DependencyOperation> {
+    match intrinsic {
+        Some(intrinsic) => operation_plan(intrinsic),
+        None => match role {
+            Some(krusty::types::SemanticCallRole::KotlinStringCompareTo) => {
+                Some(DependencyOperation::StringCompare)
+            }
+            _ => None,
+        },
     }
 }
 
@@ -39,6 +59,29 @@ mod tests {
             assert!(CraneliftBackend::new(target)
                 .realizes_dependency_intrinsic(CompilerIntrinsic::StringPlus));
         }
+    }
+
+    #[test]
+    fn klib_string_compare_is_a_native_dependency_capability() {
+        for &target in NativeTarget::ALL {
+            assert!(CraneliftBackend::new(target)
+                .realizes_dependency_intrinsic(CompilerIntrinsic::StringCompare));
+        }
+    }
+
+    #[test]
+    fn a_platform_string_comparison_role_selects_the_same_native_operation() {
+        use krusty::types::SemanticCallRole;
+        assert_eq!(
+            declaration_operation(None, Some(SemanticCallRole::KotlinStringCompareTo)),
+            operation_plan(CompilerIntrinsic::StringCompare)
+        );
+        assert_eq!(
+            declaration_operation(None, Some(SemanticCallRole::KotlinComparableCompareTo)),
+            None,
+            "an arbitrary Comparable implementation is not string comparison"
+        );
+        assert_eq!(declaration_operation(None, None), None);
     }
 
     #[test]

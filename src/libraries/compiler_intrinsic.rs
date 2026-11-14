@@ -84,6 +84,10 @@ pub enum CompilerIntrinsic {
     /// `String.get(Int): Char`, the index operator on a string.
     StringGet,
     StringPlus,
+    /// `String.compareTo(String): Int`, the lexicographic order of two strings by UTF-16 code
+    /// units. A target that lays out strings itself orders them itself, as it reads their length
+    /// and code units.
+    StringCompare,
     NullableAnyToString,
     /// Exact builtin numeric/character conversion declaration selected from Kotlin builtins.
     /// The source and target types remain call-site semantic facts on FIR; this marker only states
