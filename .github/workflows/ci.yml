@@ -40,7 +40,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence
-          source=b50427b8be676a73c4e4edbf490835d54b980ae0
+          source=66b8dbe1c6f57159473aba397ea068fc48132e08
           git diff --exit-code "$source" HEAD -- . ':!.github/workflows/ci.yml'
           git rev-parse "$source" > evidence/source-commit.txt
           sha256sum \
@@ -50,6 +50,7 @@ jobs:
             tests/box_regressions/suspendLambdaRetainedInlineObjectCaptures.kt \
             tests/box_regressions/resultCompanionIdentity.kt \
             src/klib_lowering/tests/accessor_calls.rs \
+            crates/krusty-jvm/src/external_calls.rs \
             > evidence/fixtures.sha256
       - name: check every target and test API
         timeout-minutes: 25
