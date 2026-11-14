@@ -47,7 +47,7 @@ jobs:
           set -euo pipefail
           mkdir -p evidence
           workflow_commit=$(git rev-parse HEAD)
-          source_pin=7432b84417865af8441831d07af6af3c3ab8bc63
+          source_pin=dcdf7517bc0341f0e8d0a2461537da12543b8d8b
           git fetch origin "$source_pin"
           git checkout --detach "$source_pin"
           test "$(git rev-parse HEAD)" = "$source_pin"
