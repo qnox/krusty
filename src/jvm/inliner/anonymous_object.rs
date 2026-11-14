@@ -175,10 +175,13 @@ pub struct SamWrapperCopy {
     pub bytes: Vec<u8>,
 }
 
+/// The field an object stores its enclosing instance in (`AsmUtil.CAPTURED_THIS_FIELD`).
+const CAPTURED_THIS_FIELD: &str = "this$0";
+
 /// `isCapturedFieldName`: a field an object's constructor fills from a captured value.
 pub(super) fn is_captured_field_name(name: &str) -> bool {
     name.starts_with('$') && !name.starts_with("$$") && name != "$assertionsDisabled"
-        || name == "this$0"
+        || name == CAPTURED_THIS_FIELD
         || name == "receiver$0"
 }
 
@@ -712,7 +715,9 @@ fn remap_declaration(
 /// (`extractParametersMappingAndPatchConstructor`). A captured value's field is named after it with
 /// `$inlined` added, numbered when that name is taken (`getNewFieldName`, `addUniqueField`): every
 /// field the original declares is taken first, as kotlinc's `visitField` records each one it
-/// copies before the constructor is patched.
+/// copies before the constructor is patched. The call site's enclosing instance, `this$0`, keeps
+/// its name unnumbered, and lambdas that all capture it share that one field: kotlinc renames the
+/// original's own `this$0` to `this$0$i` instead, which the port does not do yet.
 fn plan_lambdas<'a>(
     plan: &mut constructor::Constructor,
     regeneration: &Regeneration<'a>,
@@ -742,6 +747,16 @@ fn plan_lambdas<'a>(
             let name = name.as_deref().ok_or(RegenerationError::Unsupported(
                 "a lambda capturing a value the port does not name",
             ))?;
+            if name == CAPTURED_THIS_FIELD {
+                // The call site's own enclosing instance keeps its name and takes no number.
+                if taken.contains_key(CAPTURED_THIS_FIELD) {
+                    return Err(RegenerationError::Unsupported(
+                        "an object declaring `this$0` that a passed lambda also captures",
+                    ));
+                }
+                captured.push((name.to_string(), desc));
+                continue;
+            }
             let base = format!("{name}$inlined");
             let seen = taken.entry(base.clone()).or_default();
             let unique = match *seen {

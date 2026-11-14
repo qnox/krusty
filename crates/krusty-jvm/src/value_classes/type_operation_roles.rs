@@ -136,7 +136,9 @@ pub(super) fn record_primitive_array_type_operations(ir: &mut IrFile, under: &Un
     }
     for (id, expr) in ir.exprs.iter().enumerate() {
         let IrExpr::TypeOp {
-            op, type_operand, ..
+            op,
+            arg,
+            type_operand,
         } = expr
         else {
             continue;
@@ -151,6 +153,15 @@ pub(super) fn record_primitive_array_type_operations(ir: &mut IrFile, under: &Un
         let role = match op {
             IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf => IrValueClassTypeRole::Box,
             _ if receivers.contains(&id) => IrValueClassTypeRole::Box,
+            // A checked cast from an erased reference still denotes the nominal box. The
+            // consumer may unbox it separately; its carrier array is never that reference.
+            _ if ir
+                .physical_type(*arg)
+                .or_else(|| ir.logical_type(*arg))
+                .is_some_and(|source| source.is_erased_top()) =>
+            {
+                IrValueClassTypeRole::Box
+            }
             _ => IrValueClassTypeRole::Carrier,
         };
         ir.value_class_type_operations.insert(
@@ -230,6 +241,49 @@ mod tests {
         assert_eq!(
             krusty::jvm::names::type_descriptor(Ty::obj_name(array)),
             krusty::jvm::names::type_descriptor(carrier)
+        );
+    }
+
+    #[test]
+    fn an_erased_reference_cast_keeps_the_nominal_array_box() {
+        let array = krusty::types::type_name("kotlin/UByteArray");
+        let carrier = Ty::obj("kotlin/ByteArray");
+        let under = [(array, carrier)].into_iter().collect();
+        let mut ir = IrFile::default();
+        let boxed = ir.add_expr(IrExpr::GetValue(0));
+        ir.set_physical_type(boxed, Ty::obj("kotlin/Any"));
+        let storage = ir.add_expr(IrExpr::GetValue(1));
+        ir.set_physical_type(storage, carrier);
+        let logical_box = ir.add_expr(IrExpr::GetValue(2));
+        ir.set_logical_type(logical_box, Ty::obj("kotlin/Any"));
+        let physical_storage = ir.add_expr(IrExpr::GetValue(3));
+        ir.set_physical_type(physical_storage, carrier);
+        ir.set_logical_type(physical_storage, Ty::obj("kotlin/Any"));
+        let mut operations = Vec::new();
+        for arg in [boxed, logical_box, storage, physical_storage] {
+            for op in [
+                IrTypeOp::Cast,
+                IrTypeOp::CastNonNull,
+                IrTypeOp::SafeCast,
+                IrTypeOp::ImplicitCoercion,
+            ] {
+                operations.push(ir.add_expr(IrExpr::TypeOp {
+                    op,
+                    arg,
+                    type_operand: Ty::obj_name(array),
+                }));
+            }
+        }
+        record_primitive_array_type_operations(&mut ir, &under);
+        assert_eq!(
+            operations
+                .into_iter()
+                .map(|id| ir.value_class_type_operations[&id].role)
+                .collect::<Vec<_>>(),
+            [IrValueClassTypeRole::Box; 8]
+                .into_iter()
+                .chain([IrValueClassTypeRole::Carrier; 8])
+                .collect::<Vec<_>>()
         );
     }
 

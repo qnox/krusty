@@ -35,6 +35,7 @@ use super::{carrier, Body, FileContext, Unsupported, STRING};
 pub(super) const STRING_HEAP: HeapType = HeapType::Concrete(1);
 
 mod override_bridges;
+mod root_any;
 mod unrealized_members;
 
 pub(super) use unrealized_members::holds_unprinted_values;
@@ -76,6 +77,9 @@ impl Body<'_> {
         class: ClassId,
         index: u32,
     ) -> Result<(), Unsupported> {
+        if let Some(read) = self.materialized_value_storage_read(receiver, class, index) {
+            return read;
+        }
         let structure = self.object(receiver, class)?;
         let field = self.file_classes()?.field(class, index);
         self.code.struct_get(structure, field);
@@ -120,10 +124,10 @@ impl Body<'_> {
         args: &[u32],
         selected: Option<&[Ty]>,
     ) -> Result<(), Unsupported> {
+        if let Some(constructed) = self.scalar_value_construction(internal, args, selected) {
+            return constructed;
+        }
         let Some(class) = self.classes.and(self.ir.class_id_by_name(internal)) else {
-            if let Some(constructed) = self.scalar_value_construction(internal, args, selected) {
-                return constructed;
-            }
             // Boundary conversion for a diagnostic.
             return Err(format!(
                 "construction of the library class `{}`",
@@ -1233,6 +1237,13 @@ impl Body<'_> {
                     self.runtime
                         .exception_class(self.module, self.classifiers, name)?;
                 self.code.ref_test(nullable, HeapType::Concrete(structure));
+            }
+            // Each array classifier is an object type of its own, so the test is its type's:
+            // `UIntArray` is not an `IntArray`, though one wraps the other's storage.
+            _ if tested.is_array() => {
+                let (form, _) = self.array_form(tested)?;
+                self.code
+                    .ref_test(nullable, HeapType::Concrete(form.object));
             }
             _ => match (self.interface_of_type(tested), self.class_of_type(tested)) {
                 (Some(interface), _) => self.interface_test(interface, nullable),

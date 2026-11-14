@@ -1640,7 +1640,12 @@ fn stdlib_calls_reach_header_declared_callees() {
                     "it uses a `for` loop over a progression that is not a range literal)",
                     4,
                 ),
-                ("it uses a call of a member function)", 94),
+                (
+                    "it uses a `for` loop over an extension property that is not an array's \
+                     indices)",
+                    6,
+                ),
+                ("it uses a call of a member function)", 88),
                 ("it uses a call through a property accessor signature)", 40),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses an access of a generic property)", 2),
@@ -1662,7 +1667,12 @@ fn stdlib_calls_reach_header_declared_callees() {
                     "it uses a `for` loop over a progression that is not a range literal)",
                     4,
                 ),
-                ("it uses a call of a member function)", 86),
+                (
+                    "it uses a `for` loop over an extension property that is not an array's \
+                     indices)",
+                    6,
+                ),
+                ("it uses a call of a member function)", 80),
                 ("it uses a call through a property accessor signature)", 40),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses an access of a generic property)", 2),
@@ -1716,7 +1726,8 @@ fn stdlib_bodies_decline_inside_header_declared_callees() {
                 &[int],
             ),
             "the KLIB body of `kotlin.collections.contains` (it reaches the KLIB body of \
-             `kotlin.collections.indexOf` (it uses a call of a member function))",
+             `kotlin.collections.indexOf` (it uses a `for` loop over an extension property \
+             that is not an array's indices))",
         ),
     ];
     let declines = cases

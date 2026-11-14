@@ -75,7 +75,7 @@ pprof = { version = "0.15", features = ["flamegraph"] }
 # pointer once instead of once per stack (see `write_flamegraph`). Already in the tree via pprof.
 backtrace = "0.3"
 # The Native e2e tests read the objects the backend emits.
-object = { version = "0.40.0", default-features = false, features = ["read_core", "elf", "std"] }
+object = { version = "0.41.0", default-features = false, features = ["read_core", "elf", "std"] }
 
 [lib]
 name = "krusty"

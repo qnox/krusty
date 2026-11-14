@@ -14,7 +14,7 @@
 
 use super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
 use super::objects::{ObjectRoot, REFERENCE};
-use super::runtime::{ADD32, GE_U32, MUL32, SHR_U64, WRAP_I64, XOR64};
+use super::runtime::{ADD32, GE_S32, GE_U32, MUL32, SHR_U64, WRAP_I64, XOR64};
 use krusty::backend::class_tables::AnyMember;
 use krusty::types::{Ty, TyKind};
 
@@ -33,6 +33,17 @@ const CANONICAL_NAN_F64: i64 = 0x7ff8_0000_0000_0000;
 /// The hash of `kotlin.Unit`. `Unit` inherits `Any`'s identity hash, and any fixed number is an
 /// identity hash of a class with exactly one instance.
 pub(super) const UNIT_HASH: i32 = 0;
+
+/// The storage and locals of one array content-hash fold.
+pub(super) struct ArrayHash {
+    pub(super) storage: u32,
+    pub(super) read: super::array_objects::ElementRead,
+    pub(super) element: Ty,
+    pub(super) reference: bool,
+    pub(super) values: u32,
+    pub(super) index: u32,
+    pub(super) hash: u32,
+}
 
 /// Function indices of the hashing runtime.
 pub(super) struct Hashing {
@@ -117,6 +128,58 @@ impl Hashing {
             }
             _ => return false,
         }
+        true
+    }
+
+    /// Fold the elements of a non-null array storage local with Kotlin's content-hash rule.
+    pub(super) fn emit_array_content_hash(&self, code: &mut Code, array: ArrayHash) -> bool {
+        if !array.reference && !self.emit_scalar_hash(&mut Code::default(), array.element) {
+            return false;
+        }
+        code.i32_const(1)
+            .local_set(array.hash)
+            .i32_const(0)
+            .local_set(array.index)
+            .block(BlockType::Empty)
+            .loop_(BlockType::Empty)
+            .local_get(array.index)
+            .local_get(array.values)
+            .ref_as_non_null()
+            .array_len()
+            .op(GE_S32)
+            .br_if(1)
+            .i32_const(31)
+            .local_get(array.hash)
+            .op(MUL32)
+            .local_get(array.values)
+            .ref_as_non_null()
+            .local_get(array.index);
+        match array.read {
+            super::array_objects::ElementRead::Plain => {
+                code.array_get(array.storage);
+            }
+            super::array_objects::ElementRead::Signed => {
+                code.array_get_s(array.storage);
+            }
+            super::array_objects::ElementRead::Unsigned => {
+                code.array_get_u(array.storage);
+            }
+        }
+        if array.reference {
+            code.call(self.hash_code);
+        } else {
+            self.emit_scalar_hash(code, array.element);
+        }
+        code.op(ADD32)
+            .local_set(array.hash)
+            .local_get(array.index)
+            .i32_const(1)
+            .op(ADD32)
+            .local_set(array.index)
+            .br(0)
+            .end()
+            .end()
+            .local_get(array.hash);
         true
     }
 
