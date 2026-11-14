@@ -17,9 +17,7 @@ pub(super) fn record_checked(
     let mut implementations = ir.external_builtin_implementations.clone();
     for (&identity, checked) in callables.klib_builtin_implementations() {
         match implementations.entry(identity) {
-            std::collections::hash_map::Entry::Occupied(existing)
-                if existing.get() != checked =>
-            {
+            std::collections::hash_map::Entry::Occupied(existing) if existing.get() != checked => {
                 return Err(identity);
             }
             std::collections::hash_map::Entry::Occupied(_) => {}
