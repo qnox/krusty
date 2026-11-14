@@ -2,7 +2,7 @@
 //! FIR would build for the same inline function: an anonymous object, one constructor field per
 //! captured parameter, and members that read those fields.
 
-use super::super::*;
+use super::*;
 use crate::compilation_target::CompilationTarget;
 use crate::ir::IrExpr;
 use crate::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
