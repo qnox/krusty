@@ -299,14 +299,24 @@ fn a_value_block_in_a_statement_keeps_its_value_and_value_position_suspension_de
         stmts: vec![initializer],
         value: None,
     });
-    let expressions_before = ir.exprs.clone();
+    let expressions_before = ir
+        .exprs
+        .iter()
+        .map(|expression| format!("{expression:?}"))
+        .collect::<Vec<_>>();
     let suspend_set = ir.suspend_funs.iter().copied().collect::<HashSet<_>>();
 
     assert_eq!(
         split_at_suspensions(&mut ir, body, &suspend_set, &Slots, 10),
         Err(ReentryDecline::UnsupportedSuspension)
     );
-    assert_eq!(ir.exprs, expressions_before);
+    assert_eq!(
+        ir.exprs
+            .iter()
+            .map(|expression| format!("{expression:?}"))
+            .collect::<Vec<_>>(),
+        expressions_before
+    );
 }
 
 /// `if (c) { leaf() } else { 2 }`: the suspending branch is taken by its condition on label 0 or
