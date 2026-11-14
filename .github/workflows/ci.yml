@@ -8,11 +8,12 @@ jobs:
     runs-on:
       - self-hosted
       - rust-4c-8gb
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 0
+          ref: c360b8e8980a5f488637d4961ce3e4e6d636a5a1
+          fetch-depth: 1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: 1.100.0
@@ -40,15 +41,32 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence
-          source=870cf98e0
-          git diff --exit-code "$source" HEAD -- . ':!.github/workflows/ci.yml'
-          git rev-parse "$source" > evidence/source-commit.txt
+          source=c360b8e8980a5f488637d4961ce3e4e6d636a5a1
+          actual=$(git rev-parse HEAD)
+          test "$actual" = "$source"
+          git diff --exit-code "$source" HEAD -- .
+          printf '%s\n' "$actual" > evidence/source-commit.txt
+          printf '%s\n' "$GITHUB_SHA" > evidence/workflow-trigger-commit.txt
           sha256sum \
             tests/box_regressions/suspendStateMachineResumesLocalsAndFailure.kt \
             tests/box_regressions/multimodule/suspendStateMachineExternalCps.kt \
             tests/box_regressions/suspendLambdaRetainedInlineObject.kt \
             tests/box_regressions/suspendLambdaRetainedInlineObjectCaptures.kt \
+            tests/box_regressions/resultCompanionIdentity.kt \
+            tests/box_regressions/librarySuspendCoroutine.kt \
             > evidence/fixtures.sha256
+      - name: provision clang and preflight the changed Native runtime unit
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          if ! command -v clang >/dev/null; then sudo apt-get update -q && sudo apt-get install -y -q clang; fi
+          echo "KRUSTY_RUNTIME_CC=$(command -v clang)" >> "$GITHUB_ENV"
+          clang --version > evidence/clang-version.txt
+          clang -std=c11 -ffreestanding -nostdlib -fno-pic -fno-stack-protector \
+            -I crates/krusty-native/runtime -fsyntax-only \
+            crates/krusty-native/runtime/krusty_lang.c \
+            > evidence/native-runtime-c-preflight.log 2>&1
+          cat evidence/native-runtime-c-preflight.log
       - name: build the conformance executable once
         timeout-minutes: 40
         run: |
@@ -62,14 +80,12 @@ jobs:
       - name: provision exact JVM, Native, and Wasm inputs
         run: |
           set -euo pipefail
-          if ! command -v clang >/dev/null; then sudo apt-get update -q && sudo apt-get install -y -q clang; fi
-          echo "KRUSTY_RUNTIME_CC=$(command -v clang)" >> "$GITHUB_ENV"
           echo "KRUSTY_LANGUAGE_VERSION=2.4.21" >> "$GITHUB_ENV"
           echo "KRUSTY_KOTLINC=$(just kotlinc 2.4.21)" >> "$GITHUB_ENV"
           echo "KRUSTY_KOTLIN_NATIVE=$(just kotlin-native 2.4.21)" >> "$GITHUB_ENV"
           echo "KRUSTY_KOTLIN_BOX_DIR=$(just box-corpus 2.4.21)" >> "$GITHUB_ENV"
       - name: run every whole coroutine fixture on all four targets
-        timeout-minutes: 35
+        timeout-minutes: 75
         env:
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
           KRUSTY_TEST_THREADS: '1'
@@ -80,6 +96,7 @@ jobs:
           set -uo pipefail
           set +e
           result=0
+          : > evidence/status.tsv
           run_case() {
             local lane="$1" fixture="$2" test_name="$3" key="$4" selector
             if [ "$lane" = JVM ]; then
@@ -87,7 +104,7 @@ jobs:
             else
               selector="KRUSTY_${lane}_BOX_ONLY"
             fi
-            env "$selector=$fixture" timeout 120 ./conformance-bin "$test_name" --nocapture > "evidence/$key.log" 2>&1
+            env "$selector=$fixture" timeout 180 ./conformance-bin "$test_name" --nocapture > "evidence/$key.log" 2>&1
             local status=$?
             printf '%s\t%s\n' "$key" "$status" | tee -a evidence/status.tsv
             cat "evidence/$key.log"
@@ -99,12 +116,15 @@ jobs:
             suspendStateMachineResumesLocalsAndFailure.kt \
             multimodule/suspendStateMachineExternalCps.kt \
             suspendLambdaRetainedInlineObject.kt \
-            suspendLambdaRetainedInlineObjectCaptures.kt; do
+            suspendLambdaRetainedInlineObjectCaptures.kt \
+            resultCompanionIdentity.kt \
+            librarySuspendCoroutine.kt; do
             run_case JVM "$fixture" kotlin_codegen_box_conformance "jvm-$(basename "$fixture" .kt)"
             run_case NATIVE "$fixture" kotlin_codegen_box_native_conformance "native-$(basename "$fixture" .kt)"
             run_case WASM_JS "$fixture" kotlin_codegen_box_wasm_js_conformance "wasm-js-$(basename "$fixture" .kt)"
             run_case WASM_WASI "$fixture" kotlin_codegen_box_wasm_wasi_conformance "wasm-wasi-$(basename "$fixture" .kt)"
           done
+          if [ "$(wc -l < evidence/status.tsv)" -ne 24 ]; then result=1; fi
           exit "$result"
       - name: upload complete evidence
         if: always()
