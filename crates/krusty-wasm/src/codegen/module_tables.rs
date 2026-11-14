@@ -43,13 +43,17 @@ impl ModuleTables {
     ) -> Self {
         let mut published = HashMap::default();
         for (name, class) in classes.iter() {
-            if !class.dependency {
+            if !class.is_dependency() {
                 continue;
             }
             let Some(identity) = classifiers
                 .classifier(name)
                 .and_then(|fact| fact.klib_identity.clone())
             else {
+                published.insert(
+                    name,
+                    Err("a dependency class without its selected declaration identity".into()),
+                );
                 continue;
             };
             match layouts.published_layout(&identity) {
@@ -65,7 +69,12 @@ impl ModuleTables {
                 Err(reason) => {
                     published.insert(name, Err(reason));
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    published.insert(
+                        name,
+                        Err("a dependency class without its producer table type".into()),
+                    );
+                }
             }
         }
         Self {

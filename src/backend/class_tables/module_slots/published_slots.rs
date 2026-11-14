@@ -29,7 +29,12 @@ pub(super) fn bind(
             Err(reason) => {
                 tables.insert(name, Err(reason));
             }
-            Ok(None) => {}
+            Ok(None) => {
+                tables.insert(
+                    name,
+                    Err("a dependency class without its published physical slot inventory".into()),
+                );
+            }
         }
     }
     tables

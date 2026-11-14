@@ -1,0 +1,76 @@
+//! Physical dispatch through a class already emitted by a dependency module.
+
+use krusty::backend::{BackendCallableFact, BackendClassifierSource};
+use krusty::libraries::{ExternalCallableKind, MemberRealization};
+
+use super::super::super::super::encode::{Module, ValType};
+use super::super::super::super::objects::REFERENCE;
+use super::super::super::laid_out_classes::LaidOutClasses;
+use super::super::{carrier, Unsupported};
+use super::{library_member_identity, library_member_owner, MemberRole};
+
+pub(in crate::codegen) struct PublishedMember {
+    pub(in crate::codegen) table: u32,
+    pub(in crate::codegen) slot: u32,
+    pub(in crate::codegen) signature: u32,
+}
+
+/// The same selected declaration controls both dependency prewalking and body emission.
+/// No executable export is required for an abstract declaration's physical table slot.
+pub(in crate::codegen) fn select(
+    fact: &BackendCallableFact,
+    role: MemberRole,
+    classifiers: &dyn BackendClassifierSource,
+    layouts: &LaidOutClasses,
+    module: &mut Module,
+) -> Option<Result<PublishedMember, Unsupported>> {
+    if role != MemberRole::Function
+        || !fact.builtin_implementations.is_empty()
+        || fact.kind != ExternalCallableKind::Member
+        || fact.member_realization != MemberRealization::Dispatch
+        || fact.compiler_operation().is_some()
+        || fact.owner_is_interface
+    {
+        return None;
+    }
+    let owner = library_member_owner(fact)?;
+    let identity = classifiers.classifier(owner)?.klib_identity.clone()?;
+    let layout = match layouts.published_layout(&identity) {
+        Ok(Some(layout)) => layout,
+        Ok(None) => {
+            return Some(Err(
+                "a selected class member without its producer layout".into()
+            ))
+        }
+        Err(reason) => return Some(Err(reason)),
+    };
+    Some((|| {
+        let identity = library_member_identity(fact, role)
+            .ok_or("a published class member without its exact declaration identity")?;
+        let slot = *layout
+            .declaration_slots
+            .get(&identity)
+            .ok_or("a selected class member without its producer slot binding")?;
+        let signature = layout
+            .slot_types
+            .get(slot as usize)
+            .copied()
+            .flatten()
+            .ok_or("a published class member slot without its physical signature")?;
+        let params = fact.declared_params.as_deref().unwrap_or(&fact.params);
+        let result = fact.declared_ret.unwrap_or(fact.ret);
+        let mut frame = vec![REFERENCE];
+        for &parameter in params {
+            frame.push(carrier(parameter)?.ok_or("a `Unit` class member parameter")?);
+        }
+        let results: Vec<ValType> = carrier(result)?.into_iter().collect();
+        if module.func_type(frame, results) != signature {
+            return Err("a selected class member frame differing from its producer slot".into());
+        }
+        Ok(PublishedMember {
+            table: layout.table_type,
+            slot,
+            signature,
+        })
+    })())
+}

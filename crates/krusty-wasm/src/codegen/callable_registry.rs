@@ -207,6 +207,8 @@ impl CallableRegistry {
         ir: &IrFile,
         callables: &CheckedBackendCallables,
         module_facts: &krusty::backend::BackendModuleFacts,
+        classifiers: &dyn krusty::backend::BackendClassifierSource,
+        classes: &super::laid_out_classes::LaidOutClasses,
         wasm: &mut Module,
     ) -> Result<FileCallTargets, Unsupported> {
         let mut targets = FileCallTargets {
@@ -348,6 +350,21 @@ impl CallableRegistry {
                         // `kotlin.Any`'s members, and the declarations overriding them, are
                         // realized through the receiver's own representation.
                         continue;
+                    }
+                    if dispatch_receiver.is_some()
+                        && extension_receiver_parameter.is_none()
+                        && defaults.is_empty()
+                    {
+                        if let Some(member) = super::lower::library_members::published_class::select(
+                            callable,
+                            super::lower::library_members::MemberRole::Function,
+                            classifiers,
+                            classes,
+                            wasm,
+                        ) {
+                            member?;
+                            continue;
+                        }
                     }
                     // A published exact export owns even a specialized generic call. Its actual
                     // operand roles are authenticated from checked substitutions during emission,
@@ -656,6 +673,16 @@ impl FileCallTargets {
 
 #[cfg(test)]
 mod tests {
+    struct NoClassifiers;
+    impl krusty::backend::BackendClassifierSource for NoClassifiers {
+        fn classifier(
+            &self,
+            _: krusty::types::TypeName,
+        ) -> Option<std::sync::Arc<krusty::backend::BackendClassifierFact>> {
+            None
+        }
+    }
+
     fn no_facts() -> krusty::backend::BackendModuleFacts {
         krusty::backend::BackendModuleFacts::from_classifiers([], [])
             .expect("an empty module has valid facts")
@@ -973,6 +1000,8 @@ mod tests {
                 &ir,
                 &CheckedBackendCallables::default(),
                 &no_facts(),
+                &NoClassifiers,
+                &super::super::laid_out_classes::LaidOutClasses::default(),
                 &mut wasm,
             )
             .expect("a dead inline template cannot affect emitted calls");
@@ -1010,6 +1039,8 @@ mod tests {
                 &ir,
                 &CheckedBackendCallables::default(),
                 &no_facts(),
+                &NoClassifiers,
+                &super::super::laid_out_classes::LaidOutClasses::default(),
                 &mut wasm,
             )
             .expect("a supported constructor initializer has registered calls");
@@ -1093,6 +1124,8 @@ mod tests {
                 &caller,
                 &CheckedBackendCallables::default(),
                 &no_facts(),
+                &NoClassifiers,
+                &super::super::laid_out_classes::LaidOutClasses::default(),
                 &mut wasm,
             )
             .expect("the inherited provider reserves its exact entry");
