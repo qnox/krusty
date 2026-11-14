@@ -55,9 +55,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             // the declaring module's defaults.
             return None;
         }
-        let Some(receiver) = receiver else {
-            return None;
-        };
+        let receiver = receiver?;
         if !fact.is_member_function()
             || fact.owner_is_interface
             || fact.source_receiver.is_some()
@@ -70,12 +68,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let Some(SemanticCallableOwner::Classifier(owner)) = fact.declaration_owner else {
             return None;
         };
-        let Some(classifier) = self.file.classifiers.classifier(owner) else {
-            return None;
-        };
-        let Some(identity) = classifier.klib_identity.as_ref() else {
-            return None;
-        };
+        let classifier = self.file.classifiers.classifier(owner)?;
+        let identity = classifier.klib_identity.as_ref()?;
         if fact
             .klib_body_class_contract
             .as_ref()
@@ -605,12 +599,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         if self.file.ir.class_id_by_name(owner).is_none() {
             return self.laid_out_direct_call(
-                owner,
-                kind,
-                declaration,
-                parameters.as_deref(),
-                result,
-                name,
+                SuperTarget {
+                    owner,
+                    name,
+                    kind,
+                    declaration,
+                    parameters,
+                    result,
+                },
                 receiver,
                 args,
             );
@@ -655,15 +651,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// record names.
     fn laid_out_direct_call(
         &mut self,
-        owner: TypeName,
-        kind: krusty::ir::IrSuperCallKind,
-        declaration: Option<krusty::fir::ResolvedFunctionOverrideTarget>,
-        selected_parameters: Option<&[Ty]>,
-        selected_result: Option<Ty>,
-        name: &str,
+        target: SuperTarget<'_>,
         receiver: u32,
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
+        let SuperTarget {
+            owner,
+            name,
+            kind,
+            declaration,
+            parameters,
+            result: selected_result,
+        } = target;
+        let selected_parameters = parameters.as_deref();
         let outside = || {
             declined!(
                 "a `super` call to a method of `{}`, which is not declared in this file",
@@ -673,7 +673,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if kind != krusty::ir::IrSuperCallKind::Function {
             return Err(outside());
         }
-        let record = self.file.laid_out.get(owner).ok_or_else(|| outside())?;
+        let record = self.file.laid_out.get(owner).ok_or_else(&outside)?;
         let (function, params, _) = match declaration {
             Some(krusty::fir::ResolvedFunctionOverrideTarget::Module(callable)) => {
                 record.methods.get(&callable).cloned().ok_or_else(|| {
