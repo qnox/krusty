@@ -789,6 +789,24 @@ mod tests {
     }
 
     #[test]
+    fn physical_function_type_is_available_only_after_definition() {
+        let mut module = Module::default();
+        let constructor = module.declare();
+        let signature = module.func_type(vec![ValType::I32], Vec::new());
+        assert_eq!(module.defined_function_type(constructor), None);
+        module.define(
+            constructor,
+            Function {
+                ty: signature,
+                locals: Vec::new(),
+                code: Code::default(),
+            },
+        );
+        assert_eq!(module.defined_function_type(constructor), Some(signature));
+        assert_eq!(module.defined_function_type(constructor + 1), None);
+    }
+
+    #[test]
     fn leb128_matches_the_specification_examples() {
         let mut out = Vec::new();
         uleb(&mut out, 624_485);
