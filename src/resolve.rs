@@ -34,10 +34,12 @@ use scope::{ContextReceiver, ContextReceiverKind, FlowExclusion, NarrowPath, Ns}
 
 mod abstract_obligations;
 mod argument_parameter_mapping;
+mod builtin_implementation;
 use argument_parameter_mapping::{
     call_argument_parameter_indices, call_argument_parameter_indices_result,
     named_whole_array_varargs,
 };
+pub(crate) use builtin_implementation::for_checked_external_members;
 mod call_site_publication;
 mod constructor_references;
 mod implicit_source_member_lambda;
@@ -59,6 +61,7 @@ mod anonymous_object_capture;
 mod backing_field_binding;
 mod boolean_implications;
 mod dependency_annotation_defaults;
+mod dependency_body_call_edges;
 use anonymous_object_capture::{
     record_anonymous_construction_captures, AnonymousCaptureCandidate,
     SelectedLocalCallableCaptures,
@@ -417,6 +420,7 @@ use context_sensitive_resolution::{expected_nested_classifier, parameterized_cla
 use delegated_properties::{
     select_delegate_operator, select_delegate_operator_return, DelegateConventionSite,
 };
+pub(crate) use dependency_body_call_edges::klib_dependency_member_call_edge;
 pub(crate) use dependency_platform::DependencyPlatform;
 pub(crate) use diagnostic_selection::unresolved_member_message;
 use extension_reference_selection::ExtensionReferenceChoice;
@@ -7271,6 +7275,9 @@ pub struct TypeInfo {
     /// [`ResolvedCall`] for the target kinds and the typed accessors ([`Self::resolved_member`],
     /// [`Self::resolved_top_level_call`], …).
     pub resolved_calls: HashMap<ExprId, ResolvedCall>,
+    /// Builtin override implementations selected for external members in this checked unit.
+    /// Common lowering carries these facts into IR; backend handoff does not reopen the hierarchy.
+    pub(crate) builtin_implementations: builtin_implementation::Facts,
     /// The exact semantic receiver selected for an unqualified member access through the implicit-receiver
     /// stack. This is deliberately separate from [`Self::resolved_calls`]: the selected callable says
     /// what to invoke, while this map says which runtime object supplies its dispatch/extension
@@ -31761,6 +31768,18 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     c.narrow_script_template_receivers();
     c.publish_member_declaring_receivers();
     let enhanced_values = c.enhanced_value_heads();
+    let builtin_implementations = match builtin_implementation::for_checked_unit(&c) {
+        Ok(implementations) => implementations,
+        Err(identity) => {
+            c.diags.error(
+                Span::new(0, 0),
+                format!(
+                    "internal error: selected external member {identity:?} has no semantic owner"
+                ),
+            );
+            HashMap::default()
+        }
+    };
     let Checker {
         expr_types,
         callable_reference_types,
@@ -32110,6 +32129,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         generated_class_names,
         narrowed_this_member,
         resolved_calls,
+        builtin_implementations,
         implicit_receiver_selections,
         resolved_source_calls,
         inspection_source_declarations: std::sync::Arc::default(),
