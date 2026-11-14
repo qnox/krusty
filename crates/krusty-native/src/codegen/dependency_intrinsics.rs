@@ -122,11 +122,11 @@ fn runtime_companion_symbol(
     {
         return None;
     }
-    let owner = super::intrinsics::DeclarationOwner::callable(
+    let owner = super::super::intrinsics::DeclarationOwner::callable(
         declaration.physical_owner,
         declaration.declaration_owner,
     );
-    super::intrinsics::runtime_companion_member(owner, declaration.name, declaration.params)
+    super::super::intrinsics::runtime_companion_member(owner, declaration.name, declaration.params)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
