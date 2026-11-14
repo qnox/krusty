@@ -359,7 +359,7 @@ fn klib_primitive_planning_and_body_lowering_use_the_same_authenticated_shape() 
             root,
             &bodies,
             &facts,
-            &crate::klib_libraries::KlibIntrinsicFacts::empty(),
+            crate::klib_libraries::KlibIntrinsicFacts::empty(),
             &externals,
         )
         .unwrap();
