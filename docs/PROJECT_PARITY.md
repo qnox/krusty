@@ -13,8 +13,8 @@ latency stay unmeasured unless the server path timed them; do not copy `elapsed_
 into either. Those counts belong in the pull request that measured them.
 
 Project revision: `b2c2e6113bcb04dfa18a73dcffca3de2532f1b6f`  
-Compiler binary SHA-256: `55d5c8ae11d1d137d09fbedbf96dc4ff87f5265b0085fdef646337f207279ac6`  
-Harness repository revision: `b7d5ea6062038d44ce27e979b4b4fa4d953664de` (dirty worktree)
+Compiler binary SHA-256: `d64b3f1d5e26387a7684a9a05487a6c4a615b5021dfc624388b84f3ad1c4edfd`  
+Harness repository revision: `7153a17edc3d18731c0fe3a5872630e281244c5b`
 
 ## How to read this
 
@@ -33,19 +33,19 @@ conservative heuristic, not an adjusted module pass rate.
 | modules scanned | 1059 |
 | modules with zero errors | 37 (3.5%) |
 | modules whose only errors name an unbuilt dependency | 2 |
-| Kotlin files checked | 15007 |
-| error diagnostics | 482265 |
-| … naming a declaration the scan could not see | 136898 |
-| … remaining, clustered below | 345367 |
-| distinct error clusters | 512 |
+| Kotlin files checked | 15049 |
+| error diagnostics | 447523 |
+| … naming a declaration the scan could not see | 137463 |
+| … remaining, clustered below | 310060 |
+| distinct error clusters | 541 |
 | modules that hit the input budget | 0 |
 | checked files that could not be read | 0 |
 | modules whose Java stub overlay failed | 0 |
 | modules that opened completely | 555 |
-| classpath entries missing from disk | 1946 |
+| classpath entries missing from disk | 1970 |
 | parse time | not measured |
 | type-information latency | not measured |
-| go-to-definition and find-references | definition 3369 µs, references 165539 µs (index lookup, not analysis) |
+| go-to-definition and find-references | definition 3903 µs, references 139758 µs (index lookup, not analysis) |
 
 Parse time and type-information latency are not measured: one module analysis is timed
 as a whole (`elapsed_ms`), and that figure is not copied into either of them. Go-to-definition
@@ -62,69 +62,68 @@ denominator above without contributing to any cluster.
 | status | modules |
 | --- | ---: |
 | `errors` | 920 |
-| `crash (exit status: 101)` | 101 |
+| `crash (exit status: 101)` | 102 |
 | `ok` | 37 |
-| `crash (signal: 6 (SIGABRT))` | 1 |
 
 ## Top error clusters
 
 | errors | modules | pattern | example |
 | ---: | ---: | --- | --- |
-| 254975 | 905 | unresolved reference '_'. | `DefaultGithubGistContentsCollector.kt:4` |
-| 24510 | 670 | unresolved reference '_' on receiver of type '_'. | `GHOpenInBrowserActionGroup.kt:39` |
-| 21503 | 718 | '_' overrides nothing. | `GHCopyLinkActionGroup.kt:15` |
-| 5722 | 560 | internal error: Pass-N class has no finalized constructor signatures | `GHOpenInBrowserFromAnnotationActionGroup.kt:19` |
-| 4693 | 431 | overload resolution ambiguity for extension property '_' | `GHGQLQueryLoader.kt:22` |
-| 4620 | 511 | cannot infer type for type parameter '_'. Specify it explicitly. | `DefaultGithubGistContentsCollector.kt:22` |
-| 3868 | 300 | Cannot access class '_'. Check your module classpath for missing or conflicting dependencies. | `DefaultGithubGistContentsCollector.kt:76` |
-| 3838 | 149 | Cannot access '_' which is a supertype of '_'. Check your module classpath for missing or conflicting dependencies. | `GithubCreateGistService.kt:40` |
-| 2482 | 276 | krusty: cannot destructure this type (no operator '_') | `DefaultGithubGistContentsCollector.kt:33` |
-| 1899 | 297 | argument type mismatch: actual type is '_', but '_' was expected. | `GithubApiHelperRequestExecutor.kt:126` |
-| 1454 | 269 | krusty: unresolved super method '_' | `GHPRReviewSubmitAction.kt:99` |
-| 1399 | 327 | return type mismatch: expected '_', actual '_'. | `GHGQLRequests.kt:48` |
-| 1094 | 228 | unresolved label. | `GHRepositoryHostingService.kt:26` |
-| 1020 | 275 | unresolved reference '_' for operator '_'. | `DefaultGithubGistContentsCollector.kt:121` |
-| 859 | 137 | '_' is prohibited here. | `GHPRReviewCommentBodyViewModel.kt:166` |
-| 713 | 156 | '_' cannot be reassigned. | `GHCloneDialogExtensionComponentBase.kt:240` |
+| 224209 | 904 | unresolved reference '_'. | `DefaultGithubGistContentsCollector.kt:4` |
+| 20617 | 718 | '_' overrides nothing. | `GHCopyLinkActionGroup.kt:15` |
+| 19953 | 665 | unresolved reference '_' on receiver of type '_'. | `GHOpenInBrowserActionGroup.kt:39` |
+| 5724 | 559 | internal error: Pass-N class has no finalized constructor signatures | `GHOpenInBrowserFromAnnotationActionGroup.kt:19` |
+| 5130 | 150 | Cannot access '_' which is a supertype of '_'. Check your module classpath for missing or conflicting dependencies. | `GithubCreateGistService.kt:40` |
+| 4739 | 433 | overload resolution ambiguity for extension property '_' | `GHGQLQueryLoader.kt:22` |
+| 4738 | 516 | cannot infer type for type parameter '_'. Specify it explicitly. | `DefaultGithubGistContentsCollector.kt:22` |
+| 3096 | 222 | Cannot access class '_'. Check your module classpath for missing or conflicting dependencies. | `DefaultGithubGistContentsCollector.kt:76` |
+| 2263 | 265 | krusty: cannot destructure this type (no operator '_') | `DefaultGithubGistContentsCollector.kt:33` |
+| 2064 | 304 | argument type mismatch: actual type is '_', but '_' was expected. | `GithubApiHelperRequestExecutor.kt:126` |
+| 1441 | 326 | return type mismatch: expected '_', actual '_'. | `GHGQLRequests.kt:48` |
+| 1353 | 232 | '_' cannot be reassigned. | `GithubLoginPanel.kt:58` |
+| 1352 | 264 | krusty: unresolved super method '_' | `GHPRReviewSubmitAction.kt:99` |
+| 1045 | 274 | unresolved reference '_' for operator '_'. | `DefaultGithubGistContentsCollector.kt:121` |
+| 1044 | 224 | unresolved label. | `GHRepositoryHostingService.kt:26` |
+| 833 | 134 | '_' is prohibited here. | `GHPRReviewCommentBodyViewModel.kt:166` |
 | 650 | 9 | expected a class member declaration | `JavaProjectSettingsEntityImpl.kt:129` |
-| 639 | 187 | '_' expression must be exhaustive. Add an '_' branch. | `GHPullRequestReviewThread.kt:72` |
-| 556 | 48 | no value passed for parameter '_'. | `GHPRTimelineReviewViewModel.kt:118` |
-| 543 | 133 | annotation argument must be a compile-time constant. | `GithubApiRequestExecutor.kt:51` |
-| 506 | 116 | none of the following candidates is applicable: | `GithubApiRequest.kt:352` |
-| 399 | 168 | unresolved Java static '_' for given argument types | `GHGQLQueryLoader.kt:30` |
-| 388 | 125 | candidate '_' is inapplicable because of a receiver type mismatch. | `GHPRListViewModel.kt:86` |
-| 353 | 91 | cannot infer type for value parameter '_'. Specify it explicitly. | `GithubApiHelperRequestExecutor.kt:125` |
-| 318 | 140 | selected inline body has an unpublishable declaration dependency | `GHPRCreationServiceImpl.kt:80` |
+| 569 | 48 | no value passed for parameter '_'. | `GHPRVirtualFileSystem.kt:35` |
+| 565 | 177 | '_' expression must be exhaustive. Add an '_' branch. | `GHPullRequestReviewThread.kt:72` |
+| 532 | 132 | annotation argument must be a compile-time constant. | `GithubApiRequestExecutor.kt:51` |
+| 488 | 113 | none of the following candidates is applicable: | `GithubApiRequest.kt:352` |
+| 387 | 164 | unresolved Java static '_' for given argument types | `GHGQLQueryLoader.kt:30` |
+| 377 | 94 | cannot infer type for value parameter '_'. Specify it explicitly. | `GithubApiHelperRequestExecutor.kt:125` |
+| 369 | 119 | candidate '_' is inapplicable because of a receiver type mismatch. | `GHPRListViewModel.kt:86` |
+| 333 | 16 | no parameter with name '_' found. | `JavaToJKTreeBuilder.kt:1023` |
 
 ## Slowest modules
 
 | ms | module |
 | ---: | --- |
-| 17374 | intellij.platform.lang.impl:main |
-| 14052 | intellij.platform.ide.impl:main |
-| 6924 | intellij.platform.consoleView.impl:main |
-| 6168 | intellij.vcs.git.shared:main |
-| 5723 | intellij.platform.debugger.impl:main |
-| 5589 | intellij.vcs.github:main |
-| 5432 | intellij.platform.searchEverywhere.frontend:main |
-| 5202 | intellij.kotlin.j2k:main |
-| 4408 | intellij.platform.locking.impl:main |
-| 4368 | intellij.maven:main |
-| 4331 | intellij.platform.polySymbols.testFramework:main |
-| 4137 | intellij.vcs.git.backend:main |
-| 4113 | intellij.grid.impl:main |
-| 3991 | intellij.vcs.gitlab.backend:main |
-| 3780 | intellij.platform.ide:main |
-| 3761 | intellij.platform.recentFiles.frontend:main |
-| 3644 | intellij.platform.vcs.impl:main |
-| 3437 | intellij.platform.buildScripts.devDistGenerator:main |
-| 3333 | intellij.platform.workspace.jps:main |
-| 3172 | intellij.platform.buildScripts.productDsl:main |
-| 3112 | intellij.driver.sdk:main |
-| 3102 | intellij.tools.ide.starter:main |
-| 3006 | intellij.platform.structureView.frontend:main |
-| 2955 | intellij.java.impl:main |
-| 2862 | intellij.kotlin.projectWizard.core:main |
+| 18065 | intellij.platform.lang.impl:main |
+| 14819 | intellij.platform.ide.impl:main |
+| 8738 | intellij.platform.searchEverywhere.frontend:main |
+| 7736 | intellij.platform.consoleView.impl:main |
+| 6803 | intellij.vcs.git.shared:main |
+| 6325 | intellij.platform.debugger.impl:main |
+| 6030 | intellij.vcs.github:main |
+| 5736 | intellij.kotlin.j2k:main |
+| 4692 | intellij.maven:main |
+| 4668 | intellij.platform.polySymbols.testFramework:main |
+| 4652 | intellij.grid.impl:main |
+| 4387 | intellij.vcs.git.backend:main |
+| 4316 | intellij.vcs.gitlab.backend:main |
+| 4301 | intellij.platform.locking.impl:main |
+| 4091 | intellij.platform.workspace.jps:main |
+| 4050 | intellij.platform.ide:main |
+| 4044 | intellij.platform.recentFiles.frontend:main |
+| 3832 | intellij.platform.vcs.impl:main |
+| 3659 | intellij.platform.buildScripts.devDistGenerator:main |
+| 3593 | intellij.platform.buildScripts.productDsl:main |
+| 3267 | intellij.platform.structureView.frontend:main |
+| 3198 | intellij.driver.sdk:main |
+| 3129 | intellij.tools.ide.starter:main |
+| 2919 | intellij.java.impl:main |
+| 2910 | intellij.kotlin.projectWizard.core:main |
 
 ## Bazel worker: what actually builds
 
