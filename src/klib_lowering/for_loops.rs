@@ -4,6 +4,7 @@
 //! backend. Body lowering and the dependency prewalk recognize the loop here, once, so the calls
 //! a counted loop does not make never become declaration edges.
 
+use crate::metadata::id_signature::KlibAccessorIdSignature;
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrArguments, KlibIrExpr, KlibIrExprId, KlibIrExprKind, KlibIrLoop,
     KlibIrMemberAccess, KlibIrStatement, KlibIrType, KlibIrTypeId, KlibIrVariableId,
@@ -46,6 +47,41 @@ pub(super) struct RangeForLoop<'a> {
     pub(super) inner: &'a KlibIrLoop,
     pub(super) body: &'a [KlibIrStatement],
     pub(super) binding: KlibIrVariableId,
+}
+
+/// A serialized `for` loop over the progression an extension property getter builds
+/// (`array.indices`). Whether the getter is kotlinc's `indices` is its declaration, which body
+/// lowering authenticates; this is only its shape.
+pub(super) struct IndicesForLoop<'a> {
+    /// The getter whose result the loop iterates.
+    pub(super) getter: &'a KlibAccessorIdSignature,
+    /// The extension receiver of the getter: the array or collection whose indices are counted.
+    pub(super) receiver: KlibIrExprId,
+    /// The `reversed()` call applied to the indices, when the loop counts them downwards. Whether
+    /// the callee is kotlinc's progression `reversed` is its declaration, which body lowering
+    /// authenticates; this is only its shape.
+    pub(super) reversed: Option<&'a KlibIrMemberAccess>,
+    pub(super) inner: &'a KlibIrLoop,
+    pub(super) body: &'a [KlibIrStatement],
+    pub(super) binding: KlibIrVariableId,
+}
+
+/// The `for` loop over the indices of a receiver whose `FOR_LOOP` block holds `statements`.
+pub(super) fn indices_for_loop<'a>(
+    arena: &'a KlibIrArena,
+    statements: &'a [KlibIrStatement],
+) -> Option<IndicesForLoop<'a>> {
+    let protocol = protocol_loop(arena, statements)?;
+    let (reversed, indices) = indices_iterable(arena, protocol.iterable);
+    let (getter, receiver) = indices_call(arena, indices)?;
+    Some(IndicesForLoop {
+        getter,
+        receiver,
+        reversed,
+        inner: protocol.inner,
+        body: protocol.body,
+        binding: protocol.binding,
+    })
 }
 
 /// The `for` loop over an array whose `FOR_LOOP` block holds `statements`, if it is one.
@@ -106,6 +142,9 @@ pub(crate) fn folded_loop_calls(arena: &KlibIrArena, expression: &KlibIrExpr) ->
     } else if range_call(arena, protocol.iterable).is_some() {
         calls.extend(protocol.calls);
         calls.push(protocol.iterable);
+    } else if indices_call(arena, indices_iterable(arena, protocol.iterable).1).is_some() {
+        // The getter stays an edge: its declaration is what authenticates the counted loop.
+        calls.extend(protocol.calls);
     }
     calls
 }
@@ -211,6 +250,91 @@ fn range_call(
         },
     };
     Some((access, start, end))
+}
+
+/// `iterable` as the indices read a loop counts, and the `reversed()` call applied to it, if any.
+fn indices_iterable(
+    arena: &KlibIrArena,
+    iterable: KlibIrExprId,
+) -> (Option<&KlibIrMemberAccess>, KlibIrExprId) {
+    match reversed_call(arena, iterable) {
+        Some((reversed, receiver)) => (Some(reversed), receiver),
+        None => (None, iterable),
+    }
+}
+
+/// `iterable` as a call of a public function on a `kotlin.ranges` progression, with no other
+/// argument, that yields a progression: the call and its receiver.
+fn reversed_call(
+    arena: &KlibIrArena,
+    iterable: KlibIrExprId,
+) -> Option<(&KlibIrMemberAccess, KlibIrExprId)> {
+    let expression = arena.expr(iterable);
+    let KlibIrExprKind::Call {
+        access,
+        super_qualifier: None,
+    } = &expression.kind
+    else {
+        return None;
+    };
+    if access.symbol.kind != KlibIrSymbolKind::Function
+        || !matches!(access.symbol.signature, KlibIrSignature::Public(_))
+        || !access.type_arguments.is_empty()
+        || !is_progression_type(arena, expression.ty?)
+    {
+        return None;
+    }
+    let receiver = match &access.arguments {
+        KlibIrArguments::Flat(arguments) => match arguments.as_slice() {
+            &[Some(receiver)] => receiver,
+            _ => return None,
+        },
+        KlibIrArguments::Split {
+            dispatch_receiver,
+            extension_receiver,
+            values,
+        } if values.is_empty() => match (dispatch_receiver, extension_receiver) {
+            (Some(receiver), None) | (None, Some(receiver)) => *receiver,
+            _ => return None,
+        },
+        KlibIrArguments::Split { .. } => return None,
+    };
+    Some((access, receiver))
+}
+
+/// `iterable` as a read of a public extension property whose type is a `kotlin.ranges`
+/// progression: the getter and its extension receiver.
+fn indices_call(
+    arena: &KlibIrArena,
+    iterable: KlibIrExprId,
+) -> Option<(&KlibAccessorIdSignature, KlibIrExprId)> {
+    let expression = arena.expr(iterable);
+    let KlibIrExprKind::Call {
+        access,
+        super_qualifier: None,
+    } = &expression.kind
+    else {
+        return None;
+    };
+    let KlibIrSignature::Accessor(getter) = &access.symbol.signature else {
+        return None;
+    };
+    if !is_progression_type(arena, expression.ty?) {
+        return None;
+    }
+    let receiver = match &access.arguments {
+        KlibIrArguments::Split {
+            dispatch_receiver: None,
+            extension_receiver: Some(receiver),
+            values,
+        } if values.is_empty() => *receiver,
+        KlibIrArguments::Flat(arguments) => match arguments.as_slice() {
+            &[Some(receiver)] => receiver,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some((getter, receiver))
 }
 
 /// The dispatch receiver of `call`, a member call without other arguments that the loop

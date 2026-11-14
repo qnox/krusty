@@ -470,7 +470,6 @@ closures/kt11634_4.kt
 closures/kt47894_inlineFunWithObjectWithNothing.kt
 closures/localFunInInit.kt
 closures/localFunctionInInitBlock.kt
-collectionLiterals/array.kt
 collectionLiterals/primitiveArrays.kt
 collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
@@ -2708,7 +2707,6 @@ ranges/contains/generated/ulongDownTo.kt
 ranges/contains/generated/ulongRangeTo.kt
 ranges/contains/generated/ulongRangeUntil.kt
 ranges/contains/generated/ulongUntil.kt
-ranges/contains/inArray.kt
 ranges/contains/inCharSequence.kt
 ranges/contains/inComparableRange.kt
 ranges/contains/inCustomObjectRange.kt
