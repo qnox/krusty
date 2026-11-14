@@ -928,7 +928,7 @@ impl super::Emitter<'_> {
                     krusty::ir::IrIntrinsic::Ieee754Equals { operand } => {
                         self.emit_nullable_ieee754_equals(e, *operand, args, code)
                     }
-                    krusty::ir::IrIntrinsic::DataClassArrayToString { ty } => {
+                    krusty::ir::IrIntrinsic::GeneratedPropertyArrayToString { ty } => {
                         self.emit_value(args[0], code);
                         let descriptor =
                             krusty::jvm::array_representation::arrays_to_string_descriptor(*ty);

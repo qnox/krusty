@@ -55,6 +55,7 @@ pub use crate::context_parameters::{CapturedContextKind, ContextParameterKind};
 pub use crate::inline_parameter_modifier::{InlineExpansionMode, InlineParameterModifier};
 use crate::name_tree::{NameId, NameTree};
 use interning::ShardedInterner;
+mod array_types;
 mod primitive_arrays;
 mod raw_erasure;
 pub(crate) use raw_erasure::{formal_erasures, raw_member_type};
@@ -735,61 +736,6 @@ impl Ty {
             ),
             _ => self,
         }
-    }
-
-    /// An array whose element is `elem`, choosing the array *kind* the way Kotlin does: a primitive
-    /// element yields the specialized primitive array (`Int` → `IntArray` = `Obj("kotlin/IntArray")`,
-    /// `[I`), any reference element yields the boxed `Array<T>` (`String` → `Obj("kotlin/Array", [String])`,
-    /// `[Ljava/lang/String;`). To force a boxed `Array<Int>` (`[Ljava/lang/Integer;`) construct it
-    /// directly as `Ty::obj_args_name(wk::array(), &[Ty::Int])`.
-    pub fn array(elem: Ty) -> Ty {
-        match prim_array_name(elem) {
-            Some(n) => Ty::obj(n),
-            None => Ty::obj_args_name(wk::array(), &[elem]),
-        }
-    }
-
-    /// The element type if this is an array — a primitive specialized array (`IntArray` → `Int`) or a
-    /// Kotlin `Array<T>` carried as `Obj("kotlin/Array", [T])` (its *logical* element, e.g. `Int` for
-    /// `Array<Int>`; the wrapper boxing is the backend's concern, not the type's).
-    pub fn array_elem(self) -> Option<Ty> {
-        match self.kind() {
-            TyKind::Obj(n, args) if n == wk::array() => args.first().copied(),
-            TyKind::Obj(n, _) => prim_array_element(n),
-            TyKind::TyParam(_, b) | TyKind::Var(_, b) | TyKind::PlatformNullable(b) => {
-                b.array_elem()
-            }
-            _ => None,
-        }
-    }
-
-    /// The type produced by READING one element from this array. [`Ty::array_elem`] preserves the
-    /// classifier argument exactly, including a use-site projection; an expression cannot itself
-    /// have that projection wrapper. Reading `Array<out T>` yields `T`, while an `in`-projected
-    /// array exposes only nullable `Any`. Primitive and invariant arrays keep their declared element.
-    pub fn array_read_elem(self) -> Option<Ty> {
-        Some({
-            let element = self.array_elem()?;
-            match element.kind() {
-                TyKind::OutProjection(inner) | TyKind::StarProjection(inner) => inner,
-                TyKind::InProjection(_) => Ty::nullable(Ty::obj("kotlin/Any")),
-                _ => element,
-            }
-        })
-    }
-
-    /// Whether this type is any array — a primitive specialized array (`kotlin/IntArray`, …) or a boxed
-    /// `Array<T>` (`Obj("kotlin/Array", [T])`). The single array-ness predicate; consumers must use this
-    /// instead of pattern-matching a specific spelling so the representation can migrate under them.
-    pub fn is_array(self) -> bool {
-        matches!(self.kind(), TyKind::Obj(n, _) if n == wk::array() || prim_array_element(n).is_some())
-    }
-
-    /// Whether this is a boxed `Array<T>` (`aaload`/`aastore`, elements stored as objects) as opposed to
-    /// a primitive specialized array (`IntArray` → `iaload`/`iastore`). The only bit the backend needs to
-    /// pick array opcodes; a reference array boxes primitive [`array_elem`]s at the store boundary.
-    pub fn is_reference_array(self) -> bool {
-        matches!(self.kind(), TyKind::Obj(n, _) if n == wk::array())
     }
 
     /// The nullable form `T?` of a type. Idempotent (Kotlin has no `T??`), and degenerate inputs
