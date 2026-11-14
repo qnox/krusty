@@ -27,15 +27,21 @@ entry recent-ok OK 6
 entry stale-ok OK 8
 entry fresh-failed FAILED 1 'a.kt:1:1: error: x'
 entry stale-failed FAILED 30 'a.kt:1:1: error: x'
+entry fresh-rejected REJECTED 1 'main
+a.kt:1:1: error: x
+'
+entry stale-rejected REJECTED 30 'main
+a.kt:1:1: error: x
+'
 entry 0123.stage42-0 - 0
 
 out=$("$prune" "$cache" 7)
-[ "$out" = "reference cache: kept 3 entries, dropped 3 unread for 7+ days or unpublished" ] \
+[ "$out" = "reference cache: kept 4 entries, dropped 4 unread for 7+ days or unpublished" ] \
   || fail "summary: $out"
-for kept in fresh-ok recent-ok fresh-failed; do
+for kept in fresh-ok recent-ok fresh-failed fresh-rejected; do
   [ -f "$cache/$kept/main/pkg/A.class" ] || fail "$kept was dropped"
 done
-for dropped in stale-ok stale-failed 0123.stage42-0; do
+for dropped in stale-ok stale-failed stale-rejected 0123.stage42-0; do
   [ ! -e "$cache/$dropped" ] || fail "$dropped was kept"
 done
 
@@ -45,12 +51,12 @@ entry read-ok OK 0
 touch -d '-1 days' "$work/restored"
 touch "$cache/read-ok/OK"
 out=$("$prune" "$cache" 7 "$work/restored")
-[ "$out" = "reference cache: kept 2 entries, dropped 3 unread for 7+ days, unread since $work/restored, or unpublished" ] \
+[ "$out" = "reference cache: kept 2 entries, dropped 4 unread for 7+ days, unread since $work/restored, or unpublished" ] \
   || fail "read-since summary: $out"
 for kept in fresh-ok read-ok; do
   [ -f "$cache/$kept/main/pkg/A.class" ] || fail "$kept was dropped with a read-since file"
 done
-for dropped in recent-ok fresh-failed seeded-ok; do
+for dropped in recent-ok fresh-failed fresh-rejected seeded-ok; do
   [ ! -e "$cache/$dropped" ] || fail "$dropped was kept with a read-since file"
 done
 if "$prune" "$cache" 7 "$work/absent" 2>/dev/null; then fail "accepted a missing read-since file"; fi

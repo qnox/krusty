@@ -398,7 +398,7 @@ from its base commit's GHA cache (`box-reference-classes-<version>-…`), and ma
 its own commit, so a pull request pays kotlinc only for cases whose inputs it changed. The outer key
 names only the Kotlin version: a change to how references are planned, invoked, or laid out bumps
 `REF_CACHE_SALT` in `tests/box_reference_classes.rs`, which re-keys every entry, while any other
-harness edit keeps the cache. A read refreshes an entry's `OK`/`FAILED` marker time, and before
+harness edit keeps the cache. A read refreshes an entry's `OK`/`REJECTED` marker time, and before
 master saves, `scripts/prune-reference-cache.sh` drops entries unread for a week, so the cache
 tracks the current suite instead of growing with every input it ever compiled. The Native and Wasm
 rows keep their own copy (`box-reference-classes-<target>-<version>-…`) for the JVM oracles of their
@@ -434,7 +434,7 @@ class-dump: live kotlinc summary cache-miss test=<module>::<case> invocations=<n
 `kotlin_cli_jvm_conformance` (in the `conformance` binary) runs Kotlin's own command-line test
 corpus, `compiler/testData/cli/jvm` at the reference tag, through the krusty binary. `just box-corpus`
 provisions it in the same checkout as the box corpus. CI caches that checkout under a key versioned
-for every input it carries (`box-cli-and-generator-corpus-v3-…`); a cache hit sets `KRUSTY_BOX_CORPUS_OFFLINE=1`,
+for every input it carries (`box-cli-diagnostics-and-generator-corpus-v4-…`); a cache hit sets `KRUSTY_BOX_CORPUS_OFFLINE=1`,
 and `just box-corpus` then fails rather than fetch into an incomplete restored checkout, so adding a
 corpus input means bumping the salt. Each case is an `.args` file and the `.out`
 file kotlinc's `AbstractCliTest` compares against: the normalized stderr followed by the exit code's
@@ -474,6 +474,46 @@ being skipped, so the gate never tests fewer cases than it claims. JDKs are foun
 `JAVA_HOME_<release>_X64` variables `actions/setup-java` exports, and from
 `KRUSTY_JDK_<release>_HOME`, which overrides the rest.
 
+## Diagnostics False-Accept Ratchet
+
+`tests/kotlin_diagnostics_jvm_conformance.rs` runs Kotlin's diagnostics test data
+(`compiler/testData/diagnostics/tests` and `testsWithStdLib` of the provisioned checkout) through the
+box lane's compile path: krusty compiles each case in process with the same topologies (`// FILE:`
+with Java, `// MODULE:`), the same mock JDK unless `// FULL_JDK`, and the same kotlinc reference
+oracle and `target/cache/ref-classes` cache. Before either compiler sees a case, the lane strips its
+diagnostic markers and adds the helper files its directives select, as kotlinc's test runner does
+(`// CHECK_TYPE` adds `diagnostics/helpers/types/checkType.kt`, `// INFERENCE_HELPERS` adds
+`inference/inferenceUtils.kt`). It compares only whether each compiler rejects the case.
+
+A false accept, a case kotlinc rejects and krusty compiles without an error, is the divergence it
+ratchets in `tests/diagnostics_false_accepts/jvm/<version>.txt`. kotlinc rejects a case only by
+exiting with a compilation error (status 1) anchored at a Kotlin source position. A case kotlinc
+gives no verdict on (an internal error or crash status, an error with no source position, or javac
+refusing the case's Java) is excused only where `tests/diagnostics_not_scored/jvm/<version>.txt`
+lists it, and the run proves that list in both directions. A harness that cannot observe a case (a
+missing kotlinc or javac, the reference JDK configuration, a scratch or transport failure, a case it
+cannot prepare) fails the run whatever the lists say, and blessing then writes neither list. A
+listed false accept leaves the list only on a definite verdict from both compilers: an entry whose
+case lost kotlinc's or krusty's verdict fails the run, and blessing refuses while one does. Rewrite
+both lists with:
+
+```sh
+KRUSTY_BLESS_DIAGNOSTICS_EXPECTATIONS=1 just diagnostics-conformance "$(just conformance-bin)" <v>
+```
+
+krusty compiles the cases in a pool of long-lived worker processes, one per test thread, each this
+same test binary running the ignored `diagnostics_krusty_worker` test. A worker pays krusty's
+startup once; a case that crashes its worker (a stack overflow aborts the process) or runs past
+`KRUSTY_DIAGNOSTICS_CASE_TIMEOUT_SECONDS` (60 by default) is a krusty failure of that case, and a
+fresh worker takes the next one. `scripts/check-outcome-lists.sh` guards the false-accept lists like
+the box lists; the not-scored lists are proven by the reference run instead. False rejects and
+krusty failures are printed with the totals, not ratcheted. With kotlinc's references cached a run
+takes about a minute and a half on four cores; a cold reference cache adds about 1.5 hours of
+kotlinc compiles. Ordinary runs therefore ignore
+the test; `just diagnostics-conformance` first checks that the binary lists the test (an older
+binary would select none and pass), then runs it under `KRUSTY_DIAGNOSTICS_TIMEOUT_SECONDS`. CI runs
+it in the newest supported version's JVM conformance row after the box conformance run, and saves the
+references even when the run fails.
 ## Bytecode Text Ratchet
 
 `kotlin_bytecode_text_conformance` (in the `conformance` binary) compiles Kotlin's bytecode-text

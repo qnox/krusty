@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # The platform/version outcome manifests only shrink: a change may remove entries, never add one, so a
 # regression cannot be recorded as expected and a fix cannot pay for one. That covers the box
-# expected failures and not-applicable lists, the CLI corpus expected failures, and uncovered KLIB
-# implementations. A release records a manifest only where it differs from its predecessor's, and a
+# expected failures and not-applicable lists, the CLI corpus expected failures, the diagnostics
+# false accepts, and uncovered KLIB implementations. A release records a manifest only where it differs from its predecessor's, and a
 # release with none reads the newest one below it, so what is compared is the manifest each release
 # READS: deleting a release's own file is an addition when the inherited one lists more. A release
 # the base did not support yet (a newly supported Kotlin version, or a new target) is exempt. Only
 # the head's own changes count: it is compared with its merge base, so a branch that is behind a
-# base which has since dropped entries is not charged with them. The CLI not-applicable lists are
-# not checked here: they record what the reference kotlinc cannot run in this environment, and the
-# required reference run proves every entry instead.
+# base which has since dropped entries is not charged with them. The CLI not-applicable lists and the
+# diagnostics not-scored lists are not checked here: they record what the reference kotlinc cannot
+# run in this environment, and the required reference run proves every entry instead.
 # The sole approved #2459 migration pins each exact loaded old/new blob and effective release in
 # outcome-list-migrations.tsv. Only a row introduced in this comparison can authorize that reset;
 # the approval is spent once the merge-base or actual target records it. A different blob transition
@@ -129,7 +129,7 @@ while read -r lane; do
   done
 done < <(
   { git ls-tree -r --name-only "$base"; git ls-tree -r --name-only "$head"; } |
-    grep -E '^tests/(box_expected_failures|box_expected_not_applicable|cli_expected_failures|klib_uncovered_implementations)/[^/]+/[^/]+\.txt$' |
+    grep -E '^tests/(box_expected_failures|box_expected_not_applicable|cli_expected_failures|diagnostics_false_accepts|klib_uncovered_implementations)/[^/]+/[^/]+\.txt$' |
     sed 's|/[^/]*$||' | sort -u
 )
 

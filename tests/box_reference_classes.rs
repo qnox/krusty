@@ -12,7 +12,8 @@
 //! name, is the key.
 //!
 //! A reference failure — a compiler rejection, a missing input, an unreadable class — is returned
-//! explicitly as `Err`. No applicable case is dropped from the population by its shape.
+//! explicitly as `Err`, typed by what was observed ([`ReferenceFailure`]). No applicable case is
+//! dropped from the population by its shape.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -27,6 +28,10 @@ use krusty::conformance::{
 };
 
 use super::common::{self, byte_dump};
+
+#[path = "box_reference_classes/reference_verdict.rs"]
+mod reference_verdict;
+pub use reference_verdict::ReferenceFailure;
 
 /// The stable module identity for every single-module topology (ordinary, `// FILE:` multi-file,
 /// and mixed Java). It matches the module name krusty emits those cases under.
@@ -103,6 +108,8 @@ pub fn checked_prepared_box(src: &str, stem: &str) -> Result<ReferenceClasses, S
 /// property rides `jvm_properties`, so a change of either re-keys itself. `v7` keys on the planned
 /// units' files and topology as well as the case text, so a partition change (such as leading code
 /// moving onto the first declared FILE) never replays an entry compiled from another partition.
+/// A rejection is recorded under its own marker with kotlinc's complete diagnostics; a `FAILED`
+/// entry an older layout wrote is never read, so it recompiles without a salt bump.
 const REF_CACHE_SALT: &str = "ref-classes-v7-planned-units";
 
 /// A reference `.class` inventory grouped by module identity.
@@ -174,7 +181,21 @@ pub fn reference_compile(
     jdk: BoxJdk<'_>,
     coroutine_helpers: &str,
 ) -> Result<ReferenceClasses, String> {
-    let units = plan_units(src, stem, coroutine_helpers)?;
+    reference_verdict(src, stem, cp_jars, jdk, coroutine_helpers)
+        .map_err(|failure| failure.to_string())
+}
+
+/// [`reference_compile`] with its failure kept typed: a source rejection carries kotlinc's status
+/// and complete diagnostics, and a harness that could not observe the reference is told apart from
+/// a reference that gave no verdict.
+pub fn reference_verdict(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+    jdk: BoxJdk<'_>,
+    coroutine_helpers: &str,
+) -> Result<ReferenceClasses, ReferenceFailure> {
+    let units = plan_units(src, stem, coroutine_helpers).map_err(ReferenceFailure::NoVerdict)?;
     let jvm_properties = reference_jvm_properties(&units);
     let fingerprint = cache_key(
         src,
@@ -184,7 +205,8 @@ pub fn reference_compile(
         coroutine_helpers,
         &jvm_properties,
         &units,
-    )?;
+    )
+    .map_err(ReferenceFailure::Harness)?;
     let cache = reference_cache_dir(fingerprint);
     // A snapshot/dev/beta compiler is not an immutable build, so its output is never cached.
     let cacheable = byte_dump::published_compiler_id().is_some();
@@ -203,7 +225,7 @@ pub fn reference_compile(
 
     STATS.misses.bump();
     let compiling = Instant::now();
-    let scratch = ScratchDir::new()?;
+    let scratch = ScratchDir::new().map_err(ReferenceFailure::Harness)?;
     let result = compile_all(&units, cp_jars, jdk, &jvm_properties, scratch.path());
     STATS.compile.add_since(compiling);
     let cleanup = Instant::now();
@@ -729,7 +751,7 @@ fn compile_all(
     jdk: BoxJdk<'_>,
     jvm_properties: &[String],
     work: &Path,
-) -> Result<ReferenceClasses, String> {
+) -> Result<ReferenceClasses, ReferenceFailure> {
     let mut classes = ReferenceClasses::default();
     let mut outputs: HashMap<&str, PathBuf> = HashMap::new();
     for unit in units {
@@ -737,10 +759,10 @@ fn compile_all(
         let mut friends = Vec::new();
         for dependency in &unit.deps {
             let Some(output) = outputs.get(dependency.as_str()) else {
-                return Err(format!(
+                return Err(ReferenceFailure::Harness(format!(
                     "reference module {}: dependency {dependency} was not built",
                     unit.module
-                ));
+                )));
             };
             classpath.push(output.clone());
             if unit.friends.contains(dependency) {
@@ -771,7 +793,9 @@ fn compile_all(
         outputs.insert(&unit.module, output);
     }
     if classes.is_empty() {
-        return Err("reference compile produced no .class artifacts".to_string());
+        return Err(ReferenceFailure::NoVerdict(
+            "reference compile produced no .class artifacts".to_string(),
+        ));
     }
     Ok(classes)
 }
@@ -800,9 +824,11 @@ fn compile_unit(
     jvm_properties: &[String],
     unit_root: &Path,
     output: &Path,
-) -> Result<BTreeMap<String, Vec<u8>>, String> {
-    std::fs::create_dir_all(output)
-        .map_err(|error| format!("reference module {}: {error}", unit.module))?;
+) -> Result<BTreeMap<String, Vec<u8>>, ReferenceFailure> {
+    let harness = |error: &dyn std::fmt::Display| {
+        ReferenceFailure::Harness(format!("reference module {}: {error}", unit.module))
+    };
+    std::fs::create_dir_all(output).map_err(|error| harness(&error))?;
     if unit.kotlin.is_empty() && unit.java.is_empty() {
         // A source-less hmpp intermediate: no classes, but dependents still need its (empty)
         // classpath directory, which the caller recorded.
@@ -810,13 +836,17 @@ fn compile_unit(
     }
 
     let source_root = unit_root.join("sources");
-    let kotlin_paths = write_group(&source_root.join("kotlin"), unit.kotlin)?;
-    let java_paths = write_group(&source_root.join("java"), unit.java)?;
+    let kotlin_paths =
+        write_group(&source_root.join("kotlin"), unit.kotlin).map_err(|error| harness(&error))?;
+    let java_paths =
+        write_group(&source_root.join("java"), unit.java).map_err(|error| harness(&error))?;
 
     if !unit.kotlin.is_empty() {
         // Each unit resolves its Kotlin against the base classpath PLUS its already-built
         // dependency modules, so the `-classpath`/`-no-jdk` arguments are derived per unit.
-        let classpath_args = jdk.kotlinc_args(unit.classpath)?;
+        let classpath_args = jdk
+            .kotlinc_args(unit.classpath)
+            .map_err(|error| harness(&error))?;
         let mut args: Vec<String> = vec!["-d".to_string(), output.to_string_lossy().into_owned()];
         args.extend(classpath_args);
         args.extend_from_slice(jvm_properties);
@@ -846,8 +876,8 @@ fn compile_unit(
             }
         }
         if !unit.friend_paths.is_empty() {
-            let friends = std::env::join_paths(unit.friend_paths)
-                .map_err(|error| format!("reference module {}: {error}", unit.module))?;
+            let friends =
+                std::env::join_paths(unit.friend_paths).map_err(|error| harness(&error))?;
             args.push(format!("-Xfriend-paths={}", friends.to_string_lossy()));
         }
         // Java sources are supplementary input so the Kotlin compile resolves Java declarations;
@@ -857,59 +887,37 @@ fn compile_unit(
         }
         // This inventory's own cache is keyed by every input and the exact compiler, so a miss
         // compiles live rather than also replaying or recording through the recorded-byte archive.
-        let (code, diagnostics) =
-            common::kotlinc_server::kotlinc_compile_unrecorded_with_language_settings(
-                &args,
-                unit.language_version
-                    .map(|version| version.to_string())
-                    .as_deref(),
-                unit.api_version
-                    .map(|version| version.to_string())
-                    .as_deref(),
-            )
-            .ok_or_else(|| "kotlinc unavailable".to_string())?;
-        if code != 0 {
-            return Err(reference_compile_error(unit.module, &diagnostics));
-        }
+        let outcome = common::kotlinc_server::kotlinc_compile_unrecorded_with_language_settings(
+            &args,
+            unit.language_version
+                .map(|version| version.to_string())
+                .as_deref(),
+            unit.api_version
+                .map(|version| version.to_string())
+                .as_deref(),
+        );
+        reference_verdict::kotlinc_outcome(unit.module, outcome)?;
     }
 
     if !unit.java.is_empty() {
-        let mut javac_cp = unit.classpath.to_vec();
-        javac_cp.push(output.to_path_buf());
-        let (javadir, java_classes) =
-            common::javac_compile(unit.java, &javac_cp).ok_or_else(|| {
-                format!(
-                    "reference module {}: javac rejected the Java sources",
-                    unit.module
-                )
-            })?;
-        if let Some(root) = javadir.parent() {
-            let _ = std::fs::remove_dir_all(root);
-        }
-        for (name, bytes) in &java_classes {
-            let path = output.join(format!("{name}.class"));
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|error| format!("reference module {}: {error}", unit.module))?;
-            }
-            std::fs::write(&path, bytes)
-                .map_err(|error| format!("reference module {}: {error}", unit.module))?;
-        }
+        // javac writes the Java classes beside the Kotlin ones, so a dependent module reads both
+        // off the classpath and the inventory below collects both.
+        let separator = if cfg!(windows) { ";" } else { ":" };
+        let join = |paths: &mut dyn Iterator<Item = &PathBuf>| {
+            paths
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(separator)
+        };
+        let sources = join(&mut java_paths.iter());
+        let output_dir = output.to_path_buf();
+        let classpath = join(&mut unit.classpath.iter().chain(std::iter::once(&output_dir)));
+        let outcome =
+            common::javac_run_proc(&sources, &classpath, &output.to_string_lossy(), "", "");
+        reference_verdict::javac_outcome(unit.module, outcome)?;
     }
 
-    read_class_tree(output)
-}
-
-/// Extract the first source-anchored kotlinc diagnostic as the explicit failure cause, falling back
-/// to the first `error`/output line so a locationless failure is still reported, never swallowed.
-fn reference_compile_error(module: &str, diagnostics: &str) -> String {
-    let line = diagnostics
-        .lines()
-        .find(|line| line.contains(": error:") && line.contains(".kt:"))
-        .or_else(|| diagnostics.lines().find(|line| line.contains("error")))
-        .or_else(|| diagnostics.lines().next())
-        .unwrap_or("reference compiler rejected the sources");
-    format!("reference module {module}: {}", line.trim())
+    read_class_tree(output).map_err(|error| harness(&error))
 }
 
 fn write_group(dir: &Path, blocks: &[(String, String)]) -> Result<Vec<PathBuf>, String> {
@@ -949,7 +957,7 @@ fn write_group(dir: &Path, blocks: &[(String, String)]) -> Result<Vec<PathBuf>, 
 /// An open marker is recognized only when an upper-snake-case name follows `<!` AND a closing `!>`
 /// appears on the same line, so a real `a < !b` is left intact. Markers never span a line, so
 /// removing them preserves line numbers — and thus `LineNumberTable` bytes — on both sides.
-pub(super) fn strip_diagnostic_markers(src: &str) -> String {
+pub fn strip_diagnostic_markers(src: &str) -> String {
     let b = src.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -1008,22 +1016,21 @@ impl Drop for ScratchDir {
 }
 
 /// Read a cached result. `None` = no cached entry (compile it); `Some(Ok|Err)` = a published
-/// success or a cached deterministic rejection.
+/// success or a cached rejection with its complete diagnostics.
 ///
 /// A read refreshes the entry's marker modification time. `scripts/prune-reference-cache.sh`
 /// drops entries whose marker has gone unread for a while, so the saved cache holds the current
 /// suite's inventories rather than every case and input any earlier run ever compiled.
-fn load_cache(cache: &Path) -> Option<Result<ReferenceClasses, String>> {
-    let failed = cache.join("FAILED");
-    if failed.is_file() {
-        mark_used(&failed);
-        let reason = std::fs::read_to_string(&failed).unwrap_or_default();
-        return Some(Err(reason.lines().next().unwrap_or("?").to_string()));
+fn load_cache(cache: &Path) -> Option<Result<ReferenceClasses, ReferenceFailure>> {
+    let rejected = cache.join("REJECTED");
+    if let Some(rejection) = reference_verdict::load_rejection(cache) {
+        mark_used(&rejected);
+        return Some(Err(rejection));
     }
     let ok = cache.join("OK");
     if ok.is_file() {
         mark_used(&ok);
-        return Some(read_cached_classes(cache));
+        return Some(read_cached_classes(cache).map_err(ReferenceFailure::Harness));
     }
     None
 }
@@ -1043,7 +1050,7 @@ fn read_cached_classes(cache: &Path) -> Result<ReferenceClasses, String> {
         let entry = entry.map_err(|error| format!("read ref cache entry: {error}"))?;
         let path = entry.path();
         if !path.is_dir() {
-            continue; // the OK / FAILED markers
+            continue; // the OK / REJECTED markers
         }
         let module = entry.file_name().to_string_lossy().into_owned();
         for (name, bytes) in read_class_tree(&path)? {
@@ -1053,11 +1060,16 @@ fn read_cached_classes(cache: &Path) -> Result<ReferenceClasses, String> {
     Ok(classes)
 }
 
-/// Publish a result to the cache. Success and a deterministic source-anchored rejection are stored;
-/// a transient failure is left uncached so the next run retries instead of being poisoned.
-fn store_cache(cache: &Path, fingerprint: u128, result: &Result<ReferenceClasses, String>) {
+/// Publish a result to the cache. Success and a source rejection are stored; any other failure is
+/// left uncached so the next run observes it again instead of being poisoned.
+fn store_cache(
+    cache: &Path,
+    fingerprint: u128,
+    result: &Result<ReferenceClasses, ReferenceFailure>,
+) {
     match result {
         Ok(classes) => {
+            reference_verdict::remove_legacy_failure(cache);
             // Publish atomically: write the whole tree into a unique staging dir, then rename it
             // into place. A concurrent publisher's rename simply loses; a published cache is never
             // deleted out from under a reader.
@@ -1077,12 +1089,7 @@ fn store_cache(cache: &Path, fingerprint: u128, result: &Result<ReferenceClasses
                 let _ = std::fs::remove_dir_all(&staging);
             }
         }
-        Err(reason) if reason.contains(".kt:") && reason.contains(": error:") => {
-            if std::fs::create_dir_all(cache).is_ok() {
-                let _ = std::fs::write(cache.join("FAILED"), reason);
-            }
-        }
-        Err(_) => {} // transient / toolchain-unavailable: do not cache
+        Err(failure) => reference_verdict::store_rejection(cache, failure),
     }
 }
 
@@ -1113,7 +1120,10 @@ mod tests {
     fn reading_a_cached_entry_refreshes_its_marker() {
         let scratch = ScratchDir::new().expect("scratch dir");
         let stale = std::time::SystemTime::now() - Duration::from_secs(30 * 24 * 3600);
-        for (marker, contents) in [("OK", ""), ("FAILED", "a.kt:1:1: error: unresolved")] {
+        for (marker, contents) in [
+            ("OK", ""),
+            ("REJECTED", "main\na.kt:1:1: error: unresolved\n"),
+        ] {
             let cache = scratch.path().join(marker);
             std::fs::create_dir_all(&cache).expect("entry dir");
             let path = cache.join(marker);
