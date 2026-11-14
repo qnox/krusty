@@ -1107,6 +1107,15 @@ fn stdlib_built_in_calls_have_the_signed_operands() {
                 super::super::ir_builtins::BuiltinOperator::CheckNotNull => {
                     ("CHECK_NOT_NULL", None)
                 }
+                super::super::ir_builtins::BuiltinOperator::DataClassArrayMember(_) => {
+                    // Lowering calls the array's content extension; the prewalk must reach it.
+                    let call = arena.expr(expr_id(arena, index));
+                    assert!(
+                        super::super::array_content_members::implied_callee(arena, call).is_some(),
+                        "a data class array member call has no content extension edge: {callee:?}"
+                    );
+                    ("data class array member", None)
+                }
             };
             if let Some(expected) = expected {
                 for ty in operand_types.into_iter().flatten() {
@@ -1125,6 +1134,7 @@ fn stdlib_built_in_calls_have_the_signed_operands() {
         "EQEQ",
         "EQEQEQ",
         "CHECK_NOT_NULL",
+        "data class array member",
     ] {
         assert!(
             checked.get(kind).copied().unwrap_or(0) > 0,
