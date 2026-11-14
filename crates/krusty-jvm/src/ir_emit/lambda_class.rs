@@ -32,9 +32,24 @@ pub(super) fn emit_lambda_class(
     // `-Xlambdas=class`; a SAM class uses the source record while extending `Object`.
     let reflection = match &lambda.lambda_origin {
         Some(origin) => {
+            // A SAM lambda's class is typed by the SAM interface at its source expression, so
+            // `lambda.function_type` is the interface type rather than a function type. The
+            // checked target already owns the exact logical method shape (including generic
+            // substitution and receiver/context roles); use its source callable view for the
+            // lambda metadata record. The SAM method's suspend bit describes the target method,
+            // while `source_suspend` describes the lambda value being converted.
+            let function_type = lambda.sam.as_ref().map_or(lambda.function_type, |target| {
+                krusty::types::Ty::fun_with_shape(
+                    target.parameters.clone(),
+                    target.result,
+                    target.context_count as usize,
+                    target.has_receiver,
+                    target.source_suspend,
+                )
+            });
             match class_lambda_reflection::reflect_source(
                 ir,
-                lambda.function_type,
+                function_type,
                 lambda.invoke,
                 origin,
                 lambda
