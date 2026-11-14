@@ -70,6 +70,81 @@ pub fn method_annotations(bytes: &[u8]) -> Result<Vec<MethodAnnotations>, ReadEr
     Ok(out)
 }
 
+/// The applications of one exact method, keeping the physical attribute's retention partition.
+pub fn read_method_annotation_applications(
+    bytes: &[u8],
+    name: &str,
+    descriptor: &str,
+) -> Option<Vec<(crate::types::AnnotationRetention, ResolvedAnnotation)>> {
+    let mut r = Reader { b: bytes, i: 0 };
+    if r.u4().ok()? != 0xCAFEBABE {
+        return None;
+    }
+    r.u2().ok()?; // minor
+    r.u2().ok()?; // major
+    let cp = parse_constant_pool(&mut r).ok()?;
+    let utf8 = |index: u16| match cp.get(index as usize) {
+        Some(super::C::Utf8(value)) => value.as_str(),
+        _ => "",
+    };
+    r.u2().ok()?; // access_flags
+    r.u2().ok()?; // this_class
+    r.u2().ok()?; // super_class
+    let interfaces = r.u2().ok()?;
+    for _ in 0..interfaces {
+        r.u2().ok()?;
+    }
+    for _ in 0..r.u2().ok()? {
+        r.u2().ok()?; // access
+        r.u2().ok()?; // name
+        r.u2().ok()?; // descriptor
+        super::skip_attributes(&mut r).ok()?;
+    }
+    for _ in 0..r.u2().ok()? {
+        r.u2().ok()?; // access
+        let method_name = utf8(r.u2().ok()?);
+        let method_descriptor = utf8(r.u2().ok()?);
+        if method_name != name || method_descriptor != descriptor {
+            super::skip_attributes(&mut r).ok()?;
+            continue;
+        }
+        let mut annotations = Vec::new();
+        for _ in 0..r.u2().ok()? {
+            let attribute = utf8(r.u2().ok()?);
+            let length = usize::try_from(r.u4().ok()?).ok()?;
+            let body = r.take(length).ok()?;
+            let retention = match attribute {
+                "RuntimeVisibleAnnotations" => crate::types::AnnotationRetention::Runtime,
+                "RuntimeInvisibleAnnotations" => crate::types::AnnotationRetention::Binary,
+                _ => continue,
+            };
+            let mut applications = Vec::new();
+            super::read_class_annotations(body, &cp, &mut applications).ok()?;
+            annotations.extend(
+                applications
+                    .into_iter()
+                    .map(|application| (retention, application)),
+            );
+        }
+        return Some(annotations);
+    }
+    None
+}
+
+/// The applications of one exact method without their physical retention partition.
+pub fn read_method_annotations(
+    bytes: &[u8],
+    name: &str,
+    descriptor: &str,
+) -> Option<Vec<ResolvedAnnotation>> {
+    read_method_annotation_applications(bytes, name, descriptor).map(|applications| {
+        applications
+            .into_iter()
+            .map(|(_, application)| application)
+            .collect()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use crate::ir::{
@@ -114,7 +189,33 @@ mod tests {
                 ),
             ]),
         );
-        let read = super::method_annotations(&writer.finish()).unwrap();
+        let bytes = writer.finish();
+        let read = super::method_annotations(&bytes).unwrap();
+        let retained =
+            super::read_method_annotation_applications(&bytes, "value", "()Ljava/lang/String;")
+                .expect("the selected method has readable attributes");
+        assert_eq!(
+            retained
+                .iter()
+                .map(|(retention, _)| *retention)
+                .collect::<Vec<_>>(),
+            [AnnoRetention::Runtime, AnnoRetention::Binary]
+        );
+        assert_eq!(
+            retained
+                .into_iter()
+                .map(|(_, application)| application)
+                .collect::<Vec<_>>(),
+            read[0].annotations
+        );
+        assert_eq!(
+            super::read_method_annotation_applications(&bytes, "plain", "()I"),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            super::read_method_annotation_applications(&bytes, "missing", "()I"),
+            None
+        );
         let annotation =
             |class: &str, arguments: Vec<(String, AnnotationValue)>| ResolvedAnnotation {
                 annotation: type_name(class),

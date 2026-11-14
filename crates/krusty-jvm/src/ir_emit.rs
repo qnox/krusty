@@ -2891,13 +2891,7 @@ fn emit_interface_class(
     // holder forward per non-private body.
     let enable_compat = jvm_default == JvmDefaultMode::Enable;
     let mut jd_bridge_fids: Vec<u32> = Vec::new();
-    // kotlinc emits interface members in SOURCE order — a property's accessors sit at the
-    // property's declared position among the functions — while lowering registers declared
-    // functions before property accessors. Sort by the recorded source offset (stable, so a
-    // property's getter stays before its setter); synthesized members without one trail in
-    // registration order, kotlinc's placement for them too.
-    let mut member_fids: Vec<u32> = c.methods.clone();
-    member_fids.sort_by_key(|fid| ir.fn_source_order.get(fid).copied().unwrap_or(u32::MAX));
+    let member_fids = member_schedule::interface_functions(ir, c);
     for &fid in &member_fids {
         if standalone_method_is_elided(ir, fid, env) {
             continue;
