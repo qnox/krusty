@@ -115,4 +115,8 @@ impl InheritedFacts for ValueClassConstructorFacts {
         } = self;
         parameter_constructions.relocate(source, target);
     }
+
+    fn truncate_from(&mut self, first: ExprId) {
+        self.parameter_constructions.truncate_from(first);
+    }
 }

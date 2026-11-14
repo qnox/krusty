@@ -103,6 +103,10 @@ impl InheritedFacts for IrNodePositions {
             copy.statement_line = statement_line;
         }
     }
+
+    fn truncate_from(&mut self, first: ExprId) {
+        self.nodes.truncate(first as usize);
+    }
 }
 
 impl IrFile {

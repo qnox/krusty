@@ -387,6 +387,101 @@ impl CallLinker for TemplateCalls<'_> {
             .is_some_and(|realization| realization.callable.suspend)
     }
 
+    fn unintercepted_suspension(
+        &self,
+        signature: &KlibDeclarationSignature,
+    ) -> Result<Option<super::body_lowering::UninterceptedSuspensionCall>, KlibBodyDeclineReason>
+    {
+        let KlibDeclarationSignature::Public(_) = signature else {
+            return Ok(None);
+        };
+        let binding = match self.callees.references.get(self.module, signature) {
+            KlibReferenceOrigin::Exact(binding) => binding,
+            KlibReferenceOrigin::Ambiguous | KlibReferenceOrigin::Missing => return Ok(None),
+        };
+        let Some((_target, realization)) = self
+            .callees
+            .source
+            .external_callable_by_dependency(&binding.declaration)
+        else {
+            return Ok(None);
+        };
+        let intrinsic = crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn;
+        if realization.callable.compiler_intrinsic != Some(intrinsic) {
+            return Ok(None);
+        }
+        let Some(callable) = realization.klib_body_callable() else {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "the selected suspension intrinsic has no provider body identity".to_owned(),
+            ));
+        };
+        if callable.identity() != &binding.declaration {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "the selected suspension intrinsic resolves to another provider identity"
+                    .to_owned(),
+            ));
+        }
+        let generic = realization.callable.generic_sig.as_deref().ok_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch(
+                "the selected suspension intrinsic has no generic contract".to_owned(),
+            )
+        })?;
+        let [formal] = generic.formals.as_slice() else {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "the selected suspension intrinsic does not have one type parameter".to_owned(),
+            ));
+        };
+        let [parameter] = realization.callable.params.as_slice() else {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "the selected suspension intrinsic does not have one block parameter".to_owned(),
+            ));
+        };
+        let (arena, declaration) = self
+            .callees
+            .declarations
+            .function(&binding.declaration)
+            .ok_or(KlibBodyDeclineReason::Unjoined)?;
+        let header = super::function_lowering::function_header(Some(callable), arena, declaration)?;
+        let (serialized_parameters, serialized_result, contexts, extension, receiver) =
+            header.linked_signature();
+        if realization.kind != ExternalCallableKind::TopLevel
+            || !realization.callable.suspend
+            || realization.callable.context_count != 0
+            || realization.callable.compiler_intrinsic != Some(intrinsic)
+            || serialized_parameters != realization.callable.params.as_slice()
+            || serialized_result != realization.callable.ret
+            || contexts != 0
+            || extension
+            || receiver.is_some()
+        {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "the selected suspension intrinsic disagrees with its serialized header".to_owned(),
+            ));
+        }
+        let result = realization.callable.ret;
+        let is_result_formal = matches!(result.kind(), TyKind::TyParam(name, _) if name == *formal);
+        let function_shape = matches!(parameter.non_null().kind(), TyKind::Fun(function)
+            if !function.suspend
+                && function.context_count == 0
+                && !function.has_receiver
+                && function.params.len() == 1
+                && function.ret.is_nullable()
+                && function.ret.non_null() == Ty::obj("kotlin/Any")
+                && matches!(function.params[0].non_null().kind(), TyKind::Obj(owner, arguments)
+                    if owner.matches("kotlin/coroutines/Continuation")
+                        && arguments.as_slice() == std::slice::from_ref(&result)));
+        if !is_result_formal || !function_shape {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "the selected suspension intrinsic has an unsupported block contract".to_owned(),
+            ));
+        }
+        Ok(Some(super::body_lowering::UninterceptedSuspensionCall {
+            parameter: *parameter,
+            result,
+            formal: *formal,
+        }))
+    }
+
     /// A template is expanded into a source file, whose read of the constant reaches the enum
     /// through the entry its declaring file exports. The selected library record proves the
     /// enum and its constant.
