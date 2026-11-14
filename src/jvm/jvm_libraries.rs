@@ -85,9 +85,11 @@ use crate::libraries::{
     PropertyInfo, PropertyProducer, PropertySet, ReturnInfo, Visibility,
 };
 use crate::runtime::{PlatformRangeCtor, RangeConstruction};
-use crate::symbol_resolver::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
-use crate::types::{type_name, SemanticCallableOwner, Ty, TyKind, TypeName, TypeNameList};
+use crate::types::{
+    ty_subst, ty_subst_all, ty_subst_keep_unbound, type_name, SemanticCallableOwner, Ty, TyKind,
+    TypeName, TypeNameList,
+};
 
 use java_operator_convention::java_method_has_operator_convention;
 

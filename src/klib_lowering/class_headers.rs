@@ -60,10 +60,10 @@ pub(super) fn declared_receiver(class: &KlibBodyClassContract) -> Ty {
     }
 }
 
-pub(super) fn authenticate<'a, 'b>(
+/// Provider-owned class identity, independently of whether this compilation loaded its IR.
+pub(super) fn authenticate_contract<'a>(
     selected: KlibBodyCallable<'a>,
-    bodies: &'b KlibDeclarationBodies,
-) -> Result<ClassMemberHeader<'a, 'b>, KlibBodyDeclineReason> {
+) -> Result<&'a KlibBodyClassContract, KlibBodyDeclineReason> {
     let class = selected
         .class_contract()
         .ok_or_else(|| mismatch("a selected member has no provider-owned class contract"))?;
@@ -83,6 +83,15 @@ pub(super) fn authenticate<'a, 'b>(
             "the class identity disagrees with its selected member",
         ));
     }
+    Ok(class)
+}
+
+pub(super) fn authenticate<'a, 'b>(
+    selected: KlibBodyCallable<'a>,
+    bodies: &'b KlibDeclarationBodies,
+) -> Result<ClassMemberHeader<'a, 'b>, KlibBodyDeclineReason> {
+    let class = authenticate_contract(selected)?;
+    let class_is_singleton = selected.singleton_classifier() == Some(class.classifier);
     let member = bodies
         .class_member_header(
             selected.identity(),
@@ -263,41 +272,27 @@ fn bind_class_parameters(
     arena: &KlibIrArena,
     raw_class: &KlibIrClass,
 ) -> Result<(KlibTypeParameters, Vec<String>), KlibBodyDeclineReason> {
-    let count = parameters.formals.len();
-    if parameters.own_count != count {
-        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-            "captured class type parameters",
-        ));
-    }
-    if raw_class.type_parameters.len() != count
-        || parameters.bounds.len() != count
-        || parameters.variances.len() != count
-    {
+    let formals = class_parameter_identities(parameters)?;
+    let count = formals.len();
+    if raw_class.type_parameters.len() != count {
         return Err(mismatch(
             "the serialized class formals are not parallel to the provider contract",
         ));
     }
     let mut types = KlibTypeParameters::default();
-    let mut identities = HashSet::default();
-    let mut formals = Vec::with_capacity(count);
     for (index, parameter) in raw_class.type_parameters.iter().enumerate() {
-        let TyKind::TyParam(identity, _) = parameters.formals[index].kind() else {
-            return Err(mismatch("a selected class formal is not a type parameter"));
-        };
         let variance = match parameters.variances[index] {
             TypeVariance::Invariant => KlibIrVariance::Invariant,
             TypeVariance::In => KlibIrVariance::In,
             TypeVariance::Out => KlibIrVariance::Out,
         };
-        if !identities.insert(identity)
-            || parameter.base.symbol.kind != KlibIrSymbolKind::TypeParameter
+        if parameter.base.symbol.kind != KlibIrSymbolKind::TypeParameter
             || !types.bind(&parameter.base.symbol, parameters.formals[index])
             || parameter.is_reified()
             || parameter.variance() != Some(variance)
         {
             return Err(mismatch("the serialized class formal identity, variance or reification disagrees with its provider"));
         }
-        formals.push(identity.as_str().to_owned());
     }
     for (index, parameter) in raw_class.type_parameters.iter().enumerate() {
         let bounds = parameter
@@ -315,6 +310,34 @@ fn bind_class_parameters(
         }
     }
     Ok((types, formals))
+}
+
+/// The provider's class formals are also the declared frame for an already emitted initializer.
+/// Raw-header binding and retained declarations use the same normalized identity validation.
+pub(super) fn class_parameter_identities(
+    parameters: &KlibBodyClassParameters,
+) -> Result<Vec<String>, KlibBodyDeclineReason> {
+    let count = parameters.formals.len();
+    if parameters.own_count != count {
+        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+            "captured class type parameters",
+        ));
+    }
+    if parameters.bounds.len() != count || parameters.variances.len() != count {
+        return Err(mismatch("the selected class formal facts are not parallel"));
+    }
+    let mut identities = HashSet::default();
+    let mut formals = Vec::with_capacity(count);
+    for formal in &parameters.formals {
+        let TyKind::TyParam(identity, _) = formal.kind() else {
+            return Err(mismatch("a selected class formal is not a type parameter"));
+        };
+        if !identities.insert(identity) {
+            return Err(mismatch("a class repeats a semantic formal identity"));
+        }
+        formals.push(identity.as_str().to_owned());
+    }
+    Ok(formals)
 }
 
 fn normalized_bounds(bounds: &[Ty]) -> Vec<Ty> {

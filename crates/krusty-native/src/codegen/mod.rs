@@ -359,7 +359,13 @@ impl Backend for CraneliftBackend {
                 classes.carried_types(),
                 &file.classifiers,
             ) {
-                Ok(values) => super::classes::module_plan(classes, &values),
+                Ok(values) => super::classes::module_plan(
+                    classes,
+                    &values,
+                    &file.callables,
+                    &file.classifiers,
+                    &state.laid_out,
+                ),
                 Err(unsupported) => {
                     diags.error(
                         krusty::diag::Span::new(0, 0),
@@ -375,6 +381,14 @@ impl Backend for CraneliftBackend {
         state.laid_out.enter_source_module(
             file.module_name,
             file.kind != krusty::backend::CheckedIrUnitKind::Source,
+        );
+        state.laid_out.bind_published_layouts(
+            file.classifiers.module().classes().classifier_names(),
+            &file.classifiers,
+            slot_plan,
+            &file.ir,
+            &file.dependency_exports,
+            &file.callables,
         );
         let mut dependency_exports: krusty::fx_hash::HashMap<_, DependencyExportDefinition> =
             krusty::fx_hash::HashMap::default();

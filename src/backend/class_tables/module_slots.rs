@@ -314,6 +314,20 @@ impl ModuleSlotPlan {
         &self.interfaces
     }
 
+    /// The declaration keys that share one numbered interface slot: its introduced spelling and
+    /// every inherited/redeclared alias. A target persisting physical interface entries uses
+    /// these checked keys to record stable declaration identities instead of module-local numbers.
+    pub fn interface_member_keys(&self, number: u32) -> Option<Vec<PlanKey>> {
+        if number >= self.interfaces.count() {
+            return None;
+        }
+        let member = self.interfaces.member(number);
+        let mut keys = Vec::with_capacity(member.aliases.len() + 1);
+        keys.push(member.key);
+        keys.extend(member.aliases.iter().copied());
+        Some(keys)
+    }
+
     /// Every class the plan covers, with its planned table or why it has none.
     pub fn tables(&self) -> impl Iterator<Item = (TypeName, Result<&PlannedTable, &str>)> {
         self.tables

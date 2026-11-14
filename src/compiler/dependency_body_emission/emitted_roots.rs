@@ -188,22 +188,28 @@ pub(super) fn declarations(
             capabilities.callees.with_declaration(selected),
             &superclasses,
         );
+        let retained = externals
+            .get(&identity)
+            .and_then(|external| external.constructor_initializer_target());
+        if let Some(target) = retained {
+            if target != declaration_target {
+                return Err("an emitted initializer changed its rebound provider handle".into());
+            }
+            if !facts
+                .authenticates_retained_constructor(&identity, bodies)
+                .map_err(|reason| {
+                    format!("an invalid retained constructor declaration: {reason:?}")
+                })?
+            {
+                return Err("an emitted initializer lost its constructor declaration".into());
+            }
+            declarations.push((declaration_target, realization));
+            continue;
+        }
         let constructor = facts
             .authenticates_constructor(&identity, bodies)
             .map_err(|reason| format!("an invalid constructor declaration: {reason:?}"))?;
         if constructor {
-            if let Some(target) = externals
-                .get(&identity)
-                .and_then(|external| external.constructor_initializer_target())
-            {
-                if target != declaration_target {
-                    return Err(
-                        "an emitted initializer changed its rebound provider handle".to_owned()
-                    );
-                }
-                declarations.push((declaration_target, realization));
-                continue;
-            }
             if let Some(callees) = facts
                 .constructor_initialization_callees(&identity, bodies)
                 .map_err(|reason| format!("an invalid class initialization: {reason:?}"))?
@@ -387,7 +393,7 @@ pub(super) fn declarations(
 pub(super) struct OrdinaryRootCapabilities<'a> {
     pub(super) realizes_intrinsic: &'a dyn Fn(crate::libraries::CompilerIntrinsic) -> bool,
     pub(super) represents_classifier: &'a dyn Fn(crate::types::TypeName) -> bool,
-    pub(super) retains_initializer: &'a dyn Fn(&KlibDependencyCallable) -> bool,
+    pub(super) retains_initializer: &'a dyn Fn(KlibBodyCallable<'_>) -> Result<bool, &'static str>,
 }
 
 pub(super) fn ordinary_roots<'a>(
@@ -533,9 +539,9 @@ pub(super) fn ordinary_roots<'a>(
         else {
             continue;
         };
-        if (capabilities.retains_initializer)(selected.identity()) {
+        if (capabilities.retains_initializer)(selected)? {
             if !callees
-                .authenticates_constructor(selected.identity(), bodies)
+                .authenticates_retained_constructor(selected.identity(), bodies)
                 .map_err(|reason| {
                     format!("an invalid retained superclass initializer: {reason:?}")
                 })?

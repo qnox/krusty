@@ -481,6 +481,28 @@ fn native_generic_class_members_instantiate_their_declared_dependency_exports() 
 }
 
 #[test]
+fn native_cross_file_superclasses_keep_selected_constructor_and_generic_method_frames() {
+    for (source, stem) in [
+        (
+            include_str!("box_regressions/multimodule/sourceLibraryGenericClassDispatch.kt"),
+            "sourceLibraryGenericClassDispatch",
+        ),
+        (
+            include_str!("box_regressions/crossFileSuperclassSecondary.kt"),
+            "crossFileSuperclassSecondary",
+        ),
+    ] {
+        super::box_reference_classes::checked_box(source, stem)
+            .expect("the JVM oracle must run the complete source superclass module graph");
+        assert_eq!(
+            run_native_abi_case(source, stem),
+            Outcome::Pass,
+            "Native must preserve selected superclass ABI across module and file boundaries"
+        );
+    }
+}
+
+#[test]
 fn native_data_class_signed_array_members_are_lowered_from_the_library_klib() {
     let source = include_str!("box_regressions/multimodule/dataClassSignedArrayMembers.kt");
     let stem = "dataClassSignedArrayMembers";

@@ -266,7 +266,8 @@ impl KlibDeclarationBodies {
         Ok(origin)
     }
 
-    fn class_header(
+    /// The exact serialized class header, independently of any callable it declares.
+    pub(crate) fn class_header(
         &self,
         module: &str,
         signature: &KlibPublicIdSignature,

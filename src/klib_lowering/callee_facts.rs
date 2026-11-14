@@ -231,16 +231,25 @@ impl<'a> KlibCalleeFacts<'a> {
         Option<super::constructor_calls::ConstructorDeclaration>,
         super::decline::KlibBodyDeclineReason,
     > {
+        self.selected_constructor(identity)?
+            .map(|selected| super::constructor_calls::authenticate(selected, bodies))
+            .transpose()
+    }
+
+    fn selected_constructor(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Result<Option<KlibBodyCallable<'a>>, super::decline::KlibBodyDeclineReason> {
         match self.get(identity) {
             Some(KlibCalleeFact::Ambiguous) => {
                 Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
-                    "conflicting provider contracts for a constructor declaration".to_owned(),
+                    "conflicting provider contracts for a constructor declaration".into(),
                 ))
             }
             Some(KlibCalleeFact::Selected(callables))
                 if callables[0].kind() == crate::libraries::ExternalCallableKind::Constructor =>
             {
-                super::constructor_calls::authenticate(callables[0], bodies).map(Some)
+                Ok(Some(callables[0]))
             }
             _ => Ok(None),
         }
@@ -252,6 +261,19 @@ impl<'a> KlibCalleeFacts<'a> {
         bodies: &crate::klib_libraries::KlibDeclarationBodies,
     ) -> Result<bool, super::decline::KlibBodyDeclineReason> {
         self.constructor(identity, bodies)
+            .map(|constructor| constructor.is_some())
+    }
+
+    /// An actual emitted initializer remains a declaration edge when its producer has no raw IR.
+    /// Ambiguous provider buckets and every known malformed serialized header still decline.
+    pub(crate) fn authenticates_retained_constructor(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<bool, super::decline::KlibBodyDeclineReason> {
+        self.selected_constructor(identity)?
+            .map(|selected| super::constructor_calls::authenticate_retained(selected, bodies))
+            .transpose()
             .map(|constructor| constructor.is_some())
     }
 

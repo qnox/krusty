@@ -222,6 +222,14 @@ impl ModuleClasses {
         self.classes.iter().map(|(name, class)| (*name, class))
     }
 
+    /// The named class and interface classifier identities this module's plan covers.
+    pub fn classifier_names(&self) -> impl Iterator<Item = TypeName> + '_ {
+        self.classes
+            .keys()
+            .copied()
+            .chain(self.interfaces.iter().map(|(name, _)| *name))
+    }
+
     /// The named classes of the module whose declared superclass is `superclass`.
     pub fn subclasses_of(&self, superclass: TypeName) -> impl Iterator<Item = TypeName> + '_ {
         self.classes
