@@ -65,6 +65,41 @@ pub(super) fn freeze(
     facts
 }
 
+fn collect_type(ty: Ty, classifiers: &mut Vec<TypeName>, variables: &mut HashSet<String>) {
+    match ty.kind() {
+        TyKind::Obj(owner, arguments) => {
+            classifiers.push(owner);
+            for &argument in arguments.iter() {
+                collect_type(argument, classifiers, variables);
+            }
+        }
+        TyKind::Fun(signature) => {
+            for &parameter in &signature.params {
+                collect_type(parameter, classifiers, variables);
+            }
+            collect_type(signature.ret, classifiers, variables);
+        }
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::StarProjection(inner)
+        | TyKind::RawProjection(inner)
+        | TyKind::DefinitelyNotNull(inner) => collect_type(inner, classifiers, variables),
+        TyKind::TyParam(name, bound) | TyKind::Var(name, bound) => {
+            variables.insert(name.as_str().to_owned());
+            collect_type(bound, classifiers, variables);
+        }
+        TyKind::Intersection(parts) => {
+            for &part in parts.iter() {
+                collect_type(part, classifiers, variables);
+            }
+        }
+        TyKind::Unit | TyKind::Null | TyKind::Nothing | TyKind::Error | TyKind::Pending => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,40 +174,5 @@ mod tests {
         assert!(is_subtype(&TyCtx::new(), &facts, child, parent));
         assert!(!is_subtype(&TyCtx::new(), &facts, child, mismatched));
         assert_eq!(facts.direct_supertypes(raw_child), vec![raw_parent]);
-    }
-}
-
-fn collect_type(ty: Ty, classifiers: &mut Vec<TypeName>, variables: &mut HashSet<String>) {
-    match ty.kind() {
-        TyKind::Obj(owner, arguments) => {
-            classifiers.push(owner);
-            for &argument in arguments.iter() {
-                collect_type(argument, classifiers, variables);
-            }
-        }
-        TyKind::Fun(signature) => {
-            for &parameter in &signature.params {
-                collect_type(parameter, classifiers, variables);
-            }
-            collect_type(signature.ret, classifiers, variables);
-        }
-        TyKind::Nullable(inner)
-        | TyKind::PlatformNullable(inner)
-        | TyKind::MutabilityFlexible(inner)
-        | TyKind::InProjection(inner)
-        | TyKind::OutProjection(inner)
-        | TyKind::StarProjection(inner)
-        | TyKind::RawProjection(inner)
-        | TyKind::DefinitelyNotNull(inner) => collect_type(inner, classifiers, variables),
-        TyKind::TyParam(name, bound) | TyKind::Var(name, bound) => {
-            variables.insert(name.as_str().to_owned());
-            collect_type(bound, classifiers, variables);
-        }
-        TyKind::Intersection(parts) => {
-            for &part in parts.iter() {
-                collect_type(part, classifiers, variables);
-            }
-        }
-        TyKind::Unit | TyKind::Null | TyKind::Nothing | TyKind::Error | TyKind::Pending => {}
     }
 }
