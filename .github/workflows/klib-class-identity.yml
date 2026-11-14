@@ -1,0 +1,135 @@
+name: klib-class-identity
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: [self-hosted, rust-4c-8gb]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: build-tool-bins
+          save-if: false
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: zulu
+          java-version: '17'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - name: find installed just
+        id: just
+        shell: bash
+        run: if command -v just > /dev/null; then echo "found=true" >> "$GITHUB_OUTPUT"; fi
+      - name: install just
+        if: steps.just.outputs.found != 'true'
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: just
+      - name: authenticate the exact product source and whole fixtures
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          source=abb8db84f39b1a8d1b4210b4c879a79853473614
+          printf 'source=%s\n' "$source" > evidence/source-auth.log
+          if ! git diff --exit-code "$source" HEAD -- . ':!.github/workflows/klib-class-identity.yml' > evidence/source-diff.log 2>&1; then
+            cat evidence/source-diff.log
+            exit 1
+          fi
+          git rev-parse "$source" > evidence/source-commit.txt
+          sha256sum \
+            tests/box_regressions/multimodule/sourceLibraryClassIdentity.kt \
+            tests/box_regressions/runtimeAnyConstruction.kt \
+            tests/box_regressions/functionClassInvokeProtocol.kt \
+            tests/box_regressions/multimodule/sourceLibraryClassLayout.kt \
+            tests/box_regressions/multimodule/sourceLibraryUnboxedFunctionBridge.kt \
+            > evidence/fixtures.sha256
+      - name: check Wasm library and owning test APIs
+        timeout-minutes: 15
+        env:
+          CARGO_BUILD_JOBS: '1'
+        run: cargo check --profile gate -p krusty-wasm --lib --tests
+      - name: build the conformance executable once
+        timeout-minutes: 40
+        run: |
+          set -euo pipefail
+          CARGO_BUILD_JOBS=1 bash scripts/cargo-test-binary.sh conformance -p krusty --test conformance > evidence/build.log 2>&1
+          cat evidence/build.log
+          cp "$(tail -n 1 evidence/build.log)" conformance-bin
+          cp conformance-bin evidence/conformance-bin
+          tail -n 1 evidence/build.log > evidence/binary-path.txt
+          sha256sum conformance-bin > evidence/binary.sha256
+      - name: exercise owning class identity and constructor controls
+        timeout-minutes: 15
+        env:
+          CARGO_BUILD_JOBS: '1'
+        run: |
+          set -euo pipefail
+          cargo test --profile gate -p krusty-wasm --lib codegen::laid_out_classes::tests:: -- --nocapture > evidence/class-identity-units.log 2>&1
+          cat evidence/class-identity-units.log
+          cargo test --profile gate -p krusty-wasm --lib codegen::classes::constructor_prefix_tests:: -- --nocapture > evidence/constructor-units.log 2>&1
+          cat evidence/constructor-units.log
+      - name: provision exact inputs
+        run: |
+          set -euo pipefail
+          command -v clang
+          echo "KRUSTY_RUNTIME_CC=$(command -v clang)" >> "$GITHUB_ENV"
+          echo "KRUSTY_LANGUAGE_VERSION=2.4.21" >> "$GITHUB_ENV"
+          echo "KRUSTY_KOTLINC=$(just kotlinc 2.4.21)" >> "$GITHUB_ENV"
+          echo "KRUSTY_KOTLIN_NATIVE=$(just kotlin-native 2.4.21)" >> "$GITHUB_ENV"
+          echo "KRUSTY_KOTLIN_BOX_DIR=$(just box-corpus 2.4.21)" >> "$GITHUB_ENV"
+      - name: run whole regression cases with the existing reference oracles
+        timeout-minutes: 60
+        env:
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
+          KRUSTY_TEST_THREADS: '1'
+          KRUSTY_REQUIRE_NATIVE_CONFORMANCE: '1'
+          KRUSTY_REQUIRE_WASM_JS_CONFORMANCE: '1'
+          KRUSTY_REQUIRE_WASM_WASI_CONFORMANCE: '1'
+        run: |
+          set -uo pipefail
+          set +e
+          result=0
+          run_case() {
+            local lane="$1" fixture="$2" test_name="$3" key="$4"
+            env "KRUSTY_${lane}_BOX_ONLY=$fixture" timeout 300 ./conformance-bin "$test_name" --nocapture > "evidence/$key.log" 2>&1
+            local status=$?
+            printf '%s\t%s\n' "$key" "$status" | tee -a evidence/status.tsv
+            cat "evidence/$key.log"
+            if [ "$status" -ne 0 ] || ! grep -q 'test result: ok. 1 passed; 0 failed;' "evidence/$key.log"; then result=1; fi
+          }
+          for lane in JVM NATIVE WASM_JS WASM_WASI; do
+            case "$lane" in
+              JVM) test_name=kotlin_box_ir_jvm_conformance::kotlin_codegen_box_conformance ;;
+              NATIVE) test_name=kotlin_box_native_conformance::kotlin_codegen_box_native_conformance ;;
+              WASM_JS) test_name=kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_js_conformance ;;
+              WASM_WASI) test_name=kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_wasi_conformance ;;
+            esac
+            for fixture in multimodule/sourceLibraryClassIdentity.kt runtimeAnyConstruction.kt functionClassInvokeProtocol.kt multimodule/sourceLibraryClassLayout.kt multimodule/sourceLibraryUnboxedFunctionBridge.kt; do
+              key="${lane,,}-$(basename "$fixture" .kt)"
+              if [ "$lane" = JVM ]; then
+                KRUSTY_BOX_ONLY="$fixture" run_case JVM "$fixture" "$test_name" "$key"
+              else
+                run_case "$lane" "$fixture" "$test_name" "$key"
+              fi
+            done
+          done
+          exit "$result"
+      - name: upload complete evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: klib-class-identity-evidence
+          path: evidence/
+          if-no-files-found: error
