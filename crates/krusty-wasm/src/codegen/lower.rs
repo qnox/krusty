@@ -1130,7 +1130,10 @@ impl<'a> Body<'a> {
                     self.statement(statement)?;
                 }
                 if let Some(value) = value {
-                    self.expression(value)?;
+                    match self.type_of(id)? {
+                        Some(result) => self.value(value, result)?,
+                        None => self.expression(value)?,
+                    }
                 }
             }
             IrExpr::Return(value) => {
