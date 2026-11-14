@@ -197,7 +197,14 @@ pub(super) fn lower_file(
         runtime
             .callable_references
             .begin_file(module_name, ir, dependency_exports)?;
-    let call_targets = callable_registry.file_calls(ir, callables, module_facts, module)?;
+    let call_targets = callable_registry.file_calls(
+        ir,
+        callables,
+        module_facts,
+        classifiers,
+        laid_out_classes,
+        module,
+    )?;
     let inert_singleton_bindings = krusty::backend::inert_staged_singleton_bindings(
         ir,
         |expression| {
@@ -1967,8 +1974,8 @@ impl<'a> Body<'a> {
             && (left == Ty::Unit || matches!(carrier(left)?, Some(ValType::Ref { .. })))
             && (right == Ty::Unit || matches!(carrier(right)?, Some(ValType::Ref { .. })))
         {
-            self.value(lhs, any())?;
-            self.value(rhs, any())?;
+            self.value(lhs, objects::any())?;
+            self.value(rhs, objects::any())?;
             self.code.ref_eq();
             if matches!(op, IrBinOp::Ne | IrBinOp::RefNe) {
                 self.code.op(EQZ32);
