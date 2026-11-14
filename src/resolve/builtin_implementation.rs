@@ -78,6 +78,31 @@ pub(super) fn for_checked_unit(checker: &Checker<'_>) -> Result<Facts, ExternalC
             }
         }
     }
+    // A property write selects its setter in the statement checker rather than in the call
+    // expression tables. Retain that exact external member as well, including Java synthetic
+    // properties which have no external Kotlin property identity.
+    for lowering in checker.stmt_lowers.values() {
+        let StmtLowering::MemberPropertyWrite {
+            setter: Some(setter),
+            ..
+        } = lowering
+        else {
+            continue;
+        };
+        let Some(identity) = setter.external_identity else {
+            continue;
+        };
+        let Some(SemanticCallableOwner::Classifier(owner)) = setter.declaration_owner else {
+            return Err(identity);
+        };
+        let name = setter
+            .external_property_identity
+            .and_then(|property| checker.libraries.external_property(property))
+            .map_or_else(|| setter.name.clone(), |property| property.name);
+        selected
+            .entry(identity)
+            .or_insert_with(|| (owner, name.into_boxed_str()));
+    }
 
     // Override declarations are checked in Pass 1 and can be referenced by common IR even when
     // no source body calls them (for example, a data class's generated Any methods). Carry their
