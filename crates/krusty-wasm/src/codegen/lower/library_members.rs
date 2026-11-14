@@ -136,10 +136,11 @@ impl Body<'_> {
             _ => return None,
         };
         let fact = self.callables.callable(target)?;
-        if role == MemberRole::Function {
+        if let IrExpr::Call { callee, .. } = node {
             if let Some(member) = published_class::select(
                 fact,
                 role,
+                callee,
                 self.classifiers,
                 self.laid_out_classes,
                 self.module,
@@ -175,8 +176,13 @@ impl Body<'_> {
         let this = self.local(REFERENCE);
         self.value(receiver, objects::any())?;
         self.code.local_tee(this);
-        for (&argument, &parameter) in args.iter().zip(params) {
-            self.value(argument, parameter)?;
+        for ((&argument, &applied), &parameter) in args
+            .iter()
+            .zip(member.applied_parameters.iter())
+            .zip(params)
+        {
+            self.value(argument, applied)?;
+            self.coerce_emitted_value(applied, parameter)?;
         }
         self.code.local_get(this);
         self.table_of_object();
@@ -184,8 +190,9 @@ impl Body<'_> {
             .ref_cast(false, HeapType::Concrete(member.table))
             .struct_get(member.table, slot_field(member.slot))
             .call_ref(member.signature);
+        self.coerce_emitted_value(result, member.applied_result)?;
         match self.type_of(id)? {
-            Some(ty) => self.coerce_emitted_value(result, ty),
+            Some(ty) => self.coerce_emitted_value(member.applied_result, ty),
             None => {
                 self.code.unreachable();
                 Ok(())

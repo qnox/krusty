@@ -358,6 +358,7 @@ impl CallableRegistry {
                         if let Some(member) = super::lower::library_members::published_class::select(
                             callable,
                             super::lower::library_members::MemberRole::Function,
+                            callee,
                             classifiers,
                             classes,
                             wasm,
