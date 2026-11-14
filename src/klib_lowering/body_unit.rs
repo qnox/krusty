@@ -37,6 +37,8 @@ use crate::types::{Ty, TypeName};
 
 mod class_construction;
 mod enum_materialization;
+#[cfg(test)]
+mod initializer_capability_tests;
 mod local_class;
 mod object_roots;
 
@@ -75,6 +77,7 @@ enum DependencyExternalRealization {
     TargetIntrinsic(crate::libraries::CompilerIntrinsic),
     Constructor,
     AllocatingConstructor,
+    ConstructorInitializer,
     PropertyGetter,
     TargetMember,
     ProviderLeaf,
@@ -113,6 +116,23 @@ impl EmittedDependencyCallable {
             realization: DependencyExternalRealization::Constructor,
             ..Self::new(target, None, None)
         }
+    }
+
+    /// Actual emitted initialization code; this capability does not permit allocation.
+    pub(crate) fn constructor_initializer(target: ExternalCallableId) -> Self {
+        Self {
+            realization: DependencyExternalRealization::ConstructorInitializer,
+            ..Self::new(target, None, None)
+        }
+    }
+
+    pub(crate) fn constructor_initializer_target(self) -> Option<ExternalCallableId> {
+        matches!(
+            self.realization,
+            DependencyExternalRealization::ConstructorInitializer
+                | DependencyExternalRealization::AllocatingConstructor
+        )
+        .then_some(self.target)
     }
 
     pub(crate) fn allocating_constructor(target: ExternalCallableId) -> Self {
@@ -216,10 +236,10 @@ pub struct DependencyBodyUnit {
     builtins: IrBuiltinOperators,
 }
 
-/// The allocation a materialized class's constructor exports: the class, and the index of the
-/// secondary constructor that builds it, or `None` for its primary constructor.
+/// A constructor of an actually materialized class: its class and secondary ordinal, or `None`
+/// for its primary constructor. Allocation eligibility is a separate declaration capability.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct AllocatingConstructor {
+pub(crate) struct MaterializedClassConstructor {
     pub(crate) class: crate::ir::ClassId,
     pub(crate) secondary: Option<usize>,
 }
@@ -673,24 +693,29 @@ impl DependencyBodyUnit {
             .map(|(identity, &function)| (identity, function))
     }
 
-    /// Allocation exports are separate from their private instance initialization functions. An
-    /// abstract class has none: only its subclasses' constructors initialize it.
+    /// Actual constructor initializers materialized in this unit, including abstract classes.
+    pub(crate) fn initializing_constructors(
+        &self,
+    ) -> impl Iterator<Item = (&KlibDependencyCallable, MaterializedClassConstructor)> {
+        self.constructors.iter().map(|(identity, constructor)| {
+            (
+                identity,
+                MaterializedClassConstructor {
+                    class: self.classes[identity],
+                    secondary: constructor.secondary,
+                },
+            )
+        })
+    }
+
+    /// Allocation exports are separate from initializer declarations. Abstract classes have none.
     pub(crate) fn allocating_constructors(
         &self,
-    ) -> impl Iterator<Item = (&KlibDependencyCallable, AllocatingConstructor)> {
-        self.constructors
-            .iter()
-            .filter_map(|(identity, constructor)| {
-                let class = self.classes[identity];
-                let declaration = &self.ir.classes[class as usize];
-                (!declaration.is_abstract && !declaration.is_object).then_some((
-                    identity,
-                    AllocatingConstructor {
-                        class,
-                        secondary: constructor.secondary,
-                    },
-                ))
-            })
+    ) -> impl Iterator<Item = (&KlibDependencyCallable, MaterializedClassConstructor)> {
+        self.initializing_constructors().filter(|(_, constructor)| {
+            let class = &self.ir.classes[constructor.class as usize];
+            !class.is_abstract && !class.is_sealed && !class.is_object
+        })
     }
 
     /// A unit that reads the constants of `enums`, which earlier units materialized, through
@@ -1202,6 +1227,21 @@ impl CallLinker for Linker<'_, '_> {
                 "a constructor call selected a non-constructor provider declaration".to_owned(),
             ));
         }
+        if self
+            .sources
+            .externals
+            .get(&identity)
+            .is_some_and(|external| {
+                matches!(
+                    external.realization,
+                    DependencyExternalRealization::ConstructorInitializer
+                )
+            })
+        {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "an initializer-only dependency does not permit class allocation".to_owned(),
+            ));
+        }
         let declaration = self
             .sources
             .callees
@@ -1547,7 +1587,7 @@ impl CallLinker for Linker<'_, '_> {
             });
         }
         if let Some(&emitted) = self.sources.externals.get(&identity) {
-            if emitted.is_constructor() {
+            if emitted.is_constructor() || emitted.constructor_initializer_target().is_some() {
                 return Err(callee_declined(KlibBodyDeclineReason::SignatureMismatch(
                     "a constructor external is called as a function".to_owned(),
                 )));

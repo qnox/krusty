@@ -168,6 +168,31 @@ impl Backend for WasmBackend {
             })
     }
 
+    fn emitted_constructor_initializer(
+        &self,
+        state: &mut Self::State,
+        declaration: &krusty::backend::ConstructorInitializerDeclaration,
+    ) -> bool {
+        if state.declined {
+            return false;
+        }
+        let Some(started) = state.started.as_mut() else {
+            return false;
+        };
+        let Ok(Some((owner, _, signature))) = started
+            .classes
+            .published_initializer(&declaration.constructor, &started.module)
+        else {
+            return false;
+        };
+        owner == &declaration.class
+            && laid_out_classes::constructor_frame_matches(
+                &mut started.module,
+                &declaration.parameters,
+                signature,
+            )
+    }
+
     fn lower_ir_file(
         &self,
         mut file: CheckedIrFile<'_>,
@@ -215,6 +240,11 @@ impl Backend for WasmBackend {
             decline(state, declined.construct().to_string());
             return Vec::new();
         }
+        krusty::backend::construction_entries::publish_constructors(
+            &mut file.ir,
+            (file.module_name, file.classifiers.module()),
+            &mut file.dependency_exports,
+        );
         krusty::backend::construction_entries::realize(&mut file.ir, &mut file.dependency_exports);
         if let Err(error) =
             krusty::backend::property_entries::realize(&mut file.ir, &mut file.dependency_exports)
@@ -236,19 +266,39 @@ impl Backend for WasmBackend {
             // cross-file reservations from the current source module.
             started.callables.enter_source_module(file.module_name);
             started.properties.enter_source_module(file.module_name);
-            started.classes.enter_source_module(file.module_name);
+            started.classes.enter_source_module(
+                file.module_name,
+                &file.ir,
+                &file.callables,
+                &file.classifiers,
+                &mut started.module,
+            );
         } else {
-            started.classes.enter_dependency_support();
+            started.classes.enter_dependency_support(
+                &file.ir,
+                &file.callables,
+                &file.classifiers,
+                &mut started.module,
+            );
         }
         if state
             .slot_plan
             .as_ref()
             .is_none_or(|(module, _)| module != file.module_name)
         {
-            let plan = classes::module_plan(file.classifiers.module().classes(), &file.classifiers);
+            let plan = classes::module_plan(
+                file.classifiers.module().classes(),
+                &file.classifiers,
+                &file.callables,
+                &started.classes,
+            );
             state.slot_plan = Some((file.module_name.to_owned(), plan));
             // The table types are built from the plan, so they are that module's too.
-            started.tables = Default::default();
+            started.tables = module_tables::ModuleTables::with_published(
+                file.classifiers.module().classes(),
+                &file.classifiers,
+                &started.classes,
+            );
         }
         let plan = &state.slot_plan.as_ref().expect("planned just above").1;
         let lowered = match lower::lower_file(

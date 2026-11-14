@@ -1,16 +1,17 @@
 //! Links from one file to an instance of a classifier another file realizes: an object's single
-//! instance, or one constant of an enum.
+//! instance, one constant of an enum, or a new instance built by one of its constructors.
 //!
-//! Only the declaring file holds such an instance's storage and initialization, so it realizes an
-//! entry, an ordinary function answering the instance: an object's in
-//! `super::construction_entries`, an enum constant's in `super::enums`. Every other file reads the
-//! instance by calling that entry. An object and an enum constant are the same problem, so they
+//! Only the declaring file holds such an instance's layout, storage and initialization, so it
+//! realizes an entry, an ordinary function answering the instance: an object's and a
+//! constructor's in `super::construction_entries`, an enum constant's in `super::enums`. Every
+//! other file reads the instance by calling that entry. These are the same problem, so they
 //! share one identity ([`InstanceEntry`]), one Pass-1 fact
 //! (`super::BackendModuleFacts::declares_instance`) and one table of links
 //! ([`super::module_links::ModuleLinks`]): whichever of the reading and the declaring file is
 //! lowered first allocates the link, and the other finds it. The table serves every module of a
 //! program, so a library's instance links the same way.
 
+use crate::fir::DeclarationId;
 use crate::fx_hash::HashMap;
 use crate::ir::{FunId, IrExpr, IrFile};
 use crate::types::TypeName;
@@ -24,6 +25,13 @@ pub enum InstanceEntry {
     /// The single instance of an `object` or companion object.
     Object(TypeName),
     EnumConstant(EnumConstant),
+    /// A new instance, built by the checked constructor declaration of the named source module;
+    /// the entry takes the constructor's declared parameters. A declaration identity belongs to
+    /// one module's analysis, so the module qualifies it.
+    Constructor {
+        module: Box<str>,
+        declaration: DeclarationId,
+    },
 }
 
 /// Canonical declaration evidence; only a target's defined instance entry grants publication.
@@ -33,21 +41,12 @@ pub struct ObjectDeclaration {
     pub identity: crate::libraries::KlibClassIdentity,
 }
 
-impl ObjectDeclaration {
-    pub(crate) fn of(class: &crate::libraries::KlibBodyClassContract) -> Self {
-        Self {
-            classifier: class.classifier,
-            identity: class.identity(),
-        }
-    }
-}
-
 impl InstanceEntry {
-    /// The enum constant this entry reads, or `None` for an object's single instance.
+    /// The enum constant this entry reads, or `None` for any other kind of instance.
     pub fn enum_constant(&self) -> Option<&EnumConstant> {
         match self {
             Self::EnumConstant(constant) => Some(constant),
-            Self::Object(_) => None,
+            Self::Object(_) | Self::Constructor { .. } => None,
         }
     }
 }
@@ -66,7 +65,7 @@ pub fn link_entries<V: Clone>(
             links
                 .define(instance.clone(), &mut allocate)
                 .map(|link| (*entry, link))
-                .map_err(|_| "two files realize one object or enum constant")
+                .map_err(|_| "two files realize one instance entry")
         })
         .collect()
 }
@@ -94,11 +93,54 @@ pub fn link_reads<V: Clone>(
             IrExpr::SingletonValue { classifier } => InstanceEntry::Object(*classifier),
             _ => continue,
         };
-        let classifier = match &instance {
-            InstanceEntry::Object(classifier) => *classifier,
-            InstanceEntry::EnumConstant(constant) => constant.classifier,
+        let declared_here = match &instance {
+            InstanceEntry::Object(classifier) => ir.class_id_by_name(*classifier).is_some(),
+            InstanceEntry::EnumConstant(constant) => {
+                ir.class_id_by_name(constant.classifier).is_some()
+            }
+            InstanceEntry::Constructor { .. } => continue,
         };
-        if ir.class_id_by_name(classifier).is_some() || reads.contains_key(&instance) {
+        if declared_here || reads.contains_key(&instance) {
+            continue;
+        }
+        let declared = module.declares_instance(&instance);
+        if let Some(link) = links.read(instance.clone(), declared, &mut allocate) {
+            reads.insert(instance, link);
+        }
+    }
+    reads
+}
+
+/// The link of each constructor of another file's class that `ir` builds an instance through,
+/// reserved or found like [`link_reads`] does for the instances it reads. A construction the
+/// checker selected a module constructor for whose class `ir` does not declare, and that `module`
+/// does not certify, has no link, and the target declines it.
+pub fn link_constructor_reads<V: Clone>(
+    ir: &IrFile,
+    module_name: &str,
+    module: &BackendModuleFacts,
+    links: &mut ModuleLinks<InstanceEntry, V>,
+    mut allocate: impl FnMut() -> V,
+) -> HashMap<InstanceEntry, V> {
+    let mut reads = HashMap::default();
+    for expression in crate::ir::emitted_body_roots(ir)
+        .into_iter()
+        .flat_map(|root| crate::ir::value_namespace_expressions(ir, root))
+    {
+        let IrExpr::New { internal, .. } = ir.expr(expression) else {
+            continue;
+        };
+        let Some(&constructor) = ir.module_constructions.selected.get(&expression) else {
+            continue;
+        };
+        if ir.class_id_by_name(*internal).is_some() {
+            continue;
+        }
+        let instance = InstanceEntry::Constructor {
+            module: module_name.into(),
+            declaration: constructor,
+        };
+        if reads.contains_key(&instance) {
             continue;
         }
         let declared = module.declares_instance(&instance);

@@ -320,6 +320,16 @@ impl Module {
         self.functions.get(local).is_some_and(Option::is_some)
     }
 
+    /// The actual type of a defined local function. A reserved declaration is not evidence of
+    /// a physical frame; imported entries are owned by their separate import contract.
+    pub(super) fn defined_function_type(&self, index: u32) -> Option<u32> {
+        let local = (index as usize).checked_sub(self.imports.len())?;
+        self.functions
+            .get(local)?
+            .as_ref()
+            .map(|function| function.ty)
+    }
+
     pub(super) fn memory(&mut self, pages: u32) {
         self.memory_pages = Some(pages);
     }
@@ -795,6 +805,24 @@ mod tests {
                 7, 1, 0, 12, 1, 1, 10, 1, 0, 11, 3, 1, 1, 0,
             ]
         );
+    }
+
+    #[test]
+    fn physical_function_type_is_available_only_after_definition() {
+        let mut module = Module::default();
+        let constructor = module.declare();
+        let signature = module.func_type(vec![ValType::I32], Vec::new());
+        assert_eq!(module.defined_function_type(constructor), None);
+        module.define(
+            constructor,
+            Function {
+                ty: signature,
+                locals: Vec::new(),
+                code: Code::default(),
+            },
+        );
+        assert_eq!(module.defined_function_type(constructor), Some(signature));
+        assert_eq!(module.defined_function_type(constructor + 1), None);
     }
 
     #[test]

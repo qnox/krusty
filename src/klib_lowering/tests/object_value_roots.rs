@@ -72,7 +72,7 @@ fn value_only_objects_publish_instances_without_constructor_or_callable_exports(
         &libraries,
     )
     .unwrap();
-    assert!(unit.has_initialization());
+    assert!(unit.initializing_constructors().next().is_some());
     assert_eq!(unit.allocating_constructors().count(), 0);
     assert_eq!(unit.callable_functions().count(), 0);
     let mut ir = unit.into_ir();
@@ -119,7 +119,7 @@ fn missing_object_initialization_declines_and_rolls_back_the_whole_batch() {
             &libraries
         )
         .is_err());
-    assert!(!unit.has_initialization());
+    assert!(unit.initializing_constructors().next().is_none());
     assert_eq!(unit.ir().classes.len(), 0);
     assert_eq!(unit.ir().functions.len(), 0);
     assert_eq!(unit.callable_functions().count(), 0);
@@ -137,6 +137,6 @@ fn missing_object_initialization_declines_and_rolls_back_the_whole_batch() {
         &libraries,
     )
     .unwrap();
-    assert!(!unit.has_initialization());
+    assert!(unit.initializing_constructors().next().is_none());
     assert_eq!(unit.ir().classes.len(), 0);
 }

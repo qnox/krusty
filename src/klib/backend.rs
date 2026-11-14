@@ -639,28 +639,39 @@ fn record_class_function_exports(
         let Some(chain) = metadata_class_chain(package, name, &decoded.classes)? else {
             continue;
         };
+        let (own, enclosing) = chain
+            .split_last()
+            .ok_or_else(|| format!("class {name} has no metadata class chain"))?;
+        let class_id = ir
+            .class_id_by_name(source.fq_name_id())
+            .ok_or_else(|| format!("class {name} has no checked IR declaration"))?;
+        exports.record_classifier(
+            class_id,
+            crate::libraries::KlibClassIdentity {
+                module: module_name.to_owned(),
+                signature: crate::metadata::id_signature::metadata_class_signature(
+                    MetadataContainer {
+                        package,
+                        classes: enclosing,
+                        native_interop_library: false,
+                    },
+                    *own,
+                ),
+            },
+        );
         let container = MetadataContainer {
             package,
             classes: &chain,
             native_interop_library: false,
         };
         if source.is_object || source.is_companion {
-            let (class, parents) = chain
-                .split_last()
-                .ok_or("an object without its metadata class")?;
             exports
                 .record_object_declaration(crate::backend::instance_links::ObjectDeclaration {
                     classifier: source.fq_name_id(),
-                    identity: crate::libraries::KlibClassIdentity {
-                        module: module_name.to_owned(),
-                        signature: crate::metadata::id_signature::metadata_class_signature(
-                            MetadataContainer {
-                                classes: parents,
-                                ..container
-                            },
-                            *class,
-                        ),
-                    },
+                    identity: exports
+                        .classifier(class_id)
+                        .ok_or("an object lost its writer-owned classifier identity")?
+                        .clone(),
                 })
                 .map_err(str::to_owned)?;
         }
@@ -713,16 +724,18 @@ fn record_class_function_exports(
             if source.type_params.is_empty() && source.captured_type_params.is_empty() {
                 declarations.record(function, signature.clone(), receiver);
             }
-            if source.is_interface && !declaration.is_static {
-                exports.record_interface_member(
-                    function,
-                    crate::libraries::KlibDependencyCallable {
-                        module: module_name.to_owned(),
-                        declaration: crate::libraries::KlibDeclarationSignature::Public(
-                            signature.clone(),
-                        ),
-                    },
-                );
+            if !declaration.is_static {
+                let identity = crate::libraries::KlibDependencyCallable {
+                    module: module_name.to_owned(),
+                    declaration: crate::libraries::KlibDeclarationSignature::Public(
+                        signature.clone(),
+                    ),
+                };
+                if source.is_interface {
+                    exports.record_interface_member(function, identity);
+                } else {
+                    exports.record_member_declaration(function, identity);
+                }
             }
             if !crate::backend::has_standalone_dependency_code(ir, function) {
                 continue;
@@ -762,7 +775,8 @@ fn record_class_function_exports(
 /// and publishes no constructor. A generic class's entry takes its constructor's declared
 /// parameter types, which a KLIB target realizes as it realizes the class's own storage; an inner
 /// class's entry takes its enclosing instance first, as its constructor does. A class capturing
-/// type parameters of an enclosing declaration has no entry yet.
+/// type parameters of an enclosing declaration has no entry yet. Abstract and sealed classes
+/// retain initializer declarations for checked superclass delegation, without allocation exports.
 fn record_constructor_exports(
     ir: &IrFile,
     module_name: &str,
@@ -783,8 +797,6 @@ fn record_constructor_exports(
         ));
     }
     if source.is_interface
-        || source.is_abstract
-        || source.is_sealed
         || source.is_object
         || source.is_companion
         || source.is_enum
@@ -817,13 +829,18 @@ fn record_constructor_exports(
         let class = ir
             .class_id_by_name(source.fq_name_id())
             .ok_or_else(|| format!("class {} has no IR identity", source.fq_name()))?;
-        exports.record_constructor(
-            crate::backend::ExportedConstructor { class, secondary },
-            crate::libraries::KlibDependencyCallable {
-                module: module_name.to_owned(),
-                declaration: crate::libraries::KlibDeclarationSignature::Public(signature),
-            },
-        );
+        let constructor = crate::backend::ExportedConstructor { class, secondary };
+        let identity = crate::libraries::KlibDependencyCallable {
+            module: module_name.to_owned(),
+            declaration: crate::libraries::KlibDeclarationSignature::Public(signature),
+        };
+        if source.is_abstract || source.is_sealed {
+            exports
+                .record_constructor_declaration(constructor, identity)
+                .map_err(str::to_owned)?;
+        } else {
+            exports.record_constructor(constructor, identity);
+        }
     }
     Ok(())
 }

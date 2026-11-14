@@ -743,6 +743,7 @@ mod tests {
         role: Option<ClassifierRole>,
     ) -> Arc<krusty::backend::BackendClassifierFact> {
         Arc::new(krusty::backend::BackendClassifierFact {
+            klib_identity: None,
             runtime_exception: None,
             declaration_name: None,
             access: krusty::libraries::ClassifierAccess::Public,

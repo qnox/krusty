@@ -156,6 +156,8 @@ pub struct Lowered {
     pub laid_out: Vec<(TypeName, LaidOutClass)>,
     /// Canonical object declarations whose actual exported getter symbol was defined.
     pub defined_objects: Vec<krusty::backend::instance_links::ObjectDeclaration>,
+    /// Actual externally linkable descriptor definitions, signed by their producer class records.
+    pub class_descriptors: Vec<(krusty::backend::KlibClassIdentity, String)>,
 }
 
 /// Build the ISA for `target`. Non-PIC, because the output is a static executable at a fixed
@@ -334,6 +336,7 @@ pub fn lower_file(
         .map_err(|()| {
             declined!("a dependency body with more than one runtime companion declaration")
         })?,
+        class_descriptors: Vec::new(),
         extension_entries: HashMap::default(),
         extension_tables: HashMap::default(),
         module: &mut module,
@@ -414,7 +417,6 @@ pub fn lower_file(
         }
     }
     lowering.define_property_entry_points(file_init)?;
-    lowering.define_constructor_entry_points(file_init)?;
     lowering.define_value_box_entry_points()?;
     lowering.define_extension_entries(file_init)?;
     let defines_entry = selected.is_some();
@@ -429,6 +431,7 @@ pub fn lower_file(
     lowering.define_interface_identities()?;
 
     let records = lowering.laid_out_records()?;
+    let class_descriptors = std::mem::take(&mut lowering.class_descriptors);
     let comdat_objects = std::mem::take(&mut lowering.comdat_objects);
     let mut product = module.finish();
     let mut defined_objects = Vec::new();
@@ -481,6 +484,7 @@ pub fn lower_file(
         abi,
         laid_out: records,
         defined_objects,
+        class_descriptors,
     })
 }
 
@@ -530,6 +534,7 @@ struct FileLowering<'a> {
     module_facts: &'a krusty::backend::BackendModuleFacts,
     /// The classes earlier files of the source module laid out.
     laid_out: &'a LaidOutClasses,
+    class_descriptors: Vec<(krusty::backend::KlibClassIdentity, String)>,
     /// The classes of this file another file of the module extends.
     extended: krusty::fx_hash::HashSet<krusty::ir::ClassId>,
     /// The classes of `extended` and their superclasses here, whose table entries another file

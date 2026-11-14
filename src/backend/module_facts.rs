@@ -93,6 +93,8 @@ fn is_subclassifier(
 /// parser-backed member identities cannot be represented here.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BackendClassifierFact {
+    /// Exact selected-provider classifier identity, independent of constructor selections.
+    pub klib_identity: Option<crate::libraries::KlibClassIdentity>,
     pub runtime_exception: Option<crate::libraries::RuntimeExceptionLayout>,
     pub declaration_name: Option<crate::types::ClassifierDeclarationName>,
     pub access: crate::libraries::ClassifierAccess,
@@ -169,6 +171,7 @@ struct SourceDeclaration {
 impl BackendClassifierFact {
     fn from_library(classifier: TypeName, shape: &LibraryType) -> Self {
         Self {
+            klib_identity: shape.klib_identity.clone(),
             runtime_exception: shape.runtime_exception,
             declaration_name: shape.declaration_name.clone(),
             access: shape.access,
@@ -252,6 +255,9 @@ pub struct BackendModuleFacts {
     /// of the module reads one through the entry its declaring file publishes, and links that read
     /// by this fact before the declaring file is lowered (see `super::module_links`).
     source_enum_constants: HashMap<TypeName, Box<[Box<str>]>>,
+    /// The constructors of this module another file may build an instance through, by their
+    /// checked declaration: see [`constructible_from_another_file`].
+    source_constructors: HashSet<crate::fir::DeclarationId>,
     /// Each `expect` classifier an `actual typealias` actualizes, mapped to the alias's target.
     /// Common code types the `expect` as its own classifier; every target realizes the target.
     actualized_expects: HashMap<TypeName, TypeName>,
@@ -293,6 +299,7 @@ impl BackendModuleFacts {
         let mut source_supertypes = HashMap::default();
         let mut source_class_members = HashMap::default();
         let mut source_enum_constants = HashMap::default();
+        let mut source_constructors = HashSet::default();
         let mut actualized_expects = HashMap::default();
         let mut actualized_nested_expects = HashMap::default();
         for raw in 0..index.declaration_count() {
@@ -304,6 +311,9 @@ impl BackendModuleFacts {
                     crate::libraries::ClassifierDeclarationKey::TypeAlias(alias.identity),
                     alias.declaration_name.clone(),
                 );
+            }
+            if constructible_from_another_file(index, declaration) {
+                source_constructors.insert(declaration);
             }
             let Some(classifier) = index.classifier_header(declaration) else {
                 continue;
@@ -320,6 +330,14 @@ impl BackendModuleFacts {
                         .has(crate::fir::DeclarationFlags::ANNOTATION_CLASS)
                     && !header.flags.has(crate::fir::DeclarationFlags::ABSTRACT)
             });
+            let declared_supertypes = classifier
+                .declared_supertypes()
+                .filter_map(|ty| {
+                    crate::libraries::function_classifiers::supertype_classifier(ty.get())
+                        .non_null()
+                        .obj_internal()
+                })
+                .collect::<Box<[_]>>();
             source_supertypes.insert(
                 classifier.classifier,
                 (
@@ -327,10 +345,7 @@ impl BackendModuleFacts {
                         .then(|| index.declaration_anchor(declaration))
                         .flatten()
                         .map(|anchor| anchor.source),
-                    classifier
-                        .declared_supertypes()
-                        .filter_map(|ty| ty.get().non_null().obj_internal())
-                        .collect::<Box<[_]>>(),
+                    declared_supertypes.clone(),
                 ),
             );
             if index.is_body_local_declaration(declaration) {
@@ -409,10 +424,7 @@ impl BackendModuleFacts {
                 kind,
                 crate::libraries::TypeKind::Interface | crate::libraries::TypeKind::Annotation
             );
-            let mut direct_supertypes = classifier
-                .declared_supertypes()
-                .filter_map(|ty| ty.get().non_null().obj_internal())
-                .collect::<Vec<_>>();
+            let mut direct_supertypes = declared_supertypes.into_vec();
             if direct_supertypes.is_empty()
                 && classifier.classifier != crate::types::type_name("kotlin/Any")
             {
@@ -482,6 +494,7 @@ impl BackendModuleFacts {
             let companion = source_companion(index, declaration);
             let qualified_name = source_qualified_name(index, declaration);
             let fact = BackendClassifierFact {
+                klib_identity: None,
                 runtime_exception: None,
                 declaration_name: classifier.declaration_name.clone(),
                 access: declaration_header.visibility.into(),
@@ -575,6 +588,7 @@ impl BackendModuleFacts {
             source_class_members,
             dependency_implementors: dependency_implementors(&source_supertypes),
             source_enum_constants,
+            source_constructors,
             actualized_expects,
             actualized_nested_expects,
         })
@@ -625,6 +639,7 @@ impl BackendModuleFacts {
             source_class_members: HashMap::default(),
             dependency_implementors: HashMap::default(),
             source_enum_constants: HashMap::default(),
+            source_constructors: HashSet::default(),
             actualized_expects: HashMap::default(),
             actualized_nested_expects: HashMap::default(),
         })
@@ -634,7 +649,8 @@ impl BackendModuleFacts {
         self.classifiers.get(&classifier).cloned()
     }
 
-    /// Whether a file of this module declares `instance`: an object, or a constant of an enum.
+    /// Whether a file of this module declares `instance`: an object, a constant of an enum, or a
+    /// constructor another file may build through.
     pub fn declares_instance(&self, instance: &super::instance_links::InstanceEntry) -> bool {
         match instance {
             super::instance_links::InstanceEntry::Object(classifier) => self
@@ -645,6 +661,9 @@ impl BackendModuleFacts {
                 .source_enum_constants
                 .get(&constant.classifier)
                 .is_some_and(|constants| constants.contains(&constant.name)),
+            super::instance_links::InstanceEntry::Constructor { declaration, .. } => {
+                self.source_constructors.contains(declaration)
+            }
         }
     }
 
@@ -1215,6 +1234,55 @@ fn visit_inline_plan(plan: &InlineBodyPlan, visit: &mut impl FnMut(Ty)) {
     }
 }
 
+/// Whether `constructor` is a constructor of an ordinary class that another file builds an
+/// instance through its declaring file's entry: a non-private constructor without context
+/// parameters of a class that is not abstract, `sealed`, an `enum`, an object, an annotation or an
+/// interface. An `inner` class's entry takes its enclosing instance first.
+fn constructible_from_another_file(
+    index: &crate::fir::ResolvedModuleIndex,
+    constructor: crate::fir::DeclarationId,
+) -> bool {
+    use crate::fir::DeclarationFlags as Flag;
+    let Some(header) = index.declaration_header(constructor) else {
+        return false;
+    };
+    if header.kind != crate::fir::DeclarationKind::Constructor
+        || header.visibility == crate::types::Visibility::Private
+        || header.flags.has(Flag::EXPECT)
+    {
+        return false;
+    }
+    let Some(owner) = index
+        .declaration_anchor(constructor)
+        .and_then(|anchor| anchor.owner)
+    else {
+        return false;
+    };
+    let (Some(owner_header), Some(_)) = (
+        index.declaration_header(owner),
+        index.classifier_header(owner),
+    ) else {
+        return false;
+    };
+    ![
+        Flag::INTERFACE,
+        Flag::ANNOTATION_CLASS,
+        Flag::ENUM,
+        Flag::SINGLETON,
+        Flag::ABSTRACT,
+        Flag::SEALED,
+        Flag::LOCAL_CLASS,
+        Flag::ANONYMOUS_OBJECT,
+        Flag::EXPECT,
+    ]
+    .iter()
+    .any(|flag| owner_header.flags.has(*flag))
+        && index
+            .callable_for_declaration(constructor)
+            .is_some_and(|callable| callable.shape.context_parameter_count == 0)
+        && !index.is_body_local_declaration(owner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1247,6 +1315,29 @@ mod tests {
             assert_eq!(class.declaration_name, fact.declaration_name);
         }
         facts
+    }
+
+    #[test]
+    fn frozen_function_supertypes_keep_their_checked_classifier() {
+        let facts = classifier_name_snapshot(
+            "package ownership.functions\n\
+             fun interface Plain { fun invoke(value: Int): Int }\n\
+             fun interface Callable : (Int) -> Int { override fun invoke(value: Int): Int }\n\
+             interface Suspending : suspend (Int) -> Int\n",
+        );
+        for (name, parent) in [
+            ("Plain", "kotlin/Any"),
+            ("Callable", "kotlin/Function1"),
+            ("Suspending", "kotlin/coroutines/SuspendFunction1"),
+        ] {
+            let classifier =
+                crate::types::type_name_child(crate::types::type_name("ownership/functions"), name);
+            assert_eq!(
+                facts.classifier(classifier).unwrap().supertypes.as_ref(),
+                &[crate::types::type_name(parent)],
+                "{name}"
+            );
+        }
     }
 
     #[test]

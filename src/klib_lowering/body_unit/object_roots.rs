@@ -16,10 +16,6 @@ pub(super) fn constructor_identity(
 }
 
 impl DependencyBodyUnit {
-    pub(crate) fn has_initialization(&self) -> bool {
-        !self.constructors.is_empty()
-    }
-
     pub(crate) fn lower_objects_with_declarations<'a>(
         &mut self,
         classes: &'a [crate::libraries::KlibBodyClassContract],

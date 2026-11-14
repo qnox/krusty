@@ -192,6 +192,18 @@ pub(super) fn declarations(
             .authenticates_constructor(&identity, bodies)
             .map_err(|reason| format!("an invalid constructor declaration: {reason:?}"))?;
         if constructor {
+            if let Some(target) = externals
+                .get(&identity)
+                .and_then(|external| external.constructor_initializer_target())
+            {
+                if target != declaration_target {
+                    return Err(
+                        "an emitted initializer changed its rebound provider handle".to_owned()
+                    );
+                }
+                declarations.push((declaration_target, realization));
+                continue;
+            }
             if let Some(callees) = facts
                 .constructor_initialization_callees(&identity, bodies)
                 .map_err(|reason| format!("an invalid class initialization: {reason:?}"))?
@@ -372,15 +384,22 @@ pub(super) fn declarations(
     })
 }
 
+pub(super) struct OrdinaryRootCapabilities<'a> {
+    pub(super) realizes_intrinsic: &'a dyn Fn(crate::libraries::CompilerIntrinsic) -> bool,
+    pub(super) represents_classifier: &'a dyn Fn(crate::types::TypeName) -> bool,
+    pub(super) retains_initializer: &'a dyn Fn(&KlibDependencyCallable) -> bool,
+}
+
 pub(super) fn ordinary_roots<'a>(
     platform: &dyn SemanticPlatform,
     source: &'a CheckedIrFile<'_>,
     bodies: &KlibDeclarationBodies,
     intrinsics: &KlibIntrinsicFacts,
     callees: &crate::klib_lowering::KlibCalleeFacts<'a>,
-    target_realizes_intrinsic: &dyn Fn(crate::libraries::CompilerIntrinsic) -> bool,
-    target_represents_classifier: &dyn Fn(crate::types::TypeName) -> bool,
+    capabilities: &OrdinaryRootCapabilities<'_>,
 ) -> Result<Vec<KlibBodyCallable<'a>>, String> {
+    let target_realizes_intrinsic = capabilities.realizes_intrinsic;
+    let target_represents_classifier = capabilities.represents_classifier;
     let mut roots = Vec::new();
     let mut seen = HashSet::default();
     for expression in crate::ir::emitted_body_roots(&source.ir)
@@ -514,6 +533,17 @@ pub(super) fn ordinary_roots<'a>(
         else {
             continue;
         };
+        if (capabilities.retains_initializer)(selected.identity()) {
+            if !callees
+                .authenticates_constructor(selected.identity(), bodies)
+                .map_err(|reason| {
+                    format!("an invalid retained superclass initializer: {reason:?}")
+                })?
+            {
+                return Err("a retained superclass initializer without its authenticated constructor header".into());
+            }
+            continue;
+        }
         if bodies.function_has_body(selected.identity()) != Some(true) {
             continue;
         }
