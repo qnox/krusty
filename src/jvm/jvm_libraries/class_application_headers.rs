@@ -5,7 +5,7 @@ use super::generic_signatures::{
     parse_class_gsig,
 };
 use super::JvmLibraries;
-use crate::fx_hash::HashSet;
+use crate::fx_hash::{HashMap, HashSet};
 use crate::jvm::classreader::{ClassInfo, ACC_STATIC};
 use crate::types::{type_name, Ty, TypeName, TypeParameters, TypeVariance};
 
@@ -39,6 +39,101 @@ impl JvmLibraries {
         identity: TypeName,
     ) -> Result<ClassApplicationHeader, ClassHeaderError> {
         read_header(self, identity, &mut HashSet::default())
+    }
+
+    /// The ordered class formals and arguments a receiver applies at a hierarchy node.
+    pub(super) fn receiver_type_application_name(
+        &self,
+        receiver: Ty,
+        target_internal: TypeName,
+    ) -> Option<(Vec<String>, Vec<Ty>)> {
+        let crate::types::TyKind::Obj(start, start_args) = receiver.kind() else {
+            return None;
+        };
+        let target = crate::jvm::jvm_class_map::to_jvm_type_name(target_internal);
+        let mut seen = HashSet::default();
+        let mut pending = std::collections::VecDeque::new();
+        pending.push_back((
+            crate::jvm::jvm_class_map::to_jvm_type_name(start),
+            start_args.to_vec(),
+        ));
+        while let Some((internal, arguments)) = pending.pop_front() {
+            if !seen.insert(internal) {
+                continue;
+            }
+            let class = self.cp.find_name(internal);
+            // A mapped Kotlin builtin can be absent from the classpath in a no-JDK compile. Its
+            // `.kotlin_builtins` declaration carries the same formal and applied-supertype data.
+            let (formals, supertypes) = match &class {
+                Some(class) => class
+                    .signature
+                    .as_deref()
+                    .and_then(parse_class_gsig)
+                    .map(|(formals, _, supertypes)| (formals, supertypes))
+                    .unzip(),
+                None => self.cp.builtin_class_gsig_name(internal).unzip(),
+            };
+            if class.is_none() && formals.is_none() {
+                continue;
+            }
+            let formals = formals.unwrap_or_default();
+            if internal == target {
+                return Some((formals, arguments));
+            }
+            let bindings: HashMap<String, Ty> = formals
+                .iter()
+                .cloned()
+                .zip(arguments.iter().copied())
+                .collect();
+            match (supertypes, &class) {
+                (Some(supertypes), _) => {
+                    for supertype in supertypes {
+                        if let crate::types::TyKind::Obj(super_internal, super_arguments) =
+                            supertype.kind()
+                        {
+                            let super_arguments =
+                                super::ty_subst_all(super_arguments.as_slice(), &bindings);
+                            pending.push_back((
+                                crate::jvm::jvm_class_map::to_jvm_type_name(super_internal),
+                                super_arguments,
+                            ));
+                        }
+                    }
+                }
+                (None, Some(class)) => {
+                    for supertype in class.interfaces.iter_ids().chain(class.super_class) {
+                        pending.push_back((supertype, Vec::new()));
+                    }
+                }
+                (None, None) => {}
+            }
+        }
+        None
+    }
+
+    /// Receiver type-parameter bindings at a classpath hierarchy node.
+    pub(super) fn receiver_type_bindings_name(
+        &self,
+        receiver: Ty,
+        target_internal: TypeName,
+    ) -> HashMap<String, Ty> {
+        self.receiver_type_application_name(receiver, target_internal)
+            .map(|(formals, arguments)| formals.into_iter().zip(arguments).collect())
+            .unwrap_or_default()
+    }
+
+    /// Class bindings excluding method parameters that shadow them.
+    pub(super) fn member_receiver_bindings_name(
+        &self,
+        receiver: Ty,
+        target_internal: TypeName,
+        method_formals: &[crate::types::TyParamName],
+    ) -> HashMap<String, Ty> {
+        let mut bindings = self.receiver_type_bindings_name(receiver, target_internal);
+        for formal in method_formals {
+            bindings.remove(formal.as_str());
+        }
+        bindings
     }
 }
 
