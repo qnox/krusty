@@ -35,13 +35,11 @@ use scope::{ContextReceiver, ContextReceiverKind, FlowExclusion, NarrowPath, Ns}
 mod abstract_obligations;
 mod argument_parameter_mapping;
 mod builtin_implementation;
-mod klib_type_facts;
 use argument_parameter_mapping::{
     call_argument_parameter_indices, call_argument_parameter_indices_result,
     named_whole_array_varargs,
 };
 pub(crate) use builtin_implementation::for_checked_external_members;
-pub(crate) use klib_type_facts::CheckedKlibTypeFacts;
 mod call_site_publication;
 mod constructor_references;
 mod implicit_source_member_lambda;
@@ -422,9 +420,7 @@ use context_sensitive_resolution::{expected_nested_classifier, parameterized_cla
 use delegated_properties::{
     select_delegate_operator, select_delegate_operator_return, DelegateConventionSite,
 };
-pub(crate) use dependency_body_call_edges::{
-    for_checked_klib_bodies, klib_dependency_member_call_edge, CheckedKlibDependencyFacts,
-};
+pub(crate) use dependency_body_call_edges::for_checked_klib_bodies;
 pub(crate) use dependency_platform::DependencyPlatform;
 pub(crate) use diagnostic_selection::unresolved_member_message;
 use extension_reference_selection::ExtensionReferenceChoice;

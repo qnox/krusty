@@ -78,12 +78,12 @@ fn klib_target_member_links_the_root_class_member_at_its_receiver() {
     ])
     .unwrap();
     let root = records["a"].klib_body_callable().unwrap();
-    let checked = super::checked_backend_klib_facts(crate::resolve::CheckedKlibDependencyFacts {
+    let checked = super::checked_backend_klib_facts(crate::fir::CheckedKlibDependencyFacts {
         member_edges: super::non_overriding_edges([selected]),
         ..Default::default()
     });
     let facts = KlibCalleeFacts::with_declarations([root], [selected])
-        .with_checked_dependency_facts(&checked);
+        .with_checked_dependency_facts(checked.klib_dependency_facts());
     let external = crate::fir::ExternalCallableId::from_raw(73);
 
     let leaves = [(

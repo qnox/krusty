@@ -1646,7 +1646,7 @@ pub(super) fn non_overriding_edges<'a>(
 }
 
 pub(super) fn checked_backend_klib_facts(
-    facts: crate::resolve::CheckedKlibDependencyFacts,
+    facts: crate::fir::CheckedKlibDependencyFacts,
 ) -> CheckedBackendCallables {
     let mut checked = CheckedBackendCallables::default();
     checked

@@ -497,7 +497,8 @@ fn checked_klib_property_facts_use_the_exact_property_name() {
         )
         .expect("selected property body has checked facts"),
     );
-    let facts = KlibCalleeFacts::new([selected]).with_checked_dependency_facts(&checked);
+    let facts = KlibCalleeFacts::new([selected])
+        .with_checked_dependency_facts(checked.klib_dependency_facts());
     let [implementation] = facts.builtin_implementation_facts()[&identity].as_ref() else {
         panic!("CharSequence.length has one represented builtin implementation");
     };

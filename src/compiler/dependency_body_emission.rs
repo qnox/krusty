@@ -100,7 +100,7 @@ pub(super) fn emit_dependencies<B: Backend>(
     let target_represents_classifier =
         |classifier| backend.represents_dependency_classifier(classifier);
     let callees = KlibCalleeFacts::new(selected.iter().copied())
-        .with_checked_dependency_facts(&source.callables)
+        .with_checked_dependency_facts(source.callables.klib_dependency_facts())
         .with_target_classifiers(&target_represents_classifier);
     let mut roots: Vec<crate::libraries::KlibBodyCallable<'_>> = Vec::new();
     for callable in selected.iter().copied().filter(|callable| {
@@ -199,7 +199,7 @@ pub(super) fn emit_dependencies<B: Backend>(
                     .map(|callable| (*target, callable))
             }),
         )
-        .with_checked_dependency_facts(&source.callables)
+        .with_checked_dependency_facts(source.callables.klib_dependency_facts())
         .with_target_classifiers(&target_represents_classifier);
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,

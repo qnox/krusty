@@ -209,12 +209,12 @@ fn stdlib_array_copy_binds_its_captured_type_argument() {
         ])
         .collect();
     let oracle = crate::symbol_resolver::SourceOracle(&libraries);
-    let checked = super::checked_backend_klib_facts(crate::resolve::CheckedKlibDependencyFacts {
+    let checked = super::checked_backend_klib_facts(crate::fir::CheckedKlibDependencyFacts {
         member_edges: super::non_overriding_edges([size, get]),
         ..Default::default()
     });
     let facts = KlibCalleeFacts::with_declarations([root], leaves.into_iter().chain([size, get]))
-        .with_checked_dependency_facts(&checked)
+        .with_checked_dependency_facts(checked.klib_dependency_facts())
         .with_type_oracle(&oracle);
     let mut unit = DependencyBodyUnit::default();
     let lowered = unit
@@ -610,12 +610,12 @@ fn a_nullable_result_through_a_contravariant_receiver_reads_as_any() {
         })
         .collect();
     let oracle = crate::symbol_resolver::SourceOracle(&libraries);
-    let checked = super::checked_backend_klib_facts(crate::resolve::CheckedKlibDependencyFacts {
+    let checked = super::checked_backend_klib_facts(crate::fir::CheckedKlibDependencyFacts {
         member_edges: super::non_overriding_edges(leaves),
         ..Default::default()
     });
     let facts = KlibCalleeFacts::with_declarations([root], leaves)
-        .with_checked_dependency_facts(&checked)
+        .with_checked_dependency_facts(checked.klib_dependency_facts())
         .with_type_oracle(&oracle);
     let mut unit = DependencyBodyUnit::default();
     unit.lower_function_with_intrinsics_and_externals(
@@ -702,12 +702,12 @@ fn an_argument_through_a_contravariant_receiver_is_checked_against_the_parameter
         })
         .collect();
     let oracle = crate::symbol_resolver::SourceOracle(&libraries);
-    let checked = super::checked_backend_klib_facts(crate::resolve::CheckedKlibDependencyFacts {
+    let checked = super::checked_backend_klib_facts(crate::fir::CheckedKlibDependencyFacts {
         member_edges: super::non_overriding_edges(leaves),
         ..Default::default()
     });
     let facts = KlibCalleeFacts::with_declarations([root], leaves)
-        .with_checked_dependency_facts(&checked)
+        .with_checked_dependency_facts(checked.klib_dependency_facts())
         .with_type_oracle(&oracle);
     let mut unit = DependencyBodyUnit::default();
     unit.lower_function_with_intrinsics_and_externals(
@@ -808,12 +808,12 @@ fn an_argument_through_a_contravariant_receiver_is_checked_against_the_bound_ins
         })
         .collect();
     let oracle = crate::symbol_resolver::SourceOracle(&libraries);
-    let checked = super::checked_backend_klib_facts(crate::resolve::CheckedKlibDependencyFacts {
+    let checked = super::checked_backend_klib_facts(crate::fir::CheckedKlibDependencyFacts {
         member_edges: super::non_overriding_edges(leaves),
         ..Default::default()
     });
     let facts = KlibCalleeFacts::with_declarations([root], leaves)
-        .with_checked_dependency_facts(&checked)
+        .with_checked_dependency_facts(checked.klib_dependency_facts())
         .with_type_oracle(&oracle);
     let mut unit = DependencyBodyUnit::default();
     unit.lower_function_with_intrinsics_and_externals(

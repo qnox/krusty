@@ -409,7 +409,7 @@ mod tests {
             "kotlin/CharSequence",
         )));
         assert!(fact.builtin_implementations.is_empty());
-        let mut graph = crate::resolve::CheckedKlibDependencyFacts::default();
+        let mut graph = crate::fir::CheckedKlibDependencyFacts::default();
         graph
             .builtin_implementations
             .insert(identity, expected.clone());
@@ -442,7 +442,7 @@ mod tests {
             callables.callables[&identity].builtin_implementations,
             expected
         );
-        let mut conflicting_graph = crate::resolve::CheckedKlibDependencyFacts::default();
+        let mut conflicting_graph = crate::fir::CheckedKlibDependencyFacts::default();
         conflicting_graph.builtin_implementations = selected;
         assert_eq!(
             callables.record_klib_dependency_facts(conflicting_graph),
@@ -728,12 +728,8 @@ struct SingletonEdge {
 pub struct CheckedBackendCallables {
     callables: HashMap<ExternalCallableId, BackendCallableFact>,
     properties: HashMap<ExternalPropertyId, BackendPropertyFact>,
-    /// Checker-produced facts for the exact KLIB dependency-body graph selected by this file.
-    klib_builtin_implementations: HashMap<ExternalCallableId, Box<[BuiltinImplementation]>>,
-    klib_member_edges:
-        HashMap<crate::libraries::KlibDependencyCallable, crate::fir::CheckedMemberCallEdge>,
-    /// Checker-frozen class hierarchy used by common KLIB dependency-body lowering.
-    klib_type_hierarchy: Option<crate::resolve::CheckedKlibTypeFacts>,
+    /// The checker-owned immutable snapshot of this file's reached KLIB declarations.
+    klib_dependency_facts: crate::fir::CheckedKlibDependencyFacts,
     singleton_dispatches: HashMap<crate::ir::ExprId, SingletonDispatch>,
     singleton_selections: HashMap<ExternalCallableId, Vec<SingletonEdge>>,
     /// The runtime declarations native plugins selected at the handoff for their generated code,
@@ -747,37 +743,34 @@ impl CheckedBackendCallables {
     /// Source-vs-graph consistency is checked when actual selected implementations are recorded.
     pub(crate) fn record_klib_dependency_facts(
         &mut self,
-        facts: crate::resolve::CheckedKlibDependencyFacts,
+        facts: crate::fir::CheckedKlibDependencyFacts,
     ) -> Result<(), ExternalCallableId> {
         for (&identity, implementations) in &facts.builtin_implementations {
             if self
-                .klib_builtin_implementations
+                .klib_dependency_facts
+                .builtin_implementations
                 .get(&identity)
                 .is_some_and(|previous| previous != implementations)
             {
                 return Err(identity);
             }
         }
-        self.klib_builtin_implementations = facts.builtin_implementations;
-        self.klib_member_edges = facts.member_edges;
-        self.klib_type_hierarchy = Some(facts.type_hierarchy);
+        self.klib_dependency_facts = facts;
         Ok(())
     }
 
     pub(crate) fn klib_builtin_implementations(
         &self,
     ) -> &HashMap<ExternalCallableId, Box<[BuiltinImplementation]>> {
-        &self.klib_builtin_implementations
+        &self.klib_dependency_facts.builtin_implementations
     }
 
-    pub(crate) fn klib_member_edges(
-        &self,
-    ) -> &HashMap<crate::libraries::KlibDependencyCallable, crate::fir::CheckedMemberCallEdge> {
-        &self.klib_member_edges
+    pub(crate) fn klib_dependency_facts(&self) -> &crate::fir::CheckedKlibDependencyFacts {
+        &self.klib_dependency_facts
     }
 
-    pub(crate) fn klib_type_hierarchy(&self) -> Option<&crate::resolve::CheckedKlibTypeFacts> {
-        self.klib_type_hierarchy.as_ref()
+    pub(crate) fn klib_type_hierarchy(&self) -> Option<&crate::fir::CheckedKlibTypeFacts> {
+        self.klib_dependency_facts.type_hierarchy.as_ref()
     }
 
     /// Whether native plugins selected `identity` at the handoff for the code they generate.
@@ -951,7 +944,8 @@ impl CheckedBackendCallables {
                 return Err(identity);
             };
             if self
-                .klib_builtin_implementations
+                .klib_dependency_facts
+                .builtin_implementations
                 .get(&identity)
                 .is_some_and(|graph| graph != selected)
             {

@@ -561,7 +561,7 @@ mod tests {
         assert!(text.contains("klib_type_hierarchy"));
         let checker = source_path("src/resolve/dependency_body_call_edges.rs");
         let text = fs::read_to_string(&checker).expect("read KLIB body hierarchy checker");
-        assert!(text.contains("CheckedKlibTypeFacts::from_source"));
+        assert!(text.contains("klib_type_facts::freeze"));
     }
 
     #[test]

@@ -54,21 +54,21 @@ impl<'a> KlibCalleeFacts<'a> {
     /// Copy checker-produced semantic facts for the selected KLIB dependency graph.
     pub(crate) fn with_checked_dependency_facts(
         mut self,
-        checked: &'a crate::backend::CheckedBackendCallables,
+        checked: &'a crate::fir::CheckedKlibDependencyFacts,
     ) -> Self {
         self.builtin_implementation_facts.extend(
             checked
-                .klib_builtin_implementations()
+                .builtin_implementations
                 .iter()
                 .map(|(&id, facts)| (id, facts.clone())),
         );
         self.member_edges.extend(
             checked
-                .klib_member_edges()
+                .member_edges
                 .iter()
                 .map(|(id, edge)| (id.clone(), edge.clone())),
         );
-        if let Some(hierarchy) = checked.klib_type_hierarchy() {
+        if let Some(hierarchy) = checked.type_hierarchy.as_ref() {
             self.class_type_oracle = Some(hierarchy);
         }
         self
@@ -137,6 +137,7 @@ impl<'a> KlibCalleeFacts<'a> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn with_type_oracle(
         mut self,
         oracle: &'a dyn crate::assignable::TypeOracle,

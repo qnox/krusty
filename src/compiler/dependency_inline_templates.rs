@@ -45,7 +45,7 @@ impl DependencyInlineTemplates for KlibInlineTemplates {
             declarations: bodies.bodies(),
             references: bodies.references(),
             source: self.platform.as_ref(),
-            type_hierarchy: &checked.type_hierarchy,
+            type_hierarchy: checked.type_hierarchy.as_ref()?,
         };
         let Some(template) =
             lower_inline_template(ir, &realization, bodies.inline_bodies(), callees)

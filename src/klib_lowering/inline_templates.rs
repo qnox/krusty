@@ -65,7 +65,7 @@ pub struct TemplateCallees<'a> {
     pub source: &'a dyn crate::symbol_source::SymbolSource,
     /// Checker-frozen hierarchy for the selected inline body and its reachable callees. Required
     /// so template type checks cannot fall back to provider queries.
-    pub(crate) type_hierarchy: &'a crate::resolve::CheckedKlibTypeFacts,
+    pub(crate) type_hierarchy: &'a crate::fir::CheckedKlibTypeFacts,
 }
 
 impl TemplateCallees<'_> {

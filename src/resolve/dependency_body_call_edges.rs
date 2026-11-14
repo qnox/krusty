@@ -1,19 +1,11 @@
 //! Checked member-call facts for declarations selected by serialized KLIB bodies.
 
-use crate::fir::{CheckedMemberCallEdge, ExternalCallableId};
+#[path = "klib_type_facts.rs"]
+mod klib_type_facts;
+
+use crate::fir::{CheckedKlibDependencyFacts, CheckedMemberCallEdge, ExternalCallableId};
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName};
-
-/// Member facts for every exact KLIB body edge reachable from the declarations a checked source
-/// file selected. The checker builds this table before the backend receives the file.
-#[derive(Default)]
-pub(crate) struct CheckedKlibDependencyFacts {
-    pub(crate) builtin_implementations:
-        crate::fx_hash::HashMap<ExternalCallableId, Box<[crate::fir::BuiltinImplementation]>>,
-    pub(crate) member_edges:
-        crate::fx_hash::HashMap<crate::libraries::KlibDependencyCallable, CheckedMemberCallEdge>,
-    pub(crate) type_hierarchy: super::klib_type_facts::CheckedKlibTypeFacts,
-}
 
 /// Check and freeze semantic facts for the body graph reachable from the source file's selected
 /// KLIB declarations. Backends may later choose a target-specific subset, but they never resolve
@@ -109,12 +101,12 @@ pub(crate) fn for_checked_klib_bodies<'a>(
             facts.member_edges.insert(identity, edge);
         }
     }
-    facts.type_hierarchy = super::klib_type_facts::CheckedKlibTypeFacts::from_source(
+    facts.type_hierarchy = Some(klib_type_facts::freeze(
         source,
         classifier_roots,
         std::iter::empty(),
         semantic_types,
-    );
+    ));
     Ok(facts)
 }
 
