@@ -155,7 +155,7 @@ pub struct Lowered {
     /// What a later file of the module extending a class of this one reads of it.
     pub laid_out: Vec<(TypeName, LaidOutClass)>,
     /// Actual externally linkable descriptor definitions, signed by their producer class records.
-    pub class_descriptors: Vec<(krusty::libraries::KlibClassIdentity, String)>,
+    pub class_descriptors: Vec<(krusty::backend::KlibClassIdentity, String)>,
 }
 
 /// Build the ISA for `target`. Non-PIC, because the output is a static executable at a fixed
@@ -496,7 +496,7 @@ struct FileLowering<'a> {
     module_facts: &'a krusty::backend::BackendModuleFacts,
     /// The classes earlier files of the source module laid out.
     laid_out: &'a LaidOutClasses,
-    class_descriptors: Vec<(krusty::libraries::KlibClassIdentity, String)>,
+    class_descriptors: Vec<(krusty::backend::KlibClassIdentity, String)>,
     /// The classes of this file another file of the module extends.
     extended: krusty::fx_hash::HashSet<krusty::ir::ClassId>,
     /// The classes of `extended` and their superclasses here, whose table entries another file

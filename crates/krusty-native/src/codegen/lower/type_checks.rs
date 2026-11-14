@@ -77,7 +77,7 @@ impl<'a> FileLowering<'a> {
         &mut self,
         class: ClassId,
         base: &str,
-    ) -> Result<DataId, Unsupported> {
+    ) -> Result<(DataId, Option<String>), Unsupported> {
         // A support unit names the descriptors of the dependency classes a source file extends,
         // which that file's descriptors point at as their superclass's.
         let named = match self.unit_kind {
@@ -87,15 +87,18 @@ impl<'a> FileLowering<'a> {
             krusty::backend::CheckedIrUnitKind::DependencySupport => self.exported.contains(&class),
         };
         if !named {
-            return self.declare_local_data(&format!("kt_type_{base}"), false);
+            let descriptor = self.declare_local_data(&format!("kt_type_{base}"), false)?;
+            return Ok((descriptor, None));
         }
         let symbol = super::super::super::symbols::module_descriptor_symbol(
             self.module_name,
             self.ir.classes[class as usize].fq_name_id(),
         );
-        self.module
+        let descriptor = self
+            .module
             .declare_data(&symbol, Linkage::Hidden, false, false)
-            .map_err(|error| declined!("declaring `{symbol}` ({error})"))
+            .map_err(|error| declined!("declaring `{symbol}` ({error})"))?;
+        Ok((descriptor, Some(symbol)))
     }
 
     /// The runtime descriptor for a represented type: a class of this file or of another file of

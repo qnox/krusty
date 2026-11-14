@@ -74,6 +74,9 @@ const _: () = {
 pub(super) struct ClassItems {
     /// Its `KType`.
     pub(super) descriptor: DataId,
+    /// The classifier identity this descriptor was declared to publish, if its physical
+    /// declaration is linkable from another file.
+    pub(super) published_descriptor: Option<(krusty::backend::KlibClassIdentity, String)>,
     /// `kt_<class>__init(this, args…)`, absent for a class with no primary constructor: every
     /// `<init>` of one comes from its secondaries.
     pub(super) constructor: Option<FuncId>,
@@ -228,7 +231,11 @@ impl<'a> FileLowering<'a> {
     pub(super) fn declare_classes(&mut self) -> Result<(), Unsupported> {
         for class in 0..self.ir.classes.len() as ClassId {
             let base = self.class_base(class).to_string();
-            let descriptor = self.declare_descriptor(class, &base)?;
+            let (descriptor, linkable_symbol) = self.declare_descriptor(class, &base)?;
+            let published_descriptor =
+                linkable_symbol.zip(self.dependency_signatures.classifier(class).cloned());
+            let published_descriptor =
+                published_descriptor.map(|(symbol, identity)| (identity, symbol));
             let params: Vec<Ty> = std::iter::once(any())
                 .chain(constructor_parameters(self.ir, class))
                 .collect();
@@ -268,6 +275,7 @@ impl<'a> FileLowering<'a> {
             };
             self.classes.push(ClassItems {
                 descriptor,
+                published_descriptor,
                 constructor,
                 singleton,
                 secondaries,
@@ -805,7 +813,8 @@ impl<'a> FileLowering<'a> {
                 class_names,
             },
         )?;
-        self.record_published_descriptor(class, descriptor)
+        let publication = self.classes[class as usize].published_descriptor.clone();
+        self.record_published_descriptor(class, descriptor, publication)
     }
 
     /// The names Kotlin reflection publishes for one declared classifier, from the declaration

@@ -15,7 +15,7 @@ use crate::fx_hash::{HashMap, HashSet};
 use super::{Artifact, CheckedIrFile, CompilationTarget};
 use crate::diag::DiagSink;
 use crate::ir::FunId;
-pub use crate::libraries::KlibDependencyCallable;
+pub use crate::libraries::{KlibClassIdentity, KlibDependencyCallable};
 
 /// Whether `callable` has a standalone body a target can publish for another source module.
 ///
