@@ -25,6 +25,7 @@ fn tables(ir: &IrFile) -> Result<NumberedClassTables, Unsupported> {
         &IntsAndReferences,
         ir,
         &super::module_slots::ModuleSlotPlan::empty(),
+        &|_| None,
     )
 }
 
@@ -133,6 +134,7 @@ fn a_superclass_no_file_declares_is_declined_unless_the_target_owns_it() {
         &OwnsEverything,
         &ir,
         &super::module_slots::ModuleSlotPlan::empty(),
+        &|_| None,
     )
     .expect("tables");
     assert_eq!(owned.table(error).superclass, None);

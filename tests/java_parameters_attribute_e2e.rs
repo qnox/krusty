@@ -114,7 +114,7 @@ fn compile_java_parameters(
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
-    let backend = krusty::jvm::JvmBackend::new(classpath).with_java_parameters(true);
+    let backend = krusty_jvm::JvmBackend::new(classpath).with_java_parameters(true);
     let outputs =
         krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diagnostics);
     (!diagnostics.has_errors()).then(|| {

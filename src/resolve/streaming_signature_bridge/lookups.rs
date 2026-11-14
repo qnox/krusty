@@ -268,11 +268,11 @@ impl ProductionSignatureSemantics<'_> {
                 internal,
             );
             if let Some(access) = access {
-                self.record_classifier_access_diagnostic_at(
+                self.record_unconditional_diagnostic_at(
                     scope.owner,
                     scope.source,
                     reference.span,
-                    internal,
+                    crate::diag::DiagnosticIdentity::classifier_access(reference.span, internal),
                     super::super::inaccessible_classifier_message(&reference.name, access),
                 );
             }
@@ -1804,29 +1804,30 @@ impl ProductionSignatureSemantics<'_> {
             dispatch_receiver,
         )];
         let selected = super::super::member_extension_properties::select(
-            &source,
-            &oracle,
-            &receivers,
-            &|parameters| {
-                super::super::context_argument_types(&[dispatch_receiver], parameters, &oracle).map(
-                    |types| {
-                        types
-                            .into_iter()
-                            .map(|ty| {
-                                (
-                                    super::super::ResolvedContextArgument::ImplicitReceiver(
-                                        super::super::ImplicitReceiverSelection::signature_receiver(
-                                            ty,
+            super::super::member_extension_properties::MemberExtensionPropertySources {
+                source: &source,
+                oracle: &oracle,
+                implicit_receivers: &receivers,
+                context_arguments: &|parameters| {
+                    super::super::context_argument_types(&[dispatch_receiver], parameters, &oracle)
+                        .map(|types| {
+                            types
+                                .into_iter()
+                                .map(|ty| {
+                                    (
+                                        super::super::ResolvedContextArgument::ImplicitReceiver(
+                                            super::super::ImplicitReceiverSelection::signature_receiver(
+                                                ty,
+                                            ),
                                         ),
-                                    ),
-                                    ty,
-                                )
-                            })
-                            .collect()
-                    },
-                )
+                                        ty,
+                                    )
+                                })
+                                .collect()
+                        })
+                },
+                active_declarations: &|_, _| Vec::new(),
             },
-            &|_, _| Vec::new(),
             extension_receiver,
             name,
             crate::symbol_resolver::PropertyAccess::Read,

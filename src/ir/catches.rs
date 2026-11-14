@@ -26,7 +26,7 @@ pub struct IrCatch {
 impl IrCatch {
     /// A compiler-generated handler: no source clause, so neither a debug-visible binding nor a
     /// `catch` line. `class` is the JVM class the handler catches.
-    pub(crate) fn generated(var: u32, class: TypeName, body: ExprId) -> Self {
+    pub fn generated(var: u32, class: TypeName, body: ExprId) -> Self {
         Self {
             var,
             binding: None,
@@ -38,7 +38,7 @@ impl IrCatch {
 
     /// JVM class this handler catches. A type parameter catches its bound; a concrete class catches
     /// itself. A catch that does not determine a class is invalid IR.
-    pub(crate) fn jvm_class(&self) -> TypeName {
+    pub fn jvm_class(&self) -> TypeName {
         self.ty
             .non_null()
             .obj_internal()

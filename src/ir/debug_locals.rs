@@ -5,7 +5,7 @@ use crate::types::TypeName;
 use super::{ExprId, FunId, IrFile};
 
 impl IrFile {
-    pub(crate) fn set_debug_local_provenance(
+    pub fn set_debug_local_provenance(
         &mut self,
         declaration: ExprId,
         provenance: IrDebugLocalProvenance,
@@ -13,10 +13,7 @@ impl IrFile {
         self.debug_local_provenance.insert(declaration, provenance);
     }
 
-    pub(crate) fn debug_local_provenance(
-        &self,
-        declaration: ExprId,
-    ) -> Option<IrDebugLocalProvenance> {
+    pub fn debug_local_provenance(&self, declaration: ExprId) -> Option<IrDebugLocalProvenance> {
         self.debug_local_provenance.get(&declaration).copied()
     }
 }
@@ -25,7 +22,7 @@ impl IrFile {
 /// Common lowering retains the source name separately in `IrFile::value_names` and records only
 /// the semantic role/depth here. A target owns separators, escaping, and synthetic spelling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IrDebugLocalProvenance {
+pub enum IrDebugLocalProvenance {
     InlineValue {
         role: IrInlineLocalRole,
         depth: u32,
@@ -69,12 +66,12 @@ pub(crate) enum IrDebugLocalProvenance {
 }
 
 impl IrDebugLocalProvenance {
-    pub(crate) fn inline_value(role: IrInlineLocalRole, depth: u32) -> Self {
+    pub fn inline_value(role: IrInlineLocalRole, depth: u32) -> Self {
         debug_assert!(depth > 0, "an inline expansion depth is one-based");
         Self::InlineValue { role, depth }
     }
 
-    pub(crate) fn nested_inline(self) -> Self {
+    pub fn nested_inline(self) -> Self {
         match self {
             Self::InlineValue { role, depth } => Self::InlineValue {
                 role,
@@ -101,7 +98,7 @@ impl IrDebugLocalProvenance {
 
     /// Whether this local is an inline-depth marker: a frame boundary for a debugger, never a
     /// value any code reads.
-    pub(crate) fn is_inline_marker(self) -> bool {
+    pub fn is_inline_marker(self) -> bool {
         matches!(
             self,
             Self::FunctionFrameMarker | Self::LambdaFrameMarker { .. }
@@ -114,7 +111,7 @@ impl IrDebugLocalProvenance {
 /// `this` and the extension's receiver are different values with different debug identities — so
 /// one receiver role cannot stand for the other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IrInlineLocalRole {
+pub enum IrInlineLocalRole {
     Value,
     /// The containing class's `this`, bound because the inline callable is a member.
     DispatchReceiver,
@@ -160,7 +157,7 @@ pub struct IrLambdaOrigin {
     /// The naming walk's position for the class the lambda would compile to. A lambda spliced into
     /// an inline call writes no class, but a target spells its inline-depth marker from this
     /// provenance. The realized spelling stays in that target's own state.
-    pub(crate) class_provenance: Option<super::IrLocalClassNameProvenance>,
+    pub class_provenance: Option<super::IrLocalClassNameProvenance>,
 }
 
 impl IrFile {
@@ -194,7 +191,7 @@ pub struct IrCatchBinding {
     pub name: String,
     /// Inline provenance. `None` while the binding is still in the body that declared it; an
     /// expansion that clones this catch nests it exactly as it nests an ordinary local's.
-    pub(crate) provenance: Option<IrDebugLocalProvenance>,
+    pub provenance: Option<IrDebugLocalProvenance>,
 }
 
 impl IrCatchBinding {

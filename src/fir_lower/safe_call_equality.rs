@@ -76,8 +76,8 @@ fn fold(ir: &mut IrFile, equality: ExprId) {
     if let Some(line) = ir.source_line(equality) {
         ir.set_source_line(compared, line);
     }
-    if let Some(line) = ir.expr_lines.get(&equality).copied() {
-        ir.expr_lines.insert(compared, line);
+    if let Some(line) = ir.statement_line(equality) {
+        ir.set_statement_line(compared, line);
     }
     let absent = ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
     ir.exprs[guard as usize] = IrExpr::When {

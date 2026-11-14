@@ -6,7 +6,7 @@
 //! local of a base type, an elvis whose sides box to different classes, and a `try` whose body and
 //! catch produce different subclasses of its type.
 
-use krusty::jvm::frame_audit::{audit_class, Outcome};
+use krusty_jvm::frame_audit::{audit_class, Outcome};
 
 use crate::common::{compare_with_kotlinc_plugin, method_instructions};
 

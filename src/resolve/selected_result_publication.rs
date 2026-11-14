@@ -108,9 +108,9 @@ impl CompactSelectedResultPublication {
             receiver: signature.and_then(|signature| signature.receiver),
             enhancement: callable.enhanced_result.marks.clone(),
             arguments: publication_arguments(
-                parameter_by_argument,
+                parameter_by_argument.as_ref(),
                 callable.vararg_index,
-                whole_array_arguments,
+                whole_array_arguments.as_ref(),
             ),
             explicit_type_arguments,
         }
@@ -139,9 +139,9 @@ impl CompactSelectedResultPublication {
                 member.call_sig.result_enhancement == crate::libraries::ResultEnhancement::NotNull,
             ),
             arguments: publication_arguments(
-                parameter_by_argument,
+                parameter_by_argument.as_ref(),
                 member.call_sig.vararg_index,
-                whole_array_arguments,
+                whole_array_arguments.as_ref(),
             ),
             explicit_type_arguments,
         }
@@ -190,7 +190,11 @@ impl CompactSelectedResultPublication {
             selected,
             receiver: None,
             enhancement: TypeEnhancement::NONE,
-            arguments: publication_arguments(parameter_by_argument, vararg, whole_array_arguments),
+            arguments: publication_arguments(
+                parameter_by_argument.as_ref(),
+                vararg,
+                whole_array_arguments.as_ref(),
+            ),
             explicit_type_arguments,
         }
     }
@@ -363,9 +367,9 @@ fn suppress_enhanced_flexibility(selected: Ty, published: Ty, enhancement: &Type
 }
 
 fn publication_arguments(
-    parameter_by_argument: Box<[Option<u32>]>,
+    parameter_by_argument: &[Option<u32>],
     vararg: Option<usize>,
-    whole_array_arguments: Box<[bool]>,
+    whole_array_arguments: &[bool],
 ) -> Box<[Option<CompactPublicationArgument>]> {
     parameter_by_argument
         .iter()

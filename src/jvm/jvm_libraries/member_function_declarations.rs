@@ -35,6 +35,16 @@ impl JvmLibraries {
                 let mut function =
                     FunctionInfo::classifier_member(FnKind::Extension, owner, member.clone());
                 function.receiver = Some(extension_receiver);
+                // This declaration view is built before the classifier record is registered, so
+                // the member does not carry its `$default` bridge yet. Attach it here, as the
+                // ordinary member view does: a call omitting a default argument goes through it.
+                if function.callable.default_realization.is_none()
+                    && member.call_sig.param_defaults.contains(&true)
+                {
+                    function.callable.default_realization = self
+                        .member_default_realization(member.owner.unwrap_or(owner), member)
+                        .map(Box::new);
+                }
                 function
             })
             .collect()

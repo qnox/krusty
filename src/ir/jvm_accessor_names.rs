@@ -9,14 +9,14 @@ use super::{IrFile, TypeName};
 
 /// The realized JVM names of one declaration's default accessors. `None` keeps the convention.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct JvmAccessorNames {
+pub struct JvmAccessorNames {
     pub getter: Option<String>,
     pub setter: Option<String>,
 }
 
 /// Which default accessor of a declaration a realized name belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum JvmAccessorSide {
+pub enum JvmAccessorSide {
     Getter,
     Setter,
 }
@@ -40,7 +40,7 @@ impl JvmAccessorNames {
 impl IrFile {
     /// The JVM name realized for a class property's default accessor, keyed by the property's
     /// stable index within its declaring class. `None` keeps the ordinary spelling.
-    pub(crate) fn jvm_property_accessor_name(
+    pub fn jvm_property_accessor_name(
         &self,
         class: TypeName,
         property: u32,
@@ -52,18 +52,14 @@ impl IrFile {
     }
 
     /// Both realized accessor names of a class property.
-    pub(crate) fn jvm_property_accessor_names(
-        &self,
-        class: TypeName,
-        property: u32,
-    ) -> JvmAccessorNames {
+    pub fn jvm_property_accessor_names(&self, class: TypeName, property: u32) -> JvmAccessorNames {
         self.jvm_property_accessor_names
             .get(&(class, property))
             .cloned()
             .unwrap_or_default()
     }
 
-    pub(crate) fn set_jvm_property_accessor_name(
+    pub fn set_jvm_property_accessor_name(
         &mut self,
         class: TypeName,
         property: u32,
@@ -77,17 +73,13 @@ impl IrFile {
     }
 
     /// The JVM name realized for a static's default accessor. `None` keeps the ordinary spelling.
-    pub(crate) fn jvm_static_accessor_name(
-        &self,
-        storage: u32,
-        side: JvmAccessorSide,
-    ) -> Option<&str> {
+    pub fn jvm_static_accessor_name(&self, storage: u32, side: JvmAccessorSide) -> Option<&str> {
         self.jvm_static_accessor_names
             .get(&storage)
             .and_then(|names| names.side(side))
     }
 
-    pub(crate) fn set_jvm_static_accessor_name(
+    pub fn set_jvm_static_accessor_name(
         &mut self,
         storage: u32,
         side: JvmAccessorSide,
@@ -100,14 +92,14 @@ impl IrFile {
     }
 
     /// Give a new static the names a declaration's accessors were realized with.
-    pub(crate) fn set_jvm_static_accessor_names(&mut self, storage: u32, names: JvmAccessorNames) {
+    pub fn set_jvm_static_accessor_names(&mut self, storage: u32, names: JvmAccessorNames) {
         if names != JvmAccessorNames::default() {
             self.jvm_static_accessor_names.insert(storage, names);
         }
     }
 
     /// The JVM name of a static's compiler-default getter.
-    pub(crate) fn jvm_static_getter_name(&self, storage: u32) -> String {
+    pub fn jvm_static_getter_name(&self, storage: u32) -> String {
         self.jvm_static_accessor_name(storage, JvmAccessorSide::Getter)
             .map_or_else(
                 || crate::names::property_getter_name(&self.statics[storage as usize].name),
@@ -116,7 +108,7 @@ impl IrFile {
     }
 
     /// The JVM name of a static's compiler-default setter.
-    pub(crate) fn jvm_static_setter_name(&self, storage: u32) -> String {
+    pub fn jvm_static_setter_name(&self, storage: u32) -> String {
         self.jvm_static_accessor_name(storage, JvmAccessorSide::Setter)
             .map_or_else(
                 || crate::names::property_setter_name(&self.statics[storage as usize].name),

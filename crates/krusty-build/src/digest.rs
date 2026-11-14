@@ -220,17 +220,42 @@ fn group_digests(
     let size = (length - start.min(length)).min(GROUP) as usize;
     buffer.resize(size, 0);
     read_exact_at(file, buffer, start)?;
+    Ok(piece_digests(buffer))
+}
+
+/// The digest of each consecutive [`FILE_CHUNK`]-sized piece of `bytes`; one piece when empty.
+fn piece_digests(bytes: &[u8]) -> Vec<Digest> {
     let chunk = FILE_CHUNK as usize;
-    let full = size / chunk * chunk;
+    let full = bytes.len() / chunk * chunk;
     let mut digests = Vec::new();
     if full > 0 {
-        let pieces: Vec<&[u8]> = buffer[..full].chunks(chunk).collect();
+        let pieces: Vec<&[u8]> = bytes[..full].chunks(chunk).collect();
         digests.extend(lanes::digest_equal(&pieces).into_iter().map(Digest));
     }
-    if full < size || size == 0 {
-        digests.push(digest_bytes(&buffer[full..size]));
+    if full < bytes.len() || bytes.is_empty() {
+        digests.push(digest_bytes(&bytes[full..]));
     }
-    Ok(digests)
+    digests
+}
+
+/// [`digest_file`] of a file whose contents are `bytes`, already read: a reader that parses what
+/// it digests holds one snapshot of the file, never a second read of its path.
+pub fn digest_contents(bytes: &[u8]) -> Digest {
+    let length = bytes.len() as u64;
+    let mut hasher = Hasher::new();
+    hasher.field("length", &length.to_le_bytes());
+    hasher.count("chunks", length.div_ceil(FILE_CHUNK).max(1) as usize);
+    for group in bytes.chunks(GROUP as usize) {
+        for digest in piece_digests(group) {
+            hasher.nested("chunk", digest);
+        }
+    }
+    if bytes.is_empty() {
+        for digest in piece_digests(bytes) {
+            hasher.nested("chunk", digest);
+        }
+    }
+    hasher.finish()
 }
 
 #[cfg(unix)]
@@ -395,6 +420,28 @@ impl Sha256 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Contents already read digest as the file holding them does, across the piece and group
+    /// boundaries.
+    #[test]
+    fn contents_digest_as_their_file() {
+        let dir =
+            std::env::temp_dir().join(format!("krusty-digest-contents-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create the scratch directory");
+        let chunk = FILE_CHUNK as usize;
+        let group = GROUP as usize;
+        for length in [0, 1, chunk, chunk + 3, group, group + chunk + 5] {
+            let bytes = (0..length).map(|at| (at % 251) as u8).collect::<Vec<_>>();
+            let path = dir.join(format!("{length}.bin"));
+            std::fs::write(&path, &bytes).expect("write the file");
+            assert_eq!(
+                digest_contents(&bytes),
+                digest_file(&path).expect("digest the file"),
+                "{length} bytes"
+            );
+        }
+        std::fs::remove_dir_all(&dir).expect("remove the scratch directory");
+    }
 
     /// FIPS 180-4 / NIST standard vectors. These pin the implementation; if it is ever replaced by
     /// a dependency, these keep the replacement honest.

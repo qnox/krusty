@@ -98,6 +98,10 @@ pub enum SigExpr {
         arguments: CallArgumentRange,
         scope: SignatureScopeId,
         origin: OriginId,
+        /// The later tower levels of a bare `name(args)` whose nearest `name` is a lexical value.
+        /// kotlinc moves past that level when the value has no applicable `invoke`, so a function
+        /// of the same name is called instead.
+        later: Option<SigExprId>,
     },
     Function {
         parameters: OperandRange,
@@ -264,9 +268,13 @@ impl SignatureGraph {
                     pending.push(rhs);
                 }
                 Some(SigExpr::Invoke {
-                    callee, arguments, ..
+                    callee,
+                    arguments,
+                    later,
+                    ..
                 }) => {
                     pending.push(callee);
+                    pending.extend(later);
                     pending.extend(
                         self.call_arguments(arguments)
                             .iter()

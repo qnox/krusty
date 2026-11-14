@@ -190,10 +190,12 @@ impl Checker<'_> {
                     args,
                     &failure,
                     &class_name,
-                    &params,
-                    &call_sig.param_names,
-                    &call_sig.param_defaults,
-                    call_sig.vararg_index,
+                    ConstructorValueParameters {
+                        types: &params,
+                        names: &call_sig.param_names,
+                        defaults: &call_sig.param_defaults,
+                        vararg: call_sig.vararg_index,
+                    },
                 ) {
                     self.report_call_arg_mapping_error(call, args, failure);
                 }
@@ -223,6 +225,9 @@ impl Checker<'_> {
                 } else {
                     actual
                 };
+                if self.report_uninferred_call_argument(scope, argument, expected, actual) {
+                    return;
+                }
                 self.expect_assignable(expected, actual, self.span(argument), "argument");
             }
             LibraryConstructorFailure::TypeArgumentMismatch {

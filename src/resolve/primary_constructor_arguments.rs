@@ -140,9 +140,19 @@ impl Checker<'_> {
                             .map(|candidate| candidate.target.params())
                             .collect::<Vec<_>>(),
                     );
+                    let selection =
+                        c.select_source_constructor(header_scope, &arguments, &candidates);
+                    if let SourceConstructorSelection::NoMatch { rejected, .. } = &selection {
+                        c.report_single_constructor_argument_mismatches(
+                            header_scope,
+                            &arguments,
+                            &candidates,
+                            rejected,
+                        );
+                    }
                     if let SourceConstructorSelection::Selected {
                         resolved: selected, ..
-                    } = c.select_source_constructor(header_scope, &arguments, &candidates)
+                    } = selection
                     {
                         let mut selected = *selected;
                         if let (true, ResolvedCtorDelegationTarget::Super { owner, .. }) =
@@ -153,6 +163,7 @@ impl Checker<'_> {
                             selected.capture_plan =
                                 c.selected_constructor_capture_plan(capture_scope, *owner);
                         }
+                        c.record_whole_array_delegation_arguments(&arguments, &selected);
                         if let Some(receiver) = &selected.outer_receiver {
                             c.mark_selected_implicit_receiver_used(header_scope, receiver, d);
                         }
@@ -194,8 +205,7 @@ impl Checker<'_> {
                             };
                             c.expect_call_arg_labeled(
                                 header_scope,
-                                expected,
-                                declared,
+                                ParameterTypeExpectation { expected, declared },
                                 arg,
                                 actual,
                                 has_receiver,

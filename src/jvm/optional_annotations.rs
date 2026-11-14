@@ -62,7 +62,7 @@ pub(super) struct OptionalAnnotationIndex {
 impl OptionalAnnotationIndex {
     /// Every optional annotation class `classpath` publishes. An unreadable module file fails
     /// platform initialization rather than hiding the classes it declares.
-    pub(super) fn load(
+    pub fn load(
         classpath: &super::classpath::Classpath,
     ) -> Result<Self, crate::libraries::PlatformInitializationError> {
         classpath

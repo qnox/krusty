@@ -92,10 +92,16 @@ pub(crate) fn semantic_call_role(
         }
         return None;
     }
+    if super::builtin_member_realization::string_compare_intrinsic(&declaration).is_some() {
+        return Some(SemanticCallRole::KotlinStringCompareTo);
+    }
     if let Some(operation) =
         crate::libraries::intrinsic_const_numeric::member_operation(&declaration)
     {
         return Some(SemanticCallRole::IntrinsicConstNumeric(operation));
+    }
+    if super::builtin_member_realization::unsigned_to_string_type(&declaration).is_some() {
+        return Some(SemanticCallRole::KotlinAnyToString);
     }
     if declaration.owner == crate::types::wk::any() {
         return match (declaration.name, declaration.params, declaration.ret) {
@@ -215,6 +221,31 @@ mod tests {
             "the signature without the exact builtin owner has no role"
         );
 
+        assert_eq!(
+            semantic_call_role(declaration(
+                crate::types::wk::string(),
+                "compareTo",
+                &[Ty::String],
+                Ty::Int,
+            )),
+            Some(SemanticCallRole::KotlinStringCompareTo)
+        );
+        for (owner, parameter, result) in [
+            (
+                crate::types::type_name("sample/String"),
+                Ty::String,
+                Ty::Int,
+            ),
+            (crate::types::wk::string(), nullable_any, Ty::Int),
+            (crate::types::wk::string(), Ty::String, Ty::Long),
+        ] {
+            assert_eq!(
+                semantic_call_role(declaration(owner, "compareTo", &[parameter], result)),
+                None,
+                "a different owner or signature does not declare string comparison"
+            );
+        }
+
         let parameter = Ty::ty_param("T", Ty::obj_name(any));
         let parameters = [parameter];
         let mut comparable = declaration(
@@ -273,5 +304,68 @@ mod tests {
             None,
             "a reflection-shaped lookalike has no language role"
         );
+    }
+
+    #[test]
+    fn unsigned_decimal_roles_require_the_exact_complete_declaration() {
+        let declaration = |owner| BuiltinMemberDeclaration {
+            owner,
+            name: "toString",
+            params: &[],
+            ret: Ty::String,
+            is_property: false,
+            is_operator: false,
+            is_infix: false,
+            annotations: &[],
+        };
+        for (owner, ty) in [
+            (crate::types::wk::ubyte(), Ty::UByte),
+            (crate::types::wk::ushort(), Ty::UShort),
+            (crate::types::wk::uint(), Ty::UInt),
+            (crate::types::wk::ulong(), Ty::ULong),
+        ] {
+            assert_eq!(
+                super::super::builtin_member_realization::unsigned_to_string_type(&declaration(
+                    owner
+                )),
+                Some(ty),
+            );
+            assert_eq!(
+                semantic_call_role(declaration(owner)),
+                Some(SemanticCallRole::KotlinAnyToString),
+            );
+            for invalid in [
+                BuiltinMemberDeclaration {
+                    owner: crate::types::type_name("sample/UInt"),
+                    ..declaration(owner)
+                },
+                BuiltinMemberDeclaration {
+                    name: "render",
+                    ..declaration(owner)
+                },
+                BuiltinMemberDeclaration {
+                    params: &[Ty::Int],
+                    ..declaration(owner)
+                },
+                BuiltinMemberDeclaration {
+                    ret: ty,
+                    ..declaration(owner)
+                },
+                BuiltinMemberDeclaration {
+                    is_property: true,
+                    ..declaration(owner)
+                },
+                BuiltinMemberDeclaration {
+                    is_operator: true,
+                    ..declaration(owner)
+                },
+                BuiltinMemberDeclaration {
+                    is_infix: true,
+                    ..declaration(owner)
+                },
+            ] {
+                assert_eq!(semantic_call_role(invalid), None);
+            }
+        }
     }
 }

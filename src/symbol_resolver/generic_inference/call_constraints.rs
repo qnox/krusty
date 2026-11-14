@@ -1097,6 +1097,15 @@ fn collect_call_inference_constraints(
                     crate::types::TypeVariance::Invariant => ConstraintPosition::Lower,
                     variance => position.through(variance),
                 };
+                // The declared variance already set the direction, so a matching use-site
+                // projection on the formal side is redundant and must not turn it a second time.
+                // Java's `R<? super A>` reaches a Kotlin `R<in O>` as `R<in A>`: `R<Any>` bounds
+                // `A` above by `Any`, as `R<A>` would.
+                let argument = match (declared_variance, argument.kind()) {
+                    (crate::types::TypeVariance::In, TyKind::InProjection(inner))
+                    | (crate::types::TypeVariance::Out, TyKind::OutProjection(inner)) => inner,
+                    _ => argument,
+                };
                 collect_call_inference_constraints(
                     source,
                     argument,

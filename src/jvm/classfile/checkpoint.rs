@@ -48,7 +48,7 @@ impl ClassWriter {
     /// A literal lambda is compiled into a scratch method before the enclosing inline body is
     /// written. Its constants and any members remain inputs to that later write, but source-map
     /// ranges must not become visible until the lambda is actually inserted into the body.
-    pub(crate) fn restore_source_map(&mut self, checkpoint: &ClassCheckpoint) {
+    pub fn restore_source_map(&mut self, checkpoint: &ClassCheckpoint) {
         self.source_map = checkpoint.source_map.clone();
         self.method_source_map = checkpoint.method_source_map.clone();
     }

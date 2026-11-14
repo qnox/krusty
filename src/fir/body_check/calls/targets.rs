@@ -13,6 +13,9 @@ pub(in crate::fir::body_check) struct MemberExtensionFirTarget {
     /// The extension receiver parameter's type as the checker applied it, which an explicit
     /// receiver argument is converted to.
     pub(in crate::fir::body_check) extension_receiver: Ty,
+    /// The vararg among the parameters the call's source arguments address. The selected call
+    /// records it among all declared parameters, contexts included.
+    pub(in crate::fir::body_check) argument_vararg: Option<super::ArgumentVararg>,
 }
 
 /// The declaration's annotations mark it `@IntrinsicConstEvaluation`: kotlinc evaluates a call to
@@ -47,6 +50,19 @@ pub(super) struct ExternalCallTarget<'a> {
     pub(super) reified_type_parameter_ordinals: &'a [u32],
 }
 
+/// A member or extension operator selected in expression position, before its source operands
+/// are mapped onto the checked call. These facts travel together from selection to argument
+/// mapping.
+pub(super) struct ExpressionMemberOperatorTarget {
+    pub(super) target: FirCallTarget,
+    pub(super) substitutions: Box<[FirTypeSubstitution]>,
+    pub(super) extension: bool,
+    pub(super) context_arguments: Vec<Option<crate::resolve::ResolvedContextArgument>>,
+    /// The vararg among the parameters the call's source arguments address.
+    pub(super) vararg_index: Option<super::ArgumentVararg>,
+    pub(super) parameters: Vec<Ty>,
+}
+
 /// One already-selected operator target. Context parameters stay separate while source operands
 /// are mapped, then join the value parameters in the checked call's semantic parameter list.
 pub(in crate::fir::body_check) struct SelectedOperatorTarget {
@@ -54,7 +70,7 @@ pub(in crate::fir::body_check) struct SelectedOperatorTarget {
     pub(in crate::fir::body_check) extension: bool,
     pub(in crate::fir::body_check) context_parameters: Box<[ResolvedTy]>,
     pub(in crate::fir::body_check) value_parameters: Box<[ResolvedTy]>,
-    pub(in crate::fir::body_check) vararg_index: Option<usize>,
+    pub(in crate::fir::body_check) vararg: Option<super::ArgumentVararg>,
     pub(in crate::fir::body_check) context_arguments:
         Vec<Option<crate::resolve::ResolvedContextArgument>>,
 }

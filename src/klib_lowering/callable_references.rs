@@ -4,24 +4,30 @@ use crate::libraries::function_classifiers;
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrExpr, KlibIrExprId, KlibIrExprKind,
-    KlibIrFunctionId, KlibIrNullability, KlibIrStatement, KlibIrType,
+    KlibIrFunctionId, KlibIrNullability, KlibIrParameter, KlibIrStatement, KlibIrType,
 };
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbolKind};
 use crate::types::{Ty, TyKind};
 
-pub(super) struct UnboundReference<'a> {
+pub(super) struct DeclarationReference<'a> {
     pub(super) invoke: KlibIrFunctionId,
     pub(super) target: &'a KlibPublicIdSignature,
     pub(super) returned: KlibIrExprId,
     pub(super) arity: usize,
+    pub(super) receiver: Option<BoundReceiver<'a>>,
+}
+
+pub(super) struct BoundReceiver<'a> {
+    pub(super) operand: KlibIrExprId,
+    pub(super) parameter: &'a KlibIrParameter,
 }
 
 /// The same admission owns preparation and lowering. A reflection target alone does not prove
-/// that the wrapper invokes it without receiver binding, argument adaptation or extra effects.
-pub(super) fn unbound_reference<'a>(
+/// that the wrapper forwards its exact bound and invocation inputs without adaptation or effects.
+pub(super) fn declaration_reference<'a>(
     arena: &'a KlibIrArena,
     expression: &'a KlibIrExpr,
-) -> Option<UnboundReference<'a>> {
+) -> Option<DeclarationReference<'a>> {
     let KlibIrExprKind::RichFunctionReference {
         bound_values,
         reflection_target: Some(target),
@@ -33,7 +39,7 @@ pub(super) fn unbound_reference<'a>(
     else {
         return None;
     };
-    if !bound_values.is_empty() || target.kind != KlibIrSymbolKind::Function {
+    if bound_values.len() > 1 || target.kind != KlibIrSymbolKind::Function {
         return None;
     }
     let KlibIrSignature::Public(target_signature) = &target.signature else {
@@ -74,13 +80,14 @@ pub(super) fn unbound_reference<'a>(
         return None;
     }
     let function = arena.function(*invoke);
+    let bound_count = bound_values.len();
     if function.constructor
         || function.base.flags & crate::metadata::function_flags::IS_SUSPEND != 0
         || !function.type_parameters.is_empty()
         || function.dispatch_receiver.is_some()
         || !function.context_parameters.is_empty()
         || function.extension_receiver.is_some()
-        || function.regular_parameters.len() != family.arity()
+        || function.regular_parameters.len() != family.arity() + bound_count
         || function.regular_parameters.iter().any(|parameter| {
             parameter.default_value.is_some() || parameter.vararg_element_type.is_some()
         })
@@ -113,31 +120,49 @@ pub(super) fn unbound_reference<'a>(
     if &access.symbol != target || !access.type_arguments.is_empty() {
         return None;
     }
-    let values = match &access.arguments {
-        KlibIrArguments::Flat(values)
-        | KlibIrArguments::Split {
+    let receiver = bound_values.first().map(|operand| BoundReceiver {
+        operand: *operand,
+        parameter: &function.regular_parameters[0],
+    });
+    let (values, parameters) = match &access.arguments {
+        KlibIrArguments::Flat(values) => (values, function.regular_parameters.as_slice()),
+        KlibIrArguments::Split {
             dispatch_receiver: None,
             extension_receiver: None,
             values,
-        } => values,
+        } if receiver.is_none() => (values, function.regular_parameters.as_slice()),
+        KlibIrArguments::Split {
+            dispatch_receiver: None,
+            extension_receiver: Some(value),
+            values,
+        } if receiver
+            .as_ref()
+            .is_some_and(|bound| reads_parameter(arena, *value, bound.parameter)) =>
+        {
+            (values, &function.regular_parameters[1..])
+        }
         _ => return None,
     };
-    if values.len() != function.regular_parameters.len() {
+    if values.len() != parameters.len() {
         return None;
     }
-    for (value, parameter) in values.iter().zip(&function.regular_parameters) {
-        if !matches!(&arena.expr((*value)?).kind,
-            KlibIrExprKind::GetValue { symbol, .. } if symbol == &parameter.base.symbol)
-        {
+    for (value, parameter) in values.iter().zip(parameters) {
+        if !reads_parameter(arena, (*value)?, parameter) {
             return None;
         }
     }
-    Some(UnboundReference {
+    Some(DeclarationReference {
         invoke: *invoke,
         target: target_signature,
         returned: *returned,
         arity: family.arity(),
+        receiver,
     })
+}
+
+fn reads_parameter(arena: &KlibIrArena, value: KlibIrExprId, parameter: &KlibIrParameter) -> bool {
+    matches!(&arena.expr(value).kind,
+        KlibIrExprKind::GetValue { symbol, .. } if symbol == &parameter.base.symbol)
 }
 
 /// The declared function supertype of one exact reflective application. Nominal reflective

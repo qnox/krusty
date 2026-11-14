@@ -14,7 +14,7 @@ pub(super) const NULLABLE: &str = "Lorg/jetbrains/annotations/Nullable;";
 /// them across: `RuntimeVisibleAnnotations` (Kotlin's RUNTIME, the default) then
 /// `RuntimeInvisibleAnnotations` (BINARY). Common IR carries one list per declaration; this
 /// boundary is the only place the split exists. SOURCE-retained applications never reach the IR.
-pub(crate) fn split_declaration_annotations(
+pub fn split_declaration_annotations(
     annotations: &crate::ir::DeclarationAnnotations,
 ) -> (
     Vec<crate::ir::AppliedAnnotation>,

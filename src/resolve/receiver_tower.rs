@@ -281,6 +281,9 @@ pub(super) fn declared_receivers(
         })
         .collect::<Vec<_>>();
     for companion in companions {
+        if checker.annotated_classifier == Some(companion) {
+            continue;
+        }
         let ty = Ty::obj_name(companion);
         if !receivers.iter().any(|receiver| receiver.ty == ty) {
             receivers.push(ImplicitReceiver {

@@ -29,7 +29,7 @@ impl ClassWriter {
     /// Record the declaration enclosure visited before an inline object's copied class is
     /// regenerated at its call site. AnonymousObjectTransformer replaces the attribute, but ASM's
     /// constant pool retains the declaration owner's class and method name-and-type entries.
-    pub(in crate::jvm) fn retain_replaced_enclosing_method(
+    pub fn retain_replaced_enclosing_method(
         &mut self,
         owner: &str,
         method: &str,
@@ -94,7 +94,7 @@ impl ClassWriter {
     /// kotlinc's class-attribute visit after `@Metadata`: the `EnclosingMethod` refs, then the
     /// retained `InnerClasses` rows. This fixes their pool order only; the attributes themselves
     /// are serialized as `InnerClasses`, then `EnclosingMethod`.
-    pub(in crate::jvm) fn intern_post_metadata_attribute_refs(&mut self) {
+    pub fn intern_post_metadata_attribute_refs(&mut self) {
         self.intern_enclosing_method_refs();
         self.seed_inner_class_names();
     }

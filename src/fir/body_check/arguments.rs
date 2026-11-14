@@ -91,8 +91,7 @@ impl BodyFirChecker<'_> {
             | FirExprKind::CapturedValueWrite { .. }
             | FirExprKind::ValueWrite { .. }
             | FirExprKind::PropertyWrite { .. }
-            | FirExprKind::BackingFieldWrite { .. }
-            | FirExprKind::IndexedWrite { .. } => true,
+            | FirExprKind::BackingFieldWrite { .. } => true,
             FirExprKind::Block {
                 result: Some(result),
                 ..
@@ -221,8 +220,9 @@ impl BodyFirChecker<'_> {
         arguments: &[ExprId],
         parameters: &[Ty],
         parameter_offset: usize,
-        vararg_index: Option<usize>,
+        vararg: Option<ArgumentVararg>,
     ) -> Result<Box<[FirCallArgument]>, BodyCheckFailure> {
+        let vararg_index = vararg.map(ArgumentVararg::index);
         let cause = self.expression_origin(expression)?;
         let Some(slots) = self.info.resolved_call_arg_slots.get(&expression).cloned() else {
             return arguments
@@ -1447,8 +1447,9 @@ impl BodyFirChecker<'_> {
         arguments: &[ExprId],
         parameters: &[Ty],
         context: impl Iterator<Item = Option<&'a ResolvedContextArgument>>,
-        vararg_index: Option<usize>,
+        vararg: Option<ArgumentVararg>,
     ) -> Result<Box<[FirCallArgument]>, BodyCheckFailure> {
+        let vararg_index = vararg.map(ArgumentVararg::index);
         let context = context.collect::<Vec<_>>();
         let cause = self.expression_origin(expression)?;
         let mut checked = context
@@ -1483,7 +1484,7 @@ impl BodyFirChecker<'_> {
                 arguments,
                 parameters,
                 context.len(),
-                vararg_index,
+                vararg,
             )?);
             return Ok(checked.into_boxed_slice());
         }

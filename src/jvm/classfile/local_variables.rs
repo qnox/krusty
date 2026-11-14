@@ -26,7 +26,7 @@ fn gap_is_only_local_loads(bytes: &[u8]) -> bool {
     while index < bytes.len() {
         let opcode = bytes[index];
         let len = match opcode {
-            0x15 | 0x16 | 0x17 | 0x18 | 0x19 => 2,
+            0x15..=0x19 => 2,
             0x1a..=0x2d => 1,
             _ => return false,
         };
@@ -41,7 +41,28 @@ fn gap_is_only_local_loads(bytes: &[u8]) -> bool {
 impl CodeBuilder {
     /// Record a local owned by an inline frame. Its marker may close later and insert immediately
     /// ahead of the frame's first already-recorded local.
-    pub(crate) fn add_inline_frame_local(
+    /// Keep inline-frame locals live across a `checkcast` of the inlined result. The cast is the
+    /// call's result, so the frame ends at the store that follows it.
+    pub fn extend_inline_frame_locals_ending_at(&mut self, end: u16, extra: u16) {
+        for (entry, placement) in self
+            .local_entries
+            .iter_mut()
+            .zip(self.local_entry_placements.iter())
+        {
+            let inline_frame = matches!(
+                placement,
+                LocalEntryPlacement::FrameLocal(_) | LocalEntryPlacement::FrameMarker(_)
+            );
+            let Some(length) = entry.1 else {
+                continue;
+            };
+            if inline_frame && entry.0.saturating_add(length) == end {
+                entry.1 = Some(length.saturating_add(extra));
+            }
+        }
+    }
+
+    pub fn add_inline_frame_local(
         &mut self,
         frame: u64,
         entry: (u16, Option<u16>, u16, String, String),
@@ -72,7 +93,7 @@ impl CodeBuilder {
     /// that local. A local that ends with the marker stays after `$i$f$`, including one separated
     /// from it only by a load the inline epilogue removes (`use`'s `closed`). Operands still open
     /// are recorded after this call and follow the marker.
-    pub(crate) fn insert_inline_frame_marker(
+    pub fn insert_inline_frame_marker(
         &mut self,
         frame: u64,
         precede_recorded_locals: bool,
@@ -156,7 +177,7 @@ impl CodeBuilder {
 
     /// Record a catch row before its containing inline frame's marker. Handler emission may close
     /// after that marker's lexical scope; placement must not depend on that timing.
-    pub(crate) fn add_inline_frame_catch(
+    pub fn add_inline_frame_catch(
         &mut self,
         frame: u64,
         entry: (u16, Option<u16>, u16, String, String),

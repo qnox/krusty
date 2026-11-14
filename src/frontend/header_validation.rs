@@ -15,6 +15,9 @@ use crate::diagnostic_wording::{
 };
 
 pub(super) fn validate(file: &File, diagnostics: &mut DiagSink) {
+    for alias in &file.type_alias_decls {
+        validate_type_alias(alias, diagnostics);
+    }
     for declaration in &file.decl_arena {
         match declaration {
             Decl::Fun(function) => validate_function(function, false, diagnostics),
@@ -35,6 +38,9 @@ pub(super) fn validate(file: &File, diagnostics: &mut DiagSink) {
                 for function in &class.methods {
                     validate_function(function, true, diagnostics);
                 }
+                for alias in &class.type_aliases {
+                    validate_type_alias(alias, diagnostics);
+                }
                 if class.is_interface() {
                     for property in &class.body_props {
                         for diagnostic in
@@ -52,6 +58,12 @@ pub(super) fn validate(file: &File, diagnostics: &mut DiagSink) {
                 }
             }
         }
+    }
+}
+
+fn validate_type_alias(alias: &crate::ast::TypeAliasDecl, diagnostics: &mut DiagSink) {
+    for diagnostic in crate::declaration_validation::type_alias_diagnostics(alias) {
+        diagnostics.error(diagnostic.span, diagnostic.message.to_string());
     }
 }
 
@@ -130,8 +142,8 @@ fn validate_expect_class(file: &File, class: &crate::ast::ClassDecl, diagnostics
             // The parser records that keyword for every `init` block it parses, so an absent one is
             // a broken parse product rather than a block to skip: reporting nothing here would drop
             // the diagnostic for an implementation the header really carries.
-            match file.init_block_keywords.get(body) {
-                Some(span) => diagnostics.error(*span, body_message()),
+            match file.init_blocks.get(body) {
+                Some(header) => diagnostics.error(header.keyword, body_message()),
                 None => diagnostics.error(
                     class.span,
                     "internal error: an init block in an expect classifier has no `init` keyword",

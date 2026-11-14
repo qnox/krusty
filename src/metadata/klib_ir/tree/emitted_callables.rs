@@ -11,6 +11,12 @@ use crate::fx_hash::HashSet;
 pub(crate) struct EmittedCallForms {
     pub(crate) closure: fn(&KlibIrArena, &KlibIrExpr) -> Option<KlibIrFunctionId>,
     pub(crate) folded_call: fn(&KlibIrArena, &KlibIrExpr) -> bool,
+    /// The calls inside an expression that the form the expression is realizes without their
+    /// declarations, such as an array `for` loop's iterator protocol.
+    pub(crate) folded_calls: fn(&KlibIrArena, &KlibIrExpr) -> Vec<KlibIrExprId>,
+    /// The declaration a call is realized as a call of in place of the one it names, such as the
+    /// array content extension a data class array member operator lowers to.
+    pub(crate) implied_callee: fn(&KlibIrArena, &KlibIrExpr) -> Option<&'static KlibIrSymbol>,
 }
 
 impl KlibIrArena {
@@ -65,7 +71,7 @@ impl KlibIrArena {
         mut functions: HashSet<KlibIrSymbol>,
     ) -> Vec<&KlibIrSymbol> {
         let mut expressions = HashSet::default();
-        let mut calls = self.unfolded_call_symbols(pending.clone(), forms.folded_call);
+        let mut calls = self.unfolded_call_symbols(pending.clone(), forms);
         while let Some(id) = pending.pop() {
             if !expressions.insert(id) {
                 continue;
@@ -78,7 +84,7 @@ impl KlibIrArena {
                     if let Some(KlibIrBody::Block(statements)) = &nested.body {
                         let mut roots = Vec::new();
                         push_statement_expressions(self, statements, &mut roots);
-                        calls.extend(self.unfolded_call_symbols(roots.clone(), forms.folded_call));
+                        calls.extend(self.unfolded_call_symbols(roots.clone(), forms));
                         pending.extend(roots);
                     }
                 }
@@ -87,18 +93,25 @@ impl KlibIrArena {
         calls
     }
 
-    /// The callable symbols reached from `pending`, except those of calls `folded` realizes.
+    /// The callable symbols reached from `pending`, except those of calls `forms` fold.
     fn unfolded_call_symbols(
         &self,
         mut pending: Vec<KlibIrExprId>,
-        folded: fn(&KlibIrArena, &KlibIrExpr) -> bool,
+        forms: EmittedCallForms,
     ) -> Vec<&KlibIrSymbol> {
         let mut calls = Vec::new();
+        // A form is visited before the expressions it holds, so its folded calls are known when
+        // the walk reaches them.
+        let mut folded_calls = HashSet::default();
         while let Some(id) = pending.pop() {
             let expression = self.expr(id);
             push_child_expressions(self, &expression.kind, &mut pending);
+            folded_calls.extend((forms.folded_calls)(self, expression));
+            calls.extend((forms.implied_callee)(self, expression));
             match &expression.kind {
-                KlibIrExprKind::Call { access, .. } if !folded(self, expression) => {
+                KlibIrExprKind::Call { access, .. }
+                    if !folded_calls.contains(&id) && !(forms.folded_call)(self, expression) =>
+                {
                     calls.push(&access.symbol)
                 }
                 KlibIrExprKind::ConstructorCall { access, .. }

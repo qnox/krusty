@@ -3794,148 +3794,92 @@ pub(crate) fn finalize_navigation(
         .collect()
 }
 
-/// Analyze one source in an open source set and retain only data needed by editor queries.
-pub fn analyze_for_lsp(sources: &[&str]) -> Vec<DocumentAnalysis> {
-    analyze_for_lsp_with_navigation_limit(sources, MAX_SOURCE_SET_NAVIGATION_ENTRIES)
+/// Definition indexes for the checked files of an analysis the server already ran.
+///
+/// The same symbol tables and occurrence walk as an interactive analysis. Hover, completion, and
+/// signature help are not built: a definition or references query does not read them.
+pub(crate) fn checked_definition_indexes(
+    sources: &[&str],
+    files: &[FileAnalysis],
+    symbols: &FrontendSymbols,
+    checked: usize,
+) -> Vec<DefinitionIndex> {
+    let highlight_symbols = HighlightSymbols::from_source_set(files, symbols);
+    let definition_symbols = DefinitionSymbols::from_source_set(
+        sources,
+        files,
+        symbols,
+        MAX_SOURCE_SET_NAVIGATION_ENTRIES,
+    );
+    let mut budget = NavigationBudget::default();
+    let mut indexes = Vec::with_capacity(checked.min(files.len()));
+    for (index, file) in files.iter().enumerate().take(checked) {
+        let source = sources.get(index).copied().unwrap_or("");
+        let remaining = budget.remaining();
+        let semantic = file.semantic_occurrences(
+            source,
+            index as u32,
+            symbols,
+            &highlight_symbols,
+            &definition_symbols,
+            SemanticLimits {
+                definition_entries: remaining,
+                type_definition_entries: 0,
+                implementation_entries: 0,
+                hover_entries: 0,
+                hover_wire_bytes: 0,
+                library_definition_wire_bytes: 0,
+            },
+        );
+        indexes.push(DefinitionIndex::from_occurrences(
+            semantic.definitions,
+            &mut budget,
+        ));
+    }
+    indexes
 }
 
-/// Register the classes each Java document declares, so Kotlin references to them navigate to the
-/// Java source rather than to the classpath stub that made them resolvable.
-pub(crate) fn register_java_declarations(
-    definition_symbols: &mut DefinitionSymbols,
-    sources: &[&str],
-    java_documents: &[u32],
-) {
-    let mut declarations = Vec::new();
-    let mut counts = HashMap::new();
-    for &index in java_documents {
-        let Some(source) = sources.get(index as usize) else {
-            continue;
-        };
-        for declaration in java::global_declared_class_occurrences(source, index) {
-            *counts.entry(declaration.0.clone()).or_insert(0usize) += 1;
-            declarations.push(declaration);
+/// How long the server's definition and references lookups take once the indexes exist.
+///
+/// One definition lookup, on the first occurrence when there is one, then a references scan of
+/// every index for that target. Index construction is not included. An empty index is still a
+/// query: it is the handler's answer for a cursor that hits nothing.
+pub(crate) struct NavigationQueries {
+    pub definition_us: u64,
+    pub references_us: u64,
+}
+
+pub(crate) fn measure_navigation_queries(indexes: &[DefinitionIndex]) -> NavigationQueries {
+    let query = indexes
+        .iter()
+        .find_map(|index| index.entries.first().map(|entry| (index, entry[0])))
+        .or_else(|| indexes.first().map(|index| (index, 0)));
+    let started = std::time::Instant::now();
+    let targets = query
+        .map(|(index, offset)| index.get(offset).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let definition_us = started.elapsed().as_micros() as u64;
+    let started = std::time::Instant::now();
+    let target_ids = targets.into_iter().collect::<HashSet<_>>();
+    if !target_ids.is_empty() {
+        for index in indexes {
+            for _occurrence in index.occurrences_targeting(&target_ids) {}
         }
     }
-    for (owner, target) in declarations {
-        if counts.get(&owner) == Some(&1)
-            && !definition_symbols.class_targets().contains_key(&owner)
-        {
-            definition_symbols.insert_class_target(owner, target);
-        }
+    NavigationQueries {
+        definition_us,
+        references_us: started.elapsed().as_micros() as u64,
     }
 }
 
-pub(crate) fn apply_java_navigation(
-    analyses: &mut [DocumentAnalysis],
-    sources: &[&str],
-    java_documents: &[u32],
-    definition_symbols: &DefinitionSymbols,
-    budgets: &mut AnalysisBudgets,
-) {
-    let limit = analyses.len().min(sources.len());
-    let java_documents = java_documents
-        .iter()
-        .map(|index| *index as usize)
-        .filter(|index| *index < limit)
-        .collect::<Vec<_>>();
-    if java_documents.is_empty() {
-        return;
-    }
-    for &index in &java_documents {
-        let mut targets = definition_symbols.class_targets().clone();
-        targets.extend(java::declared_classes(sources[index], index as u32));
-        let occurrences = java::definition_occurrences(sources[index], &targets);
-        analyses[index].definitions =
-            DefinitionIndex::from_occurrences(occurrences, &mut budgets.navigation);
-    }
-}
+mod source_set_documents;
 
-pub fn analyze_documents_for_lsp(documents: &[(&str, &str)]) -> Vec<DocumentAnalysis> {
-    let inputs = documents
-        .iter()
-        .map(|(uri, source)| {
-            if uri.ends_with(".java") {
-                SourceInput::java(source)
-            } else {
-                SourceInput::kotlin(source)
-            }
-        })
-        .collect::<Vec<_>>();
-    analyze_source_inputs_for_lsp(&inputs, MAX_SOURCE_SET_NAVIGATION_ENTRIES)
-}
-
-fn analyze_for_lsp_with_navigation_limit(
-    sources: &[&str],
-    navigation_relation_limit: usize,
-) -> Vec<DocumentAnalysis> {
-    let inputs = sources
-        .iter()
-        .map(|source| SourceInput::kotlin(source))
-        .collect::<Vec<_>>();
-    analyze_source_inputs_for_lsp(&inputs, navigation_relation_limit)
-}
-
-fn analyze_source_inputs_for_lsp(
-    inputs: &[SourceInput<'_>],
-    navigation_relation_limit: usize,
-) -> Vec<DocumentAnalysis> {
-    let sources = inputs.iter().map(|input| input.text).collect::<Vec<_>>();
-    let java_documents = inputs
-        .iter()
-        .enumerate()
-        .filter(|(_, input)| input.kind == SourceKind::Java)
-        .map(|(index, _)| index as u32)
-        .collect::<Vec<_>>();
-    let analysis = crate::jvm_analysis::analyze_standalone_source_inputs(inputs);
-    let highlight_symbols = HighlightSymbols::from_source_set(&analysis.files, &analysis.symbols);
-    let mut definition_symbols = DefinitionSymbols::from_source_set(
-        &sources,
-        &analysis.files,
-        &analysis.symbols,
-        navigation_relation_limit,
-    );
-    register_java_declarations(&mut definition_symbols, &sources, &java_documents);
-    let completion_symbols = CompletionSymbols::from_source_set(&analysis.files);
-    let signature_help_symbols =
-        SignatureHelpSymbols::from_source_set(&sources, &analysis.files, &analysis.symbols);
-    let workspace_symbols = WorkspaceSymbolIndex::from_source_set(&sources, &analysis.files);
-    let indexes = SourceSetIndexes::new(
-        &analysis.symbols,
-        &highlight_symbols,
-        &definition_symbols,
-        &completion_symbols,
-        &signature_help_symbols,
-    );
-    let mut budgets = AnalysisBudgets::new();
-    let pending = analysis
-        .files
-        .into_iter()
-        .zip(&sources)
-        .enumerate()
-        .map(|(file_index, (file, source))| {
-            DocumentAnalysis::from_file_analysis(
-                source,
-                file,
-                file_index as u32,
-                &indexes,
-                &mut budgets,
-            )
-        })
-        .collect();
-    let mut analyses = finalize_navigation(pending, &mut budgets);
-    apply_java_navigation(
-        &mut analyses,
-        &sources,
-        &java_documents,
-        &definition_symbols,
-        &mut budgets,
-    );
-    if let Some(first) = analyses.first_mut() {
-        first.workspace_symbols = workspace_symbols;
-    }
-    analyses
-}
+pub use source_set_documents::{analyze_documents_for_lsp, analyze_for_lsp};
+#[cfg(test)]
+use source_set_documents::{
+    analyze_for_lsp_with_navigation_limit, document_analyses_for_source_set,
+};
+pub(crate) use source_set_documents::{apply_java_navigation, register_java_declarations};
 
 #[cfg(test)]
 mod tests {
@@ -5968,7 +5912,21 @@ mod tests {
                       fun smart(value: SmartBase) {\n\
                       \u{20}\u{20}if (value is SmartDerived) { val narrowed = value }\n\
                       }\n";
-        let analysis = analyze_for_lsp(&[source]).pop().unwrap();
+        let inputs = [SourceInput::kotlin(source)];
+        let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            krusty::toolchain::stdlib_classpath(),
+        ));
+        let analysis = document_analyses_for_source_set(
+            &inputs,
+            crate::compiler_analysis::analyze_source_inputs_with_features(
+                &inputs,
+                PlatformProvider::jvm(platform),
+                &krusty::features::LangFeatures::new(),
+            ),
+            MAX_SOURCE_SET_NAVIGATION_ENTRIES,
+        )
+        .pop()
+        .unwrap();
         assert!(
             analysis.diagnostics.is_empty(),
             "{:?}",

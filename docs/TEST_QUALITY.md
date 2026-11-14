@@ -14,7 +14,7 @@ full sweep is hours. Scope it.
 ```sh
 just mutants                     # mutate only the diff vs origin/master (recent work) — tractable
 just mutants -f src/resolve.rs   # mutate one file
-just mutants -f src/jvm/ir_emit.rs --line-col-in-diff  # etc. — any cargo-mutants flags pass through
+just mutants -f crates/krusty-jvm/src/ir_emit.rs --line-col-in-diff  # etc. — any cargo-mutants flags pass through
 ```
 
 Needs the tool: `cargo install cargo-mutants`. Config is in `.cargo/mutants.toml` (fast `gate`

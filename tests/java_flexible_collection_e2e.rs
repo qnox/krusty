@@ -75,7 +75,7 @@ fun box(): String {\n\
 #[test]
 fn a_kotlin_mutable_map_expectation_still_rejects_a_read_only_result() {
     // No flexibility without a Java origin: kotlinc rejects `Map<K, V>` for a Kotlin
-    // `MutableMap<String, Any>` parameter.
+    // `MutableMap<String, Any>` parameter, leaving both of `emptyMap`'s formals uninferred.
     let src = "class Stub<T> { infix fun returns(value: T): Stub<T> = this }\n\
 fun <T> every(block: () -> T): Stub<T> = Stub()\n\
 interface KAttrs { val attributes: MutableMap<String, Any> }\n\
@@ -85,7 +85,12 @@ fun f(k: KAttrs) { every { k.attributes } returns emptyMap() }\n";
         common::front_end_diagnostics(src, &[common::stdlib_jar()], Some(jdk.as_path()));
     assert_eq!(
         diagnostics,
-        ["argument type mismatch: actual type is 'Map<K, V>', but 'MutableMap<String, Any>' was expected."]
+        [
+            "cannot infer type for type parameter 'K'. Specify it explicitly.",
+            "cannot infer type for type parameter 'V'. Specify it explicitly.",
+            "argument type mismatch: actual type is 'Map<uninferred K (of fun <K, V> emptyMap), \
+uninferred V (of fun <K, V> emptyMap)>', but 'MutableMap<String, Any>' was expected.",
+        ]
     );
 }
 

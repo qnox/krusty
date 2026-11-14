@@ -214,7 +214,7 @@ impl Executor<FixStackInterpreter> for FixStackFrames<'_> {
 
 /// Why the stack could not be fixed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum FixStackError {
+pub enum FixStackError {
     Analysis(AnalyzerError),
     /// A closing marker where more than the call's result is on the stack.
     ResultShape(usize),

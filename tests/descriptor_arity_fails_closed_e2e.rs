@@ -10,7 +10,7 @@
 //! A panic loses the diagnostic and takes down the whole compilation rather than one file. But
 //! simply returning early is also wrong: the operand helper stops pushing while the caller still
 //! emits its `invoke*`, so the method claims operands that were never pushed. The contract in
-//! `src/jvm/ir_emit/call_operands.rs` therefore refuses with a typed value BEFORE touching the
+//! `crates/krusty-jvm/src/ir_emit/call_operands.rs` therefore refuses with a typed value BEFORE touching the
 //! operand stack, and each call site abandons the whole call.
 //!
 //! The refusal itself needs malformed IR to reach, so it is covered by unit tests beside the

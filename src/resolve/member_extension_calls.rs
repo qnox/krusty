@@ -175,10 +175,12 @@ impl Checker<'_> {
             MemberExtensionFunctionSelection::None(rejections) => self
                 .report_single_mapped_candidate_type_errors(
                     scope,
-                    call,
+                    CallArgs {
+                        call,
+                        args,
+                        arg_tys,
+                    },
                     name,
-                    args,
-                    arg_tys,
                     CallConstraints {
                         type_args: &explicit_type_args,
                         receiver: extension_receiver,

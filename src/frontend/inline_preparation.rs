@@ -112,17 +112,13 @@ fn default_check_selection(
         if root.source != provider.source {
             return None;
         }
-        let Some(selected_bodies) = bodies.get_mut(provider.source.raw() as usize) else {
-            return None;
-        };
+        let selected_bodies = bodies.get_mut(provider.source.raw() as usize)?;
         // The provider selects the live syntax; the target selects the surviving semantic
         // declaration after expect/actual actualization. `bind_defaults` aliases both identities
         // to that one parser declaration for this bounded check.
         selected_bodies.insert(work.provider);
         selected_bodies.insert(work.target);
-        let Some(selected_roots) = roots.get_mut(root.source.raw() as usize) else {
-            return None;
-        };
+        let selected_roots = roots.get_mut(root.source.raw() as usize)?;
         selected_roots.insert(root_id);
     }
     Some(DefaultCheckSelection { roots, bodies })
@@ -339,11 +335,15 @@ fn check_default_source(input: DefaultSourceInput<'_>, state: DefaultSourceState
     diagnostic_ranges.dedup();
     let info = diags.with_authoritative_ranges(&diagnostic_ranges, |diags| {
         crate::resolve::check_signature_default_declarations_at_with_index(
-            file,
-            raw_source as u32,
+            crate::resolve::SourceFileUnit {
+                file,
+                file_index: raw_source as u32,
+            },
             &active,
-            &selection.roots[raw_source],
-            &selection.bodies[raw_source],
+            crate::resolve::StableDefaultSelection {
+                roots: &selection.roots[raw_source],
+                defaults: &selection.bodies[raw_source],
+            },
             symbols,
             index,
             diags,
@@ -551,17 +551,27 @@ pub(super) fn from_checked_analysis(
     finish(index, inline_bodies, sources, default_arguments, unexpected)
 }
 
+pub(super) struct StreamingPreparationInputs<'a> {
+    pub(super) files: &'a mut [File],
+    pub(super) local_contexts: &'a [crate::resolve::PassOneLocalClassContext],
+    pub(super) skip: &'a [bool],
+    pub(super) checked_count: usize,
+}
+
 pub(super) fn streaming(
     module: crate::fir::FrontendModule,
     bodies: crate::fir::BodyPartition,
     default_arguments: crate::fir::DefaultArgumentStore,
-    files: &mut [File],
-    local_contexts: &[crate::resolve::PassOneLocalClassContext],
-    skip: &[bool],
-    checked_count: usize,
+    inputs: StreamingPreparationInputs<'_>,
     symbols: &mut FrontendSymbols,
     diags: &mut crate::diag::DiagSink,
 ) -> Option<StreamedPassState> {
+    let StreamingPreparationInputs {
+        files,
+        local_contexts,
+        skip,
+        checked_count,
+    } = inputs;
     let selection = bodies.inline_check_selection(module.index(), files.len());
     let payload_roots = inline_payload_roots(&selection, module.index())?;
     let (mut index, mut inline_bodies, initial_defaults, mut sources) = module.into_parts();
@@ -634,11 +644,15 @@ pub(super) fn streaming(
                 }
             };
             let info = crate::resolve::check_preinferred_inline_declarations_at_with_index(
-                &files[raw_source],
-                raw_source as u32,
-                &selection.roots[raw_source],
-                &selection.bodies[raw_source],
-                &selected_stable_bodies,
+                crate::resolve::SourceFileUnit {
+                    file: &files[raw_source],
+                    file_index: raw_source as u32,
+                },
+                crate::resolve::SpanBodySelection {
+                    declarations: &selection.roots[raw_source],
+                    bodies: &selection.bodies[raw_source],
+                    stable_bodies: &selected_stable_bodies,
+                },
                 &active,
                 &index,
                 symbols,

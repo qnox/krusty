@@ -18,7 +18,7 @@ const INLINE_CALL_TRANSFORMATION_SUFFIX: &str = "$$inlined";
 
 /// One level of regenerated names.
 #[derive(Clone, Debug)]
-pub(crate) struct NameGenerator {
+pub struct NameGenerator {
     class: String,
     next_lambda_index: u32,
     children: HashMap<String, NameGenerator>,
@@ -34,13 +34,13 @@ impl NameGenerator {
     }
 
     /// The internal name this generator numbers under (`generatorClass`).
-    pub(crate) fn class(&self) -> &str {
+    pub fn class(&self) -> &str {
         &self.class
     }
 
     /// `subGenerator(inliningMethod)`: the generator for inline calls of `method`, created on first
     /// use.
-    pub(crate) fn for_inlined_method(&mut self, method: &str) -> &mut NameGenerator {
+    pub fn for_inlined_method(&mut self, method: &str) -> &mut NameGenerator {
         let class = format!("{}${method}", self.class);
         self.children
             .entry(method.to_string())
@@ -49,7 +49,7 @@ impl NameGenerator {
 
     /// `subGenerator(true, null)`: the generator of the next regenerated anonymous object, named
     /// `<class>$<n>`.
-    pub(crate) fn next_object(&mut self) -> &mut NameGenerator {
+    pub fn next_object(&mut self) -> &mut NameGenerator {
         let class = format!("{}${}", self.class, self.next_lambda_index);
         self.next_lambda_index += 1;
         self.child(class)
@@ -80,7 +80,7 @@ pub(crate) fn sam_wrapper_name(class: &str, original: &str) -> Option<String> {
 
 /// The generators of one class being written (`ClassCodegen.regeneratedObjectNameGenerators`).
 #[derive(Clone, Debug, Default)]
-pub(crate) struct ClassNameGenerators {
+pub struct ClassNameGenerators {
     by_function: HashMap<String, NameGenerator>,
     sam_wrappers: HashSet<String>,
 }
@@ -89,7 +89,7 @@ impl ClassNameGenerators {
     /// The copy of the SAM wrapper `original` in `class`: `<class>$inlined$sam$…`, the original's
     /// name from its `$sam$` segment on. Every inline call in the class shares the one copy, so
     /// the flag says whether this call is the first to name it and must write it.
-    pub(crate) fn sam_wrapper(&mut self, class: &str, original: &str) -> Option<(String, bool)> {
+    pub fn sam_wrapper(&mut self, class: &str, original: &str) -> Option<(String, bool)> {
         let name = sam_wrapper_name(class, original)?;
         let first = self.sam_wrappers.insert(name.clone());
         Some((name, first))
@@ -97,11 +97,7 @@ impl ClassNameGenerators {
 
     /// `getRegeneratedObjectNameGenerator`: the generator of the function named `function` (its
     /// Kotlin name, `None` for a special name such as a constructor) in the class `class`.
-    pub(crate) fn for_function(
-        &mut self,
-        class: &str,
-        function: Option<&str>,
-    ) -> &mut NameGenerator {
+    pub fn for_function(&mut self, class: &str, function: Option<&str>) -> &mut NameGenerator {
         let name = match function {
             Some(function) => format!("${function}"),
             None => SPECIAL_TRANSFORMATION_NAME.to_string(),

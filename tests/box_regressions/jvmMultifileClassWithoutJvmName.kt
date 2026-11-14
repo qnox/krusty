@@ -1,3 +1,5 @@
+// TARGET_BACKEND: JVM_IR
+// PLATFORM-SPECIFIC: JVM multifile facade annotations and package-part ABI.
 // Without `@file:JvmName`, kotlinc ignores `@file:JvmMultifileClass`: the file compiles to its
 // ordinary package part, private functions keep their names, and callers name that part.
 // FILE: plain.kt

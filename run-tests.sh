@@ -42,9 +42,9 @@ if [ "${1:-}" = "--survey" ]; then
   export KRUSTY_KOTLINC="${KRUSTY_KOTLINC:-$(just kotlinc "$survey_version")}"
   survey_box="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$survey_version")}"
   if [ "${KRUSTY_SURVEY_TRACE:-0}" = "1" ]; then
-    cargo build --profile gate --bin survey --features trace
+    cargo build --profile gate -p krusty-jvm --bin survey --features trace
   else
-    cargo build --profile gate --bin survey
+    cargo build --profile gate -p krusty-jvm --bin survey
   fi
   survey_bin="$target_root/gate/survey"
   [[ -x "$survey_bin" ]] || {

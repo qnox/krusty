@@ -44,7 +44,8 @@ use super::common;
 mod diagnostics;
 #[path = "kotlin_box_ir_jvm_conformance/entry.rs"]
 mod entry;
-use entry::{find_box_class, CompiledClasses};
+use entry::find_box_class;
+pub(super) use entry::CompiledClasses;
 
 // BoxRunner.java source embedded at compile time; compiled once at test start.
 const BOX_RUNNER_SRC: &str = r#"
@@ -477,15 +478,16 @@ fn compile_multifile(
     // `.java` blocks are collected separately: javac compiles them first (in-process, via the
     // persistent JavaRunner) and their classes join krusty's classpath as an in-memory overlay,
     // mirroring how kotlinc's test infra makes Java sources visible to the Kotlin compile.
-    let (mut blocks, java_blocks) = krusty::conformance::split_files(src);
+    let (mut blocks, java_blocks) = krusty::conformance::split_files(src).ok()?;
     // Single-file (no `// FILE:` markers) but routed here for coroutine-helper injection: the whole
     // source is the one main block.
     if blocks.is_empty() && java_blocks.is_empty() {
         blocks.push((main_stem.to_string(), src.to_string()));
     }
     // Mirror kotlinc: a `// WITH_COROUTINES` test gets the generated `helpers` source as an extra file.
-    if src.contains("// WITH_COROUTINES") {
-        blocks.push(("CoroutineUtil".to_string(), COROUTINE_HELPERS.to_string()));
+    if krusty::conformance::directive(src, "WITH_COROUTINES") {
+        let helpers = krusty::conformance::coroutine_sources(src, COROUTINE_HELPERS).ok()?;
+        blocks.extend(helpers);
     }
     // A lone `// FILE: main.kt` block still names the file (and so its facade class), exactly as
     // kotlinc's test infra compiles it; only a source with no Kotlin at all is rejected here.
@@ -725,7 +727,7 @@ fn compile_module_test(
     let mut modules = split_modules(src)?;
     // kotlinc's `// WITH_COROUTINES` helpers live in an implicit `support` module every module sees.
     if krusty::conformance::directive(src, "WITH_COROUTINES") {
-        krusty::conformance::inject_support_module(&mut modules, COROUTINE_HELPERS);
+        krusty::conformance::inject_coroutine_support(&mut modules, src, COROUTINE_HELPERS).ok()?;
     }
     let uid = UID.fetch_add(1, Ordering::Relaxed);
     let tmp = std::env::temp_dir().join(format!("krusty_modtest_{}_{uid}", std::process::id()));
@@ -863,7 +865,7 @@ fn compile_module_test(
 /// Compile one box case with krusty through the topology its markers select: `// MODULE:` builds,
 /// then `// FILE:` multi-file sets (also used for `// WITH_COROUTINES`, which needs the generated
 /// `helpers` source compiled alongside it), then a single source file.
-fn compile_box_case(
+pub(super) fn compile_box_case(
     src: &str,
     stem: &str,
     cp_jars: &[PathBuf],
@@ -1017,27 +1019,10 @@ impl BoxRunner {
     }
 }
 
-/// Milliseconds `BoxRunner` waits for one `box()` call.
-///
-/// Unset or blank keeps the hosted-runner deadline of 2s. An explicit positive integer selects
-/// up to `u32::MAX` milliseconds, keeping the Java long literal and the client's additional
-/// duration representable. The value is compiled into that run's runner.
+/// Milliseconds `BoxRunner` waits for one `box()` call: unset or blank keeps the hosted-runner
+/// deadline of 2s. The value is compiled into that run's runner.
 fn box_case_timeout_ms_from(raw: Option<&str>) -> u64 {
-    const DEFAULT_MS: u64 = 2_000;
-    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
-        return DEFAULT_MS;
-    };
-    let Ok(value) = raw.parse::<u32>() else {
-        panic!(
-            "KRUSTY_BOX_CASE_TIMEOUT_MS must be an integer from 1 through 4294967295, got {raw}"
-        );
-    };
-    if value == 0 {
-        panic!(
-            "KRUSTY_BOX_CASE_TIMEOUT_MS must be an integer from 1 through 4294967295, got {raw}"
-        );
-    }
-    u64::from(value)
+    common::timeout_ms_from("KRUSTY_BOX_CASE_TIMEOUT_MS", raw, 2_000)
 }
 
 fn box_case_timeout_ms() -> u64 {
@@ -1115,62 +1100,6 @@ fn setup_runner(java_home: &str, _work: &Path) -> PathBuf {
         );
     }
     runner_dir
-}
-
-/// The scored run's reference-compile profile: inventory cache hits and misses, then the live
-/// compiler server's lifecycle. Durations are summed over worker threads, like the `timing` line.
-fn reference_profile(
-    reference: box_reference_classes::ReferenceStats,
-    server: common::kotlinc_server::KotlincServerStats,
-) -> String {
-    let secs = |duration: Duration| duration.as_secs_f64();
-    format!(
-        "reference profile (thread-sum): cache hit {} | cached rejection {} | miss {} | \
-         read {:.1}s | compile {:.1}s | cleanup {:.1}s | store {:.1}s\n\
-         kotlinc server (thread-sum): requests {} | starts {} | restarts {} | pool wait {:.1}s | \
-         start {:.1}s | compile {:.1}s",
-        reference.hits,
-        reference.cached_rejections,
-        reference.misses,
-        secs(reference.cache_read),
-        secs(reference.compile),
-        secs(reference.cleanup),
-        secs(reference.store),
-        server.requests,
-        server.starts,
-        server.restarts,
-        secs(server.pool_wait),
-        secs(server.start_time),
-        secs(server.compile_time),
-    )
-}
-
-#[test]
-fn reference_profile_reports_cache_and_server_counts() {
-    let reference = box_reference_classes::ReferenceStats {
-        hits: 3,
-        cached_rejections: 1,
-        misses: 596,
-        cache_read: Duration::from_millis(240),
-        compile: Duration::from_millis(140_049),
-        cleanup: Duration::from_millis(1_960),
-        store: Duration::from_millis(1_040),
-    };
-    let server = common::kotlinc_server::KotlincServerStats {
-        requests: 636,
-        starts: 2,
-        restarts: 0,
-        pool_wait: Duration::from_millis(40),
-        start_time: Duration::from_millis(9),
-        compile_time: Duration::from_millis(125_056),
-    };
-    assert_eq!(
-        reference_profile(reference, server),
-        "reference profile (thread-sum): cache hit 3 | cached rejection 1 | miss 596 | read 0.2s | \
-         compile 140.0s | cleanup 2.0s | store 1.0s\n\
-         kotlinc server (thread-sum): requests 636 | starts 2 | restarts 0 | pool wait 0.0s | \
-         start 0.0s | compile 125.1s"
-    );
 }
 
 #[test]
@@ -1338,7 +1267,7 @@ fn write_flamegraph(guard: &pprof::ProfilerGuard<'_>) {
     }
 
     let mut v: Vec<_> = leaf.into_iter().collect();
-    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.sort_by_key(|frame| std::cmp::Reverse(frame.1));
     eprintln!("--- profiler: top krusty frames ({total} samples) ---");
     for (name, c) in v.into_iter().take(25) {
         eprintln!("  {:>5.1}%  {name}", 100.0 * c as f64 / total.max(1) as f64);
@@ -1407,22 +1336,36 @@ fun box(): String = Registry.value()\n";
         .filter(|(_, bytes)| bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]))
         .collect();
 
+    // kotlinc's test infrastructure compiles the partitioned files, which keep the test data's
+    // line numbers, so the reference compiles the same unit the module harness compiled.
+    let modules = split_modules(&source).expect("the fixture declares two modules");
+    let units = krusty::conformance::module_units(&modules);
+    let [unit] = units.as_slice() else {
+        panic!("the folded common module compiles into the platform unit: {units:?}");
+    };
+    assert_eq!(
+        unit.common_file_count, 1,
+        "Common.kt is the folded common source"
+    );
     let reference_root = common::scratch_dir().expect("allocate reference source-set directory");
     let reference_output = reference_root.join("classes");
-    let common_path = reference_root.join("Common.kt");
-    let platform_path = reference_root.join("Platform.kt");
-    fs::write(&common_path, COMMON).expect("write common reference source");
-    fs::write(&platform_path, PLATFORM).expect("write platform reference source");
-    let arguments = vec![
+    let mut arguments = vec![
         "-d".to_string(),
         reference_output.to_string_lossy().into_owned(),
         "-module-name".to_string(),
-        "platform".to_string(),
+        unit.name.clone(),
         "-Xmulti-platform".to_string(),
-        format!("-Xcommon-sources={}", common_path.to_string_lossy()),
-        common_path.to_string_lossy().into_owned(),
-        platform_path.to_string_lossy().into_owned(),
     ];
+    let mut paths = Vec::new();
+    for (index, (name, text)) in unit.files.iter().enumerate() {
+        let path = reference_root.join(format!("{name}.kt"));
+        fs::write(&path, text).expect("write reference source");
+        if index < unit.common_file_count {
+            arguments.push(format!("-Xcommon-sources={}", path.to_string_lossy()));
+        }
+        paths.push(path.to_string_lossy().into_owned());
+    }
+    arguments.extend(paths);
     let (reference_status, reference_diagnostics) =
         common::kotlinc_compile(&arguments).expect("reference compiler is provisioned");
     assert_eq!(
@@ -1441,6 +1384,16 @@ fun box(): String = Registry.value()\n";
     assert_eq!(
         common::run_box(&classes, &box_class, std::slice::from_ref(&stdlib)),
         Some("OK".to_string())
+    );
+}
+
+/// The shared atomicfu regression's JVM classes are kotlinc's and its atomicfu plugin's, byte for
+/// byte.
+#[test]
+fn atomicfu_field_updaters_are_byte_identical_to_kotlinc() {
+    assert_plugin_case_matches_kotlinc(
+        include_str!("box_regressions/atomicfu/fieldUpdaters.kt"),
+        "fieldUpdaters",
     );
 }
 
@@ -1523,8 +1476,14 @@ fn assert_compose_fixture_matches_kotlinc(stem: &str) {
         .join("tests/fixtures/compose")
         .join(format!("{stem}.kt"));
     let source = fs::read_to_string(&path).expect("read the Compose fixture");
+    assert_plugin_case_matches_kotlinc(&source, stem);
+}
+
+/// A compiler plugin's case compiles to exactly the classes the reference compiler and that plugin
+/// emit, byte for byte, and both builds pass its `box()`.
+fn assert_plugin_case_matches_kotlinc(source: &str, stem: &str) {
     let source =
-        krusty::conformance::prepare_test_source(&source, krusty::conformance::TestTarget::Jvm);
+        krusty::conformance::prepare_test_source(source, krusty::conformance::TestTarget::Jvm);
     let reference = box_reference_classes::checked_prepared_box(&source, stem)
         .expect("the reference compiler compiles the fixture and its box() returns OK");
     let classpath = common::classpath_jars_for(&source);
@@ -1747,8 +1706,8 @@ fn kotlin_codegen_box_conformance() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(usize::MAX);
 
-    let mut files =
-        super::box_inventory::discover(&box_dir).unwrap_or_else(|error| panic!("{error}"));
+    let mut files = super::box_inventory::discover(&box_dir, krusty::conformance::TestTarget::Jvm)
+        .unwrap_or_else(|error| panic!("{error}"));
     let corpus: BTreeSet<String> = files
         .iter()
         .map(|file| box_ratchet::corpus_key(&box_dir, file))
@@ -2180,7 +2139,7 @@ fn kotlin_codegen_box_conformance() {
     if score_on {
         eprintln!(
             "{}",
-            reference_profile(
+            box_reference_classes::reference_profile(
                 box_reference_classes::reference_stats(),
                 common::kotlinc_server::kotlinc_server_stats()
             )
@@ -2280,7 +2239,7 @@ fn kotlin_codegen_box_conformance() {
     );
     if byte_diff_on {
         let mut diffs = byte_diffs.into_inner().unwrap();
-        diffs.sort_by(|a, b| a.0.cmp(&b.0));
+        diffs.sort_by_key(|(path, _)| path.clone());
         let (mut identical, mut divergent, mut ref_fail) = (0usize, 0, 0);
         let report_path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/byte_diff_report.txt");

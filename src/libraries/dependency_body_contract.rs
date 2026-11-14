@@ -54,10 +54,6 @@ impl DependencyBodyProviderSnapshot {
             role,
         }
     }
-
-    pub(crate) fn has_content_fingerprint(&self, fingerprint: [u8; 32]) -> bool {
-        self.content_fingerprint == fingerprint
-    }
 }
 
 /// The exact producer graph from which one target session may retain dependency support.
@@ -66,7 +62,7 @@ impl DependencyBodyProviderSnapshot {
 /// manifest edges, including metadata-only edge nodes. Input order is not semantic, so construction
 /// sorts the already canonical provider identities before comparison.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DependencyBodySnapshot {
+pub struct DependencyBodySnapshot {
     providers: Box<[DependencyBodyProviderSnapshot]>,
 }
 

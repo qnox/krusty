@@ -11,18 +11,18 @@ use super::{
 ///
 /// Both answers come from one compaction rule shared with instruction, frame, and debug-local
 /// rewriting, so a removed wide parameter closes the same two slots everywhere.
-pub(in crate::jvm) struct SplicedFrame {
+pub struct SplicedFrame {
     /// One entry per `lambda_params` position, in that order.
-    pub(in crate::jvm) lambda_bases: Vec<u16>,
+    pub lambda_bases: Vec<u16>,
     /// How many `FunctionN.invoke` sites the host has for each `lambda_params` position.
-    pub(in crate::jvm) site_counts: Vec<usize>,
+    pub site_counts: Vec<usize>,
     /// One past the highest caller slot the relocated host body occupies.
-    pub(in crate::jvm) top_local: u16,
+    pub top_local: u16,
 }
 
 /// Plan the caller frame for splicing `body`. `None` when the body cannot be decoded or a lambda
 /// parameter has no `FunctionN.invoke` this splice would replace.
-pub(in crate::jvm) fn spliced_frame(
+pub fn spliced_frame(
     body: &MethodCode,
     descriptor: &str,
     lambda_params: &[usize],

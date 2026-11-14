@@ -128,9 +128,11 @@ fun scope() { typealias Alias<T> = Parent<T?>; class Local<Own> : Alias<Own> }",
         0,
         None,
         &analysis.symbols,
-        Some(index),
-        Some(&active),
-        None,
+        CheckerIndexes {
+            resolved_index: Some(index),
+            active_declarations: Some(&active),
+            streamed_cache: None,
+        },
         &mut diagnostics,
     );
     checker

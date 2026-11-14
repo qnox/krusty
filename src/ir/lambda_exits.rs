@@ -19,15 +19,15 @@ pub(super) struct LambdaExits {
 /// How an inline lambda's body leaves the lambda: each way it can leave, kept apart, since one body
 /// can leave by several and each obligates its route differently.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct LambdaExit {
+pub struct LambdaExit {
     /// By a non-local `return` of the function the lambda is written in.
     pub(crate) returns: bool,
     /// By a `break` or `continue` of a loop outside it.
-    pub(crate) jumps: bool,
+    pub jumps: bool,
     /// By a return of an inline expansion outside it, which lowering made a `break` of the
     /// expansion's return frame. The return stores the frame's result, a value of the code outside
     /// the lambda.
-    pub(crate) frame_returns: bool,
+    pub frame_returns: bool,
 }
 
 impl LambdaExit {
@@ -76,7 +76,7 @@ impl IrFile {
 
     /// Record the exit of every inline body of the file that has no recorded exit yet: each
     /// lambda's, and the invocation template of each callable reference an inline call can take.
-    pub(crate) fn record_lambda_exits(&mut self) {
+    pub fn record_lambda_exits(&mut self) {
         let bodies = (0..self.exprs.len())
             .filter_map(|expression| {
                 let expression = ExprId::try_from(expression).ok()?;
@@ -102,7 +102,7 @@ impl IrFile {
     /// labeled return of an enclosing lambda (`return@outer` in an inner lambda) becomes a `break`
     /// of that lambda's return frame. The body as it stands is walked again, so such a body leaves
     /// by a frame return rather than the return it was recorded as.
-    pub(crate) fn lambda_exit(&self, body: ExprId) -> Option<LambdaExit> {
+    pub fn lambda_exit(&self, body: ExprId) -> Option<LambdaExit> {
         self.lambda_exits.leaves.get(&body)?;
         Some(lambda_exit(self, body, &mut Vec::new()))
     }

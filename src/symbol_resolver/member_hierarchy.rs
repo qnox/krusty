@@ -985,11 +985,7 @@ fn record_overridden_declarations(
                 if !overrides_in_family(source, inherited, implementation, intersection_parts) {
                     continue;
                 }
-                let identity = inherited
-                    .declaration_identity
-                    .as_deref()
-                    .cloned()
-                    .unwrap_or_else(|| declaration_identity(inherited));
+                let identity = function_declaration_identity(inherited);
                 if !overridden.contains(&identity) {
                     overridden.push(identity);
                 }
@@ -1000,6 +996,18 @@ fn record_overridden_declarations(
     for (implementation, overridden) in functions.overloads.iter_mut().zip(recorded) {
         implementation.callable.overridden_declarations = overridden;
     }
+}
+
+/// The identity override edges record for `declaration`: the one a specialized view retained from
+/// its declaration, or the declaration's own.
+pub(crate) fn function_declaration_identity(
+    declaration: &FunctionInfo,
+) -> crate::types::OverriddenDeclaration {
+    declaration
+        .declaration_identity
+        .as_deref()
+        .cloned()
+        .unwrap_or_else(|| declaration_identity(declaration))
 }
 
 /// The exact semantic identity of one declaration in a member family: its declaring classifier,

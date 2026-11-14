@@ -127,6 +127,7 @@ fn remap_selected_sources(
             let original = &remap.original[field];
             capture.source = original.source;
             capture.lexical_binding = original.lexical_binding;
+            capture.lexical_declaration = original.lexical_declaration;
             capture.lexical_shadow_depth = original.lexical_shadow_depth;
             capture.capture_dependency = match original.source {
                 AnonymousObjectCaptureSource::ClassStorage(_) => original.capture_dependency,
@@ -156,6 +157,7 @@ mod tests {
             semantic_receiver: None,
             lexical_shadow_depth: 0,
             lexical_binding: Some(7),
+            lexical_declaration: None,
             capture_dependency: None,
             constructor_projections: Vec::new(),
             receiver_capture: None,

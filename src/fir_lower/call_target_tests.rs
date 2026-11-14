@@ -235,6 +235,56 @@ fn one_delegation_forwarder_records_each_independent_interface_obligation() {
 }
 
 #[test]
+fn one_delegation_forwarder_replaces_exact_superclass_slots() {
+    let ir = lower_single_source(
+        "interface I { fun foo(): Int }\n\
+         open class A : I { override fun foo(): Int = 1; fun foo(x: Int): Int = x }\n\
+         open class B : A() { override fun foo(): Int = 2 }\n\
+         class Z(val delegate: I) : B(), I by delegate\n",
+        "DelegationSuperclassSlots",
+    );
+    let expected = [
+        member(&ir, "I", "foo", &[]),
+        member(&ir, "A", "foo", &[]),
+        member(&ir, "B", "foo", &[]),
+    ];
+    let edges = ir
+        .function_overrides
+        .get(&type_name("Z"))
+        .expect("Z has an exact override plan")
+        .iter()
+        .filter(|edge| edge.name == "foo")
+        .collect::<Vec<_>>();
+    assert_eq!(edges.len(), 3);
+    let forwarder = edges[0]
+        .implementation_function
+        .expect("one generated body");
+    assert!(edges
+        .iter()
+        .all(|edge| edge.implementation_function == Some(forwarder)));
+    assert_eq!(
+        edges
+            .iter()
+            .map(|edge| edge.overridden)
+            .collect::<crate::fx_hash::HashSet<_>>(),
+        expected
+            .into_iter()
+            .map(ResolvedFunctionOverrideTarget::Module)
+            .collect()
+    );
+    for edge in edges {
+        assert_eq!(
+            edge.overridden_is_interface,
+            edge.overridden_owner == type_name("I")
+        );
+        assert_eq!(
+            edge.has_kotlin_superclass_override,
+            edge.overridden_owner != type_name("B")
+        );
+    }
+}
+
+#[test]
 fn a_super_accessor_names_its_property_and_a_super_call_its_declaration() {
     let ir = lower_single_source(
         "open class Base {

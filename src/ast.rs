@@ -471,6 +471,8 @@ pub struct DestructureEntry {
 pub struct TypeAliasDecl {
     pub name: String,
     pub type_params: Vec<String>,
+    /// The span of each upper bound written on a type parameter, which a type alias may not have.
+    pub type_param_bound_spans: Vec<Span>,
     pub target: TypeRef,
     pub span: Span,
     /// Exact span of the alias's NAME, like [`FunDecl::name_span`].
@@ -1239,6 +1241,17 @@ pub enum ClassInit {
     Block(ExprId),   // an `init { … }` block expression
 }
 
+/// The syntax an `init { … }` block carries besides its body.
+#[derive(Clone, Debug)]
+pub struct InitBlockHeader {
+    /// The `init` keyword. A diagnostic about an initializer block points at it, which the block
+    /// expression's own span (the `{`) does not cover.
+    pub keyword: Span,
+    /// Annotations written before `init`, with their argument expressions in parallel.
+    pub annotations: Vec<AnnotationRef>,
+    pub annotation_args: Vec<Vec<ExprId>>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ExplicitBackingField {
     pub ty: Option<TypeRef>,
@@ -1622,10 +1635,9 @@ pub struct File {
     pub assignment_overload_calls: crate::fx_hash::HashMap<u32, ExprId>,
     /// Source-name spans keyed by the synthetic read expression made for `target op= value`.
     pub compound_assignment_read_spans: crate::fx_hash::HashMap<u32, Span>,
-    /// Source span of the `init` KEYWORD introducing each initializer block, keyed by the block
-    /// expression [`ClassInit::Block`] records. A diagnostic about an `init` block points at the
-    /// keyword, which the block expression's own span (the `{`) does not cover.
-    pub init_block_keywords: crate::fx_hash::HashMap<ExprId, Span>,
+    /// The `init` keyword and declaration annotations of each initializer block, keyed by the
+    /// block expression [`ClassInit::Block`] records.
+    pub init_blocks: crate::fx_hash::HashMap<ExprId, InitBlockHeader>,
     /// Labels written on declaration statements (`label@ val …`, `label@ fun …`), keyed by the
     /// declaration statement. The value retains both spelling and exact label-token span.
     pub statement_labels: crate::fx_hash::HashMap<StmtId, (String, Span)>,
@@ -1904,6 +1916,9 @@ pub struct File {
     /// `+ExplicitContextArguments`: named context parameters may be supplied at a call site instead
     /// of being selected from the implicit receiver and lexical scope.
     pub explicit_context_arguments: bool,
+    /// `+CallableReferencesToContextual`: a reference to a declaration with context parameters
+    /// selects those arguments from the reference site and exposes only the value parameters.
+    pub callable_references_to_contextual: bool,
     /// `+ContextSensitiveResolutionUsingExpectedType`: an otherwise-unbound simple classifier or
     /// classifier value may be selected from the expected type's nested classifier hierarchy.
     pub context_sensitive_resolution_using_expected_type: bool,
@@ -1920,6 +1935,9 @@ pub struct File {
     pub forbid_array_of_nothing_in_lhs_of_class_literal: bool,
     /// `+EnumEntries`: expose the synthetic classifier property `E.entries` on enum classes.
     pub enum_entries_enabled: bool,
+    /// `+CollectionLiterals`: uses of `kotlin.ExperimentalCollectionLiteralsApi` declarations are
+    /// accepted without an opt-in, as kotlinc's opt-in usage check does.
+    pub collection_literals_enabled: bool,
     /// `+PrioritizedEnumEntries`: the synthetic enum property wins over a same-named companion
     /// declaration. With the legacy feature disabled, the companion rung is considered first.
     pub prioritized_enum_entries: bool,
@@ -1949,6 +1967,9 @@ pub struct File {
     /// `+FullValueClasses`: a `value class` without `@JvmInline` is a boxed class with structural
     /// `equals`/`hashCode`/`toString`. Without the feature that declaration is an error.
     pub full_value_classes: bool,
+    /// `+AllowSmartCastsOnValueClassUnderlyingProperties`: a value class's component declared in
+    /// another module is a stable smart-cast subject.
+    pub smart_cast_value_class_components: bool,
     /// `+ForbidValueClassRecursionViaTypeParameters`: a value class whose underlying type reaches
     /// itself through a type parameter's bound is an error rather than a deprecation warning.
     pub forbid_value_class_recursion_via_type_parameters: bool,
@@ -1963,6 +1984,9 @@ pub struct File {
     /// Exact per-compilation warning text for that transition. Releases before the diagnostic split
     /// leave this absent and report the construct as an ordinary error.
     pub inapplicable_operator_modifier_warning: Option<String>,
+    /// `+NormalizeNaNValuesInConstContext`: every NaN a compile-time constant evaluates to is the
+    /// canonical NaN of its type, whatever sign and payload the arithmetic produced.
+    pub normalize_nan_in_const_context: bool,
     /// `+CustomEqualsInValueClasses`: permit the typed `equals(Self)` convention in a value class
     /// whose selected representation is inline rather than full/boxed.
     pub custom_equals_in_value_classes: bool,
@@ -2044,7 +2068,7 @@ impl File {
         self.assignment_target_spans = Default::default();
         self.assignment_overload_calls = Default::default();
         self.compound_assignment_read_spans = Default::default();
-        self.init_block_keywords = Default::default();
+        self.init_blocks = Default::default();
         self.incdec_accesses = Default::default();
         self.call_arg_names = Default::default();
         self.collection_literal_calls = Default::default();

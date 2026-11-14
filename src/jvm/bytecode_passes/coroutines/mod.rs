@@ -7,7 +7,7 @@
 
 mod change_boxing;
 mod lambda_mode;
-pub(crate) mod markers;
+pub mod markers;
 mod redundant_locals;
 mod spilled_types;
 mod spilling;
@@ -28,7 +28,7 @@ use crate::jvm::method_node::{Insn, MethodNode, Node};
 
 /// Why a body could not be transformed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum CoroutineError {
+pub enum CoroutineError {
     Analysis(AnalyzerError),
     FixStack(FixStackError),
     /// A suspension point inside a `synchronized` block, at this source line (kotlinc's
@@ -87,7 +87,7 @@ pub(crate) struct DeclaredSpillFields<'a> {
 
 /// A field the state machine spills into, which the continuation class must declare.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SpillField {
+pub struct SpillField {
     pub name: String,
     pub descriptor: String,
 }
@@ -110,7 +110,7 @@ pub(crate) struct StateMachineLayout {
 
 /// The values of the continuation class's `kotlin.coroutines.jvm.internal.DebugMetadata`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DebugMetadata {
+pub struct DebugMetadata {
     /// `f`
     pub source_file: String,
     /// `l`: each suspension point's line, `-1` where it has none.

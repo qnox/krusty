@@ -193,6 +193,7 @@ impl ActiveSourceCursor {
         let mut parser_names = LookupNames::default();
         let parser_len =
             extract_file_stubs_for_stable_binding(file, source, &mut parser_ids, &mut parser_names)
+                .0
                 .into_iter()
                 .filter(|stub| stub.kind != DeclarationKind::TypeAlias)
                 .count();
@@ -216,10 +217,12 @@ impl ActiveSourceCursor {
             source,
             index,
             stable,
-            Some(&roots),
-            None,
-            None,
-            None,
+            ActiveBindingSelection {
+                unit_roots: Some(&roots),
+                root_bodies: None,
+                selected: None,
+                parser_classifier_identities: None,
+            },
         )?;
         self.next = end;
         Ok(active)
@@ -336,10 +339,12 @@ impl ActiveSourceDeclarations {
             source,
             index,
             &stable,
-            None,
-            None,
-            Some(&selected),
-            Some(parser_classifier_identities),
+            ActiveBindingSelection {
+                unit_roots: None,
+                root_bodies: None,
+                selected: Some(&selected),
+                parser_classifier_identities: Some(parser_classifier_identities),
+            },
         )
     }
 
@@ -403,16 +408,17 @@ impl ActiveSourceDeclarations {
         source: SourceFileId,
         index: &ResolvedModuleIndex,
         stable: &[DeclarationId],
-        unit_roots: Option<&crate::fx_hash::HashSet<DeclarationId>>,
-        root_bodies: Option<&crate::fx_hash::HashSet<DeclarationId>>,
-        selected: Option<&crate::fx_hash::HashSet<DeclarationId>>,
-        parser_classifier_identities: Option<
-            &crate::fx_hash::HashMap<DeclId, crate::types::TypeName>,
-        >,
+        selection: ActiveBindingSelection<'_>,
     ) -> Result<Self, ActiveSourceBindingError> {
+        let ActiveBindingSelection {
+            unit_roots,
+            root_bodies,
+            selected,
+            parser_classifier_identities,
+        } = selection;
         let mut parser_ids = DeclarationIds::default();
         let mut parser_names = LookupNames::default();
-        let mut parser_stubs =
+        let (mut parser_stubs, lexical_owners) =
             extract_file_stubs_for_stable_binding(file, source, &mut parser_ids, &mut parser_names);
         // A source typealias has no ordinary executable unit. The streaming parser can accumulate
         // one immediately before the next declaration callback, while Pass 2 receives its complete
@@ -421,7 +427,7 @@ impl ActiveSourceDeclarations {
         parser_stubs.retain(|stub| stub.kind != DeclarationKind::TypeAlias);
         // Re-form exactly the stream Pass 1 captured from this bounded parse. The shared ordering
         // operation consumes only live syntax coordinates; none survive as a Pass-2 locator.
-        order_file_stubs(&mut parser_stubs, &parser_ids);
+        order_file_stubs(&mut parser_stubs, &parser_ids, &lexical_owners);
         let mut stable = stable.to_vec();
         stable.sort_by_key(|declaration| index.source_order(*declaration).unwrap_or(u32::MAX));
         let retained_fragment = unit_roots.is_none();
@@ -441,9 +447,11 @@ impl ActiveSourceDeclarations {
                 source,
                 index,
                 &stable,
-                &parser_ids,
-                &parser_names,
-                &parser_stubs,
+                ParserDeclarationInventory {
+                    ids: &parser_ids,
+                    names: &parser_names,
+                    stubs: &parser_stubs,
+                },
                 selected.expect("retained fragment binding has an explicit stable selection"),
                 parser_classifier_identities
                     .expect("retained fragment binding has exact classifier identities"),
@@ -670,7 +678,7 @@ impl ActiveSourceDeclarations {
     ) -> Result<Vec<super::BodyWorkItem>, ActiveSourceBindingError> {
         let mut parser_ids = DeclarationIds::default();
         let mut parser_names = LookupNames::default();
-        let parser_stubs =
+        let (parser_stubs, _) =
             extract_file_stubs_for_stable_binding(file, source, &mut parser_ids, &mut parser_names);
         let retained_by_inline_owner = |declaration: DeclarationId| {
             let mut current = Some(declaration);
@@ -928,9 +936,7 @@ impl ActiveSourceDeclarations {
                 // classes that this unit had already bound, so a foreign id returned no overlay
                 // instead of indexing off the end of this arena.
                 let class = DeclId(owner);
-                if file.decl_arena.get(class.0 as usize).is_none() {
-                    return None;
-                }
+                file.decl_arena.get(class.0 as usize)?;
                 let primary = class_decl(file, class).map_or(0, |class| class.props.len());
                 let index = u32::try_from((property as usize).checked_sub(primary)?)
                     .expect("a class-body property index fits in a declaration sibling");
@@ -1114,6 +1120,22 @@ impl ActiveSourceDeclarations {
     }
 }
 
+/// Optional stable-declaration filters for one active-source binding.
+struct ActiveBindingSelection<'a> {
+    unit_roots: Option<&'a crate::fx_hash::HashSet<DeclarationId>>,
+    root_bodies: Option<&'a crate::fx_hash::HashSet<DeclarationId>>,
+    selected: Option<&'a crate::fx_hash::HashSet<DeclarationId>>,
+    parser_classifier_identities:
+        Option<&'a crate::fx_hash::HashMap<DeclId, crate::types::TypeName>>,
+}
+
+/// Parser declarations re-extracted for one retained fragment.
+struct ParserDeclarationInventory<'a> {
+    ids: &'a DeclarationIds,
+    names: &'a LookupNames,
+    stubs: &'a [super::DeclarationStub],
+}
+
 /// Bind parser-only ancestry nodes (notably anonymous/local classifier owners) by their stable
 /// owner-local structure. These declarations are absent from the public header inventory, but an
 /// inventoried child can still name one as its owner. No source range participates in the match.
@@ -1129,12 +1151,15 @@ fn bind_retained_parser_declarations(
     source: SourceFileId,
     index: &ResolvedModuleIndex,
     stable: &[DeclarationId],
-    parser_ids: &DeclarationIds,
-    parser_names: &LookupNames,
-    parser_stubs: &[super::DeclarationStub],
+    parser: ParserDeclarationInventory<'_>,
     selected: &crate::fx_hash::HashSet<DeclarationId>,
     parser_classifier_identities: &crate::fx_hash::HashMap<DeclId, crate::types::TypeName>,
 ) -> Result<Vec<Option<DeclarationId>>, ActiveSourceBindingError> {
+    let ParserDeclarationInventory {
+        ids: parser_ids,
+        names: parser_names,
+        stubs: parser_stubs,
+    } = parser;
     let mut parser_to_stable = vec![None; parser_ids.len()];
     // Selected stable declarations of this source, bucketed by the structural key a parser stub
     // matches on. A file of a few thousand declarations matched each stub against every stable

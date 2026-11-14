@@ -107,7 +107,7 @@ fn physically_invoked(callee: &Callee) -> bool {
 }
 
 impl IrFile {
-    pub(crate) fn expr_diverges_by(
+    pub fn expr_diverges_by(
         &self,
         expression: ExprId,
         leaf: &impl Fn(ExprId, &IrExpr) -> bool,
@@ -119,7 +119,7 @@ impl IrFile {
     /// selected as [`IrBottomValueCompletion::FallThroughWhenDiscarded`] is non-divergent only at
     /// the discarded root/branch position; operands consumed by another operation remain value
     /// uses and therefore still diverge.
-    pub(crate) fn expr_discarding_diverges_by(
+    pub fn expr_discarding_diverges_by(
         &self,
         expression: ExprId,
         leaf: &impl Fn(ExprId, &IrExpr) -> bool,

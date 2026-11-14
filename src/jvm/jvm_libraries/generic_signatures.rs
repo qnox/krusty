@@ -173,7 +173,7 @@ pub(super) fn mark_receiver_fun_params(gsig: &mut GenericSig, recv_fun: &[bool],
 }
 
 /// Parse a JVM method generic signature `<formals>(params)ret` declared outside any generic class.
-pub(in crate::jvm) fn parse_method_gsig(sig: &str) -> Option<GenericSig> {
+pub fn parse_method_gsig(sig: &str) -> Option<GenericSig> {
     parse_member_method_gsig(sig, &crate::fx_hash::HashMap::default())
 }
 
@@ -240,7 +240,7 @@ pub(super) fn parse_member_method_gsig_with(
 /// which is what lets a type argument propagate up the hierarchy (`List<Int>` → `Collection<Int>`).
 pub(in crate::jvm) type ParsedClassGenericSignature = (Vec<String>, Vec<Vec<Ty>>, Vec<Ty>);
 
-pub(in crate::jvm) fn parse_class_gsig(sig: &str) -> Option<ParsedClassGenericSignature> {
+pub fn parse_class_gsig(sig: &str) -> Option<ParsedClassGenericSignature> {
     parse_class_gsig_with(sig, &ordinary_application)
 }
 

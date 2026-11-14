@@ -65,6 +65,51 @@ pub(super) struct ConstructionExpectations {
 }
 
 impl Checker<'_> {
+    /// Report why the only constructor a delegation or entry could reach rejected its arguments.
+    ///
+    /// kotlinc checks `super(...)`, `this(...)`, a class-header base call, and an enum entry's
+    /// arguments like any call: a single candidate whose arguments all map reports each argument
+    /// that does not fit its parameter, at that argument. Returns whether anything was reported,
+    /// so the caller keeps its own diagnostic for a mapping failure or several candidates.
+    pub(super) fn report_single_constructor_argument_mismatches(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        arguments: &CtorDelegationCall,
+        candidates: &[CtorDelegationCandidate],
+        rejected: &[ConstructorCandidateRejection],
+    ) -> bool {
+        let ([_], [rejection]) = (candidates, rejected) else {
+            return false;
+        };
+        let reportable = rejection
+            .mapped_mismatches
+            .iter()
+            .filter(|mismatch| mismatch.actual != Ty::Error && mismatch.expected != Ty::Error)
+            .filter_map(|mismatch| {
+                Some((*arguments.args.get(mismatch.source_argument)?, *mismatch))
+            })
+            .collect::<Vec<_>>();
+        for &(argument, mismatch) in &reportable {
+            // An argument call whose own formals the parameter leaves uninferred reports that
+            // first, and renders them as uninferred in the mismatch (`super(arrayOf())`).
+            if self.report_uninferred_call_argument(
+                scope,
+                argument,
+                mismatch.expected,
+                mismatch.actual,
+            ) {
+                continue;
+            }
+            self.report_assignability_error(
+                mismatch.expected,
+                mismatch.actual,
+                self.span(argument),
+                "argument",
+            );
+        }
+        !reportable.is_empty()
+    }
+
     pub(super) fn match_ctor_delegation_candidate(
         &self,
         scope: &CheckerScope<'_>,
@@ -609,5 +654,28 @@ impl Checker<'_> {
                 Some((index, actual))
             })
             .collect()
+    }
+
+    /// A named argument mapped to the selected constructor's vararg parameter passes the whole
+    /// array (`Base(parts = values)`), exactly as in an ordinary call. Constructor delegation and
+    /// enum entries commit that mapping here; checked FIR would otherwise pack it as one element.
+    pub(super) fn record_whole_array_delegation_arguments(
+        &mut self,
+        arguments: &CtorDelegationCall,
+        selected: &ResolvedCtorDelegation,
+    ) {
+        let Some(vararg) = selected.vararg else {
+            return;
+        };
+        for ((&argument, &slot), name) in arguments
+            .args
+            .iter()
+            .zip(&selected.argument_slots)
+            .zip(&arguments.names)
+        {
+            if slot == vararg && name.is_some() && !self.file.is_spread_arg(argument) {
+                self.resolved_whole_array_vararg_args.insert(argument);
+            }
+        }
     }
 }

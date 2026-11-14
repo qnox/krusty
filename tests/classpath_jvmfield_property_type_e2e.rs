@@ -1,5 +1,6 @@
 //! A `@JvmField` property of a dependency class is a Kotlin declaration: its type is the one its
 //! `@Metadata` declares, type arguments and nullability included, not the field's erased classifier.
+//! A top-level one has no accessor at all; its package-facade field realizes it.
 use super::common;
 
 const LIB: &str = "package dep\n\
@@ -59,4 +60,74 @@ fn a_nullable_jvmfield_property_stays_nullable() {
     assert_eq!(result.krusty_code, 1, "krusty unexpectedly accepted");
     assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
     assert_eq!(krusty, expected);
+}
+
+const TOP_LEVEL_LIB: &str = "package dep\n\
+    \n\
+    @JvmField val names: List<String> = listOf(\"a\")\n\
+    @JvmField var count: Int = 1\n";
+
+const TOP_LEVEL_MAIN: &str = "import dep.*\n\
+    \n\
+    fun box(): String {\n\
+    \x20   count = count + names.size\n\
+    \x20   return if (count == 2 && names.single() == \"a\") \"OK\" else \"fail\"\n\
+    }\n";
+
+#[test]
+fn a_top_level_jvmfield_property_is_read_and_written() {
+    if let Some(output) = common::expect_box_run_against_kotlinc(TOP_LEVEL_LIB, TOP_LEVEL_MAIN) {
+        assert_eq!(output, "OK");
+    }
+    if let Some(result) = common::class_bytes_diff_against_kotlinc(
+        "TopLevelJvmField",
+        &[("Lib.kt", TOP_LEVEL_LIB)],
+        TOP_LEVEL_MAIN,
+        "TopLevelJvmFieldKt",
+        "box",
+    ) {
+        result.unwrap_or_else(|difference| panic!("{difference}"));
+    }
+}
+
+const DUPLICATE_A: &str = "package dep\n@JvmField val duplicate: String = \"A\"\n";
+const DUPLICATE_B: &str = "package dep\n@JvmField val duplicate: Int = 1\n";
+const DUPLICATE_MAIN: &str = "\
+import dep.duplicate
+
+fun text(): String = duplicate
+";
+
+/// Two independently compiled libraries that declare the same top-level `@JvmField` property are
+/// two candidates, and the one earlier on the classpath shadows the other, as kotlinc resolves
+/// it: with the `String` declaration first the use compiles, with the `Int` one first it is a
+/// return type mismatch. Neither order loses a declaration before that choice.
+#[test]
+fn the_same_top_level_jvmfield_property_in_two_libraries_follows_classpath_order() {
+    let Some(string) = common::kotlinc_libraries(&[("LibA.kt", DUPLICATE_A)]) else {
+        return;
+    };
+    let Some(int) = common::kotlinc_libraries(&[("LibB.kt", DUPLICATE_B)]) else {
+        return;
+    };
+    let sources = [("Main.kt", DUPLICATE_MAIN)];
+    let accepted = common::compiler_diagnostics(
+        &sources,
+        &[string.clone(), int.clone(), common::stdlib_jar()],
+    );
+    assert_eq!(
+        (accepted.reference_code, accepted.krusty_code),
+        (0, 0),
+        "string-first: kotlinc {}\nkrusty {}{}",
+        accepted.reference_stderr,
+        accepted.krusty_stdout,
+        accepted.krusty_stderr
+    );
+    assert_eq!(
+        common::compiler_errors(&accepted.krusty_stderr),
+        common::compiler_errors(&accepted.reference_stderr),
+        "string-first: the complete error ledgers"
+    );
+    let rejected = common::compiler_diagnostics(&sources, &[int, string, common::stdlib_jar()]);
+    common::expect_identical_rejection(&rejected, "int-first");
 }

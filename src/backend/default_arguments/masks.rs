@@ -2,15 +2,12 @@
 //! `k` as left to its default.
 
 /// The number of mask words a default-argument entry of `parameters` parameters takes.
-pub(crate) fn mask_words(parameters: usize) -> usize {
+pub fn mask_words(parameters: usize) -> usize {
     parameters.div_ceil(32)
 }
 
 /// The mask words of a call to a declaration of `parameters` parameters that leaves `omitted` out.
-pub(crate) fn omission_masks(
-    parameters: usize,
-    omitted: impl IntoIterator<Item = usize>,
-) -> Vec<u32> {
+pub fn omission_masks(parameters: usize, omitted: impl IntoIterator<Item = usize>) -> Vec<u32> {
     let mut masks = vec![0_u32; mask_words(parameters)];
     for ordinal in omitted {
         masks[ordinal / 32] |= 1 << (ordinal % 32);

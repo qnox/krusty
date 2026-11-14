@@ -1,4 +1,4 @@
-//! End-to-end `box()` coverage for `suspend`/coroutine lowering (`src/jvm/suspend.rs`).
+//! End-to-end `box()` coverage for `suspend`/coroutine lowering (`crates/krusty-jvm/src/suspend.rs`).
 //!
 //! Each test compiles a self-contained Kotlin program whose `fun box(): String` drives one or more
 //! `suspend` functions through a local `runBlocking` (a synchronous coroutine driver built on

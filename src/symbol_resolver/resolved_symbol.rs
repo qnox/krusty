@@ -66,17 +66,6 @@ pub enum Symbol {
 }
 
 impl Symbol {
-    pub(crate) fn selected_member(self) -> Option<LibraryMember> {
-        match self {
-            Self::Member(facets) => facets.call.map(|resolved| resolved.member),
-            Self::Instance(member) | Self::Companion(member) => Some(member),
-            Self::Constructor(SelectedConstructorCall::Direct(selected)) => {
-                Some(selected.declaration)
-            }
-            Self::Constructor(SelectedConstructorCall::Platform(_)) => None,
-        }
-    }
-
     pub fn call(self) -> Option<ResolvedMember> {
         match self {
             Self::Member(facets) => facets.call,

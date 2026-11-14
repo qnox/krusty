@@ -1,11 +1,11 @@
 //! The frame computation reproduces the `StackMapTable` of every Kotlin method kotlinc wrote.
 //!
 //! kotlinc's writer computes all frames with ASM (`COMPUTE_FRAMES`, every common superclass
-//! `java/lang/Object`). `krusty::jvm::frame_audit` runs krusty's port of that computation over a
+//! `java/lang/Object`). `krusty_jvm::frame_audit` runs krusty's port of that computation over a
 //! class file and compares the result with the table the class carries. Over the reference
 //! toolchain's own kotlinc-built jars, nothing may differ.
 
-use krusty::jvm::frame_audit::{audit_jar, Outcome};
+use krusty_jvm::frame_audit::{audit_jar, Outcome};
 
 use crate::common;
 

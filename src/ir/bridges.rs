@@ -18,6 +18,17 @@ pub struct BridgeParameter {
     pub semantic: Ty,
 }
 
+impl BridgeParameter {
+    /// A parameter the overridden declaration names `name` in source, as a generated declaration a
+    /// compiler plugin publishes names it.
+    pub fn source(name: &str, semantic: Ty) -> Self {
+        Self {
+            identity: ResolvedParameterIdentity::Source(name.into()),
+            semantic,
+        }
+    }
+}
+
 /// The collection-bridge guard a JVM pass selects once: which erased parameters to test, in order,
 /// how, and the neutral result to return when a value is not its parameter's type. Common lowering
 /// leaves the plan absent. Emission writes this record and does not select it again.

@@ -59,7 +59,7 @@ const RESULT_VARIABLES: [&str; 10] = [
     "LINT_RESULT",
     "PLUGIN_HOST_RESULT",
     "CONFORMANCE_RESULT",
-    "KLIB_CONFORMANCE_RESULT",
+    "KLIB_COVERAGE_RESULT",
     "GRADLE_PLUGIN_RESULT",
     "GRADLE_RESULT",
     "MAVEN_RESULT",
@@ -101,7 +101,7 @@ fn aggregate_passes_only_when_every_merge_gate_succeeded() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "ci: success\nlint: success\nplugin-host: success\nconformance: success\nKLIB conformance: success\nbuild-gradle-plugin: success\ngradle: success\nmaven: success\nbuild-tools: success\nbazel: success\n",
+        "ci: success\nlint: success\nplugin-host: success\nconformance: success\nklib-implementation-coverage: success\nbuild-gradle-plugin: success\ngradle: success\nmaven: success\nbuild-tools: success\nbazel: success\n",
         "the log names every dependency result"
     );
 
@@ -110,7 +110,7 @@ fn aggregate_passes_only_when_every_merge_gate_succeeded() {
         "lint",
         "plugin-host",
         "conformance",
-        "KLIB conformance",
+        "klib-implementation-coverage",
         "build-gradle-plugin",
         "gradle",
         "maven",
@@ -128,7 +128,7 @@ fn aggregate_passes_only_when_every_merge_gate_succeeded() {
             );
             assert_eq!(
                 String::from_utf8_lossy(&output.stderr),
-                "lint, plugin host tests, coverage, conformance (including KLIB semantics), every Gradle gate, the Maven goal, every build-tools lane, and every Bazel lane must succeed\n",
+                "lint, plugin host tests, coverage, conformance (including KLIB semantics), KLIB implementation coverage, every Gradle gate, the Maven goal, every build-tools lane, and every Bazel lane must succeed\n",
                 "{gate}={result:?}"
             );
         }

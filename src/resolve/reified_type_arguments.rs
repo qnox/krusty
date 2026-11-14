@@ -53,6 +53,17 @@ enum ReifiedProblem {
     },
 }
 
+/// One occurrence `checkArgumentAndReport` walks: the written spelling, its provenance, and
+/// whether the walk is inside an array or a definitely-non-null / flexible type.
+struct ReifiedArgumentCheck<'a> {
+    spelling: Option<&'a crate::spelling::Spelled>,
+    provenance: &'a super::intersection_inference::ReifiedArgumentProvenance,
+    argument: Ty,
+    intersection: Option<&'a super::intersection_inference::InferredIntersection>,
+    in_array: bool,
+    in_dnn_or_flexible: bool,
+}
+
 impl Checker<'_> {
     /// Check the type arguments `expression`'s selected callee reifies.
     pub(super) fn check_reified_type_arguments(
@@ -76,15 +87,23 @@ impl Checker<'_> {
                 spelling: written.map(|reference| self.reified_argument_spelling(reference)),
                 provenance: written.map_or(reified.provenance, |_| Default::default()),
             };
+            // A written argument is the type argument itself. The one derived from the result
+            // cannot tell `arrayOfNulls<Nothing>` from `arrayOfNulls<Nothing?>`: both return
+            // `Array<Nothing?>`.
+            let argument = written
+                .and_then(|r| self.resolved_type_tys.get(&(r.span.lo, r.span.hi)).copied())
+                .unwrap_or(reified.argument);
             let mut problems = Vec::new();
             self.reified_problems(
                 scope,
-                site.spelling.as_ref(),
-                &site.provenance,
-                reified.argument,
-                reified.intersection.as_ref(),
-                false,
-                false,
+                ReifiedArgumentCheck {
+                    spelling: site.spelling.as_ref(),
+                    provenance: &site.provenance,
+                    argument,
+                    intersection: reified.intersection.as_ref(),
+                    in_array: false,
+                    in_dnn_or_flexible: false,
+                },
                 &mut problems,
             );
             findings.push((site.span, reified.formal, problems));
@@ -210,14 +229,17 @@ impl Checker<'_> {
     fn reified_problems(
         &self,
         scope: &CheckerScope<'_>,
-        spelling: Option<&crate::spelling::Spelled>,
-        provenance: &super::intersection_inference::ReifiedArgumentProvenance,
-        argument: Ty,
-        intersection: Option<&super::intersection_inference::InferredIntersection>,
-        in_array: bool,
-        in_dnn_or_flexible: bool,
+        check: ReifiedArgumentCheck<'_>,
         problems: &mut Vec<ReifiedProblem>,
     ) {
+        let ReifiedArgumentCheck {
+            spelling,
+            provenance,
+            argument,
+            intersection,
+            in_array,
+            in_dnn_or_flexible,
+        } = check;
         let explicitly_dnn = spelling.is_some_and(|spelling| spelling.use_site_definitely_non_null);
         let through_indirect = in_dnn_or_flexible || explicitly_dnn || provenance.is_indirect();
         if explicitly_dnn {
@@ -239,14 +261,16 @@ impl Checker<'_> {
                 ) {
                     self.reified_problems(
                         scope,
-                        spelling.map(|spelling| spelling.arg(index)),
-                        provenance.argument(index).unwrap_or(
-                            super::intersection_inference::ReifiedArgumentProvenance::NONE,
-                        ),
-                        element,
-                        None,
-                        true,
-                        through_indirect,
+                        ReifiedArgumentCheck {
+                            spelling: spelling.map(|spelling| spelling.arg(index)),
+                            provenance: provenance.argument(index).unwrap_or(
+                                super::intersection_inference::ReifiedArgumentProvenance::NONE,
+                            ),
+                            argument: element,
+                            intersection: None,
+                            in_array: true,
+                            in_dnn_or_flexible: through_indirect,
+                        },
                         problems,
                     );
                 }
@@ -277,7 +301,16 @@ impl Checker<'_> {
             }
             TyKind::DefinitelyNotNull(original) => {
                 self.reified_problems(
-                    scope, None, provenance, original, None, in_array, true, problems,
+                    scope,
+                    ReifiedArgumentCheck {
+                        spelling: None,
+                        provenance,
+                        argument: original,
+                        intersection: None,
+                        in_array,
+                        in_dnn_or_flexible: true,
+                    },
+                    problems,
                 );
             }
             TyKind::Nothing => problems.push(ReifiedProblem::ForbiddenSubstitution("Nothing")),
@@ -290,7 +323,16 @@ impl Checker<'_> {
             }),
             TyKind::PlatformNullable(lower) => {
                 self.reified_problems(
-                    scope, spelling, provenance, lower, None, in_array, true, problems,
+                    scope,
+                    ReifiedArgumentCheck {
+                        spelling,
+                        provenance,
+                        argument: lower,
+                        intersection: None,
+                        in_array,
+                        in_dnn_or_flexible: true,
+                    },
+                    problems,
                 );
             }
             _ => {}

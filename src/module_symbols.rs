@@ -1835,6 +1835,7 @@ mod tests {
             declared_callable_order: Vec::new(),
             source_methods: Vec::new(),
             flags: FrontendClassFlags::default(),
+            enum_entries: Vec::new(),
             inner_of: None,
             companion_internal: None,
             lateinit_props: HashSet::default(),
@@ -1891,13 +1892,10 @@ mod tests {
             .classes
             .insert(type_name("sample/Complete"), complete);
 
-        symbols
-            .classes
-            .insert(type_name("sample/Phase"), class("sample/Phase"));
-        symbols.enums.insert(
-            type_name("sample/Phase"),
-            vec!["FIRST".to_string(), "SECOND".to_string()],
-        );
+        let mut phase = class("sample/Phase");
+        phase.flags = phase.flags.with_enum(true);
+        phase.enum_entries = vec!["FIRST".to_string(), "SECOND".to_string()];
+        symbols.classes.insert(type_name("sample/Phase"), phase);
 
         let source = ModuleSymbols::new(&symbols);
         let state = source.classifier(type_name("sample/State")).unwrap();

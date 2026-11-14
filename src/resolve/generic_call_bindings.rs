@@ -15,6 +15,15 @@
 
 use super::*;
 
+/// The mapped value arguments that solve one generic call, in source order.
+pub(super) struct MappedGenericArguments<'a> {
+    pub(super) args: &'a [ExprId],
+    pub(super) arg_tys: &'a [Option<Ty>],
+    /// Source argument index for each value parameter the mapping selected.
+    pub(super) argument_map: &'a [usize],
+    pub(super) named_whole_array_varargs: &'a [bool],
+}
+
 impl Checker<'_> {
     /// Solve this overload's formals from the mapped arguments AND the extension receiver together.
     ///
@@ -25,13 +34,16 @@ impl Checker<'_> {
         &self,
         overload: &crate::libraries::FunctionInfo,
         receiver: Option<Ty>,
-        args_and_partial: (&[ExprId], &[Option<Ty>]),
-        argument_map: &[usize],
-        named_whole_array_varargs: &[bool],
+        arguments: MappedGenericArguments<'_>,
         explicit_type_arguments: &[Ty],
         bindings: &mut crate::symbol_resolver::GSigBinds,
     ) {
-        let (args, arg_tys) = args_and_partial;
+        let MappedGenericArguments {
+            args,
+            arg_tys,
+            argument_map,
+            named_whole_array_varargs,
+        } = arguments;
         let semantic = overload.semantic_signature();
         let source = self.fed_source();
         let inferred =
@@ -93,9 +105,12 @@ impl Checker<'_> {
         self.merge_mapped_generic_argument_bindings(
             overload,
             receiver,
-            (args, arg_tys),
-            argument_map,
-            named_whole_array_varargs,
+            MappedGenericArguments {
+                args,
+                arg_tys,
+                argument_map,
+                named_whole_array_varargs,
+            },
             type_args,
             &mut bindings,
         );

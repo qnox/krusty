@@ -2,7 +2,7 @@
 
 use super::{focused_wasm_lane_available, WasmLane};
 use crate::box_lane::{Lane, Outcome};
-use krusty::wasm::WasmTarget;
+use krusty_wasm::WasmTarget;
 
 #[test]
 fn builtin_value_hashes_match_kotlin_including_utf16_and_ieee_bits() {

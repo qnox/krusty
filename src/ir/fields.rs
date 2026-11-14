@@ -22,8 +22,8 @@ pub struct IrField {
     /// `val t: T? = null` → `Some(Null)`), else `None` (no default, or a non-constant one). Later
     /// compiler passes may use it; the core backend ignores it.
     pub default: Option<IrConst>,
-    /// Bit-packed `has_default`/`is_final`/`is_private`/`is_lateinit`/`is_compiler_generated` (read
-    /// via the accessors below).
+    /// Bit-packed `has_default`/`is_final`/`is_private`/`is_lateinit`/`is_compiler_generated`/
+    /// `is_atomic` (read via the accessors below).
     /// `has_default` — the primary-constructor parameter declared ANY default (constant or not, e.g.
     /// `routes: List<String> = emptyList()`); distinct from `default` (constant-only), needed so the
     /// `@Metadata` emitter sets the `DECLARES_DEFAULT_VALUE` value-parameter flag as kotlinc does.

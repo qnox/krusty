@@ -7,6 +7,8 @@
 //! language/API levels use the typed channel which Kotlin's own test runner uses.
 
 use super::{directive, UnitCodegenModes};
+use crate::features::LanguageVersionPolicy;
+use crate::kotlin_version::KotlinVersion;
 use crate::language_version::LanguageVersion;
 
 /// Compiler configuration selected by a box test for one compilation unit.
@@ -52,19 +54,45 @@ pub fn unit_compiler_configuration<'a>(
 }
 
 fn case_compiler_configuration(src: &str) -> Result<UnitCompilerConfiguration, String> {
-    let mut arguments = case_cli_arguments(src)?;
-    let language_version = exact_version(src, "LANGUAGE_VERSION")?;
-    let api_version = exact_version(src, "API_VERSION")?;
-    if let Some(version) = last_value(src, "LANGUAGE_VERSION") {
-        if !predates_kotlin_2(version) {
-            arguments.extend(["-language-version".to_string(), version.to_string()]);
-        }
+    case_compiler_configuration_for_release(src, crate::kotlin_version::target())
+}
+
+fn case_compiler_configuration_for_release(
+    src: &str,
+    compiler: KotlinVersion,
+) -> Result<UnitCompilerConfiguration, String> {
+    platform_compiler_configuration_for_release(src, super::TestTarget::Jvm, compiler)
+}
+
+/// Case-wide source settings plus only the selected reference backend's physical options.
+pub fn platform_compiler_configuration(
+    src: &str,
+    target: super::TestTarget,
+) -> Result<UnitCompilerConfiguration, String> {
+    platform_compiler_configuration_for_release(src, target, crate::kotlin_version::target())
+}
+
+fn platform_compiler_configuration_for_release(
+    src: &str,
+    target: super::TestTarget,
+    compiler: KotlinVersion,
+) -> Result<UnitCompilerConfiguration, String> {
+    let mut arguments = case_cli_arguments(src, target, compiler)?;
+    let api_version = exact_version(src, "API_VERSION", compiler)?;
+    let language_version = exact_version(src, "LANGUAGE_VERSION", compiler)?.or_else(|| {
+        // Kotlin's test settings raise the implicit language level when the requested API is newer
+        // than LATEST_STABLE. In particular, `API_VERSION: LATEST` includes experimental levels.
+        api_version.filter(|version| *version > LanguageVersion::default_for(compiler))
+    });
+    if let Some(version) = language_version.filter(|version| version.major >= 2) {
+        arguments.extend(["-language-version".to_string(), version.to_string()]);
     }
     Ok(UnitCompilerConfiguration {
         arguments,
         language_version,
         api_version,
-        inline_scopes_numbers: super::directive(src, "USE_INLINE_SCOPES_NUMBERS"),
+        inline_scopes_numbers: target == super::TestTarget::Jvm
+            && super::directive(src, "USE_INLINE_SCOPES_NUMBERS"),
     })
 }
 
@@ -83,6 +111,7 @@ fn case_compiler_configuration(src: &str) -> Result<UnitCompilerConfiguration, S
 /// | `// ASSERTIONS_MODE: X` | `-Xassertions=X` |
 /// | `// WHEN_EXPRESSIONS: X` | `-Xwhen-expressions=x` |
 /// | `// WITH_COMPOSE` | `-Xplugin=<the distribution's Compose plugin>`, with source information |
+/// | `// WITH_ATOMICFU` | `-Xplugin=<the atomicfu plugin of the distribution's Kotlin version>` |
 ///
 /// The per-unit `// LAMBDAS:`, `// SAM_CONVERSIONS:` and `// JVM_DEFAULT_MODE:` directives belong
 /// to [`unit_kotlinc_arguments`]; a value of one that names no mode fails closed here, so no unit
@@ -116,21 +145,29 @@ pub fn case_kotlinc_arguments(src: &str) -> Result<Vec<String>, String> {
     Ok(configuration.arguments)
 }
 
-fn case_cli_arguments(src: &str) -> Result<Vec<String>, String> {
-    if let Some(directive) = super::unsupported_codegen_mode_directive(src) {
+fn case_cli_arguments(
+    src: &str,
+    target: super::TestTarget,
+    compiler: KotlinVersion,
+) -> Result<Vec<String>, String> {
+    if let Some(directive) = (target == super::TestTarget::Jvm)
+        .then(|| super::unsupported_codegen_mode_directive(src))
+        .flatten()
+    {
         return Err(format!(
             "box directive `{directive}` names no code-generation mode"
         ));
     }
+    let features = crate::features::FeatureTable::for_version(compiler)
+        .ok_or_else(|| format!("kotlinc {compiler} has no language feature table"))?;
     let mut arguments: Vec<String> = values(src, "LANGUAGE")
         .flat_map(|payload| payload.split([' ', ',', '\t']))
         .filter(|token| !token.is_empty())
-        .map(|token| format!("-XXLanguage:{token}"))
+        .map(|token| features.language_argument(token))
         .collect();
-    if let Some(version) = last_value(src, "API_VERSION") {
-        if !predates_kotlin_2(version) {
-            arguments.extend(["-api-version".to_string(), version.to_string()]);
-        }
+    arguments.dedup();
+    if let Some(version) = exact_version(src, "API_VERSION", compiler)?.filter(|v| v.major >= 2) {
+        arguments.extend(["-api-version".to_string(), version.to_string()]);
     }
     arguments.extend(
         values(src, "OPT_IN")
@@ -144,17 +181,26 @@ fn case_cli_arguments(src: &str) -> Result<Vec<String>, String> {
     if directive(src, "ALLOW_KOTLIN_PACKAGE") || declares_reserved_kotlin_package(src) {
         arguments.push("-Xallow-kotlin-package".to_string());
     }
-    if let Some(target) = last_value(src, "JVM_TARGET") {
-        arguments.extend(["-jvm-target".to_string(), target.to_string()]);
+    if target == super::TestTarget::Native {
+        arguments.extend(
+            values(src, "FREE_COMPILER_ARGS")
+                .flat_map(str::split_whitespace)
+                .map(str::to_owned),
+        );
     }
-    if let Some(mode) = last_value(src, "STRING_CONCAT") {
-        arguments.push(format!("-Xstring-concat={mode}"));
-    }
-    if let Some(mode) = last_value(src, "ASSERTIONS_MODE") {
-        arguments.push(format!("-Xassertions={mode}"));
-    }
-    if let Some(mode) = last_value(src, "WHEN_EXPRESSIONS") {
-        arguments.push(format!("-Xwhen-expressions={}", mode.to_ascii_lowercase()));
+    if target == super::TestTarget::Jvm {
+        if let Some(target) = last_value(src, "JVM_TARGET") {
+            arguments.extend(["-jvm-target".to_string(), target.to_string()]);
+        }
+        if let Some(mode) = last_value(src, "STRING_CONCAT") {
+            arguments.push(format!("-Xstring-concat={mode}"));
+        }
+        if let Some(mode) = last_value(src, "ASSERTIONS_MODE") {
+            arguments.push(format!("-Xassertions={mode}"));
+        }
+        if let Some(mode) = last_value(src, "WHEN_EXPRESSIONS") {
+            arguments.push(format!("-Xwhen-expressions={}", mode.to_ascii_lowercase()));
+        }
     }
     if directive(src, "WITH_COMPOSE") {
         // The reference distribution's own plugin jar, with source information on so a case
@@ -173,6 +219,14 @@ fn case_cli_arguments(src: &str) -> Result<Vec<String>, String> {
             ),
         ]);
     }
+    if directive(src, "WITH_ATOMICFU") {
+        let plugin = crate::toolchain::atomicfu_compiler_plugin_jar().ok_or_else(|| {
+            "box directive `// WITH_ATOMICFU` needs the atomicfu compiler plugin of the reference \
+             Kotlin version"
+                .to_string()
+        })?;
+        arguments.push(format!("-Xplugin={}", plugin.display()));
+    }
     Ok(arguments)
 }
 
@@ -189,8 +243,16 @@ fn case_cli_arguments(src: &str) -> Result<Vec<String>, String> {
 /// `// USE_INLINE_SCOPES_NUMBERS` selects `-Xuse-inline-scopes-numbers`, which krusty's compile
 /// receives as [`UnitCompilerConfiguration::inline_scopes_numbers`] instead.
 pub fn reference_only_kotlinc_arguments(src: &str) -> Result<Vec<String>, String> {
+    reference_only_kotlinc_arguments_for_target(src, super::TestTarget::Jvm)
+}
+
+/// Reference-only settings shared across backends, with JVM debug options confined to JVM.
+pub fn reference_only_kotlinc_arguments_for_target(
+    src: &str,
+    target: super::TestTarget,
+) -> Result<Vec<String>, String> {
     let mut arguments = Vec::new();
-    if super::directive(src, "USE_INLINE_SCOPES_NUMBERS") {
+    if target == super::TestTarget::Jvm && super::directive(src, "USE_INLINE_SCOPES_NUMBERS") {
         arguments.push("-Xuse-inline-scopes-numbers".to_string());
     }
     let Some(mode) = last_value(src, "RETURN_VALUE_CHECKER_MODE") else {
@@ -230,21 +292,32 @@ fn last_value<'a>(src: &'a str, name: &'a str) -> Option<&'a str> {
         .last()
 }
 
-/// Whether a `major.minor` version names a Kotlin 1.x release.
-fn predates_kotlin_2(version: &str) -> bool {
-    version
-        .split_once('.')
-        .and_then(|(major, _)| major.parse::<u32>().ok())
-        .is_some_and(|major| major < 2)
-}
-
-fn exact_version(src: &str, directive: &str) -> Result<Option<LanguageVersion>, String> {
+/// Resolve the official test directive's levels, including the symbolic `LATEST_STABLE` and
+/// (for `API_VERSION` only) `LATEST`, against the selected compiler's recorded policy.
+fn exact_version(
+    src: &str,
+    directive: &str,
+    compiler: KotlinVersion,
+) -> Result<Option<LanguageVersion>, String> {
     let Some(version) = last_value(src, directive) else {
         return Ok(None);
     };
-    LanguageVersion::from_major_minor_text(version)
-        .map(Some)
-        .ok_or_else(|| format!("box directive `// {directive}: {version}` names no language level"))
+    let policy = || {
+        LanguageVersionPolicy::for_release(compiler)
+            .ok_or_else(|| format!("kotlinc {compiler} has no recorded language version policy"))
+    };
+    let level = match version {
+        "LATEST" if directive == "API_VERSION" => policy()?.latest(),
+        "LATEST_STABLE" => policy()?.latest_stable(),
+        _ => {
+            return LanguageVersion::from_major_minor_text(version)
+                .map(Some)
+                .ok_or_else(|| {
+                    format!("box directive `// {directive}: {version}` names no language level")
+                });
+        }
+    };
+    Ok(Some(level))
 }
 
 /// Whether any source file declares the top-level package `kotlin` or a `kotlin.*` subpackage,
@@ -264,6 +337,87 @@ mod tests {
 
     fn arguments(src: &str) -> Vec<String> {
         case_kotlinc_arguments(src).expect("the directives map to arguments")
+    }
+
+    #[test]
+    fn symbolic_api_levels_use_the_selected_release_and_raise_the_implicit_language_level() {
+        for (compiler, latest) in [
+            (KotlinVersion::V2_4_10, LanguageVersion::V2_5),
+            (KotlinVersion::V2_4_20, LanguageVersion::V2_6),
+        ] {
+            let configure = |src: &str| case_compiler_configuration_for_release(src, compiler);
+            let levels = |api: LanguageVersion, language: LanguageVersion| {
+                vec![
+                    "-api-version".to_owned(),
+                    api.to_string(),
+                    "-language-version".to_owned(),
+                    language.to_string(),
+                ]
+            };
+            let symbolic = configure("// API_VERSION: LATEST\nfun box() = \"OK\"\n").unwrap();
+            assert_eq!(symbolic.api_version, Some(latest));
+            assert_eq!(symbolic.language_version, Some(latest));
+            assert_eq!(symbolic.arguments, levels(latest, latest));
+            let numeric = configure(&format!("// API_VERSION: {latest}\nfun box() = \"OK\"\n"));
+            assert_eq!(numeric.unwrap(), symbolic);
+
+            let stable = LanguageVersion::default_for(compiler);
+            let explicit = configure(&format!(
+                "// API_VERSION: {latest}\n// LANGUAGE_VERSION: {stable}\nfun box() = \"OK\"\n"
+            ))
+            .unwrap();
+            assert_eq!(explicit.api_version, Some(latest));
+            assert_eq!(explicit.language_version, Some(stable));
+            assert_eq!(explicit.arguments, levels(latest, stable));
+
+            let stable_levels = configure(
+                "// API_VERSION: LATEST_STABLE\n// LANGUAGE_VERSION: LATEST_STABLE\nfun box() = \"OK\"\n",
+            )
+            .unwrap();
+            assert_eq!(stable_levels.api_version, Some(stable));
+            assert_eq!(stable_levels.language_version, Some(stable));
+            assert_eq!(stable_levels.arguments, levels(stable, stable));
+
+            assert_eq!(
+                configure("// LANGUAGE_VERSION: LATEST\n"),
+                Err(
+                    "box directive `// LANGUAGE_VERSION: LATEST` names no language level"
+                        .to_owned()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn non_jvm_reference_settings_preserve_source_versions_and_ignore_jvm_physical_modes() {
+        let source = "// LANGUAGE_VERSION: 1.9\n// API_VERSION: 1.8\n// OPT_IN: demo.Marker\n// JVM_TARGET: 21\n// STRING_CONCAT: inline\n// ASSERTIONS_MODE: always-enable\n// USE_INLINE_SCOPES_NUMBERS\n// RETURN_VALUE_CHECKER_MODE: FULL\n// FREE_COMPILER_ARGS: -Xbinary=genericSafeCasts=true\n";
+        for target in [
+            super::super::TestTarget::Native,
+            super::super::TestTarget::WasmJs,
+            super::super::TestTarget::WasmWasi,
+        ] {
+            let arguments = if target == super::super::TestTarget::Native {
+                vec![
+                    "-opt-in=demo.Marker".into(),
+                    "-Xbinary=genericSafeCasts=true".into(),
+                ]
+            } else {
+                vec!["-opt-in=demo.Marker".into()]
+            };
+            assert_eq!(
+                platform_compiler_configuration(source, target),
+                Ok(UnitCompilerConfiguration {
+                    arguments,
+                    language_version: Some(LanguageVersion::new(1, 9)),
+                    api_version: Some(LanguageVersion::new(1, 8)),
+                    inline_scopes_numbers: false,
+                })
+            );
+            assert_eq!(
+                reference_only_kotlinc_arguments_for_target(source, target),
+                Ok(vec!["-Xreturn-value-checker=full".into()])
+            );
+        }
     }
 
     #[test]

@@ -812,6 +812,97 @@ fun box(): String {\n\
     let _ = std::fs::remove_dir_all(library);
 }
 
+/// What every default-stub fixture below declares: an inline function, in its own file, that
+/// returns an escaping lambda checking the call's reified type argument.
+const DEFAULT_STUB_CHECKS: &str = r#"
+interface Item
+class Token : Item
+class Other : Item
+
+inline fun <reified T : Item> lambdaCheck(): (Item) -> Boolean = { it is T }
+
+fun checked(lambda: (Item) -> Boolean): String {
+    if (!lambda(Token())) return "lambda rejects Token"
+    if (lambda(Other())) return "lambda accepts Other"
+    return "OK"
+}
+"#;
+
+const TOP_LEVEL_DEFAULT_STUB: &str = r#"
+fun withDefault(lambda: (Item) -> Boolean = lambdaCheck<Token>()) = checked(lambda)
+
+fun box(): String = withDefault()
+"#;
+
+const MEMBER_DEFAULT_STUB: &str = r#"
+class DefaultHost {
+    fun withDefault(lambda: (Item) -> Boolean = lambdaCheck<Token>()) = checked(lambda)
+}
+
+fun box(): String = DefaultHost().withDefault()
+"#;
+
+const CONSTRUCTOR_DEFAULT_STUB: &str = r#"
+class DefaultConstructorHost(val lambda: (Item) -> Boolean = lambdaCheck<Token>())
+
+fun box(): String = checked(DefaultConstructorHost().lambda)
+"#;
+
+/// The module a default-stub fixture compiles: the shared checks and the stub's caller.
+fn default_stub_module(caller: &str) -> [(&str, &str); 2] {
+    [("Checks.kt", DEFAULT_STUB_CHECKS), ("Caller.kt", caller)]
+}
+
+/// Every class of the module is kotlinc's, byte for byte: the lambda the stub regenerates is
+/// numbered under the stub, carries kotlinc's `EnclosingMethod` owner, method and descriptor, and
+/// its public ABI.
+fn assert_default_stub_module_like_kotlinc(caller: &str) {
+    let classes = common::classes_against_kotlinc_module(&default_stub_module(caller));
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+/// kotlinc's program returns `OK`, then krusty's does.
+fn assert_default_stub_runs_like_kotlinc(caller: &str) {
+    let sources = default_stub_module(caller);
+    assert_eq!(
+        common::kotlinc_box_files_result(&sources, "CallerKt"),
+        "OK",
+        "kotlinc's CallerKt"
+    );
+    common::expect_box_ok_files_with_stdlib(&sources, "CallerKt");
+}
+
+#[test]
+fn a_top_level_default_stub_regenerates_its_escaping_reified_lambda_like_kotlinc() {
+    assert_default_stub_module_like_kotlinc(TOP_LEVEL_DEFAULT_STUB);
+}
+
+#[test]
+fn a_top_level_default_stub_runs_its_escaping_reified_lambda_like_kotlinc() {
+    assert_default_stub_runs_like_kotlinc(TOP_LEVEL_DEFAULT_STUB);
+}
+
+#[test]
+fn a_member_default_stub_regenerates_its_escaping_reified_lambda_like_kotlinc() {
+    assert_default_stub_module_like_kotlinc(MEMBER_DEFAULT_STUB);
+}
+
+#[test]
+fn a_member_default_stub_runs_its_escaping_reified_lambda_like_kotlinc() {
+    assert_default_stub_runs_like_kotlinc(MEMBER_DEFAULT_STUB);
+}
+
+#[test]
+fn a_constructor_default_stub_regenerates_its_escaping_reified_lambda_like_kotlinc() {
+    assert_default_stub_module_like_kotlinc(CONSTRUCTOR_DEFAULT_STUB);
+}
+
+#[test]
+fn a_constructor_default_stub_runs_its_escaping_reified_lambda_like_kotlinc() {
+    assert_default_stub_runs_like_kotlinc(CONSTRUCTOR_DEFAULT_STUB);
+}
+
 /// One reified inline function creates both an escaping lambda and an escaping object that check
 /// the call's type argument. The expansion copies the object for the binding; the lambda's copy
 /// still checks the bound type.

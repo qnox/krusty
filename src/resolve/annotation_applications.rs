@@ -123,6 +123,9 @@ enum AnnotationApplicationHost {
     NonProperty {
         declaration_target: &'static str,
         constructor_parameter: bool,
+        /// A declaration no annotation target denotes (an initializer): an annotation that allows
+        /// an explicit use-site target is still wrong on it.
+        targetless: bool,
     },
 }
 
@@ -331,6 +334,7 @@ impl Checker<'_> {
                 AnnotationApplicationHost::NonProperty {
                     declaration_target: "value parameter",
                     constructor_parameter: true,
+                    targetless: false,
                 }
             };
             self.check_annotation_application_for_host(scope, annotation, arguments, host);
@@ -354,6 +358,7 @@ impl Checker<'_> {
             AnnotationApplicationHost::NonProperty {
                 declaration_target,
                 constructor_parameter: false,
+                targetless: false,
             },
         )
     }
@@ -632,6 +637,7 @@ impl Checker<'_> {
             AnnotationApplicationHost::NonProperty {
                 declaration_target,
                 constructor_parameter,
+                ..
             } => (
                 Some(declaration_target),
                 None,
@@ -711,16 +717,18 @@ impl Checker<'_> {
         {
             return true;
         }
-        if suppressed || (unavailable.is_some() && targets.allows(target)) {
+        let targetless = matches!(
+            host,
+            AnnotationApplicationHost::NonProperty {
+                targetless: true,
+                ..
+            }
+        );
+        if suppressed || (unavailable.is_some() && targets.allows(target) && !targetless) {
             self.discard_annotation_application(annotation);
             return false;
         }
-        let applicable = targets
-            .applicable()
-            .iter()
-            .map(|target| target.description())
-            .collect::<Vec<_>>()
-            .join(", ");
+        let applicable = targets.diagnostic_list();
         let target_description =
             if site == crate::types::PropertyAnnotationSite::Field && !has_backing_field {
                 field_unavailable_target
@@ -758,21 +766,36 @@ impl Checker<'_> {
         class: &ClassDecl,
         owner: Option<TypeName>,
     ) {
-        let container = owner
-            .and_then(|owner| owner.nested_owner())
-            .filter(|container| {
-                self.fed_source().classifier(*container).is_some()
-                    && !self.lexical_source_class_names().contains(container)
-            });
-        if let Some(container) = container {
-            self.lexical_class_context.insert(0, container);
-        }
+        let container = self.enter_annotation_class_rung(owner.and_then(TypeName::nested_owner));
+        let annotated = std::mem::replace(&mut self.annotated_classifier, owner);
         for (annotation, arguments) in class.annotations.iter().zip(&class.annotation_args) {
             self.check_non_property_annotation_application(scope, annotation, arguments, "class");
         }
-        if let Some(container) = container {
+        self.annotated_classifier = annotated;
+        self.exit_annotation_class_rung(container);
+    }
+
+    /// Open the lexical rung of `class` for annotation applications checked outside its body
+    /// scope. A member's annotations (`@Ser(Nested::class) val p`, `@Tag(CONST) constructor()`)
+    /// see the static rungs of the classifier that declares the member, as a classifier's own
+    /// annotations see those of its container. Returns the rung this call opened, if the class
+    /// was not already lexically enclosing.
+    pub(super) fn enter_annotation_class_rung(
+        &mut self,
+        class: Option<TypeName>,
+    ) -> Option<TypeName> {
+        let rung = class.filter(|class| {
+            self.fed_source().classifier(*class).is_some()
+                && !self.lexical_source_class_names().contains(class)
+        })?;
+        self.lexical_class_context.insert(0, rung);
+        Some(rung)
+    }
+
+    pub(super) fn exit_annotation_class_rung(&mut self, rung: Option<TypeName>) {
+        if let Some(rung) = rung {
             let removed = self.lexical_class_context.remove(0);
-            debug_assert_eq!(removed, container);
+            debug_assert_eq!(removed, rung);
         }
     }
 }
@@ -798,4 +821,82 @@ pub(super) fn annotation_retention(
 /// The last segment of an annotation's written class reference, which names it in rendering.
 fn written_short_name(spelling: &str) -> &str {
     spelling.rsplit('.').next().unwrap_or(spelling)
+}
+
+/// kotlinc's WRONG_ANNOTATION_TARGET message for an application on a declaration that
+/// `target_description` names, given the annotation class's resolved targets.
+pub(super) fn wrong_annotation_target_message(
+    target_description: &str,
+    targets: crate::types::AnnotationTargets,
+) -> String {
+    format!(
+        "this annotation is not applicable to target '{target_description}'. Applicable targets: \
+         {}",
+        targets.diagnostic_list()
+    )
+}
+
+impl Checker<'_> {
+    /// Check the annotations of `class`'s secondary constructors.
+    pub(super) fn check_secondary_constructor_annotations(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        class: &ClassDecl,
+    ) {
+        for constructor in &class.secondary_ctors {
+            self.check_non_property_annotation_applications_in_declaration_scope(
+                scope,
+                &constructor.annotations,
+                &constructor.annotation_args,
+                "constructor",
+            );
+        }
+    }
+
+    /// Check the annotations written before an `init` block, in the scope its body is checked in:
+    /// they see the class's instance members, as a member function's do. An initializer is a declaration no
+    /// annotation target denotes, so every application that resolves to an annotation class is a
+    /// WRONG_ANNOTATION_TARGET unless suppressed; its arguments are checked like any other.
+    pub(super) fn check_initializer_annotation_applications(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        block: crate::ast::ExprId,
+    ) {
+        let file = self.file;
+        let Some(header) = file.init_blocks.get(&block) else {
+            return;
+        };
+        let policy_depth =
+            self.push_declaration_policies(scope, &header.annotations, &header.annotation_args);
+        for (annotation, arguments) in header.annotations.iter().zip(&header.annotation_args) {
+            let Some(classifier) = self.check_annotation_application_for_host(
+                scope,
+                annotation,
+                arguments,
+                AnnotationApplicationHost::NonProperty {
+                    declaration_target: "initializer",
+                    constructor_parameter: false,
+                    targetless: true,
+                },
+            ) else {
+                continue;
+            };
+            // An explicit use-site was reported by the site validation above, which knows the
+            // initializer has no target.
+            if annotation.property_site.is_some()
+                || self.suppresses_diagnostic("WRONG_ANNOTATION_TARGET")
+            {
+                continue;
+            }
+            let targets = self
+                .diagnostic_annotation_targets(classifier)
+                .unwrap_or(crate::types::AnnotationTargets::DEFAULT);
+            self.diags.error(
+                Span::new(annotation.at, annotation.span.hi),
+                wrong_annotation_target_message("initializer", targets),
+            );
+            self.discard_annotation_application(annotation);
+        }
+        self.active_lexical_policies.truncate(policy_depth);
+    }
 }

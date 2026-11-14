@@ -607,6 +607,7 @@ fn plus_captured() -> Lambda {
         capture_names: vec![Some("$base".to_string())],
         default_class: None,
         suspend: false,
+        generated_return_landing: false,
     }
 }
 

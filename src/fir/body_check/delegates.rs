@@ -79,26 +79,24 @@ impl BodyFirChecker<'_> {
             span.ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?,
             property_ty,
         )?;
-        let get_value = self
+        let get_value_target = self
             .info
             .delegate_getvalue(delegate)
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))?;
-        let get_value = self.delegate_call_target(delegate, delegate_ty, get_value)?;
-        let get_value_dispatch = self.local_delegate_dispatch_parameter(&get_value)?;
-        let set_value = if mutable {
+        let get_value = self.delegate_call_target(delegate, delegate_ty, get_value_target)?;
+        let get_value_dispatch =
+            self.local_delegate_dispatch_parameter(&get_value, get_value_target)?;
+        let (set_value, set_value_dispatch) = if mutable {
             let target = self
                 .info
                 .delegate_setvalue(delegate)
                 .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))?;
-            Some(self.delegate_call_target(delegate, delegate_ty, target)?)
+            let call = self.delegate_call_target(delegate, delegate_ty, target)?;
+            let dispatch = self.local_delegate_dispatch_parameter(&call, target)?;
+            (Some(call), dispatch)
         } else {
-            None
+            (None, None)
         };
-        let set_value_dispatch = set_value
-            .as_ref()
-            .map(|call| self.local_delegate_dispatch_parameter(call))
-            .transpose()?
-            .flatten();
 
         let declaration = self.allocate_local_delegated_property();
         let mut initializer = self.expression(delegate)?;
@@ -638,24 +636,22 @@ impl BodyFirChecker<'_> {
                     construction_sites: Vec::new(),
                 }
             }
-            FirDelegateDispatchReceiver::ContextBinding {
-                ty,
-                name,
-                shadow_depth,
-            } => crate::resolve::ImplicitReceiverSelection {
-                ty: ty.get(),
-                current: false,
-                receiver_depth: 0,
-                classifier: None,
-                context_binding: Some(crate::resolve::ContextBinding {
-                    name: name.to_string(),
-                    shadow_depth: *shadow_depth as usize,
-                    flow_identity: None,
-                }),
-                singleton: None,
-                context_parameter: true,
-                construction_sites: Vec::new(),
-            },
+            FirDelegateDispatchReceiver::ContextBinding { ty, name, source } => {
+                crate::resolve::ImplicitReceiverSelection {
+                    ty: ty.get(),
+                    current: false,
+                    receiver_depth: 0,
+                    classifier: None,
+                    context_binding: Some(crate::resolve::ContextBinding {
+                        name: name.to_string(),
+                        source: *source,
+                        flow_identity: None,
+                    }),
+                    singleton: None,
+                    context_parameter: true,
+                    construction_sites: Vec::new(),
+                }
+            }
             FirDelegateDispatchReceiver::Singleton { ty, classifier } => {
                 crate::resolve::ImplicitReceiverSelection {
                     ty: ty.get(),
@@ -689,17 +685,49 @@ impl BodyFirChecker<'_> {
     fn local_delegate_dispatch_parameter(
         &self,
         call: &FirDelegateCall,
+        target: &DelegateGetValueTarget,
     ) -> Result<Option<FirLocalDelegateDispatchParameter>, BodyCheckFailure> {
         let Some(dispatch) = call.dispatch_receiver.as_ref() else {
             return Ok(None);
         };
         Ok(match dispatch {
             FirDelegateDispatchReceiver::Scoped { depth, .. } => {
-                let receiver =
-                    self.receiver_capture_at_depth(*depth as usize)
+                let DelegateGetValueTarget::MemberExtension {
+                    dispatch_receiver_role,
+                    ..
+                } = target
+                else {
+                    return Err(self.failure(None, BodyCheckFailureKind::MissingStableCallTarget));
+                };
+                // The receiver may now live in a captured class field, so its old tower depth is
+                // not authority for the source role of this generated accessor parameter.
+                let receiver = match dispatch_receiver_role {
+                    FirCapturedReceiver::Enclosing { classifier, .. } => {
+                        // Preserve the actual instance owner, including an enum-entry instance.
+                        // A stored receiver already owns that provenance; a live receiver frame
+                        // supplies it only when there is no selected class-storage operand.
+                        let owner = match self.class_receiver_binding_at(*depth) {
+                            Some(binding) => binding.enclosing_instance_owner,
+                            None => self
+                                .receiver_capture_at_depth(*depth as usize)
+                                .and_then(|receiver| receiver.enclosing_owner()),
+                        }
                         .ok_or_else(|| {
-                            self.failure(None, BodyCheckFailureKind::UnsupportedCallShape)
+                            self.failure(None, BodyCheckFailureKind::MissingStableCallTarget)
                         })?;
+                        let receiver = self.enclosing_instance(owner.declaration);
+                        if !matches!(&receiver, FirCapturedReceiver::Enclosing {
+                            classifier: actual, ..
+                        } if actual == classifier && receiver.enclosing_owner() == Some(owner))
+                        {
+                            return Err(
+                                self.failure(None, BodyCheckFailureKind::MissingStableCallTarget)
+                            );
+                        }
+                        receiver
+                    }
+                    role => role.clone(),
+                };
                 Some(FirLocalDelegateDispatchParameter::ImplicitReceiver(
                     receiver,
                 ))
@@ -1158,9 +1186,15 @@ fn delegate_substitutions(
             let value = ResolvedTy::new(value)
                 .map_err(|error| failure(BodyCheckFailureKind::UnpublishableType(error)))?;
             let runtime = if reified {
-                crate::symbol_resolver::reified_runtime_type(value.get(), &|name| {
-                    index.recorded_direct_supertypes(name)
-                })
+                crate::symbol_resolver::reified_runtime_type(
+                    value.get(),
+                    &crate::symbol_resolver::ReifiedDeclarations {
+                        direct_supertypes: &|name| index.recorded_direct_supertypes(name),
+                        variance_at: &|name, position| {
+                            index.recorded_type_argument_variance(name, position)
+                        },
+                    },
+                )
             } else {
                 value.get()
             };
@@ -1195,10 +1229,7 @@ fn delegate_dispatch_receiver(
         return Ok(FirDelegateDispatchReceiver::ContextBinding {
             ty,
             name: binding.name.clone().into_boxed_str(),
-            shadow_depth: u32::try_from(binding.shadow_depth).map_err(|_| BodyCheckFailure {
-                span: None,
-                kind: BodyCheckFailureKind::UnsupportedCallShape,
-            })?,
+            source: binding.source,
         });
     }
     if let Some(singleton) = &selected.singleton {
@@ -1220,6 +1251,42 @@ fn delegate_dispatch_receiver(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_checked_delegate_plan_retains_a_required_capture_instead_of_a_name_depth() {
+        let ty = Ty::obj("Context");
+        let source = crate::context_parameters::ContextBindingSource::RequiredClassCapture {
+            lexical_binding: 71,
+        };
+        let selected = crate::resolve::ImplicitReceiverSelection {
+            ty,
+            current: false,
+            receiver_depth: 2,
+            classifier: None,
+            context_binding: Some(crate::resolve::ContextBinding {
+                name: "c".to_string(),
+                source,
+                flow_identity: Some(11),
+            }),
+            singleton: None,
+            context_parameter: true,
+            construction_sites: Vec::new(),
+        };
+        let resolved = |ty| {
+            ResolvedTy::new(ty).map_err(|error| BodyCheckFailure {
+                span: None,
+                kind: BodyCheckFailureKind::UnpublishableType(error),
+            })
+        };
+        assert_eq!(
+            delegate_dispatch_receiver(&selected, &resolved),
+            Ok(FirDelegateDispatchReceiver::ContextBinding {
+                ty: ResolvedTy::new(ty).unwrap(),
+                name: "c".into(),
+                source,
+            })
+        );
+    }
 
     #[test]
     fn an_extension_declaration_shorter_than_its_applied_shape_is_rejected() {

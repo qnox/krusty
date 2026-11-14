@@ -93,9 +93,7 @@ pub(crate) fn spelling_contains_definitely_non_null_type(
             .any(spelling_contains_definitely_non_null_type)
 }
 
-pub(crate) fn needs_definitely_non_null_type(
-    spellings: &crate::spelling::DeclaredSpellings,
-) -> bool {
+pub fn needs_definitely_non_null_type(spellings: &crate::spelling::DeclaredSpellings) -> bool {
     spelling_contains_definitely_non_null_type(&spellings.ret)
         || spelling_contains_definitely_non_null_type(&spellings.receiver)
         || spellings

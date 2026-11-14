@@ -22,6 +22,19 @@ struct SourceConstructorRequest<'a> {
     vararg: Option<usize>,
 }
 
+/// Source arguments of one constructor call, the parameters they fill, and the arguments
+/// already evaluated at an anonymous object's construction site.
+struct ForwardedConstructorArguments<'a> {
+    arguments: &'a [ExprId],
+    parameters: &'a [Ty],
+    argument_slots: Vec<usize>,
+    omitted: Vec<usize>,
+    vararg: Option<usize>,
+    /// Arguments evaluated at the construction site. The constructor must not resolve names
+    /// inside those source expressions.
+    forwarded: &'a [ExprId],
+}
+
 struct ExternalConstructorRequest<'a> {
     expression: ExprId,
     arguments: &'a [ExprId],
@@ -706,12 +719,14 @@ impl BodyFirChecker<'_> {
     ) -> Result<Box<[FirCallArgument]>, BodyCheckFailure> {
         self.checked_constructor_arguments_forwarding(
             span,
-            arguments,
-            parameters,
-            argument_slots,
-            omitted,
-            vararg,
-            &[],
+            ForwardedConstructorArguments {
+                arguments,
+                parameters,
+                argument_slots,
+                omitted,
+                vararg,
+                forwarded: &[],
+            },
         )
     }
 
@@ -720,13 +735,16 @@ impl BodyFirChecker<'_> {
     fn checked_constructor_arguments_forwarding(
         &mut self,
         span: Span,
-        arguments: &[ExprId],
-        parameters: &[Ty],
-        argument_slots: Vec<usize>,
-        omitted: Vec<usize>,
-        vararg: Option<usize>,
-        forwarded: &[ExprId],
+        sources: ForwardedConstructorArguments<'_>,
     ) -> Result<Box<[FirCallArgument]>, BodyCheckFailure> {
+        let ForwardedConstructorArguments {
+            arguments,
+            parameters,
+            argument_slots,
+            omitted,
+            vararg,
+            forwarded,
+        } = sources;
         if arguments.len() != argument_slots.len() {
             return Err(self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape));
         }
@@ -1171,12 +1189,14 @@ fn add_constructor_delegation(
         };
         let arguments = checker.checked_constructor_arguments_forwarding(
             span,
-            arguments,
-            resolved.target.params(),
-            resolved.argument_slots.clone(),
-            resolved.omitted.clone(),
-            resolved.vararg,
-            &forwarded,
+            ForwardedConstructorArguments {
+                arguments,
+                parameters: resolved.target.params(),
+                argument_slots: resolved.argument_slots.clone(),
+                omitted: resolved.omitted.clone(),
+                vararg: resolved.vararg,
+                forwarded: &forwarded,
+            },
         )?;
         let arguments = checker.constructor_arguments_with_context_at(
             Some(span),
@@ -1360,7 +1380,20 @@ pub(super) fn check_and_dispatch_signature_constructor_defaults(
             parameter.context_kind,
         )
     });
-    let (parameters, mut defaults, span) = if secondary.is_none() {
+    let (parameters, mut defaults, span) = if let Some(constructor) = secondary {
+        let (parameters, defaults) = checked_constructor_parameters(
+            context_source.chain(constructor.params.iter().map(|parameter| {
+                (
+                    parameter.name.as_str(),
+                    parameter.ty.span,
+                    parameter.default,
+                    crate::types::ContextParameterKind::None,
+                )
+            })),
+            &signature.parameters,
+        )?;
+        (parameters, defaults, constructor.span)
+    } else {
         let (parameters, defaults) = checked_constructor_parameters(
             context_source
                 .clone()
@@ -1375,20 +1408,6 @@ pub(super) fn check_and_dispatch_signature_constructor_defaults(
             &signature.parameters,
         )?;
         (parameters, defaults, class.span)
-    } else {
-        let constructor = secondary.expect("secondary constructor was selected");
-        let (parameters, defaults) = checked_constructor_parameters(
-            context_source.chain(constructor.params.iter().map(|parameter| {
-                (
-                    parameter.name.as_str(),
-                    parameter.ty.span,
-                    parameter.default,
-                    crate::types::ContextParameterKind::None,
-                )
-            })),
-            &signature.parameters,
-        )?;
-        (parameters, defaults, constructor.span)
     };
     let value_parameter_count = signature
         .parameters

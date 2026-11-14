@@ -8,7 +8,7 @@ use crate::types::{Ty, TyKind, TypeName};
 
 /// Push every classifier identity carried by `ty`, including nested generic/projection/function
 /// positions. Source spellings never participate in this inventory.
-pub(crate) fn collect_classifier_names(ty: Ty, out: &mut Vec<TypeName>) {
+pub fn collect_classifier_names(ty: Ty, out: &mut Vec<TypeName>) {
     match ty.kind() {
         TyKind::Obj(classifier, arguments) => {
             out.push(classifier);
@@ -33,7 +33,7 @@ pub(crate) fn collect_classifier_names(ty: Ty, out: &mut Vec<TypeName>) {
     }
 }
 
-pub(crate) fn referenced_classifier_names(ir: &IrFile) -> Vec<TypeName> {
+pub fn referenced_classifier_names(ir: &IrFile) -> Vec<TypeName> {
     let mut out = Vec::new();
     let mut seen = HashSet::default();
     for function in &ir.functions {

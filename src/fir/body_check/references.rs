@@ -32,6 +32,30 @@ impl BodyFirChecker<'_> {
         expression: ExprId,
         receiver: Option<ExprId>,
     ) -> Result<FirExprKind, BodyCheckFailure> {
+        let mut kind = self.callable_reference_target(expression, receiver)?;
+        if let Some(selected) = self.info.context_args.get(&expression).cloned() {
+            let cause = self.expression_origin(expression)?;
+            let span = self.file.expr_span(expression);
+            let materialized = selected
+                .iter()
+                .map(|argument| self.materialize_context_argument_at(span, cause, argument))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_boxed_slice();
+            match &mut kind {
+                FirExprKind::CallableReference {
+                    context_arguments, ..
+                } => *context_arguments = materialized,
+                _ => return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)),
+            }
+        }
+        Ok(kind)
+    }
+
+    fn callable_reference_target(
+        &mut self,
+        expression: ExprId,
+        receiver: Option<ExprId>,
+    ) -> Result<FirExprKind, BodyCheckFailure> {
         let span = self.file.expr_span(expression);
         if let Some(ExprLowering::ClassLiteral { unbound }) =
             self.info.expr_lowers.get(&expression).cloned()
@@ -100,9 +124,7 @@ impl BodyFirChecker<'_> {
                 self.reference_to_declaration(
                     expression,
                     declaration,
-                    FirCallableReferenceBinding::Static,
-                    None,
-                    None,
+                    ReferenceReceivers::static_binding(),
                     None,
                     None,
                 )
@@ -113,9 +135,7 @@ impl BodyFirChecker<'_> {
                         &reference.target,
                         &reference.target.params,
                     ),
-                    FirCallableReferenceBinding::Static,
-                    None,
-                    None,
+                    ReferenceReceivers::static_binding(),
                     None,
                     None,
                 )
@@ -157,6 +177,7 @@ impl BodyFirChecker<'_> {
                 binding: FirCallableReferenceBinding::Static,
                 dispatch_receiver: None,
                 extension_receiver: None,
+                context_arguments: Box::new([]),
                 substitutions: Box::new([]),
                 adaptation: None,
                 reflection_owner: None,
@@ -184,9 +205,7 @@ impl BodyFirChecker<'_> {
                 self.reference_to_declaration(
                     expression,
                     declaration,
-                    FirCallableReferenceBinding::Static,
-                    None,
-                    None,
+                    ReferenceReceivers::static_binding(),
                     Some(adaptation),
                     None,
                 )
@@ -194,9 +213,7 @@ impl BodyFirChecker<'_> {
                 self.reference_to_external(
                     expression,
                     ExternalReferenceDeclaration::callable(&target, &target.params),
-                    FirCallableReferenceBinding::Static,
-                    None,
-                    None,
+                    ReferenceReceivers::static_binding(),
                     Some(adaptation),
                     None,
                 )
@@ -217,7 +234,19 @@ impl BodyFirChecker<'_> {
             // callable-reference object, not a lambda: `kotlin.reflect.KFunction` is not a function
             // interface and the adapter would fail its cast at run time. Only a reference used as a
             // plain function value is materialized here.
-            if !self.info.semantic_ty(expression).non_null().is_fun() {
+            // Binding context arguments alone leaves the plain carrier, which is a reflective
+            // reference, so only a reference that adapts its value parameters is refused.
+            let mut next = None;
+            let binds_contexts_only = argument_mapping.iter().all(|argument| match argument {
+                AdaptedRefArgument::Context => true,
+                AdaptedRefArgument::Value(ordinal) => {
+                    let in_order = next.is_none_or(|expected| *ordinal == expected);
+                    next = Some(*ordinal + 1);
+                    in_order
+                }
+                _ => false,
+            });
+            if !binds_contexts_only && !self.info.semantic_ty(expression).non_null().is_fun() {
                 return Err(self.failure(
                     span,
                     BodyCheckFailureKind::UnsupportedExpression(ExpressionForm::CallableRef),
@@ -356,6 +385,7 @@ impl BodyFirChecker<'_> {
                         binding: FirCallableReferenceBinding::Static,
                         dispatch_receiver: None,
                         extension_receiver: None,
+                        context_arguments: Box::new([]),
                         substitutions: Box::new([]),
                         adaptation: None,
                         reflection_owner: None,
@@ -507,7 +537,7 @@ impl BodyFirChecker<'_> {
                                 AdaptedRefArgument::Vararg { values, .. } => {
                                     values.iter_mut().for_each(|value| *value += 1);
                                 }
-                                AdaptedRefArgument::Default => {}
+                                AdaptedRefArgument::Context | AdaptedRefArgument::Default => {}
                             }
                         }
                     }
@@ -557,6 +587,7 @@ impl BodyFirChecker<'_> {
                 binding,
                 dispatch_receiver,
                 extension_receiver: None,
+                context_arguments: Box::new([]),
                 substitutions: Box::new([]),
                 adaptation: adaptation.map(Box::new),
                 reflection_owner: None,
@@ -606,9 +637,11 @@ impl BodyFirChecker<'_> {
                     self.reference_to_declaration(
                         expression,
                         declaration,
-                        binding,
-                        dispatch_receiver,
-                        None,
+                        ReferenceReceivers {
+                            binding,
+                            dispatch_receiver,
+                            extension_receiver: None,
+                        },
                         adaptation,
                         reflection_owner,
                     )
@@ -619,9 +652,11 @@ impl BodyFirChecker<'_> {
                             receiver: Some(receiver_ty),
                             ..ExternalReferenceDeclaration::member(&member)
                         },
-                        binding,
-                        dispatch_receiver,
-                        None,
+                        ReferenceReceivers {
+                            binding,
+                            dispatch_receiver,
+                            extension_receiver: None,
+                        },
                         adaptation,
                         reflection_owner,
                     )
@@ -643,9 +678,11 @@ impl BodyFirChecker<'_> {
                     self.reference_to_declaration(
                         expression,
                         declaration,
-                        binding,
-                        None,
-                        extension_receiver,
+                        ReferenceReceivers {
+                            binding,
+                            dispatch_receiver: None,
+                            extension_receiver,
+                        },
                         adaptation,
                         None,
                     )
@@ -665,9 +702,11 @@ impl BodyFirChecker<'_> {
                             extension_receiver_target: extension_target,
                             ..ExternalReferenceDeclaration::callable(&callable, parameters)
                         },
-                        binding,
-                        None,
-                        extension_receiver,
+                        ReferenceReceivers {
+                            binding,
+                            dispatch_receiver: None,
+                            extension_receiver,
+                        },
                         adaptation,
                         None,
                     )
@@ -710,6 +749,7 @@ impl BodyFirChecker<'_> {
                         binding: FirCallableReferenceBinding::Static,
                         dispatch_receiver: None,
                         extension_receiver: None,
+                        context_arguments: Box::new([]),
                         substitutions: Box::new([]),
                         adaptation: adaptation.map(Box::new),
                         reflection_owner: None,
@@ -719,9 +759,7 @@ impl BodyFirChecker<'_> {
                     self.reference_to_declaration(
                         expression,
                         declaration,
-                        FirCallableReferenceBinding::Static,
-                        None,
-                        None,
+                        ReferenceReceivers::static_binding(),
                         adaptation,
                         None,
                     )
@@ -729,9 +767,7 @@ impl BodyFirChecker<'_> {
                     self.reference_to_external(
                         expression,
                         ExternalReferenceDeclaration::member(&member),
-                        FirCallableReferenceBinding::Static,
-                        None,
-                        None,
+                        ReferenceReceivers::static_binding(),
                         adaptation,
                         None,
                     )
@@ -907,13 +943,18 @@ impl BodyFirChecker<'_> {
             ));
         }
         let mut arguments = std::mem::take(&mut plan.arguments).into_vec();
-        if arguments.first() != Some(&FirAdaptedReferenceArgument::Value(0)) {
+        // The receiver follows the context arguments the reference site binds.
+        let receiver = arguments
+            .iter()
+            .take_while(|argument| matches!(argument, FirAdaptedReferenceArgument::Context))
+            .count();
+        if arguments.get(receiver) != Some(&FirAdaptedReferenceArgument::Value(0)) {
             return Err(self.failure(
                 self.file.expr_span(expression),
                 BodyCheckFailureKind::UnsupportedCallShape,
             ));
         }
-        arguments.remove(0);
+        arguments.remove(receiver);
         plan.arguments = arguments.into_boxed_slice();
         Ok(adaptation)
     }
@@ -975,12 +1016,15 @@ impl BodyFirChecker<'_> {
         &self,
         expression: ExprId,
         declaration: DeclarationId,
-        binding: FirCallableReferenceBinding,
-        dispatch_receiver: Option<FirReceiver>,
-        extension_receiver: Option<FirReceiver>,
+        receivers: ReferenceReceivers,
         adaptation: Option<FirReferenceAdaptation>,
         reflection_owner: Option<crate::types::TypeName>,
     ) -> Result<FirExprKind, BodyCheckFailure> {
+        let ReferenceReceivers {
+            binding,
+            dispatch_receiver,
+            extension_receiver,
+        } = receivers;
         let span = self.file.expr_span(expression);
         let callable = self
             .index
@@ -993,6 +1037,7 @@ impl BodyFirChecker<'_> {
             binding,
             dispatch_receiver,
             extension_receiver,
+            context_arguments: Box::new([]),
             substitutions: self.call_substitutions(expression, declaration)?,
             adaptation: adaptation.map(Box::new),
             reflection_owner,
@@ -1003,12 +1048,15 @@ impl BodyFirChecker<'_> {
         &self,
         expression: ExprId,
         target: ExternalReferenceDeclaration<'_>,
-        binding: FirCallableReferenceBinding,
-        dispatch_receiver: Option<FirReceiver>,
-        extension_receiver: Option<FirReceiver>,
+        receivers: ReferenceReceivers,
         adaptation: Option<FirReferenceAdaptation>,
         reflection_owner: Option<crate::types::TypeName>,
     ) -> Result<FirExprKind, BodyCheckFailure> {
+        let ReferenceReceivers {
+            binding,
+            dispatch_receiver,
+            extension_receiver,
+        } = receivers;
         let ExternalReferenceDeclaration {
             declaration,
             mut singleton_dispatch,
@@ -1076,6 +1124,7 @@ impl BodyFirChecker<'_> {
                 binding,
                 dispatch_receiver: None,
                 extension_receiver: None,
+                context_arguments: Box::new([]),
                 substitutions: Box::new([]),
                 adaptation: adaptation.map(Box::new),
                 reflection_owner,
@@ -1125,6 +1174,7 @@ impl BodyFirChecker<'_> {
             binding,
             dispatch_receiver,
             extension_receiver,
+            context_arguments: Box::new([]),
             substitutions: substitutions.into_boxed_slice(),
             adaptation: adaptation.map(Box::new),
             reflection_owner,
@@ -1408,6 +1458,7 @@ impl BodyFirChecker<'_> {
                 AdaptedRefArgument::Value(value) => u32::try_from(value)
                     .map(FirAdaptedReferenceArgument::Value)
                     .map_err(|_| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)),
+                AdaptedRefArgument::Context => Ok(FirAdaptedReferenceArgument::Context),
                 AdaptedRefArgument::Default => Ok(FirAdaptedReferenceArgument::Default),
                 AdaptedRefArgument::Vararg {
                     values,
@@ -1448,12 +1499,22 @@ impl BodyFirChecker<'_> {
     }
 }
 
-/// How a property reference to a source declaration is bound: its binding kind and the receivers
-/// the reference captured.
+/// How a callable or property reference is bound: its binding kind and the receivers the
+/// reference captured.
 struct ReferenceReceivers {
     binding: FirCallableReferenceBinding,
     dispatch_receiver: Option<FirReceiver>,
     extension_receiver: Option<FirReceiver>,
+}
+
+impl ReferenceReceivers {
+    fn static_binding() -> Self {
+        Self {
+            binding: FirCallableReferenceBinding::Static,
+            dispatch_receiver: None,
+            extension_receiver: None,
+        }
+    }
 }
 
 /// The selected property as the reference sees it: specialized receiver and property types, and

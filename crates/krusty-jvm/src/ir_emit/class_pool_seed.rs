@@ -1,0 +1,239 @@
+//! The constant-pool entries a plain class interns before krusty's emission reaches them, reserved
+//! in kotlinc's visit order: the primary constructor's header and parameter annotations, its
+//! LocalVariableTable and `$default` header.
+
+use super::*;
+
+pub(super) struct PlainClassPoolSeed<'a> {
+    pub(super) ir: &'a IrFile,
+    pub(super) class: &'a krusty::ir::IrClass,
+    pub(super) fq_name: &'a str,
+    pub(super) ctor_signature: Option<&'a str>,
+    pub(super) java_parameters: bool,
+}
+
+/// The primary constructor's `MethodParameters` entries under `-java-parameters`, else none.
+pub(super) fn primary_constructor_method_parameters(
+    ir: &IrFile,
+    class: &krusty::ir::IrClass,
+    java_parameters: bool,
+) -> Vec<crate::method_parameters::MethodParameter> {
+    if !java_parameters {
+        Vec::new()
+    } else if super::metadata_policy::is_continuation_class(class) {
+        crate::method_parameters::continuation_constructor(class)
+    } else {
+        crate::method_parameters::primary_constructor(ir, class, &class_ctor_jvm_tys(ir, class))
+    }
+}
+
+/// Reserve an ordinary class's constructor before its members, at kotlinc's schedule position.
+pub(super) fn seed_ctor_before_members(
+    enabled: bool,
+    seed: PlainClassPoolSeed<'_>,
+    cw: &mut ClassWriter,
+) {
+    if enabled && seed.class.has_primary_ctor && !seed.class.is_value {
+        seed_plain_class_pool(seed, cw);
+    }
+}
+
+/// Reserve a value class's constructor after the declared members which precede it. Reserving it
+/// with an ordinary class makes `<init>` the first member-owned pool entry and shifts the whole pool
+/// even when the method table is correctly ordered.
+pub(super) fn seed_value_ctor_after_members(
+    enabled: bool,
+    seed: PlainClassPoolSeed<'_>,
+    cw: &mut ClassWriter,
+) {
+    if enabled && seed.class.has_primary_ctor && seed.class.is_value {
+        seed_plain_class_pool(seed, cw);
+    }
+}
+
+fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_>, cw: &mut ClassWriter) {
+    let PlainClassPoolSeed {
+        ir,
+        class: c,
+        ctor_signature,
+        java_parameters,
+        ..
+    } = seed;
+    let ctor_desc = primary_ctor_descriptor(ir, c);
+    let parameters: Vec<krusty::jvm::classfile::SeedCtorParameter> =
+        primary_ctor_source_parameters(ir, c)
+            .into_iter()
+            .map(|parameter| {
+                let (visible, invisible) = parameter
+                    .annotations
+                    .map(krusty::jvm::classfile::split_declaration_annotations)
+                    .unwrap_or_default();
+                krusty::jvm::classfile::SeedCtorParameter {
+                    ann_kind: parameter.nullability,
+                    visible_annotations: visible,
+                    invisible_annotations: invisible,
+                }
+            })
+            .collect();
+    cw.seed_plain_class_pool(
+        &ctor_desc,
+        &primary_constructor_method_parameters(ir, c, java_parameters),
+        &parameters,
+        &krusty::jvm::classfile::MemberSignatures {
+            ctor: ctor_signature,
+        },
+        &primary_ctor_annotations(c),
+    );
+}
+
+/// Seed the primary constructor's local-variable strings, which kotlinc interns once the body is
+/// done and before the frames of that body.
+pub(super) fn seed_plain_constructor_locals(
+    seed: PlainClassPoolSeed<'_>,
+    body: &CodeBuilder,
+    cw: &mut ClassWriter,
+) {
+    let parameter_locals = constructor_parameter_locals(seed.ir, seed.class);
+    cw.seed_plain_constructor_locals(body, seed.fq_name, &parameter_locals);
+}
+
+/// Seed what kotlinc interns once the primary constructor is written: its `$default` overload's
+/// header.
+pub(super) fn seed_plain_constructor_tail(seed: PlainClassPoolSeed<'_>, cw: &mut ClassWriter) {
+    let PlainClassPoolSeed {
+        ir,
+        class: c,
+        fq_name,
+        ..
+    } = seed;
+    // The header of the primary ctor's `$default` overload, which kotlinc writes right after it.
+    let default_marker_desc = ir
+        .class_ctor_defaults(fq_name)
+        .filter(|defaults| defaults.iter().any(Option::is_some))
+        .map(|defaults| {
+            let source_parameter_count = defaults
+                .len()
+                .checked_sub(c.constructor_prefix_count as usize)
+                .expect("constructor default prefix exceeds its parameters");
+            let masks = "I".repeat(default_mask_count(source_parameter_count));
+            format!(
+                "({}{masks}Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
+                primary_ctor_parameter_descs(ir, c)
+            )
+        });
+    cw.seed_plain_constructor_tail(default_marker_desc.as_deref());
+}
+
+/// Seed an enum constructor's LocalVariableTable strings, which kotlinc interns with the constructor,
+/// before `values`: `this`, the two synthetic `Enum` parameters, then every declared parameter.
+pub(super) fn seed_enum_constructor_locals(
+    ir: &IrFile,
+    c: &krusty::ir::IrClass,
+    self_desc: &str,
+    cw: &mut ClassWriter,
+) {
+    let synthetic = [
+        ("this".to_string(), self_desc.to_string()),
+        ("$enum$name".to_string(), "Ljava/lang/String;".to_string()),
+        ("$enum$ordinal".to_string(), "I".to_string()),
+    ];
+    for (name, desc) in synthetic
+        .into_iter()
+        .chain(constructor_parameter_locals(ir, c))
+    {
+        cw.reserve_method_name(&name);
+        cw.reserve_descriptor(&desc);
+    }
+}
+
+/// The constructor's LocalVariableTable rows after its receiver and synthetic prefix: every named
+/// parameter, property-backed or plain (`enum class E(value: Int)` has no field `value`, but its
+/// constructor still lists it).
+fn constructor_parameter_locals(ir: &IrFile, c: &krusty::ir::IrClass) -> Vec<(String, String)> {
+    let arguments = c
+        .ctor_args
+        .iter()
+        .zip(crate::parameter_names::constructor_local_variables(ir, c))
+        .collect();
+    super::capture_order::physical(ir, c, arguments)
+        .into_iter()
+        .filter_map(|(argument, name)| {
+            Some((name?, krusty::jvm::names::type_descriptor(argument.ty)))
+        })
+        .collect()
+}
+
+/// Seed a synthesized accessor's `LocalVariableTable` receiver strings right after its body, where
+/// kotlinc interns them. The table itself is attached later with the class's other synthesized
+/// debug tables, which only a class with a declaration line gets; a primary constructor's tail has
+/// usually interned these strings already.
+pub(super) fn seed_accessor_locals(c: &krusty::ir::IrClass, fq_name: &str, cw: &mut ClassWriter) {
+    if c.decl_line != 0 {
+        cw.seed_utf8("this");
+        cw.seed_utf8(&format!("L{fq_name};"));
+    }
+}
+
+/// Intern one generated value-class method's local names immediately after that method's body.
+///
+/// The debug tables are attached once the whole class has been emitted, but kotlinc visits each
+/// table with its owning method. Reserving these strings at the same boundary keeps later method,
+/// bridge, field, and annotation constants in their real order. Roles come from synthesis-owned
+/// function identities; generated spellings are output here, never lookup input.
+pub(super) fn seed_value_class_method_locals(
+    enabled: bool,
+    ir: &IrFile,
+    c: &krusty::ir::IrClass,
+    fid: u32,
+    cw: &mut ClassWriter,
+) {
+    if !enabled || !c.is_value {
+        return;
+    }
+    let Some(field) = c.fields.first() else {
+        return;
+    };
+    let carrier = krusty::jvm::names::type_descriptor(field.ty);
+    let this_desc = format!("L{};", c.fq_name());
+    let object = "Ljava/lang/Object;";
+    let locals: Vec<(&str, &str)> = if let Some(role) = ir.jvm_value_class_generated_any.get(&fid) {
+        match role {
+            krusty::ir::IrValueClassAnyMember::Equals => {
+                vec![("arg0", carrier.as_str()), ("other", object)]
+            }
+            krusty::ir::IrValueClassAnyMember::HashCode
+            | krusty::ir::IrValueClassAnyMember::ToString => vec![("arg0", carrier.as_str())],
+        }
+    } else if let Some(role) = ir.jvm_value_class_any_delegators.get(&fid) {
+        match role {
+            krusty::ir::IrValueClassAnyMember::Equals => {
+                vec![("this", this_desc.as_str()), ("other", object)]
+            }
+            krusty::ir::IrValueClassAnyMember::HashCode
+            | krusty::ir::IrValueClassAnyMember::ToString => {
+                vec![("this", this_desc.as_str())]
+            }
+        }
+    } else {
+        match ir.jvm_value_class_representation_order.get(&fid).copied() {
+            Some(0) => vec![(field.name.as_str(), carrier.as_str())],
+            Some(1) => vec![("v", carrier.as_str())],
+            Some(2) => vec![("this", this_desc.as_str())],
+            Some(3) => vec![
+                (
+                    crate::parameter_names::value_class_equals_operand(1),
+                    carrier.as_str(),
+                ),
+                (
+                    crate::parameter_names::value_class_equals_operand(2),
+                    carrier.as_str(),
+                ),
+            ],
+            _ => return,
+        }
+    };
+    for (name, descriptor) in locals {
+        cw.seed_utf8(name);
+        cw.seed_utf8(descriptor);
+    }
+}

@@ -59,3 +59,79 @@ fn incomparable_shared_supertypes_join_at_their_intersection() {
         "InferredIncomparableSupertypes",
     );
 }
+
+/// A contravariant argument of a joined classifier is the meet of the arguments: `Sink<A>` and
+/// `Sink<AB>`, `AB : A`, join at `Sink<AB>`, which still accepts an `AB`. The inference join and
+/// the branch join compute it with the same argument rules.
+const CONTRAVARIANT_ARGUMENT_MEET: &str = r#"interface Sink<in T> { fun put(t: T): String }
+interface A { fun a(): String = "O" }
+interface B { fun b(): String = "K" }
+class AB : A, B
+class SinkA : Sink<A> { override fun put(t: A): String = t.a() }
+class SinkAB : Sink<AB> { override fun put(t: AB): String = t.a() + t.b() }
+
+fun <T> pick(first: T, second: T, takeFirst: Boolean): T = if (takeFirst) first else second
+
+fun box(): String {
+    val inferred = pick(SinkA(), SinkAB(), takeFirst = false)
+    val branch = if (inferred.put(AB()) == "OK") SinkA() else SinkAB()
+    val text = inferred.put(AB()) + branch.put(AB())
+    return if (text == "OKO") "OK" else text
+}
+"#;
+
+#[test]
+fn a_contravariant_argument_joins_at_the_meet_of_the_arguments() {
+    common::expect_box_same_as_kotlinc(CONTRAVARIANT_ARGUMENT_MEET, "InferredContravariantMeet");
+}
+
+/// The whole program lives once in the shared box regressions.
+const CONTRAVARIANT_ARGUMENT_INTERSECTION: &str =
+    include_str!("box_regressions/contravariantArgumentIntersection.kt");
+
+#[test]
+fn unrelated_contravariant_arguments_meet_at_their_intersection() {
+    common::expect_box_same_as_kotlinc(
+        CONTRAVARIANT_ARGUMENT_INTERSECTION,
+        "InferredContravariantIntersection",
+    );
+}
+
+/// A reified argument cannot carry an intersection, so it is approximated by the position the
+/// intersection occupies: a contravariant one reifies as `Nothing`, a covariant one as the common
+/// supertype, and an invariant one as an `out` projection of it. kotlinc must agree on every
+/// rendered type for the fixture to return `OK`.
+const REIFIED_INTERSECTION_ARGUMENTS: &str = r#"import kotlin.reflect.typeOf
+class In<in T>
+class Out<out T>
+class Inv<T>
+interface A
+interface B
+
+@OptIn(kotlin.ExperimentalStdlibApi::class)
+inline fun <reified K> reify(first: K, second: K): String =
+    typeOf<K>().toString().substringBefore(" (") + " " +
+        Array<K>(1) { first }.javaClass.componentType.simpleName
+
+fun box(): String {
+    val rendered = listOf(
+        reify(In<A>(), In<B>()),
+        reify(Out<A>(), Out<B>()),
+        reify(Inv<A>(), Inv<B>()),
+    )
+    val expected = listOf(
+        "In<kotlin.Nothing> In",
+        "Out<java.lang.Object> Out",
+        "Inv<out java.lang.Object> Inv",
+    )
+    return if (rendered == expected) "OK" else rendered.toString()
+}
+"#;
+
+#[test]
+fn a_reified_intersection_argument_is_approximated_by_its_position() {
+    common::expect_box_same_as_kotlinc(
+        REIFIED_INTERSECTION_ARGUMENTS,
+        "ReifiedIntersectionArguments",
+    );
+}

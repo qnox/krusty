@@ -154,12 +154,39 @@ impl ProviderKind {
     }
 }
 
+/// A transitive dependency a repository library tells Maven not to install.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExcludedMavenArtifact {
+    pub group: String,
+    pub artifact: String,
+}
+
+/// A named JPS repository library: one Maven coordinate and the jars that
+/// coordinate maps to. One coordinate can land several jars when the library
+/// includes transitive artifacts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepositoryLibrary {
+    pub name: String,
+    pub group: String,
+    pub artifact: String,
+    pub version: String,
+    pub packaging: String,
+    pub include_transitive: bool,
+    pub excluded: Vec<ExcludedMavenArtifact>,
+    /// Class jars this library contributes. Every one of them has to exist
+    /// before the library counts as resolved.
+    pub jars: Vec<PathBuf>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectModel {
     pub root: PathBuf,
     pub kind: ProviderKind,
     pub jdk_home: Option<PathBuf>,
     pub modules: Vec<Module>,
+    /// JPS repository libraries. Empty for every other provider, and omitted
+    /// from the harness JSON.
+    pub repository_libraries: Vec<RepositoryLibrary>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -427,6 +454,7 @@ impl ProjectModel {
             kind,
             jdk_home: None,
             modules: Vec::new(),
+            repository_libraries: Vec::new(),
         }
     }
 

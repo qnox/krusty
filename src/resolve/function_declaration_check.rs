@@ -422,6 +422,7 @@ impl Checker<'_> {
                             ClassStorageSource { owner, identity },
                             capture.shared_cell,
                         );
+                        self.retain_capture_declaration(scope, capture);
                     }
                 }
             }
@@ -430,7 +431,7 @@ impl Checker<'_> {
                 &defaults_scope,
                 f.params
                     .iter()
-                    .map(|parameter| (parameter.name.as_str(), parameter.default)),
+                    .map(|parameter| (parameter.name.as_str(), parameter.default, parameter.span)),
                 &parameter_types,
                 ParameterDefaultFlow::Function,
             );
@@ -974,7 +975,7 @@ impl Checker<'_> {
                 scope,
                 f.params
                     .iter()
-                    .map(|parameter| (parameter.name.as_str(), parameter.default)),
+                    .map(|parameter| (parameter.name.as_str(), parameter.default, parameter.span)),
                 &parameter_types,
                 ParameterDefaultFlow::Function,
             );

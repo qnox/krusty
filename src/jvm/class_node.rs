@@ -13,12 +13,12 @@ mod read;
 
 use crate::jvm::method_node::{Constant, MethodNode};
 
-pub(crate) use annotation::{Annotation, ElementValue};
+pub use annotation::{Annotation, ElementValue};
 pub(crate) use read::ClassReadError;
 
 /// One class file.
 #[derive(Clone, Debug)]
-pub(crate) struct ClassNode {
+pub struct ClassNode {
     pub major: u16,
     pub access: u16,
     pub name: String,
@@ -42,7 +42,7 @@ pub(crate) struct ClassNode {
 
 /// `EnclosingMethod`: the class, and the method when there is one, a local class is declared in.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct OuterClass {
+pub struct OuterClass {
     pub owner: String,
     /// The enclosing method's name and descriptor.
     pub method: Option<(String, String)>,
@@ -50,7 +50,7 @@ pub(crate) struct OuterClass {
 
 /// One `InnerClasses` row.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct InnerClass {
+pub struct InnerClass {
     pub name: String,
     pub outer_name: Option<String>,
     pub inner_name: Option<String>,
@@ -59,7 +59,7 @@ pub(crate) struct InnerClass {
 
 /// One field.
 #[derive(Clone, Debug)]
-pub(crate) struct FieldNode {
+pub struct FieldNode {
     pub access: u16,
     pub name: String,
     pub desc: String,
@@ -73,7 +73,7 @@ pub(crate) struct FieldNode {
 
 /// One method: its declaration and, unless it is abstract or native, its body.
 #[derive(Clone, Debug)]
-pub(crate) struct ClassMethod {
+pub struct ClassMethod {
     pub access: u16,
     pub name: String,
     pub desc: String,
@@ -96,7 +96,7 @@ pub(crate) struct ClassMethod {
 
 impl ClassNode {
     /// Read the class file `bytes`.
-    pub(crate) fn read(bytes: &[u8]) -> Result<ClassNode, ClassReadError> {
+    pub fn read(bytes: &[u8]) -> Result<ClassNode, ClassReadError> {
         read::read_class(bytes)
     }
 }

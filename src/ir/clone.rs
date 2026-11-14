@@ -288,7 +288,7 @@ pub(crate) fn make_expression_children_unique(ir: &mut IrFile, root: ExprId) {
 
 /// As [`make_expression_children_unique`], returning every `(source, clone)` identity so backend
 /// side tables can copy their exact per-expression contracts instead of inferring them again.
-pub(crate) fn make_expression_children_unique_tracked(
+pub fn make_expression_children_unique_tracked(
     ir: &mut IrFile,
     root: ExprId,
 ) -> Vec<(ExprId, ExprId)> {
@@ -670,18 +670,10 @@ fn copy_function_implementation_facts(
     ir.set_method_visibility(target, ir.method_visibility(source));
     copy_map!(fn_source_names);
     copy_map!(fn_params);
-    copy_map!(fn_param_declared_nullable);
     copy_map!(fn_declared_spellings);
-    copy_map!(fn_context_counts);
-    copy_map!(fn_param_annotations);
-    copy_map!(fn_param_no_infer);
     copy_map!(fn_return_value_statuses);
-    copy_map!(fn_varargs);
-    copy_map!(fn_decl_lines);
-    copy_map!(fn_close_lines);
-    copy_map!(fn_end_lines);
-    copy_map!(fn_sig_lines);
-    copy_map!(fn_signature_offsets);
+    ir.copy_function_position(source, target);
+    ir.copy_declared_parameters(source, target);
     copy_map!(fn_source_order);
     copy_map!(fn_continuation_ordinal);
     copy_map!(fn_contracts);
@@ -951,7 +943,7 @@ mod tests {
         let parameter = Ty::ty_param("T", Ty::obj("kotlin/Any"));
         let source = ir.add_fun(function("check", parameter));
         ir.set_method_visibility(source, Visibility::Private);
-        ir.fn_decl_lines.insert(source, 4);
+        ir.function_position_mut(source).decl_line = Some(4);
         ir.inline_fns.insert(source);
         ir.signatures.insert(source, signature(parameter));
         ir.callable_bound_type_parameters.insert(
@@ -989,7 +981,9 @@ mod tests {
                 caller: Some(IrEnclosure::Function(caller)),
                 caller_is_default: false,
                 caller_source_name: "box".to_string(),
-                inline_callee: crate::fir::CallableId::from_raw(11),
+                inline_callee: crate::ir::IrInlineCallee::Module(crate::fir::CallableId::from_raw(
+                    11,
+                )),
                 inline_callee_source_name: "defineFunc".to_string(),
                 parent: None,
                 consumed_inline_capture: false,
@@ -1006,7 +1000,9 @@ mod tests {
                 caller: Some(IrEnclosure::Function(caller)),
                 caller_is_default: false,
                 caller_source_name: "box".to_string(),
-                inline_callee: crate::fir::CallableId::from_raw(11),
+                inline_callee: crate::ir::IrInlineCallee::Module(crate::fir::CallableId::from_raw(
+                    11,
+                )),
                 inline_callee_source_name: "defineFunc".to_string(),
                 parent: None,
                 consumed_inline_capture: false,
@@ -1019,7 +1015,7 @@ mod tests {
         assert_eq!(ir.functions[first as usize].params, vec![specialized]);
         assert_eq!(ir.shared_capture_parameters[&(first, 0)], parameter);
         assert_eq!(ir.method_visibility(first), Visibility::Private);
-        assert_eq!(ir.fn_decl_lines.get(&first), Some(&4));
+        assert_eq!(ir.function_position(first).decl_line, Some(4));
         assert!(ir.inline_fns.contains(&source));
         assert!(!ir.inline_fns.contains(&first));
         assert!(!ir.specialized_functions.contains_key(&source));
@@ -1051,7 +1047,10 @@ mod tests {
         let recorded = &ir.specialized_functions[&first];
         assert_eq!(recorded.source, source);
         assert_eq!(recorded.caller, Some(IrEnclosure::Function(caller)));
-        assert_eq!(recorded.inline_callee, crate::fir::CallableId::from_raw(11));
+        assert_eq!(
+            recorded.inline_callee,
+            crate::ir::IrInlineCallee::Module(crate::fir::CallableId::from_raw(11))
+        );
         assert_eq!(recorded.inline_callee_source_name, "defineFunc");
         assert_eq!(recorded.parent, None);
         assert_eq!(ir.specialized_functions[&second].parent, None);

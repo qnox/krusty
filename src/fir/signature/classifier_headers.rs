@@ -2,7 +2,8 @@
 //!
 //! Kotlin walks a classifier's supertypes in the order they are written, and that order decides
 //! the order of inherited members and bridges. The resolved header keeps the superclass apart from
-//! the interfaces, so it also records the superclass's slot among them.
+//! the interfaces, so it also records the superclass's slot among them. The index answers what a
+//! recorded classifier declares from here: its direct supertypes and its type arguments' variance.
 
 use super::super::{HeaderSyntaxArena, HeaderTypeId, ResolvedTy};
 use super::{
@@ -83,6 +84,33 @@ impl ResolvedClassifierHeader {
 }
 
 impl ResolvedModuleIndex {
+    /// Direct supertypes already recorded for `classifier`. `None` means this index has no
+    /// hierarchy for that classifier; an empty list means the recorded hierarchy has no parent
+    /// other than the implicit `Any`.
+    pub fn recorded_direct_supertypes(&self, classifier: TypeName) -> Option<Vec<TypeName>> {
+        let declaration = self.classifier_declaration(classifier)?;
+        let hierarchy = self.classifier_hierarchy(declaration)?;
+        Some(
+            hierarchy
+                .iter()
+                .filter(|entry| entry.depth == 1)
+                .map(|entry| entry.classifier)
+                .collect(),
+        )
+    }
+
+    /// Declaration-site variance of a recorded classifier's type argument at `index`, counting
+    /// its own parameters first and then the ones it captures, as [`Ty::type_args`] does.
+    pub fn recorded_type_argument_variance(
+        &self,
+        classifier: TypeName,
+        index: usize,
+    ) -> Option<crate::types::TypeVariance> {
+        let declaration = self.classifier_declaration(classifier)?;
+        let parameter = *self.classifier_type_arguments(declaration)?.get(index)?;
+        Some(self.type_parameter_header(parameter)?.flags.variance())
+    }
+
     pub(crate) fn publish_classifier_declaration_name(
         &mut self,
         declaration: DeclarationId,

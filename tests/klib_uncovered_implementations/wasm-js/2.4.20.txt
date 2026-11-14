@@ -48,8 +48,6 @@ module=6:kotlin accessor property{package=2[6:kotlin,7:reflect] declaration=2[18
 module=6:kotlin accessor property{package=2[6:kotlin,7:reflect] declaration=2[5:KType,10:classifier] member=13400843487627486315 mask=0} name=16:<get-classifier> member=12263307943527378546 mask=0
 module=6:kotlin accessor property{package=2[6:kotlin,7:reflect] declaration=2[5:KType,16:isMarkedNullable] member=16098059578558276114 mask=0} name=22:<get-isMarkedNullable> member=3220462515987358872 mask=0
 module=6:kotlin accessor property{package=2[6:kotlin,7:reflect] declaration=2[5:KType,9:arguments] member=10020203558252839322 mask=0} name=15:<get-arguments> member=16743478936463263558 mask=0
-module=6:kotlin accessor property{package=2[6:kotlin,7:reflect] declaration=2[6:KClass,10:simpleName] member=18109218115557214977 mask=0} name=16:<get-simpleName> member=6194689460658081932 mask=0
-module=6:kotlin accessor property{package=2[6:kotlin,7:reflect] declaration=2[6:KClass,13:qualifiedName] member=13076341249274380822 mask=0} name=19:<get-qualifiedName> member=1107577607282358666 mask=0
 module=6:kotlin accessor property{package=3[6:kotlin,4:text,5:regex] declaration=2[11:AbstractSet,4:next] member=6964984896108982693 mask=0} name=10:<get-next> member=17408027601773021436 mask=0
 module=6:kotlin accessor property{package=3[6:kotlin,4:text,5:regex] declaration=2[11:AbstractSet,4:next] member=6964984896108982693 mask=0} name=10:<set-next> member=18419007088327073161 mask=0
 module=6:kotlin accessor property{package=3[6:kotlin,4:text,5:regex] declaration=2[12:SpecialToken,4:type] member=12395688456585750208 mask=0} name=10:<get-type> member=5958014174245684635 mask=0

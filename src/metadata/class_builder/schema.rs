@@ -193,6 +193,7 @@ struct CtorShape<'a> {
     slot: ConstructorSlot,
     flags: u64,
     param_defaults: &'a [bool],
+    annotation_param_defaults: Option<&'a [Option<crate::ir::AnnoValue>]>,
     param_tparams: &'a [Option<u32>],
     /// User annotations on each parameter, parallel to `params` (a short list ⇒ the rest carry none).
     param_annotations: &'a [crate::metadata::MetadataAnnotations],
@@ -279,6 +280,13 @@ fn build_ctor(
                 st.put_type(&mut vp, 4, 6, &et); // ValueParameter.vararg_element_type(_id) = 4 / 6
             }
         }
+        // FIR visits the closed default before parameter annotations, but protobuf writes
+        // annotations (field 7) before the default (field 8).
+        let default_value = shape
+            .annotation_param_defaults
+            .and_then(|values| values.get(i))
+            .and_then(Option::as_ref)
+            .map(|value| crate::metadata::builder::annotation_value_pb(st, value));
         append_param_annotations(
             st,
             &mut vp,
@@ -286,6 +294,9 @@ fn build_ctor(
             shape.annotations_in_metadata,
             carrier.annotation_field(AnnotationSite::ValueParameter),
         );
+        if let Some(value) = default_value {
+            vp.field_message(8, &value);
+        }
         ctor.repeated_message(2, &vp); // Constructor.value_parameter = 2
     }
     // The carrier's extensions INTERN first (kotlinc's serializer writes the JVM signature before
@@ -340,14 +351,14 @@ fn enum_entry_pb(
 }
 
 /// Everything one `Class` record is built from.
-pub(crate) struct ClassDeclaration<'a> {
+pub struct ClassDeclaration<'a> {
     pub(crate) name: TypeName,
-    pub(crate) class_id: &'a crate::metadata::class_id::ResolvedClassId,
-    pub(crate) ctor_params: &'a [(String, Ty)],
-    pub(crate) props: &'a [PropMeta],
-    pub(crate) methods: &'a [FnMeta],
-    pub(crate) enum_entries: &'a [EnumEntryMeta<'a>],
-    pub(crate) tail: &'a ClassTail<'a>,
+    pub class_id: &'a crate::metadata::class_id::ResolvedClassId,
+    pub ctor_params: &'a [(String, Ty)],
+    pub props: &'a [PropMeta],
+    pub methods: &'a [FnMeta],
+    pub enum_entries: &'a [EnumEntryMeta<'a>],
+    pub tail: &'a ClassTail<'a>,
 }
 
 /// The `Class` message for `declaration`, its strings interned into `st` in kotlinc's order.
@@ -525,6 +536,7 @@ pub(crate) fn class_message(
                 slot: ConstructorSlot::Primary,
                 flags: tail.primary_ctor_flags,
                 param_defaults: tail.ctor_param_defaults,
+                annotation_param_defaults: tail.annotation_param_defaults,
                 param_tparams: &ctor_param_tparams,
                 param_annotations: tail.ctor_param_annotations,
                 vararg_index: tail.ctor_vararg_index,
@@ -547,6 +559,7 @@ pub(crate) fn class_message(
                 slot: ConstructorSlot::Secondary(index),
                 flags: sc.flags,
                 param_defaults: sc.param_defaults,
+                annotation_param_defaults: None,
                 param_tparams: &[],
                 param_annotations: &[],
                 vararg_index: sc.vararg_index,
@@ -937,6 +950,10 @@ pub(crate) fn class_message(
                 annotations_in_metadata,
                 carrier.annotation_field(AnnotationSite::ValueParameter),
             );
+            if let Some(bound) = m.equality_bound.filter(|bound| bound.index == i) {
+                let ty = type_pb(st, bound.bound, &function_type_parameters);
+                st.put_type(&mut vp, 9, 10, &ty); // ValueParameter.equality_bound_type(_id) = 9 / 10
+            }
             if i < m.context_count {
                 // Leading context parameters → Function.context_parameter = 13 (filled implicitly
                 // by callers), NOT the positional value_parameter list.
@@ -1074,17 +1091,17 @@ pub(crate) fn class_message(
     }
     // Unscheduled records are compiler/plugin synthetics or callers using the legacy/default shape.
     // Preserve their established property-then-function order after all explicitly ordered members.
-    for index in 0..props.len() {
-        if prop_msgs[index].is_none() {
-            prop_msgs[index] = Some((
+    for (index, message) in prop_msgs.iter_mut().enumerate() {
+        if message.is_none() {
+            *message = Some((
                 built.next().expect("unbounded"),
                 build_prop(st, &mut requirements, index),
             ));
         }
     }
-    for index in 0..methods.len() {
-        if func_msgs[index].is_none() {
-            func_msgs[index] = Some((
+    for (index, message) in func_msgs.iter_mut().enumerate() {
+        if message.is_none() {
+            *message = Some((
                 built.next().expect("unbounded"),
                 build_func(st, &mut requirements, &mut contract_types, index),
             ));
@@ -1251,10 +1268,6 @@ pub(crate) fn class_message(
 
     Ok(class.canonical())
 }
-
-/// Build the `(d1, d2)` payload for an ANONYMOUS class (`object : P2 {}` inside a function):
-/// kotlinc's record is `Class { flags = LOCAL visibility (10), fq_name = <raw internal, marked
-/// localName in the string table>, supertype* }` — no members, no constructor record.
 
 /// A member list in the order its records were built, which is the order kotlinc serializes it.
 fn in_build_order(slots: Vec<Option<(usize, Pb)>>, kind: &str) -> Vec<Pb> {

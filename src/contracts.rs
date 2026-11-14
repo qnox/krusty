@@ -60,7 +60,10 @@ impl ResolvedContract {
                     condition: conclusion,
                     ..
                 } => validate(conclusion)?,
-                Effect::Returns(_) | Effect::CallsInPlace { .. } => {}
+                Effect::Returns(_)
+                | Effect::CallsInPlace { .. }
+                | Effect::ReturnsResultOf { .. }
+                | Effect::ReturnsParameter { .. } => {}
             }
         }
         Ok(Self(std::sync::Arc::new(contract)))
@@ -99,7 +102,10 @@ impl ResolvedContract {
                                 condition: conclusion,
                                 ..
                             } => condition_bytes(conclusion),
-                            Effect::Returns(_) | Effect::CallsInPlace { .. } => 0,
+                            Effect::Returns(_)
+                            | Effect::CallsInPlace { .. }
+                            | Effect::ReturnsResultOf { .. }
+                            | Effect::ReturnsParameter { .. } => 0,
                         }
                 })
                 .sum::<usize>()
@@ -189,6 +195,12 @@ pub enum Effect {
         condition: Condition,
         lambda: ParamRef,
     },
+    /// `returnsResultOf(lambda)` — the call may return the result of invoking the function
+    /// parameter. kotlinc's return-value checker reads it; it states no data-flow fact.
+    ReturnsResultOf { lambda: ParamRef },
+    /// `returnsParameter(value)` — the call may return that parameter or receiver as-is. kotlinc's
+    /// return-value checker reads it; it states no data-flow fact.
+    ReturnsParameter { param: ParamRef },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

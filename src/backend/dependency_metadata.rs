@@ -30,7 +30,7 @@ pub(crate) fn has_standalone_dependency_code(ir: &crate::ir::IrFile, callable: F
 /// body recorded. The receiver node may be a local read after inline callable-reference staging;
 /// its syntax carries no authority. The per-expression singleton classifier frozen from common IR
 /// is the semantic proof, while a present receiver preserves the source call's operand shape.
-pub(crate) fn authenticated_singleton_receiver(
+pub fn authenticated_singleton_receiver(
     receiver: Option<crate::ir::ExprId>,
     selected_classifier: Option<crate::types::TypeName>,
     expected: crate::types::Ty,
@@ -48,7 +48,7 @@ pub(crate) fn authenticated_singleton_receiver(
 /// dependency call, and that every such call joins to the same inert exported receiver effect.
 /// A shared `GetValue` node used in any second position fails the edge-count equality and remains
 /// evaluated.
-pub(crate) fn inert_staged_singleton_bindings(
+pub fn inert_staged_singleton_bindings(
     ir: &crate::ir::IrFile,
     mut singleton_dispatch: impl FnMut(crate::ir::ExprId) -> Option<crate::types::TypeName>,
     mut receiver_is_inert: impl FnMut(crate::fir::ExternalCallableId, crate::types::TypeName) -> bool,
@@ -199,6 +199,10 @@ pub struct DependencyExportSignatures {
     /// identity a dependent module's implementation of the member is recorded under.
     interface_members: HashMap<FunId, KlibDependencyCallable>,
     interface_properties: HashMap<crate::fir::PropertyId, KlibDependencyCallable>,
+    /// Every property of this file another module may name, by its getter's published identity,
+    /// whether or not the getter has code of its own: what a reference to the property is equal
+    /// by in every module.
+    property_declarations: HashMap<crate::fir::PropertyId, KlibDependencyCallable>,
     member_receivers: HashMap<FunId, DependencyMemberReceiver>,
     singleton_member_receivers: HashMap<FunId, SingletonMemberReceiver>,
     singleton_extension_unread_receivers: HashMap<FunId, SingletonExtensionUnreadReceiver>,
@@ -208,16 +212,22 @@ pub struct DependencyExportSignatures {
     constructors: Vec<(ExportedConstructor, KlibDependencyCallable)>,
     /// Concrete default property accessors whose checked operations a target exports as bodies.
     property_accessors: Vec<(ExportedPropertyAccessor, KlibDependencyCallable)>,
-    /// Every object declaration of this file another module may read as a value, and, once a
-    /// target realized it, the entry answering its instance (see `super::construction_entries`).
-    singletons: Vec<crate::ir::ClassId>,
-    singleton_entries: Vec<(crate::types::TypeName, FunId)>,
+    /// The entry a target realized answering each object instance and enum constant of this
+    /// file (see `super::instance_links`).
+    instance_entries: Vec<(super::instance_links::InstanceEntry, FunId)>,
+}
+
+/// One constant of an enum class, as a read of it names it: the enum and the constant's name.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct EnumConstant {
+    pub classifier: crate::types::TypeName,
+    pub name: Box<str>,
 }
 
 /// One constructor [`DependencyExportSignatures`] publishes: the class and which of its
 /// constructors, `None` for the primary one and the ordinal in `IrClass::secondary_ctors` for a
 /// secondary one.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ExportedConstructor {
     pub class: crate::ir::ClassId,
     pub secondary: Option<usize>,
@@ -281,6 +291,23 @@ impl DependencyExportSignatures {
         self.interface_properties.get(&property)
     }
 
+    /// The published identity of `property`, which another module names it by: its getter's.
+    pub fn property_declaration(
+        &self,
+        property: crate::fir::PropertyId,
+    ) -> Option<&KlibDependencyCallable> {
+        self.property_declarations.get(&property)
+    }
+
+    /// Every property identity this file publishes.
+    pub fn property_declarations(
+        &self,
+    ) -> impl Iterator<Item = (crate::fir::PropertyId, &KlibDependencyCallable)> {
+        self.property_declarations
+            .iter()
+            .map(|(&property, identity)| (property, identity))
+    }
+
     /// Exact unread extension receiver and its separately authenticated source-evaluation effect.
     pub fn singleton_extension_unread_receiver(
         &self,
@@ -312,36 +339,26 @@ impl DependencyExportSignatures {
     }
 
     /// Every constructor this file publishes, in record order.
-    pub(crate) fn constructors(&self) -> &[(ExportedConstructor, KlibDependencyCallable)] {
+    pub fn constructors(&self) -> &[(ExportedConstructor, KlibDependencyCallable)] {
         &self.constructors
     }
 
-    /// Record an object declaration another module may read as a value.
-    pub(crate) fn record_singleton(&mut self, class: crate::ir::ClassId) {
-        self.singletons.push(class);
-    }
-
-    /// Every object declaration this file publishes, in record order.
-    pub(crate) fn singletons(&self) -> &[crate::ir::ClassId] {
-        &self.singletons
-    }
-
-    /// Record the target-realized entry answering the instance of the object `classifier`.
-    pub(crate) fn record_singleton_entry(
+    /// Record the target-realized entry answering an object's instance or an enum constant.
+    pub(crate) fn record_instance_entry(
         &mut self,
-        classifier: crate::types::TypeName,
+        instance: super::instance_links::InstanceEntry,
         entry: FunId,
     ) {
-        self.singleton_entries.push((classifier, entry));
+        self.instance_entries.push((instance, entry));
     }
 
-    /// Every object instance entry a target realized, by the object's classifier.
-    pub(crate) fn singleton_entries(&self) -> &[(crate::types::TypeName, FunId)] {
-        &self.singleton_entries
+    /// Every instance entry a target realized for this file.
+    pub fn instance_entries(&self) -> &[(super::instance_links::InstanceEntry, FunId)] {
+        &self.instance_entries
     }
 
     /// Record one declaration at the metadata owner that computed its exact identity.
-    pub(crate) fn record_callable(&mut self, callable: FunId, identity: KlibDependencyCallable) {
+    pub fn record_callable(&mut self, callable: FunId, identity: KlibDependencyCallable) {
         let previous = self.callables.insert(callable, identity);
         assert!(
             previous.is_none(),
@@ -373,6 +390,18 @@ impl DependencyExportSignatures {
         );
     }
 
+    pub(crate) fn record_property_declaration(
+        &mut self,
+        property: crate::fir::PropertyId,
+        getter: KlibDependencyCallable,
+    ) {
+        let previous = self.property_declarations.insert(property, getter);
+        assert!(
+            previous.is_none(),
+            "one property cannot publish two KLIB declaration identities"
+        );
+    }
+
     pub(crate) fn record_member_receiver(&mut self, callable: FunId, receiver: crate::types::Ty) {
         let previous = self
             .member_receivers
@@ -383,7 +412,7 @@ impl DependencyExportSignatures {
         );
     }
 
-    pub(crate) fn record_singleton_extension_unread_receiver(
+    pub fn record_singleton_extension_unread_receiver(
         &mut self,
         callable: FunId,
         receiver: crate::types::Ty,
@@ -402,7 +431,7 @@ impl DependencyExportSignatures {
         );
     }
 
-    pub(crate) fn record_singleton_member_receiver(
+    pub fn record_singleton_member_receiver(
         &mut self,
         callable: FunId,
         classifier: crate::types::TypeName,

@@ -156,7 +156,7 @@ where
 
 /// A type-parameter binding map. The frontend keys bindings by [`TyParamName`]; lowering and
 /// backends still key theirs by the identity's text until they move to the typed key.
-pub(crate) trait TyParamKey: std::borrow::Borrow<str> + Eq + std::hash::Hash {}
+pub trait TyParamKey: std::borrow::Borrow<str> + Eq + std::hash::Hash {}
 
 impl TyParamKey for TyParamName {}
 impl TyParamKey for String {}
@@ -170,7 +170,7 @@ fn recorded_binding<K: TyParamKey>(bindings: &HashMap<K, Ty>, name: &str) -> Opt
     bindings.get(name).copied()
 }
 
-pub(crate) fn ty_subst<K: TyParamKey>(ty: Ty, bindings: &HashMap<K, Ty>) -> Ty {
+pub fn ty_subst<K: TyParamKey>(ty: Ty, bindings: &HashMap<K, Ty>) -> Ty {
     substitute_type_parameters(
         ty,
         |name| recorded_binding(bindings, name),
@@ -262,7 +262,7 @@ pub(crate) fn ty_subst_formals<F: TyParamKey, K: TyParamKey>(
     )
 }
 
-pub(crate) fn ty_subst_all<K: TyParamKey>(types: &[Ty], bindings: &HashMap<K, Ty>) -> Vec<Ty> {
+pub fn ty_subst_all<K: TyParamKey>(types: &[Ty], bindings: &HashMap<K, Ty>) -> Vec<Ty> {
     types.iter().map(|ty| ty_subst(*ty, bindings)).collect()
 }
 
@@ -536,7 +536,7 @@ where
     )
 }
 
-pub(crate) fn ty_subst_applied_arguments<K: TyParamKey>(ty: Ty, bindings: &HashMap<K, Ty>) -> Ty {
+pub fn ty_subst_applied_arguments<K: TyParamKey>(ty: Ty, bindings: &HashMap<K, Ty>) -> Ty {
     ty_subst_applied_lookup(ty, |name| recorded_binding(bindings, name))
 }
 

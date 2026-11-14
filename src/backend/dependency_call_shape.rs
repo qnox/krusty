@@ -4,7 +4,7 @@
 use crate::types::Ty;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DependencyExportCall {
+pub enum DependencyExportCall {
     TopLevel,
     /// An ordinary instance member whose exported ABI keeps its dispatch receiver first.
     Member,
@@ -34,20 +34,20 @@ pub(crate) enum DependencyExportCall {
 
 /// The declaration-owned operand roles a defaulted dependency call is checked against.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct DeclaredOperandRoles<'a> {
+pub struct DeclaredOperandRoles<'a> {
     /// Leading context operands, which a call always supplies.
-    pub(crate) context_count: usize,
+    pub context_count: usize,
     /// Per context and value parameter, whether the declaration owns a default for it. A
     /// declaration that publishes none admits no omission.
-    pub(crate) defaults: Option<&'a [bool]>,
+    pub defaults: Option<&'a [bool]>,
     /// The operands the export declares, inserted receiver included.
-    pub(crate) declared: usize,
+    pub declared: usize,
 }
 
 impl DependencyExportCall {
     /// How many leading export operands are the dispatch receiver, which a default entry takes
     /// first but whose omission masks number only the parameters after it.
-    pub(crate) fn unmasked_receiver_operands(self) -> usize {
+    pub fn unmasked_receiver_operands(self) -> usize {
         usize::from(matches!(self, Self::Member | Self::MemberExtension))
     }
 
@@ -57,7 +57,7 @@ impl DependencyExportCall {
     /// after it, and a serialized extension receiver occupies the ordinal after it; neither a
     /// context nor a receiver is ever omitted. Each ordinal names one distinct value parameter
     /// whose declaration owns a default, or the call is malformed.
-    pub(crate) fn omitted_operands(
+    pub fn omitted_operands(
         self,
         omitted: &[u32],
         roles: DeclaredOperandRoles<'_>,
@@ -136,24 +136,24 @@ impl DependencyExportCall {
     }
 }
 
-pub(crate) struct DependencyCallShape<'a> {
-    pub(crate) is_top_level_function: bool,
-    pub(crate) is_extension: bool,
-    pub(crate) source_receiver: Option<Ty>,
-    pub(crate) context_count: usize,
+pub struct DependencyCallShape<'a> {
+    pub is_top_level_function: bool,
+    pub is_extension: bool,
+    pub source_receiver: Option<Ty>,
+    pub context_count: usize,
     /// The instantiated selected declaration, not the stored physical export signature.
-    pub(crate) emitted_params: &'a [Ty],
-    pub(crate) call_params: &'a [Ty],
-    pub(crate) extension_receiver_parameter: Option<u32>,
-    pub(crate) has_dispatch_receiver: bool,
-    pub(crate) unread_receiver: Option<Ty>,
-    pub(crate) companion_receiver_position: Option<usize>,
-    pub(crate) member_receiver: Option<Ty>,
-    pub(crate) receiver_is_exact_singleton: bool,
+    pub emitted_params: &'a [Ty],
+    pub call_params: &'a [Ty],
+    pub extension_receiver_parameter: Option<u32>,
+    pub has_dispatch_receiver: bool,
+    pub unread_receiver: Option<Ty>,
+    pub companion_receiver_position: Option<usize>,
+    pub member_receiver: Option<Ty>,
+    pub receiver_is_exact_singleton: bool,
 }
 
 impl DependencyCallShape<'_> {
-    pub(crate) fn authenticate(self) -> Result<DependencyExportCall, &'static str> {
+    pub fn authenticate(self) -> Result<DependencyExportCall, &'static str> {
         let Self {
             is_top_level_function,
             is_extension,

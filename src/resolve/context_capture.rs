@@ -125,11 +125,11 @@ fn scan_context_sources(
                         .filter(|bound| *bound == name)
                         .count()
                         + usize::from(name == "this") * nested_receiver_count.implicit_this;
-                    let Some(normalized_depth) = binding.shadow_depth.checked_sub(body_local_depth)
+                    let Some(source) = binding.source.outside_nested_bindings(body_local_depth)
                     else {
                         return;
                     };
-                    binding.shadow_depth = normalized_depth;
+                    binding.source = source;
                 }
                 if !state.direct_implicit_receivers.contains(&selection) {
                     state.direct_implicit_receivers.push(selection);
@@ -140,19 +140,19 @@ fn scan_context_sources(
         let normalized = match source {
             ResolvedContextArgument::Binding {
                 name,
-                shadow_depth,
+                source,
                 flow_identity,
             } => {
                 let nested_depth = nested_bound_names
                     .iter()
                     .filter(|bound| *bound == name)
                     .count();
-                let Some(shadow_depth) = shadow_depth.checked_sub(nested_depth) else {
+                let Some(source) = source.outside_nested_bindings(nested_depth) else {
                     return;
                 };
                 ResolvedContextArgument::Binding {
                     name: name.clone(),
-                    shadow_depth,
+                    source,
                     flow_identity: *flow_identity,
                 }
             }
@@ -165,11 +165,10 @@ fn scan_context_sources(
                         .filter(|bound| *bound == name)
                         .count()
                         + usize::from(name == "this") * nested_receiver_count.implicit_this;
-                    let Some(normalized_depth) = binding.shadow_depth.checked_sub(nested_depth)
-                    else {
+                    let Some(source) = binding.source.outside_nested_bindings(nested_depth) else {
                         return;
                     };
-                    binding.shadow_depth = normalized_depth;
+                    binding.source = source;
                 } else if selection.singleton.is_none() {
                     let Some(receiver_depth) = selection
                         .receiver_depth
@@ -280,7 +279,11 @@ fn scan_context_sources(
                                 None,
                                 &ResolvedContextArgument::Binding {
                                     name: capture.name.clone(),
-                                    shadow_depth: 0,
+                                    source:
+                                        crate::resolve::ContextBindingSource::ProvenLocalDepth {
+                                            shadow_depth: 0,
+                                            lexical_binding: capture.lexical_binding,
+                                        },
                                     flow_identity: capture.flow_identity,
                                 },
                                 nested_callable,

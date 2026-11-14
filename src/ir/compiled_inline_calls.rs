@@ -54,7 +54,7 @@ impl IrFile {
     /// Record that `call` is inlined from the compiled body of `function`. Each operand carries the
     /// `crossinline`/`noinline` modifier its parameter declares, so the backend knows which literal
     /// lambdas the body's invokes take in.
-    pub(crate) fn record_compiled_inline_call(&mut self, call: ExprId, function: FunId) {
+    pub fn record_compiled_inline_call(&mut self, call: ExprId, function: FunId) {
         debug_assert_eq!(
             self.compiled_inline_calls.lowering,
             SameModuleInlining::CompiledBodies
@@ -93,7 +93,7 @@ impl IrFile {
     /// calls (`jvm_member_targets`): the declaration `function` this file holds, or else, for a
     /// member of another file inlined from its compiled body, the template of the checked
     /// `module_target` the call inlines.
-    pub(crate) fn record_realized_member_target(
+    pub fn record_realized_member_target(
         &mut self,
         call: ExprId,
         function: Option<FunId>,
@@ -150,7 +150,7 @@ impl IrFile {
 
     /// A recorded call moved to `target` (below a representation wrapper left at `source`) is
     /// still the call inlined from that body; the wrapper is not.
-    pub(crate) fn move_compiled_inline_call(&mut self, source: ExprId, target: ExprId) {
+    pub fn move_compiled_inline_call(&mut self, source: ExprId, target: ExprId) {
         if let Some(function) = self.compiled_inline_calls.calls.remove(&source) {
             self.compiled_inline_calls.calls.insert(target, function);
         }

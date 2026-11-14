@@ -31,6 +31,11 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
+# The Gradle project probe is allowed 45 minutes. A shorter wrapper kills a real model
+# (the Kotlin compiler repository configures in several minutes) and the scan then
+# publishes counts with no declaration set.
+MODEL_RESOLVE_TIMEOUT_SECONDS = 45 * 60
+
 # Message normalization: a cluster is a root cause, not a wording. Identifiers, literals and numbers
 # are what vary between two reports of the SAME gap, so they are what gets folded away.
 NORMALIZERS = [
@@ -59,18 +64,20 @@ NAMED_UNRESOLVED = [
     re.compile(r"unresolved Java static '([^']+)'"),
 ]
 
-# Mirrors PARITY_SKIP_DIRECTORIES in crates/krusty-lsp/src/main.rs. The Rust list decides which
+# Mirrors IGNORED_DIRECTORIES in crates/krusty-lsp/src/project/walk.rs. The Rust list decides which
 # files are compiled; this one decides which names are excused, so they must agree — a name excused
 # here that the scan never had a chance to see is exactly the case this filter exists for.
 SKIP_DIRECTORIES = {
     ".git",
+    ".gradle",
+    ".idea",
+    "build",
+    "node_modules",
+    "out",
+    "target",
     "testData",
     "test-data",
     "testdata",
-    "out",
-    "build",
-    "target",
-    "node_modules",
 }
 
 
@@ -112,7 +119,10 @@ def resolve_model(binary: Path | None, root: Path) -> dict | None:
         return None
     try:
         finished = subprocess.run(
-            [str(binary), "model", str(root)], capture_output=True, text=True, timeout=300
+            [str(binary), "model", str(root)],
+            capture_output=True,
+            text=True,
+            timeout=MODEL_RESOLVE_TIMEOUT_SECONDS,
         )
         return json.loads(finished.stdout) if finished.returncode == 0 else None
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -349,6 +359,26 @@ def summarize(
             modules_clean_but_for_unseen += 1
     checked = sum(report.get("checked_files", 0) for report in reports)
     clean = status.get("ok", 0)
+    # Absent on a record written before the field existed. Zero would claim every such module
+    # failed to open, which that scan did not measure.
+    def counted(key):
+        if not reports or any(key not in report for report in reports):
+            return None
+        return sum(report[key] for report in reports)
+
+    def flagged(key):
+        if not reports or any(key not in report for report in reports):
+            return None
+        return sum(1 for report in reports if report[key])
+
+    def summed_optional(key):
+        if not reports or any(key not in report for report in reports):
+            return None
+        numbers = [report[key] for report in reports if report[key] is not None]
+        if not numbers:
+            return None
+        return sum(numbers)
+
     return {
         "run": metadata or {},
         "truncated_modules": sum(1 for report in reports if report.get("truncated")),
@@ -365,6 +395,17 @@ def summarize(
         "status": dict(status),
         "unseen_declaration_errors": unseen,
         "total_errors": sum(report.get("error_count", 0) for report in reports),
+        "open_complete_modules": flagged("open_complete"),
+        "missing_classpath_entries": counted("missing_classpath_entries"),
+        # Parsing and type checking are one analysis. `elapsed_ms` is that combined time.
+        # It is not a parse time, a type-check time, or a navigation query.
+        "parse_ms": None,
+        "type_info_ms": None,
+        # Definition and references lookups, in microseconds, summed over modules that issued
+        # them. A missing key means an older record that did not measure the query. JSON null
+        # means this module did not issue one (it never finished analysis). Neither is elapsed_ms.
+        "definition_query_us": summed_optional("definition_query_us"),
+        "references_query_us": summed_optional("references_query_us"),
         "slowest": sorted(
             ((report["elapsed_ms"], report["module"]) for report in reports), reverse=True
         )[:top],
@@ -389,6 +430,17 @@ def summarize(
     }
 
 
+def navigation_text(summary: dict) -> str:
+    definition = summary.get("definition_query_us")
+    references = summary.get("references_query_us")
+    if definition is None and references is None:
+        return "not measured"
+    return (
+        f"definition {definition} µs, references {references} µs "
+        "(index lookup, not analysis)"
+    )
+
+
 def render_text(summary: dict) -> str:
     lines = []
     modules = summary["modules"]
@@ -397,6 +449,23 @@ def render_text(summary: dict) -> str:
     lines.append(f"modules      {clean}/{modules} clean ({share:.1f}%)")
     lines.append(f"kotlin files {summary['checked_files']}")
     lines.append(f"errors       {summary['total_errors']} total")
+    opened = summary["open_complete_modules"]
+    lines.append(
+        "open         "
+        + ("not measured" if opened is None else f"{opened}/{modules} modules complete")
+    )
+    missing = summary["missing_classpath_entries"]
+    lines.append(
+        "classpath    "
+        + (
+            "not measured"
+            if missing is None
+            else f"{missing} declared entries missing from disk"
+        )
+    )
+    lines.append("parse        not measured")
+    lines.append("type info    not measured")
+    lines.append("navigation   " + navigation_text(summary))
     lines.append(
         f"  of which   {summary['unseen_declaration_errors']} name a declaration the scan could "
         f"not see (unbuilt dependency module)"
@@ -498,6 +567,18 @@ def render_markdown(summary: dict, root: Path, jsonl: Path) -> str:
         f"| modules that hit the input budget | {summary['truncated_modules']} |",
         f"| checked files that could not be read | {summary['unreadable_checked_files']} |",
         f"| modules whose Java stub overlay failed | {summary['java_stub_failed_modules']} |",
+        f"| modules that opened completely | {summary['open_complete_modules'] if summary['open_complete_modules'] is not None else 'not measured'} |",
+        f"| classpath entries missing from disk | {summary['missing_classpath_entries'] if summary['missing_classpath_entries'] is not None else 'not measured'} |",
+        "| parse time | not measured |",
+        "| type-information latency | not measured |",
+        f"| go-to-definition and find-references | {navigation_text(summary)} |",
+        "",
+        "Parse time and type-information latency are not measured: one module analysis is timed",
+        "as a whole (`elapsed_ms`), and that figure is not copied into either of them. Go-to-definition",
+        "and find-references are the server's index lookups after that analysis, in microseconds,",
+        "and only for modules that issued the query. Find-references reads the open documents'",
+        "definition indexes. The closed-file index keeps diagnostics and parse-only symbols, not",
+        "those edges, so it is not searched.",
         "",
         "## Module outcomes",
         "",

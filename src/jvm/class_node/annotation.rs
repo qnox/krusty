@@ -5,7 +5,7 @@ use crate::kt_string::KtString;
 
 /// One `annotation` structure.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Annotation {
+pub struct Annotation {
     /// The annotation interface's field descriptor.
     pub desc: String,
     /// The element-value pairs, in their order.
@@ -14,7 +14,7 @@ pub(crate) struct Annotation {
 
 /// One `element_value`.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum ElementValue {
+pub enum ElementValue {
     /// `B`, `C`, `I`, `S` or `Z`: the tag and the `CONSTANT_Integer` it names.
     Int(u8, i32),
     /// `J`.

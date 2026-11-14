@@ -42,7 +42,7 @@ impl<'a> ProjectAnalysisGroup<'a> {
     }
 }
 
-fn source_kind_from_uri(uri: &str) -> krusty::source::SourceKind {
+pub(crate) fn source_kind_from_uri(uri: &str) -> krusty::source::SourceKind {
     if uri.ends_with(".java") {
         return krusty::source::SourceKind::Java;
     }
@@ -56,7 +56,7 @@ fn source_kind_from_uri(uri: &str) -> krusty::source::SourceKind {
 
 /// A script document's file stem, which names its class: the decoded file name without its
 /// extension. Any other document has none.
-fn script_stem(uri: &str) -> Option<String> {
+pub(crate) fn script_stem(uri: &str) -> Option<String> {
     if source_kind_from_uri(uri) != krusty::source::SourceKind::KotlinScript {
         return None;
     }

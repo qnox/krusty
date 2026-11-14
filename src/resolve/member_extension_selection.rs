@@ -491,10 +491,12 @@ impl Checker<'_> {
             self.intersection_bindings_from_lower_inputs(&candidate.lower_inputs);
         let result = self.commit_selected_call_intersections(
             call,
-            &signature,
-            explicit_type_args,
-            &candidate.parameter_indices,
-            &candidate.call_sig,
+            super::intersection_inference::GenericCallCommitment {
+                signature: &signature,
+                explicit_type_args,
+                parameter_indices: &candidate.parameter_indices,
+                call_sig: &candidate.call_sig,
+            },
             &mut candidate.bindings,
             &mut candidate.intersection_bindings,
             Default::default(),
@@ -592,81 +594,6 @@ impl Checker<'_> {
         let call = candidate.resolved_call(dispatch_receiver, interface);
         self.mark_extension_receiver_used(expression, candidate.dispatch_receiver);
         Ok(Some((result, call)))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{ordinary_dispatch_first, ImplicitReceiver, MemberExtensionFunctionSelection};
-    use crate::resolve::scope::{ContextReceiver, ContextReceiverKind, ScopeKind};
-    use crate::types::Ty;
-
-    #[test]
-    fn a_selection_carries_a_pointer_to_its_callable() {
-        assert_eq!(std::mem::size_of::<MemberExtensionFunctionSelection>(), 24);
-    }
-
-    #[test]
-    fn ordinary_dispatch_receivers_keep_their_relative_priority_before_context_receivers() {
-        let root: super::super::CheckerScope<'_> = super::super::CheckerScope::root();
-        let outer = root.child(ScopeKind::Class {
-            ty: Ty::obj("test/Outer"),
-            carries_outer: true,
-        });
-        let inner = outer.child(ScopeKind::Class {
-            ty: Ty::obj("test/Inner"),
-            carries_outer: true,
-        });
-        let scope = inner.function_child(
-            Some(Ty::obj("test/Extension")),
-            None,
-            &[
-                ContextReceiver::new(
-                    Ty::obj("test/FirstContext"),
-                    ContextReceiverKind::LegacyReceiver,
-                    None,
-                ),
-                ContextReceiver::new(
-                    Ty::obj("test/SecondContext"),
-                    ContextReceiverKind::LegacyReceiver,
-                    None,
-                ),
-            ],
-        );
-        let receivers = scope
-            .implicit_receivers_with_declarations()
-            .into_iter()
-            .enumerate()
-            .map(
-                |(receiver_depth, (ty, extension_receiver, identity, class_receiver))| {
-                    ImplicitReceiver {
-                        receiver_role: scope.implicit_receiver_role(identity),
-                        ty,
-                        declared_ty: ty,
-                        identity,
-                        extension_receiver,
-                        class_receiver,
-                        current: receiver_depth == 0,
-                        receiver_depth,
-                    }
-                },
-            )
-            .collect::<Vec<_>>();
-
-        let ordered = ordinary_dispatch_first(&scope, receivers);
-        assert_eq!(
-            ordered
-                .into_iter()
-                .map(|receiver| receiver.ty)
-                .collect::<Vec<_>>(),
-            vec![
-                Ty::obj("test/Extension"),
-                Ty::obj("test/Inner"),
-                Ty::obj("test/Outer"),
-                Ty::obj("test/SecondContext"),
-                Ty::obj("test/FirstContext"),
-            ]
-        );
     }
 }
 
@@ -774,4 +701,79 @@ pub(super) fn member_extension_lambda_shape_with(
         return MemberExtensionLambdaShape::Ambiguous;
     }
     MemberExtensionLambdaShape::Selected(plans.swap_remove(selected).2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ordinary_dispatch_first, ImplicitReceiver, MemberExtensionFunctionSelection};
+    use crate::resolve::scope::{ContextReceiver, ContextReceiverKind, ScopeKind};
+    use crate::types::Ty;
+
+    #[test]
+    fn a_selection_carries_a_pointer_to_its_callable() {
+        assert_eq!(std::mem::size_of::<MemberExtensionFunctionSelection>(), 24);
+    }
+
+    #[test]
+    fn ordinary_dispatch_receivers_keep_their_relative_priority_before_context_receivers() {
+        let root: super::super::CheckerScope<'_> = super::super::CheckerScope::root();
+        let outer = root.child(ScopeKind::Class {
+            ty: Ty::obj("test/Outer"),
+            carries_outer: true,
+        });
+        let inner = outer.child(ScopeKind::Class {
+            ty: Ty::obj("test/Inner"),
+            carries_outer: true,
+        });
+        let scope = inner.function_child(
+            Some(Ty::obj("test/Extension")),
+            None,
+            &[
+                ContextReceiver::new(
+                    Ty::obj("test/FirstContext"),
+                    ContextReceiverKind::LegacyReceiver,
+                    None,
+                ),
+                ContextReceiver::new(
+                    Ty::obj("test/SecondContext"),
+                    ContextReceiverKind::LegacyReceiver,
+                    None,
+                ),
+            ],
+        );
+        let receivers = scope
+            .implicit_receivers_with_declarations()
+            .into_iter()
+            .enumerate()
+            .map(
+                |(receiver_depth, (ty, extension_receiver, identity, class_receiver))| {
+                    ImplicitReceiver {
+                        receiver_role: scope.implicit_receiver_role(identity),
+                        ty,
+                        declared_ty: ty,
+                        identity,
+                        extension_receiver,
+                        class_receiver,
+                        current: receiver_depth == 0,
+                        receiver_depth,
+                    }
+                },
+            )
+            .collect::<Vec<_>>();
+
+        let ordered = ordinary_dispatch_first(&scope, receivers);
+        assert_eq!(
+            ordered
+                .into_iter()
+                .map(|receiver| receiver.ty)
+                .collect::<Vec<_>>(),
+            vec![
+                Ty::obj("test/Extension"),
+                Ty::obj("test/Inner"),
+                Ty::obj("test/Outer"),
+                Ty::obj("test/SecondContext"),
+                Ty::obj("test/FirstContext"),
+            ]
+        );
+    }
 }

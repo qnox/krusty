@@ -702,6 +702,10 @@ impl JvmLibraries {
     ) -> crate::libraries::PropertyReadStability {
         if self.cp.grants_internal_access(owner) {
             mp.read_stability
+        } else if mp.is_value_class_component
+            && mp.read_stability == crate::libraries::PropertyReadStability::Stable
+        {
+            crate::libraries::PropertyReadStability::ValueClassComponentOfOtherModule
         } else {
             crate::libraries::PropertyReadStability::Unstable
         }

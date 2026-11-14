@@ -1,4 +1,4 @@
-//! Coverage-focused end-to-end tests for the IR backend (`src/ir_lower.rs`, `src/jvm/ir_emit.rs`).
+//! Coverage-focused end-to-end tests for the IR backend (`src/ir_lower.rs`, `crates/krusty-jvm/src/ir_emit.rs`).
 //!
 //! Two kinds of test live here, both driving the FULL pipeline:
 //!

@@ -151,8 +151,8 @@ names compilations and keeps errors whole, for an issue you are free to share in
 - **kotlinc-compatible command line** for the supported subset, output to a class directory or a jar.
 - **Byte-level fidelity.** Every change is diffed against the real `kotlinc`, and every build runs
   JetBrains' `codegen/box` suite.
-- **Low memory.** On our multi-module benchmark, about a third of the peak memory of the
-  GraalVM-native `kotlinc`.
+- **Memory, measured nightly.** The [metrics page](https://krustythecompiler.dev/metrics/#cost)
+  compares krusty's peak memory with kotlinc's on real open-source projects.
 - **Build systems and compiler plugins** listed below: Gradle, the Kotlin Toolchain, the Kotlin
   Build Tools API and Bazel; kotlinx.serialization, all-open, no-arg, sam-with-receiver and KSP.
 - **Editor support.** `krusty-lsp` language server, with a [Zed extension](editors/zed/README.md).

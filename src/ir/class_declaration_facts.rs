@@ -4,7 +4,38 @@
 use super::{ExprId, IrClass, IrFile, IrGenericSig, IrTypeParameter};
 use crate::types::{Ty, TypeName};
 
+/// The Kotlin visibility a plugin gives a class it generates without a declaration. No declaration
+/// record describes the class, so its synthetic-class `@Metadata` records this one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IrDeclarationlessVisibility {
+    /// A file-level class of the module, such as Compose's `ComposableSingletons$<File>Kt`.
+    Internal,
+    /// A class local to a declaration's body or initializer, such as Parcelize's `Creator`.
+    Local,
+}
+
 impl IrFile {
+    /// The class and method index of `function` when it is a method of an open class, which a
+    /// subclass may override, so a call reaches it through the class's dispatch table.
+    pub(crate) fn overridable_method(
+        &self,
+        function: super::FunId,
+    ) -> Option<(super::ClassId, u32)> {
+        let owner = self.functions[function as usize].dispatch_receiver?;
+        let class = self.class_id_by_name(owner)?;
+        let declaration = &self.classes[class as usize];
+        if !(declaration.is_open || declaration.is_abstract)
+            || self.method_visibility(function) == crate::types::Visibility::Private
+        {
+            return None;
+        }
+        let index = declaration
+            .methods
+            .iter()
+            .position(|&method| method == function)?;
+        Some((class, u32::try_from(index).ok()?))
+    }
+
     pub(crate) fn record_declared_class_self_type(&mut self, classifier: TypeName, self_type: Ty) {
         assert_eq!(self_type.kotlin_class_internal(), Some(classifier));
         let previous = self.declared_class_self_types.insert(classifier, self_type);
@@ -28,7 +59,7 @@ impl IrFile {
             .retain(|owner, _| owners.contains(owner));
     }
 
-    pub(crate) fn declared_class_self_type(&self, classifier: TypeName) -> Option<Ty> {
+    pub fn declared_class_self_type(&self, classifier: TypeName) -> Option<Ty> {
         self.declared_class_self_types.get(&classifier).copied()
     }
 
@@ -40,12 +71,17 @@ impl IrFile {
         self.synthetic_classes.contains(&internal)
     }
 
-    pub(crate) fn mark_declarationless_class(&mut self, internal: TypeName) {
-        self.declarationless_classes.insert(internal);
+    pub(crate) fn mark_declarationless_class(
+        &mut self,
+        internal: TypeName,
+        visibility: IrDeclarationlessVisibility,
+    ) {
+        self.declarationless_classes.insert(internal, visibility);
     }
 
-    pub(crate) fn is_declarationless_class(&self, internal: TypeName) -> bool {
-        self.declarationless_classes.contains(&internal)
+    /// The visibility a class generated without a declaration was given, if it is one.
+    pub fn declarationless_class(&self, internal: TypeName) -> Option<IrDeclarationlessVisibility> {
+        self.declarationless_classes.get(&internal).copied()
     }
 
     pub fn mark_deprecated_class(&mut self, internal: TypeName) {
@@ -77,7 +113,7 @@ impl IrFile {
     }
 
     /// Checked primary-constructor default expressions, each an independently emitted value root.
-    pub(crate) fn class_ctor_default_roots(&self) -> impl Iterator<Item = ExprId> + '_ {
+    pub fn class_ctor_default_roots(&self) -> impl Iterator<Item = ExprId> + '_ {
         self.class_ctor_defaults
             .values()
             .flat_map(|defaults| defaults.iter().flatten().copied())
@@ -109,19 +145,19 @@ impl IrFile {
 
     /// Record the signature a plugin's IR lowering gives a class it generated, when it differs from
     /// the declared one (kotlinx.serialization's bounded `$serializer` type parameters).
-    pub(crate) fn insert_lowered_class_signature(&mut self, internal: TypeName, sig: IrGenericSig) {
+    pub fn insert_lowered_class_signature(&mut self, internal: TypeName, sig: IrGenericSig) {
         self.lowered_class_signatures.insert(internal, sig);
     }
 
     /// The signature the class's classfile is written from: its lowered one, else its declaration.
-    pub(crate) fn lowered_class_signature(&self, internal: TypeName) -> Option<&IrGenericSig> {
+    pub fn lowered_class_signature(&self, internal: TypeName) -> Option<&IrGenericSig> {
         self.lowered_class_signatures
             .get(&internal)
             .or_else(|| self.class_signatures.get(&internal))
     }
 
     /// `class` applied to its own type parameters (`C<T>`): the type of its `this`.
-    pub(crate) fn class_type(&self, class: &IrClass) -> Ty {
+    pub fn class_type(&self, class: &IrClass) -> Ty {
         let arguments: Vec<Ty> = self
             .class_signature_name(class.fq_name)
             .map(|signature| {

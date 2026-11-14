@@ -20,7 +20,7 @@ use crate::jvm::inline::Insn;
 const OBJECT_INTERNAL_NAME: &str = "java/lang/Object";
 
 /// What the analysis needs to read out of the constant pool the body's operands index.
-pub(crate) trait PoolView {
+pub trait PoolView {
     /// The internal name of the `CONSTANT_Class` at `index`.
     fn class_name(&self, index: u16) -> Option<&str>;
     /// The descriptor of the field reference at `index`.
@@ -55,7 +55,7 @@ impl PoolView for crate::jvm::classfile::ClassWriter {
 /// object created by `new` and not yet constructed is `Uninitialized`, which a frame cannot name in
 /// this compiler's representation.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum VerificationType {
+pub enum VerificationType {
     Top,
     Integer,
     Float,
@@ -89,7 +89,7 @@ impl VerificationType {
     }
 
     /// The frame representation. An uninitialized object has none and reads as `Top`.
-    pub(crate) fn to_verif(&self) -> VerifType {
+    pub fn to_verif(&self) -> VerifType {
         match self {
             VerificationType::Top | VerificationType::Uninitialized(_) => VerifType::Top,
             VerificationType::Integer => VerifType::Integer,
@@ -123,7 +123,7 @@ impl VerificationType {
 /// The verifier's state at one program point: locals by SLOT (a `long`/`double` is its type then
 /// `Top`), and the operand stack bottom-first, one entry per value.
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
-pub(crate) struct FrameState {
+pub struct FrameState {
     pub locals: Vec<VerificationType>,
     pub stack: Vec<VerificationType>,
 }
@@ -142,7 +142,7 @@ impl FrameState {
         }
     }
 
-    pub(crate) fn local(&self, slot: u16) -> &VerificationType {
+    pub fn local(&self, slot: u16) -> &VerificationType {
         self.locals
             .get(usize::from(slot))
             .unwrap_or(&VerificationType::Top)
@@ -274,7 +274,7 @@ fn pop_group(state: &mut FrameState) -> Option<Vec<VerificationType>> {
 }
 
 /// The verifier's state before every instruction of one method body.
-pub(crate) struct FrameTypes {
+pub struct FrameTypes {
     before: Vec<Option<FrameState>>,
 }
 
@@ -284,7 +284,7 @@ impl FrameTypes {
     /// will carry there (`ClassWriter::merged_frames`), not the per-label frames several labels
     /// bound at one offset registered. `None` when an instruction cannot be modelled, two frames
     /// share an index, or the body does not verify under this model — the caller declines then.
-    pub(crate) fn analyze(
+    pub fn analyze(
         insns: &[Insn],
         graph: &ControlGraph,
         entry: &[VerifType],
@@ -438,7 +438,7 @@ impl FrameTypes {
     }
 
     /// The state immediately BEFORE `index` executes; `None` where the instruction is unreachable.
-    pub(crate) fn before(&self, index: usize) -> Option<&FrameState> {
+    pub fn before(&self, index: usize) -> Option<&FrameState> {
         self.before.get(index)?.as_ref()
     }
 }

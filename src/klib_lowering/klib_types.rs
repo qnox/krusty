@@ -59,11 +59,12 @@ fn class_type(
     classifier: &KlibIrSymbol,
     arguments: &[KlibIrTypeArgument],
     annotations: &[KlibIrAnnotation],
+    local_class: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
 ) -> Result<Ty, KlibBodyDeclineReason> {
-    let (name, receiver) = class_head(classifier, annotations)?;
+    let (name, receiver) = class_head(classifier, annotations, local_class)?;
     let mut arguments = arguments
         .iter()
-        .map(|argument| type_argument(arena, parameters, *argument))
+        .map(|argument| type_argument(arena, parameters, *argument, local_class))
         .collect::<Result<Vec<_>, _>>()?;
     if let Some(function) = function_shape(name, arguments.len())? {
         if !function.is_reflective() {
@@ -91,6 +92,17 @@ pub(super) fn semantic_type(
     parameters: &KlibTypeParameters,
     id: KlibIrTypeId,
 ) -> Result<Ty, KlibBodyDeclineReason> {
+    semantic_type_in(arena, parameters, id, &|_| Ok(None))
+}
+
+/// [`semantic_type`], also admitting a non-public class `local_class` resolves inside the library
+/// whose body is being lowered. `Ok(None)` keeps the refusal of every other non-public classifier.
+pub(super) fn semantic_type_in(
+    arena: &KlibIrArena,
+    parameters: &KlibTypeParameters,
+    id: KlibIrTypeId,
+    local_class: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
+) -> Result<Ty, KlibBodyDeclineReason> {
     let (classifier, nullability, arguments, annotations) = match arena.ty(id) {
         KlibIrType::Simple {
             classifier,
@@ -113,9 +125,14 @@ pub(super) fn semantic_type(
         }
     };
     let semantic = match classifier.kind {
-        KlibIrSymbolKind::Class => {
-            class_type(arena, parameters, classifier, arguments, annotations)?
-        }
+        KlibIrSymbolKind::Class => class_type(
+            arena,
+            parameters,
+            classifier,
+            arguments,
+            annotations,
+            local_class,
+        )?,
         KlibIrSymbolKind::TypeParameter => {
             if !arguments.is_empty() {
                 return Err(mismatch("a type parameter is applied to type arguments"));
@@ -135,8 +152,11 @@ pub(super) fn semantic_type(
     Ok(match nullability {
         KlibIrNullability::MarkedNullable => Ty::nullable(semantic),
         // A class type the serializer marks definitely non-null is its ordinary non-null type; on
-        // a type parameter the mark is the intersection `T & Any`.
-        KlibIrNullability::DefinitelyNotNull if semantic.is_ty_param() => {
+        // a type parameter whose bound admits null the mark is the intersection `T & Any`. A
+        // parameter bounded by a non-null type is already non-null, and `T & Any` is `T` itself.
+        KlibIrNullability::DefinitelyNotNull
+            if semantic.is_ty_param() && semantic.upper_bound_admits_null() =>
+        {
             Ty::from(TyKind::DefinitelyNotNull(semantic))
         }
         KlibIrNullability::NotSpecified | KlibIrNullability::DefinitelyNotNull => semantic,
@@ -146,18 +166,21 @@ pub(super) fn semantic_type(
 fn class_head(
     classifier: &KlibIrSymbol,
     annotations: &[KlibIrAnnotation],
+    local_class: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
 ) -> Result<(TypeName, bool), KlibBodyDeclineReason> {
-    let KlibIrSignature::Public(signature) = &classifier.signature else {
-        return Err(KlibBodyDeclineReason::UnsupportedType(
+    let name = match &classifier.signature {
+        KlibIrSignature::Public(signature) => {
+            if signature.member_id().is_some() || signature.declaration().is_empty() {
+                return Err(KlibBodyDeclineReason::UnsupportedType(
+                    "a type whose classifier is not a class",
+                ));
+            }
+            classifier_name(signature)?
+        }
+        signature => local_class(signature)?.ok_or(KlibBodyDeclineReason::UnsupportedType(
             "a type of a non-public class",
-        ));
+        ))?,
     };
-    if signature.member_id().is_some() || signature.declaration().is_empty() {
-        return Err(KlibBodyDeclineReason::UnsupportedType(
-            "a type whose classifier is not a class",
-        ));
-    }
-    let name = classifier_name(signature)?;
     let mut receiver = false;
     for annotation in annotations {
         let Some(annotation) = annotation_classifier(annotation) else {
@@ -212,7 +235,7 @@ pub(super) fn closure_type_arity(arena: &KlibIrArena, id: KlibIrTypeId) -> Optio
     {
         return None;
     }
-    let (name, _) = class_head(classifier, annotations).ok()?;
+    let (name, _) = class_head(classifier, annotations, &|_| Ok(None)).ok()?;
     let function = function_shape(name, arguments.len()).ok()??;
     (!function.is_reflective()).then(|| function.arity())
 }
@@ -222,11 +245,12 @@ fn type_argument(
     arena: &KlibIrArena,
     parameters: &KlibTypeParameters,
     argument: KlibIrTypeArgument,
+    local_class: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
 ) -> Result<Ty, KlibBodyDeclineReason> {
     Ok(match argument {
         KlibIrTypeArgument::Star => Ty::out_projection(Ty::nullable(Ty::obj_name(wk::any()))),
         KlibIrTypeArgument::Type { variance, ty } => {
-            let ty = semantic_type(arena, parameters, ty)?;
+            let ty = semantic_type_in(arena, parameters, ty, local_class)?;
             match variance {
                 KlibIrVariance::Invariant => ty,
                 KlibIrVariance::In => Ty::in_projection(ty),
@@ -364,4 +388,43 @@ fn declaration_name(
 
 fn mismatch(detail: &str) -> KlibBodyDeclineReason {
     KlibBodyDeclineReason::SignatureMismatch(detail.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata::klib_ir::KlibIrSignature;
+
+    /// `T & Any` as kotlinc serializes it: the type parameter `T` marked definitely non-null.
+    fn definitely_non_null(bound: Ty) -> Ty {
+        let symbol = KlibIrSymbol {
+            kind: KlibIrSymbolKind::TypeParameter,
+            signature: KlibIrSignature::FileLocal { file: 0, slot: 0 },
+        };
+        let mut parameters = KlibTypeParameters::default();
+        assert!(parameters.bind(&symbol, Ty::ty_param("T", bound)));
+        let mut arena = KlibIrArena::default();
+        let id = arena.push_type(KlibIrType::Simple {
+            classifier: symbol,
+            nullability: KlibIrNullability::DefinitelyNotNull,
+            arguments: Vec::new(),
+            annotations: Vec::new(),
+            abbreviation: None,
+        });
+        semantic_type(&arena, &parameters, id).expect("a type parameter type")
+    }
+
+    /// kotlinc serializes `listOf(element)` in `fun <T : Any> listOfNotNull(element: T?)` at the
+    /// type argument `T & Any`, and types the call `List<T>`: for a parameter bounded by `Any`,
+    /// `T & Any` is `T`.
+    #[test]
+    fn a_definitely_non_null_parameter_bounded_by_a_non_null_type_is_the_parameter() {
+        let any = Ty::obj("kotlin/Any");
+        assert_eq!(definitely_non_null(any), Ty::ty_param("T", any));
+        let nullable_any = Ty::nullable(any);
+        assert_eq!(
+            definitely_non_null(nullable_any),
+            Ty::from(TyKind::DefinitelyNotNull(Ty::ty_param("T", nullable_any)))
+        );
+    }
 }

@@ -171,7 +171,7 @@ struct Marker {
 
 /// Whether `node` calls `Intrinsics.reifiedOperationMarker`: its reified type parameters must be
 /// specialized for the call site, which only this inliner does.
-pub(in crate::jvm) fn has_reified_markers(node: &MethodNode) -> bool {
+pub fn has_reified_markers(node: &MethodNode) -> bool {
     node.nodes.iter().any(|entry| {
         matches!(
             entry,

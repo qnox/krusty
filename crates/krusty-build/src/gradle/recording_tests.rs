@@ -1,6 +1,8 @@
 //! Complete invocation records while Gradle launches independent compile or support-check tasks.
 
-use super::tests::{clear_invocation_log, invocations, read_invocation_log, write_krusty_proxy};
+use super::tests::{
+    clear_invocation_log, invocations, read_invocation_log, write_krusty_proxy, ProxyRecords,
+};
 use std::collections::HashSet;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -40,19 +42,31 @@ fn parallel_proxy_calls_keep_complete_compile_and_support_records() {
     let actual = directory.0.join("compiler");
     let log = directory.0.join("compiles");
     let probes = directory.0.join("probes");
+    let fingerprints = directory.0.join("fingerprints");
     let diagnostics = directory.0.join("diagnostics");
     std::fs::write(&actual, "#!/bin/sh\nexit 0\n").unwrap();
-    write_krusty_proxy(&proxy, &log, &probes, &diagnostics, &actual);
+    write_krusty_proxy(
+        &proxy,
+        ProxyRecords {
+            compiles: &log,
+            probes: &probes,
+            fingerprints: &fingerprints,
+        },
+        &diagnostics,
+        &actual,
+    );
     for path in [&proxy, &actual] {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    for (support, record) in [(false, &log), (true, &probes)] {
+    for (command, record) in [
+        (None, &log),
+        (Some("refusals"), &probes),
+        (Some("classpath-fingerprint"), &fingerprints),
+    ] {
         let payloads = (0..12)
             .map(|index| {
                 let mut arguments = Vec::new();
-                if support {
-                    arguments.push("refusals".to_string());
-                }
+                arguments.extend(command.map(str::to_string));
                 arguments.extend([
                     format!("begin-{index}"),
                     format!("{index}:{}", "x".repeat(32768)),
@@ -81,12 +95,13 @@ fn parallel_proxy_calls_keep_complete_compile_and_support_records() {
         let actual: HashSet<_> = runs.into_iter().collect();
         let expected: HashSet<_> = payloads.into_iter().collect();
         assert_eq!(actual, expected, "complete invocation payloads");
-        if !support {
+        if command.is_none() {
             assert!(!probes.exists(), "no support call was made");
+            assert!(!fingerprints.exists(), "no fingerprint was taken");
         }
     }
-    clear_invocation_log(&log);
-    clear_invocation_log(&probes);
-    assert!(!log.exists());
-    assert!(!probes.exists());
+    for record in [&log, &probes, &fingerprints] {
+        clear_invocation_log(record);
+        assert!(!record.exists());
+    }
 }

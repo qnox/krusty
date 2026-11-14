@@ -76,13 +76,39 @@ impl ClassWriter {
         desc: &str,
         params: &[crate::ir::DeclarationAnnotations],
     ) {
+        let arity = descriptor_param_count(desc).max(params.len());
+        self.attach_method_param_annotations(name, desc, params, arity);
+    }
+
+    /// Attach the annotations of a method whose leading physical parameters are synthetic and not
+    /// annotable (an enum constructor's name and ordinal). The attributes count exactly `params`,
+    /// one per annotable trailing parameter, as ASM's `visitAnnotableParameterCount` writes them.
+    pub fn set_annotable_method_param_annotations(
+        &mut self,
+        name: &str,
+        desc: &str,
+        params: &[crate::ir::DeclarationAnnotations],
+    ) {
+        assert!(
+            params.len() <= descriptor_param_count(desc),
+            "annotable parameters cannot outnumber the physical descriptor parameters"
+        );
+        self.attach_method_param_annotations(name, desc, params, params.len());
+    }
+
+    fn attach_method_param_annotations(
+        &mut self,
+        name: &str,
+        desc: &str,
+        params: &[crate::ir::DeclarationAnnotations],
+        arity: usize,
+    ) {
         if params
             .iter()
             .all(crate::ir::DeclarationAnnotations::retains_none)
         {
             return;
         }
-        let arity = descriptor_param_count(desc).max(params.len());
         let (Some(name_index), Some(desc_index)) =
             (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc))
         else {

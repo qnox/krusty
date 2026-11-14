@@ -95,7 +95,7 @@ fn compile(runtime: &KspRuntime, source: &Path, out: &Path) {
         &krusty::features::LangFeatures::from_source(&text),
         &mut diags,
     );
-    let backend = krusty::jvm::JvmBackend::new(classpath(runtime, &[]));
+    let backend = krusty_jvm::JvmBackend::new(classpath(runtime, &[]));
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     let messages: Vec<&str> = diags.diags.iter().map(|diag| diag.msg.as_str()).collect();
     assert!(

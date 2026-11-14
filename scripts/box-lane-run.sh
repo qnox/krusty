@@ -35,6 +35,10 @@ if [ -z "${KRUSTY_TEST_THREADS:-}" ]; then
   export KRUSTY_TEST_THREADS="$lane_threads"
 fi
 
+byte_report_var="KRUSTY_${infix}_BYTE_REPORT"
+byte_report="${!byte_report_var:-}"
+[ -z "$byte_report" ] || : >"$byte_report"
+
 report="$(mktemp)"
 trap 'rm -f "$report"' EXIT
 # A run that stops before producing totals must not leave an earlier caller-owned report behind.
@@ -49,6 +53,19 @@ set -e
 if [ "$status" -eq 124 ]; then
   echo "$lane-conformance-run: timed out after ${KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS}s while running $lane box conformance" >&2
   exit "$status"
+fi
+
+if [ -n "$byte_report" ]; then
+  byte_counts="$(conformance_report_parse "$byte_report")" || {
+    echo "$lane-conformance-run: test did not write a valid KLIB byte report" >&2
+    exit $((status == 0 ? 1 : status))
+  }
+  read -r byte_pct byte_matched byte_total <<<"$byte_counts"
+  [ "$byte_counts" = "$(conformance_report_line "$byte_matched" "$byte_total")" ] || {
+    echo "$lane-conformance-run: KLIB byte percentage $byte_pct% does not match its counts" >&2
+    exit 1
+  }
+  echo "$lane-conformance-run: KLIB byte equality: $byte_counts" >&2
 fi
 
 parsed="$(conformance_report_parse "$report")" || {

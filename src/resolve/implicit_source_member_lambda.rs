@@ -8,7 +8,7 @@ use crate::ast::ExprId;
 use crate::types::Ty;
 
 use super::lambda_expectation::{module_member_lambda_shape, MemberLambdaShape};
-use super::{Checker, CheckerScope};
+use super::{Checker, CheckerScope, PartialArguments};
 
 impl Checker<'_> {
     /// The innermost implicit receiver whose source member shapes the lambdas of `name(args)`,
@@ -28,7 +28,15 @@ impl Checker<'_> {
             .enumerate()
             .find_map(|(depth, receiver)| {
                 let (member, generic_member) = self.module_member_lambda_plan(
-                    scope, call, receiver, name, args, partial, expected,
+                    scope,
+                    call,
+                    receiver,
+                    name,
+                    PartialArguments {
+                        args,
+                        types: partial,
+                    },
+                    expected,
                 );
                 let member = member?;
                 let contextual = self.contextual_call_shape(

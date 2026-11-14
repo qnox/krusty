@@ -2,11 +2,17 @@
 # Build one Cargo test target and print only its executable path. Cargo's JSON stream is also the
 # sole carrier of rendered rustc diagnostics under `--message-format=json`; mirror those messages
 # to stderr before selecting the artifact so command substitution in CI cannot swallow failures.
+# With --build the selection goes to `cargo build`, which also builds the selected binaries.
 
 set -euo pipefail
 
+command=(test --no-run)
+if [ "${1:-}" = --build ]; then
+  command=(build)
+  shift
+fi
 if [ "$#" -lt 2 ]; then
-  echo "usage: $0 <cargo-target-name> <cargo test target arguments...>" >&2
+  echo "usage: $0 [--build] <cargo-target-name> <cargo target arguments...>" >&2
   exit 2
 fi
 
@@ -14,7 +20,7 @@ target_name="$1"
 shift
 
 bin=$(
-  cargo test --no-run --profile gate "$@" --message-format=json \
+  cargo "${command[@]}" --profile gate "$@" --message-format=json \
     | tee >(jq -r 'select(.reason == "compiler-message") | .message.rendered // empty' >&2) \
     | jq -r --arg target "$target_name" \
         'select(.reason == "compiler-artifact" and .target.name == $target and .executable != null) | .executable' \

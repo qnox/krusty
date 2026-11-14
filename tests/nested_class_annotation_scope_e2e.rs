@@ -68,3 +68,78 @@ class Container {
         &[],
     );
 }
+
+/// Annotation arguments resolve in the same scope as the annotation: a nested classifier's
+/// arguments see its container's nested classifiers and companion constants, and a member's
+/// arguments (property, constructor, constructor parameter, enum entry) see those of the classifier
+/// that declares it.
+const ACCEPTED_ARGUMENTS: &str = r#"
+import kotlin.reflect.KClass
+
+annotation class With(val type: KClass<*>)
+annotation class Tag(val name: String)
+
+class Top(@Tag(NAME) val parameter: Int) {
+    @With(Helper::class)
+    @Tag(NAME)
+    class Inner
+
+    private class Helper
+
+    @With(Helper::class)
+    @Tag(NAME)
+    val property = 1
+
+    @Tag(NAME)
+    constructor() : this(0)
+
+    companion object {
+        const val NAME = "n"
+    }
+}
+
+object Secrets {
+    @With(Serializer::class)
+    class Escaped(val data: String)
+
+    object Serializer
+}
+
+enum class Kind {
+    @Tag(LABEL) A;
+
+    companion object {
+        const val LABEL = "a"
+    }
+}
+"#;
+
+#[test]
+fn nested_and_member_annotation_arguments_see_the_declaring_scope_like_kotlinc() {
+    common::assert_accepted_like_kotlinc(ACCEPTED_ARGUMENTS);
+    common::assert_classes_identical_to_kotlinc(
+        "NestedAnnotationArgumentScope",
+        ACCEPTED_ARGUMENTS,
+        &["Top", "Top$Inner", "Secrets$Escaped", "Kind"],
+    );
+}
+
+#[test]
+fn a_class_annotation_argument_does_not_see_the_class_own_nested_declarations() {
+    common::assert_errors_match_kotlinc(
+        &[(
+            "main.kt",
+            r#"
+import kotlin.reflect.KClass
+
+annotation class With(val type: KClass<*>)
+
+@With(Own::class)
+class Outer {
+    class Own
+}
+"#,
+        )],
+        &[],
+    );
+}

@@ -802,6 +802,18 @@ impl Body {
         )
     }
 
+    /// A composite of `statements`: a block whose declarations its enclosing form reads, as a
+    /// KLIB serializes a `do`-`while` body.
+    pub(super) fn composite(&mut self, statements: Vec<KlibIrStatement>, ty: T) -> KlibIrExprId {
+        self.expr(
+            ty,
+            KlibIrExprKind::Composite {
+                statements,
+                origin: None,
+            },
+        )
+    }
+
     /// `value` coerced to `Unit`, as a KLIB states a discarded value of another type.
     pub(super) fn coerced(&mut self, value: KlibIrExprId) -> KlibIrExprId {
         self.type_operator(KlibIrTypeOperator::ImplicitCoercionToUnit, value, T::Unit)
@@ -903,6 +915,19 @@ pub(super) fn demo_with(
     build: impl Fn(&str, &mut Body) -> Option<Vec<KlibIrStatement>>,
 ) -> Demo {
     demo_with_module("demo", shapes, extra, build)
+}
+
+/// One fixture module's frozen facts and declaration trees, including `extra` class trees.
+pub(super) fn module_trees(
+    module: &str,
+    shapes: &[Shape],
+    extra: Vec<KlibIrDeclarationTree>,
+    build: impl Fn(&str, &mut Body) -> Option<Vec<KlibIrStatement>>,
+) -> (
+    HashMap<&'static str, BackendCallableFact>,
+    KlibIrModuleTrees,
+) {
+    demo_module(module, shapes, extra, |_| true, build)
 }
 
 fn demo_with_module(

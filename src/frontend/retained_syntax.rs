@@ -377,7 +377,7 @@ fn collect_pass_one_roots(file: &File) -> Reachable {
             }
         }
     }
-    // File, declaration-type-parameter, and type-use annotations are header syntax. Inline
+    // File, declaration-type-parameter, type-use, and initializer annotations are header syntax. Inline
     // checking may still consult their suppression/contract arguments, and stable type-use
     // annotation publication folds the type-use ones, so retain these bounded roots as well.
     retained.roots(
@@ -391,7 +391,12 @@ fn collect_pass_one_roots(file: &File) -> Reachable {
                     .flatten()
                     .flat_map(|parameter| parameter.annotation_args.iter().flatten().copied()),
             )
-            .chain(file.type_annotation_arguments.values().flatten().copied()),
+            .chain(file.type_annotation_arguments.values().flatten().copied())
+            .chain(
+                file.init_blocks
+                    .values()
+                    .flat_map(|header| header.annotation_args.iter().flatten().copied()),
+            ),
     );
     // A default declared inside a nested/local/anonymous classifier is evaluated in the lexical
     // scope where that classifier was introduced. Preserve its enclosing top-level declaration unit until the
@@ -718,6 +723,17 @@ fn remap_declarations(file: &mut File, expressions: &HashMap<ExprId, ExprId>) {
     for argument in file.type_annotation_arguments.values_mut().flatten() {
         *argument = mapped_expr(expressions, *argument);
     }
+    // An initializer block the compaction drops takes its header with it.
+    file.init_blocks = std::mem::take(&mut file.init_blocks)
+        .into_iter()
+        .filter_map(|(block, mut header)| {
+            let block = expressions.get(&block).copied()?;
+            for argument in header.annotation_args.iter_mut().flatten() {
+                *argument = mapped_expr(expressions, *argument);
+            }
+            Some((block, header))
+        })
+        .collect();
 }
 
 fn remap_expression(

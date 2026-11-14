@@ -192,22 +192,24 @@ impl super::Checker<'_> {
         access: crate::symbol_resolver::PropertyAccess,
     ) -> Result<Option<MemberExtensionProperty>, ()> {
         select(
-            &self.fed_source(),
-            self,
-            &member_extension_selection::ordinary_dispatch_first(
-                scope,
-                self.implicit_receivers(scope),
-            ),
-            &|parameters| {
-                self.select_context_arguments_with_types(scope, parameters)
-                    .ok()
-            },
-            &|owner, name| {
-                self.checked_local_member_extension_properties
-                    .get(&owner)
-                    .and_then(|properties| properties.get(name))
-                    .cloned()
-                    .unwrap_or_default()
+            MemberExtensionPropertySources {
+                source: &self.fed_source(),
+                oracle: self,
+                implicit_receivers: &member_extension_selection::ordinary_dispatch_first(
+                    scope,
+                    self.implicit_receivers(scope),
+                ),
+                context_arguments: &|parameters| {
+                    self.select_context_arguments_with_types(scope, parameters)
+                        .ok()
+                },
+                active_declarations: &|owner, name| {
+                    self.checked_local_member_extension_properties
+                        .get(&owner)
+                        .and_then(|properties| properties.get(name))
+                        .cloned()
+                        .unwrap_or_default()
+                },
             },
             extension_receiver,
             name,
@@ -216,19 +218,35 @@ impl super::Checker<'_> {
     }
 }
 
+type ContextArgumentBindings = Vec<(ResolvedContextArgument, Ty)>;
+type ContextArgumentSelector<'a> = &'a dyn Fn(&[Ty]) -> Option<ContextArgumentBindings>;
+type ActiveMemberExtensionProperties<'a> = &'a dyn Fn(TypeName, &str) -> Vec<MemberExtPropSig>;
+
+/// The symbol environment and receiver tower a member-extension property is selected against.
+pub(super) struct MemberExtensionPropertySources<'a> {
+    pub(super) source: &'a dyn SymbolSource,
+    pub(super) oracle: &'a dyn crate::assignable::TypeOracle,
+    pub(super) implicit_receivers: &'a [ImplicitReceiver],
+    pub(super) context_arguments: ContextArgumentSelector<'a>,
+    pub(super) active_declarations: ActiveMemberExtensionProperties<'a>,
+}
+
 /// Select a member-extension property against an explicit receiver tower. The tower and the
 /// context-argument resolver are the only things a scope supplies here, so both are parameters:
 /// the checker passes its scope's, while signature evaluation passes the declaration's.
 pub(super) fn select(
-    source: &dyn SymbolSource,
-    oracle: &dyn crate::assignable::TypeOracle,
-    implicit_receivers: &[ImplicitReceiver],
-    context_arguments: &dyn Fn(&[Ty]) -> Option<Vec<(ResolvedContextArgument, Ty)>>,
-    active_declarations: &dyn Fn(TypeName, &str) -> Vec<MemberExtPropSig>,
+    sources: MemberExtensionPropertySources<'_>,
     extension_receiver: Ty,
     name: &str,
     access: crate::symbol_resolver::PropertyAccess,
 ) -> Result<Option<MemberExtensionProperty>, ()> {
+    let MemberExtensionPropertySources {
+        source,
+        oracle,
+        implicit_receivers,
+        context_arguments,
+        active_declarations,
+    } = sources;
     let mut candidates = Vec::new();
     for (dispatch_rank, dispatch_receiver) in implicit_receivers.iter().copied().enumerate() {
         // Member extensions are inherited across module boundaries exactly like ordinary members.

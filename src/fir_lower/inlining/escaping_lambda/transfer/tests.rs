@@ -243,15 +243,19 @@ fn captured_lambda_substitution_refreshes_the_retained_inline_body() {
         plan,
         &HashMap::default(),
         &HashMap::default(),
-        crate::fir::DeclarationId::from_raw(0),
-        None,
-        false,
-        "caller",
-        implementation,
-        None,
-        crate::fir::SourceFileId::from_raw(0),
-        crate::fir::CallableId::from_raw(0),
-        "inlineCall",
+        super::EscapingLambdaCaller {
+            declaration: crate::fir::DeclarationId::from_raw(0),
+            enclosure: None,
+            is_default: false,
+            source_name: "caller",
+        },
+        super::EscapingInlineTemplate {
+            function: implementation,
+            owner: None,
+            source: crate::fir::SourceFileId::from_raw(0),
+            callee: crate::ir::IrInlineCallee::Module(crate::fir::CallableId::from_raw(0)),
+            callee_source_name: "inlineCall",
+        },
     );
 
     assert_eq!(suppressions, [actual_implementation]);
@@ -356,26 +360,18 @@ fn removing_a_middle_inline_capture_keeps_every_parameter_fact_aligned() {
             ..FnParamInfo::default()
         },
     );
-    ir.fn_param_declared_nullable
-        .insert(function, vec![true, false, true]);
-    ir.fn_param_annotations.insert(
-        function,
-        vec![
-            DeclarationAnnotations::default().with_suppressed_source_application(true),
-            DeclarationAnnotations::default(),
-            DeclarationAnnotations::default(),
-        ],
-    );
-    ir.fn_param_no_infer
-        .insert(function, vec![false, true, true]);
+    ir.declared_parameters_mut(function).nullable = vec![true, false, true];
+    ir.declared_parameters_mut(function).annotations = vec![
+        DeclarationAnnotations::default().with_suppressed_source_application(true),
+        DeclarationAnnotations::default(),
+        DeclarationAnnotations::default(),
+    ];
+    ir.declared_parameters_mut(function).no_infer = vec![false, true, true];
     ir.lambda_own_params_from.insert(function, 3);
-    ir.fn_varargs.insert(
-        function,
-        IrVarargParameter {
-            index: 2,
-            is_last: true,
-        },
-    );
+    ir.declared_parameters_mut(function).vararg = Some(IrVarargParameter {
+        index: 2,
+        is_last: true,
+    });
     ir.shared_capture_parameters.insert((function, 0), Ty::Int);
     ir.shared_capture_parameters
         .insert((function, 1), Ty::Boolean);
@@ -429,13 +425,14 @@ fn removing_a_middle_inline_capture_keeps_every_parameter_fact_aligned() {
         info.expansion_modes,
         [InlineExpansionMode::Receiver, InlineExpansionMode::Splice]
     );
-    assert_eq!(ir.fn_param_declared_nullable[&function], [true, true]);
-    assert_eq!(ir.fn_param_annotations[&function].len(), 2);
-    assert!(ir.fn_param_annotations[&function][0].has_suppressed_source_application());
-    assert!(!ir.fn_param_annotations[&function][1].declares_annotations());
-    assert_eq!(ir.fn_param_no_infer[&function], [false, true]);
+    let declared = ir.declared_parameters(function);
+    assert_eq!(declared.nullable, [true, true]);
+    assert_eq!(declared.annotations.len(), 2);
+    assert!(declared.annotations[0].has_suppressed_source_application());
+    assert!(!declared.annotations[1].declares_annotations());
+    assert_eq!(declared.no_infer, [false, true]);
     assert_eq!(ir.lambda_own_params_from[&function], 2);
-    assert_eq!(ir.fn_varargs[&function].index, 1);
+    assert_eq!(declared.vararg.map(|vararg| vararg.index), Some(1));
     assert_eq!(ir.shared_capture_parameters[&(function, 0)], Ty::Int);
     assert_eq!(ir.shared_capture_parameters[&(function, 1)], Ty::String);
     assert!(!ir.shared_capture_parameters.contains_key(&(function, 2)));
@@ -704,15 +701,19 @@ fn caller_captures_transfer_into_the_specialized_declaration_closure() {
         transfer_plan,
         &HashMap::default(),
         &HashMap::default(),
-        crate::fir::DeclarationId::from_raw(0),
-        None,
-        false,
-        "caller",
-        escaping_implementation,
-        None,
-        crate::fir::SourceFileId::from_raw(0),
-        crate::fir::CallableId::from_raw(0),
-        "inlineCall",
+        super::EscapingLambdaCaller {
+            declaration: crate::fir::DeclarationId::from_raw(0),
+            enclosure: None,
+            is_default: false,
+            source_name: "caller",
+        },
+        super::EscapingInlineTemplate {
+            function: escaping_implementation,
+            owner: None,
+            source: crate::fir::SourceFileId::from_raw(0),
+            callee: crate::ir::IrInlineCallee::Module(crate::fir::CallableId::from_raw(0)),
+            callee_source_name: "inlineCall",
+        },
     );
     assert_eq!(suppressions, [actual_implementation]);
     let IrExpr::Lambda {
@@ -852,15 +853,19 @@ fn captured_substituted_lambda_stays_materialized_while_capture_free_copy_specia
         plan,
         &HashMap::default(),
         &HashMap::default(),
-        crate::fir::DeclarationId::from_raw(0),
-        None,
-        false,
-        "caller",
-        implementation,
-        None,
-        crate::fir::SourceFileId::from_raw(0),
-        crate::fir::CallableId::from_raw(0),
-        "inlineCall",
+        super::EscapingLambdaCaller {
+            declaration: crate::fir::DeclarationId::from_raw(0),
+            enclosure: None,
+            is_default: false,
+            source_name: "caller",
+        },
+        super::EscapingInlineTemplate {
+            function: implementation,
+            owner: None,
+            source: crate::fir::SourceFileId::from_raw(0),
+            callee: crate::ir::IrInlineCallee::Module(crate::fir::CallableId::from_raw(0)),
+            callee_source_name: "inlineCall",
+        },
     );
     assert!(suppressions.is_empty());
     assert_eq!(ir.functions[implementation as usize].body, Some(body));
@@ -1095,10 +1100,12 @@ fn duplicate_function_requests_require_identical_capture_provenance() {
             None,
             &HashMap::default(),
             &exact_request,
-            &mut decisions,
-            &mut planned,
-            &mut requests,
-            &mut visiting,
+            &mut super::EscapingFunctionPlans {
+                decisions: &mut decisions,
+                planned: &mut planned,
+                requests: &mut requests,
+                visiting: &mut visiting,
+            },
         ),
         FunctionPlan::Planned
     );
@@ -1110,10 +1117,12 @@ fn duplicate_function_requests_require_identical_capture_provenance() {
             None,
             &HashMap::default(),
             &exact_request,
-            &mut decisions,
-            &mut planned,
-            &mut requests,
-            &mut visiting,
+            &mut super::EscapingFunctionPlans {
+                decisions: &mut decisions,
+                planned: &mut planned,
+                requests: &mut requests,
+                visiting: &mut visiting,
+            },
         ),
         FunctionPlan::Planned
     );

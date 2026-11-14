@@ -245,6 +245,7 @@ impl<'a> CommonIrBodySink<'a> {
         finalize_inherited_statuses(index, self.ir);
         finalize_constructors(index, self.ir)?;
         super::annotation_constructions::finalize_defaults(self.ir)?;
+        super::annotation_constructions::normalize_declaration_defaults(self.ir);
         super::annotation_constructions::assign_evaluation_scopes(self.ir);
         super::constructors::finalize_local_superclass_captures(self.ir)?;
         finalize_enum_entries(self.ir)?;
@@ -389,6 +390,8 @@ impl<'a> CommonIrBodySink<'a> {
         callable: CallableId,
         visiting: &mut crate::fx_hash::HashSet<CallableId>,
     ) -> Result<(), FirFileLoweringFailure> {
+        // A common call of an `expect` inlines the template of the `actual` replacing it.
+        let callable = super::expect_realization::realized_callable(index, callable);
         if self.materialized_inline_callables.contains(&callable) {
             return Ok(());
         }
@@ -664,9 +667,8 @@ impl<'a> CommonIrBodySink<'a> {
             self.ir.extension_receiver_fns.insert(function);
         }
         if callable.shape.context_parameter_count != 0 {
-            self.ir
-                .fn_context_counts
-                .insert(function, callable.shape.context_parameter_count as usize);
+            self.ir.declared_parameters_mut(function).context_count =
+                callable.shape.context_parameter_count as usize;
         }
         if flags.has(crate::fir::DeclarationFlags::SUSPEND) {
             self.ir.suspend_funs.push(function);
@@ -1067,6 +1069,12 @@ impl<'a> CommonIrBodySink<'a> {
                     // this skeleton as an enum-entry subclass.
                     entry_class.is_enum_entry = true;
                     let entry_class = self.ir.add_class(entry_class);
+                    // An inner class in the entry body stores this subclass as its enclosing
+                    // instance. That field is authenticated against the declaration's self type.
+                    self.ir.record_declared_class_self_type(
+                        subclass,
+                        crate::types::Ty::obj_name(subclass),
+                    );
                     assert!(
                         self.ir
                             .property_overrides
@@ -1171,7 +1179,7 @@ impl<'a> CommonIrBodySink<'a> {
                 (outer_ty, field_ty)
             } else if let Some(outer) = self.ir.checked_enum_entry_classes.get(&outer).copied() {
                 let outer_ty = crate::types::Ty::obj_name(self.ir.classes[outer as usize].fq_name);
-                (outer_ty.clone(), outer_ty)
+                (outer_ty, outer_ty)
             } else {
                 return Err(FirFileLoweringFailure::MissingClassifier(outer));
             };
@@ -1392,9 +1400,8 @@ impl<'a> CommonIrBodySink<'a> {
                 self.ir.extension_receiver_fns.insert(function);
             }
             if callable.shape.context_parameter_count != 0 {
-                self.ir
-                    .fn_context_counts
-                    .insert(function, callable.shape.context_parameter_count as usize);
+                self.ir.declared_parameters_mut(function).context_count =
+                    callable.shape.context_parameter_count as usize;
             }
             if declaration_header
                 .flags
@@ -1479,13 +1486,11 @@ impl<'a> CommonIrBodySink<'a> {
                     .callable_parameter(callable.id, *ordinal as u32)
                     .is_some_and(|parameter| parameter.flags().is_vararg())
             }) {
-                self.ir.fn_varargs.insert(
-                    function,
-                    crate::ir::IrVarargParameter {
+                self.ir.declared_parameters_mut(function).vararg =
+                    Some(crate::ir::IrVarargParameter {
                         index: vararg,
                         is_last: vararg + 1 == signature.parameters.len(),
-                    },
-                );
+                    });
             }
             attach_callable_generic_facts(index, declaration, function, self.ir);
             assert!(
@@ -1590,6 +1595,13 @@ impl<'a> CommonIrBodySink<'a> {
             .has(crate::fir::DeclarationFlags::COMPANION);
         if !default_fragment && self.ir.functions[function as usize].body.is_some() {
             return Err(FirFileLoweringFailure::DuplicateBody(callable.id));
+        }
+        if let Some(guard) = body.equality_bound_guard() {
+            self.ir.declared_parameters_mut(function).equality_bound =
+                Some(crate::ir::IrEqualityBoundParameter {
+                    index: guard.ordinal as usize,
+                    bound: guard.bound.get(),
+                });
         }
         if callable.is_inline() {
             let (modifiers, modes) = body.inline_parameter_contract();
@@ -1721,7 +1733,7 @@ impl<'a> CommonIrBodySink<'a> {
         }
         self.ir.functions[function as usize].body = Some(body);
         if close_line != 0 {
-            self.ir.fn_close_lines.insert(function, close_line);
+            self.ir.function_position_mut(function).close_line = Some(close_line);
         }
 
         self.attach_callable_defaults(

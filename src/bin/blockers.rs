@@ -48,7 +48,9 @@ fn main() {
     let mut buckets: HashMap<String, (u32, Vec<String>)> = HashMap::default();
     for f in &files {
         let src = std::fs::read_to_string(f).unwrap_or_default();
-        if src.contains("// FILE:") || src.contains("// MODULE:") {
+        if krusty::conformance::contains_directive(&src, "FILE")
+            || krusty::conformance::contains_directive(&src, "MODULE")
+        {
             continue;
         }
         if !src.contains("fun box()") {
@@ -81,7 +83,7 @@ fn main() {
         }
     }
     let mut sorted: Vec<_> = buckets.into_iter().collect();
-    sorted.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+    sorted.sort_by_key(|bucket| std::cmp::Reverse(bucket.1 .0));
     for (k, (n, samples)) in sorted.iter().take(40) {
         println!("{:4}  {:50}", n, k);
         for s in samples {

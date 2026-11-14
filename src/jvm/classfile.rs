@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod annotation_values;
-pub(crate) mod bytecode_analysis;
+pub mod bytecode_analysis;
 mod checkpoint;
 mod class_pool_seed;
 mod codegen_markers;
@@ -24,7 +24,7 @@ mod enclosing_method;
 mod exception_tables;
 mod field_annotations;
 mod inline_call_stacks;
-pub(crate) mod inline_scope_frames;
+pub mod inline_scope_frames;
 mod inner_classes;
 mod kotlin_metadata;
 mod late_fields;
@@ -40,14 +40,15 @@ mod source_map_annotation;
 mod stack_maps;
 mod utf8_pool;
 
-pub(crate) use annotation_values::split_declaration_annotations;
+pub use annotation_values::split_declaration_annotations;
 use annotation_values::{NOT_NULL, NULLABLE};
+pub use control_flow::InlineSplice;
 use descriptor_mentions::DescriptorMentionCache;
 
 pub use coroutine_markers::{markers_in, CoroutineMarker, MARKER_LEN};
-pub(crate) use coroutine_transform::{CoroutineOutcome, CoroutineRequest, TransformedCoroutine};
+pub use coroutine_transform::{CoroutineOutcome, CoroutineRequest, TransformedCoroutine};
 pub use inner_classes::{InnerClassDetails, InnerClassResolver, InnerClassSpec};
-pub(crate) use {
+pub use {
     copied_class::CopyError,
     inner_classes::{DeclarationPaths, TableOrders},
 };
@@ -89,6 +90,9 @@ pub enum VerifType {
     /// uses this; instruction-referenced classes stay `Object(idx)`.
     ObjectName(String),
 }
+
+/// Locals or operand-stack slots of one instruction's verification frame.
+pub type VerifSlots = Vec<VerifType>;
 
 /// One property-backed primary-constructor parameter, as the plain-class pool seeder sees it: the
 /// annotations the constructor's header visit interns for it.
@@ -375,9 +379,6 @@ struct MethodInfo {
     /// is producer provenance, not a guess from the final byte stream; explicit returns and throws
     /// leave it absent.
     implicit_void_return_pc: Option<u16>,
-    /// Body emission deliberately left the leading instruction without a source position. This
-    /// suppresses the declared-function fallback that would otherwise fill pc 0.
-    suppress_entry_line: bool,
     /// Emission dropped dead code that named a constant (see `CodeBuilder::dropped_constant`).
     dropped_constant: bool,
     /// What kotlinc's bytecode rewrites need to reshape this method when the class is written.
@@ -622,7 +623,7 @@ impl ClassWriter {
         self.source_file = name;
     }
 
-    pub(crate) fn set_value_classes(
+    pub fn set_value_classes(
         &mut self,
         value_classes: Rc<crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors>,
     ) {
@@ -739,7 +740,6 @@ impl ClassWriter {
             max_locals: 0,
             code: None,
             implicit_void_return_pc: None,
-            suppress_entry_line: false,
             dropped_constant: false,
             rewrite_source: None,
             exceptions: Vec::new(),
@@ -761,6 +761,14 @@ impl ClassWriter {
     /// Declare a field (e.g. a backing field for a Kotlin property).
     pub fn add_field(&mut self, access: u16, name: &str, desc: &str) {
         self.add_field_sig(access, name, desc, None);
+    }
+
+    /// Intern a copied anonymous class's field name and descriptor when its fields are visited,
+    /// before method bodies add `NameAndType` and `Fieldref` entries. The field table itself stays
+    /// on the late visit; these utf8s are already present, so that visit dedups them.
+    pub fn intern_copied_field(&mut self, name: &str, desc: &str) {
+        self.cp.utf8(name);
+        self.cp.utf8(desc);
     }
 
     /// Like [`add_field`], plus an optional generic `Signature` attribute string (`TA;` for a field
@@ -916,7 +924,7 @@ impl ClassWriter {
     }
 
     /// The name and descriptor of every method declared so far, in declaration order.
-    pub(crate) fn declared_methods(&self) -> Vec<(String, String)> {
+    pub fn declared_methods(&self) -> Vec<(String, String)> {
         self.methods
             .iter()
             .filter_map(|method| {
@@ -1160,7 +1168,6 @@ impl ClassWriter {
             max_locals: code.max_locals,
             code: Some(code.bytes.clone()),
             implicit_void_return_pc: code.implicit_void_return_pc,
-            suppress_entry_line: code.suppress_entry_line,
             dropped_constant: code.dropped_constant,
             // kotlinc's bytecode rewrites run when the class is written: several of this method's
             // tables are attached after it is added, and the rewrite depends on them.
@@ -1239,7 +1246,7 @@ impl ClassWriter {
     /// whose inline calls saved the operand stack: the class, what each coroutine transformation
     /// found (which its continuation class is built from), and each method that could not be
     /// normalized. A class with such a failure is not written: its bytes are empty.
-    pub(crate) fn finish_with_coroutines(mut self) -> FinishedClass {
+    pub fn finish_with_coroutines(mut self) -> FinishedClass {
         // Every method's tables are final now: the coroutine transformer runs over the suspend
         // functions it was asked for, the operand stack is saved around the other methods' inline
         // calls, then kotlinc's bytecode rewrites run over the rest.
@@ -1310,6 +1317,7 @@ impl ClassWriter {
             Rvpa,
             Ripa,
             Sig,
+            AnnotationDefault(&'static str),
             Mp,
         }
         /// A method's `RuntimeInvisibleParameterAnnotations` entries: the USER (BINARY-retained)
@@ -1414,6 +1422,12 @@ impl ClassWriter {
             if !invisible_param_anns(m).is_empty() && !seq.contains(&An::Ripa) {
                 seq.push(An::Ripa);
             }
+            if let Some(default) = &m.annotation_default {
+                let attribute = An::AnnotationDefault(default.attribute_name());
+                if !seq.contains(&attribute) {
+                    seq.push(attribute);
+                }
+            }
             if !m.method_parameters.is_empty() && !seq.contains(&An::Mp) {
                 seq.push(An::Mp);
             }
@@ -1434,6 +1448,7 @@ impl ClassWriter {
         let mut rvpa_attr_name = None;
         // A method-level RIA first use dedups onto the field-level index when both are present.
         let mut invis_ann_name = field_ria;
+        let mut annotation_default_attrs = HashMap::default();
         for k in &seq {
             match k {
                 An::Code => code_attr_name = self.cp.utf8("Code"),
@@ -1452,6 +1467,9 @@ impl ClassWriter {
                 An::Sig => {
                     self.cp.utf8("Signature");
                 }
+                An::AnnotationDefault(name) => {
+                    annotation_default_attrs.insert(*name, self.cp.utf8(name));
+                }
                 An::Mp => method_parameters_attr_name = Some(self.cp.utf8("MethodParameters")),
             }
         }
@@ -1467,17 +1485,6 @@ impl ClassWriter {
                 .any(|m| m.signature.is_some())
                 .then(|| self.cp.utf8("Signature"))
         });
-        let mut annotation_default_attrs = HashMap::default();
-        for default in self
-            .methods
-            .iter()
-            .filter_map(|m| m.annotation_default.as_ref())
-        {
-            let name = default.attribute_name();
-            if !annotation_default_attrs.contains_key(name) {
-                annotation_default_attrs.insert(name, self.cp.utf8(name));
-            }
-        }
         // Field annotation attribute names, interned only when a field actually carries them.
         let field_vis_ann_name = field_rva;
         // Field-level `RuntimeInvisibleAnnotations` reuses the name interned before `Code` (dedup).
@@ -1919,13 +1926,6 @@ pub struct CodeBuilder {
     /// class initializers curate their final table, so they retain this provenance separately from
     /// ordinary nested-expression marks.
     inlined_line_marks: Vec<(u16, u16)>,
-    /// A bytecode offset whose last recorded line mark must be KEPT when another mark lands on the
-    /// same offset: the next one appends after it instead of replacing it. See
-    /// [`CodeBuilder::mark_line_retained`].
-    retained_line_mark: Option<usize>,
-    /// The retained mark keeps only a mark of ANOTHER line after it; the same line dedupes as
-    /// usual. See [`CodeBuilder::mark_line_kept`].
-    retained_line_distinct: bool,
     /// `(start_pc, length, slot, name, descriptor)` entries in scope-close order.
     local_entries: Vec<(u16, Option<u16>, u16, String, String)>,
     /// Semantic inline-frame placement parallel to `local_entries`. This never reaches the class
@@ -1937,9 +1937,6 @@ pub struct CodeBuilder {
     /// Offset of the implicit void return appended by declared-function emission. Ordinary
     /// `ret_void` calls intentionally do not populate it.
     implicit_void_return_pc: Option<u16>,
-    /// The leading instruction intentionally has no source position; declared-function debug
-    /// attachment must not synthesize its declaration line at pc 0.
-    suppress_entry_line: bool,
     /// Whether the instruction stream is currently UNREACHABLE: an unconditional terminator
     /// (`goto`/`athrow`/a `*return`) has been emitted and no label has been bound since. Instructions
     /// appended in that state are dead code the type-checking verifier rejects — it demands a
@@ -1978,8 +1975,8 @@ pub struct CodeBuilder {
     /// stand in, which a bytecode rewrite that inserts an instruction between them needs.
     bind_sequence: Vec<u32>,
     next_bind: u32,
-    /// Pending line-mark obligations (see [`line_numbers::PendingLines`]).
-    pending_lines: line_numbers::PendingLines,
+    /// kotlinc's `LineNumberMapper` state for this body (see [`line_numbers::LineNumberMapper`]).
+    lines: line_numbers::LineNumberMapper,
     /// This method expanded an inline body. kotlinc sorts that method's whole exception table by
     /// handler pc, then start pc, only after inlining. A method that was not inlined keeps
     /// emission order (the inner handler of a nested `try` stays ahead of the outer one).
@@ -2000,20 +1997,17 @@ impl CodeBuilder {
             exceptions: Vec::new(),
             line_marks: Vec::new(),
             inlined_line_marks: Vec::new(),
-            retained_line_mark: None,
-            retained_line_distinct: false,
             local_entries: Vec::new(),
             local_entry_placements: Vec::new(),
             inline_scope_frames: Vec::new(),
             implicit_void_return_pc: None,
-            suppress_entry_line: false,
             dead: false,
             kept_for_inlining: false,
             dropped_constant: false,
             dead_bound: Vec::new(),
             bind_sequence: Vec::new(),
             next_bind: 0,
-            pending_lines: Default::default(),
+            lines: Default::default(),
             inlined_bytecode: false,
         }
     }
@@ -2024,6 +2018,10 @@ impl CodeBuilder {
             .get(label as usize)
             .copied()
             .unwrap_or(false)
+    }
+
+    pub fn owns_label(&self, label: Label) -> bool {
+        label.builder == self.id
     }
 
     fn label_index(&self, label: Label) -> usize {
@@ -2068,7 +2066,7 @@ impl CodeBuilder {
         self.cur_stack = height;
     }
 
-    pub(crate) fn can_fall_through(&self) -> bool {
+    pub fn can_fall_through(&self) -> bool {
         !self.dead
     }
 
@@ -2605,7 +2603,7 @@ impl CodeBuilder {
 }
 
 /// A class written by [`ClassWriter::finish_with_coroutines`].
-pub(crate) struct FinishedClass {
+pub struct FinishedClass {
     /// The class file, empty when a method failed to be normalized.
     pub bytes: Vec<u8>,
     /// What the coroutine transformation of each requested method found.

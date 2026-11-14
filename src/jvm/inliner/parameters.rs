@@ -17,7 +17,7 @@ const CHECKCAST: u8 = 0xc0;
 
 /// How one parameter's value reaches the inlined body.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Binding {
+pub enum Binding {
     /// Stored to a temporary of the inline frame right after its argument is evaluated.
     Temporary,
     /// Read from the caller local the argument already lives in (kotlinc's `genOrGetLocal`), so no
@@ -51,7 +51,7 @@ pub(crate) enum Binding {
 
 /// One parameter of the inlined callee, in declaration order.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Parameter {
+pub struct Parameter {
     pub category: Category,
     pub binding: Binding,
 }
@@ -59,7 +59,7 @@ pub(crate) struct Parameter {
 /// The inlined callee's parameters, `this` included, followed by the values its inline lambdas
 /// capture (kotlinc's captured parameters, which `prepareNode` places after the real ones).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Parameters {
+pub struct Parameters {
     pub parameters: Vec<Parameter>,
     /// Each lambda's captured values, the lambdas in argument order.
     pub captured: Vec<Parameter>,
@@ -157,7 +157,7 @@ impl Parameters {
     /// The temporary each parameter is stored to, relative to the inline frame's base, indexed like
     /// [`Self::all`]; `None` for a parameter that is not a temporary. Temporaries are numbered in
     /// store order: the arguments in turn, each lambda's captured temporaries at its argument.
-    pub(crate) fn temporaries(&self) -> Vec<Option<u16>> {
+    pub fn temporaries(&self) -> Vec<Option<u16>> {
         let real = self.parameters.len();
         let mut slots = vec![None; real + self.captured.len()];
         let mut next = 0u16;

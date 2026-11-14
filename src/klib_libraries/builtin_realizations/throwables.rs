@@ -47,10 +47,21 @@ pub(in super::super) fn realize_throwable_property(
     compiler_builtin_owner: bool,
     property: &mut PropertyInfo,
 ) {
+    // `message: String?` and `cause: Throwable?`, the two fields the platform's storage holds.
+    let (intrinsic, ty) = match property.name.as_str() {
+        "message" => (
+            CompilerIntrinsic::ThrowableMessage,
+            Ty::nullable(Ty::String),
+        ),
+        "cause" => (
+            CompilerIntrinsic::ThrowableCause,
+            Ty::nullable(Ty::obj_name(owner)),
+        ),
+        _ => return,
+    };
     if compiler_builtin_owner
         && owner == type_name("kotlin/Throwable")
         && property.owner == owner
-        && property.name == "message"
         && property.kind == PropKind::Member
         && property.receiver.is_none()
         && property.formals.is_empty()
@@ -58,7 +69,7 @@ pub(in super::super) fn realize_throwable_property(
         && property.context_count == 0
         && property.setter.is_none()
         && !property.is_const
-        && property.ty == Ty::nullable(Ty::String)
+        && property.ty == ty
         && property.getter.params.is_empty()
         && property.getter.context_count == 0
         && property.getter.generic_sig.is_none()
@@ -68,7 +79,7 @@ pub(in super::super) fn realize_throwable_property(
         && property.getter.ret == property.ty
         && !property.getter.suspend
     {
-        property.getter.compiler_intrinsic = Some(CompilerIntrinsic::ThrowableMessage);
+        property.getter.compiler_intrinsic = Some(intrinsic);
     }
 }
 
@@ -191,6 +202,35 @@ mod tests {
         let mut other_owner = original;
         realize_throwable_property(type_name("user/Throwable"), true, &mut other_owner);
         assert_eq!(other_owner.getter.compiler_intrinsic, None);
+    }
+
+    #[test]
+    fn throwable_cause_requires_an_authenticated_member_of_its_exact_type() {
+        let owner = type_name("kotlin/Throwable");
+        let mut cause = message_property();
+        cause.name = "cause".into();
+        cause.ty = Ty::nullable(Ty::obj_name(owner));
+        cause.getter.ret = cause.ty;
+
+        let mut trusted = cause.clone();
+        realize_throwable_property(owner, true, &mut trusted);
+        assert_eq!(
+            trusted.getter.compiler_intrinsic,
+            Some(CompilerIntrinsic::ThrowableCause)
+        );
+        let mut untrusted = cause.clone();
+        realize_throwable_property(owner, false, &mut untrusted);
+        assert_eq!(untrusted.getter.compiler_intrinsic, None);
+
+        let mut text = cause.clone();
+        text.ty = Ty::nullable(Ty::String);
+        text.getter.ret = text.ty;
+        let mut other_name = cause;
+        other_name.name = "suppressed".into();
+        for mut property in [text, other_name] {
+            realize_throwable_property(owner, true, &mut property);
+            assert_eq!(property.getter.compiler_intrinsic, None);
+        }
     }
 
     #[test]

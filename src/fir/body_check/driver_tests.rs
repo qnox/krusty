@@ -99,7 +99,7 @@ fn anonymous_property_initializer_reads_same_named_lexical_capture() {
     crate::resolve::publish_checked_local_signatures(
         &analysis.files[0],
         SourceFileId::from_raw(0),
-        &mut analysis.symbols,
+        &analysis.symbols,
         info,
         &mut index,
     )
@@ -236,7 +236,7 @@ fn local_classifier_property_reference_streams_with_captured_type_arguments() {
     crate::resolve::publish_checked_local_signatures(
         &analysis.files[0],
         SourceFileId::from_raw(0),
-        &mut analysis.symbols,
+        &analysis.symbols,
         info,
         &mut index,
     )
@@ -627,7 +627,7 @@ fn local_class_init_reads_a_property_parameter_through_the_captured_outer_instan
     crate::resolve::publish_checked_local_signatures(
         &analysis.files[0],
         SourceFileId::from_raw(0),
-        &mut analysis.symbols,
+        &analysis.symbols,
         info,
         &mut index,
     )
@@ -1061,7 +1061,7 @@ fn anonymous_class_mutable_capture_is_a_shared_cell_in_checked_fir() {
     crate::resolve::publish_checked_local_signatures(
         &analysis.files[0],
         SourceFileId::from_raw(0),
-        &mut analysis.symbols,
+        &analysis.symbols,
         info,
         &mut index,
     )
@@ -1133,7 +1133,7 @@ fn anonymous_class_inferred_property_increment_keeps_outer_capture_mutable() {
     crate::resolve::publish_checked_local_signatures(
         &analysis.files[0],
         SourceFileId::from_raw(0),
-        &mut analysis.symbols,
+        &analysis.symbols,
         info,
         &mut index,
     )
@@ -1235,7 +1235,7 @@ fn nested_anonymous_class_forwards_a_mutable_destructure_capture() {
     crate::resolve::publish_checked_local_signatures(
         &analysis.files[0],
         SourceFileId::from_raw(0),
-        &mut analysis.symbols,
+        &analysis.symbols,
         info,
         &mut index,
     )
@@ -1322,7 +1322,7 @@ fn inner_local_class_super_lambda_reads_the_enclosing_class_capture() {
     crate::resolve::publish_checked_local_signatures(
         &analysis.files[0],
         SourceFileId::from_raw(0),
-        &mut analysis.symbols,
+        &analysis.symbols,
         info,
         &mut index,
     )
@@ -1394,7 +1394,7 @@ fn local_class_inside_setter_keeps_enclosing_backing_field_identity() {
     crate::resolve::publish_checked_local_signatures(
         &analysis.files[0],
         SourceFileId::from_raw(0),
-        &mut analysis.symbols,
+        &analysis.symbols,
         info,
         &mut index,
     )

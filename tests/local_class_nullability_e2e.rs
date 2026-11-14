@@ -113,7 +113,7 @@ fn nullability(root: &std::path::Path, class: &str) -> Vec<String> {
             name = declaration
                 .trim_end_matches(';')
                 .split(' ')
-                .last()
+                .next_back()
                 .unwrap_or("")
                 .to_string();
         } else if let Some(descriptor) = line.trim().strip_prefix("descriptor: ") {

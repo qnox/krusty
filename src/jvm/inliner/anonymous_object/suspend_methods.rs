@@ -156,7 +156,7 @@ pub(super) fn fake_continuation_class(
 /// Where the call that regenerates the object is: what the copy's state machine reports as its
 /// own position (`InlineCallSiteInfo.file` and `lineNumber`).
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct CallSiteSource<'a> {
+pub struct CallSiteSource<'a> {
     /// The calling class's source file name.
     pub file: &'a str,
     /// The call's line as kotlinc's IR reports it to the transformer: zero-based.
@@ -166,7 +166,7 @@ pub(crate) struct CallSiteSource<'a> {
 /// What a copied suspend method's state machine adds to its continuation: the spill fields and
 /// the `@DebugMetadata` the transformer computed.
 #[derive(Debug)]
-pub(crate) struct ContinuationMachine {
+pub struct ContinuationMachine {
     pub fields: Vec<SpillField>,
     pub debug_metadata: DebugMetadata,
 }

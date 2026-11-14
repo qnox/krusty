@@ -100,22 +100,14 @@ pub(super) fn instantiate_member_extension_with(
         extension_receiver,
         &mut bindings,
     );
-    // A formal the receiver reaches only covariantly (`Assert<out T>`) gets a lower bound from
-    // it, not an equality: an argument's lower bound joins it at their common supertype, as an
-    // ordinary extension's receiver and arguments do in `merge_call_argument_bindings`.
-    let covariant_receiver_formals = method_type_params
+    // The receiver's own evidence. A formal it reaches only covariantly (`Assert<out T>`) is a
+    // lower bound that an argument's lower bound joins at their common supertype; an invariant
+    // occurrence stays an equality (`merge_call_argument_bindings`).
+    let receiver_bindings = bindings
         .iter()
-        .map(|(_, formal)| *formal)
-        .filter(|formal| {
-            !bound_before_receiver.contains_key((*formal).as_str())
-                && bindings.contains_key((*formal).as_str())
-                && crate::symbol_resolver::formal_variance_in_type(
-                    source,
-                    declared_receiver,
-                    formal,
-                ) == Some(crate::types::TypeVariance::Out)
-        })
-        .collect::<Vec<_>>();
+        .filter(|(formal, _)| !bound_before_receiver.contains_key(formal.as_str()))
+        .map(|(formal, actual)| (*formal, *actual))
+        .collect::<crate::symbol_resolver::GSigBinds>();
     // The receiver is applicable only as the instantiated declaration: `Column<U?>` admits a
     // caller's `Column<A>` (`A : Any`) structurally, but `U? = A` has no solution.
     if !crate::symbol_resolver::resolution_subtype(
@@ -125,7 +117,6 @@ pub(super) fn instantiate_member_extension_with(
     ) {
         return None;
     }
-    let symbols = source;
     let declared_params = generic.map_or(function.signature.params.as_slice(), |signature| {
         signature.params.as_slice()
     });
@@ -175,6 +166,11 @@ pub(super) fn instantiate_member_extension_with(
     .enumerate()
     .map(|(source, parameter)| (parameter, source))
     .collect::<Vec<_>>();
+    // Value arguments are lower and upper evidence for the method's formals, solved together by
+    // the shared call-constraint solver, as for any other generic call: two lambdas returning
+    // `List<Nothing>` and `List<T>` for one `(R) -> T` formal join at `List<T>`, rather than the
+    // first argument fixing the formal for the second.
+    let mut actuals = Vec::with_capacity(argument_parameters.len());
     for &(visible_parameter, source) in &argument_parameters {
         let Some(Some(actual)) = partial_arg_tys.get(source) else {
             continue;
@@ -183,49 +179,74 @@ pub(super) fn instantiate_member_extension_with(
         let Some(&declared) = declared_params.get(parameter) else {
             continue;
         };
-        let vararg = full_call_sig.vararg_index == Some(parameter);
+        let spread = is_spread_arg(source);
         // Generic signatures describe a vararg slot as its ARRAY (`Array<T>`), while call-site
         // inference is over its element. A spread contributes the source array's element and an
-        // ordinary argument contributes its own type. Normalizing both sides to the element keeps
-        // `render(*intArray)` and `render(1)` on one inference path and works for non-final varargs.
-        let declared = if vararg {
-            declared.array_read_elem().unwrap_or(declared)
+        // ordinary argument contributes its own type.
+        if full_call_sig.vararg_index == Some(parameter) {
+            intersection_inference::record_direct_lower_input(
+                generic,
+                declared.array_read_elem().unwrap_or(declared),
+                if spread {
+                    actual.array_read_elem().unwrap_or(*actual)
+                } else {
+                    *actual
+                },
+                &mut lower_inputs,
+            );
         } else {
-            declared
+            intersection_inference::record_direct_lower_input(
+                generic,
+                declared,
+                *actual,
+                &mut lower_inputs,
+            );
+        }
+        actuals.push((parameter, *actual, spread));
+    }
+    if let Some(generic) = generic {
+        // The dispatch receiver's class arguments are fixed types here; only the method's own
+        // formals are variables of this call.
+        let applied = GenericSig {
+            receiver: Some(apply_inference_bindings(
+                declared_receiver,
+                &shape.class_bindings,
+            )),
+            params: generic
+                .params
+                .iter()
+                .map(|parameter| apply_inference_bindings(*parameter, &shape.class_bindings))
+                .collect(),
+            ..generic.clone()
         };
-        let actual = if vararg && is_spread_arg(source) {
-            actual.array_read_elem().unwrap_or(*actual)
-        } else {
-            *actual
-        };
-        intersection_inference::record_direct_lower_input(
-            generic,
-            declared,
-            actual,
-            &mut lower_inputs,
-        );
-        let mut evidence = crate::symbol_resolver::GSigBinds::default();
-        crate::symbol_resolver::unify_ty(declared, actual, &mut evidence);
-        for formal in &covariant_receiver_formals {
-            // Only a covariant occurrence is another lower bound; `(T) -> Unit` bounds T above.
-            if crate::symbol_resolver::formal_variance_in_type(symbols, declared, formal)
-                != Some(crate::types::TypeVariance::Out)
-            {
-                continue;
-            }
-            if let (Some(&receiver), Some(&argument)) = (
-                bindings.get((*formal).as_str()),
-                evidence.get((*formal).as_str()),
-            ) {
-                let joined = crate::symbol_resolver::merge_inferred_ty_from_symbols(
-                    Some(symbols),
-                    receiver,
-                    argument,
-                );
-                bindings.insert(crate::types::TyParamName::new(formal), joined);
+        let solved =
+            crate::symbol_resolver::infer_generic_call_constraints_with_receiver_from_symbols(
+                source,
+                &applied,
+                None,
+                actuals,
+                full_call_sig.vararg_index,
+            );
+        let mut inferred = solved.bindings.clone();
+        // A formal the arguments bound only from above (`(T) -> Unit`) is not a lower bound to
+        // join with the receiver's: it fills a formal nothing else solved and otherwise leaves it.
+        for formal in &solved.upper_only {
+            if !bindings.contains_key(formal.as_str()) {
+                inferred
+                    .entry(crate::types::TyParamName::new(formal))
+                    .or_insert_with(|| solved.denotable_upper_binding(source, formal));
             }
         }
-        unify_member_extension_slot(declared, actual, deferred_type_variables, &mut bindings);
+        // An active postponed call owns its variables; leave their constraints to that frame.
+        inferred.retain(|formal, _| !deferred_type_variables.contains(formal));
+        crate::symbol_resolver::merge_call_argument_bindings(
+            source,
+            &applied,
+            explicit_type_args,
+            &receiver_bindings,
+            &mut bindings,
+            inferred,
+        );
     }
     // A formal observable only through another formal's bound (`T` of `E : EntityID<T>` on a
     // `Column<out E?>` receiver) is solved from that formal's applied bound, as for any other

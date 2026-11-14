@@ -45,6 +45,21 @@ fn a_value_class_answers_by_the_value_it_wraps() {
     every_backend_agrees_with_kotlinc("ValueClassAnswers", source);
 }
 
+/// A value class over an ARRAY hashes its contents, as a data class's array property does: the
+/// hash follows the elements, while equality stays the array's identity.
+#[test]
+fn a_value_class_over_an_array_hashes_its_contents() {
+    let source = "@JvmInline value class Bits(val raw: IntArray)\n\
+         fun box(): String {\n\
+         \x20   val shared = intArrayOf(1, -2)\n\
+         \x20   val before = Bits(shared).hashCode()\n\
+         \x20   shared[0] = 7\n\
+         \x20   val text = \"$before;${Bits(shared).hashCode()};${Bits(shared) == Bits(intArrayOf(7, -2))}\"\n\
+         \x20   return if (text == \"990;1176;false\") \"OK\" else \"fail \" + text\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("ValueClassArrayContentHash", source);
+}
+
 /// Into `Any`, a type parameter and generic storage, and back: each crossing boxes as `V`, not as
 /// the value inside, and a box read back out is the value again. The storage is the program's own
 /// generic classes, so nothing but the representation is under test: a stdlib collection would

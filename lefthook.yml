@@ -27,6 +27,9 @@ pre-commit:
       glob: "*.rs"
       run: rustfmt --edition 2021 {staged_files}
       stage_fixed: true
+    # The legacy resolution surface may only shrink (legacy-baseline.tsv).
+    legacy:
+      run: just legacy-baseline-check
     # clippy stays a check (whole-crate; can't be scoped to single files reliably).
     clippy:
       run: just clippy-baseline-check

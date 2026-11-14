@@ -10,10 +10,10 @@ use std::process::Command;
 
 use krusty::backend::Backend as _;
 use krusty::diag::DiagSink;
-use krusty::native::{Arch, CraneliftBackend, Entry, NativeTarget};
 use krusty::source::SourceInput;
 use krusty::symbol_source::{SymbolNamespace, SymbolSource};
 use krusty::types::type_name;
+use krusty_native::{Arch, CraneliftBackend, Entry, NativeTarget};
 
 use super::common;
 
@@ -59,12 +59,12 @@ fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/native_cinterop/direct_call.klib")
 }
 
-fn libraries(target: NativeTarget) -> Option<krusty::native::NativeKlibInputs> {
+fn libraries(target: NativeTarget) -> Option<krusty_native::NativeKlibInputs> {
     let stdlib = krusty::toolchain::kotlin_stdlib_klib(
         krusty::compilation_target::CompilationTarget::Native,
     )?;
     Some(
-        krusty::native::NativeKlibInputs::open(
+        krusty_native::NativeKlibInputs::open(
             &[
                 krusty::klib_libraries::KlibLibraryInput::dependency(fixture()),
                 krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
@@ -128,7 +128,7 @@ fn c_object(compiler: &str, scratch: &Path) -> Vec<u8> {
 #[test]
 fn a_real_interop_klib_publishes_and_calls_its_exact_direct_c_target() {
     let Some(target) = NativeTarget::host()
-        .filter(|target| target.arch == Arch::X86_64 && krusty::native::can_link(*target))
+        .filter(|target| target.arch == Arch::X86_64 && krusty_native::can_link(*target))
     else {
         return;
     };
@@ -209,7 +209,7 @@ fn a_real_interop_klib_publishes_and_calls_its_exact_direct_c_target() {
         .map(|(_, bytes)| bytes.as_slice())
         .collect::<Vec<_>>();
     objects.push(&c);
-    let image = krusty::native::link_program(&objects, target).expect("link the Native program");
+    let image = krusty_native::link_program(&objects, target).expect("link the Native program");
     let executable = scratch.0.join("program");
     std::fs::write(&executable, image).expect("write the Native program");
     #[cfg(unix)]
@@ -224,7 +224,7 @@ fn a_real_interop_klib_publishes_and_calls_its_exact_direct_c_target() {
     let stdout = String::from_utf8(output.stdout).expect("the Native output is UTF-8");
     assert_eq!(
         stdout,
-        format!("{}OK", krusty::native::BOX_RESULT_FRAME),
+        format!("{}OK", krusty_native::BOX_RESULT_FRAME),
         "the direct C call answers through the real fixture"
     );
 }
@@ -232,7 +232,7 @@ fn a_real_interop_klib_publishes_and_calls_its_exact_direct_c_target() {
 #[test]
 fn an_authenticated_direct_c_pointer_declines_its_nullable_boxed_carrier_exactly() {
     let Some(target) = NativeTarget::host()
-        .filter(|target| target.arch == Arch::X86_64 && krusty::native::can_link(*target))
+        .filter(|target| target.arch == Arch::X86_64 && krusty_native::can_link(*target))
     else {
         return;
     };
@@ -321,7 +321,7 @@ fn shared_library(compiler: &str, directory: &Path) {
 #[test]
 fn a_program_against_a_krusty_built_interop_klib_links_and_calls_its_shared_library() {
     let Some(target) = NativeTarget::host()
-        .filter(|target| target.arch == Arch::X86_64 && krusty::native::can_link(*target))
+        .filter(|target| target.arch == Arch::X86_64 && krusty_native::can_link(*target))
     else {
         return;
     };
@@ -366,7 +366,7 @@ fn a_program_against_a_krusty_built_interop_klib_links_and_calls_its_shared_libr
     std::fs::rename(scratch.0.join(SHARED_LIBRARY), loaded.join(SHARED_LIBRARY))
         .expect("move the shared library out of the link's reach");
 
-    let native_inputs = krusty::native::NativeKlibInputs::open(
+    let native_inputs = krusty_native::NativeKlibInputs::open(
         &[
             krusty::klib_libraries::KlibLibraryInput::dependency(klib),
             krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
@@ -460,7 +460,7 @@ fn a_program_against_a_krusty_built_interop_klib_links_and_calls_its_shared_libr
             vec!["krusty_shared_scale", "krusty_shared_sum"]
         )]
     );
-    let image = krusty::native::link_program_with_libraries(&objects, &imports, target)
+    let image = krusty_native::link_program_with_libraries(&objects, &imports, target)
         .expect("link the Native program with its imported library");
     let executable = scratch.0.join("program");
     std::fs::write(&executable, image).expect("write the Native program");
@@ -484,7 +484,7 @@ fn a_program_against_a_krusty_built_interop_klib_links_and_calls_its_shared_libr
         ),
         (
             Some(0),
-            format!("{}OK", krusty::native::BOX_RESULT_FRAME),
+            format!("{}OK", krusty_native::BOX_RESULT_FRAME),
             String::new()
         ),
         "the program calls both C functions through the imported shared library"

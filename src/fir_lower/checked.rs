@@ -18,6 +18,7 @@ pub(super) struct CheckedCallableReference<'a> {
     pub(super) binding: crate::fir::FirCallableReferenceBinding,
     pub(super) dispatch_receiver: Option<FirReceiver>,
     pub(super) extension_receiver: Option<FirReceiver>,
+    pub(super) context_arguments: &'a [FirReceiver],
     pub(super) substitutions: &'a [FirTypeSubstitution],
     pub(super) adaptation: Option<&'a crate::fir::FirReferenceAdaptation>,
     pub(super) reference_ty: crate::types::Ty,
@@ -28,6 +29,21 @@ pub(super) struct CheckedCallableReference<'a> {
 struct MaterializedCallableReference {
     ty: crate::types::Ty,
     reflection_owner: Option<crate::types::TypeName>,
+}
+
+/// Dispatch and extension receivers already lowered for one callable reference.
+struct BoundCallableReceivers {
+    dispatch: Option<ExprId>,
+    extension: Option<ExprId>,
+    /// Values the reference site selected for the declaration's leading context parameters.
+    contexts: Vec<ExprId>,
+}
+
+/// The receivers a checked property read or write carries together.
+pub(super) struct CheckedPropertyReceivers<'a> {
+    pub(super) dispatch_receiver: Option<FirReceiver>,
+    pub(super) extension_receiver: Option<FirReceiver>,
+    pub(super) context_arguments: &'a [FirReceiver],
 }
 
 impl BodyLowering<'_> {
@@ -152,6 +168,7 @@ impl BodyLowering<'_> {
             binding,
             dispatch_receiver,
             extension_receiver,
+            context_arguments,
             substitutions,
             adaptation,
             reference_ty,
@@ -167,11 +184,13 @@ impl BodyLowering<'_> {
         } = &target
         {
             return self.materialize_constructor_reference(
-                target,
-                *classifier,
-                *outer,
-                parameters,
-                *result,
+                super::classifier_references::ConstructorReferenceTarget {
+                    target,
+                    classifier: *classifier,
+                    outer: *outer,
+                    parameters,
+                    result: *result,
+                },
                 binding,
                 dispatch_receiver,
                 adaptation,
@@ -229,8 +248,10 @@ impl BodyLowering<'_> {
             return self.checked_external_callable_reference(
                 target,
                 binding,
-                dispatch_receiver,
-                extension_receiver,
+                super::external_references::ExternalReferenceReceivers {
+                    dispatch: dispatch_receiver,
+                    extension: extension_receiver,
+                },
                 substitutions,
                 adaptation,
                 super::external_references::CheckedExternalReference {
@@ -239,17 +260,28 @@ impl BodyLowering<'_> {
                 },
             );
         };
+        let target = super::expect_realization::realized_callable(self.index, target);
         let callable = self
             .index
             .callable(target)
             .ok_or(FirLoweringFailure::MissingCallable(target))?;
         let dispatch_receiver = self.receiver(dispatch_receiver)?;
         let extension_receiver = self.receiver(extension_receiver)?;
+        let contexts = context_arguments
+            .iter()
+            .map(|argument| self.receiver(Some(*argument)))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         if let Some(reference) = self.materialize_callable_reference(
             callable,
             binding,
-            dispatch_receiver,
-            extension_receiver,
+            BoundCallableReceivers {
+                dispatch: dispatch_receiver,
+                extension: extension_receiver,
+                contexts,
+            },
             substitutions,
             adaptation,
             MaterializedCallableReference {
@@ -266,12 +298,16 @@ impl BodyLowering<'_> {
         &mut self,
         callable: crate::fir::ResolvedCallableHeader,
         binding: crate::fir::FirCallableReferenceBinding,
-        dispatch_capture: Option<ExprId>,
-        extension_capture: Option<ExprId>,
+        receivers: BoundCallableReceivers,
         substitutions: &[FirTypeSubstitution],
         adaptation: Option<&crate::fir::FirReferenceAdaptation>,
         reference: MaterializedCallableReference,
     ) -> Result<Option<ExprId>, FirLoweringFailure> {
+        let BoundCallableReceivers {
+            dispatch: dispatch_capture,
+            extension: extension_capture,
+            contexts: context_captures,
+        } = receivers;
         let MaterializedCallableReference {
             ty: reference_ty,
             reflection_owner,
@@ -303,6 +339,22 @@ impl BodyLowering<'_> {
 
         let mut captures = Vec::new();
         let mut capture_types = Vec::new();
+        // The declaration's leading context parameters are bound at the reference site: each is
+        // one more captured value, read by the adapter in declaration order.
+        if context_captures.len() > signature_parameters.len() {
+            return Ok(None);
+        }
+        let context_capture_slots = context_captures
+            .iter()
+            .zip(&signature_parameters)
+            .map(|(value, &declared)| {
+                let slot = captures.len() as u32;
+                captures.push(*value);
+                capture_types.push(declared);
+                slot
+            })
+            .collect::<Vec<_>>();
+        let receiver_capture_start = captures.len();
         let dispatch_capture_slot = dispatch_capture.map(|value| {
             let slot = captures.len() as u32;
             captures.push(value);
@@ -334,33 +386,39 @@ impl BodyLowering<'_> {
         let mut extension_receiver =
             extension_capture_slot.map(|slot| self.ir.add_expr(IrExpr::GetValue(slot)));
         if binding == crate::fir::FirCallableReferenceBinding::Unbound {
-            if dispatch_receiver.is_none() && enclosing.is_some() {
-                let Some(receiver_ty) = own_parameters.first().copied() else {
-                    return Ok(None);
-                };
-                let expected = crate::types::Ty::obj_name(
-                    enclosing
-                        .expect("an unbound member has an enclosing classifier")
-                        .classifier,
-                );
-                dispatch_receiver =
-                    Some(self.adapted_reference_argument_read(own_start, receiver_ty, expected));
-                own_parameters.remove(0);
-                own_parameter_slots.remove(0);
-            } else if extension_receiver.is_none() {
-                if let Some(expected) = callable.shape.extension_receiver {
-                    let position = callable.shape.context_parameter_count as usize;
-                    let Some(source) = own_parameters.get(position).copied() else {
+            match enclosing {
+                Some(enclosing) if dispatch_receiver.is_none() => {
+                    let Some(receiver_ty) = own_parameters.first().copied() else {
                         return Ok(None);
                     };
-                    extension_receiver = Some(self.adapted_reference_argument_read(
-                        own_start + position as u32,
-                        source,
-                        specialize(expected.get()),
+                    let expected = crate::types::Ty::obj_name(enclosing.classifier);
+                    dispatch_receiver = Some(self.adapted_reference_argument_read(
+                        own_start,
+                        receiver_ty,
+                        expected,
                     ));
-                    own_parameters.remove(position);
-                    own_parameter_slots.remove(position);
+                    own_parameters.remove(0);
+                    own_parameter_slots.remove(0);
                 }
+                _ if extension_receiver.is_none() => {
+                    if let Some(expected) = callable.shape.extension_receiver {
+                        // Context parameters the reference site binds are not inputs of the
+                        // reference, so the receiver follows only the ones it still exposes.
+                        let position = (callable.shape.context_parameter_count as usize)
+                            .saturating_sub(context_capture_slots.len());
+                        let Some(source) = own_parameters.get(position).copied() else {
+                            return Ok(None);
+                        };
+                        extension_receiver = Some(self.adapted_reference_argument_read(
+                            own_start + position as u32,
+                            source,
+                            specialize(expected.get()),
+                        ));
+                        own_parameters.remove(position);
+                        own_parameter_slots.remove(position);
+                    }
+                }
+                _ => {}
             }
         }
         if adaptation.is_none() && own_parameters.len() != signature_parameters.len() {
@@ -386,6 +444,15 @@ impl BodyLowering<'_> {
                                 source_ty,
                                 signature_parameters[parameter as usize],
                             ),
+                        }
+                    }
+                    crate::fir::FirAdaptedReferenceArgument::Context => {
+                        let Some(&slot) = context_capture_slots.get(parameter as usize) else {
+                            return Ok(None);
+                        };
+                        IrCheckedArgument::Expression {
+                            parameter,
+                            value: self.ir.add_expr(IrExpr::GetValue(slot)),
                         }
                     }
                     crate::fir::FirAdaptedReferenceArgument::Default => {
@@ -452,15 +519,15 @@ impl BodyLowering<'_> {
         let enclosing_temporary = self.next_temporary;
         self.next_temporary = u32::try_from(captures.len() + reference.params.len())
             .expect("too many callable-reference adapter parameters");
-        let call = self.same_file_call(
-            callable.id,
-            super::source_calls::DispatchOperand::plain(dispatch_receiver),
+        let call = self.same_file_call(super::source_calls::SameFileCall {
+            target: callable.id,
+            dispatch: super::source_calls::DispatchOperand::plain(dispatch_receiver),
             extension_receiver,
-            &arguments,
-            &signature_parameters,
+            arguments: &arguments,
+            specialized_parameters: &signature_parameters,
             substitutions,
-            None,
-        );
+            source_line: None,
+        });
         self.next_temporary = enclosing_temporary;
         let Some(call) = call.transpose()? else {
             return Ok(None);
@@ -495,11 +562,13 @@ impl BodyLowering<'_> {
             .index
             .declaration_header(callable.declaration)
             .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::SUSPEND));
-        let bound_receiver = match captures.as_slice() {
+        let (context_captures, receiver_captures) = captures.split_at(receiver_capture_start);
+        let bound_receiver = match receiver_captures {
             [] => None,
             [receiver] => Some(*receiver),
             _ => return Ok(None),
         };
+        let context_captures = context_captures.to_vec();
         // The declaration's own parameter list: its extension receiver follows its context
         // parameters, as the declaration takes them. A companion-associated declaration's receiver
         // names the classifier whose static scope it joins; it is not a physical parameter.
@@ -517,36 +586,34 @@ impl BodyLowering<'_> {
                 (callable.shape.context_parameter_count as usize).min(declaration_parameters.len());
             declaration_parameters.insert(position, specialize(receiver.get()));
         }
-        Ok(Some(self.ir.add_expr(IrExpr::CallableReference(Box::new(
-            crate::ir::IrCallableReference {
-                target: crate::ir::IrCallableReferenceTarget::Module(callable.id),
-                adapter: function,
-                captures: Vec::new(),
-                bound_receiver,
-                function_type: reference_ty,
-                declaration_parameters: declaration_parameters.into_boxed_slice(),
-                declaration_result: signature_result,
-                declaration_suspend,
-                adaptation: adaptation.cloned().map(Box::new),
-                reflection_owner,
-            },
-        )))))
+        Ok(Some(
+            self.ir.add_expr(IrExpr::CallableReference(Box::new(
+                crate::ir::IrCallableReference {
+                    target: crate::ir::IrCallableReferenceTarget::Module(callable.id),
+                    adapter: function,
+                    bound_contexts: u32::try_from(context_captures.len())
+                        .expect("too many bound context arguments"),
+                    captures: context_captures,
+                    bound_receiver,
+                    function_type: reference_ty,
+                    declaration_parameters: declaration_parameters.into_boxed_slice(),
+                    declaration_result: signature_result,
+                    declaration_suspend,
+                    adaptation: adaptation.cloned().map(Box::new),
+                    reflection_owner,
+                },
+            ))),
+        ))
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn checked_property_reference(
         &mut self,
-        target: &FirPropertyReferenceTarget,
-        binding: crate::fir::FirCallableReferenceBinding,
+        reference: super::property_references::CheckedPropertyReference<'_>,
         dispatch_receiver: Option<FirReceiver>,
         extension_receiver: Option<FirReceiver>,
-        mutable: bool,
-        substitutions: &[FirTypeSubstitution],
-        adaptation: Option<&crate::fir::FirReferenceAdaptation>,
-        reference_ty: crate::types::Ty,
         reflective: bool,
     ) -> Result<ExprId, FirLoweringFailure> {
-        match target {
+        match reference.target {
             FirPropertyReferenceTarget::Module(target) => {
                 self.index
                     .property(*target)
@@ -571,28 +638,24 @@ impl BodyLowering<'_> {
         let dispatch_receiver = self.receiver(dispatch_receiver)?;
         let extension_receiver = self.receiver(extension_receiver)?;
         if !reflective {
-            if let Some(reference) = self.materialize_property_function_reference(
-                target,
-                binding,
+            if let Some(function) = self.materialize_property_function_reference(
+                &reference,
                 dispatch_receiver,
                 extension_receiver,
-                substitutions,
-                adaptation,
-                reference_ty,
             )? {
-                return Ok(reference);
+                return Ok(function);
             }
         }
         Ok(self.ir.add_expr(IrExpr::Checked(Box::new(
             IrCheckedOperation::PropertyReference {
-                target: target.clone(),
+                target: reference.target.clone(),
                 delegated: false,
-                binding,
+                binding: reference.binding,
                 dispatch_receiver,
                 extension_receiver,
-                mutable,
-                substitutions: lower_substitutions(substitutions),
-                adaptation: adaptation.cloned().map(Box::new),
+                mutable: reference.mutable,
+                substitutions: lower_substitutions(reference.substitutions),
+                adaptation: reference.adaptation.cloned().map(Box::new),
             },
         ))))
     }
@@ -607,6 +670,7 @@ impl BodyLowering<'_> {
         let extension_receiver = self.receiver(call.extension_receiver)?;
         match &call.target {
             FirCallTarget::Module(target) => {
+                let target = &super::expect_realization::realized_callable(self.index, *target);
                 self.index
                     .callable(*target)
                     .ok_or(FirLoweringFailure::MissingCallable(*target))?;
@@ -617,18 +681,18 @@ impl BodyLowering<'_> {
                     .collect::<Vec<_>>();
                 let arguments = self.arguments(*target, &call.arguments, &parameter_types)?;
                 if let Some(call) = self
-                    .same_file_call(
-                        *target,
-                        super::source_calls::DispatchOperand {
+                    .same_file_call(super::source_calls::SameFileCall {
+                        target: *target,
+                        dispatch: super::source_calls::DispatchOperand {
                             receiver: dispatch_receiver,
                             class: dispatch_class,
                         },
                         extension_receiver,
-                        &arguments,
-                        &parameter_types,
-                        &call.substitutions,
-                        Some(source_line),
-                    )
+                        arguments: &arguments,
+                        specialized_parameters: &parameter_types,
+                        substitutions: &call.substitutions,
+                        source_line: Some(source_line),
+                    })
                     .transpose()?
                 {
                     return Ok(call);
@@ -713,7 +777,12 @@ impl BodyLowering<'_> {
                     .iter()
                     .map(|parameter| parameter.get())
                     .collect::<Vec<_>>();
-                let (statements, receiver, arguments, defaults) = self
+                let super::source_calls::SelectedSemanticOperands {
+                    statements,
+                    receiver,
+                    args: arguments,
+                    defaults,
+                } = self
                     .selected_semantic_operands(super::source_calls::SelectedOperandRequest {
                         receiver_ty: None,
                         parameter_types: &parameter_types,
@@ -806,19 +875,20 @@ impl BodyLowering<'_> {
                             extension_receiver,
                             &call.arguments,
                             *result,
+                            source_line,
                         )
                         .ok_or(FirLoweringFailure::UnsupportedIntrinsicCall);
                 }
                 let arguments = self.external_arguments(&call.arguments, parameters)?;
-                self.intrinsic_call(
-                    lower_fir_intrinsic(operation),
-                    *receiver,
+                self.intrinsic_call(super::source_calls::IntrinsicCall {
+                    operation: lower_fir_intrinsic(operation),
+                    receiver_ty: *receiver,
                     parameters,
-                    *result,
+                    result: *result,
                     dispatch_receiver,
                     extension_receiver,
-                    &arguments,
-                )
+                    arguments: &arguments,
+                })
                 .ok_or(FirLoweringFailure::UnsupportedIntrinsicCall)
             }
             FirCallTarget::Classifier {
@@ -1147,16 +1217,20 @@ impl BodyLowering<'_> {
     pub(super) fn checked_property_read(
         &mut self,
         target: &FirPropertyTarget,
-        dispatch_receiver: Option<FirReceiver>,
-        extension_receiver: Option<FirReceiver>,
-        context_arguments: &[FirReceiver],
+        receivers: CheckedPropertyReceivers<'_>,
         substitutions: &[FirTypeSubstitution],
     ) -> Result<ExprId, FirLoweringFailure> {
+        let CheckedPropertyReceivers {
+            dispatch_receiver,
+            extension_receiver,
+            context_arguments,
+        } = receivers;
         match target {
             FirPropertyTarget::Module {
                 property: target,
                 inline_splice,
             } => {
+                let target = &super::expect_realization::realized_property(self.index, *target);
                 let (dispatch_receiver, dispatch_class) =
                     self.module_property_receiver(*target, dispatch_receiver)?;
                 let operation = IrCheckedOperation::PropertyRead {
@@ -1223,18 +1297,22 @@ impl BodyLowering<'_> {
     pub(super) fn checked_property_write(
         &mut self,
         target: &FirPropertyTarget,
-        dispatch_receiver: Option<FirReceiver>,
-        extension_receiver: Option<FirReceiver>,
-        context_arguments: &[FirReceiver],
+        receivers: CheckedPropertyReceivers<'_>,
         value: crate::fir::FirExprId,
         conversion: Option<crate::fir::FirConversion>,
         substitutions: &[FirTypeSubstitution],
     ) -> Result<ExprId, FirLoweringFailure> {
+        let CheckedPropertyReceivers {
+            dispatch_receiver,
+            extension_receiver,
+            context_arguments,
+        } = receivers;
         match target {
             FirPropertyTarget::Module {
                 property: target,
                 inline_splice,
             } => {
+                let target = &super::expect_realization::realized_property(self.index, *target);
                 let (dispatch_receiver, dispatch_class) =
                     self.module_property_receiver(*target, dispatch_receiver)?;
                 let operation = IrCheckedOperation::PropertyWrite {

@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 
-use krusty::native::{NativeCompileOptions, NativeTarget};
+use krusty_native::{NativeCompileOptions, NativeTarget};
 
 pub const HELP: &str = "\
 Usage: krusty kotlinc-native <options> <source files>

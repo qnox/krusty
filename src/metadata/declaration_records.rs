@@ -10,20 +10,13 @@ use crate::ir::{IrFile, IrParameterIdentity, IrParameterRole};
 use super::builder::{FnMeta, PropMeta, TypeAliasMeta};
 
 /// A package function's record, without any target signature.
-pub(crate) fn package_function(ir: &IrFile, declaration: &crate::ir::IrPackageFunction) -> FnMeta {
-    let mut param_annotations = ir
-        .fn_param_annotations
-        .get(&declaration.function)
-        .cloned()
-        .unwrap_or_default();
+pub fn package_function(ir: &IrFile, declaration: &crate::ir::IrPackageFunction) -> FnMeta {
+    let declared = ir.declared_parameters(declaration.function);
+    let mut param_annotations = declared.annotations.clone();
     if declaration.receiver.is_some() && declaration.context_count < param_annotations.len() {
         param_annotations.remove(declaration.context_count);
     }
-    let mut no_infer_params = ir
-        .fn_param_no_infer
-        .get(&declaration.function)
-        .cloned()
-        .unwrap_or_default();
+    let mut no_infer_params = declared.no_infer.clone();
     if declaration.receiver.is_some() && declaration.context_count < no_infer_params.len() {
         no_infer_params.remove(declaration.context_count);
     }
@@ -91,7 +84,7 @@ pub(crate) fn package_function(ir: &IrFile, declaration: &crate::ir::IrPackageFu
 
 /// A package property's record, without any target accessor or field signature. `setter` is the
 /// common-IR function of a source-declared setter, whose parameter name the record keeps.
-pub(crate) fn package_property(
+pub fn package_property(
     ir: &IrFile,
     declaration: &crate::ir::IrPackageProperty,
     setter: Option<u32>,
@@ -162,7 +155,7 @@ pub(crate) fn package_property(
 }
 
 /// A package typealias's record.
-pub(crate) fn package_alias(alias: &crate::ir::IrTypeAlias) -> TypeAliasMeta {
+pub fn package_alias(alias: &crate::ir::IrTypeAlias) -> TypeAliasMeta {
     TypeAliasMeta {
         name: alias.name.clone(),
         formals: alias
@@ -194,7 +187,7 @@ pub(crate) fn explicit_setter_name(ir: &IrFile, setter: Option<u32>) -> Option<S
 /// Kotlin metadata accepts only a declaration/producer-published semantic name. A lambda's `_`
 /// parameter, which declares no name, is kotlinc's `<unused var>` like an anonymous context
 /// parameter; a destructuring one is `<destruct>`.
-pub(crate) fn parameter_name(identity: &IrParameterIdentity) -> Option<&str> {
+pub fn parameter_name(identity: &IrParameterIdentity) -> Option<&str> {
     match identity.role {
         IrParameterRole::AnonymousContextParameter { .. } | IrParameterRole::UnusedValue => {
             Some("<unused var>")
@@ -206,7 +199,7 @@ pub(crate) fn parameter_name(identity: &IrParameterIdentity) -> Option<&str> {
 
 /// Kotlin's special name for a parameter written as a destructuring declaration. A suspend lambda's
 /// body also reads the parameter back into a local of this name.
-pub(crate) const DESTRUCTURED: &str = "<destruct>";
+pub const DESTRUCTURED: &str = "<destruct>";
 
 pub(crate) fn context_kind(identity: &IrParameterIdentity) -> crate::types::ContextParameterKind {
     match identity.role {

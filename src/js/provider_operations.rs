@@ -2,15 +2,15 @@
 //!
 //! Checked IR keeps every selected declaration as an ordinary dependency access. The provider
 //! attached the operation a declaration denotes to its frozen facts, so a read of an array's
-//! `size` or a string's `length`, and a call of an array's or a string's `get`, is realized here,
-//! at the target, from that fact and never from a spelling.
+//! `size` or a string's `length`, and a call of an array's `get`/`set` or a string's `get`, is
+//! realized here, at the target, from that fact and never from a spelling.
 
 use crate::backend::{BackendCompilerIntrinsic, CheckedBackendCallables};
 use crate::ir::{Callee, IrCheckedOperation, IrExpr, IrFile, IrIntrinsic};
 
 /// Realize each dependency property read whose getter is an array's `size` or a string's
 /// `length` as the JavaScript length operation, an enum's `name` as its stored field, and each
-/// dependency call of an array's or a string's `get` as the JavaScript element read.
+/// dependency call of an array's `get`/`set` or a string's `get` as the JavaScript element access.
 pub(super) fn realize(ir: &mut IrFile, callables: &CheckedBackendCallables) {
     for expression in &mut ir.exprs {
         if let IrExpr::Call { callee, .. } = expression {
@@ -26,6 +26,7 @@ pub(super) fn realize(ir: &mut IrFile, callables: &CheckedBackendCallables) {
                     .and_then(|callable| callable.compiler_operation())
                 {
                     Some(BackendCompilerIntrinsic::ArrayGet) => Some(IrIntrinsic::ArrayGet),
+                    Some(BackendCompilerIntrinsic::ArraySet) => Some(IrIntrinsic::ArraySet),
                     Some(BackendCompilerIntrinsic::StringGet) => Some(IrIntrinsic::StringGet),
                     _ => None,
                 };

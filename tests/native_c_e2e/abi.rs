@@ -12,8 +12,8 @@ use object::{Object, ObjectSymbol};
 
 use krusty::backend::{Artifact, Backend as _};
 use krusty::diag::DiagSink;
-use krusty::native::{CraneliftBackend, NativeTarget};
 use krusty::source::SourceInput;
+use krusty_native::{CraneliftBackend, NativeTarget};
 
 use super::common;
 
@@ -46,7 +46,7 @@ impl Drop for Scratch {
 
 fn host() -> Option<NativeTarget> {
     let target = NativeTarget::host()?;
-    krusty::native::can_link(target).then_some(target)
+    krusty_native::can_link(target).then_some(target)
 }
 
 fn compile(sources: &[(&str, &str)], module: &str) -> (Vec<Artifact>, Vec<String>) {
@@ -72,9 +72,9 @@ fn compile(sources: &[(&str, &str)], module: &str) -> (Vec<Artifact>, Vec<String
         .iter()
         .any(|(_, source)| source.contains("fun box("))
     {
-        krusty::native::Entry::Box
+        krusty_native::Entry::Box
     } else {
-        krusty::native::Entry::Main
+        krusty_native::Entry::Main
     };
     let backend = CraneliftBackend::new(host().expect("checked by the caller"))
         .with_entry(entry)
@@ -238,7 +238,7 @@ void kt_program_entry(void) {
     let caller_object = compile_c(&compiler, scratch.path(), caller);
     let mut inputs = objects(&artifacts);
     inputs.push(&caller_object);
-    let image = krusty::native::link_program(&inputs, target).expect("link the C caller");
+    let image = krusty_native::link_program(&inputs, target).expect("link the C caller");
     let executable = scratch.path().join("program");
     std::fs::write(&executable, image).expect("write");
     #[cfg(unix)]
@@ -297,7 +297,7 @@ kt_ref demo_box(void);
 #endif
 "
     );
-    let image = krusty::native::link_program(&objects(&artifacts), target).expect("link");
+    let image = krusty_native::link_program(&objects(&artifacts), target).expect("link");
     let scratch = Scratch::new("point");
     let executable = scratch.path().join("program");
     std::fs::write(&executable, image).expect("write");
@@ -310,9 +310,9 @@ kt_ref demo_box(void);
     assert!(output.status.success(), "{:?}", output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let answer = stdout
-        .split_once(krusty::native::BOX_RESULT_FRAME)
+        .split_once(krusty_native::BOX_RESULT_FRAME)
         .map(|(_, answer)| answer)
-        .filter(|answer| !answer.contains(krusty::native::BOX_RESULT_FRAME))
+        .filter(|answer| !answer.contains(krusty_native::BOX_RESULT_FRAME))
         .unwrap_or("");
     assert_eq!(answer, "OK");
 }
@@ -418,7 +418,7 @@ kt_ref box(void);
             .count(),
         1
     );
-    let image = krusty::native::link_program(&objects(&artifacts), target).expect("link");
+    let image = krusty_native::link_program(&objects(&artifacts), target).expect("link");
     assert!(!image.is_empty());
 }
 

@@ -30,6 +30,7 @@ import org.gradle.api.tasks.TaskProvider
 import org.gradle.build.event.BuildEventsListenerRegistry
 import org.gradle.jvm.toolchain.JavaToolchainService
 import org.gradle.process.ExecOperations
+import org.gradle.work.DisableCachingByDefault
 import org.jetbrains.kotlin.buildtools.api.ExperimentalBuildToolsApi
 import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension
@@ -52,8 +53,11 @@ import javax.inject.Inject
  * kotlinc's fragments: one per source set, refining the source sets it depends on.
  *
  * A dirty task always compiles the complete source set into a clean output directory. Gradle owns
- * task incrementality; krusty does not try to infer Kotlin dependency invalidation from class-file
- * names or partial ABI snapshots.
+ * task incrementality. A compile is keyed on its classpath through `krusty classpath-fingerprint`,
+ * krusty's own reading of what a dependent compilation observes of each entry, not on the
+ * classpath's bytes: a body-only edit in a dependency leaves its dependents up to date, and every
+ * edit a dependent could observe still recompiles it. krusty does not infer Kotlin dependency
+ * invalidation from class-file names or partial ABI snapshots.
  *
  * A compile that requests a compiler plugin (Compose, Parcelize, any third-party FIR/IR plugin) or
  * a kotlinc argument krusty does not implement stays with kotlinc: a check task asks the krusty
@@ -229,6 +233,26 @@ private fun replaceKotlinJvmCompiles(
             binary.set(project.layout.file(binaryPath.map(::File)))
             refusals.set(compilerChoice)
         }
+        // KGP infers producer dependencies from task inputs as well as explicit dependsOn.
+        // Every classpath reader needs that complete graph. The Kotlin task also depends on
+        // our replacement, so exclude only that owned task by identity.
+        val replacement = project.tasks.register(replacementName, KrustyCompileTask::class.java)
+        val compilePrerequisites = project.provider {
+            val replacementTask = replacement.get()
+            kotlinTask.taskDependencies.getDependencies(kotlinTask).filterNot { it === replacementTask }
+        }
+        val classpathFingerprint = project.tasks.register(
+            "${kotlinTask.name}KrustyClasspath",
+            KrustyClasspathFingerprintTask::class.java,
+        ) {
+            description = "Fingerprints what ${kotlinTask.path} observes of its classpath"
+            libraries.from(kotlinTask.libraries)
+            friendPaths.from(kotlinTask.friendPaths)
+            dependsOn(compilePrerequisites)
+            binary.set(project.layout.file(binaryPath.map(::File)))
+            viewCache.set(File(project.gradle.gradleUserHomeDir, "caches/krusty/dependency-views").absolutePath)
+            fingerprint.set(project.layout.buildDirectory.file("krusty/${kotlinTask.name}/classpath-fingerprint.txt"))
+        }
         // Both krusty compiles of this Kotlin task, the replacement and the verify compile beside
         // kotlinc, receive the same request.
         val configureCompilation: KrustyCompilation.() -> Unit = {
@@ -237,6 +261,7 @@ private fun replaceKotlinJvmCompiles(
             )
             libraries.from(kotlinTask.libraries)
             friendPaths.from(kotlinTask.friendPaths)
+            this.classpathFingerprint.set(classpathFingerprint.flatMap { it.fingerprint })
             val jvmCompilation = compilation
             if (jvmCompilation != null) {
                 val fragments = project.provider { fragmentStructure(jvmCompilation, project.projectDir) }
@@ -262,20 +287,12 @@ private fun replaceKotlinJvmCompiles(
             compilerPluginOptions.set(compilerPluginArguments)
             binary.set(project.layout.file(binaryPath.map(::File)))
         }
-        val replacement = project.tasks.register(replacementName, KrustyCompileTask::class.java) {
+        replacement.configure {
             group = kotlinTask.group ?: "build"
             description = "${kotlinTask.description ?: kotlinTask.name}, using krusty"
             configureCompilation()
             destinationDirectory.set(kotlinTask.destinationDirectory)
-            // A build that adds a source directory by path wires its generator onto the Kotlin
-            // task (`compileKotlin { dependsOn(generator) }`), not onto the directory. The compile
-            // runs here now, so it needs those dependencies; the Kotlin task's dependency on this
-            // replacement is the one it must not take back.
-            dependsOn(
-                project.provider {
-                    kotlinTask.dependsOn.filterNot { it is TaskProvider<*> && it.name == replacementName }
-                },
-            )
+            dependsOn(compilePrerequisites)
             dependsOn(supportCheck)
             onlyIf("krusty implements everything the compile requests") { !compilerChoice.refuses() }
             onlyIf("the build verifies krusty against kotlinc, which compiles") { !verifying }
@@ -382,11 +399,21 @@ abstract class KrustyCompilation : DefaultTask() {
     @get:PathSensitive(PathSensitivity.RELATIVE)
     abstract val javaSourceFiles: ConfigurableFileCollection
 
-    @get:Classpath
+    /**
+     * The compile's classpath. The compile reads it, but is keyed on [classpathFingerprint] in its
+     * place, which the fingerprint task takes after every task producing an entry has run.
+     */
+    @get:Internal
     abstract val libraries: ConfigurableFileCollection
 
-    @get:Classpath
+    /** The classpath entries whose internal declarations the compile sees, keyed like [libraries]. */
+    @get:Internal
     abstract val friendPaths: ConfigurableFileCollection
+
+    /** `krusty classpath-fingerprint` of [libraries] and [friendPaths]. */
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val classpathFingerprint: RegularFileProperty
 
     @get:Input
     abstract val compilerArguments: ListProperty<String>
@@ -527,6 +554,76 @@ abstract class KrustyCompileTask @Inject constructor(
         if (result.exitValue != 0) {
             throw GradleException("$executable exited with ${result.exitValue} for $path")
         }
+    }
+}
+
+/**
+ * `krusty classpath-fingerprint` of a compile's classpath and friend paths: what the compilation
+ * observes of them. A class directory or a jar enters by its declarations and by the bytecode an
+ * inline call copies out of it, not by its method bodies, so a dependency's body-only edit reruns
+ * this task and leaves the fingerprint, and with it the compile keyed on it, unchanged.
+ */
+@DisableCachingByDefault(because = "Reading the classpath again is what a cache lookup would cost")
+abstract class KrustyClasspathFingerprintTask @Inject constructor(
+    private val execOperations: ExecOperations,
+) : DefaultTask() {
+    @get:Classpath
+    abstract val libraries: ConfigurableFileCollection
+
+    @get:Classpath
+    abstract val friendPaths: ConfigurableFileCollection
+
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val binary: RegularFileProperty
+
+    /**
+     * Where krusty keeps each jar's view by the digest of its bytes, shared by every build of this
+     * Gradle user home, so an unchanged library jar is parsed once. An entry is keyed by contents
+     * alone and never stale, so the directory is no input.
+     */
+    @get:Internal
+    abstract val viewCache: Property<String>
+
+    @get:OutputFile
+    abstract val fingerprint: RegularFileProperty
+
+    @TaskAction
+    fun digest() {
+        // The compile's own classpath arguments; the JDK and the compile's other inputs are keyed
+        // by the compile task itself.
+        val arguments = mutableListOf(
+            "classpath-fingerprint",
+            "--view-cache",
+            viewCache.get(),
+            "-no-stdlib",
+            "-no-reflect",
+            "-no-jdk",
+        )
+        if (!libraries.isEmpty) {
+            arguments.add("-classpath")
+            arguments.add(libraries.files.joinToString(File.pathSeparator, transform = File::getAbsolutePath))
+        }
+        if (!friendPaths.isEmpty) {
+            arguments.add("-Xfriend-paths=" + friendPaths.files.joinToString(",", transform = File::getAbsolutePath))
+        }
+        val executable = binary.get().asFile.absolutePath
+        val output = ByteArrayOutputStream()
+        val errors = ByteArrayOutputStream()
+        val result = execOperations.exec {
+            this.executable = executable
+            args(arguments)
+            standardOutput = output
+            errorOutput = errors
+            isIgnoreExitValue = true
+        }
+        if (result.exitValue != 0) {
+            throw GradleException(
+                "$executable classpath-fingerprint exited with ${result.exitValue} for $path\n" +
+                    errors.toString(Charsets.UTF_8).trimEnd(),
+            )
+        }
+        fingerprint.get().asFile.writeText(output.toString(Charsets.UTF_8))
     }
 }
 
@@ -683,64 +780,6 @@ private fun validateJvmTargets(kotlin: String, java: String, mode: String, warn:
  * its free arguments, or the reasons this plugin cannot derive them. A compile with refusals is
  * left to kotlinc, which receives the task's own request unchanged.
  */
-private class KotlincRequest(val arguments: List<String>, val refusals: List<String>)
-
-private fun kotlincRequest(task: KotlinJvmCompile, pluginVersion: String, compilerVersion: String): KotlincRequest {
-    fun refused(reason: String) = KotlincRequest(emptyList(), listOf(reason))
-    if (compilerVersion != pluginVersion) {
-        return refused("Kotlin compiler $compilerVersion differs from Kotlin Gradle plugin $pluginVersion")
-    }
-    val options = task.compilerOptions
-    val unsupported = listOf(
-        "extraWarnings" to options.extraWarnings,
-        "suppressWarnings" to options.suppressWarnings,
-        // Named `-Xwarning-level` policy is forwarded to the compiler, whose diagnostic registry
-        // is the authoritative place to validate names and apply severities. `-Werror` is the
-        // global form of that policy: the compiler fails the compilation when any warning is
-        // emitted.
-        "verbose" to options.verbose,
-        // `useModuleDetection` (set on every Android compile) only configures kotlinc's
-        // multi-module incremental compilation, never a compiler argument; a full krusty compile
-        // has nothing to detect.
-    ).filter { (_, enabled) -> enabled.getOrElse(false) }
-        .map { (name, _) -> "krusty does not support compilerOptions.$name" }
-    if (unsupported.isNotEmpty()) return KotlincRequest(emptyList(), unsupported)
-    val languageVersion = options.languageVersion.orNull?.version
-    val apiVersion = options.apiVersion.orNull?.version
-
-    val structuredOptIns = options.optIn.getOrElse(emptyList())
-    val freeArguments = options.freeCompilerArgs.getOrElse(emptyList())
-    structuredOptInRefusal(structuredOptIns)?.let { return refused(it) }
-    freeArgumentRefusal(freeArguments, pluginVersion)?.let { return refused(it) }
-    // KGP fills kotlinc's arguments from the structured options and appends the free arguments
-    // after them, so a free argument overrides the structured option it restates.
-    val arguments = ArrayList<String>()
-    languageVersion?.let { arguments.addPair("-language-version", it) }
-    apiVersion?.let { arguments.addPair("-api-version", it) }
-    structuredOptIns.forEach { marker ->
-        arguments.add("-opt-in=$marker")
-    }
-    options.moduleName.orNull?.takeIf(String::isNotEmpty)?.let {
-        arguments.addPair("-module-name", it)
-    }
-    options.jvmTarget.orNull?.let { arguments.addPair("-jvm-target", it.target) }
-    options.jvmDefault.orNull?.let { arguments.addPair("-jvm-default", it.compilerArgument) }
-    if (task.multiPlatformEnabled.getOrElse(false)) arguments.add("-Xmulti-platform")
-    if (options.progressiveMode.getOrElse(false)) arguments.add("-progressive")
-    if (options.javaParameters.getOrElse(false)) arguments.add("-java-parameters")
-    if (options.noJdk.getOrElse(false)) arguments.add("-no-jdk")
-    if (options.allWarningsAsErrors.getOrElse(false) && "-Werror" !in freeArguments) {
-        arguments.add("-Werror")
-    }
-    arguments.addAll(freeArguments)
-    return KotlincRequest(arguments, emptyList())
-}
-
-// kotlinc accepts a repeated `-opt-in` marker, so a repeated structured marker reaches krusty as
-// KGP passes it.
-private fun structuredOptInRefusal(markers: List<String>): String? =
-    if (markers.any(String::isBlank)) "compilerOptions.optIn contains an empty marker" else null
-
 private fun supportedKotlinPluginVersion(version: String): String =
     if (version in supportedKotlinVersions) {
         version
@@ -752,9 +791,4 @@ private fun unsupportedKotlinPluginVersion(version: String): String {
     val expected = supportedKotlinVersions.dropLast(1).joinToString(", ") +
         ", or " + supportedKotlinVersions.last()
     return "unsupported Kotlin Gradle plugin $version; expected $expected"
-}
-
-private fun MutableList<String>.addPair(name: String, value: String) {
-    add(name)
-    add(value)
 }

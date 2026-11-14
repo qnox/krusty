@@ -9,7 +9,9 @@ use crate::fx_hash::{HashMap, HashSet};
 
 mod annotation_constructions;
 mod context_parameters;
+mod equality_bound;
 pub use annotation_constructions::{FirAnnotationConstruction, FirAnnotationDefaultValue};
+pub use equality_bound::FirEqualityBoundGuard;
 pub(super) mod value_parameters;
 pub use value_parameters::{FirDefaultValue, FirValueParameter, FirVarargParameter};
 pub(crate) mod debug_lines;
@@ -20,8 +22,9 @@ mod capture_order;
 mod capture_parameters;
 pub use capture_parameters::FirCaptureParameter;
 mod class_captures;
+pub use class_captures::ClassCaptureIdentity;
 pub(crate) use class_captures::{
-    ClassBodyContext, ClassCaptureBinding, ClassCaptureIdentity, ClassReceiverCaptureSource,
+    ClassBodyContext, ClassCaptureBinding, ClassReceiverCaptureSource,
 };
 mod lifting_sites;
 mod local_type_parameters;
@@ -582,6 +585,7 @@ impl FirReferenceAdaptation {
                         values.len() * std::mem::size_of::<u32>()
                     }
                     FirAdaptedReferenceArgument::Value(_)
+                    | FirAdaptedReferenceArgument::Context
                     | FirAdaptedReferenceArgument::Default => 0,
                 })
                 .sum::<usize>()
@@ -636,6 +640,9 @@ pub struct FirAnonymousSuperArgument {
 pub struct FirAnonymousObject {
     pub declaration: DeclarationId,
     pub captures: Box<[FirLocalClassCapture]>,
+    /// `order[position]` is the capture field at that constructor position. The same first-use
+    /// permutation a local class records on its declaration.
+    pub capture_order: Box<[u32]>,
     pub delegate_arguments: Box<[FirInterfaceDelegateArgument]>,
     pub super_arguments: Box<[FirAnonymousSuperArgument]>,
 }
@@ -822,6 +829,8 @@ impl FirCallableReferenceTarget {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FirAdaptedReferenceArgument {
     Value(u32),
+    /// A leading context parameter, taken in order from the reference's context arguments.
+    Context,
     Default,
     Vararg {
         values: Box<[u32]>,
@@ -1138,6 +1147,10 @@ pub enum FirExprKind {
         binding: FirCallableReferenceBinding,
         dispatch_receiver: Option<FirReceiver>,
         extension_receiver: Option<FirReceiver>,
+        /// Values selected at the reference site for the declaration's leading context
+        /// parameters (`CallableReferencesToContextual`), evaluated once when the reference is
+        /// created and bound into it.
+        context_arguments: Box<[FirReceiver]>,
         substitutions: Box<[FirTypeSubstitution]>,
         adaptation: Option<Box<FirReferenceAdaptation>>,
         reflection_owner: Option<crate::types::TypeName>,
@@ -1237,7 +1250,9 @@ pub enum FirExprKind {
         comparison: ResolvedTy,
     },
     /// `ends_inlined_call`: the selected range declaration is an inline function (`UInt.rangeTo`)
-    /// that this construction realizes in place of the body kotlinc inlines.
+    /// that this construction realizes in place of the body kotlinc inlines. `declaration` is that
+    /// selected dependency declaration, which a target that does not lay out the range class
+    /// calls to build it.
     Range {
         operation: FirRangeOperation,
         start: FirExprId,
@@ -1245,6 +1260,7 @@ pub enum FirExprKind {
         end: FirExprId,
         end_type: ResolvedTy,
         ends_inlined_call: bool,
+        declaration: Option<crate::fir::ExternalCallableId>,
     },
     InRange {
         operation: FirRangeOperation,
@@ -1261,12 +1277,6 @@ pub enum FirExprKind {
         start: FirExprId,
         end: FirExprId,
         negated: bool,
-    },
-    IndexedWrite {
-        receiver: FirExprId,
-        indices: Box<[FirConvertedValue]>,
-        value: FirExprId,
-        conversion: Option<FirConversion>,
     },
     /// Null-guarded member/extension selection. The nested selector owns the receiver exactly once;
     /// lowering guards that selected receiver and never repeats lookup or overload selection.
@@ -1384,9 +1394,6 @@ impl FirExprKind {
             FirExprKind::ClassLiteral { .. } => 0,
             FirExprKind::LocalPropertyReference { name, .. } => name.len(),
             FirExprKind::LocalDelegateAccess { .. } => 0,
-            FirExprKind::IndexedWrite { indices, .. } => {
-                indices.len() * std::mem::size_of::<FirConvertedValue>()
-            }
             FirExprKind::AnnotationArray(expressions)
             | FirExprKind::StringTemplate(expressions) => {
                 expressions.len() * std::mem::size_of::<FirExprId>()
@@ -1471,6 +1478,7 @@ impl FirExprKind {
                         .iter()
                         .map(FirLocalClassCapture::storage_payload_bytes)
                         .sum::<usize>()
+                    + std::mem::size_of_val(object.capture_order.as_ref())
                     + object.delegate_arguments.len()
                         * std::mem::size_of::<FirInterfaceDelegateArgument>()
                     + object.super_arguments.len()
@@ -1777,6 +1785,7 @@ pub struct FirBody {
     /// crossinline capture wherever it is moved, which the target's inline ABI depends on.
     crossinline_parameters: Vec<LocalValueId>,
     parameters: Vec<FirValueParameter>,
+    equality_bound_guard: Option<FirEqualityBoundGuard>,
     default_values: Vec<FirDefaultValue>,
     captures: Vec<FirCapture>,
     capture_declaration_ordinals: Box<[u32]>,
@@ -1845,6 +1854,7 @@ impl FirBody {
             spliced_inline_parameters: Vec::new(),
             crossinline_parameters: Vec::new(),
             parameters: Vec::new(),
+            equality_bound_guard: None,
             default_values: Vec::new(),
             captures: Vec::new(),
             capture_declaration_ordinals: Box::default(),

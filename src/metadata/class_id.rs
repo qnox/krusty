@@ -109,7 +109,7 @@ impl ResolvedClassId {
 
     /// An anonymous object's own declaration retains its raw local ID even when its named
     /// members belong to an enum-entry declaration namespace.
-    pub(crate) fn anonymous(classifier: TypeName) -> Self {
+    pub fn anonymous(classifier: TypeName) -> Self {
         Self {
             classifier,
             declaration: ClassIdName::Anonymous,

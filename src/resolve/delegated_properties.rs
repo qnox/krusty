@@ -45,6 +45,35 @@ struct DelegateGetValueSelection {
 /// What kotlinc's delegate-convention diagnostics name beyond the types already in hand: where the
 /// `by` keyword sits, which receivers the property has, and whether it is a `var`. The receivers are
 /// listed dispatch first — the order `KProperty2<D, E, V>` spells them.
+/// The operand facts one delegate-convention diagnostic is rendered from.
+pub(crate) struct DelegateConventionQuery<'a> {
+    pub(crate) site: DelegateConventionSite,
+    pub(crate) delegate_ty: Ty,
+    pub(crate) name: &'a str,
+    pub(crate) this_ref: Ty,
+    pub(crate) property: Option<Ty>,
+    pub(crate) value: Option<Ty>,
+}
+
+impl<'a> DelegateConventionQuery<'a> {
+    /// The convention question asked before a property type or written value exists.
+    pub(crate) fn for_delegate(
+        site: DelegateConventionSite,
+        delegate_ty: Ty,
+        name: &'a str,
+        this_ref: Ty,
+    ) -> Self {
+        Self {
+            site,
+            delegate_ty,
+            name,
+            this_ref,
+            property: None,
+            value: None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct DelegateConventionSite {
     pub(crate) by_span: Span,
@@ -294,6 +323,12 @@ pub enum DelegateGetValueTarget {
         name: String,
         extension_receiver: Ty,
         dispatch_receiver: ImplicitReceiverSelection,
+        /// Source role selected while the receiver declaration and lexical tower are live.
+        dispatch_receiver_role: crate::fir::FirCapturedReceiver,
+        /// Declaration identity of that receiver. A capture matches this, not the formatted role:
+        /// the formatted role is rebuilt from whichever scope asks, and two scopes can spell one
+        /// receiver differently.
+        dispatch_declaration: Option<super::ReceiverDeclarationRole>,
         context_count: usize,
         params: Vec<Ty>,
         ret: Ty,
@@ -760,17 +795,18 @@ pub(crate) fn delegate_convention_ambiguity_message_with_candidates(
 }
 
 pub(crate) fn delegate_convention_ambiguity_message_with_functions(
-    site: DelegateConventionSite,
-    delegate_ty: Ty,
-    name: &str,
-    this_ref: Ty,
-    property: Option<Ty>,
-    value: Option<Ty>,
+    query: &DelegateConventionQuery<'_>,
     candidates: &[crate::libraries::FunctionInfo],
     candidate_result: &mut dyn FnMut(
         &crate::libraries::FunctionInfo,
     ) -> Result<Ty, crate::fir::DiagnosticId>,
 ) -> Result<Option<String>, crate::fir::DiagnosticId> {
+    let site = query.site.clone();
+    let delegate_ty = query.delegate_ty;
+    let name = query.name;
+    let this_ref = query.this_ref;
+    let property = query.property;
+    let value = query.value;
     if delegate_ty.mentions_error()
         || delegate_ty.mentions_pending()
         || this_ref.mentions_error()
@@ -803,16 +839,17 @@ pub(crate) fn delegate_convention_ambiguity_message_with_functions(
 /// string is what lets the duplicate collapse if they ever both reach the sink.
 pub(crate) fn delegate_convention_message(
     resolver: &crate::symbol_resolver::SymbolResolver,
-    site: DelegateConventionSite,
-    delegate_ty: Ty,
-    name: &str,
-    this_ref: Ty,
-    property: Option<Ty>,
-    value: Option<Ty>,
+    query: &DelegateConventionQuery<'_>,
     candidate_result: &mut dyn FnMut(
         &crate::libraries::FunctionInfo,
     ) -> Result<Ty, crate::fir::DiagnosticId>,
 ) -> Result<Option<String>, crate::fir::DiagnosticId> {
+    let site = query.site.clone();
+    let delegate_ty = query.delegate_ty;
+    let name = query.name;
+    let this_ref = query.this_ref;
+    let property = query.property;
+    let value = query.value;
     // Do not demand or render candidates when the convention's own operand facts already failed.
     // Their source diagnostics are authoritative and this convention message would only cascade.
     if delegate_ty.mentions_error()
@@ -849,12 +886,14 @@ impl Checker<'_> {
         // signature phase, where one may still be undetermined, resolves it first.
         let message = match delegate_convention_message(
             &self.resolver(),
-            site.clone(),
-            delegate_ty,
-            name,
-            this_ref,
-            property,
-            value,
+            &DelegateConventionQuery {
+                site: site.clone(),
+                delegate_ty,
+                name,
+                this_ref,
+                property,
+                value,
+            },
             &mut |candidate| Ok(candidate.callable.ret),
         ) {
             Ok(message) => message,
@@ -870,21 +909,11 @@ impl Checker<'_> {
 
     fn report_delegate_convention_ambiguity(
         &mut self,
-        site: DelegateConventionSite,
-        delegate_ty: Ty,
-        name: &str,
-        this_ref: Ty,
-        property: Option<Ty>,
-        value: Option<Ty>,
+        query: &DelegateConventionQuery<'_>,
         candidates: &[crate::libraries::FunctionInfo],
     ) {
         let message = match delegate_convention_ambiguity_message_with_functions(
-            site.clone(),
-            delegate_ty,
-            name,
-            this_ref,
-            property,
-            value,
+            query,
             candidates,
             &mut |candidate| Ok(candidate.callable.ret),
         ) {
@@ -892,20 +921,21 @@ impl Checker<'_> {
             Err(_) => panic!("a checked ambiguous convention candidate has a finalized result"),
         };
         if let Some(message) = message {
-            self.diags.error(site.by_span, message);
+            self.diags.error(query.site.by_span, message);
         }
     }
 
     fn report_member_extension_delegate_convention_ambiguity(
         &mut self,
-        site: DelegateConventionSite,
-        delegate_ty: Ty,
-        name: &str,
-        this_ref: Ty,
-        property: Option<Ty>,
-        value: Option<Ty>,
+        query: &DelegateConventionQuery<'_>,
         candidates: &[MemberExtensionFunctionCandidate],
     ) {
+        let site = query.site.clone();
+        let delegate_ty = query.delegate_ty;
+        let name = query.name;
+        let this_ref = query.this_ref;
+        let property = query.property;
+        let value = query.value;
         let candidates = candidates
             .iter()
             .map(|candidate| {
@@ -947,17 +977,17 @@ impl Checker<'_> {
         self.diags.error(site.by_span, message);
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn report_inapplicable_delegate_convention_failure(
         &mut self,
-        site: DelegateConventionSite,
-        delegate_ty: Ty,
-        name: &str,
-        this_ref: Ty,
-        property: Option<Ty>,
-        value: Option<Ty>,
+        query: &DelegateConventionQuery<'_>,
         families: &DelegateConventionFamilies,
     ) {
+        let site = query.site.clone();
+        let delegate_ty = query.delegate_ty;
+        let name = query.name;
+        let this_ref = query.this_ref;
+        let property = query.property;
+        let value = query.value;
         let candidates = families
             .diagnostic_candidates(name, &mut |candidate| {
                 Ok(match candidate {
@@ -990,48 +1020,21 @@ impl Checker<'_> {
         self.diags.error(site.by_span, message);
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn report_delegate_operator_failure(
         &mut self,
-        site: DelegateConventionSite,
-        delegate_ty: Ty,
-        name: &str,
-        this_ref: Ty,
-        property: Option<Ty>,
-        value: Option<Ty>,
+        query: &DelegateConventionQuery<'_>,
         failure: DelegateOperatorFailure,
     ) {
         match failure {
-            DelegateOperatorFailure::AmbiguousOrdinary(candidates) => self
-                .report_delegate_convention_ambiguity(
-                    site,
-                    delegate_ty,
-                    name,
-                    this_ref,
-                    property,
-                    value,
-                    &candidates,
-                ),
-            DelegateOperatorFailure::InapplicableCandidates(families) => self
-                .report_inapplicable_delegate_convention_failure(
-                    site,
-                    delegate_ty,
-                    name,
-                    this_ref,
-                    property,
-                    value,
-                    &families,
-                ),
-            DelegateOperatorFailure::AmbiguousMemberExtensions(candidates) => self
-                .report_member_extension_delegate_convention_ambiguity(
-                    site,
-                    delegate_ty,
-                    name,
-                    this_ref,
-                    property,
-                    value,
-                    &candidates,
-                ),
+            DelegateOperatorFailure::AmbiguousOrdinary(candidates) => {
+                self.report_delegate_convention_ambiguity(query, &candidates)
+            }
+            DelegateOperatorFailure::InapplicableCandidates(families) => {
+                self.report_inapplicable_delegate_convention_failure(query, &families)
+            }
+            DelegateOperatorFailure::AmbiguousMemberExtensions(candidates) => {
+                self.report_member_extension_delegate_convention_ambiguity(query, &candidates)
+            }
         }
     }
 
@@ -1134,12 +1137,14 @@ impl Checker<'_> {
             DelegateOperatorSelection::None => None,
             DelegateOperatorSelection::Failure(failure) => {
                 self.report_delegate_operator_failure(
-                    site,
-                    delegate_ty,
-                    "provideDelegate",
-                    provide_ref,
-                    expected_property,
-                    None,
+                    &DelegateConventionQuery {
+                        site,
+                        delegate_ty,
+                        name: "provideDelegate",
+                        this_ref: provide_ref,
+                        property: expected_property,
+                        value: None,
+                    },
                     failure,
                 );
                 return DelegateGetValueAttempt::Complete(None);
@@ -1171,12 +1176,14 @@ impl Checker<'_> {
             }
             DelegateOperatorSelection::Failure(failure) => {
                 self.report_delegate_operator_failure(
-                    site,
-                    stored_ty,
-                    "getValue",
-                    this_ref,
-                    expected_property,
-                    None,
+                    &DelegateConventionQuery {
+                        site,
+                        delegate_ty: stored_ty,
+                        name: "getValue",
+                        this_ref,
+                        property: expected_property,
+                        value: None,
+                    },
                     failure,
                 );
                 return DelegateGetValueAttempt::Complete(None);
@@ -1226,23 +1233,19 @@ impl Checker<'_> {
             crate::symbol_resolver::unify_ty(ret, expected, &mut bindings);
             let refined = crate::symbol_resolver::ty_subst_keep_unbound(delegate_ty, &bindings);
             let refined = match refined.kind() {
-                TyKind::Obj(name, arguments)
-                    if arguments.iter().any(|argument| *argument == ret) =>
-                {
-                    Ty::obj_args_name(
-                        name,
-                        &arguments
-                            .iter()
-                            .map(|argument| {
-                                if *argument == ret {
-                                    expected
-                                } else {
-                                    *argument
-                                }
-                            })
-                            .collect::<Vec<_>>(),
-                    )
-                }
+                TyKind::Obj(name, arguments) if arguments.contains(&ret) => Ty::obj_args_name(
+                    name,
+                    &arguments
+                        .iter()
+                        .map(|argument| {
+                            if *argument == ret {
+                                expected
+                            } else {
+                                *argument
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                ),
                 _ => refined,
             };
             let refined = self.refine_delegate_receiver_to_bounds(refined);
@@ -1250,10 +1253,8 @@ impl Checker<'_> {
                 "fir",
                 "refine delegate from getValue result delegate={delegate:?} ret={ret:?} expected={expected:?} bindings={bindings:?} receiver={delegate_ty:?} refined={refined:?}",
             );
-            if refined != delegate_ty {
-                if receiver_expectation != Some(refined) {
-                    return DelegateGetValueAttempt::RetryWithReceiver(refined);
-                }
+            if refined != delegate_ty && receiver_expectation != Some(refined) {
+                return DelegateGetValueAttempt::RetryWithReceiver(refined);
             }
         }
         crate::trace_compiler!(
@@ -1261,9 +1262,11 @@ impl Checker<'_> {
             "selected delegate getValue delegate={delegate:?} receiver={stored_ty:?} target={target:?}",
         );
         if let Some(provide_target) = provide_target {
+            self.mark_delegate_dispatch_used(scope, delegate, &provide_target);
             self.delegate_provide_targets
                 .insert(delegate, *provide_target);
         }
+        self.mark_delegate_dispatch_used(scope, delegate, &target);
         self.delegate_getvalue_targets.insert(delegate, *target);
         DelegateGetValueAttempt::Complete(Some(ret))
     }
@@ -1361,20 +1364,50 @@ impl Checker<'_> {
             }
             DelegateOperatorSelection::Failure(failure) => {
                 self.report_delegate_operator_failure(
-                    site,
-                    stored_ty,
-                    "setValue",
-                    this_ref,
-                    Some(property_ty),
-                    Some(property_ty),
+                    &DelegateConventionQuery {
+                        site,
+                        delegate_ty: stored_ty,
+                        name: "setValue",
+                        this_ref,
+                        property: Some(property_ty),
+                        value: Some(property_ty),
+                    },
                     failure,
                 );
                 return None;
             }
         };
         crate::trace_compiler!("fir", "selected delegate setValue target={target:?}");
+        self.mark_delegate_dispatch_used(scope, delegate, &target);
         self.delegate_setvalue_targets.insert(delegate, *target);
         Some(())
+    }
+
+    /// A committed convention reads its dispatch receiver even though the source has no
+    /// receiver expression. Record the demand without replacing the delegate expression's own
+    /// selected call. Provisional receiver-inference attempts do not publish a demand.
+    fn mark_delegate_dispatch_used(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        delegate: ExprId,
+        target: &DelegateGetValueTarget,
+    ) {
+        let DelegateGetValueTarget::MemberExtension {
+            dispatch_receiver, ..
+        } = target
+        else {
+            return;
+        };
+        if dispatch_receiver.singleton.is_some() {
+            return;
+        }
+        if let Some(receiver) = self
+            .implicit_receivers(scope)
+            .into_iter()
+            .find(|receiver| receiver.receiver_depth == dispatch_receiver.receiver_depth)
+        {
+            self.mark_extension_receiver_used(delegate, receiver);
+        }
     }
 
     fn select_delegate_operator(
@@ -1551,6 +1584,17 @@ impl Checker<'_> {
                             extension_receiver: selected.extension_receiver,
                             dispatch_receiver: self
                                 .implicit_receiver_selection(selected.dispatch_receiver),
+                            dispatch_receiver_role: self.captured_receiver(
+                                scope,
+                                selected.dispatch_receiver.identity,
+                                selected.dispatch_receiver.extension_receiver,
+                                selected
+                                    .dispatch_receiver
+                                    .class_receiver
+                                    .then_some(selected.dispatch_receiver.declared_ty),
+                            ),
+                            dispatch_declaration: scope
+                                .implicit_receiver_role(selected.dispatch_receiver.identity),
                             context_count: selected.context_count,
                             params: selected.params,
                             ret: selected.ret,

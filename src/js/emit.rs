@@ -1477,7 +1477,9 @@ mod tests {
                 caller: Some(crate::ir::IrEnclosure::Function(source)),
                 caller_is_default: false,
                 caller_source_name: "box".to_string(),
-                inline_callee: crate::fir::CallableId::from_raw(5),
+                inline_callee: crate::ir::IrInlineCallee::Module(crate::fir::CallableId::from_raw(
+                    5,
+                )),
                 inline_callee_source_name: "defineFunc".to_string(),
                 parent: None,
                 consumed_inline_capture: false,

@@ -341,6 +341,13 @@ impl SymbolSource for DependencyPlatform {
         self.platform.external_callable(identity)
     }
 
+    fn klib_body_class_contract(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::libraries::KlibBodyClassContract> {
+        self.platform.klib_body_class_contract(classifier)
+    }
+
     fn external_callable_by_dependency(
         &self,
         identity: &crate::libraries::KlibDependencyCallable,
@@ -557,6 +564,10 @@ impl SemanticPlatform for DependencyPlatform {
     /// to a platform, it is not a platform of its own.
     fn diagnostic_target_name(&self) -> Option<&str> {
         self.platform.diagnostic_target_name()
+    }
+
+    fn array_of_nullable_nothing_error(&self) -> Option<&'static str> {
+        self.platform.array_of_nullable_nothing_error()
     }
 
     fn library_value_form(&self, ty: Ty) -> Ty {

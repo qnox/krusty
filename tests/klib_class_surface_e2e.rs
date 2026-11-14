@@ -221,9 +221,9 @@ fn kotlinc_native_consumes_a_krusty_reified_inline_body() {
             krusty::language_version::LanguageVersion::V2_4,
         ),
     )
-    .with_native_target(krusty::native::NativeTarget::new(
-        krusty::native::Arch::X86_64,
-        krusty::native::Os::Linux,
+    .with_native_target(krusty_native::NativeTarget::new(
+        krusty_native::Arch::X86_64,
+        krusty_native::Os::Linux,
     ))
     .expect("the official consumer fixture targets Kotlin/Native linux_x64");
     let entries = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "probe", &mut diags);
@@ -784,7 +784,7 @@ fn klib_serialization_plugin_declarations_match_kotlinc_native() {
     .expect("the directed KLIB regression has its required analysis toolchain");
     let (messages, fragments) = written_fragments(analysis, &stems, diags);
     assert_eq!(messages, Vec::<String>::new());
-    assert_eq!(fragments, [expected.clone()]);
+    assert_eq!(fragments, std::slice::from_ref(expected));
 }
 
 fn kotlin_native_root() -> Option<std::path::PathBuf> {

@@ -1,9 +1,10 @@
 //! The order classes are tabled in, and the interfaces each one implements.
 
+use crate::fx_hash::HashMap;
 use crate::ir::{ClassId, IrFile};
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
 
-use super::{Representation, Unsupported};
+use super::{LaidOutSuperclass, Representation, Unsupported};
 
 /// Every interface each class implements, transitively: its own, its superclass's, and the bases
 /// of both. An interface's entry holds the interfaces it extends, not itself.
@@ -62,7 +63,8 @@ pub(crate) fn interface_closure(ir: &IrFile) -> Vec<Vec<ClassId>> {
 /// Classes sorted so that everything a class is laid out FROM precedes it: its superclass, whose
 /// fields and vtable it extends, and — for an interface — the interfaces it extends, whose member
 /// numbering it inherits. A superclass that is not in this file is declined, unless it is
-/// `kotlin.Any` or a base the target's runtime owns ([`Representation::owns_base`]).
+/// `kotlin.Any`, a base the target's runtime owns ([`Representation::owns_base`]), or a class
+/// another file laid out (`laid_out`).
 ///
 /// This is a topological sort rather than a sort by hierarchy depth. Depth is not a valid key
 /// here: two classes can sit at the same recorded depth with one extending the other, once
@@ -71,10 +73,12 @@ pub(crate) fn interface_closure(ir: &IrFile) -> Vec<Vec<ClassId>> {
 pub(crate) fn hierarchy_order(
     representation: &dyn Representation,
     ir: &IrFile,
+    laid_out: &HashMap<TypeName, LaidOutSuperclass>,
 ) -> Result<Vec<ClassId>, Unsupported> {
     for class in &ir.classes {
         if class.superclass != crate::types::wk::any()
             && !representation.owns_base(class.superclass)
+            && !laid_out.contains_key(&class.superclass)
             && ir.class_id_by_name(class.superclass).is_none()
         {
             return Err(format!(

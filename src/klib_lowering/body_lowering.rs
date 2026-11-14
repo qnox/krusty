@@ -26,6 +26,7 @@ mod constructions;
 mod elvis_blocks;
 mod instance_storage;
 mod loops;
+mod object_literals;
 mod range_membership;
 mod safe_calls;
 mod string_templates;
@@ -37,7 +38,7 @@ pub(super) use blocks::publish_parameter_defaults;
 use super::decline::KlibBodyDeclineReason;
 use super::function_lowering::FunctionHeader;
 use super::ir_builtins::IrBuiltinOperators;
-use super::klib_types::{semantic_type, KlibTypeParameters};
+use super::klib_types::KlibTypeParameters;
 use super::local_values::LocalValues;
 use crate::ir::{
     complete_bottom_value, Callee, ExprId, FunId, IrBindingStability, IrConst, IrExpr, IrFile,
@@ -45,8 +46,8 @@ use crate::ir::{
 };
 use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::klib_ir::tree::{
-    KlibIrArena, KlibIrExpr, KlibIrExprId, KlibIrExprKind, KlibIrStatement, KlibIrTypeOperator,
-    KlibIrVariableId,
+    KlibIrArena, KlibIrExpr, KlibIrExprId, KlibIrExprKind, KlibIrStatement, KlibIrTypeId,
+    KlibIrTypeOperator, KlibIrVariableId,
 };
 use crate::metadata::klib_ir::{KlibIrConstant, KlibIrSymbol};
 use crate::types::{Ty, TypeName};
@@ -77,12 +78,35 @@ pub(super) struct LinkedCallee {
     /// Whether each of [`Self::params`] declares a default a call may leave it to, for a function
     /// this unit lowers; empty for every other callee, which no call may omit an argument of.
     pub(super) parameter_defaults: Vec<bool>,
+    /// The facts a target dispatches the call by, as for a source call of the same declaration.
+    pub(super) edge: super::CallEdge,
 }
 
 pub(super) struct LinkedCallableReference {
     pub(super) declaration: crate::fir::ExternalCallableId,
     pub(super) kind: crate::libraries::ExternalCallableKind,
+    pub(super) extension_receiver_parameter: Option<usize>,
     pub(super) call: LinkedCallee,
+}
+
+impl LinkedCallableReference {
+    pub(super) fn new(
+        declaration: crate::fir::ExternalCallableId,
+        callable: crate::libraries::KlibBodyCallable<'_>,
+        call: LinkedCallee,
+    ) -> Self {
+        Self {
+            declaration,
+            kind: callable.kind(),
+            extension_receiver_parameter: callable.parameter_identities().iter().position(|role| {
+                matches!(
+                    role,
+                    crate::fir::ResolvedParameterIdentity::ExtensionReceiver
+                )
+            }),
+            call,
+        }
+    }
 }
 
 /// The declared shape of a member a range literal's membership calls.
@@ -97,6 +121,16 @@ pub(super) trait CallLinker {
     /// The same authenticated primitive call shape that dependency planning treats as a leaf.
     /// Template linkers retain their ordinary checked external-call boundary by default.
     fn common_primitive(
+        &self,
+        _callee: &crate::libraries::KlibDeclarationSignature,
+    ) -> Lowered<Option<super::primitive_calls::CommonPrimitiveCall>> {
+        Ok(None)
+    }
+
+    /// The range construction a range literal's membership compares against, read as
+    /// [`Self::common_primitive`] reads its primitive but whatever range class the target lays
+    /// out: the membership builds no range.
+    fn range_literal_bounds(
         &self,
         _callee: &crate::libraries::KlibDeclarationSignature,
     ) -> Lowered<Option<super::primitive_calls::CommonPrimitiveCall>> {
@@ -120,6 +154,37 @@ pub(super) trait CallLinker {
         Ok(None)
     }
 
+    /// The range literal kotlinc's `ForLoopsLowering` counts through when a `for` loop iterates
+    /// the progression a call of `callee` builds: a builtin scalar's `rangeTo`/`rangeUntil`, or
+    /// the `until`/`downTo` builder. `None` keeps the loop an iterator-protocol loop over the
+    /// call, as template linkers do; a linker whose dependency preparation omits the loop's
+    /// protocol edges declines a call it does not prove instead.
+    fn range_literal(
+        &self,
+        _callee: &KlibPublicIdSignature,
+    ) -> Lowered<Option<crate::fir::FirRangeOperation>> {
+        Ok(None)
+    }
+
+    /// The receiver kind of the `indices` getter `getter` is, when its provider declaration is
+    /// kotlinc's counted-loop bound (`IndicesHandler`). `None` keeps the iterator protocol, which
+    /// a linker whose dependency preparation omits the protocol edges declines instead.
+    fn indices_receiver(
+        &self,
+        _getter: &crate::metadata::id_signature::KlibAccessorIdSignature,
+    ) -> Lowered<Option<crate::libraries::IndicesReceiver>> {
+        Ok(None)
+    }
+
+    /// Whether `callee` is kotlinc's progression `reversed`, by its provider declaration. A
+    /// linker that does not model it keeps the iterator protocol.
+    fn reverses_progression(
+        &self,
+        _callee: &crate::metadata::id_signature::KlibPublicIdSignature,
+    ) -> Lowered<bool> {
+        Ok(false)
+    }
+
     /// The function a call of the public declaration `callee` invokes.
     fn link(&mut self, ir: &mut IrFile, callee: &KlibPublicIdSignature) -> Lowered<LinkedCallee>;
 
@@ -138,6 +203,34 @@ pub(super) trait CallLinker {
         callee: &KlibPublicIdSignature,
     ) -> Lowered<LinkedConstructor>;
 
+    /// The classifier a file-local signature names in the library of the body being lowered.
+    /// `Ok(None)` refuses the type, including a class that exists only in another library.
+    fn local_class(
+        &self,
+        _signature: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<Option<crate::types::TypeName>> {
+        Ok(None)
+    }
+
+    /// The constructor a file-local construction invokes. Template linkers keep the refusal.
+    fn link_local_constructor(
+        &mut self,
+        _ir: &mut IrFile,
+        _callee: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<super::same_library_class::LocalConstructor> {
+        unsupported("a call of a file-private constructor")
+    }
+
+    /// The function a file-local call invokes: a top-level function private to the lowered
+    /// body's file, or a member of a file-local class. Template linkers keep the refusal.
+    fn link_local_function(
+        &mut self,
+        _ir: &mut IrFile,
+        _callee: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<LinkedCallee> {
+        unsupported("a call of a file-private declaration")
+    }
+
     /// The dependency property a call of its accessor `callee` reads or writes.
     fn link_accessor(
         &mut self,
@@ -147,6 +240,16 @@ pub(super) trait CallLinker {
 
     /// Proves that `classifier` is a dependency object, whose value a body may read.
     fn singleton(&self, classifier: TypeName) -> Lowered<()>;
+
+    /// The dependency enum class whose constant `entry` a body reads, with that constant's name.
+    /// A linker that materializes no class declines the read.
+    fn enum_entry(
+        &mut self,
+        _ir: &mut IrFile,
+        _entry: &KlibPublicIdSignature,
+    ) -> Lowered<(TypeName, String)> {
+        unsupported("an enum entry")
+    }
 
     /// `sub` as the class `owner` it is a subtype of, with the type arguments its hierarchy applies
     /// to `owner`.
@@ -163,6 +266,36 @@ pub(super) trait CallLinker {
     /// Constructor generic bounds consume explicit hierarchy/full-formal evidence without
     /// changing the independent operand-coercion capability.
     fn constructor_bound(&self, parameters: &KlibTypeParameters, argument: Ty, bound: Ty) -> bool;
+
+    /// The dependency declaration a prepared object's member overrides, when `symbol` names one.
+    ///
+    /// The record is the shared override: the declaring classifier, and the declared and applied
+    /// signatures. `supertypes` are the object's. `property` selects a getter edge rather than a
+    /// function edge. `None` leaves the member without an edge.
+    fn dependency_override(
+        &self,
+        symbol: &KlibIrSymbol,
+        supertypes: &[Ty],
+        property: bool,
+    ) -> Lowered<Option<super::same_library_class::MemberOverride>> {
+        let _ = (symbol, supertypes, property);
+        Ok(None)
+    }
+
+    /// The provider callable `identity` publishes an override edge as.
+    fn external_override(
+        &self,
+        identity: &crate::libraries::KlibDependencyCallable,
+    ) -> Lowered<crate::fir::ExternalCallableId> {
+        let _ = identity;
+        unsupported("an object literal override")
+    }
+
+    /// Whether the selected classifier `name` is an interface.
+    fn is_interface(&self, name: TypeName) -> Lowered<bool> {
+        let _ = name;
+        unsupported("an object literal supertype")
+    }
 }
 
 /// The dependency constructor a constructor call invokes: the provider's identity, the class it
@@ -232,6 +365,12 @@ pub(super) struct BodyLowering<'a> {
     /// declared type cancels.
     erasure_coercions: HashSet<ExprId>,
     instance_storage: Option<instance_storage::InstanceStorageFrame<'a>>,
+    /// Enclosing values a member of an object literal reads through its constructor fields.
+    captures: HashMap<KlibIrSymbol, object_literals::CaptureField>,
+    /// The member function whose `return`s are being lowered, when that is not the template.
+    member_return: Option<KlibIrSymbol>,
+    /// The result type of [`Self::member_return`].
+    member_result: Option<Ty>,
 }
 
 impl<'a> BodyLowering<'a> {
@@ -259,20 +398,29 @@ impl<'a> BodyLowering<'a> {
             breakable_loops: HashSet::default(),
             erasure_coercions: HashSet::default(),
             instance_storage: None,
+            captures: HashMap::default(),
+            member_return: None,
+            member_result: None,
         }
     }
 
-    /// This body as a member of the value class `class`, which reads its value through `field`.
-    pub(super) fn reading_value_through(
+    /// This body as a member of the materialized class `class`, which reads its receiver's
+    /// `fields`. A value class member reads its one value and writes nothing.
+    pub(super) fn reading_through(
         mut self,
         class: crate::ir::ClassId,
-        field: &'a crate::metadata::klib_ir::tree::KlibIrField,
+        fields: &[&'a crate::metadata::klib_ir::tree::KlibIrField],
+        value: bool,
     ) -> Self {
-        self.instance_storage = Some(instance_storage::InstanceStorageFrame::value_member(
+        let declared = &self.ir.classes[class as usize].fields;
+        self.instance_storage = Some(instance_storage::InstanceStorageFrame::member(
             class,
-            field,
-            self.ir.classes[class as usize].fields[0].ty,
+            fields
+                .iter()
+                .zip(declared)
+                .map(|(field, declared)| (&field.base.symbol, declared.ty, declared.is_final())),
             self.header.value_receiver(),
+            value,
         ));
         self
     }
@@ -299,7 +447,7 @@ impl<'a> BodyLowering<'a> {
             argument,
         } = &expression.kind
         {
-            if semantic_type(self.arena, self.header.type_parameters(), *operand)? != Ty::Unit
+            if self.semantic(*operand)? != Ty::Unit
                 || self.ty(expression, "coercion to `Unit`")? != Ty::Unit
             {
                 return Err(mismatch("a coercion to `Unit` is typed apart from `Unit`"));
@@ -380,7 +528,7 @@ impl<'a> BodyLowering<'a> {
                 ..
             } => {
                 if let Some(reference) =
-                    super::callable_references::unbound_reference(self.arena, expression)
+                    super::callable_references::declaration_reference(self.arena, expression)
                 {
                     let ty = self.ty(expression, "callable reference")?;
                     let lowered = self.callable_reference(reference, ty)?;
@@ -461,6 +609,10 @@ impl<'a> BodyLowering<'a> {
                 let ty = self.ty(expression, "`for` loop")?;
                 return self.for_loop(statements, ty);
             }
+            KlibIrExprKind::Block {
+                statements,
+                origin: Some(origin),
+            } if origin == "OBJECT_LITERAL" => return self.object_literal(statements),
             KlibIrExprKind::Block { .. } => {
                 return unsupported("a block of a compiler-introduced form")
             }
@@ -524,7 +676,10 @@ impl<'a> BodyLowering<'a> {
                 let ty = self.ty(expression, "class literal")?;
                 return self.class_reference(class, *class_type, ty);
             }
-            KlibIrExprKind::GetEnumValue(_) => return unsupported("an enum entry"),
+            KlibIrExprKind::GetEnumValue(symbol) => {
+                let ty = self.ty(expression, "enum entry")?;
+                return self.enum_entry_value(symbol, ty);
+            }
             KlibIrExprKind::Break { loop_id, label: _ } => {
                 let ty = self.ty(expression, "`break`")?;
                 (self.jump(*loop_id, ty, false)?, ty)
@@ -596,7 +751,50 @@ impl<'a> BodyLowering<'a> {
         let ty = expression
             .ty
             .ok_or(KlibBodyDeclineReason::UntypedExpression(form))?;
-        semantic_type(self.arena, self.header.type_parameters(), ty)
+        self.semantic(ty)
+    }
+
+    /// A type used in this body, including a non-public class of the body's own library.
+    fn semantic(&self, id: KlibIrTypeId) -> Lowered<Ty> {
+        super::klib_types::semantic_type_in(
+            self.arena,
+            self.header.type_parameters(),
+            id,
+            &|signature| self.linker.local_class(signature),
+        )
+    }
+
+    /// Whether `actual` is an anonymous or local class declared in this body and `expected` is
+    /// one of the supertypes that class was lowered with.
+    fn local_class_subtype(&self, actual: Ty, expected: Ty) -> bool {
+        if actual.is_nullable() && !expected.is_nullable() {
+            return false;
+        }
+        let Some(name) = actual.non_null().kotlin_class_internal() else {
+            return false;
+        };
+        let Some(class) = self.ir.classes.iter().find(|class| {
+            class.fq_name == name && (class.is_anonymous_object || class.is_local_class)
+        }) else {
+            return false;
+        };
+        let parameters = self.header.type_parameters();
+        class
+            .supertypes
+            .iter()
+            .any(|supertype| self.linker.is_subtype(parameters, *supertype, expected))
+            || self
+                .linker
+                .is_subtype(parameters, Ty::obj_name(class.superclass), expected)
+    }
+
+    /// Whether `supertype` counts as a supertype of `subtype`: one recorded for a local or
+    /// anonymous class lowered in this body, or one the calling compilation's class model proves.
+    fn is_supertype_of(&self, supertype: Ty, subtype: Ty) -> bool {
+        self.local_class_subtype(subtype, supertype)
+            || self
+                .linker
+                .is_subtype(self.header.type_parameters(), subtype, supertype)
     }
 
     /// Lower `id` as a value used where `expected` is. The serialized body states every
@@ -622,10 +820,7 @@ impl<'a> BodyLowering<'a> {
     /// the coercion checked FIR lowering places when nullability or value/reference shape changes.
     /// `None` when `expected` is not a supertype of `actual`.
     fn upcast(&mut self, value: ExprId, actual: Ty, expected: Ty) -> Option<ExprId> {
-        if !self
-            .linker
-            .is_subtype(self.header.type_parameters(), actual, expected)
-        {
+        if !self.is_supertype_of(expected, actual) {
             return None;
         }
         Some(
@@ -675,6 +870,16 @@ impl<'a> BodyLowering<'a> {
     }
 
     fn read(&mut self, symbol: &KlibIrSymbol) -> Lowered<ExprId> {
+        if let Some(capture) = self.captures.get(symbol).copied() {
+            let receiver = self.ir.add_expr(IrExpr::GetValue(0));
+            self.ir
+                .set_logical_type(receiver, Ty::obj_name(capture.class_name));
+            return Ok(self.ir.add_expr(IrExpr::GetField {
+                receiver,
+                class: capture.class,
+                index: capture.index,
+            }));
+        }
         if let Some(alias) = self.compiler_aliases.get(symbol).copied() {
             return self.expression(alias);
         }
@@ -777,6 +982,12 @@ impl<'a> BodyLowering<'a> {
     /// as a prepared-inline copy passes an erased value to a function parameter's invocation.
     fn declared_operand(&mut self, id: KlibIrExprId, declared: Ty) -> Lowered<ExprId> {
         let lowered = self.expression(id)?;
+        self.declared_lowered(lowered, declared)
+    }
+
+    /// The lowered `lowered` as a value of the declared type `declared`; see
+    /// [`Self::declared_operand`].
+    fn declared_lowered(&mut self, lowered: ExprId, declared: Ty) -> Lowered<ExprId> {
         let actual = self.lowered_type(lowered);
         if is_value_of(actual, declared) {
             return Ok(lowered);
@@ -797,13 +1008,15 @@ impl<'a> BodyLowering<'a> {
     /// declaration: a named variable in the next value slot, with no type of its own.
     fn variable(&mut self, id: KlibIrVariableId) -> Lowered<ExprId> {
         let variable = self.arena.variable(id);
-        let ty = semantic_type(self.arena, self.header.type_parameters(), variable.ty)?;
-        let initializer =
-            variable
-                .initializer
-                .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
-                    "a variable without an initializer",
-                ))?;
+        // A compiler temporary, such as the cast `other` of a data class's `equals`, is an unnamed
+        // immutable local the source never names.
+        if variable.base.origin == "IR_TEMPORARY_VARIABLE" {
+            return self.unnamed_local(id);
+        }
+        let ty = self.semantic(variable.ty)?;
+        let Some(initializer) = variable.initializer else {
+            return self.deferred_variable(id, ty);
+        };
         let init = self.operand(initializer, ty)?;
         // Initializers can declare locals of their own. Allocate the enclosing declaration only
         // after those locals, as checked FIR does, and keep its symbol invisible until then.
@@ -817,6 +1030,28 @@ impl<'a> BodyLowering<'a> {
             init: Some(init),
             named: true,
         }))
+    }
+
+    /// A local declared without an initializer and assigned later (`val x: Int` followed by
+    /// `x = …` on every path kotlinc's definite-assignment analysis proved). Checked FIR lowers the
+    /// source declaration as a reassignable binding holding a target-neutral zero and records the
+    /// declared type as deferred, so each backend chooses that type's physical zero.
+    fn deferred_variable(&mut self, id: KlibIrVariableId, ty: Ty) -> Lowered<ExprId> {
+        let variable = self.arena.variable(id);
+        let local = self.locals.deferred(variable, ty)?;
+        self.locals.declare(&variable.base.symbol, local)?;
+        self.locals
+            .record_name(&variable.base.symbol, &variable.name);
+        let zero = self.ir.add_expr(IrExpr::Const(deferred_zero(ty)));
+        self.ir.set_logical_type(zero, ty);
+        let declaration = self.ir.add_expr(IrExpr::Variable {
+            index: local.index,
+            ty,
+            init: Some(zero),
+            named: true,
+        });
+        self.ir.deferred_local_types.insert(declaration, ty);
+        Ok(declaration)
     }
 
     /// An assignment to a local `var`, typed `Unit` as the source assignment is.
@@ -849,11 +1084,16 @@ impl<'a> BodyLowering<'a> {
         if let Some(returned) = self.returnable_frame_exit(target, value)? {
             return Ok(returned);
         }
-        if target != self.function.symbol {
+        let member = self
+            .member_return
+            .as_ref()
+            .is_some_and(|member| member == target);
+        if !member && target != self.function.symbol {
             return Err(KlibBodyDeclineReason::ForeignReturnTarget);
         }
-        let mut value = self.operand(value, self.header.body_result())?;
-        if self.header.body_result() != self.header.result() {
+        let expected = self.member_result.unwrap_or(self.header.body_result());
+        let mut value = self.operand(value, expected)?;
+        if !member && self.header.body_result() != self.header.result() {
             value = self.declared_value(value, self.header.result());
         }
         let returned = self.ir.add_expr(IrExpr::Return(Some(value)));
@@ -884,4 +1124,21 @@ fn unsupported<T>(form: &'static str) -> Lowered<T> {
 /// literal where a nullable type is expected, which checked FIR lowering converts nothing for.
 fn is_value_of(actual: Ty, expected: Ty) -> bool {
     actual == expected || (actual == Ty::Null && expected.is_nullable())
+}
+
+/// The target-neutral zero a deferred local of type `ty` holds before its first assignment, as the
+/// source parser supplies it: the primitive's zero, and `null` for every other type (a backend
+/// reads the deferred type to choose the physical zero it stores).
+fn deferred_zero(ty: Ty) -> IrConst {
+    match ty {
+        Ty::Boolean => IrConst::Boolean(false),
+        Ty::Byte => IrConst::Byte(0),
+        Ty::Short => IrConst::Short(0),
+        Ty::Int => IrConst::Int(0),
+        Ty::Long => IrConst::Long(0),
+        Ty::Float => IrConst::Float(0.0),
+        Ty::Double => IrConst::Double(0.0),
+        Ty::Char => IrConst::Char(0),
+        _ => IrConst::Null,
+    }
 }

@@ -173,6 +173,7 @@ impl BodyFirChecker<'_> {
             end: end_value,
             end_type,
             ends_inlined_call: self.selected_range_inlines(expression, kind.operator_name()),
+            declaration: self.selected_range_declaration(expression, kind.operator_name()),
         })
     }
 
@@ -185,6 +186,19 @@ impl BodyFirChecker<'_> {
             Some(ResolvedCall::Member(selected)) => selected.member.inline.can_inline(),
             Some(ResolvedCall::Extension(selected)) => selected.callable.inline.can_inline(),
             _ => false,
+        }
+    }
+
+    /// The dependency declaration selected for a range operator, which builds the range.
+    pub(super) fn selected_range_declaration(
+        &self,
+        expression: ExprId,
+        convention: &str,
+    ) -> Option<crate::fir::ExternalCallableId> {
+        match self.info.resolved_operator_call(expression, convention) {
+            Some(ResolvedCall::Member(selected)) => selected.member.external_identity,
+            Some(ResolvedCall::Extension(selected)) => selected.callable.external_identity,
+            _ => None,
         }
     }
 

@@ -17,23 +17,19 @@ impl ProductionSignatureSemantics<'_> {
     pub(super) fn call_argument_kind(
         argument: &crate::fir::ResolvedSigCallArgument<'_>,
     ) -> crate::symbol_resolver::CallArgKind {
+        use crate::symbol_resolver::CallArgKind;
+        let ty = argument.ty.get();
         if argument.spread {
-            return crate::symbol_resolver::CallArgKind::Spread(argument.ty.get());
+            return CallArgKind::Spread(ty);
         }
         if argument.lambda {
-            return crate::symbol_resolver::CallArgKind::LambdaLiteral(argument.ty.get());
+            return CallArgKind::LambdaLiteral(ty);
         }
         match argument.integer_literal {
-            Some(constant) => {
-                crate::symbol_resolver::CallArgKind::integer_constant(argument.ty.get(), constant)
-            }
-            None => nested_result_template(argument.ty.get()).map_or(
-                crate::symbol_resolver::CallArgKind::Typed(argument.ty.get()),
-                |generic_sig| crate::symbol_resolver::CallArgKind::ExpectedTypeCallable {
-                    provisional: argument.ty.get(),
-                    generic_sig: std::sync::Arc::new(generic_sig),
-                },
-            ),
+            Some(constant) => CallArgKind::integer_constant(ty, constant),
+            None => nested_result_template(ty).map_or(CallArgKind::Typed(ty), |generic_sig| {
+                CallArgKind::open_nested_result(ty, generic_sig)
+            }),
         }
     }
 

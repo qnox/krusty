@@ -593,6 +593,13 @@ impl Checker<'_> {
         (bound, unresolved)
     }
 
+    /// kotlinc accepts `kotlin.ExperimentalCollectionLiteralsApi` wherever `+CollectionLiterals` is
+    /// enabled: the feature's own stdlib factories carry that marker.
+    fn accepted_by_enabled_feature(&self, marker: TypeName) -> bool {
+        self.file.collection_literals_enabled
+            && marker == type_name("kotlin/ExperimentalCollectionLiteralsApi")
+    }
+
     fn report_opt_in_requirements(&mut self, span: Span, requirements: &[OptInRequirement]) {
         for requirement in requirements {
             // kotlinc's factories: `OPT_IN_USAGE` warns and `OPT_IN_USAGE_ERROR` rejects.
@@ -602,12 +609,13 @@ impl Checker<'_> {
                 crate::diag::names::OPT_IN_USAGE_ERROR
             };
             if self.lexically_opted_in(requirement.marker)
+                || self.accepted_by_enabled_feature(requirement.marker)
                 || self.command_line_opt_ins().contains(&requirement.marker)
                 || self.suppresses_diagnostic(name.as_str())
             {
                 continue;
             }
-            let marker = kotlin_qualified_name(requirement.marker);
+            let marker = requirement.marker.kotlin_qualified_name();
             let message =
                 match requirement
                     .message
@@ -628,21 +636,4 @@ impl Checker<'_> {
             }
         }
     }
-}
-
-/// The dotted Kotlin qualified name kotlinc prints for a classifier (`ClassId.asFqNameString`),
-/// which is also the spelling `-opt-in` takes.
-fn kotlin_qualified_name(classifier: TypeName) -> String {
-    let mut nested = Vec::new();
-    let mut top_level = classifier;
-    while let Some(owner) = top_level.nested_owner() {
-        nested.push(top_level.nested_segment_ref());
-        top_level = owner;
-    }
-    let mut name = top_level.render().replace('/', ".");
-    for segment in nested.iter().rev() {
-        name.push('.');
-        name.push_str(segment);
-    }
-    name
 }

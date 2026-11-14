@@ -71,10 +71,12 @@ impl Checker<'_> {
         receiver: Option<Ty>,
         args_and_partial: (&[ExprId], &[Option<Ty>]),
         argument_slots: (&[usize], &[bool]),
-        type_args: &[Ty],
+        type_arguments: ExplicitTypeArgumentProbe<'_>,
     ) -> bool {
         let (args, arg_tys) = args_and_partial;
         let (argument_map, whole_array_varargs) = argument_slots;
+        let type_args = type_arguments.arguments;
+        let explicit_bounds = type_arguments.bounds;
         let semantic = overload.semantic_signature();
         if !type_args.is_empty() && semantic.formals.len() != type_args.len() {
             return false;
@@ -166,20 +168,22 @@ impl Checker<'_> {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        if generic.as_ref().is_some_and(|(_, bindings)| {
-            // This is the pre-lambda applicability probe. A bound that still depends on an
-            // unbound callable formal is completed by the postponed lambda result, so it cannot
-            // eliminate this overload yet. Final selection validates the complete signature.
-            let mut partial_signature = semantic.clone().into_owned();
-            for bounds in &mut partial_signature.formal_bounds {
-                bounds.retain(|bound| !ty_mentions_param(*bound, &unbound_formals));
-            }
-            !crate::symbol_resolver::generic_bindings_satisfy_bounds(
-                &partial_signature,
-                bindings,
-                |actual, bound| self.generic_bound_admits(actual, bound),
-            )
-        }) {
+        if explicit_bounds == ExplicitTypeArgumentBounds::Enforced
+            && generic.as_ref().is_some_and(|(_, bindings)| {
+                // This is the pre-lambda applicability probe. A bound that still depends on an
+                // unbound callable formal is completed by the postponed lambda result, so it cannot
+                // eliminate this overload yet. Final selection validates the complete signature.
+                let mut partial_signature = semantic.clone().into_owned();
+                for bounds in &mut partial_signature.formal_bounds {
+                    bounds.retain(|bound| !ty_mentions_param(*bound, &unbound_formals));
+                }
+                !crate::symbol_resolver::generic_bindings_satisfy_bounds(
+                    &partial_signature,
+                    bindings,
+                    |actual, bound| self.generic_bound_admits(actual, bound),
+                )
+            })
+        {
             return false;
         }
         let generic_params = generic.as_ref().map(|(params, _)| params);
@@ -482,9 +486,12 @@ impl Checker<'_> {
         self.merge_mapped_generic_argument_bindings(
             overload,
             receiver,
-            (args, arg_tys),
-            argument_map,
-            whole_array_varargs,
+            super::generic_call_bindings::MappedGenericArguments {
+                args,
+                arg_tys,
+                argument_map,
+                named_whole_array_varargs: whole_array_varargs,
+            },
             type_args,
             &mut binds,
         );
@@ -668,33 +675,49 @@ impl Checker<'_> {
             shape.expected_types = Some(expected_types);
             shape.fixed_expected_types = Some(fixed_expected_types);
         }
+        // The parameter's own function TYPE (already substituted into `param_types`) carries the
+        // receiver's type ARGUMENTS (`Config<T>.() -> Unit` with `T` bound by this call) and the
+        // context-parameter count. The call sig's per-parameter lists are the weaker fallback: a
+        // callable with no generic signature records only the receiver's CLASS, so preferring it
+        // would shape the lambda against a raw `Config` and lose the binding.
+        //
+        // A `Ty::Fun` whose `has_receiver` is set is the structured form of the same metadata fact
+        // carried by `lambda_receiver_params`.
+        let instantiated_function = |argument: usize| {
+            shape
+                .expected_types
+                .as_ref()
+                .and_then(|types| types.get(argument))
+                .copied()
+                .flatten()
+                .or_else(|| {
+                    argument_parameters.get(argument).copied().map(|parameter| {
+                        crate::symbol_resolver::ty_subst_keep_unbound(parameter, &binds)
+                    })
+                })
+                .and_then(|parameter| match parameter.non_null().kind() {
+                    TyKind::Fun(function) => Some(function),
+                    _ => None,
+                })
+        };
+        let declared_context_count = |argument: usize, parameter: usize| {
+            instantiated_function(argument).map_or_else(
+                || {
+                    overload
+                        .call_sig
+                        .lambda_context_counts
+                        .get(parameter)
+                        .copied()
+                        .unwrap_or_default()
+                },
+                |function| function.context_count,
+            )
+        };
         let receivers = argument_map
             .iter()
             .enumerate()
             .map(|(argument, &parameter)| {
-                // The receiver comes from the parameter's own function TYPE (already substituted into
-                // `param_types`), which carries the receiver's type ARGUMENTS (`Config<T>.() -> Unit` with
-                // `T` bound by this call). `call_sig.lambda_receivers` is the weaker fallback: a callable
-                // with no generic signature records only the receiver's CLASS, so preferring it would
-                // shape the lambda against a raw `Config` and lose the binding.
-                //
-                // A `Ty::Fun` whose `has_receiver` is set is the structured form of the same metadata
-                // fact carried by `lambda_receiver_params`.
-                let instantiated_function = shape
-                    .expected_types
-                    .as_ref()
-                    .and_then(|types| types.get(argument))
-                    .copied()
-                    .flatten()
-                    .or_else(|| {
-                        argument_parameters.get(argument).copied().map(|parameter| {
-                            crate::symbol_resolver::ty_subst_keep_unbound(parameter, &binds)
-                        })
-                    })
-                    .and_then(|parameter| match parameter.non_null().kind() {
-                        TyKind::Fun(function) => Some(function),
-                        _ => None,
-                    });
+                let instantiated_function = instantiated_function(argument);
                 let receiver_fun_param = overload
                     .call_sig
                     .lambda_receiver_params
@@ -704,17 +727,7 @@ impl Checker<'_> {
                     || instantiated_function.is_some_and(|function| function.has_receiver);
                 receiver_fun_param
                     .then(|| {
-                        let context_count = instantiated_function.map_or_else(
-                            || {
-                                overload
-                                    .call_sig
-                                    .lambda_context_counts
-                                    .get(parameter)
-                                    .copied()
-                                    .unwrap_or_default()
-                            },
-                            |function| function.context_count,
-                        );
+                        let context_count = declared_context_count(argument, parameter);
                         instantiated_function
                             .and_then(|function| {
                                 function.params.get(function.context_count).copied()
@@ -744,14 +757,8 @@ impl Checker<'_> {
         shape.context_counts = Some(
             argument_map
                 .iter()
-                .map(|&parameter| {
-                    overload
-                        .call_sig
-                        .lambda_context_counts
-                        .get(parameter)
-                        .copied()
-                        .unwrap_or_default()
-                })
+                .enumerate()
+                .map(|(argument, &parameter)| declared_context_count(argument, parameter))
                 .collect(),
         );
         shape.boxes_captures = Some(
@@ -882,11 +889,26 @@ impl Checker<'_> {
         call: UntypedLambdaCall<'_>,
     ) -> Result<Option<crate::symbol_resolver::LambdaCallShape>, Vec<crate::libraries::FunctionInfo>>
     {
+        // A bound on an explicit type argument is decided once. While another top-level overload
+        // shares the call, the violation is applicability: that overload does not shape the
+        // lambdas, and an empty applicable set stays empty. The only overload is the selected
+        // call, so the violation is that call's own diagnostic and its lambdas are still shaped
+        // (`pick<String> { v -> v.length }` against `(String) -> Int` beside the bound error).
+        let only_overload = overloads
+            .iter()
+            .filter(|overload| overload.kind == crate::libraries::FnKind::TopLevel)
+            .count()
+            == 1;
+        let explicit_bounds = if only_overload && fully_explicit_type_arguments(call.type_args) {
+            ExplicitTypeArgumentBounds::Deferred
+        } else {
+            ExplicitTypeArgumentBounds::Enforced
+        };
         let shaped = overloads
             .iter()
             .filter(|overload| overload.kind == crate::libraries::FnKind::TopLevel)
             .filter_map(|overload| {
-                self.top_level_overload_lambda_shape(lexical_scope, overload, call)
+                self.top_level_overload_lambda_shape(lexical_scope, overload, call, explicit_bounds)
                     .map(|shape| (overload, shape))
             })
             .collect::<Vec<_>>();
@@ -1012,6 +1034,7 @@ impl Checker<'_> {
         lexical_scope: &CheckerScope<'_>,
         o: &crate::libraries::FunctionInfo,
         call: UntypedLambdaCall<'_>,
+        explicit_bounds: ExplicitTypeArgumentBounds,
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
         let UntypedLambdaCall {
             args,
@@ -1059,7 +1082,10 @@ impl Checker<'_> {
             None,
             (args, arg_tys),
             (&argument_map, &whole_arrays),
-            type_args,
+            ExplicitTypeArgumentProbe {
+                arguments: type_args,
+                bounds: explicit_bounds,
+            },
         );
         crate::trace_compiler!(
             "lambda_shape",
@@ -1246,7 +1272,10 @@ impl Checker<'_> {
             Some(binding_receiver),
             (args, arg_tys),
             (&argument_map, &whole_arrays),
-            type_args,
+            ExplicitTypeArgumentProbe {
+                arguments: type_args,
+                bounds: ExplicitTypeArgumentBounds::Enforced,
+            },
         ) {
             crate::trace_compiler!(
                 "lambda_shape",
@@ -1398,4 +1427,30 @@ enum ExtensionShapeChoice {
         lambda: usize,
         tied: Vec<crate::symbol_resolver::LambdaCallShape>,
     },
+}
+
+/// Whether the pre-lambda applicability probe rejects a candidate whose explicit type arguments
+/// break their declared bounds. Chosen once for a call: enforced while overloads compete, deferred
+/// when the only overload is already the selected call.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum ExplicitTypeArgumentBounds {
+    Enforced,
+    /// The call's diagnostics report the bound; the candidate still shapes the call's lambdas.
+    Deferred,
+}
+
+/// The call's explicit type arguments and whether this probe treats a bound violation as
+/// inapplicable. They travel together into the pre-lambda applicability check.
+#[derive(Clone, Copy)]
+pub(super) struct ExplicitTypeArgumentProbe<'a> {
+    pub(super) arguments: &'a [Ty],
+    pub(super) bounds: ExplicitTypeArgumentBounds,
+}
+
+/// Every type argument is written and resolved, so no argument constraint can change them.
+fn fully_explicit_type_arguments(type_args: &[Ty]) -> bool {
+    !type_args.is_empty()
+        && type_args
+            .iter()
+            .all(|argument| !argument.mentions_error() && !argument.mentions_pending())
 }

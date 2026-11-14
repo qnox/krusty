@@ -110,6 +110,20 @@ enum OperatorTypeArguments {
     CommittedBySelection,
 }
 
+/// One operator convention selection: the receiver, the operand expressions, and the span the
+/// diagnostic belongs to. Binary expressions, ranges, indexed stores, and `in` all select through
+/// this same shape.
+pub(super) struct OperatorCall<'a, 'scope> {
+    pub(super) scope: &'a CheckerScope<'scope>,
+    pub(super) site: ExprId,
+    pub(super) receiver: Ty,
+    pub(super) name: &'a str,
+    pub(super) arg_tys: &'a [Ty],
+    pub(super) arg_exprs: &'a [ExprId],
+    pub(super) span: Span,
+    pub(super) expected_result: Option<Ty>,
+}
+
 /// The single right-hand operand of a binary operator expression (`b` in `a + b`, `a..b`,
 /// `a < b`): its checked type and its source expression.
 pub(super) struct OperatorOperand {
@@ -120,27 +134,10 @@ pub(super) struct OperatorOperand {
 impl<'a> Checker<'a> {
     pub(super) fn operator_call_ret(
         &mut self,
-        scope: &CheckerScope<'_>,
-        site: ExprId,
-        receiver: Ty,
-        name: &str,
-        arg_tys: &[Ty],
-        arg_exprs: &[ExprId],
-        span: Span,
-        expected_result: Option<Ty>,
+        call: OperatorCall<'_, '_>,
     ) -> Option<(Ty, ResolvedCall)> {
-        self.select_operator(
-            scope,
-            site,
-            receiver,
-            name,
-            arg_tys,
-            arg_exprs,
-            span,
-            expected_result,
-            None,
-        )
-        .map(|selected| (selected.ret, selected.call))
+        self.select_operator(call, None)
+            .map(|selected| (selected.ret, selected.call))
     }
 
     /// Select the convention `name` that the binary expression `expression` denotes (`a + b`,
@@ -218,14 +215,16 @@ impl<'a> Checker<'a> {
         expected_result: Option<Ty>,
     ) -> Option<(Ty, ResolvedCall)> {
         let selected = self.select_operator(
-            scope,
-            expression,
-            receiver,
-            name,
-            &[operand.ty],
-            &[operand.expression],
-            self.span(expression),
-            expected_result,
+            OperatorCall {
+                scope,
+                site: expression,
+                receiver,
+                name,
+                arg_tys: &[operand.ty],
+                arg_exprs: &[operand.expression],
+                span: self.span(expression),
+                expected_result,
+            },
             None,
         )?;
         match selected.type_arguments {
@@ -248,16 +247,19 @@ impl<'a> Checker<'a> {
     /// declared primitive bound; the ordinary call path always derives kinds from source values.
     fn select_operator(
         &mut self,
-        scope: &CheckerScope<'_>,
-        site: ExprId,
-        receiver: Ty,
-        name: &str,
-        arg_tys: &[Ty],
-        arg_exprs: &[ExprId],
-        span: Span,
-        expected_result: Option<Ty>,
+        call: OperatorCall<'_, '_>,
         checked_argument_kinds: Option<Vec<crate::symbol_resolver::CallArgKind>>,
     ) -> Option<SelectedOperator> {
+        let OperatorCall {
+            scope,
+            site,
+            receiver,
+            name,
+            arg_tys,
+            arg_exprs,
+            span,
+            expected_result,
+        } = call;
         // `downTo` and the legacy `until` range spellings are represented by RangeKind in the AST,
         // but their Kotlin declarations are `infix`, not `operator`. They still go through the same
         // semantic callable selection and checked-FIR handoff as the operator range conventions.
@@ -667,6 +669,8 @@ impl<'a> Checker<'a> {
                 && (candidate.kind != crate::libraries::FnKind::Member
                     || candidate.context_count == 0)
         });
+        let argument_kinds =
+            self.postponed_collection_literal_kinds(args, argument_kinds, &functions.overloads);
         let callables = crate::libraries::Callables::Functions(functions);
         if name == "set" {
             match resolver.select_receiver_indexed_set_function_with_params(
@@ -696,23 +700,20 @@ impl<'a> Checker<'a> {
     }
 
     /// Whether `x in a..b` has a REFERENCE value over a primitive range whose elements can actually
-    /// inhabit it (`x: Any` over `4..10`). The membership test then reduces to "is `x` a boxed element
-    /// of the range", so a value type unrelated to the boxed element (`x: String` over `4..10`) is
+    /// inhabit it (`x: Any` over `4..10`). The membership test then reduces to "is `x` an element
+    /// of the range", so a value type unrelated to the element's classifier (`x: String` over `4..10`) is
     /// excluded — that comparison is never non-trivially true and kotlinc rejects it.
     ///
     /// Only `Int`/`Long`/`Char` elements qualify, because the widened form is `Iterable<T>.contains`:
     /// a FLOATING-POINT range is a `ClosedFloatingPointRange`, not an `Iterable`, so kotlinc rejects
-    /// `x: Any in 1.0..2.0` outright; a `Byte`/`Short` range is really an `IntRange` (its elements box
-    /// to `Integer`, not to the bound's own wrapper); and an unsigned range's elements box to their
+    /// `x: Any in 1.0..2.0` outright; a `Byte`/`Short` range is really an `IntRange` (its elements are
+    /// `Int`s, not the bound's own type); and an unsigned range's elements box to their
     /// inline class, which krusty erases to the signed primitive.
     fn in_range_widened_value(&self, value: Ty, element: Ty) -> bool {
         if !matches!(element, Ty::Int | Ty::Long | Ty::Char) {
             return false;
         }
-        let Some(boxed) = element.boxed_ref() else {
-            return false;
-        };
-        value.is_reference() && self.when_objs_comparable(value.non_null(), boxed)
+        value.is_reference() && self.when_objs_comparable(value.non_null(), element)
     }
 
     pub(super) fn resolve_in_range_expression(
@@ -744,16 +745,16 @@ impl<'a> Checker<'a> {
                 kind,
                 value_ty: vt,
             };
-            let Some((range_ty, range_call)) = self.operator_call_ret(
+            let Some((range_ty, range_call)) = self.operator_call_ret(OperatorCall {
                 scope,
-                e,
-                st,
-                convention.name,
-                &[et],
-                &[end],
-                self.span(e),
-                None,
-            ) else {
+                site: e,
+                receiver: st,
+                name: convention.name,
+                arg_tys: &[et],
+                arg_exprs: &[end],
+                span: self.span(e),
+                expected_result: None,
+            }) else {
                 self.diags.error(
                     self.span(e),
                     format!(
@@ -851,6 +852,15 @@ impl<'a> Checker<'a> {
                 } else if prim(&range_st)
                     && range_st == range_et
                     && self.in_range_widened_value(vt, range_st)
+                    && {
+                        // Resolve `contains` as for any other receiver; the widened form is only
+                        // the lowering of the generic `Iterable<T>.contains`. A precise overload
+                        // (`IntRange.contains(Int?)`) stays an ordinary call.
+                        let selected = self.range_contains_call(scope, e, range_ty, vt, value);
+                        let generic = selects_generic_element_contains(&selected);
+                        ordinary_contains = Some(selected);
+                        generic
+                    }
                 {
                     // A WIDENED value over a primitive range: `when (x: Any) { in 4..10 -> … }`. kotlinc
                     // lowers it to `CollectionsKt.contains(4..10, x)`, which is true exactly when `x` is a
@@ -972,16 +982,16 @@ impl<'a> Checker<'a> {
         value_ty: Ty,
         value: ExprId,
     ) -> Option<(Ty, ResolvedCall)> {
-        self.operator_call_ret(
+        self.operator_call_ret(OperatorCall {
             scope,
-            expression,
-            range_ty,
-            "contains",
-            &[value_ty],
-            &[value],
-            self.span(expression),
-            None,
-        )
+            site: expression,
+            receiver: range_ty,
+            name: "contains",
+            arg_tys: &[value_ty],
+            arg_exprs: &[value],
+            span: self.span(expression),
+            expected_result: None,
+        })
     }
 
     /// Select `contains` through a type parameter's checked primitive bound solely to authorize
@@ -997,14 +1007,16 @@ impl<'a> Checker<'a> {
         value: ExprId,
     ) -> Option<(Ty, ResolvedCall)> {
         self.select_operator(
-            scope,
-            expression,
-            range_ty,
-            "contains",
-            &[bound],
-            &[value],
-            self.span(expression),
-            None,
+            OperatorCall {
+                scope,
+                site: expression,
+                receiver: range_ty,
+                name: "contains",
+                arg_tys: &[bound],
+                arg_exprs: &[value],
+                span: self.span(expression),
+                expected_result: None,
+            },
             Some(vec![crate::symbol_resolver::CallArgKind::Typed(bound)]),
         )
         .map(|selected| (selected.ret, selected.call))
@@ -1157,4 +1169,20 @@ struct InRangeOperands {
     expression: ExprId,
     kind: crate::ast::RangeKind,
     value_ty: Ty,
+}
+
+/// Whether the resolved `contains` is the declaration whose element parameter is the callable's own
+/// type parameter (`fun <T> Iterable<T>.contains(element: T)`), as opposed to a precise overload of
+/// the range. Decided from the declared generic signature, never from the erased representation.
+fn selects_generic_element_contains(selected: &Option<(Ty, ResolvedCall)>) -> bool {
+    let Some((Ty::Boolean, ResolvedCall::Extension(extension))) = selected else {
+        return false;
+    };
+    extension.callable.generic_sig.as_ref().is_some_and(|sig| {
+        sig.params.first().is_some_and(|element| {
+            element
+                .ty_param_name()
+                .is_some_and(|name| sig.formals.iter().any(|formal| formal.as_str() == name))
+        })
+    })
 }

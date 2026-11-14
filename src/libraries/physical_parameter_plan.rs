@@ -46,14 +46,14 @@ pub(crate) fn parameter_plan(
 }
 
 /// A vector whose every slot is a source parameter, in order.
-pub(crate) fn source_parameter_plan(count: usize) -> Box<[PhysicalParameterSlot]> {
+pub fn source_parameter_plan(count: usize) -> Box<[PhysicalParameterSlot]> {
     parameter_plan(count, count, false, false).expect("a source vector aligns to source slots")
 }
 
 /// Physical types of the source parameters, in source order. ABI slots are not source arguments.
 ///
 /// `plan` is required. A missing plan is not a source-parameter vector.
-pub(crate) fn source_physical_parameters(
+pub fn source_physical_parameters(
     physical: &[Ty],
     plan: Option<&[PhysicalParameterSlot]>,
 ) -> Result<Vec<Ty>, String> {

@@ -62,6 +62,9 @@ fn verify_task_reports_krusty_against_kotlinc() {
         ["verify-compile", "verify-compile", "verify-report"],
         "{runs:?}"
     );
+    // Each verified compilation is keyed by its own classpath fingerprint.
+    let fingerprints = invocations(&read_invocation_log(&fixture.fingerprints).expect("log"));
+    assert_eq!(fingerprints.len(), 2, "{fingerprints:?}");
 
     for report in ["krusty-verify.html", "krusty-verify.md"] {
         assert!(report_dir.join(report).is_file(), "{report}");

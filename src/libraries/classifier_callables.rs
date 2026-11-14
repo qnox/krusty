@@ -19,12 +19,24 @@ pub struct BoundInnerConstructor {
     pub outer: TypeName,
 }
 
-/// The constructor facet of a callable candidate: the classifier it constructs and, for an `inner`
-/// classifier's constructor, the classifier that declares the captured outer instance.
+/// The constructor facet of a callable candidate: the classifier it constructs, for an `inner`
+/// classifier's constructor the classifier that declares the captured outer instance, and where
+/// the constructor comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConstructorCandidate {
     pub classifier: TypeName,
     pub outer: Option<TypeName>,
+    pub origin: ConstructorOrigin,
+}
+
+/// Where a constructor candidate comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConstructorOrigin {
+    /// A constructor the classifier declares, which the constructor path materializes.
+    Declared,
+    /// A functional interface's language-level constructor, one operand of its abstract method's
+    /// function type. It has no declaration; its conversion path commits it.
+    FunctionalInterface,
 }
 
 impl ConstructorCandidate {
@@ -241,6 +253,34 @@ impl FunctionInfo {
         Some(member)
     }
 
+    /// Normalize one constructor of `classifier`, reached by a bare `Name(args)` on the file and
+    /// import scope tower, into the candidate structure the same-named functions use. The
+    /// classifier's own type parameters are the constructor's inference variables and its
+    /// application is the result. The caller stamps the classifier's scope rung so one selection
+    /// ranks this constructor against receiver-less functions.
+    pub(crate) fn scope_constructor(
+        internal: TypeName,
+        classifier: &LibraryType,
+        mut constructor: LibraryMember,
+        origin: ConstructorOrigin,
+    ) -> Self {
+        constructor.owner.get_or_insert(internal);
+        constructor.generic_sig = constructor_generic_signature(internal, classifier, &constructor);
+        let result = constructor
+            .generic_sig
+            .as_ref()
+            .map_or_else(|| Ty::obj_name(internal), |signature| signature.ret);
+        let mut candidate = Self::classifier_member(FnKind::TopLevel, internal, constructor);
+        candidate.callable.ret = result;
+        candidate.ret = ReturnInfo::new(false, Some(result));
+        candidate.constructor = Some(ConstructorCandidate {
+            classifier: internal,
+            outer: None,
+            origin,
+        });
+        candidate
+    }
+
     /// Normalize one constructor of the `inner` classifier `inner` as a member candidate of its
     /// outer class; `None` for a classifier that captures no outer instance. Kotlin collects such
     /// a constructor into the receiver's member level together with the same-named member
@@ -283,6 +323,7 @@ impl FunctionInfo {
         candidate.constructor = Some(ConstructorCandidate {
             classifier: inner,
             outer: Some(outer),
+            origin: ConstructorOrigin::Declared,
         });
         Some(candidate)
     }

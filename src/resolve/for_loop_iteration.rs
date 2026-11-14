@@ -12,7 +12,7 @@ use crate::symbol_source::SymbolSource;
 use crate::types::{wk, Ty};
 
 use super::{
-    operator_calls::{range_operator, SelectedBuiltinOperatorAccess},
+    operator_calls::{range_operator, OperatorCall, SelectedBuiltinOperatorAccess},
     scope::ScopeKind,
     Checker, CheckerScope, ForRangeIteratorTarget, IncDecSite, IteratorProtocolTarget,
 };
@@ -201,16 +201,16 @@ impl Checker<'_> {
             // The loop counts over a range class's selected members and helpers.
             self.record_progression_plans();
             let span = self.file.stmt_spans[statement.0 as usize];
-            if let Some((_, selected)) = self.operator_call_ret(
+            if let Some((_, selected)) = self.operator_call_ret(OperatorCall {
                 scope,
-                range.start,
-                st,
-                convention.name,
-                &[et],
-                &[range.end],
+                site: range.start,
+                receiver: st,
+                name: convention.name,
+                arg_tys: &[et],
+                arg_exprs: &[range.end],
                 span,
-                None,
-            ) {
+                expected_result: None,
+            }) {
                 if let Some(access) = SelectedBuiltinOperatorAccess::selected(&selected) {
                     self.resolved_stmt_builtin_operator_accesses
                         .insert((statement, convention.key), access);
@@ -219,16 +219,16 @@ impl Checker<'_> {
             counter
         } else {
             let span = self.file.stmt_spans[statement.0 as usize];
-            match self.operator_call_ret(
+            match self.operator_call_ret(OperatorCall {
                 scope,
-                range.start,
-                st,
-                convention.name,
-                &[et],
-                &[range.end],
+                site: range.start,
+                receiver: st,
+                name: convention.name,
+                arg_tys: &[et],
+                arg_exprs: &[range.end],
                 span,
-                None,
-            ) {
+                expected_result: None,
+            }) {
                 Some((range_ty, range_call)) if range_ty != Ty::Error => {
                     match self.iterator_protocol_target(
                         scope,
@@ -282,7 +282,15 @@ impl Checker<'_> {
         };
         let body_scope = scope.child(ScopeKind::Block);
         let scope = &body_scope;
-        self.declare_loop_variable(scope, &name, elem, true); // mutated by the lowering
+        self.declare_loop_variable(scope, &name, elem, true);
+        self.record_lexical_declaration(
+            scope,
+            &name,
+            super::lexical_bindings::LexicalValueRole::Statement {
+                declaration: self.file.stmt_spans[statement.0 as usize],
+                slot: 0,
+            },
+        ); // mutated by the lowering
         self.check_loop_body(scope, body, &label);
     }
 
@@ -323,6 +331,14 @@ impl Checker<'_> {
         let body_scope = scope.child(ScopeKind::Block);
         let scope = &body_scope;
         let flow_identity = self.declare_loop_variable(scope, &name, elem, false);
+        self.record_lexical_declaration(
+            scope,
+            &name,
+            super::lexical_bindings::LexicalValueRole::Statement {
+                declaration: self.file.stmt_spans[statement.0 as usize],
+                slot: 0,
+            },
+        );
         self.record_enhanced_loop_variable(flow_identity, iterable, elem);
         self.check_loop_body(scope, body, &label);
     }

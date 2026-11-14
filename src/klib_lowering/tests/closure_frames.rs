@@ -280,8 +280,14 @@ fn emitted_closure_roots_keep_generic_shapes_and_exclude_unsupported_forms() {
                 _ => unreachable!(),
             }
             assert_eq!(emitted_closure_function(&body.arena, &missing_origin), None);
-            for suspended in [false, true] {
+            for (ordinal, suspended) in [false, true].into_iter().enumerate() {
                 let mut declaration = body.arena.function(function).clone();
+                // The probe is a different function. The module indexes each file-local identity
+                // once, and this copy exists only so the expression can name an excluded form.
+                declaration.base.symbol = local_symbol(
+                    KlibIrSymbolKind::Function,
+                    91_000 + u32::try_from(ordinal).expect("a probe ordinal fits"),
+                );
                 if suspended {
                     declaration.base.flags |= crate::metadata::function_flags::IS_SUSPEND;
                 } else {

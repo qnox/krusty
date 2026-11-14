@@ -3,10 +3,10 @@
 
 use std::path::PathBuf;
 
-use krusty::jvm::ir_emit::{JvmDefaultMode, LambdaMode};
 use krusty::kotlin_version::KotlinVersion;
 use krusty::language_settings::LanguageSettings;
 use krusty::language_version::LanguageVersion;
+use krusty_jvm::ir_emit::{JvmDefaultMode, LambdaMode};
 
 use krusty::features::{FeatureTable, LangFeatures, LanguageVersionPolicy};
 

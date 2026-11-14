@@ -26,7 +26,7 @@ pub struct InnerClassDetails {
 pub type InnerClassResolver = Rc<dyn Fn(&str) -> Option<InnerClassDetails>>;
 
 /// kotlinc's `fqNameWhenAvailable` of each class declared in executable code, by internal name.
-pub(crate) type DeclarationPaths = Rc<HashMap<String, String>>;
+pub type DeclarationPaths = Rc<HashMap<String, String>>;
 
 /// What a referenced `InnerClasses` table knows of the file's classes declared in executable code.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -63,7 +63,7 @@ pub(super) struct LocalDeclarations {
 /// without a tie is therefore reused by any writer whose candidates are equal, instead of every
 /// writer sorting the whole nest again.
 #[derive(Default)]
-pub(crate) struct TableOrders {
+pub struct TableOrders {
     known: std::cell::RefCell<Vec<TableOrder>>,
 }
 
@@ -176,7 +176,7 @@ impl ClassWriter {
     /// Register several candidates, in order, exactly as [`Self::add_inner_class`] would one at a
     /// time. A file's whole nest is registered on each of its class writers, so the duplicate check
     /// goes through one set instead of a scan of the candidates per entry.
-    pub(crate) fn add_inner_classes(&mut self, specs: &[Rc<InnerClassSpec>]) {
+    pub fn add_inner_classes(&mut self, specs: &[Rc<InnerClassSpec>]) {
         let mut known: HashSet<&str> = self
             .inner_class_candidates
             .iter()
@@ -195,7 +195,7 @@ impl ClassWriter {
     }
 
     /// The qualified names the referenced table sorts the file's local classes by.
-    pub(crate) fn set_declaration_paths(&mut self, paths: DeclarationPaths) {
+    pub fn set_declaration_paths(&mut self, paths: DeclarationPaths) {
         if let InnerClassTable::Referenced(own) = &mut self.inner_class_table {
             own.paths = paths;
         }
@@ -203,29 +203,26 @@ impl ClassWriter {
 
     /// The class each of the file's local and anonymous classes is declared in. A class lists
     /// the ones its own code declares.
-    pub(crate) fn set_declaring_classes(&mut self, declaring: Rc<HashMap<String, String>>) {
+    pub fn set_declaring_classes(&mut self, declaring: Rc<HashMap<String, String>>) {
         if let InnerClassTable::Referenced(own) = &mut self.inner_class_table {
             own.declaring = declaring;
         }
     }
 
-    pub(crate) fn set_declaration_source_orders(&mut self, orders: Rc<HashMap<String, u32>>) {
+    pub fn set_declaration_source_orders(&mut self, orders: Rc<HashMap<String, u32>>) {
         if let InnerClassTable::Referenced(own) = &mut self.inner_class_table {
             own.source_orders = orders;
         }
     }
 
     /// Specialized suspend lambdas a caller constructs without listing them.
-    pub(crate) fn set_call_site_classes(
-        &mut self,
-        call_sites: Rc<crate::fx_hash::HashSet<String>>,
-    ) {
+    pub fn set_call_site_classes(&mut self, call_sites: Rc<crate::fx_hash::HashSet<String>>) {
         if let InnerClassTable::Referenced(own) = &mut self.inner_class_table {
             own.call_sites = call_sites;
         }
     }
 
-    pub(crate) fn set_copied_inline_capture_holders(
+    pub fn set_copied_inline_capture_holders(
         &mut self,
         copied: Rc<HashMap<String, HashSet<String>>>,
         independent: Rc<HashMap<String, HashSet<String>>>,
@@ -237,7 +234,7 @@ impl ClassWriter {
     }
 
     /// The table orders shared by the writers of one file.
-    pub(crate) fn set_table_orders(&mut self, orders: Rc<TableOrders>) {
+    pub fn set_table_orders(&mut self, orders: Rc<TableOrders>) {
         if let InnerClassTable::Referenced(own) = &mut self.inner_class_table {
             own.orders = orders;
         }
@@ -245,7 +242,7 @@ impl ClassWriter {
 
     /// Write every registered entry, in registration order: the table of a class copied from a
     /// compiled one, whose writer is handed the rows one by one (`ClassVisitor.visitInnerClass`).
-    pub(crate) fn keep_visited_inner_classes(&mut self) {
+    pub fn keep_visited_inner_classes(&mut self) {
         self.inner_class_table = InnerClassTable::Visited;
     }
 
@@ -332,7 +329,7 @@ impl ClassWriter {
     /// ahead of `Foo$Companion` (`'$'` < `'C'`). Seeding only this class's own row put its name
     /// first and left the two entries transposed in the pool — the class then matched kotlinc in
     /// every other respect while still differing byte-wise.
-    pub(in crate::jvm) fn seed_inner_class_names(&mut self) {
+    pub fn seed_inner_class_names(&mut self) {
         // A referenced dependency nest may not be among the source file's registered candidates.
         // Discover those rows before sorting; resolving them later from `finish` would intern their
         // names after every source row and recreate the very order mismatch this seed prevents.

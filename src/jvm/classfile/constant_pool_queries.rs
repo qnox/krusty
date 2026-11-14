@@ -240,7 +240,7 @@ enum MemberKind {
 impl ClassWriter {
     /// Code this writer's builder emitted, read into a node against the writer's pool, which holds
     /// every constant it names. `None` when the code cannot be decoded.
-    pub(crate) fn read_emitted_code(
+    pub fn read_emitted_code(
         &self,
         access: u16,
         name: &str,

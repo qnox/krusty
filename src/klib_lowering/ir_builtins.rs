@@ -84,6 +84,37 @@ pub(super) enum BuiltinOperator {
         from: Ty,
         to: Ty,
     },
+    /// `dataClassArrayMemberToString(arg0: Any?): String` and its `HashCode` twin: the member a
+    /// data class (or a value class) generates for an array property, which is the content of
+    /// the array, not its identity.
+    DataClassArrayMember(DataClassArrayMember),
+}
+
+/// The `Any` member a data class generates over an array property's content.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) enum DataClassArrayMember {
+    ToString,
+    HashCode,
+}
+
+impl DataClassArrayMember {
+    pub(super) const ALL: [Self; 2] = [Self::ToString, Self::HashCode];
+
+    /// The name of the `IrBuiltIns` operator.
+    fn operator_name(self) -> &'static str {
+        match self {
+            Self::ToString => "dataClassArrayMemberToString",
+            Self::HashCode => "dataClassArrayMemberHashCode",
+        }
+    }
+
+    /// The name of the `kotlin.collections` extension that computes the same content member.
+    pub(super) fn content_function(self) -> &'static str {
+        match self {
+            Self::ToString => "contentToString",
+            Self::HashCode => "contentHashCode",
+        }
+    }
 }
 
 /// The built-in operators lowering realizes, by exact signature.
@@ -149,6 +180,14 @@ impl IrBuiltinOperators {
             }
         }
         let any = nullable("kotlin/Any");
+        for member in DataClassArrayMember::ALL {
+            declare(
+                builtins,
+                member.operator_name(),
+                vec![&any],
+                BuiltinOperator::DataClassArrayMember(member),
+            );
+        }
         declare(builtins, "EQEQ", vec![&any, &any], BuiltinOperator::Equals);
         declare(
             builtins,
@@ -488,6 +527,18 @@ mod tests {
                     "EQEQEQ".to_owned(),
                     12_796_179_002_905_496_035,
                     BuiltinOperator::Identical
+                ),
+                (
+                    "kotlin.internal.ir".to_owned(),
+                    "dataClassArrayMemberHashCode".to_owned(),
+                    1_313_450_872_384_774_067,
+                    BuiltinOperator::DataClassArrayMember(DataClassArrayMember::HashCode)
+                ),
+                (
+                    "kotlin.internal.ir".to_owned(),
+                    "dataClassArrayMemberToString".to_owned(),
+                    6_964_999_878_285_616_846,
+                    BuiltinOperator::DataClassArrayMember(DataClassArrayMember::ToString)
                 ),
                 (
                     "kotlin.internal.ir".to_owned(),

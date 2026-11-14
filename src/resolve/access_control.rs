@@ -176,10 +176,13 @@ impl<'a> Checker<'a> {
         {
             return true;
         }
-        if !matches!(
-            candidate.kind,
-            crate::libraries::FnKind::TopLevel | crate::libraries::FnKind::Extension
-        ) {
+        // A constructor's access is owned by its classifier and checked when it is committed.
+        if candidate.constructor.is_some()
+            || !matches!(
+                candidate.kind,
+                crate::libraries::FnKind::TopLevel | crate::libraries::FnKind::Extension
+            )
+        {
             return true;
         }
         crate::callable_access::source_callable_accessible(
@@ -194,30 +197,6 @@ impl<'a> Checker<'a> {
                         candidate.callable.owner,
                     )
             },
-        )
-    }
-
-    /// Whether a member function the call found on `receiver` is hidden from this site. Kotlin
-    /// ranks a hidden member below every visible candidate: an applicable extension takes the
-    /// call (`clone()` declared beside the protected `Object.clone`), and the member is reported
-    /// as inaccessible only when nothing visible applies. `internal` ownership stays with the
-    /// selected-member check.
-    pub(super) fn member_hidden_from_site(
-        &self,
-        candidate: &crate::libraries::FunctionInfo,
-        receiver: Option<Ty>,
-    ) -> bool {
-        let Some(receiver) = receiver else {
-            return false;
-        };
-        matches!(
-            candidate.visibility,
-            Visibility::Private | Visibility::Protected | Visibility::PackagePrivate
-        ) && !self.receiver_callable_accessible(
-            candidate.visibility,
-            candidate.callable.owner,
-            crate::symbol_resolver::member_scope_receiver(receiver),
-            candidate.callable.external_identity,
         )
     }
 
@@ -255,39 +234,53 @@ impl<'a> Checker<'a> {
         let before = overloads.len();
         overloads.retain(|candidate| {
             candidate.kind != crate::libraries::FnKind::Member
-                || !self.member_hidden_from_site(candidate, Some(receiver))
+                || self.member_candidate_accessible(candidate, Some(receiver))
         });
         overloads.len() != before
     }
 
     /// Reject an inaccessible selected constructor after diagnosing its local inference result.
     /// Evidence from the rejected call is never published into the committed-call sidecar.
-    pub(super) fn reject_ctor_access(
+    /// Whether the call site may use the selected constructor `member` of `owner`.
+    pub(super) fn constructor_accessible(
+        &self,
+        owner: TypeName,
+        member: &crate::libraries::LibraryMember,
+    ) -> bool {
+        self.callable_accessible(member.visibility, owner, member.external_identity)
+            || self.suppresses_diagnostic("INVISIBLE_REFERENCE")
+    }
+
+    /// Report a selected constructor that no later tower level displaced.
+    pub(super) fn report_invisible_constructor(
         &mut self,
         call: ExprId,
-        owner: TypeName,
-        classifier: &crate::libraries::LibraryType,
-        member: &crate::libraries::LibraryMember,
-        bindings: Option<&crate::symbol_resolver::GSigBinds>,
-    ) -> bool {
-        if self.callable_accessible(member.visibility, owner, member.external_identity)
-            || self.suppresses_diagnostic("INVISIBLE_REFERENCE")
-        {
-            return false;
-        }
-        if let Some(bindings) = bindings {
-            self.report_rejected_constructor_type_arguments(call, owner, classifier, bindings);
+        invisible: &super::provider_constructor_selection::InvisibleConstructor,
+    ) {
+        if let Some(bindings) = &invisible.bindings {
+            self.report_rejected_constructor_type_arguments(
+                call,
+                invisible.owner,
+                &invisible.classifier,
+                bindings,
+            );
         }
         self.diags.error(
             self.call_callee_name_span(call),
-            diagnostics::constructor_message(&self.fed_source(), owner, member),
+            diagnostics::constructor_message(
+                &self.fed_source(),
+                invisible.owner,
+                &invisible.member,
+            ),
         );
-        true
     }
 
-    /// Whether a member candidate is accessible through the call's receiver. Top-level and
-    /// extension candidates are filtered by [`Self::source_callable_visible`] before applicability,
-    /// and constructors keep their own access diagnostic.
+    /// Whether a member candidate is accessible through the call's receiver. Kotlin ranks an
+    /// inaccessible member below every accessible candidate: an applicable extension takes the
+    /// call (`clone()` declared beside the protected `Object.clone`), and the member is reported
+    /// as inaccessible only when nothing accessible applies. Top-level and extension candidates
+    /// are filtered by [`Self::source_callable_visible`] before applicability, and constructors
+    /// keep their own access diagnostic.
     pub(super) fn member_candidate_accessible(
         &self,
         candidate: &crate::libraries::FunctionInfo,
@@ -300,9 +293,12 @@ impl<'a> Checker<'a> {
         let owner = candidate.callable.owner_type();
         let identity = candidate.callable.external_identity;
         match receiver {
-            Some(receiver) => {
-                self.receiver_callable_accessible(candidate.visibility, owner, receiver, identity)
-            }
+            Some(receiver) => self.receiver_callable_accessible(
+                candidate.visibility,
+                owner,
+                crate::symbol_resolver::member_scope_receiver(receiver),
+                identity,
+            ),
             None => self.callable_accessible(candidate.visibility, owner, identity),
         }
     }

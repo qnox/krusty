@@ -7,7 +7,7 @@ use crate::jvm::names::method_descriptor;
 use crate::jvm::physical_type::ir_ty_to_jvm;
 use crate::types::{Ty, TyKind};
 
-pub(in crate::jvm) fn jvm_declared_ty(ty: &Ty) -> Ty {
+pub fn jvm_declared_ty(ty: &Ty) -> Ty {
     fn is_nothing(ty: &Ty) -> bool {
         match ty.kind() {
             TyKind::Nothing => true,
@@ -31,17 +31,17 @@ pub(in crate::jvm) fn jvm_declared_ty(ty: &Ty) -> Ty {
 /// A parameter, field, local, or property accessor. `Unit` is the `kotlin.Unit` singleton there,
 /// including when a type parameter erases to `Unit`. `void` is only a method result, so callers
 /// that describe a return keep [`jvm_declared_ty`].
-pub(crate) fn jvm_value_ty(ty: &Ty) -> Ty {
+pub fn jvm_value_ty(ty: &Ty) -> Ty {
     match jvm_declared_ty(ty) {
         Ty::Unit => Ty::obj("kotlin/Unit"),
         other => other,
     }
 }
 
-pub(crate) fn jvm_tys(types: &[Ty]) -> Vec<Ty> {
+pub fn jvm_tys(types: &[Ty]) -> Vec<Ty> {
     types.iter().map(jvm_value_ty).collect()
 }
 
-pub(in crate::jvm) fn ir_method_desc(parameters: &[Ty], result: &Ty) -> String {
+pub fn ir_method_desc(parameters: &[Ty], result: &Ty) -> String {
     method_descriptor(&jvm_tys(parameters), jvm_declared_ty(result))
 }

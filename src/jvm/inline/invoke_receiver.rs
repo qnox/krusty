@@ -84,7 +84,7 @@ fn stack_entry_effect(instruction: &Insn, src_cp: &[C]) -> Option<(usize, usize)
                 usize::from(result.is_some()),
             )
         }
-        0xbc | 0xbd | 0xbe => (1, 1),
+        0xbc..=0xbe => (1, 1),
         0xc4 => match *operands.first()? {
             0x15..=0x19 => (0, 1),
             0x36..=0x3a => (1, 0),

@@ -1,0 +1,441 @@
+/* krusty site design system, shared by every page under site/src/pages.
+   Layout: one reading column (--measure) inside a wider frame (--frame) for heroes, tiles and
+   tables; pages are a stack of <section class="band"> blocks, each with its own .wrap.
+   Palette: the mascot's violet carries links and focus, its shell orange is the one brand
+   emphasis; neutrals lean slightly violet. Chart colors are the validated dataviz default order
+   and are never reused as UI or status colors. */
+
+:root {
+  color-scheme: light;
+
+  /* Surfaces and ink */
+  --bg: #fbfaff;
+  --surface: #ffffff;
+  --sunken: #f1eef9;
+  --fg: #17151f;
+  --muted: #5b566b;
+  --line: #e2ddef;
+
+  /* Brand */
+  --accent: #6236e8;
+  --accent-soft: #ebe5ff;
+  --rust: #d8431a;
+
+  /* Text-safe semantic ink (paired with an icon or a word, never color alone) */
+  --ok: #0d7330;
+  --bad: #b8302c;
+
+  /* Charts: categorical slots in fixed order; chrome is recessive */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --grid: #ebe8f3;
+  --axis: #c9c4d6;
+  /* Status fills: fixed in both themes, always with an icon and a label */
+  --st-good: #0ca30c;
+  --st-warn: #fab219;
+  --st-critical: #d03b3b;
+
+  /* Type */
+  --font-display: "Bricolage Grotesque Variable", "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --step--1: 0.875rem;
+  --step-0: 1.0625rem;
+  --step-1: 1.25rem;
+  --step-2: 1.625rem;
+  --step-3: clamp(2rem, 1.4rem + 2.6vw, 3.25rem);
+
+  /* Space and shape */
+  --measure: 44rem;
+  --frame: 68rem;
+  --radius: 10px;
+  --radius-small: 6px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #110f17;
+    --surface: #1a1722;
+    --sunken: #221e2d;
+    --fg: #eeecf4;
+    --muted: #a6a0b8;
+    --line: #2f2a3d;
+    --accent: #a98fff;
+    --accent-soft: #2b2342;
+    --rust: #ff7246;
+    --ok: #45cc72;
+    --bad: #ff7a72;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --grid: #262231;
+    --axis: #3d374c;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #110f17;
+  --surface: #1a1722;
+  --sunken: #221e2d;
+  --fg: #eeecf4;
+  --muted: #a6a0b8;
+  --line: #2f2a3d;
+  --accent: #a98fff;
+  --accent-soft: #2b2342;
+  --rust: #ff7246;
+  --ok: #45cc72;
+  --bad: #ff7a72;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --grid: #262231;
+  --axis: #3d374c;
+}
+
+/* Base elements */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-padding-top: 4.5rem;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 400 var(--step-0) / 1.6 var(--font-body);
+  font-optical-sizing: auto;
+}
+
+img,
+svg {
+  max-width: 100%;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  line-height: 1.15;
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+  margin: 0;
+}
+
+h1 {
+  font-size: var(--step-3);
+  font-weight: 750;
+}
+
+h2 {
+  font-size: var(--step-2);
+  font-weight: 700;
+}
+
+h3 {
+  font-size: var(--step-1);
+  font-weight: 650;
+}
+
+p {
+  margin: 0;
+  text-wrap: pretty;
+}
+
+a {
+  color: var(--accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+}
+
+a:hover {
+  text-decoration-thickness: 2px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+code,
+pre,
+kbd {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+}
+
+:not(pre) > code {
+  background: var(--sunken);
+  padding: 0.08em 0.35em;
+  border-radius: 4px;
+  overflow-wrap: break-word;
+}
+
+pre {
+  margin: 0;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1rem 1.15rem;
+  overflow-x: auto;
+  line-height: 1.6;
+}
+
+ul,
+ol {
+  margin: 0;
+  padding-left: 1.2em;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: var(--step--1);
+  line-height: 1.5;
+}
+
+th,
+td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.7rem 0.9rem;
+  border-bottom: 1px solid var(--line);
+}
+
+th {
+  font-weight: 600;
+  color: var(--muted);
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+td,
+th {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Layout */
+
+.wrap {
+  width: 100%;
+  max-width: calc(var(--frame) + 2 * 16px);
+  margin-inline: auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+
+.band {
+  padding-block: clamp(2.5rem, 2rem + 3vw, 4.5rem);
+}
+
+.band + .band {
+  border-top: 1px solid var(--line);
+}
+
+/* An alternate band sits on the sunken plane, so panels inside it read as raised. */
+.band-alt {
+  background: var(--sunken);
+}
+
+.band-alt pre {
+  background: var(--surface);
+}
+
+.band-alt :not(pre) > code {
+  background: var(--surface);
+}
+
+.prose {
+  max-width: var(--measure);
+  display: grid;
+  gap: 1rem;
+}
+
+.section-head {
+  display: grid;
+  gap: 0.6rem;
+  max-width: var(--measure);
+  margin-bottom: 1.75rem;
+}
+
+.section-head p {
+  color: var(--muted);
+}
+
+.eyebrow {
+  font: 600 0.78rem / 1.2 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.table-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.table-scroll tr:last-child > * {
+  border-bottom: 0;
+}
+
+/* Buttons */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  padding: 0 1.15rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--fg);
+  font: 600 var(--step-0) / 1 var(--font-body);
+  text-decoration: none;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+.button:hover {
+  border-color: var(--accent);
+}
+
+.button-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+}
+
+.button-primary:hover {
+  background: color-mix(in oklab, var(--accent) 88%, var(--fg));
+}
+
+/* Stat tiles and meters (dataviz figure contract: label, value, meta) */
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+  gap: 1rem;
+}
+
+.tile {
+  display: grid;
+  gap: 0.5rem;
+  align-content: start;
+  padding: 1.15rem 1.25rem 1.25rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  min-width: 0;
+}
+
+.tile-label {
+  font: 600 var(--step--1) / 1.3 var(--font-body);
+  color: var(--muted);
+}
+
+.tile-value {
+  font: 700 2.75rem / 1 var(--font-display);
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.tile-meta {
+  color: var(--muted);
+  font-size: var(--step--1);
+  font-variant-numeric: tabular-nums;
+}
+
+.meter {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  overflow: hidden;
+}
+
+.meter > span {
+  display: block;
+  height: 100%;
+  width: var(--value, 0%);
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+/* A wide table keeps its first column in view while the rest scrolls sideways. */
+
+.table-sticky th:first-child,
+.table-sticky td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--surface);
+  box-shadow: 1px 0 0 var(--line);
+}
+
+/* Data tables: compact rows, numbers right-aligned in .num cells */
+
+.table-compact th,
+.table-compact td {
+  padding: 0.45rem 0.75rem;
+}
+
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Charts: SVG text uses these, never a series color. --rust stays out of charts so a series
+   never reads as brand emphasis. */
+
+.chart text {
+  fill: var(--muted);
+  font: 500 0.75rem var(--font-body);
+  font-variant-numeric: tabular-nums;
+}
+
+.chart .grid {
+  stroke: var(--grid);
+  stroke-width: 1;
+}
+
+.chart .axis {
+  stroke: var(--axis);
+  stroke-width: 1;
+}
+
+.chart-tooltip {
+  position: absolute;
+  pointer-events: none;
+  padding: 0.45rem 0.6rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-small);
+  box-shadow: 0 4px 16px color-mix(in oklab, var(--fg) 12%, transparent);
+  font-size: var(--step--1);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}

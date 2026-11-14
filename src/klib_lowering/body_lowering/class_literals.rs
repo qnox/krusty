@@ -18,8 +18,7 @@ impl BodyLowering<'_> {
         class_type: KlibIrTypeId,
         ty: Ty,
     ) -> Lowered<ExprId> {
-        let classifier =
-            super::semantic_type(self.arena, self.header.type_parameters(), class_type)?;
+        let classifier = self.semantic(class_type)?;
         let names = match (class.kind, &class.signature) {
             (KlibIrSymbolKind::TypeParameter, _) => classifier.ty_param_name().is_some(),
             (KlibIrSymbolKind::Class, KlibIrSignature::Public(signature)) => {

@@ -18,3 +18,13 @@ fn expression_target_plus_assign_matches_kotlin_runtime_behavior() {
         "expression_target_plus_assign",
     );
 }
+
+#[test]
+fn a_generic_argument_over_enclosing_type_parameters_selects_a_generic_plus_assign() {
+    common::expect_box_same_as_kotlinc(
+        include_str!(
+            "box_regressions/compoundAssignmentGenericArgumentOverEnclosingTypeParameters.kt"
+        ),
+        "CompoundAssignmentGenericArgument",
+    );
+}

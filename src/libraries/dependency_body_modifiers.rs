@@ -9,7 +9,7 @@ use crate::metadata::semantic::{
 /// Property external status is independent of accessor external status. It vetoes ordinary body
 /// emission without changing the accessor's own modifier word or the serialized function flags.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct KlibBodyDeclarationModifiers {
+pub struct KlibBodyDeclarationModifiers {
     pub(crate) is_inline: bool,
     pub(crate) is_suspend: bool,
     pub(crate) is_external: bool,
@@ -24,6 +24,12 @@ impl KlibBodyDeclarationModifiers {
             && !self.is_external
             && !self.property_is_external
             && matches!(self.modality, KotlinModality::Final | KotlinModality::Open)
+    }
+
+    /// Whether the declaration is an abstract member implementation: a call of it always reaches
+    /// an override, which the receiver's class supplies.
+    pub(crate) fn declares_abstract_implementation(self) -> bool {
+        !self.is_external && !self.property_is_external && self.modality.is_abstract()
     }
 
     pub(crate) fn function(declaration: &KotlinFunction) -> Self {

@@ -174,10 +174,14 @@ impl Checker<'_> {
                         self,
                         scope,
                         wanted.expected,
-                        then_branch,
-                        tt,
-                        eb,
-                        et,
+                        conditional_branch::BranchValue {
+                            expression: then_branch,
+                            ty: tt,
+                        },
+                        conditional_branch::BranchValue {
+                            expression: eb,
+                            ty: et,
+                        },
                         e,
                     );
                     self.record_flexible_join(e, [then_branch, eb], result, false);

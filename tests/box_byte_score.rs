@@ -18,7 +18,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::box_reference_classes::ReferenceClasses;
 
 /// A `.class` inventory keyed by `(module identity, JVM internal class name)`.
-pub type QualifiedClasses = BTreeMap<(String, String), Vec<u8>>;
+pub type QualifiedClasses = QualifiedArtifacts;
+
+/// Entries paired by source-module identity and artifact path, for class files or unpacked KLIBs.
+pub type QualifiedArtifacts = BTreeMap<(String, String), Vec<u8>>;
 
 /// Integer matched / total byte counts for one case or an accumulated set. `matched <= total`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

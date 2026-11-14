@@ -9,13 +9,13 @@ use std::rc::Rc;
 
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::compilation_inputs::{selected_jdk_feature_release, JvmCompilationInputInventory};
-use krusty::jvm::ir_emit::{JvmDefaultMode, LambdaModes};
-use krusty::jvm::JvmBackend;
 use krusty::kotlin_version::KotlinVersion;
 use krusty::language_settings::LanguageSettings;
 use krusty::language_version::LanguageVersion;
 use krusty::plugins::cli::PluginConfig;
 use krusty::plugins::registry::{Activation, NativePlugins, PluginRegistry};
+use krusty_jvm::ir_emit::{JvmDefaultMode, LambdaModes};
+use krusty_jvm::JvmBackend;
 
 use crate::kotlinc_arguments::{self, Catalog, Disposition, Lifecycle, Origin, ValueKind};
 
@@ -784,9 +784,9 @@ krusty never compiles a command line into anything other than what kotlinc would
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krusty::jvm::ir_emit::LambdaMode;
     use krusty::language_version::LanguageVersion;
     use krusty::plugins::registry::PluginDiagnostic;
+    use krusty_jvm::ir_emit::LambdaMode;
 
     fn parse_args(args: &[&str]) -> Options {
         parse(args.iter().map(|s| s.to_string()))
@@ -1019,7 +1019,7 @@ mod tests {
 
     #[test]
     fn jvm_default_mode_is_read_in_both_spellings() {
-        use krusty::jvm::ir_emit::JvmDefaultMode;
+        use krusty_jvm::ir_emit::JvmDefaultMode;
         // The current spelling.
         for (value, expected) in [
             ("enable", JvmDefaultMode::Enable),
@@ -1054,7 +1054,7 @@ mod tests {
 
     #[test]
     fn jvm_default_defaults_to_kotlincs_own_default() {
-        use krusty::jvm::ir_emit::JvmDefaultMode;
+        use krusty_jvm::ir_emit::JvmDefaultMode;
         assert_eq!(
             parse_args(&["x.kt"]).jvm_default,
             JvmDefaultMode::Enable,
@@ -1067,7 +1067,7 @@ mod tests {
     /// shape than it asked for.
     #[test]
     fn an_unknown_jvm_default_value_is_fatal_and_every_real_one_is_accepted() {
-        use krusty::jvm::ir_emit::JvmDefaultMode;
+        use krusty_jvm::ir_emit::JvmDefaultMode;
         for (value, expected) in [
             ("disable", JvmDefaultMode::Disable),
             ("enable", JvmDefaultMode::Enable),
@@ -1103,7 +1103,7 @@ mod tests {
 
     #[test]
     fn an_unknown_jvm_default_value_is_reported_and_changes_nothing() {
-        use krusty::jvm::ir_emit::JvmDefaultMode;
+        use krusty_jvm::ir_emit::JvmDefaultMode;
         let parsed = parse_args(&["-jvm-default=sideways", "x.kt"]);
         assert_eq!(parsed.jvm_default, JvmDefaultMode::Enable);
         assert!(

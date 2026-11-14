@@ -54,15 +54,14 @@ fn the_serializer_of_a_class_with_a_hand_written_companion_matches_kotlinc() {
                \x20       fun make(): Token = Token(\"made\")\n\
                \x20   }\n\
                }\n";
-    for class in ["Token$$serializer"] {
-        let built = compare_with_kotlinc_plugin("ExplicitCompanion", src, class, &cp, "25", &extra)
-            .expect("reference kotlinc and javap are provisioned");
-        if built.krusty_bytes != built.reference_bytes {
-            // The first lines name the scratch file and its checksum; the class itself follows.
-            let body = |text: &str| text.lines().skip(3).map(str::to_string).collect::<Vec<_>>();
-            assert_eq!(body(&built.krusty), body(&built.reference), "{class}");
-            panic!("{class}: same disassembly, different bytes");
-        }
+    let class = "Token$$serializer";
+    let built = compare_with_kotlinc_plugin("ExplicitCompanion", src, class, &cp, "25", &extra)
+        .expect("reference kotlinc and javap are provisioned");
+    if built.krusty_bytes != built.reference_bytes {
+        // The first lines name the scratch file and its checksum; the class itself follows.
+        let body = |text: &str| text.lines().skip(3).map(str::to_string).collect::<Vec<_>>();
+        assert_eq!(body(&built.krusty), body(&built.reference), "{class}");
+        panic!("{class}: same disassembly, different bytes");
     }
 }
 

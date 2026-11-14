@@ -28,7 +28,7 @@ pub(super) struct AssociatedSignatureArguments<'call, 'argument> {
     pub(super) expected: Option<crate::fir::ResolvedTy>,
 }
 
-type Demand<'demand> = dyn FnMut(
+pub(super) type Demand<'demand> = dyn FnMut(
         crate::fir::DeclarationId,
     ) -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>
     + 'demand;
