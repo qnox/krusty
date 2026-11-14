@@ -873,6 +873,7 @@ pub(super) fn realize(
                         scope: inline_scope,
                         lambda_origin: kotlin_lambda,
                         sam: None,
+                        sam_reference: false,
                     },
                 );
             }
