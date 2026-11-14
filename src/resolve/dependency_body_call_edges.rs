@@ -37,6 +37,13 @@ pub(crate) fn for_checked_klib_bodies<'a>(
             bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS),
         );
 
+        // A reached constructor's initialization is serialized on its owning class. These are
+        // declaration facts only: common class initialization still selects executable roots.
+        pending.extend(
+            bodies
+                .constructor_member_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS),
+        );
+
         let Some((external, realization)) = source.external_callable_by_dependency(&identity)
         else {
             continue;

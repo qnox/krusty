@@ -771,6 +771,39 @@ impl KlibDeclarationBodies {
             .collect()
     }
 
+    /// Declaration facts of the class whose exact reached constructor is `identity`. Field and
+    /// anonymous initializers live beside that constructor, not in its function body. Reuse the
+    /// same structural member walker as local-class preparation; this inventory freezes facts
+    /// only and must not replace the initialization plan's executable root selection.
+    pub(crate) fn constructor_member_callables(
+        &self,
+        identity: &KlibDependencyCallable,
+        forms: crate::metadata::klib_ir::tree::EmittedCallForms,
+    ) -> Vec<KlibDependencyCallable> {
+        let Some((_, function)) = self.function(identity) else {
+            return Vec::new();
+        };
+        if !function.constructor {
+            return Vec::new();
+        }
+        let Some((arena, class)) =
+            self.module_class_declaring(&identity.module, &ir_signature(&identity.declaration))
+        else {
+            return Vec::new();
+        };
+        arena
+            .emitted_callable_symbols_from(arena.class_member_roots(class), forms)
+            .into_iter()
+            .filter_map(|symbol| declaration_signature(&symbol.signature))
+            .filter_map(
+                |declaration| match self.linked_origin(&identity.module, &declaration) {
+                    KlibCalleeOrigin::Exact(callee) => Some(callee),
+                    KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
+                },
+            )
+            .collect()
+    }
+
     /// Whether `identity` is an executable dependency-support root: its own serialized body has a
     /// direct call edge to an intrinsic declaration authenticated from these same selected inputs,
     /// or a direct call edge to one such declaration.
