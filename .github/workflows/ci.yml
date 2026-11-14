@@ -1,4 +1,4 @@
-name: Generic dependency class layout evidence
+name: Generic dependency class layout runtime evidence
 
 # Manual diagnostic run for the exact generic-layout product commit; failures are recorded per check
 # and do not prevent the later versions or whole-fixture checks from running.
@@ -11,7 +11,7 @@ permissions:
 jobs:
   generic-layout:
     runs-on: [self-hosted, rust-4c-8gb]
-    timeout-minutes: 360
+    timeout-minutes: 60
     env:
       CARGO_BUILD_JOBS: "1"
     steps:
@@ -58,134 +58,18 @@ jobs:
           printf '%s\n' "$source_commit" > "$evidence/source-commit.txt"
           git rev-parse HEAD > "$evidence/workflow-commit.txt"
           git status --short --branch > "$evidence/checkout-status.txt"
-      - name: Build compiler library unit and conformance binaries once
+      - name: Build conformance binary independently of the memory-bound unit binary
         id: binaries
+        timeout-minutes: 30
         if: ${{ always() && steps.prepare.outcome == 'success' }}
         run: |
-          set -uo pipefail
-          snapshot() {
-            {
-              date -Is
-              free -h
-              printf '\n--- /proc/self/cgroup ---\n'
-              cat /proc/self/cgroup 2>/dev/null || true
-              for path in /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.peak /sys/fs/cgroup/memory.events; do
-                if [ -r "$path" ]; then
-                  printf '\n--- %s ---\n' "$path"
-                  cat "$path"
-                fi
-              done
-              printf '\n--- top resident processes ---\n'
-              ps -eo pid,ppid,rss,etime,comm,args --sort=-rss | awk 'NR <= 12'
-            } >> "$EVIDENCE/compiler-memory.log" 2>&1
-          }
-          build_one() {
-            local kind="$1"
-            local recipe="$2"
-            local logfile="$EVIDENCE/${kind}-build.log"
-            snapshot
-            just "$recipe" > "$logfile" 2>&1 &
-            local build_pid=$!
-            (
-              while kill -0 "$build_pid" 2>/dev/null; do
-                snapshot
-                sleep 5
-              done
-            ) &
-            local monitor_pid=$!
-            set +e
-            wait "$build_pid"
-            local status=$?
-            set -e
-            kill "$monitor_pid" 2>/dev/null || true
-            wait "$monitor_pid" 2>/dev/null || true
-            snapshot
-            cat "$logfile" >&2
-            printf '%s\n' "$status" > "$EVIDENCE/${kind}-build.exit-code"
-            if [ "$status" -ne 0 ]; then return "$status"; fi
-            tail -n 1 "$logfile"
-          }
-          set -e
-          # Experiment: keep coverage profile options and serialize Cargo, but partition krusty's
-          # cfg(test) codegen into 256 units to measure whether LLVM peak memory falls. This is a
-          # per-command profile override only; the product profile and conformance gate stay intact.
-          snapshot
-          printf '%s\n' 'coverage' 'profile.coverage.package.krusty.codegen-units=256' \
-            > "$EVIDENCE/compiler-unit-profile.txt"
-          cargo --version > "$EVIDENCE/cargo-version.txt"
-          rustc --version --verbose > "$EVIDENCE/rustc-version.txt"
-          printf '%s\n' \
-            "cargo --config 'profile.coverage.package.krusty.codegen-units=256' test --verbose --profile coverage --no-run -p krusty --lib --message-format=json" \
-            > "$EVIDENCE/compiler-unit-cargo-command.txt"
-          unit_log="$EVIDENCE/compiler-unit-build.log"
-          cargo --config 'profile.coverage.package.krusty.codegen-units=256' \
-            test --verbose --profile coverage --no-run -p krusty --lib --message-format=json \
-            > "$unit_log" 2>&1 &
-          unit_pid=$!
-          (
-            while kill -0 "$unit_pid" 2>/dev/null; do
-              snapshot
-              sleep 5
-            done
-          ) &
-          monitor_pid=$!
-          set +e
-          wait "$unit_pid"
-          unit_status=$?
-          set -e
-          kill "$monitor_pid" 2>/dev/null || true
-          wait "$monitor_pid" 2>/dev/null || true
-          snapshot
-          cat "$unit_log" >&2
-          printf '%s\n' "$unit_status" > "$EVIDENCE/compiler-unit-build.exit-code"
-          if [ "$unit_status" -ne 0 ]; then exit "$unit_status"; fi
-          unitbin="$(jq -Rr 'fromjson? | select(.reason == "compiler-artifact" and .profile.test == true and .target.name == "krusty" and .executable != null) | .executable' "$unit_log" | tail -n 1)"
-          if [ ! -x "$unitbin" ]; then
-            echo "could not locate krusty library test binary in cargo artifact stream" >&2
-            exit 1
-          fi
-          printf '%s\n' "$unitbin" > "$EVIDENCE/unit-binary.txt"
-          sha256sum "$unitbin" > "$EVIDENCE/unit-binary.sha256"
-          stat -c '%s' "$unitbin" > "$EVIDENCE/unit-binary.bytes"
-          conformancebin="$(build_one conformance conformance-bin)"
-          echo "$conformancebin" > "$EVIDENCE/conformance-binary.txt"
-          echo "UNITBIN=$(realpath "$unitbin")" >> "$GITHUB_ENV"
+          set -euo pipefail
+          printf '%s\n' 'Unit compilation and all four unit censuses remain pending; not attempted in this runtime-only run.' > "$EVIDENCE/unit-validation-pending.txt"
+          bash scripts/cargo-test-binary.sh conformance -p krusty --test conformance > "$EVIDENCE/conformance-build.log" 2>&1
+          cat "$EVIDENCE/conformance-build.log"
+          conformancebin="$(tail -n 1 "$EVIDENCE/conformance-build.log")"
+          sha256sum "$conformancebin" > "$EVIDENCE/conformance-binary.sha256"
           echo "CONFORMANCEBIN=$(realpath "$conformancebin")" >> "$GITHUB_ENV"
-      - name: Run exact Native KLIB unit tests and implementation censuses at all stable releases
-        id: release-checks
-        if: ${{ always() && steps.prepare.outcome == 'success' && steps.binaries.outcome == 'success' }}
-        env:
-          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
-        run: |
-          set -uo pipefail
-          status_file="$EVIDENCE/release-check-status.tsv"
-          : > "$status_file"
-          run_check() {
-            local label="$1"
-            shift
-            set +e
-            "$@" 2>&1 | tee "$EVIDENCE/$label.log"
-            local status=${PIPESTATUS[0]}
-            set -e
-            printf '%s\t%s\n' "$label" "$status" | tee -a "$status_file"
-          }
-          for version in 2.4.0 2.4.10 2.4.20 2.4.21; do
-            native="$(just kotlin-native "$version")"
-            run_check "${version}-stdlib-callee-census" env \
-              KRUSTY_LANGUAGE_VERSION="$version" KRUSTY_KOTLIN_NATIVE="$native" \
-              "$UNITBIN" stdlib_calls_reach_header_declared_callees --nocapture
-            run_check "${version}-generic-constructor-formals" env \
-              KRUSTY_LANGUAGE_VERSION="$version" KRUSTY_KOTLIN_NATIVE="$native" \
-              "$UNITBIN" klib_generic_constructor_target_owned_body_retains_class_formals --nocapture
-            run_check "${version}-architecture-target-neutrality" env \
-              KRUSTY_LANGUAGE_VERSION="$version" KRUSTY_KOTLIN_NATIVE="$native" \
-              "$UNITBIN" klib_body_lowering_is_target_neutral --nocapture
-            run_check "${version}-implementation-census" env \
-              KRUSTY_LANGUAGE_VERSION="$version" KRUSTY_KOTLIN_NATIVE="$native" \
-              KRUSTY_REQUIRE_KLIB=1 \
-              KRUSTY_REQUIRE_KLIB_IMPLEMENTATION_TARGETS=native,wasm-js,wasm-wasi \
-              "$UNITBIN" klib_libraries::tests::implementation_coverage:: --nocapture
-          done
       - name: Provision exact 2.4.21 inputs and box corpus
         id: box-inputs
         if: ${{ always() && steps.prepare.outcome == 'success' && steps.binaries.outcome == 'success' }}
@@ -210,7 +94,7 @@ jobs:
             local filter="$2"
             set +e
             KRUSTY_NATIVE_BOX_ONLY="$filter" \
-              ./run-tests.sh --test conformance kotlin_box_native_conformance::kotlin_codegen_box_native_conformance -- --nocapture \
+              timeout 300 "$CONFORMANCEBIN" kotlin_box_native_conformance::kotlin_codegen_box_native_conformance --nocapture \
               2>&1 | tee "$EVIDENCE/native-${key}.log"
             local status=${PIPESTATUS[0]}
             set -e
@@ -232,7 +116,7 @@ jobs:
           for target in WASM_JS WASM_WASI; do
             set +e
             env "KRUSTY_${target}_BOX_ONLY=genericDependencyBaseClassLayout" \
-              ./run-tests.sh --test conformance "kotlin_box_wasm_conformance::kotlin_codegen_box_${target,,}_conformance" -- --nocapture \
+              timeout 300 "$CONFORMANCEBIN" "kotlin_box_wasm_conformance::kotlin_codegen_box_${target,,}_conformance" --nocapture \
               2>&1 | tee "$EVIDENCE/${target,,}-genericDependencyBaseClassLayout.log"
             status=${PIPESTATUS[0]}
             set -e
