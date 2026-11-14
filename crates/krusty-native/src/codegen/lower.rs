@@ -450,8 +450,8 @@ pub fn lower_file(
 
 /// The classes of `ir` another file of the module extends, with their superclasses in this file:
 /// what a later file's subclass names by symbol, so their objects define those symbols for the
-/// link to find. Of a support unit's classes, the dependency classes the module plan numbers are
-/// the ones a source file extends.
+/// link to find. A materialized dependency class must also retain its layout for an inline local
+/// subclass emitted by a later support unit, which is absent from the frozen named-class plan.
 fn extended_elsewhere(
     ir: &IrFile,
     unit_kind: krusty::backend::CheckedIrUnitKind,
@@ -463,7 +463,10 @@ fn extended_elsewhere(
         if class.is_interface || ir.local_class_name_provenance.contains_key(&(id as u32)) {
             continue;
         }
-        if support && !classes.is_dependency_class(class.fq_name) {
+        if support {
+            if classes.is_dependency_class(class.fq_name) {
+                extended.insert(id as krusty::ir::ClassId);
+            }
             continue;
         }
         if classes
