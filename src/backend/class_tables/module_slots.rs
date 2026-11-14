@@ -160,7 +160,7 @@ impl ModuleSlotPlan {
     pub fn build_with_published_slots(
         classes: &ModuleClasses,
         representation: &dyn Representation,
-        declarations: &crate::backend::CheckedBackendCallables,
+        declarations: &super::super::CheckedBackendCallables,
         published: &dyn Fn(TypeName) -> Result<Option<PublishedClassSlots>, Unsupported>,
     ) -> Self {
         let tables = published_slots::bind(classes, representation, declarations, published);
