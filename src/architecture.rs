@@ -345,7 +345,7 @@ mod tests {
         for path in jvm_backend_files() {
             // These standalone files are included by a `#[cfg(test)]` parent, so their own source
             // has no test attribute for the Rust dependency scanner to recognize.
-            if path.starts_with(&provider_tests) {
+            if path.starts_with(&provider_tests) || is_test_only_module_source(&path) {
                 continue;
             }
             let check = if path.starts_with(source_path("crates/krusty-jvm")) {
@@ -475,7 +475,11 @@ mod tests {
             }
             let text = fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-            let offenders = backend_resolver_uses(&text);
+            // The JVM provider is separately budgeted for shared hierarchy normalization. Permit
+            // the namespace here, but still reject the resolver type and overload entrypoint.
+            let provider_namespace = path == source_path("src/jvm/jvm_libraries.rs");
+            let offenders =
+                backend_resolver_uses_with_provider_namespace(&text, provider_namespace);
             assert!(
                 offenders.is_empty(),
                 "{} calls frontend selection from production backend code: {forbidden}",
@@ -562,6 +566,107 @@ mod tests {
             let found = backend_resolver_uses(source);
             assert_eq!(found.as_slice(), *expected, "{case}");
         }
+    }
+
+    #[test]
+    fn file_backed_test_modules_follow_their_parent_cfg() {
+        let parent = Path::new("/workspace/src/jvm.rs");
+        let default_mod = Path::new("/workspace/src/jvm/jvm_libraries/mod.rs");
+        for (declaration, expected) in [
+            ("#[cfg(test)] mod jvm_libraries;", true),
+            ("mod jvm_libraries;", false),
+            ("#[cfg(not(test))] mod jvm_libraries;", false),
+            (
+                "#[cfg(any(test, feature = \"x\"))] mod jvm_libraries;",
+                false,
+            ),
+            (
+                "#[cfg(test)] mod jvm_libraries; #[cfg(not(test))] mod jvm_libraries;",
+                false,
+            ),
+            (
+                "#[cfg(not(test))] mod jvm_libraries; #[cfg(test)] mod jvm_libraries;",
+                false,
+            ),
+        ] {
+            assert_eq!(
+                external_module_is_test_only(declaration, parent, "jvm_libraries", default_mod),
+                expected,
+                "{declaration}"
+            );
+        }
+        assert!(external_module_is_test_only(
+            "#[cfg(test)] #[path = \"jvm/contract_dsl_tests.rs\"] mod contract_dsl_tests;",
+            Path::new("/workspace/src/lib.rs"),
+            "contract_dsl_tests",
+            Path::new("/workspace/src/jvm/contract_dsl_tests.rs")
+        ));
+        assert!(!external_module_is_test_only(
+            "#[cfg(test)] #[path = \"other.rs\"] mod contract_dsl_tests;",
+            Path::new("/workspace/src/jvm_libraries.rs"),
+            "contract_dsl_tests",
+            Path::new("/workspace/src/jvm_libraries/contract_dsl_tests.rs")
+        ));
+        assert!(is_test_only_module_source(&source_path(
+            "src/jvm/jvm_libraries/contract_dsl_tests.rs"
+        )));
+        assert!(!is_test_only_module_source(&source_path(
+            "src/jvm/jvm_libraries/synthetic_properties.rs"
+        )));
+    }
+
+    #[test]
+    fn a_test_only_declaration_with_another_path_does_not_hide_production_source() {
+        let root = std::env::temp_dir().join(format!(
+            "krusty-architecture-cfg-path-{}",
+            std::process::id()
+        ));
+        let source = root.join("src");
+        fs::create_dir_all(source.join("parent")).expect("create module tree");
+        fs::write(
+            source.join("parent.rs"),
+            "#[cfg(test)] #[path = \"other.rs\"] mod child;",
+        )
+        .expect("write test-only parent declaration");
+        fs::write(source.join("other.rs"), "").expect("write declared test module");
+        let production = source.join("parent/child.rs");
+        fs::write(&production, "pub fn production() {}")
+            .expect("write unrelated production module source");
+
+        assert!(!is_test_only_module_source(&production));
+
+        let shared = root.join("shared/src");
+        fs::create_dir_all(&shared).expect("create shared crate-root module tree");
+        fs::write(shared.join("lib.rs"), "#[cfg(test)] mod shared;")
+            .expect("write test-only library root");
+        fs::write(shared.join("main.rs"), "mod shared;").expect("write production binary root");
+        let shared_module = shared.join("shared.rs");
+        fs::write(&shared_module, "pub fn production() {}").expect("write shared module source");
+        assert!(!is_test_only_module_source(&shared_module));
+
+        fs::remove_dir_all(root).expect("remove temporary module tree");
+    }
+
+    #[test]
+    fn provider_hierarchy_namespace_does_not_admit_selection_entrypoints() {
+        let hierarchy =
+            "fn f() { crate::symbol_resolver::members_in_hierarchy(source, receiver, name); }";
+        assert_eq!(backend_resolver_uses(hierarchy), ["symbol_resolver::"],);
+        assert!(backend_resolver_uses_with_provider_namespace(hierarchy, true).is_empty());
+        assert_eq!(
+            backend_resolver_uses_with_provider_namespace(
+                "fn f() { crate::symbol_resolver::resolve_symbol(); }",
+                true
+            ),
+            ["resolve_symbol("],
+        );
+        assert_eq!(
+            backend_resolver_uses_with_provider_namespace(
+                "fn f() { SymbolResolver::new(source).resolve_symbol(); }",
+                true
+            ),
+            ["SymbolResolver", "resolve_symbol("],
+        );
     }
 
     #[test]
@@ -1265,9 +1370,19 @@ mod tests {
     }
 
     fn backend_resolver_uses(text: &str) -> Vec<&'static str> {
+        backend_resolver_uses_with_provider_namespace(text, false)
+    }
+
+    fn backend_resolver_uses_with_provider_namespace(
+        text: &str,
+        allow_namespace: bool,
+    ) -> Vec<&'static str> {
         let file =
             syn::parse_file(text).unwrap_or_else(|err| panic!("failed to parse Rust: {err}"));
-        let mut visitor = BackendResolverVisitor::default();
+        let mut visitor = BackendResolverVisitor {
+            allow_symbol_resolver_namespace: allow_namespace,
+            ..BackendResolverVisitor::default()
+        };
         syn::visit::visit_file(&mut visitor, &file);
         ["SymbolResolver", "symbol_resolver::", "resolve_symbol("]
             .into_iter()
@@ -1278,6 +1393,7 @@ mod tests {
     #[derive(Default)]
     struct BackendResolverVisitor {
         found: BTreeSet<&'static str>,
+        allow_symbol_resolver_namespace: bool,
     }
 
     impl BackendResolverVisitor {
@@ -1287,7 +1403,9 @@ mod tests {
                     self.found.insert("SymbolResolver");
                 }
                 "symbol_resolver" => {
-                    self.found.insert("symbol_resolver::");
+                    if !self.allow_symbol_resolver_namespace {
+                        self.found.insert("symbol_resolver::");
+                    }
                 }
                 "resolve_symbol" => {
                     self.found.insert("resolve_symbol(");
@@ -1389,6 +1507,163 @@ mod tests {
             syn::Item::Use(item) => &item.attrs,
             _ => &[],
         }
+    }
+
+    /// An out-of-line module source has no attributes of its own. Check its immediately enclosing
+    /// module declaration so a file included only by a proven test-only parent is not mistaken for
+    /// production code when backend files are enumerated recursively.
+    fn is_test_only_module_source(path: &Path) -> bool {
+        let (module_name, containing_dir) =
+            if path.file_name().and_then(|name| name.to_str()) == Some("mod.rs") {
+                let Some(module_dir) = path.parent() else {
+                    return false;
+                };
+                (
+                    module_dir.file_name().and_then(|name| name.to_str()),
+                    module_dir.parent(),
+                )
+            } else {
+                (
+                    path.file_stem().and_then(|name| name.to_str()),
+                    path.parent(),
+                )
+            };
+        let (Some(module_name), Some(containing_dir)) = (module_name, containing_dir) else {
+            return false;
+        };
+        let Some(parent_module_name) = containing_dir.file_name().and_then(|name| name.to_str())
+        else {
+            return false;
+        };
+        let parent_candidates = [
+            if parent_module_name == "src" {
+                containing_dir.join("lib.rs")
+            } else {
+                containing_dir
+                    .parent()
+                    .unwrap_or(containing_dir)
+                    .join(format!("{parent_module_name}.rs"))
+            },
+            if parent_module_name == "src" {
+                containing_dir.join("main.rs")
+            } else {
+                containing_dir.join("mod.rs")
+            },
+        ];
+        let mut matched_declaration = false;
+        for parent in parent_candidates {
+            if parent == path {
+                continue;
+            }
+            let Ok(source) = fs::read_to_string(&parent) else {
+                continue;
+            };
+            let Some(test_only) = external_module_test_cfg(&source, &parent, module_name, path)
+            else {
+                continue;
+            };
+            matched_declaration = true;
+            if !test_only && !is_test_only_module_source(&parent) {
+                return false;
+            }
+        }
+        matched_declaration
+    }
+
+    fn external_module_is_test_only(
+        source: &str,
+        parent_file: &Path,
+        name: &str,
+        child_file: &Path,
+    ) -> bool {
+        external_module_test_cfg(source, parent_file, name, child_file).unwrap_or(false)
+    }
+
+    fn external_module_test_cfg(
+        source: &str,
+        parent_file: &Path,
+        name: &str,
+        child_file: &Path,
+    ) -> Option<bool> {
+        let file = syn::parse_file(source)
+            .unwrap_or_else(|err| panic!("failed to parse Rust module declarations: {err}"));
+        let mut matched = false;
+        let mut test_only = true;
+        for item in &file.items {
+            let syn::Item::Mod(module) = item else {
+                continue;
+            };
+            if module.ident.to_string() == name
+                && module.content.is_none()
+                && module_source_matches(parent_file, module, child_file)
+            {
+                matched = true;
+                test_only &= has_cfg_test(&module.attrs);
+            }
+        }
+        matched.then_some(test_only)
+    }
+
+    fn module_source_matches(parent_file: &Path, module: &syn::ItemMod, child_file: &Path) -> bool {
+        let parent_dir = parent_file.parent().unwrap_or(parent_file);
+        let parent_filename = parent_file.file_name().and_then(|name| name.to_str());
+        let parent_module_dir = if matches!(parent_filename, Some("mod.rs" | "lib.rs" | "main.rs"))
+        {
+            parent_dir.to_path_buf()
+        } else {
+            parent_dir.join(parent_file.file_stem().unwrap_or_default())
+        };
+        let explicit_paths: Vec<_> = module
+            .attrs
+            .iter()
+            .filter_map(|attribute| match &attribute.meta {
+                syn::Meta::NameValue(value) if value.path.is_ident("path") => {
+                    let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(path),
+                        ..
+                    }) = &value.value
+                    else {
+                        return None;
+                    };
+                    Some(path.value())
+                }
+                _ => None,
+            })
+            .collect();
+        if module.attrs.iter().any(|attribute| {
+            matches!(&attribute.meta, syn::Meta::List(list) if list.path.is_ident("cfg_attr"))
+        }) {
+            return false;
+        }
+        if let Some(explicit) = explicit_paths.first() {
+            return explicit_paths.len() == 1
+                && same_source_path(&parent_dir.join(explicit), child_file);
+        }
+        let name = module.ident.to_string();
+        [
+            parent_module_dir.join(format!("{name}.rs")),
+            parent_module_dir.join(&name).join("mod.rs"),
+        ]
+        .iter()
+        .any(|expected| same_source_path(expected, child_file))
+    }
+
+    fn same_source_path(left: &Path, right: &Path) -> bool {
+        normalize_source_path(left) == normalize_source_path(right)
+    }
+
+    fn normalize_source_path(path: &Path) -> PathBuf {
+        let mut normalized = PathBuf::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    normalized.pop();
+                }
+                component => normalized.push(component.as_os_str()),
+            }
+        }
+        normalized
     }
 
     fn impl_item_attrs(item: &syn::ImplItem) -> &[syn::Attribute] {
