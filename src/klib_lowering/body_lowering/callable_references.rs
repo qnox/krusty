@@ -121,6 +121,7 @@ impl BodyLowering<'_> {
                 adapter,
                 captures: Vec::new(),
                 bound_receiver,
+                bound_contexts: 0,
                 function_type,
                 declaration_parameters,
                 declaration_result,
