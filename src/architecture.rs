@@ -345,7 +345,7 @@ mod tests {
         for path in jvm_backend_files() {
             // These standalone files are included by a `#[cfg(test)]` parent, so their own source
             // has no test attribute for the Rust dependency scanner to recognize.
-            if path.starts_with(&provider_tests) || is_test_only_module_source(&path) {
+            if path.starts_with(&provider_tests) {
                 continue;
             }
             let check = if path.starts_with(source_path("crates/krusty-jvm")) {
@@ -613,6 +613,11 @@ mod tests {
         assert!(!is_test_only_module_source(&source_path(
             "src/jvm/jvm_libraries/synthetic_properties.rs"
         )));
+        // Dependency budgets share the same proven parent-module production boundary.
+        assert_allowed_crate_modules_in_file(
+            &source_path("src/jvm/jvm_libraries/contract_dsl_tests.rs"),
+            &[],
+        );
     }
 
     #[test]
@@ -1314,6 +1319,9 @@ mod tests {
     }
 
     fn assert_allowed_crate_modules_in_file(path: &Path, allowed: &[&str]) {
+        if is_test_only_module_source(path) {
+            return;
+        }
         let text = fs::read_to_string(path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
         // `fx_hash` is the standard hash map and set with a fixed hasher, and `archive` opens a zip
@@ -1339,6 +1347,9 @@ mod tests {
     }
 
     fn assert_allowed_external_crate_modules_in_file(path: &Path, allowed: &[&str]) {
+        if is_test_only_module_source(path) {
+            return;
+        }
         let text = fs::read_to_string(path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
         // As in `assert_allowed_crate_modules_in_file`: `fx_hash` and `archive` are leaf modules.
