@@ -289,29 +289,19 @@ fn atomicfu_plugins(
     native
 }
 
-/// The atomicfu runtime KLIB a `// WITH_ATOMICFU` native or wasm case resolves `kotlinx.atomicfu`
-/// against. The JVM lane compiles that directive with the compiler plugin and the JVM jar.
-fn atomicfu_runtime_dependencies(
+/// Directive-selected KLIBs for a native or wasm case, the same libraries the KLIB reference
+/// compiles that case against. The JVM lane uses the jars from `classpath_jars_for` instead.
+fn directive_klib_dependencies(
     directive_source: &str,
     target: krusty::compilation_target::CompilationTarget,
 ) -> Vec<PathBuf> {
-    if !krusty::conformance::directive(directive_source, "WITH_ATOMICFU") {
-        return Vec::new();
-    }
-    if matches!(
-        target,
-        krusty::compilation_target::CompilationTarget::Jvm
-            | krusty::compilation_target::CompilationTarget::Js
-    ) {
-        return Vec::new();
-    }
-    vec![krusty::toolchain::atomicfu_klib(target)
-        .unwrap_or_else(|| panic!("cannot provision the atomicfu runtime KLIB for {target:?}"))]
+    krusty::toolchain::klib_libraries_for(directive_source, target)
+        .unwrap_or_else(|error| panic!("{error}"))
 }
 
 /// Wasm publishes kotlin-test separately from its stdlib. Retain it as an ordinary dependency:
 /// these coordinates select the exact target/version but confer no compiler intrinsic authority.
-fn wasm_test_library(
+pub(super) fn wasm_test_library(
     target: krusty::compilation_target::CompilationTarget,
 ) -> Option<krusty::klib_libraries::KlibLibraryInput> {
     use krusty::compilation_target::CompilationTarget;
@@ -409,7 +399,7 @@ pub fn compile<B: Backend>(
             "the {target:?} corpus lane received a {compilation_target:?} backend"
         )));
     }
-    let dependencies = atomicfu_runtime_dependencies(directive_source, compilation_target);
+    let dependencies = directive_klib_dependencies(directive_source, compilation_target);
     let PlatformLibraries {
         semantics,
         native_imports,
@@ -424,8 +414,24 @@ pub fn compile<B: Backend>(
     if let Some(first) = first_error(&diags, 0) {
         return Err(Outcome::Frontend(first.msg.clone()));
     }
-    let artifacts =
-        krusty::compiler::emit_analyzed(analysis, &stems, backend, module_name, &mut diags);
+    let artifacts = if super::box_klib_bytes::capturing() {
+        let metadata = super::box_klib_bytes::metadata_backend(target, directive_source)
+            .map_err(Outcome::Harness)?;
+        let observer = super::box_klib_bytes::MetadataObserver(metadata);
+        let mut session = krusty::compiler::EmissionSession::new(backend);
+        if session
+            .emit_module(analysis, &stems, &observer, module_name, &mut diags)
+            .is_none()
+            && !diags.has_errors()
+        {
+            return Err(Outcome::Harness(
+                "source emission failed without a diagnostic".into(),
+            ));
+        }
+        session.finish(module_name, &mut diags)
+    } else {
+        krusty::compiler::emit_analyzed(analysis, &stems, backend, module_name, &mut diags)
+    };
     if let Some(decline) = diags
         .diags
         .iter()
@@ -504,7 +510,7 @@ pub fn analyze_module(
         .map(|(stem, _)| stem.clone())
         .collect::<Vec<_>>();
     let mut dependencies = module_dependencies.klibs.to_vec();
-    dependencies.extend(atomicfu_runtime_dependencies(
+    dependencies.extend(directive_klib_dependencies(
         directive_source,
         backend_target,
     ));
@@ -673,6 +679,7 @@ pub fn compile_modules<B: Backend, M: krusty::backend::DependencyMetadata>(
             });
             return Err(outcome);
         };
+        super::box_klib_bytes::capture_artifacts(&unit.name, dependency.artifacts());
         let archive = write_dependency_archive(&generated_root.0, ordinal, dependency.artifacts())?;
         generated.insert(
             unit.name.clone(),
@@ -693,9 +700,48 @@ pub fn compile_modules<B: Backend, M: krusty::backend::DependencyMetadata>(
     })
 }
 
+/// Preserve accepted-but-failing programs at their owning execution boundary. The report's path
+/// travels with the failure, so the original CI job contains everything needed for inspection.
+pub fn retain_failure(
+    label: &str,
+    source: &str,
+    artifacts: &[(String, Vec<u8>)],
+    outcome: Outcome,
+) -> Outcome {
+    if !matches!(
+        outcome,
+        Outcome::Failed(_) | Outcome::Harness(_) | Outcome::CompilerPanic(_)
+    ) {
+        return outcome;
+    }
+    let mut files = artifacts
+        .iter()
+        .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+        .collect::<Vec<_>>();
+    files.push(("source.kt", source.as_bytes()));
+    let report = format!("case: {label}\n{outcome:?}");
+    let evidence = match crate::failure_evidence::retain(label, &report, &files) {
+        Ok(path) => format!("failure artifacts: {}", path.display()),
+        Err(error) => format!("could not preserve failure artifacts: {error}"),
+    };
+    match outcome {
+        Outcome::Failed(reason) => Outcome::Failed(format!("{reason}; {evidence}")),
+        Outcome::Harness(reason) => Outcome::Harness(format!("{reason}; {evidence}")),
+        Outcome::CompilerPanic(reason) => Outcome::CompilerPanic(format!("{reason}; {evidence}")),
+        other => other,
+    }
+}
+
 /// Run a program with the lane's deadline; its framed verdict.
 pub fn run_program(command: &mut Command) -> Outcome {
-    match timed(Stage::Run, || run_with_timeout(command, RUN_TIMEOUT)) {
+    let invocation = format!(
+        "program {:?}; arguments {:?}; cwd {:?}; deadline {}s",
+        command.get_program(),
+        command.get_args().collect::<Vec<_>>(),
+        command.get_current_dir(),
+        RUN_TIMEOUT.as_secs()
+    );
+    let outcome = match timed(Stage::Run, || run_with_timeout(command, RUN_TIMEOUT)) {
         // The entry prints what `box()` returned after `BOX_RESULT_FRAME`, and nothing after it:
         // the answer is every byte past the one frame. Anything before it is the PROGRAM's own
         // output — `controlStructures/kt513.kt` builds a list and `println`s it before returning
@@ -705,6 +751,11 @@ pub fn run_program(command: &mut Command) -> Outcome {
         Ok(output) => framed_outcome(output),
         Err(ProgramRunError::Harness(error)) => Outcome::Harness(error),
         Err(ProgramRunError::Program(error)) => Outcome::Failed(error),
+    };
+    match outcome {
+        Outcome::Failed(reason) => Outcome::Failed(format!("{invocation}; {reason}")),
+        Outcome::Harness(reason) => Outcome::Harness(format!("{invocation}; {reason}")),
+        other => other,
     }
 }
 
@@ -741,11 +792,13 @@ fn run_with_timeout(
             Ok(None) if started.elapsed() > timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = stdout.join();
-                let _ = stderr.join();
+                let stdout = captured_output(stdout, "stdout").map_err(ProgramRunError::Harness)?;
+                let stderr = captured_output(stderr, "stderr").map_err(ProgramRunError::Harness)?;
                 return Err(ProgramRunError::Program(format!(
-                    "the program did not finish within {}s",
-                    timeout.as_secs()
+                    "the program did not finish within {}s; stdout (bounded tail) {:?}; stderr (bounded tail) {:?}",
+                    timeout.as_secs(),
+                    String::from_utf8_lossy(&stdout.bytes),
+                    String::from_utf8_lossy(&stderr.bytes)
                 )));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(2)),
@@ -887,8 +940,9 @@ pub fn prepare_sources(
     target: TestTarget,
 ) -> Result<Vec<(String, String)>, Outcome> {
     let prepared = krusty::conformance::prepare_test_source(source, target);
-    let mut sources = if source.contains("// FILE:") {
-        let (kotlin, java) = krusty::conformance::split_files(&prepared);
+    let mut sources = if krusty::conformance::contains_directive(source, "FILE") {
+        let (kotlin, java) =
+            krusty::conformance::split_files(&prepared).map_err(Outcome::Harness)?;
         if !java.is_empty() {
             return Err(Outcome::NotApplicable(
                 "contains Java source blocks unavailable to this target",
@@ -902,10 +956,10 @@ pub fn prepare_sources(
         vec![(fallback_stem.to_string(), prepared)]
     };
     if krusty::conformance::directive(source, "WITH_COROUTINES") {
-        sources.push((
-            "CoroutineUtil".to_string(),
-            krusty::conformance::COROUTINE_HELPERS.to_string(),
-        ));
+        let helpers =
+            krusty::conformance::coroutine_sources(source, krusty::conformance::COROUTINE_HELPERS)
+                .map_err(Outcome::Harness)?;
+        sources.extend(helpers);
     }
     Ok(sources)
 }
@@ -1031,11 +1085,8 @@ fn owned_fatal_outcomes_cannot_be_blessed_as_box_failures() {
     );
 }
 
-fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
-    let source = match std::fs::read_to_string(file) {
-        Ok(source) => source,
-        Err(error) => return Outcome::Harness(format!("reading case: {error}")),
-    };
+fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path, source: &str) -> Outcome {
+    let source = source.to_owned();
     let stem = file
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -1067,16 +1118,28 @@ fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
     if let Some(reason) = lane.harness_limitation(&source) {
         return Outcome::Harness(reason.to_string());
     }
-    if source.contains("// MODULE:") {
+    let source = match lane.test_target() {
+        TestTarget::WasmJs | TestTarget::WasmWasi => {
+            match krusty::conformance::with_wasm_additional_sources(&source, file) {
+                Ok(prepared) => prepared,
+                Err(error) => return Outcome::Harness(error),
+            }
+        }
+        TestTarget::Jvm | TestTarget::Native => source,
+    };
+    if krusty::conformance::contains_directive(&source, "MODULE") {
         let prepared = krusty::conformance::prepare_test_source(&source, lane.test_target());
         let Some(mut modules) = krusty::conformance::split_modules(&prepared) else {
             return Outcome::Harness("unsupported // MODULE: shape".to_string());
         };
         if krusty::conformance::directive(&source, "WITH_COROUTINES") {
-            krusty::conformance::inject_support_module(
+            if let Err(error) = krusty::conformance::inject_coroutine_support(
                 &mut modules,
+                &source,
                 krusty::conformance::COROUTINE_HELPERS,
-            );
+            ) {
+                return Outcome::Harness(error);
+            }
         }
         let units = krusty::conformance::module_units(&modules);
         if units.iter().any(|unit| !unit.java_files.is_empty()) {
@@ -1166,7 +1229,8 @@ pub fn run(lane: &dyn Lane) {
     super::box_inventory::require_setup(unavailable.as_deref(), provisioned)
         .unwrap_or_else(|error| panic!("{label}: {error}"));
     let corpus = krusty::toolchain::box_corpus_dir().expect("validated corpus setup");
-    let files = super::box_inventory::discover(&corpus).unwrap_or_else(|error| panic!("{error}"));
+    let files = super::box_inventory::discover(&corpus, lane.test_target())
+        .unwrap_or_else(|error| panic!("{error}"));
     let relative = |file: &Path| box_ratchet::corpus_key(&corpus, file);
     let platform = lane.platform();
     let version = krusty::kotlin_version::target();
@@ -1219,6 +1283,7 @@ pub fn run(lane: &dyn Lane) {
     }
     let pool = pool.build().expect("build the worker pool");
 
+    let bytes = super::box_klib_bytes::ByteRun::new(lane);
     let started = Instant::now();
     let timed_outcomes: Vec<((&PathBuf, Outcome), Duration)> = pool.install(|| {
         files
@@ -1228,21 +1293,32 @@ pub fn run(lane: &dyn Lane) {
                 // A panic inside the compiler is a failure of THAT case, recorded like any other
                 // so one bug does not hide the picture for the rest of the corpus; the test still
                 // fails.
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    outcome(lane, &scratch.0, file)
-                }))
-                .unwrap_or_else(|panic| {
-                    let message = panic
-                        .downcast_ref::<String>()
-                        .cloned()
-                        .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
-                        .unwrap_or_else(|| "panic".to_string());
-                    let origin = LAST_PANIC_FILE.with(|last| last.borrow_mut().take());
-                    Outcome::CompilerPanic(match origin {
-                        Some(origin) => format!("{message} ({origin})"),
-                        None => message,
-                    })
-                });
+                let capture = bytes.capture();
+                let source = std::fs::read_to_string(file);
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &source {
+                        Ok(source) => outcome(lane, &scratch.0, file, source),
+                        Err(error) => Outcome::Harness(format!("reading case: {error}")),
+                    }))
+                    .unwrap_or_else(|panic| {
+                        let message = panic
+                            .downcast_ref::<String>()
+                            .cloned()
+                            .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                            .unwrap_or_else(|| "panic".to_string());
+                        let origin = LAST_PANIC_FILE.with(|last| last.borrow_mut().take());
+                        Outcome::CompilerPanic(match origin {
+                            Some(origin) => format!("{message} ({origin})"),
+                            None => message,
+                        })
+                    });
+                bytes.record(
+                    lane,
+                    file,
+                    source.as_ref().map(String::as_str),
+                    &result,
+                    capture,
+                );
                 ((file, result), case_started.elapsed())
             })
             .collect()
@@ -1436,11 +1512,21 @@ pub fn run(lane: &dyn Lane) {
     for (file, reason) in &failed {
         eprintln!("FAILED {}: {reason}", file.display());
     }
+    let byte_reference_failures = bytes.finish();
+    for failure in &byte_reference_failures {
+        eprintln!("KLIB byte reference failure {failure}");
+    }
     assert!(
         failed.is_empty(),
         "{} {label} conformance failure(s): every applicable non-pass must match the committed \
          expected-failure inventory, and compiler panics are never expected",
         failed.len()
+    );
+    assert!(
+        byte_reference_failures.is_empty(),
+        "{} {label} KLIB byte reference failure(s): the byte score is withheld rather than \
+         computed over fewer cases",
+        byte_reference_failures.len()
     );
 }
 
@@ -1560,8 +1646,11 @@ fn unexpected_rejection_reporting_uses_exact_ratchet_keys_and_preserves_diagnost
         ),
     ];
     assert_eq!(
-        unexpected_failure_reason_report(&traced, &mismatches.unexpected_failures, |file|
-            file.strip_prefix("/corpus").unwrap().to_string_lossy().into_owned()),
+        unexpected_failure_reason_report(&traced, &mismatches.unexpected_failures, |file| file
+            .strip_prefix("/corpus")
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()),
         "  unexpected /corpus/regressions/z.kt: z.kt:2:3: unresolved reference\nz.kt:4:5: second diagnostic\n  unexpected /corpus/regressions/a.kt: the checked operation `SelectedCall`\n",
     );
 }
@@ -1619,7 +1708,10 @@ fn a_missing_program_is_a_harness_error_not_a_recordable_failure() {
     let error = Command::new(&missing).output().unwrap_err();
     assert_eq!(
         run_program(&mut Command::new(&missing)),
-        Outcome::Harness(format!("could not start the program: {error}"))
+        Outcome::Harness(format!(
+            "program {missing:?}; arguments []; cwd None; deadline {}s; could not start the program: {error}",
+            RUN_TIMEOUT.as_secs()
+        ))
     );
 }
 
@@ -1665,12 +1757,16 @@ fn a_frame_discarded_from_the_bounded_tail_still_invalidates_the_verdict() {
 #[test]
 fn runner_kills_a_program_at_its_deadline() {
     let scratch = Scratch::new("runner");
-    let executable = executable_script(&scratch, "timeout", "while :; do :; done");
+    let executable = executable_script(
+        &scratch,
+        "timeout",
+        "printf before-timeout; printf timeout-error >&2; while :; do :; done",
+    );
 
     assert_eq!(
         run_with_timeout(&mut Command::new(&executable), Duration::from_millis(20)),
         Err(ProgramRunError::Program(
-            "the program did not finish within 0s".to_string()
+            "the program did not finish within 0s; stdout (bounded tail) \"before-timeout\"; stderr (bounded tail) \"timeout-error\"".to_string()
         ))
     );
 }

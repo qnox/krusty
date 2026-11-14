@@ -17,10 +17,13 @@ mod dependency_signature;
 pub mod dispatch_entries;
 mod entry;
 pub mod enums;
+pub mod instance_links;
 pub mod interface_identity;
 pub mod local_properties;
 mod module_facts;
+pub mod module_links;
 pub mod property_entries;
+pub mod range_constructions;
 mod source_class_members;
 pub mod value_classes;
 
@@ -30,8 +33,8 @@ pub use dependency_call_shape::{DeclaredOperandRoles, DependencyCallShape, Depen
 pub use dependency_facts::referenced_dependencies;
 pub use dependency_facts::{
     BackendCallableFact, BackendCompilerIntrinsic, BackendPropertyFact, BackendSemanticCallRole,
-    CheckedBackendCallables, DependencyClassifier, DependencyFactError, DependencyGetterSignature,
-    PrimitiveImplementation, PrimitiveOverrideDeclaration,
+    BuiltinImplementation, BuiltinOverrideDeclaration, CheckedBackendCallables,
+    DependencyClassifier, DependencyFactError, DependencyGetterSignature,
 };
 pub(crate) use dependency_metadata::has_standalone_dependency_code;
 pub use dependency_metadata::KlibDependencyCallable;
@@ -124,6 +127,13 @@ pub trait Backend {
     /// Whether this backend emits compiler-owned executable bodies selected from dependencies.
     /// Metadata writers leave this disabled: their output describes the source module only.
     fn emits_dependency_support(&self) -> bool {
+        false
+    }
+
+    /// Whether this backend lowers suspend functions on common IR with the shared coroutine
+    /// passes, and so calls the stdlib declarations the handoff selects for them
+    /// ([`crate::ir::IrCoroutineRuntime`]). A backend with its own coroutine pass leaves this off.
+    fn lowers_coroutines_on_common_ir(&self) -> bool {
         false
     }
 

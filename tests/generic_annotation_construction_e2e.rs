@@ -1,6 +1,13 @@
-//! PLATFORM: JVM annotation attributes and Kotlin metadata retain checked generic construction.
+//! Checked generic annotation construction and declaration-default evaluation.
+//! JVM artifact controls and portable runtime controls use the same complete source fixtures.
 
 use super::common;
+
+#[path = "generic_annotation_construction_e2e/default_expression_metadata.rs"]
+mod default_expression_metadata;
+
+#[path = "generic_annotation_construction_e2e/default_evaluation.rs"]
+mod default_evaluation;
 
 const NESTED_CLASS_ARGUMENTS: &str = r#"import kotlin.reflect.KClass
 annotation class Anno(val k: KClass<*>, val e: C.NestedEnum, val a: C.NestedAnno)

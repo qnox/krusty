@@ -6,7 +6,7 @@
 //! reads, or the bridge the plan placed. Anything the plan and the IR disagree about declines the
 //! file, because a caller in another file is reading the plan's numbers.
 
-use crate::fx_hash::HashMap;
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::fir::{CallableId, PropertyId, ResolvedPropertyOverrideTarget};
 use crate::ir::{ClassId, FunId, IrClass, IrFile, IrLocalPropertyLayout};
@@ -132,8 +132,41 @@ pub(super) fn planned_class_table(
             {
                 Slot::Inherited { slot: slot as u32 }
             }
+            PlannedSlot::Member(PlanKey::Forwarder { class, ordinal }) => {
+                match forwarder(ir, class, ordinal) {
+                    Some(fid) => method(fid),
+                    None if elsewhere(slot) => Slot::Inherited { slot: slot as u32 },
+                    None => {
+                        return Err(format!(
+                            "a planned interface-delegation forwarder this file did not lower \
+                             (`{qualified}`)"
+                        ))
+                    }
+                }
+            }
             PlannedSlot::Member(PlanKey::Getter(property)) => accessor(property, false)?,
             PlannedSlot::Member(PlanKey::Setter(property)) => accessor(property, true)?,
+            // A dependency class's member is a method of the support unit materializing the
+            // class, and is inherited by a class extending it.
+            PlannedSlot::Member(
+                PlanKey::DependencyCallable(member) | PlanKey::DependencyGetter(member),
+            ) => match ir.dependency_methods.get(&member) {
+                Some(&fid) => method(fid),
+                None if elsewhere(slot) => Slot::Inherited { slot: slot as u32 },
+                None => {
+                    return Err(format!(
+                        "a planned dependency member this unit did not lower (`{qualified}`)"
+                    ))
+                }
+            },
+            PlannedSlot::Member(PlanKey::DependencySetter(_)) if elsewhere(slot) => {
+                Slot::Inherited { slot: slot as u32 }
+            }
+            PlannedSlot::Member(PlanKey::DependencySetter(_)) => {
+                return Err(format!(
+                    "a planned setter of a dependency property (`{qualified}`)"
+                ))
+            }
             PlannedSlot::Bridge {
                 declared,
                 target_slot,
@@ -179,39 +212,19 @@ pub(super) fn planned_class_table(
         });
     }
     // Every member the IR dispatches has to be one the plan numbered; a method the headers do not
-    // declare would sit at a number no other file knows about. A forwarder of `I by d` is the one
-    // exception: it implements interface members alone, which no class number names, so it takes a
-    // number past the planned ones, where no other file reads. A subclass gives the forwarders it
-    // inherits numbers past its own planned ones in turn, so the parent's keys and bridges are
-    // renumbered before this class's planned keys join them.
-    let planned_len = vtable.len() as u32;
-    let moved = |slot: &mut u32| {
-        if *slot >= planned.inherited {
-            *slot = *slot - planned.inherited + planned_len;
-        }
-    };
+    // declare would sit at a number no other file knows about. The parent's table holds exactly
+    // the numbers the plan gives it, so this one extends it.
+    if parent.is_some_and(|parent| parent.vtable.len() as u32 != planned.inherited) {
+        return Err(format!(
+            "a superclass whose table differs from its module-wide plan (`{qualified}`)"
+        ));
+    }
     let mut slots: HashMap<SlotKey, u32> = parent
         .map(|parent| parent.slots.clone())
         .unwrap_or_default();
     let mut interface_bridges = parent
         .map(|parent| parent.interface_bridges.clone())
         .unwrap_or_default();
-    if let Some(parent) = parent {
-        slots.values_mut().for_each(moved);
-        for bridge in interface_bridges.values_mut() {
-            match bridge {
-                Slot::Bridge {
-                    target_slot: Some(slot),
-                    ..
-                }
-                | Slot::AccessorBridge {
-                    target_slot: slot, ..
-                } => moved(slot),
-                _ => {}
-            }
-        }
-        vtable.extend(parent.vtable[planned.inherited as usize..].iter().cloned());
-    }
     slots.extend(AnyMember::ALL.map(|member| (SlotKey::Any(member.slot()), member.slot())));
     for (key, &slot) in &planned.slots {
         let key = match *key {
@@ -221,58 +234,91 @@ pub(super) fn planned_class_table(
                 continue
             }
             PlanKey::Callable(callable) => SlotKey::Function(function(callable)?),
+            PlanKey::Forwarder { class, ordinal } => match forwarder(ir, class, ordinal) {
+                Some(fid) => SlotKey::Function(fid),
+                // A forwarder of the superclass another file laid out.
+                None => continue,
+            },
             PlanKey::Getter(property) => {
                 SlotKey::Getter(ResolvedPropertyOverrideTarget::Module(property))
             }
             PlanKey::Setter(property) => {
                 SlotKey::Setter(ResolvedPropertyOverrideTarget::Module(property))
             }
+            PlanKey::DependencyCallable(member) => match ir.dependency_methods.get(&member) {
+                Some(&fid) => SlotKey::Function(fid),
+                // As for a member of a superclass another file laid out.
+                None => continue,
+            },
+            // A support unit emits a dependency property's dispatched accessor as a method.
+            PlanKey::DependencyGetter(property) => match ir.dependency_methods.get(&property) {
+                Some(&fid) => SlotKey::Function(fid),
+                None => SlotKey::Getter(ResolvedPropertyOverrideTarget::External(property)),
+            },
+            PlanKey::DependencySetter(property) => {
+                SlotKey::Setter(ResolvedPropertyOverrideTarget::External(property))
+            }
         };
         slots.insert(key, slot);
     }
     let overridden = overridden_functions(ir, class, numbered, laid_out.is_some())?;
+    let dispatched_dependency_members = ir
+        .dependency_methods
+        .values()
+        .copied()
+        .collect::<HashSet<_>>();
+    let mut direct_methods = HashSet::default();
     for &fid in &class.methods {
         let function = &ir.functions[fid as usize];
         if function.dispatch_receiver.is_none() || function.is_static {
             continue;
         }
         let key = function_key(ir, id, fid);
-        let slot = match slots.get(&key) {
-            // A forwarder realizing a member this class inherits under the same key replaces
-            // what the parent put there.
-            Some(&slot) if ir.interface_delegation_forwarders.contains(&fid) => {
-                vtable[slot as usize] = method(fid);
-                slot
+        let slot = if ir.interface_delegation_forwarders.contains(&fid) {
+            // The plan numbered every forwarder by its place among the class's forwarders.
+            let slot = forwarder_ordinal(ir, class, fid)
+                .and_then(|ordinal| {
+                    planned.slots.get(&PlanKey::Forwarder {
+                        class: class.fq_name,
+                        ordinal,
+                    })
+                })
+                .copied()
+                .ok_or_else(|| {
+                    format!(
+                        "an interface-delegation forwarder the module plan does not number \
+                         (`{qualified}.{}`)",
+                        function.name
+                    )
+                })?;
+            // One standing for an inherited class member must carry it alike.
+            if let Some(replaced) =
+                forwarded_class_slot(representation, ir, class, fid, &overridden, &slots)?
+            {
+                if replaced != slot {
+                    return Err(format!(
+                        "a delegated member the module plan numbers apart from the class member \
+                         it overrides (`{qualified}.{}`)",
+                        function.name
+                    ));
+                }
             }
-            Some(&slot) => slot,
-            None if ir.interface_delegation_forwarders.contains(&fid) => {
-                // A forwarder that also stands for an inherited class member (`class E : B(), C by
-                // D()` where both declare `x`) fills that member's number, as an override would.
-                let slot = match forwarded_class_slot(
-                    representation,
-                    ir,
-                    class,
-                    fid,
-                    &overridden,
-                    &slots,
-                )? {
-                    Some(slot) => {
-                        vtable[slot as usize] = method(fid);
-                        slot
-                    }
-                    None => {
-                        vtable.push(method(fid));
-                        (vtable.len() - 1) as u32
-                    }
-                };
-                slots.insert(key, slot);
-                slot
-            }
-            None => {
-                return Err(format!(
-                    "a member its declaration does not plan (`{qualified}.{}`)",
-                    function.name
-                ))
+            slots.insert(key, slot);
+            slot
+        } else {
+            match slots.get(&key) {
+                Some(&slot) => slot,
+                // A support unit's non-dispatched dependency functions are called directly.
+                None if planned.dependency && !dispatched_dependency_members.contains(&fid) => {
+                    direct_methods.insert(fid);
+                    continue;
+                }
+                None => {
+                    return Err(format!(
+                        "a member its declaration does not plan (`{qualified}.{}`)",
+                        function.name
+                    ))
+                }
             }
         };
         let keys = interface_keys(representation, ir, function, &overridden, fid)?;
@@ -296,6 +342,7 @@ pub(super) fn planned_class_table(
         vtable,
         slots,
         interface_bridges,
+        direct_methods,
     })
 }
 
@@ -354,4 +401,27 @@ fn forwarded_class_slot(
         }
     }
     Ok(None)
+}
+
+/// The `ordinal`-th forwarder the interface delegations of `class` generated in this file, `None`
+/// when this file does not declare the class.
+fn forwarder(ir: &IrFile, class: TypeName, ordinal: u32) -> Option<FunId> {
+    let class = &ir.classes[ir.class_id_by_name(class)? as usize];
+    forwarders(ir, class).nth(ordinal as usize)
+}
+
+/// Where `fid` stands among the forwarders of `class`.
+fn forwarder_ordinal(ir: &IrFile, class: &IrClass, fid: FunId) -> Option<u32> {
+    forwarders(ir, class)
+        .position(|forwarder| forwarder == fid)
+        .map(|ordinal| ordinal as u32)
+}
+
+/// The forwarders of `class`, in the order its delegations generated them.
+fn forwarders<'i>(ir: &'i IrFile, class: &'i IrClass) -> impl Iterator<Item = FunId> + 'i {
+    class
+        .methods
+        .iter()
+        .copied()
+        .filter(|fid| ir.interface_delegation_forwarders.contains(fid))
 }

@@ -100,6 +100,31 @@ fn is_deferred_zero(ir: &IrFile, declaration: ExprId, initializer: ExprId) -> bo
         && matches!(ir.expr(initializer), IrExpr::Const(_))
 }
 
+/// Whether `root` constructs an anonymous object regenerated into this caller. Its captured
+/// locals are emitted while the initializer runs, above the variable that receives the object.
+pub(super) fn initializer_constructs_regenerated_anonymous(ir: &IrFile, root: ExprId) -> bool {
+    let mut pending = vec![root];
+    let mut seen = krusty::fx_hash::HashSet::default();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::New { internal, .. } = ir.expr(expression) {
+            let regenerated = ir.class_id_by_name(*internal).is_some_and(|class| {
+                let class = &ir.classes[class as usize];
+                class.is_anonymous_object && !class.is_source_declared
+            });
+            if regenerated {
+                return true;
+            }
+        }
+        if !matches!(ir.expr(expression), IrExpr::Lambda { .. }) {
+            krusty::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        }
+    }
+    false
+}
+
 fn emit_deferred_zero(
     ir: &IrFile,
     declaration: ExprId,
@@ -160,9 +185,10 @@ impl Emitter<'_> {
             })
             .map(|(slot, _)| slot);
         // Reserve source declarations and argument-order holders before evaluating the initializer.
-        // An expanded callable's formal binding instead starts after its operand is evaluated.
-        // A pending argument-order holder has no semantic binding until its store, so initialization
-        // still sees the previous value map.
+        // kotlinc's frame does the same, so an initializer's temporary occupies the next slot
+        // rather than the variable's. An expanded callable's formal binding instead starts after
+        // its operand is evaluated. A pending argument-order holder has no semantic binding until
+        // its store, so initialization still sees the previous value map.
         let holds_operand = self.ir.call_operand_bindings.contains(&declaration);
         let holds_evaluation = self.ir.argument_evaluation_bindings.contains(&declaration);
         // The receiver temporary of a folded safe-call chain (`a?.b?.c`) is also delayed: the chain

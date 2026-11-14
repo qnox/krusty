@@ -88,6 +88,7 @@ impl BodyLowering<'_> {
                     adapter,
                     captures: Vec::new(),
                     bound_receiver: Some(value),
+                    bound_contexts: 0,
                     function_type: to.get(),
                     declaration_parameters: parameters.into_boxed_slice(),
                     declaration_result: target.ret,

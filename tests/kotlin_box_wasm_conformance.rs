@@ -51,6 +51,7 @@ impl WasmLane {
         scratch: &Path,
         stem: &str,
         suffix: &str,
+        source: &str,
         program: box_lane::CompiledProgram,
     ) -> Outcome {
         if !program.native_imports.is_empty() {
@@ -80,6 +81,12 @@ impl WasmLane {
             Command::new("node")
                 .arg("--no-warnings")
                 .arg(directory.join("box.mjs")),
+        );
+        let outcome = box_lane::retain_failure(
+            &format!("{}-{stem}-{suffix}", self.target.name()),
+            source,
+            &artifacts,
+            outcome,
         );
         let _ = std::fs::remove_dir_all(&directory);
         outcome
@@ -179,7 +186,7 @@ impl Lane for WasmLane {
             Ok(program) => program,
             Err(outcome) => return outcome,
         };
-        self.run_artifacts(scratch, stem, "single", program)
+        self.run_artifacts(scratch, stem, "single", directive_source, program)
     }
 
     fn compile_modules_and_run(
@@ -224,7 +231,7 @@ impl Lane for WasmLane {
             Ok(program) => program,
             Err(outcome) => return outcome,
         };
-        self.run_artifacts(scratch, stem, "modules", program)
+        self.run_artifacts(scratch, stem, "modules", directive_source, program)
     }
 }
 
@@ -443,7 +450,7 @@ fn wasm_property_reference_function_values_are_equal_across_files() {
     const STEM: &str = "wasmPropertyReferenceIdentityAcrossFiles";
     super::box_reference_classes::checked_box(SOURCE, STEM)
         .expect("the exact Kotlin compiler must run the whole fixture");
-    let (files, java) = krusty::conformance::split_files(SOURCE);
+    let (files, java) = krusty::conformance::split_files(SOURCE).expect("partition");
     assert!(java.is_empty());
     let files = files
         .into_iter()
@@ -563,7 +570,20 @@ import kotlin.math.pow
 fun box(): String = if (2.0.pow(3.0) == 8.0) "OK" else "pow"
 "#,
         "wasmUnmodelledInstructionWrapper",
-        "a dependency callable whose target code was not emitted",
+        concat!(
+            r#"a dependency callable whose target code was not emitted: `pow`; "#,
+            r#"selected declaration KlibDependencyCallable { module: "kotlin", declaration: Public(KlibPublicIdSignature { package: KlibNamePath { segments: ["kotlin", "math"] }, declaration: KlibNamePath { segments: ["pow"] }, member_id: Some(15712335000106601333), mask: 0 }) }; "#,
+            r#"owner Some(Package(TypeName("kotlin/math"))); "#,
+            r#"kind Extension; "#,
+            r#"realization Dispatch; "#,
+            r#"checked parameters [Obj(TypeName("kotlin/Double"), [])]; "#,
+            r#"checked result Obj(TypeName("kotlin/Double"), []); "#,
+            r#"provider parameters [Obj(TypeName("kotlin/Double"), []), Obj(TypeName("kotlin/Double"), [])]; "#,
+            r#"provider result Obj(TypeName("kotlin/Double"), []); "#,
+            r#"declared parameters Some([Obj(TypeName("kotlin/Double"), []), Obj(TypeName("kotlin/Double"), [])]); "#,
+            r#"declared result None; "#,
+            r#"compiler operation None"#,
+        ),
     );
 }
 
@@ -842,7 +862,7 @@ fn explicit_array_checks_share_metadata_with_the_reference_compiler() {
     let options = krusty::conformance::WasmCompilerOptions::from_source(source)
         .expect("the original case's compilation metadata");
     assert_eq!(options.array_range_checks(), Some(true));
-    let (sources, java) = krusty::conformance::split_files(source);
+    let (sources, java) = krusty::conformance::split_files(source).expect("partition");
     assert!(java.is_empty());
     let [(stem, written_source)] = sources.as_slice() else {
         panic!("one complete array-store source")
@@ -948,7 +968,7 @@ fn expect_reference_array_bounds(source: &str, name: &str) {
 "#.to_vec()));
             }
             assert_eq!(
-                lane.run_artifacts(&std::env::temp_dir(), &stem, "bounds", program),
+                lane.run_artifacts(&std::env::temp_dir(), &stem, "bounds", source, program),
                 Outcome::Pass,
                 "{stem} on {}",
                 target.name()
@@ -1314,6 +1334,26 @@ fn wasm_callable_references_share_identity_across_independent_module_analyses() 
 }
 
 #[test]
+fn wasm_data_class_signed_array_members_are_lowered_from_the_library_klib() {
+    let source = include_str!("box_regressions/multimodule/dataClassSignedArrayMembers.kt");
+    let stem = "wasmDataClassSignedArrayMembers";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must run the complete signed-array KLIB module graph");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        assert_eq!(
+            lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            Outcome::Pass,
+            "{} must lower generated signed-array data-class members from the producer KLIB",
+            target.name(),
+        );
+    }
+}
+
+#[test]
 fn wasm_a_generated_hash_of_an_erased_property_dispatches_when_every_class_has_a_body() {
     expect_wasm_box(
         include_str!("box_regressions/dataClassErasedPropertyHash.kt"),
@@ -1343,6 +1383,9 @@ mod dependency_constructor_exports;
 #[path = "wasm_escaping_closures.rs"]
 mod escaping_closures;
 
+#[path = "wasm_default_identity_hash.rs"]
+mod default_identity_hash;
+
 #[path = "wasm_type_of.rs"]
 mod type_of;
 
@@ -1367,3 +1410,23 @@ mod unsigned_decimal;
 
 #[path = "wasm_enclosing_instances.rs"]
 mod enclosing_instances;
+
+#[test]
+fn wasm_generic_elvis_preserves_its_non_null_type_parameter() {
+    let source = include_str!("box_regressions/multimodule/genericElvisNullProof.kt");
+    let stem = "genericElvisNullProof";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the whole generic Elvis module graph");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        assert_eq!(
+            lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            Outcome::Pass,
+            "{stem} on {}",
+            target.name()
+        );
+    }
+}

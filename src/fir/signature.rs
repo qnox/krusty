@@ -1474,6 +1474,8 @@ pub struct ResolvedModuleIndex {
     /// Exact property override edges selected while module/dependency declarations are live. These
     /// are semantic declaration headers; target erasure and bridge materialization are absent.
     pub(super) override_relations: super::OverrideRelations,
+    /// The dispatch shape of the dependency classes the module's classes extend.
+    pub(super) dependency_superclasses: Box<[super::ResolvedDependencySuperclass]>,
     /// The interface defaults each source classifier inherits without overriding, selected while
     /// the semantic hierarchy provider is live; target backends realize them without a walk.
     pub(super) inherited_defaults: HashMap<DeclarationId, Box<[super::ResolvedInheritedDefault]>>,
@@ -2503,6 +2505,7 @@ impl ResolvedModuleIndex {
             && self.callable_equality_bounds.is_empty()
             && self.callable_inherited_statuses.is_empty()
             && self.override_relations.is_empty()
+            && self.dependency_superclasses.is_empty()
             && self.property_return_value_statuses.is_empty()
             && self.function_typed_parameter_callables.is_empty()
             && self.properties.is_empty()

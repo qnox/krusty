@@ -2,6 +2,7 @@
 
 mod artifact_origin;
 mod backend_handoff;
+mod builtin_implementations;
 mod capture_storage;
 mod checked_body_observer;
 mod declaration_metadata;
@@ -11,7 +12,6 @@ mod diagnostic_recovery;
 mod emission_session;
 mod local_visibility;
 mod metadata_handoff;
-mod primitive_implementations;
 #[cfg(test)]
 mod streaming_tests;
 
@@ -469,6 +469,7 @@ fn emit_analyzed_into<B: Backend>(
                 text: source.text(),
                 stems,
                 origins: source_map.origins(),
+                common_ir_coroutines: backend.lowers_coroutines_on_common_ir(),
             },
             diags,
         ) else {
@@ -477,6 +478,18 @@ fn emit_analyzed_into<B: Backend>(
         before_target(&mut file, diags);
         if diags.has_errors() {
             continue;
+        }
+        // A target emitting library bodies builds a range class it does not lay out through the
+        // library's own declaration, which support emission below then selects.
+        if backend.emits_dependency_support() {
+            if let Err(error) = crate::backend::range_constructions::realize(
+                &mut file.ir,
+                &file.callables,
+                &|classifier| backend.represents_dependency_classifier(classifier),
+            ) {
+                diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                continue;
+            }
         }
         dependency_body_emission::emit_dependencies(
             &file,

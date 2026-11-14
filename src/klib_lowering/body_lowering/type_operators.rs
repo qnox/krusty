@@ -107,9 +107,10 @@ impl BodyLowering<'_> {
     /// is a widening checked FIR lowering marks as a coercion, and one to another supertype (by
     /// the calling compilation's subtyping) is the value itself, as in the source. An implicit
     /// cast of a reference to a subtype, or to another parameterization of its classifier, is a
-    /// smart cast the declaring compilation proved, which checked FIR lowering lowers as a cast.
-    /// One of a primitive value from its nullable type is a coercion. Any other implicit cast
-    /// declines.
+    /// smart cast the declaring compilation proved, which checked FIR lowering lowers as a cast
+    /// to a non-null reference type and as a coercion to a nullable or primitive one: a counted
+    /// loop's inlined `Any?` element read back as `Int` is such a coercion. One of a primitive
+    /// value from its nullable type is a coercion. Any other implicit cast declines.
     fn implicit_cast(&mut self, target: Ty, argument: KlibIrExprId, ty: Ty) -> Lowered<ExprId> {
         if target != ty {
             return Err(mismatch("an implicit cast is typed apart from its target"));
@@ -129,13 +130,18 @@ impl BodyLowering<'_> {
             return Ok(upcast);
         }
         let to_non_null = !target.is_nullable() && Ty::nullable(target) == actual;
-        let op = if target.is_reference()
-            && actual.is_reference()
-            && (to_non_null || self.narrows(actual, target))
-        {
-            IrTypeOp::Cast
-        } else if to_non_null {
-            IrTypeOp::ImplicitCoercion
+        let op = if to_non_null {
+            if target.is_reference() && actual.is_reference() {
+                IrTypeOp::Cast
+            } else {
+                IrTypeOp::ImplicitCoercion
+            }
+        } else if actual.is_reference() && self.narrows(actual, target) {
+            if target.is_reference() && !target.is_nullable() {
+                IrTypeOp::Cast
+            } else {
+                IrTypeOp::ImplicitCoercion
+            }
         } else {
             return Err(KlibBodyDeclineReason::ImplicitConversion);
         };
@@ -152,8 +158,12 @@ impl BodyLowering<'_> {
     /// Whether a smart cast of a value of `actual` to `target` narrows it: `target` is a subtype
     /// of `actual`, of `actual`'s classifier at any type arguments (`Collection<*>` after
     /// `this is Collection<*>` on an `Iterable<T>`), or names the same classifier at other type
-    /// arguments.
+    /// arguments. A value of a type parameter narrows to any type: its argument can be any
+    /// subtype of its bounds.
     fn narrows(&self, actual: Ty, target: Ty) -> bool {
+        if matches!(actual.non_null().kind(), TyKind::TyParam(..)) {
+            return true;
+        }
         let classifier = |ty: Ty| match ty.non_null().kind() {
             TyKind::Obj(name, _) => Some(name),
             _ => None,

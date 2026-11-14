@@ -6,11 +6,12 @@
 //! `Comparable`), as it is on every Kotlin target. Each such classifier has one box type: a
 //! struct of the dispatch table every object starts with, then the value itself. Its table holds
 //! that type's own `equals` and `hashCode`, which is what kotlinc's output observes, and
-//! `toString` where a scalar printer writes Kotlin's form: a boolean, a signed integer, or a
-//! character. A floating box and an unsigned box have no such printer, so the slot traps and
+//! `toString` where a scalar printer writes Kotlin's form: a boolean, an integer, or a
+//! character. A floating box has no such printer, so the slot traps and
 //! lowering declines a `toString` that could reach it. A box type and its table are declared the
 //! first time a file boxes a value of that classifier. A box also implements the members of the
-//! library classes above its classifier that a call goes through (`Number.toLong`, see [`members`]).
+//! library classifiers above its classifier that a call goes through (`Number.toLong`, see
+//! `super::builtin_members`).
 //!
 //! The box type is keyed by the classifier's identity, never by the carrier: a `Long` box never
 //! equals an `Int` box holding the same number, a `UInt` box never equals an `Int` box holding the
@@ -24,18 +25,14 @@ use super::interface_dispatch::ClassRef;
 use super::objects::immutable;
 use super::runtime::{Runtime, AND32, EQ32, EQ64, OR32};
 
-mod members;
-
-pub(super) use members::BoxMembers;
-
 /// A scalar type's box struct and the global holding its dispatch table.
 #[derive(Clone, Copy)]
 pub(super) struct BoxForm {
     pub(super) structure: u32,
     pub(super) table: u32,
     /// The boxed type, and the class its box is in the program's dispatch.
-    boxed: Ty,
-    class: ClassRef,
+    pub(super) boxed: Ty,
+    pub(super) class: ClassRef,
     /// The globals holding the only two `Boolean` boxes, `false` then `true`: the JVM's
     /// `Boolean.valueOf` answers one instance per value, which `===` observes.
     pub(super) booleans: Option<[u32; 2]>,
@@ -77,8 +74,7 @@ impl BoxForm {
 }
 
 /// Whether a box of `ty` answers `toString` rather than trapping. `None` when `ty` is not a scalar
-/// this backend boxes: a signed integer, a boolean, or a character prints, and a floating or
-/// unsigned box traps.
+/// this backend boxes: an integer, a boolean, or a character prints, and a floating box traps.
 pub(super) fn box_prints(ty: Ty) -> Option<bool> {
     match ty.kind() {
         TyKind::BOOLEAN
@@ -86,13 +82,12 @@ pub(super) fn box_prints(ty: Ty) -> Option<bool> {
         | TyKind::SHORT
         | TyKind::CHAR
         | TyKind::INT
-        | TyKind::LONG => Some(true),
-        TyKind::FLOAT
-        | TyKind::DOUBLE
+        | TyKind::LONG
         | TyKind::UBYTE
         | TyKind::USHORT
         | TyKind::UINT
-        | TyKind::ULONG => Some(false),
+        | TyKind::ULONG => Some(true),
+        TyKind::FLOAT | TyKind::DOUBLE => Some(false),
         _ => None,
     }
 }
@@ -102,8 +97,6 @@ pub(super) fn box_prints(ty: Ty) -> Option<bool> {
 pub(super) struct Boxes {
     /// By the boxed classifier's identity.
     forms: HashMap<TypeName, BoxForm>,
-    /// The library class members called on a value that may be a box.
-    members: BoxMembers,
     /// The global holding `kotlin.Unit`, once something reads it as a reference.
     unit: Option<u32>,
 }
@@ -176,12 +169,21 @@ impl Runtime {
             booleans,
         };
         self.boxes.forms.insert(identity, form);
+        self.box_instances(form);
         self.implement_box_members(module, form)?;
         Ok(Some(form))
     }
 }
 
 impl Runtime {
+    /// Every box declared so far, in declaration order, so what is written for them is the same on
+    /// every run.
+    pub(super) fn box_forms(&self) -> Vec<BoxForm> {
+        let mut forms = self.boxes.forms.values().copied().collect::<Vec<_>>();
+        forms.sort_unstable_by_key(|form| form.structure);
+        forms
+    }
+
     /// The global holding `kotlin.Unit`: what a `Unit` expression is where a reference is expected
     /// (a lambda's result, a type parameter's value). `Unit` has no carrier of its own, so it is
     /// boxed like a primitive is, into the one instance it has.
@@ -267,21 +269,27 @@ fn equals(value: ValType, structure: u32) -> (Vec<ValType>, Code) {
 }
 
 impl Runtime {
-    /// `toString(this)`: the scalar the box holds, as Kotlin prints it. `None` for a floating or
-    /// unsigned box, which has no such printer ([`box_prints`]).
+    /// `toString(this)`: the scalar the box holds, as Kotlin prints it. `None` for a floating box, which has no such printer ([`box_prints`]).
     fn boxed_to_string(&self, ty: Ty, structure: u32) -> Option<(Vec<ValType>, Code)> {
         let printer = match ty.kind() {
             TyKind::BOOLEAN => self.string_of_boolean,
             TyKind::BYTE | TyKind::SHORT | TyKind::INT => self.string_of_i32,
             TyKind::LONG => self.string_of_i64,
             TyKind::CHAR => self.string_of_char,
+            // An unsigned box prints its bits as the unsigned number: a narrow one is widened
+            // without its sign first.
+            TyKind::UBYTE | TyKind::USHORT | TyKind::UINT => self.string_of_u32,
+            TyKind::ULONG => self.string_of_u64,
             _ => return None,
         };
         let mut code = Code::default();
         code.local_get(0)
             .ref_cast(false, HeapType::Concrete(structure))
-            .struct_get(structure, BOX_VALUE_FIELD)
-            .call(printer);
+            .struct_get(structure, BOX_VALUE_FIELD);
+        if let Some(mask) = ty.unsigned_widen_mask() {
+            code.i32_const(mask).op(super::runtime::AND32);
+        }
+        code.call(printer);
         Some((Vec::new(), code))
     }
 

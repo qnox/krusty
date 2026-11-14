@@ -266,7 +266,7 @@ impl BodyLowering<'_> {
     /// Record a local class's first-use capture order for the JVM backend. The class keeps its
     /// fields, constructor prefix and construction arguments in field order; only an order that
     /// differs from it is recorded. It must name every capture field exactly once.
-    fn record_capture_order(
+    pub(super) fn record_capture_order(
         &mut self,
         declaration: crate::fir::DeclarationId,
         captures: usize,
@@ -461,6 +461,7 @@ impl BodyLowering<'_> {
                     source_name: capture.name.clone(),
                     receiver,
                     crossinline_parameter,
+                    inlined: false,
                 }),
                 provenance: crate::ir::IrCtorParameterProvenance::Capture,
                 capture_identity: capture.capture_identity,

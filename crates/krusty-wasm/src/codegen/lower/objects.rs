@@ -15,8 +15,8 @@ use krusty::fir::{
     ResolvedPropertyOverrideTarget,
 };
 use krusty::ir::{
-    Callee, ClassId, CtorDelegateTarget, FunId, IrLocalPropertyLayout, IrSuperCallKind, IrTypeOp,
-    IrVirtualTarget,
+    Callee, ClassId, CtorDelegateTarget, FunId, IrFile, IrLocalPropertyLayout, IrSuperCallKind,
+    IrTypeOp, IrVirtualTarget,
 };
 use krusty::types::{Ty, TyKind, TypeName};
 
@@ -32,9 +32,10 @@ use super::super::property_registry::{MemberProperty, MemberPropertyDefinition, 
 use super::{carrier, Body, FileContext, Unsupported, STRING};
 
 /// The heap type of the runtime's `String`, type 1 (see `STRING`).
-const STRING_HEAP: HeapType = HeapType::Concrete(1);
+pub(super) const STRING_HEAP: HeapType = HeapType::Concrete(1);
 
 mod override_bridges;
+mod root_any;
 mod unrealized_members;
 
 pub(super) use unrealized_members::holds_unprinted_values;
@@ -76,6 +77,9 @@ impl Body<'_> {
         class: ClassId,
         index: u32,
     ) -> Result<(), Unsupported> {
+        if let Some(read) = self.materialized_value_storage_read(receiver, class, index) {
+            return read;
+        }
         let structure = self.object(receiver, class)?;
         let field = self.file_classes()?.field(class, index);
         self.code.struct_get(structure, field);
@@ -120,10 +124,10 @@ impl Body<'_> {
         args: &[u32],
         selected: Option<&[Ty]>,
     ) -> Result<(), Unsupported> {
+        if let Some(constructed) = self.scalar_value_construction(internal, args, selected) {
+            return constructed;
+        }
         let Some(class) = self.classes.and(self.ir.class_id_by_name(internal)) else {
-            if let Some(constructed) = self.scalar_value_construction(internal, args, selected) {
-                return constructed;
-            }
             // Boundary conversion for a diagnostic.
             return Err(format!(
                 "construction of the library class `{}`",
@@ -166,8 +170,22 @@ impl Body<'_> {
         let object = self.local(REFERENCE);
         self.allocate(class)?;
         self.code.local_tee(object);
-        for (arg, param) in args.iter().zip(params) {
-            self.value(*arg, param)?;
+        for (index, (arg, param)) in args.iter().zip(params).enumerate() {
+            let element = self.ir.classes[class as usize]
+                .ctor_args
+                .get(index)
+                .and_then(|argument| argument.field_index)
+                .and_then(|field| {
+                    self.ir
+                        .shared_class_capture_fields
+                        .get(&(class, field))
+                        .copied()
+                });
+            if let Some(element) = element {
+                self.pass_shared_capture(*arg, element)?;
+            } else {
+                self.value(*arg, param)?;
+            }
         }
         self.code.call(constructor).local_get(object);
         Ok(())
@@ -216,8 +234,14 @@ impl Body<'_> {
             }
         }
         for &owner in chain.iter().rev() {
-            for field in &self.ir.classes[owner as usize].fields {
-                let value = carrier(field.ty)?.ok_or("a `Unit`-typed field")?;
+            let count = self.ir.classes[owner as usize].fields.len();
+            for index in 0..count {
+                let value = super::super::classes::field_carrier(
+                    self.module,
+                    self.ir,
+                    owner,
+                    u32::try_from(index).expect("too many fields"),
+                )?;
                 default_value(&mut self.code, value);
             }
         }
@@ -231,7 +255,12 @@ impl Body<'_> {
         classifier: krusty::types::TypeName,
     ) -> Result<(), Unsupported> {
         if self.ir.class_id_by_name(classifier).is_none() {
-            if let Some(entry) = self.calls.dependency_singleton(classifier) {
+            if let Some(entry) =
+                self.calls
+                    .instance(&krusty::backend::instance_links::InstanceEntry::Object(
+                        classifier,
+                    ))
+            {
                 self.code.call(entry);
                 return Ok(());
             }
@@ -276,8 +305,12 @@ impl Body<'_> {
         receiver: u32,
         args: &[u32],
     ) -> Result<(), Unsupported> {
+        let tables = &self.file_classes()?.tables;
+        if tables.table(class).direct_methods.contains(&function) {
+            return self.direct_method_call(class, function, receiver, args);
+        }
         let key = function_key(self.ir, class, function);
-        let slot = self.file_classes()?.tables.slot(class, &key);
+        let slot = tables.slot(class, &key);
         if slot.is_none() && self.ir.classes[class as usize].is_interface {
             let call = self
                 .ir
@@ -308,6 +341,27 @@ impl Body<'_> {
             return Err("a call whose arguments do not match its parameters".into());
         }
         self.dispatch(class, slot, receiver, args, &params, Some(function))
+    }
+
+    /// Call a method its class's table does not dispatch: a member of a dependency class that no
+    /// subclass can override, such as its constructor initializer or a final member.
+    fn direct_method_call(
+        &mut self,
+        class: ClassId,
+        function: FunId,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        if self.ir.functions[function as usize].params.len() != args.len() {
+            return Err("a call whose arguments do not match its parameters".into());
+        }
+        self.value(receiver, self.object_type(class))?;
+        for (parameter, &arg) in args.iter().enumerate() {
+            self.function_argument(function, parameter as u32, arg)?;
+        }
+        let function = self.emitted_function(function)?;
+        self.code.call(function);
+        Ok(())
     }
 
     /// Dispatch a member-extension property's recorded accessor. Its extension receiver and any
@@ -401,6 +455,53 @@ impl Body<'_> {
         self.code
             .ref_cast(false, HeapType::Concrete(table_type))
             .struct_get(table_type, slot_field(slot))
+            .call_ref(ty);
+        Ok(())
+    }
+
+    /// A call of `callable`, a member of `owner`, a class another file of the module declares:
+    /// through the slot the module plan numbers it, in the table type every file reads from the
+    /// plan (`super::super::module_tables`).
+    fn planned_dispatch(
+        &mut self,
+        owner: krusty::types::TypeName,
+        callable: krusty::fir::CallableId,
+        params: &[Ty],
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        let table = self.planned_tables[&owner].clone()?;
+        let slot = self
+            .plan
+            .table(owner)
+            .and_then(Result::ok)
+            .and_then(|planned| {
+                planned
+                    .slots
+                    .get(&krusty::backend::class_tables::module_slots::PlanKey::Callable(callable))
+                    .copied()
+            })
+            .ok_or("a member with no module-wide slot")?;
+        let ty = table
+            .slot_types
+            .get(slot as usize)
+            .copied()
+            .flatten()
+            .ok_or("a call through a slot with no signature")?;
+        if params.len() != args.len() {
+            return Err("a call whose arguments do not match its parameters".into());
+        }
+        let this = self.local(REFERENCE);
+        self.value(receiver, Ty::obj_name(owner))?;
+        self.code.local_tee(this);
+        for (&arg, &param) in args.iter().zip(params) {
+            self.value(arg, param)?;
+        }
+        self.code.local_get(this);
+        self.table_of_object();
+        self.code
+            .ref_cast(false, HeapType::Concrete(table.table_type))
+            .struct_get(table.table_type, slot_field(slot))
             .call_ref(ty);
         Ok(())
     }
@@ -695,6 +796,16 @@ impl Body<'_> {
                 };
                 if let Some(call) = call {
                     return self.interface_call(call, receiver, args);
+                }
+                if let (
+                    None,
+                    IrVirtualTarget::Function(ResolvedFunctionOverrideTarget::Module(callable)),
+                    Some((params, _)),
+                ) = (self.ir.class_id_by_name(*owner), target, params)
+                {
+                    if self.planned_tables.contains_key(owner) {
+                        return self.planned_dispatch(*owner, *callable, params, receiver, args);
+                    }
                 }
                 let class = self
                     .classes
@@ -1033,6 +1144,26 @@ impl Body<'_> {
         interface.then_some(name)
     }
 
+    /// The library interface `ty` names, which no file of the program declares.
+    fn library_interface_of_type(&self, ty: Ty) -> Option<TypeName> {
+        let TyKind::Obj(name, _) = ty.non_null().kind() else {
+            return None;
+        };
+        self.classifiers
+            .classifier(name)
+            .is_some_and(|fact| !fact.source && fact.is_interface() && !fact.is_annotation())
+            .then_some(name)
+    }
+
+    /// Replace the reference on the stack with whether it is an instance of the library interface
+    /// `interface` — or null, when `nullable`. Its instances are the program's classes below it and
+    /// the builtin values its builtin subclasses carry (`crate::builtin_instances`).
+    fn library_interface_test(&mut self, interface: TypeName, nullable: bool) {
+        let subtypes = self.classifiers.builtin_subtypes(interface);
+        self.runtime.builtin_instances(interface, subtypes);
+        self.interface_test(interface, nullable);
+    }
+
     /// Replace the reference on the stack with whether it is an instance of `interface` — or
     /// null, when `nullable`.
     fn interface_test(&mut self, interface: TypeName, nullable: bool) {
@@ -1107,12 +1238,22 @@ impl Body<'_> {
                         .exception_class(self.module, self.classifiers, name)?;
                 self.code.ref_test(nullable, HeapType::Concrete(structure));
             }
+            // Each array classifier is an object type of its own, so the test is its type's:
+            // `UIntArray` is not an `IntArray`, though one wraps the other's storage.
+            _ if tested.is_array() => {
+                let (form, _) = self.array_form(tested)?;
+                self.code
+                    .ref_test(nullable, HeapType::Concrete(form.object));
+            }
             _ => match (self.interface_of_type(tested), self.class_of_type(tested)) {
                 (Some(interface), _) => self.interface_test(interface, nullable),
                 (None, Some(class)) => self.instance_test(class, nullable)?,
-                (None, None) => {
-                    return Err(format!("a type test against `{}`", super::describe(tested)));
-                }
+                (None, None) => match self.library_interface_of_type(tested) {
+                    Some(interface) => self.library_interface_test(interface, nullable),
+                    None => {
+                        return Err(format!("a type test against `{}`", super::describe(tested)));
+                    }
+                },
             },
         }
         match op {
@@ -1236,7 +1377,8 @@ pub(super) fn define_class_functions(
             };
             body.primary_constructor(id)?;
             let lowered = body.finish();
-            define(module, constructor, &parameters, lowered)?;
+            let carriers = constructor_carriers(module, ir, id, &parameters)?;
+            define(module, constructor, &carriers, lowered)?;
         }
         for (ordinal, &constructor) in form.secondaries.iter().enumerate() {
             let secondary = &class.secondary_ctors[ordinal];
@@ -1259,7 +1401,8 @@ pub(super) fn define_class_functions(
             };
             body.secondary_constructor(id, ordinal)?;
             let lowered = body.finish();
-            define(module, constructor, &parameters, lowered)?;
+            let carriers = constructor_carriers(module, ir, id, &parameters)?;
+            define(module, constructor, &carriers, lowered)?;
         }
         if let Some(singleton) = form.singleton {
             let constructor = match (form.constructor, class.ctor_args.is_empty()) {
@@ -1409,12 +1552,14 @@ pub(super) fn define_module_property_functions(
                 .ok_or_else(|| "a mutable module member property with no Wasm value".to_string())?;
             let setter_ty = module.func_type(vec![REFERENCE, value], Vec::new());
             let mut body = Code::default();
-            emit_module_property_setter(context, classes, runtime, *class, *property, &mut body)?;
+            let locals = emit_module_property_setter(
+                context, classes, module, runtime, *class, *property, &mut body,
+            )?;
             module.define(
                 setter,
                 Function {
                     ty: setter_ty,
-                    locals: Vec::new(),
+                    locals,
                     code: body,
                 },
             );
@@ -1452,6 +1597,10 @@ fn emit_module_property_getter(
         code.local_get(0).call(function);
         return Ok(Vec::new());
     }
+    let public_ty = declaration.ty;
+    let storage = declaration
+        .storage_ty
+        .filter(|storage| *storage != public_ty);
     let field = declaration
         .backing_field
         .ok_or_else(|| "a module property with neither storage nor a getter".to_string())?;
@@ -1459,51 +1608,38 @@ fn emit_module_property_getter(
     code.local_get(0)
         .ref_cast(false, HeapType::Concrete(structure))
         .struct_get(structure, classes.field(class, field));
-    let Some(storage) = declaration
-        .storage_ty
-        .filter(|storage| *storage != declaration.ty)
-    else {
+    let Some(storage) = storage else {
         return Ok(Vec::new());
     };
-    // A scalar stored for a reference-typed property is boxed on the way out.
-    let stored = carrier(storage)?;
-    let boxed = match stored {
-        Some(value @ (ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64))
-            if matches!(carrier(declaration.ty)?, Some(ValType::Ref { .. })) =>
-        {
-            runtime
-                .box_form(module, storage, value)?
-                .map(|form| (form, value))
-        }
-        _ => None,
-    };
-    let Some((form, value)) = boxed else {
-        adapt_property_carrier(code, storage, declaration.ty, &declaration.name)?;
-        return Ok(Vec::new());
-    };
-    let (scratch, locals) = match form.needs_scratch() {
-        true => (Some(1), vec![value]),
-        false => (None, Vec::new()),
-    };
-    form.emit_box(code, scratch);
-    Ok(locals)
+    // The field load leaves the storage carrier. The entry answers the public type.
+    let receiver = Ty::obj_name(context.ir.classes[class as usize].fq_name);
+    coerce_property_entry(
+        context,
+        module,
+        runtime,
+        &[receiver],
+        code,
+        storage,
+        public_ty,
+    )
 }
 
 fn emit_module_property_setter(
     context: &FileContext<'_>,
     classes: &FileClasses,
-    runtime: &Runtime,
+    module: &mut Module,
+    runtime: &mut Runtime,
     class: ClassId,
     property: u32,
     code: &mut Code,
-) -> Result<(), Unsupported> {
+) -> Result<Vec<ValType>, Unsupported> {
     let declaration = &context.ir.classes[class as usize].properties[property as usize];
     let slot = local_property_target(context.ir, class, property as usize)
         .and_then(|target| classes.tables.slot(class, &SlotKey::Setter(target)));
     if let Some(slot) = slot {
         code.local_get(0).local_get(1);
         emit_module_property_dispatch(classes, runtime, class, slot, code)?;
-        return Ok(());
+        return Ok(Vec::new());
     }
     if let Some(setter) = declaration.setter {
         let function = context
@@ -1513,55 +1649,64 @@ fn emit_module_property_setter(
             .flatten()
             .ok_or_else(|| "a module property setter with no emitted function".to_string())?;
         code.local_get(0).local_get(1).call(function);
-        return Ok(());
+        return Ok(Vec::new());
     }
+    let public_ty = declaration.ty;
+    let storage = declaration
+        .storage_ty
+        .filter(|storage| *storage != public_ty);
     let field = declaration
         .backing_field
         .ok_or_else(|| "a module property with neither storage nor a setter".to_string())?;
     let structure = classes.structure(class);
+    let field_index = classes.field(class, field);
     code.local_get(0)
         .ref_cast(false, HeapType::Concrete(structure))
         .local_get(1);
-    if let Some(storage) = declaration
-        .storage_ty
-        .filter(|storage| *storage != declaration.ty)
-    {
-        // The setter argument is the public type. The field stores `storage`.
-        adapt_property_carrier(code, declaration.ty, storage, &declaration.name)?;
-    }
-    code.struct_set(structure, classes.field(class, field));
-    Ok(())
+    let locals = if let Some(storage) = storage {
+        // The argument is the public type. The field stores `storage`.
+        let receiver = Ty::obj_name(context.ir.classes[class as usize].fq_name);
+        coerce_property_entry(
+            context,
+            module,
+            runtime,
+            &[receiver, public_ty],
+            code,
+            public_ty,
+            storage,
+        )?
+    } else {
+        Vec::new()
+    };
+    code.struct_set(structure, field_index);
+    Ok(locals)
 }
 
-/// The value on the stack has type `from`. Leave it as `to` for a property whose backing
-/// field type is not the type its accessors publish.
-///
-/// A `String` is already `(ref null eq)`, which is how `Any` is carried, so reading that
-/// field as `Any` needs no instruction. Storing an `Any` into the string field casts it
-/// back. A scalar and a reference still have no carrier in common here.
-fn adapt_property_carrier(
+/// The value on `code`'s stack has type `from`. Leave it as `to` by `coerce_emitted_value`, the
+/// conversion a same-file property access already uses. `parameters` are this entry's, so a
+/// scratch local is numbered after them.
+fn coerce_property_entry(
+    context: &FileContext<'_>,
+    module: &mut Module,
+    runtime: &mut Runtime,
+    parameters: &[Ty],
     code: &mut Code,
     from: Ty,
     to: Ty,
-    name: &str,
-) -> Result<(), Unsupported> {
-    if from == to {
-        return Ok(());
-    }
-    let source = carrier(from)?;
-    let target = carrier(to)?;
-    if source == target {
-        return Ok(());
-    }
-    let declined = || format!("a property whose storage differs from its type (`{name}`)");
-    match (source, target) {
-        (Some(ValType::Ref { .. }), Some(REFERENCE)) => Ok(()),
-        (Some(ValType::Ref { .. }), Some(ValType::Ref { heap, .. })) => {
-            code.ref_cast(true, heap);
-            Ok(())
-        }
-        _ => Err(declined()),
-    }
+) -> Result<Vec<ValType>, Unsupported> {
+    let mut body = Body::new(
+        context,
+        module,
+        runtime,
+        parameters,
+        krusty::fx_hash::HashMap::default(),
+        to,
+    );
+    body.code = std::mem::take(code);
+    body.coerce_emitted_value(from, to)?;
+    let (coerced, locals) = body.finish();
+    *code = coerced;
+    Ok(locals)
 }
 
 /// Append the table reference and indirect call after the wrapper's receiver and value operands.
@@ -1588,18 +1733,40 @@ fn emit_module_property_dispatch(
     Ok(())
 }
 
+/// Wasm carriers of a constructor's parameters. Index 0 is `this`; each later entry is the
+/// constructor argument at that position, a cell when the argument fills a shared capture.
+fn constructor_carriers(
+    module: &mut Module,
+    ir: &IrFile,
+    class: ClassId,
+    parameters: &[Ty],
+) -> Result<Vec<ValType>, Unsupported> {
+    let mut carriers = Vec::with_capacity(parameters.len());
+    for (index, parameter) in parameters.iter().enumerate() {
+        let value = if index == 0 {
+            carrier(*parameter)?.ok_or("a `Unit` constructor parameter")?
+        } else {
+            super::super::classes::constructor_argument_carrier(
+                module,
+                ir,
+                class,
+                index - 1,
+                *parameter,
+            )?
+        };
+        carriers.push(value);
+    }
+    Ok(carriers)
+}
+
 /// Define `function`, taking `parameters` and answering nothing, as `(code, locals)`.
 fn define(
     module: &mut Module,
     function: u32,
-    parameters: &[Ty],
+    parameters: &[ValType],
     (code, locals): (Code, Vec<ValType>),
 ) -> Result<(), Unsupported> {
-    let mut params = Vec::with_capacity(parameters.len());
-    for parameter in parameters {
-        params.push(carrier(*parameter)?.ok_or("a `Unit` constructor parameter")?);
-    }
-    let ty = module.func_type(params, Vec::new());
+    let ty = module.func_type(parameters.to_vec(), Vec::new());
     module.define(function, Function { ty, locals, code });
     Ok(())
 }

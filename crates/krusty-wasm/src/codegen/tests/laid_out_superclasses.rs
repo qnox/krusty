@@ -111,3 +111,30 @@ fn a_class_extends_a_runtime_exception_subclass_an_earlier_file_laid_out() {
         assert_eq!(outputs.len(), 2);
     }
 }
+
+#[test]
+fn root_any_construction_keeps_identity_and_interface_dispatch() {
+    let source = include_str!("../../../../../tests/box_regressions/runtimeAnyConstruction.kt");
+    for target in WasmTarget::ALL {
+        let path = krusty::toolchain::kotlin_stdlib_klib(
+            krusty::backend::Backend::compilation_target(&WasmBackend::new(target)),
+        )
+        .expect("the exact target stdlib must be provisioned");
+        let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
+            path,
+            KlibStdlibSemantics::Wasm,
+        )])
+        .unwrap();
+        let (outputs, diagnostics) =
+            compile_program_with_provider(target, Entry::Box, &[source], Box::new(libraries));
+        assert_eq!(diagnostics, Vec::<String>::new());
+        let names = outputs
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["main.wasm", "main.mjs"]);
+        assert_eq!(&outputs[0].1[..8], b"\0asm\x01\0\0\0");
+        let loader = std::str::from_utf8(&outputs[1].1).expect("utf-8 loader");
+        assert!(loader.contains("./main.wasm"), "{loader}");
+    }
+}

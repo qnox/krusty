@@ -448,6 +448,7 @@ impl BodyLowering<'_> {
                 binding,
                 dispatch_receiver,
                 extension_receiver,
+                context_arguments,
                 substitutions,
                 adaptation,
                 reflection_owner,
@@ -456,6 +457,7 @@ impl BodyLowering<'_> {
                 binding: *binding,
                 dispatch_receiver: *dispatch_receiver,
                 extension_receiver: *extension_receiver,
+                context_arguments,
                 substitutions,
                 adaptation: adaptation.as_deref(),
                 reference_ty: function_type.get(),
@@ -909,15 +911,23 @@ impl BodyLowering<'_> {
                 start_type,
                 end,
                 end_type,
+                declaration,
                 ..
-            } => self.range_expression(
-                *operation,
-                *start,
-                start_type.get(),
-                *end,
-                end_type.get(),
-                expression.ty.get(),
-            )?,
+            } => {
+                let start = self.expression(*start)?;
+                let end = self.expression(*end)?;
+                self.ir.add_expr(IrExpr::Checked(Box::new(
+                    crate::ir::IrCheckedOperation::RangeConstruction {
+                        operation: *operation,
+                        start,
+                        start_type: start_type.get(),
+                        end,
+                        end_type: end_type.get(),
+                        result: expression.ty.get(),
+                        declaration: *declaration,
+                    },
+                )))
+            }
             FirExprKind::InRange {
                 operation,
                 provenance: _,

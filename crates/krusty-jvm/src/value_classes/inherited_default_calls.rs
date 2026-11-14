@@ -12,6 +12,7 @@ use crate::inherited_default_realization::{
 };
 use crate::ir_emit::JvmDefaultMode;
 use crate::property_realizations::{PropertyRealization, PropertyRealizations};
+use krusty::backend::BackendClassifierSource;
 use krusty::fir::{ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget};
 use krusty::fx_hash::HashMap;
 use krusty::ir::{Callee, ExprId, IrExpr, IrFile, IrVirtualTarget};
@@ -133,10 +134,25 @@ impl InheritedDefaultStatics {
             .keys()
             .filter(|&&class| ir.is_value_class_name(class))
             .filter_map(|&class| {
+                let local_class = ir.classes.iter().find(|local| local.fq_name == class);
+                let declaration_mode = if let Some(local_class) = local_class {
+                    crate::declared_jvm_default::of_class(local_class, jvm_default)
+                } else {
+                    let fact = classifiers
+                        .classifier(class)
+                        .expect("a module value class has frozen classifier facts");
+                    crate::declared_jvm_default::of_annotations(
+                        fact.annotations
+                            .iter()
+                            .map(|annotation| annotation.annotation),
+                        jvm_default,
+                    )
+                };
                 Some((
                     class,
                     module.inherited_defaults(class)?,
-                    ir.classes.iter().any(|local| local.fq_name == class),
+                    local_class.is_some(),
+                    declaration_mode,
                 ))
             })
             .chain(
@@ -150,10 +166,11 @@ impl InheritedDefaultStatics {
                             class.fq_name,
                             ir.inherited_defaults.get(&class.fq_name)?.as_slice(),
                             true,
+                            crate::declared_jvm_default::of_class(class, jvm_default),
                         ))
                     }),
             );
-        for (class, defaults, local) in defaults {
+        for (class, defaults, local, declaration_mode) in defaults {
             for default in defaults {
                 let member = InheritedMember::from_default(default);
                 // A named class in another source file contributes only statics selected by this
@@ -164,7 +181,7 @@ impl InheritedDefaultStatics {
                     continue;
                 }
                 if let Some(realized) =
-                    value_class_inherited_static(ir, callables, default, jvm_default)
+                    value_class_inherited_static(ir, callables, default, declaration_mode)
                 {
                     statics.insert((class, member), realized);
                 }

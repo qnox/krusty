@@ -124,14 +124,11 @@ pub(super) fn sam_conflict(
         )
 }
 
-/// Whether a SAM conversion's lambda is one this pass realizes when the factory cannot build it:
-/// a plain lambda literal converted to a non-suspend interface under `indy` SAM conversions.
-pub(super) fn sam_candidate(
-    target: &krusty::ir::IrSamTarget,
-    modes: crate::ir_emit::LambdaModes,
-) -> bool {
-    modes.sam_conversions == crate::ir_emit::LambdaMode::Indy
-        && !target.suspend
+/// Whether a SAM conversion's lambda is one this pass realizes as a class: a plain lambda literal
+/// converted to a non-suspend interface, where the factory cannot build it (`indy` SAM
+/// conversions) or everywhere (`-Xsam-conversions=class`).
+pub(super) fn sam_candidate(target: &krusty::ir::IrSamTarget) -> bool {
+    !target.suspend
         && !target.source_suspend
         && !target.function_adapter
         && !target.wraps_function_value
