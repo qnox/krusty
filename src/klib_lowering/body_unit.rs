@@ -196,10 +196,10 @@ pub struct DependencyBodyUnit {
     builtins: IrBuiltinOperators,
 }
 
-/// The allocation a materialized class's constructor exports: the class, and the index of the
-/// secondary constructor that builds it, or `None` for its primary constructor.
+/// A constructor of an actually materialized class: its class and secondary ordinal, or `None`
+/// for its primary constructor. Allocation eligibility is a separate declaration capability.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct AllocatingConstructor {
+pub(crate) struct MaterializedClassConstructor {
     pub(crate) class: crate::ir::ClassId,
     pub(crate) secondary: Option<usize>,
 }
@@ -653,23 +653,27 @@ impl DependencyBodyUnit {
             .map(|(identity, &function)| (identity, function))
     }
 
-    /// Allocation exports are separate from their private instance initialization functions. An
-    /// abstract class has none: only its subclasses' constructors initialize it.
+    /// Actual constructor initializers materialized in this unit, including abstract classes.
+    pub(crate) fn initializing_constructors(
+        &self,
+    ) -> impl Iterator<Item = (&KlibDependencyCallable, MaterializedClassConstructor)> {
+        self.constructors.iter().map(|(identity, constructor)| {
+            (
+                identity,
+                MaterializedClassConstructor {
+                    class: self.classes[identity],
+                    secondary: constructor.secondary,
+                },
+            )
+        })
+    }
+
+    /// Allocation exports are separate from initializer declarations. Abstract classes have none.
     pub(crate) fn allocating_constructors(
         &self,
-    ) -> impl Iterator<Item = (&KlibDependencyCallable, AllocatingConstructor)> {
-        self.constructors
-            .iter()
-            .filter_map(|(identity, constructor)| {
-                let class = self.classes[identity];
-                (!self.ir.classes[class as usize].is_abstract).then_some((
-                    identity,
-                    AllocatingConstructor {
-                        class,
-                        secondary: constructor.secondary,
-                    },
-                ))
-            })
+    ) -> impl Iterator<Item = (&KlibDependencyCallable, MaterializedClassConstructor)> {
+        self.initializing_constructors()
+            .filter(|(_, constructor)| !self.ir.classes[constructor.class as usize].is_abstract)
     }
 
     /// A unit that reads the constants of `enums`, which earlier units materialized, through
@@ -959,6 +963,75 @@ impl CallLinker for Linker<'_, '_> {
         }
     }
 
+    fn indices_receiver(
+        &self,
+        getter: &KlibAccessorIdSignature,
+    ) -> Result<Option<crate::libraries::IndicesReceiver>, KlibBodyDeclineReason> {
+        let signature = KlibDeclarationSignature::Accessor(getter.clone());
+        let identity = match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, &signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => identity,
+            // Dependency preparation omitted this getter's edge: the loop is not one this unit counts.
+            KlibCalleeOrigin::Missing => {
+                return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                    "a `for` loop over an `indices` getter without a provider declaration",
+                ))
+            }
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
+                    getter.property().clone(),
+                )))
+            }
+        };
+        Ok(self
+            .sources
+            .declarations
+            .external_callable_by_dependency(&identity)
+            .and_then(|(_, realization)| {
+                match realization.klib_body_callable()?.compiler_intrinsic()? {
+                    crate::libraries::CompilerIntrinsic::Indices(kind) => Some(kind),
+                    _ => None,
+                }
+            }))
+    }
+
+    fn reverses_progression(
+        &self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<bool, KlibBodyDeclineReason> {
+        let signature = KlibDeclarationSignature::Public(callee.clone());
+        let identity = match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, &signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => identity,
+            KlibCalleeOrigin::Missing => {
+                return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                    "a `for` loop over a `reversed` call without a provider declaration",
+                ))
+            }
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
+                    callee.clone(),
+                )))
+            }
+        };
+        Ok(self
+            .sources
+            .declarations
+            .external_callable_by_dependency(&identity)
+            .is_some_and(|(_, realization)| {
+                realization
+                    .klib_body_callable()
+                    .and_then(|callable| callable.compiler_intrinsic())
+                    == Some(crate::libraries::CompilerIntrinsic::ProgressionReversed)
+            }))
+    }
+
     fn local_class(
         &self,
         signature: &KlibIrSignature,
@@ -1144,8 +1217,7 @@ impl CallLinker for Linker<'_, '_> {
     }
 
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
-        // A support unit links no member of a generic class.
-        (sub.kotlin_class_internal() == Some(owner)).then_some(sub)
+        self.sources.callees.applied_supertype(sub, owner)
     }
 
     fn dependency_override(

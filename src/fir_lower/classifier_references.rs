@@ -174,6 +174,7 @@ impl BodyLowering<'_> {
                                 value: self.ir.add_expr(IrExpr::GetValue(own_start + *source)),
                             }
                         }
+                        FirAdaptedReferenceArgument::Context => return Err(failed()),
                         FirAdaptedReferenceArgument::Default => {
                             crate::ir::IrCheckedArgument::Default { parameter }
                         }
@@ -298,6 +299,7 @@ impl BodyLowering<'_> {
                 adapter,
                 captures: Vec::new(),
                 bound_receiver: None,
+                bound_contexts: 0,
                 function_type,
                 declaration_parameters: declaration_parameters.into_boxed_slice(),
                 declaration_result,
@@ -326,6 +328,7 @@ impl BodyLowering<'_> {
                 adapter,
                 captures: Vec::new(),
                 bound_receiver: capture,
+                bound_contexts: 0,
                 function_type,
                 declaration_parameters: declaration_parameters.into_boxed_slice(),
                 declaration_result: Ty::Unit,
@@ -498,6 +501,7 @@ impl BodyLowering<'_> {
                         Ok(self.ir.add_expr(IrExpr::GetValue(*source)))
                     }
                     FirAdaptedReferenceArgument::Value(_)
+                    | FirAdaptedReferenceArgument::Context
                     | FirAdaptedReferenceArgument::Default
                     | FirAdaptedReferenceArgument::Vararg { .. } => Err(failed()),
                 })

@@ -121,6 +121,16 @@ impl<'a> FileLowering<'a> {
                 return self.import_data(&symbol).map(Some);
             }
         }
+        if let Some(identity) = target
+            .obj_internal()
+            .and_then(|name| self.classifiers.classifier(name))
+            .and_then(|fact| fact.klib_identity.clone())
+        {
+            if let Some(symbol) = self.laid_out.published_descriptor(&identity)? {
+                let symbol = symbol.to_owned();
+                return self.import_data(&symbol).map(Some);
+            }
+        }
         let symbol = match target {
             Ty::String => "kt_type_string",
             Ty::Boolean => "kt_type_boolean",

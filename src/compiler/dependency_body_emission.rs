@@ -19,6 +19,7 @@ use crate::resolve::PassTwoSymbols;
 use crate::types::{Ty, TyKind, TypeName};
 use std::collections::VecDeque;
 
+mod class_declarations;
 mod emitted_roots;
 
 /// Exact dependency support declarations already emitted into one target program.
@@ -290,6 +291,14 @@ pub(super) fn emit_dependencies<B: Backend>(
             }
         }
         let mut exports = DependencyExportSignatures::default();
+        if let Err(error) = class_declarations::record(&unit, platform, &mut exports) {
+            diags.error(
+                Span::new(0, 0),
+                format!("internal error: cannot publish materialized class declarations: {error}"),
+            );
+            return Vec::new();
+        }
+
         let closed = unit
             .callable_functions()
             // A reachable bodyless declaration remains an exact provider edge which the target may
@@ -412,7 +421,11 @@ pub(super) fn emit_dependencies<B: Backend>(
             }
             published.push((identity.clone(), PublishedDependency::AllocatingConstructor));
         }
-        let mut callables = match CheckedBackendCallables::freeze(unit.ir(), platform) {
+        let mut callables = match CheckedBackendCallables::freeze_with_class_declarations(
+            unit.ir(),
+            platform,
+            module_facts.classes(),
+        ) {
             Ok(callables) => callables,
             Err(error) => {
                 diags.error(

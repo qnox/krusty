@@ -79,11 +79,31 @@ pub(super) fn score_with_declaration(
         *sam_signatures.borrow_mut().get_mut(source)? = Some(signature);
         Some(())
     };
+    // The result a receiver-less reference produces is candidate evidence for a function-typed
+    // parameter: a candidate whose function result the named callable cannot produce is a misfit
+    // for an `OverloadResolutionByLambdaReturnType` tie to drop. One check serves every point at
+    // which the candidate's function type becomes known.
+    let note_reference_result = |argument: ExprId, function_ty: Ty| {
+        if let (
+            Expr::CallableRef {
+                receiver: None,
+                name,
+            },
+            TyKind::Fun(function),
+        ) = (checker.file.expr(argument), function_ty.non_null().kind())
+        {
+            let fits = checker
+                .unqualified_callable_reference_result_fits(scope, name, function)
+                .unwrap_or(true);
+            lambda_result_mismatch.set(lambda_result_mismatch.get() || !fits);
+        }
+    };
     // Candidate scoring receives the expression as well as its runtime type so every module
     // call shape (positional, named, defaulted, and vararg) consults the same literal adaptation
     // carried by `CallArgKind`.
     let score = |parameter: usize, expected: Ty, actual: Ty, argument: ExprId, source: usize| {
         let expected = checker.declared_function_semantic_type(expected);
+        note_reference_result(argument, expected);
         let semantic_actual = checker.argument_type_for_expected(scope, argument, actual, expected);
         let semantic_actual = checker
             .unit_coerced_lambda_type(argument, expected, semantic_actual)
@@ -114,6 +134,9 @@ pub(super) fn score_with_declaration(
                 declared_bindings.as_ref().expect("declaration bindings"),
                 crate::symbol_resolver::UnboundSpecialization::Preserve,
             );
+            // The candidate's own function parameter, with the bindings its receiver and
+            // earlier arguments already fixed, is what the reference's result is measured by.
+            note_reference_result(argument, input);
             if projection.is_some()
                 && !checker.receiver_is_assignable(semantic_actual, input)
                 && !checker.call_result_can_bind_expected(argument, input)
@@ -329,6 +352,12 @@ pub(super) fn score_with_declaration(
                         None => Some(0),
                     }
                 }
+                // A receiver-less reference supplies a result classifier before any lambda body
+                // would.
+                Expr::CallableRef { receiver: None, .. } if expected.non_null().is_fun() => {
+                    note_reference_result(argument, expected);
+                    Some(2)
+                }
                 _ => Some(0),
             };
         }
@@ -531,18 +560,26 @@ pub(super) fn refine_lambda_tie<T>(
                 "kotlin/OverloadResolutionByLambdaReturnType",
             ))
     };
+    let postponed = |argument: ExprId| {
+        matches!(
+            file.expr(argument),
+            Expr::Lambda { .. } | Expr::CallableRef { receiver: None, .. }
+        )
+    };
     let mut lambdas = args
         .iter()
         .enumerate()
-        .filter(|(_, &argument)| matches!(file.expr(argument), Expr::Lambda { .. }))
+        .filter(|(_, &argument)| postponed(argument))
         .map(|(position, _)| position);
     let (Some(lambda), None) = (lambdas.next(), lambdas.next()) else {
         return;
     };
-    // Before the lambda is analyzed (a call's pre-lambda selection) a tie stays a tie.
-    let analyzed = arg_tys.get(lambda).is_some_and(|actual| {
-        matches!(actual.non_null().kind(), TyKind::Fun(function) if !function.ret.mentions_error())
-    });
+    // Before the lambda is analyzed (a call's pre-lambda selection) a tie stays a tie. A
+    // callable reference carries its result evidence in the candidates' misfit marks instead.
+    let analyzed = matches!(file.expr(args[lambda]), Expr::CallableRef { .. })
+        || arg_tys.get(lambda).is_some_and(|actual| {
+            matches!(actual.non_null().kind(), TyKind::Fun(function) if !function.ret.mentions_error())
+        });
     if !analyzed {
         return;
     }

@@ -1527,11 +1527,6 @@ pub(super) fn scalar_member(
             ("isNotBlank", []) => {
                 return Some(("kt_string_is_not_blank", vec![reference], Ty::Boolean));
             }
-            // The ANSWER is an `Int`, so this cannot go through the reference-carried member path
-            // below: `a < b` would box the very comparison it is asking about.
-            ("compareTo", [_]) if owner.classifier_matches("kotlin/String") => {
-                return Some(("kt_string_compare_to", vec![reference, reference], Ty::Int));
-            }
             _ => {}
         }
     }

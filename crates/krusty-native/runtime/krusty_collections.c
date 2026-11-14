@@ -848,7 +848,7 @@ static kt_char kt_chars_next(KWalk *walk) {
    and reading its element as a `Double` would take eight bytes from an array that may hold one. */
 static KRef kt_array_element(KRef array, kt_int at) {
     const KType *type = array->header.type;
-    const void *elements = (const void *)((const KArray *)array + 1);
+    const void *elements = (const void *)((const KArray *)kt_array_storage(array) + 1);
     if (type == &kt_type_array) {
         return ((KRef *)elements)[at];
     }
@@ -965,9 +965,11 @@ KRef kt_array_reversed_array(KRef array) {
     const KType *type = array->header.type;
     kt_int length = ((const KArray *)array)->length;
     KRef copy = kt_array_new(type, length);
-    size_t stride = (size_t)type->element_size;
-    const char *from = (const char *)array + type->instance_size;
-    char *to = (char *)copy + type->instance_size;
+    KRef source = kt_array_storage(array);
+    KRef destination = kt_array_storage(copy);
+    size_t stride = (size_t)source->header.type->element_size;
+    const char *from = (const char *)((const KArray *)source + 1);
+    char *to = (char *)((KArray *)destination + 1);
     for (kt_int index = 0; index < length; index++) {
         memcpy(to + (size_t)(length - 1 - index) * stride, from + (size_t)index * stride, stride);
     }
@@ -1012,6 +1014,7 @@ kt_int kt_array_content_hash_code(KRef array) {
     if (array == NULL) {
         return 0;
     }
+    array = kt_array_storage(array);
     kt_int length = ((const KArray *)array)->length;
     uint32_t result = 1;
     for (kt_int index = 0; index < length; index++) {
@@ -1109,7 +1112,7 @@ kt_long kt_walk_next_long(KRef iterator) {
     kt_int at = walk->at;
     walk->at = at + 1;
     const KType *type = walk->over->header.type;
-    const void *elements = (const void *)((const KArray *)walk->over + 1);
+    const void *elements = (const void *)((const KArray *)kt_array_storage(walk->over) + 1);
     if (type == &kt_type_byte_array) {
         return ((const kt_byte *)elements)[at];
     }

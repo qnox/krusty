@@ -12,6 +12,7 @@
 //! this lowering does not model declines by the form's name.
 
 mod accessor_calls;
+mod array_content_members;
 mod body_lowering;
 mod body_unit;
 mod callable_references;
@@ -53,6 +54,7 @@ pub(crate) const EMITTED_CALL_FORMS: crate::metadata::klib_ir::tree::EmittedCall
         closure: emitted_closure_function,
         folded_call: range_membership::folds_range_literal_membership,
         folded_calls: for_loops::folded_loop_calls,
+        implied_callee: array_content_members::implied_callee,
     };
 pub use decline::{KlibBodyDecline, KlibBodyDeclineReason};
 pub use inline_templates::{lower_inline_template, KlibInlineTemplate, TemplateCallees};

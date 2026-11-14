@@ -578,6 +578,9 @@ impl Backend for CraneliftBackend {
             }
             state.entry_file = Some(source_stem);
         }
+        for (identity, symbol) in lowered.class_descriptors {
+            state.laid_out.publish_descriptor(identity, symbol);
+        }
         state.abi.extend(lowered.abi);
         for (class, record) in lowered.laid_out {
             state.laid_out.insert(class, record);
