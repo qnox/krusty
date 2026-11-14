@@ -34,6 +34,7 @@ use scope::{ContextReceiver, ContextReceiverKind, FlowExclusion, NarrowPath, Ns}
 
 mod abstract_obligations;
 mod argument_parameter_mapping;
+mod builtin_implementation;
 use argument_parameter_mapping::{
     call_argument_parameter_indices, call_argument_parameter_indices_result,
     named_whole_array_varargs,
@@ -7271,6 +7272,9 @@ pub struct TypeInfo {
     /// [`ResolvedCall`] for the target kinds and the typed accessors ([`Self::resolved_member`],
     /// [`Self::resolved_top_level_call`], …).
     pub resolved_calls: HashMap<ExprId, ResolvedCall>,
+    /// Builtin override implementations selected for external members in this checked unit.
+    /// Common lowering carries these facts into IR; backend handoff does not reopen the hierarchy.
+    pub(crate) builtin_implementations: builtin_implementation::Facts,
     /// The exact semantic receiver selected for an unqualified member access through the implicit-receiver
     /// stack. This is deliberately separate from [`Self::resolved_calls`]: the selected callable says
     /// what to invoke, while this map says which runtime object supplies its dispatch/extension
@@ -31759,6 +31763,18 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     c.narrow_script_template_receivers();
     c.publish_member_declaring_receivers();
     let enhanced_values = c.enhanced_value_heads();
+    let builtin_implementations = match builtin_implementation::for_checked_unit(&c) {
+        Ok(implementations) => implementations,
+        Err(identity) => {
+            c.diags.error(
+                Span::new(0, 0),
+                format!(
+                    "internal error: selected external member {identity:?} has no semantic owner"
+                ),
+            );
+            HashMap::default()
+        }
+    };
     let Checker {
         expr_types,
         callable_reference_types,
@@ -32108,6 +32124,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         generated_class_names,
         narrowed_this_member,
         resolved_calls,
+        builtin_implementations,
         implicit_receiver_selections,
         resolved_source_calls,
         inspection_source_declarations: std::sync::Arc::default(),

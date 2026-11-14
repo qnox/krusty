@@ -1,5 +1,4 @@
-//! What each builtin class runs for a library classifier's member, answered at the backend
-//! handoff from the member hierarchy.
+//! Builtin implementation facts for checked source IR and generated KLIB support bodies.
 //!
 //! A backend that carries a builtin value in a representation of its own (a string, a box)
 //! dispatches a call of `CharSequence.length` or `Number.toLong` on such a value to the class's
@@ -11,8 +10,20 @@ use crate::backend::{BuiltinImplementation, BuiltinOverrideDeclaration, CheckedB
 use crate::symbol_resolver::{builtin_overrides, BuiltinOverride};
 use crate::symbol_source::SymbolSource;
 
-/// Record every called library member's builtin implementations, as `source` declares them.
-pub(super) fn record(callables: &mut CheckedBackendCallables, source: &dyn SymbolSource) {
+/// Record the implementation facts produced by the checker and carried by common IR.
+pub(super) fn record_checked(
+    callables: &mut CheckedBackendCallables,
+    ir: &crate::ir::IrFile,
+) -> Result<(), crate::fir::ExternalCallableId> {
+    callables.record_checked_builtin_implementations(&ir.external_builtin_implementations)
+}
+
+/// Record builtin implementations for generated KLIB support calls that have no source checker
+/// result to carry through IR yet.
+pub(super) fn record_dependency_support(
+    callables: &mut CheckedBackendCallables,
+    source: &dyn SymbolSource,
+) {
     callables.record_builtin_implementations(|owner, name, identity| {
         builtin_overrides(source, owner, name, identity)
             .into_iter()

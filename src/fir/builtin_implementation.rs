@@ -5,7 +5,7 @@
 //! member hierarchy.
 
 use crate::libraries::CompilerIntrinsic;
-use crate::types::{Ty, TypeName};
+use crate::types::Ty;
 
 /// What one builtin class runs for a call of a supertype member on a value of that class.
 #[derive(Clone, Debug, PartialEq)]
@@ -25,14 +25,4 @@ pub struct BuiltinOverrideDeclaration {
     /// The override's declared parameter and result types; a property's are its getter's.
     pub params: Box<[Ty]>,
     pub ret: Ty,
-}
-
-/// One selected external member and the builtin implementations checked for it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ExternalBuiltinImplementations {
-    pub declaration: crate::fir::ExternalCallableId,
-    pub owner: TypeName,
-    /// Property getters use the property's declared name for override matching.
-    pub name: Box<str>,
-    pub implementations: Box<[BuiltinImplementation]>,
 }

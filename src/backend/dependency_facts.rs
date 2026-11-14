@@ -367,6 +367,48 @@ mod tests {
         assert!(!fact.matches_dependency_body_call(&params, Some(1), false));
     }
 
+    #[test]
+    fn checked_builtin_implementations_are_copied_by_external_identity() {
+        let identity = ExternalCallableId::from_raw(1);
+        let expected = vec![BuiltinImplementation {
+            receiver: Ty::obj("kotlin/String"),
+            declaration: None,
+        }]
+        .into_boxed_slice();
+        let mut callables = accessor_facts();
+        let fact = callables.callables.get_mut(&identity).unwrap();
+        fact.kind = ExternalCallableKind::Member;
+        fact.declaration_owner = Some(SemanticCallableOwner::Classifier(crate::types::type_name(
+            "kotlin/CharSequence",
+        )));
+        let implementations = HashMap::from([(identity, expected.clone())]);
+
+        callables
+            .record_checked_builtin_implementations(&implementations)
+            .unwrap();
+
+        assert_eq!(
+            callables.callables[&identity].builtin_implementations,
+            expected
+        );
+    }
+
+    #[test]
+    fn checked_builtin_implementation_handoff_rejects_missing_identity() {
+        let identity = ExternalCallableId::from_raw(1);
+        let mut callables = accessor_facts();
+        let fact = callables.callables.get_mut(&identity).unwrap();
+        fact.kind = ExternalCallableKind::Member;
+        fact.declaration_owner = Some(SemanticCallableOwner::Classifier(crate::types::type_name(
+            "kotlin/CharSequence",
+        )));
+
+        assert_eq!(
+            callables.record_checked_builtin_implementations(&HashMap::default()),
+            Err(identity)
+        );
+    }
+
     fn accessor_facts() -> CheckedBackendCallables {
         let mut facts = CheckedBackendCallables::default();
         let mut getter = extension_fact();
@@ -819,6 +861,29 @@ impl CheckedBackendCallables {
                 .map_or(fact.name.as_str(), |name| name);
             fact.builtin_implementations = implementations(owner, name, identity);
         }
+    }
+
+    /// Copy checker-produced builtin implementation facts for every selected external member.
+    /// A missing identity is an incomplete frontend handoff and must fail closed.
+    pub fn record_checked_builtin_implementations(
+        &mut self,
+        implementations: &HashMap<ExternalCallableId, Box<[BuiltinImplementation]>>,
+    ) -> Result<(), ExternalCallableId> {
+        for (&identity, fact) in &mut self.callables {
+            if fact.kind != ExternalCallableKind::Member
+                || !matches!(
+                    fact.declaration_owner,
+                    Some(SemanticCallableOwner::Classifier(_))
+                )
+            {
+                continue;
+            }
+            let Some(selected) = implementations.get(&identity) else {
+                return Err(identity);
+            };
+            fact.builtin_implementations = selected.clone();
+        }
+        Ok(())
     }
 
     /// Freeze dependency identities on `super` calls introduced after the initial handoff.

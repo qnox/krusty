@@ -494,6 +494,19 @@ mod tests {
     }
 
     #[test]
+    fn source_backend_handoff_uses_checker_builtin_implementation_facts() {
+        let path = source_path("src/compiler/backend_handoff.rs");
+        let text = fs::read_to_string(&path).expect("read source backend handoff");
+        assert!(text.contains("record_checked"));
+        for forbidden in ["SymbolResolver", "symbol_resolver::", "resolve_symbol("] {
+            assert!(
+                !text.contains(forbidden),
+                "source backend handoff must consume checked builtin facts: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn plugin_runtime_binding_uses_provider_declarations() {
         let path = source_path("src/compiler/backend_handoff/plugin_handoff.rs");
         let text = fs::read_to_string(&path).expect("read plugin runtime handoff");
