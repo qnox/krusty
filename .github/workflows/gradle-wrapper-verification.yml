@@ -8,25 +8,26 @@ jobs:
   validate:
     runs-on: [self-hosted, rust-4c-8gb]
     timeout-minutes: 40
-    env:
-      GRADLE_USER_HOME: ${{ runner.temp }}/krusty-gradle-wrapper-verification
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
+          ref: d555f11cae9da7067973462b46cdda042146b353
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78
         with:
           distribution: zulu
           java-version: '17'
+      - name: select isolated Gradle home
+        run: echo "GRADLE_USER_HOME=$RUNNER_TEMP/krusty-gradle-wrapper-verification" >> "$GITHUB_ENV"
       - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c
         with:
           cache-read-only: true
       - name: authenticate source and wrapper
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = d555f11cae9da7067973462b46cdda042146b353
+          test "$(git rev-parse HEAD)" = d555f11cae9da7067973462b46cdda042146b353
           mkdir evidence
-          git rev-parse HEAD^ > evidence/source.txt
+          git rev-parse HEAD > evidence/source.txt
           sha256sum tools/krusty-gradle/gradle/wrapper/gradle-wrapper.jar tools/krusty-gradle/gradle/wrapper/gradle-wrapper.properties > evidence/wrapper.sha256
           cp tools/krusty-gradle/gradle/verification-metadata.xml evidence/verification-before.xml
           grep -q 'compileOnly("org.jetbrains.kotlin:kotlin-gradle-plugin-api:2.4.0")' tools/krusty-gradle/build.gradle.kts
