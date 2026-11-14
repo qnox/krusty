@@ -3,6 +3,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use syn::parse::Parser;
 
     #[test]
     fn frontend_facade_uses_only_frontend_dependencies() {
@@ -328,7 +329,6 @@ mod tests {
             "plugins",
             "runtime",
             "spelling",
-            "symbol_resolver",
             "symbol_source",
             "toolchain",
             "trace",
@@ -341,7 +341,13 @@ mod tests {
         ];
         // The JVM backend crate's own modules are its business; what it may use of the frontend is
         // the same budget as the class-file layer that stays in this crate.
+        let provider_tests = source_path("src/jvm/jvm_libraries/tests");
         for path in jvm_backend_files() {
+            // These standalone files are included by a `#[cfg(test)]` parent, so their own source
+            // has no test attribute for the Rust dependency scanner to recognize.
+            if path.starts_with(&provider_tests) {
+                continue;
+            }
             let check = if path.starts_with(source_path("crates/krusty-jvm")) {
                 assert_allowed_external_crate_modules_in_file
             } else {
@@ -361,6 +367,22 @@ mod tests {
                 // throughout the JVM backend.
                 let mut allowed = allowed.to_vec();
                 allowed.push("assignable");
+                check(&path, &allowed);
+            } else if [
+                "src/jvm/jvm_libraries.rs",
+                "src/jvm/jvm_libraries/generic_signatures.rs",
+                "src/jvm/jvm_libraries/override_slots.rs",
+                "src/jvm/jvm_libraries/synthetic_properties.rs",
+            ]
+            .iter()
+            .any(|relative| path == source_path(relative))
+            {
+                // These declaration-provider modules normalize metadata signatures and inherited
+                // Java properties before declarations enter the common symbol model. Their
+                // narrow type-substitution and hierarchy operations are provider work; the JVM
+                // emission paths remain outside the resolver dependency budget.
+                let mut allowed = allowed.to_vec();
+                allowed.push("symbol_resolver");
                 check(&path, &allowed);
             } else {
                 check(&path, &allowed);
@@ -425,10 +447,230 @@ mod tests {
                 "metadata",
                 "module_symbols",
                 "plugins",
-                "symbol_resolver",
                 "trace_compiler",
                 "types",
             ],
+        );
+    }
+
+    #[test]
+    fn representation_backends_do_not_call_the_symbol_resolver() {
+        let mut paths = rust_files_under("src/backend");
+        let jvm_provider = source_path("src/jvm/jvm_libraries");
+        paths.extend(
+            jvm_backend_files()
+                .into_iter()
+                .filter(|path| !path.starts_with(&jvm_provider)),
+        );
+        paths.extend(rust_files_under("src/js"));
+        for path in paths {
+            if path
+                .components()
+                .any(|component| component.as_os_str() == "tests")
+                || path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().ends_with("_tests.rs"))
+            {
+                continue;
+            }
+            let text = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            // The JVM provider is separately budgeted for shared hierarchy normalization. Permit
+            // the namespace here, but still reject the resolver type and overload entrypoint.
+            let provider_namespace = path == source_path("src/jvm/jvm_libraries.rs");
+            let offenders =
+                backend_resolver_uses_with_provider_namespace(&text, provider_namespace);
+            assert!(
+                offenders.is_empty(),
+                "{} calls frontend selection from production backend code: {forbidden}",
+                path.display(),
+                forbidden = offenders.join(", "),
+            );
+        }
+    }
+
+    #[test]
+    fn backend_resolver_guard_keeps_scanning_after_test_modules() {
+        let source = r###"
+            #[cfg(test)]
+            mod tests {
+                use crate::resolve::SymbolResolver;
+            }
+
+            fn production() {
+                crate::symbol_resolver::resolve_symbol();
+            }
+        "###;
+
+        assert_eq!(
+            backend_resolver_uses(source),
+            ["symbol_resolver::", "resolve_symbol("],
+        );
+    }
+
+    #[test]
+    fn backend_resolver_guard_ignores_test_items_and_non_code_text() {
+        let cases: &[(&str, &str, &[&str])] = &[
+            (
+                "comments and strings are not code",
+                r#"// SymbolResolver symbol_resolver::resolve_symbol()
+                   const MESSAGE: &str = "SymbolResolver symbol_resolver:: resolve_symbol(";"#,
+                &[],
+            ),
+            (
+                "nested test-only module and impl items are skipped",
+                r#"#[cfg(test)] mod tests { use crate::resolve::SymbolResolver; }
+                   impl Example { #[cfg(all(test, feature = "x"))]
+                       fn test_only() { crate::resolve::SymbolResolver::resolve_symbol(); }
+                   }"#,
+                &[],
+            ),
+            (
+                "not test is production",
+                "#[cfg(not(test))] fn f() { crate::resolve::SymbolResolver::resolve_symbol(); }",
+                &["SymbolResolver", "resolve_symbol("],
+            ),
+            (
+                "any test with an unknown feature is not provably test-only",
+                "#[cfg(any(test, feature = \"x\"))] fn f() { crate::resolve::SymbolResolver::resolve_symbol(); }",
+                &["SymbolResolver", "resolve_symbol("],
+            ),
+            (
+                "all test and a feature is test-only",
+                "#[cfg(all(test, feature = \"x\"))] fn f() { crate::resolve::SymbolResolver::resolve_symbol(); }",
+                &[],
+            ),
+            (
+                "method calls are checked",
+                "fn f(resolver: Resolver) { resolver.resolve_symbol(); }",
+                &["resolve_symbol("],
+            ),
+            (
+                "macro expression tokens are checked",
+                "fn f() { identity!(crate::symbol_resolver::resolve_symbol()); }",
+                &["symbol_resolver::", "resolve_symbol("],
+            ),
+            (
+                "macro definition tokens are checked",
+                "macro_rules! m { () => { crate::symbol_resolver::resolve_symbol() }; }",
+                &["symbol_resolver::", "resolve_symbol("],
+            ),
+            (
+                "macro literal tokens are not code",
+                "fn f() { identity!(r#\"SymbolResolver symbol_resolver:: resolve_symbol(\"#); }",
+                &[],
+            ),
+        ];
+
+        for (case, source, expected) in cases {
+            let found = backend_resolver_uses(source);
+            assert_eq!(found.as_slice(), *expected, "{case}");
+        }
+    }
+
+    #[test]
+    fn file_backed_test_modules_follow_their_parent_cfg() {
+        let parent = Path::new("/workspace/src/jvm.rs");
+        let default_mod = Path::new("/workspace/src/jvm/jvm_libraries/mod.rs");
+        for (declaration, expected) in [
+            ("#[cfg(test)] mod jvm_libraries;", true),
+            ("mod jvm_libraries;", false),
+            ("#[cfg(not(test))] mod jvm_libraries;", false),
+            (
+                "#[cfg(any(test, feature = \"x\"))] mod jvm_libraries;",
+                false,
+            ),
+            (
+                "#[cfg(test)] mod jvm_libraries; #[cfg(not(test))] mod jvm_libraries;",
+                false,
+            ),
+            (
+                "#[cfg(not(test))] mod jvm_libraries; #[cfg(test)] mod jvm_libraries;",
+                false,
+            ),
+        ] {
+            assert_eq!(
+                external_module_is_test_only(declaration, parent, "jvm_libraries", default_mod),
+                expected,
+                "{declaration}"
+            );
+        }
+        assert!(external_module_is_test_only(
+            "#[cfg(test)] #[path = \"jvm/contract_dsl_tests.rs\"] mod contract_dsl_tests;",
+            Path::new("/workspace/src/lib.rs"),
+            "contract_dsl_tests",
+            Path::new("/workspace/src/jvm/contract_dsl_tests.rs")
+        ));
+        assert!(!external_module_is_test_only(
+            "#[cfg(test)] #[path = \"other.rs\"] mod contract_dsl_tests;",
+            Path::new("/workspace/src/jvm_libraries.rs"),
+            "contract_dsl_tests",
+            Path::new("/workspace/src/jvm_libraries/contract_dsl_tests.rs")
+        ));
+        assert!(is_test_only_module_source(&source_path(
+            "src/jvm/jvm_libraries/contract_dsl_tests.rs"
+        )));
+        assert!(!is_test_only_module_source(&source_path(
+            "src/jvm/jvm_libraries/synthetic_properties.rs"
+        )));
+        // Dependency budgets share the same proven parent-module production boundary.
+        assert_allowed_crate_modules_in_file(
+            &source_path("src/jvm/jvm_libraries/contract_dsl_tests.rs"),
+            &[],
+        );
+    }
+
+    #[test]
+    fn a_test_only_declaration_with_another_path_does_not_hide_production_source() {
+        let root = std::env::temp_dir().join(format!(
+            "krusty-architecture-cfg-path-{}",
+            std::process::id()
+        ));
+        let source = root.join("src");
+        fs::create_dir_all(source.join("parent")).expect("create module tree");
+        fs::write(
+            source.join("parent.rs"),
+            "#[cfg(test)] #[path = \"other.rs\"] mod child;",
+        )
+        .expect("write test-only parent declaration");
+        fs::write(source.join("other.rs"), "").expect("write declared test module");
+        let production = source.join("parent/child.rs");
+        fs::write(&production, "pub fn production() {}")
+            .expect("write unrelated production module source");
+
+        assert!(!is_test_only_module_source(&production));
+
+        let shared = root.join("shared/src");
+        fs::create_dir_all(&shared).expect("create shared crate-root module tree");
+        fs::write(shared.join("lib.rs"), "#[cfg(test)] mod shared;")
+            .expect("write test-only library root");
+        fs::write(shared.join("main.rs"), "mod shared;").expect("write production binary root");
+        let shared_module = shared.join("shared.rs");
+        fs::write(&shared_module, "pub fn production() {}").expect("write shared module source");
+        assert!(!is_test_only_module_source(&shared_module));
+
+        fs::remove_dir_all(root).expect("remove temporary module tree");
+    }
+
+    #[test]
+    fn provider_hierarchy_namespace_does_not_admit_selection_entrypoints() {
+        let hierarchy =
+            "fn f() { crate::symbol_resolver::members_in_hierarchy(source, receiver, name); }";
+        assert_eq!(backend_resolver_uses(hierarchy), ["symbol_resolver::"],);
+        assert!(backend_resolver_uses_with_provider_namespace(hierarchy, true).is_empty());
+        assert_eq!(
+            backend_resolver_uses_with_provider_namespace(
+                "fn f() { crate::symbol_resolver::resolve_symbol(); }",
+                true
+            ),
+            ["resolve_symbol("],
+        );
+        assert_eq!(
+            backend_resolver_uses_with_provider_namespace(
+                "fn f() { SymbolResolver::new(source).resolve_symbol(); }",
+                true
+            ),
+            ["SymbolResolver", "resolve_symbol("],
         );
     }
 
@@ -1077,6 +1319,9 @@ mod tests {
     }
 
     fn assert_allowed_crate_modules_in_file(path: &Path, allowed: &[&str]) {
+        if is_test_only_module_source(path) {
+            return;
+        }
         let text = fs::read_to_string(path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
         // `fx_hash` is the standard hash map and set with a fixed hasher, and `archive` opens a zip
@@ -1102,6 +1347,9 @@ mod tests {
     }
 
     fn assert_allowed_external_crate_modules_in_file(path: &Path, allowed: &[&str]) {
+        if is_test_only_module_source(path) {
+            return;
+        }
         let text = fs::read_to_string(path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
         // As in `assert_allowed_crate_modules_in_file`: `fx_hash` and `archive` are leaf modules.
@@ -1130,6 +1378,367 @@ mod tests {
 
     fn external_crate_modules(text: &str) -> BTreeSet<String> {
         modules_for_roots(text, &[env!("CARGO_PKG_NAME")])
+    }
+
+    fn backend_resolver_uses(text: &str) -> Vec<&'static str> {
+        backend_resolver_uses_with_provider_namespace(text, false)
+    }
+
+    fn backend_resolver_uses_with_provider_namespace(
+        text: &str,
+        allow_namespace: bool,
+    ) -> Vec<&'static str> {
+        let file =
+            syn::parse_file(text).unwrap_or_else(|err| panic!("failed to parse Rust: {err}"));
+        let mut visitor = BackendResolverVisitor {
+            allow_symbol_resolver_namespace: allow_namespace,
+            ..BackendResolverVisitor::default()
+        };
+        syn::visit::visit_file(&mut visitor, &file);
+        ["SymbolResolver", "symbol_resolver::", "resolve_symbol("]
+            .into_iter()
+            .filter(|forbidden| visitor.found.contains(forbidden))
+            .collect()
+    }
+
+    #[derive(Default)]
+    struct BackendResolverVisitor {
+        found: BTreeSet<&'static str>,
+        allow_symbol_resolver_namespace: bool,
+    }
+
+    impl BackendResolverVisitor {
+        fn check_ident(&mut self, ident: &str) {
+            match ident {
+                "SymbolResolver" => {
+                    self.found.insert("SymbolResolver");
+                }
+                "symbol_resolver" => {
+                    if !self.allow_symbol_resolver_namespace {
+                        self.found.insert("symbol_resolver::");
+                    }
+                }
+                "resolve_symbol" => {
+                    self.found.insert("resolve_symbol(");
+                }
+                _ => {}
+            }
+        }
+
+        fn check_path(&mut self, path: &syn::Path) {
+            for segment in &path.segments {
+                self.check_ident(&segment.ident.to_string());
+            }
+        }
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for BackendResolverVisitor {
+        fn visit_item(&mut self, item: &'ast syn::Item) {
+            if !has_cfg_test(item_attrs(item)) {
+                syn::visit::visit_item(self, item);
+            }
+        }
+
+        fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+            if !has_cfg_test(impl_item_attrs(item)) {
+                syn::visit::visit_impl_item(self, item);
+            }
+        }
+
+        fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+            if !has_cfg_test(trait_item_attrs(item)) {
+                syn::visit::visit_trait_item(self, item);
+            }
+        }
+
+        fn visit_foreign_item(&mut self, item: &'ast syn::ForeignItem) {
+            if !has_cfg_test(foreign_item_attrs(item)) {
+                syn::visit::visit_foreign_item(self, item);
+            }
+        }
+
+        fn visit_stmt(&mut self, stmt: &'ast syn::Stmt) {
+            let attrs = match stmt {
+                syn::Stmt::Local(local) => Some(local.attrs.as_slice()),
+                syn::Stmt::Macro(statement) => Some(statement.attrs.as_slice()),
+                syn::Stmt::Item(_) | syn::Stmt::Expr(_, _) => None,
+            };
+            if !attrs.is_some_and(has_cfg_test) {
+                syn::visit::visit_stmt(self, stmt);
+            }
+        }
+
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            self.check_path(path);
+            syn::visit::visit_path(self, path);
+        }
+
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            self.check_ident(&call.method.to_string());
+            syn::visit::visit_expr_method_call(self, call);
+        }
+
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            let parser = |input: syn::parse::ParseStream| scan_macro_tokens(input, self);
+            parser
+                .parse2(mac.tokens.clone())
+                .expect("macro token tree is scannable");
+        }
+
+        fn visit_use_tree(&mut self, tree: &'ast syn::UseTree) {
+            match tree {
+                syn::UseTree::Path(path) => self.check_ident(&path.ident.to_string()),
+                syn::UseTree::Name(name) => self.check_ident(&name.ident.to_string()),
+                syn::UseTree::Rename(rename) => {
+                    self.check_ident(&rename.ident.to_string());
+                    self.check_ident(&rename.rename.to_string());
+                }
+                syn::UseTree::Group(_) | syn::UseTree::Glob(_) => {}
+            }
+            syn::visit::visit_use_tree(self, tree);
+        }
+    }
+
+    fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
+        match item {
+            syn::Item::Const(item) => &item.attrs,
+            syn::Item::Enum(item) => &item.attrs,
+            syn::Item::ExternCrate(item) => &item.attrs,
+            syn::Item::Fn(item) => &item.attrs,
+            syn::Item::ForeignMod(item) => &item.attrs,
+            syn::Item::Impl(item) => &item.attrs,
+            syn::Item::Macro(item) => &item.attrs,
+            syn::Item::Mod(item) => &item.attrs,
+            syn::Item::Static(item) => &item.attrs,
+            syn::Item::Struct(item) => &item.attrs,
+            syn::Item::Trait(item) => &item.attrs,
+            syn::Item::TraitAlias(item) => &item.attrs,
+            syn::Item::Type(item) => &item.attrs,
+            syn::Item::Union(item) => &item.attrs,
+            syn::Item::Use(item) => &item.attrs,
+            _ => &[],
+        }
+    }
+
+    /// An out-of-line module source has no attributes of its own. Check its immediately enclosing
+    /// module declaration so a file included only by a proven test-only parent is not mistaken for
+    /// production code when backend files are enumerated recursively.
+    fn is_test_only_module_source(path: &Path) -> bool {
+        let (module_name, containing_dir) =
+            if path.file_name().and_then(|name| name.to_str()) == Some("mod.rs") {
+                let Some(module_dir) = path.parent() else {
+                    return false;
+                };
+                (
+                    module_dir.file_name().and_then(|name| name.to_str()),
+                    module_dir.parent(),
+                )
+            } else {
+                (
+                    path.file_stem().and_then(|name| name.to_str()),
+                    path.parent(),
+                )
+            };
+        let (Some(module_name), Some(containing_dir)) = (module_name, containing_dir) else {
+            return false;
+        };
+        let Some(parent_module_name) = containing_dir.file_name().and_then(|name| name.to_str())
+        else {
+            return false;
+        };
+        let parent_candidates = [
+            if parent_module_name == "src" {
+                containing_dir.join("lib.rs")
+            } else {
+                containing_dir
+                    .parent()
+                    .unwrap_or(containing_dir)
+                    .join(format!("{parent_module_name}.rs"))
+            },
+            if parent_module_name == "src" {
+                containing_dir.join("main.rs")
+            } else {
+                containing_dir.join("mod.rs")
+            },
+        ];
+        let mut matched_declaration = false;
+        for parent in parent_candidates {
+            if parent == path {
+                continue;
+            }
+            let Ok(source) = fs::read_to_string(&parent) else {
+                continue;
+            };
+            let Some(test_only) = external_module_test_cfg(&source, &parent, module_name, path)
+            else {
+                continue;
+            };
+            matched_declaration = true;
+            if !test_only && !is_test_only_module_source(&parent) {
+                return false;
+            }
+        }
+        matched_declaration
+    }
+
+    fn external_module_is_test_only(
+        source: &str,
+        parent_file: &Path,
+        name: &str,
+        child_file: &Path,
+    ) -> bool {
+        external_module_test_cfg(source, parent_file, name, child_file).unwrap_or(false)
+    }
+
+    fn external_module_test_cfg(
+        source: &str,
+        parent_file: &Path,
+        name: &str,
+        child_file: &Path,
+    ) -> Option<bool> {
+        let file = syn::parse_file(source)
+            .unwrap_or_else(|err| panic!("failed to parse Rust module declarations: {err}"));
+        let mut matched = false;
+        let mut test_only = true;
+        for item in &file.items {
+            let syn::Item::Mod(module) = item else {
+                continue;
+            };
+            if module.ident.to_string() == name
+                && module.content.is_none()
+                && module_source_matches(parent_file, module, child_file)
+            {
+                matched = true;
+                test_only &= has_cfg_test(&module.attrs);
+            }
+        }
+        matched.then_some(test_only)
+    }
+
+    fn module_source_matches(parent_file: &Path, module: &syn::ItemMod, child_file: &Path) -> bool {
+        let parent_dir = parent_file.parent().unwrap_or(parent_file);
+        let parent_filename = parent_file.file_name().and_then(|name| name.to_str());
+        let parent_module_dir = if matches!(parent_filename, Some("mod.rs" | "lib.rs" | "main.rs"))
+        {
+            parent_dir.to_path_buf()
+        } else {
+            parent_dir.join(parent_file.file_stem().unwrap_or_default())
+        };
+        let explicit_paths: Vec<_> = module
+            .attrs
+            .iter()
+            .filter_map(|attribute| match &attribute.meta {
+                syn::Meta::NameValue(value) if value.path.is_ident("path") => {
+                    let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(path),
+                        ..
+                    }) = &value.value
+                    else {
+                        return None;
+                    };
+                    Some(path.value())
+                }
+                _ => None,
+            })
+            .collect();
+        if module.attrs.iter().any(|attribute| {
+            matches!(&attribute.meta, syn::Meta::List(list) if list.path.is_ident("cfg_attr"))
+        }) {
+            return false;
+        }
+        if let Some(explicit) = explicit_paths.first() {
+            return explicit_paths.len() == 1
+                && same_source_path(&parent_dir.join(explicit), child_file);
+        }
+        let name = module.ident.to_string();
+        [
+            parent_module_dir.join(format!("{name}.rs")),
+            parent_module_dir.join(&name).join("mod.rs"),
+        ]
+        .iter()
+        .any(|expected| same_source_path(expected, child_file))
+    }
+
+    fn same_source_path(left: &Path, right: &Path) -> bool {
+        normalize_source_path(left) == normalize_source_path(right)
+    }
+
+    fn normalize_source_path(path: &Path) -> PathBuf {
+        let mut normalized = PathBuf::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    normalized.pop();
+                }
+                component => normalized.push(component.as_os_str()),
+            }
+        }
+        normalized
+    }
+
+    fn impl_item_attrs(item: &syn::ImplItem) -> &[syn::Attribute] {
+        match item {
+            syn::ImplItem::Const(item) => &item.attrs,
+            syn::ImplItem::Fn(item) => &item.attrs,
+            syn::ImplItem::Macro(item) => &item.attrs,
+            syn::ImplItem::Type(item) => &item.attrs,
+            _ => &[],
+        }
+    }
+
+    fn trait_item_attrs(item: &syn::TraitItem) -> &[syn::Attribute] {
+        match item {
+            syn::TraitItem::Const(item) => &item.attrs,
+            syn::TraitItem::Fn(item) => &item.attrs,
+            syn::TraitItem::Macro(item) => &item.attrs,
+            syn::TraitItem::Type(item) => &item.attrs,
+            _ => &[],
+        }
+    }
+
+    fn foreign_item_attrs(item: &syn::ForeignItem) -> &[syn::Attribute] {
+        match item {
+            syn::ForeignItem::Fn(item) => &item.attrs,
+            syn::ForeignItem::Static(item) => &item.attrs,
+            syn::ForeignItem::Type(item) => &item.attrs,
+            syn::ForeignItem::Macro(item) => &item.attrs,
+            _ => &[],
+        }
+    }
+
+    fn scan_macro_tokens(
+        input: syn::parse::ParseStream<'_>,
+        visitor: &mut BackendResolverVisitor,
+    ) -> syn::Result<()> {
+        while !input.is_empty() {
+            if input.peek(syn::Ident) {
+                let ident: syn::Ident = input.parse()?;
+                visitor.check_ident(&ident.to_string());
+            } else if input.peek(syn::Lit) {
+                let _: syn::Lit = input.parse()?;
+            } else if input.peek(syn::token::Paren) {
+                let content;
+                syn::parenthesized!(content in input);
+                scan_macro_tokens(&content, visitor)?;
+            } else if input.peek(syn::token::Brace) {
+                let content;
+                syn::braced!(content in input);
+                scan_macro_tokens(&content, visitor)?;
+            } else if input.peek(syn::token::Bracket) {
+                let content;
+                syn::bracketed!(content in input);
+                scan_macro_tokens(&content, visitor)?;
+            } else {
+                input.step(|cursor| {
+                    cursor
+                        .token_tree()
+                        .map(|(_, next)| ((), next))
+                        .ok_or_else(|| cursor.error("expected a macro token"))
+                })?;
+            }
+        }
+        Ok(())
     }
 
     fn modules_for_roots(text: &str, roots: &[&str]) -> BTreeSet<String> {
@@ -1255,18 +1864,72 @@ mod tests {
     }
 
     fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {
-        attrs.iter().any(|attr| {
-            attr.path().is_ident("cfg") && {
-                let mut found = false;
-                let _ = attr.parse_nested_meta(|meta| {
-                    if meta.path.is_ident("test") {
-                        found = true;
-                    }
-                    Ok(())
-                });
-                found
+        attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("cfg") && cfg_is_false_without_test(&attr.meta))
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum CfgValue {
+        True,
+        False,
+        Unknown,
+    }
+
+    fn cfg_is_false_without_test(meta: &syn::Meta) -> bool {
+        match meta {
+            syn::Meta::List(list) if list.path.is_ident("cfg") => {
+                let nested =
+                    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated;
+                nested.parse2(list.tokens.clone()).is_ok_and(|metas| {
+                    combine_cfg_values(metas.iter().map(cfg_value), true) == CfgValue::False
+                })
             }
-        })
+            _ => false,
+        }
+    }
+
+    fn cfg_value(meta: &syn::Meta) -> CfgValue {
+        match meta {
+            syn::Meta::Path(path) if path.is_ident("test") => CfgValue::False,
+            syn::Meta::Path(_) | syn::Meta::NameValue(_) => CfgValue::Unknown,
+            syn::Meta::List(list) => {
+                let nested =
+                    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated;
+                let Ok(metas) = nested.parse2(list.tokens.clone()) else {
+                    return CfgValue::Unknown;
+                };
+                match list.path.get_ident().map(ToString::to_string).as_deref() {
+                    Some("all") => combine_cfg_values(metas.iter().map(cfg_value), true),
+                    Some("any") => combine_cfg_values(metas.iter().map(cfg_value), false),
+                    Some("not") if metas.len() == 1 => match cfg_value(&metas[0]) {
+                        CfgValue::True => CfgValue::False,
+                        CfgValue::False => CfgValue::True,
+                        CfgValue::Unknown => CfgValue::Unknown,
+                    },
+                    _ => CfgValue::Unknown,
+                }
+            }
+        }
+    }
+
+    fn combine_cfg_values(values: impl Iterator<Item = CfgValue>, all: bool) -> CfgValue {
+        let values: Vec<_> = values.collect();
+        if all {
+            if values.contains(&CfgValue::False) {
+                CfgValue::False
+            } else if values.iter().all(|value| *value == CfgValue::True) {
+                CfgValue::True
+            } else {
+                CfgValue::Unknown
+            }
+        } else if values.contains(&CfgValue::True) {
+            CfgValue::True
+        } else if values.iter().all(|value| *value == CfgValue::False) {
+            CfgValue::False
+        } else {
+            CfgValue::Unknown
+        }
     }
 
     /// The JVM backend's sources: the class-file layer in `src/jvm` and the IR emission in the
