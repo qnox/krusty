@@ -72,10 +72,11 @@ public final class MavenResolverClient {
 
     private static void resolve(Map<String, Object> request) throws Exception {
         ensureSession();
+        List<RemoteRepository> remotes = repositoriesFor(request);
         StringBuilder errors = new StringBuilder();
         for (Map<String, Object> artifact : Protocol.objects(request, "artifacts")) {
             try {
-                resolveOne(artifact);
+                resolveOne(artifact, remotes);
             } catch (Exception failure) {
                 if (!errors.isEmpty()) {
                     errors.append('\n');
@@ -90,7 +91,8 @@ public final class MavenResolverClient {
         }
     }
 
-    private static void resolveOne(Map<String, Object> requested) throws Exception {
+    private static void resolveOne(Map<String, Object> requested, List<RemoteRepository> remotes)
+        throws Exception {
         String classifier = Protocol.text(requested, "classifier");
         if (classifier.isEmpty()) {
             classifier = null;
@@ -118,11 +120,44 @@ public final class MavenResolverClient {
             }
             CollectRequest collect = new CollectRequest();
             collect.setRoot(new Dependency(artifact, "compile", false, exclusions));
-            collect.setRepositories(repositories);
+            collect.setRepositories(remotes);
             repositorySystem.resolveDependencies(session, new DependencyRequest(collect, null));
             return;
         }
-        repositorySystem.resolveArtifact(session, new ArtifactRequest(artifact, repositories, null));
+        repositorySystem.resolveArtifact(session, new ArtifactRequest(artifact, remotes, null));
+    }
+
+    /**
+     * Project repositories from {@code jarRepositories.xml} are added the way IntelliJ's
+     * embedder does. Their update policy is always: a {@code .lastUpdated} marker left by a
+     * failed Central lookup must not hide a JetBrains-only coordinate.
+     */
+    private static List<RemoteRepository> repositoriesFor(Map<String, Object> request) {
+        List<RemoteRepository> remotes = new ArrayList<>(repositories);
+        RepositoryPolicy always = new RepositoryPolicy(
+            true, RepositoryPolicy.UPDATE_POLICY_ALWAYS, RepositoryPolicy.CHECKSUM_POLICY_WARN
+        );
+        for (Map<String, Object> repository : Protocol.objects(request, "repositories")) {
+            String url = Protocol.text(repository, "url");
+            if (url.isEmpty()) {
+                continue;
+            }
+            String id = Protocol.text(repository, "id");
+            if (id.isEmpty()) {
+                id = url;
+            }
+            boolean known = false;
+            for (RemoteRepository remote : remotes) {
+                if (url.equals(remote.getUrl())) {
+                    known = true;
+                    break;
+                }
+            }
+            if (!known) {
+                remotes.add(repository(id, url, always));
+            }
+        }
+        return remotes;
     }
 
     private static void ensureSession() throws Exception {
@@ -193,8 +228,8 @@ public final class MavenResolverClient {
             );
         }
         created.setProxySelector(proxies);
-        session = created;
         repositories = repositorySystem.newResolutionRepositories(created, remoteRepositories(settings));
+        session = created;
     }
 
     private static Settings settings() {

@@ -54,10 +54,19 @@ pub struct MavenExclusion {
     pub artifact: String,
 }
 
+/// A remote repository from the project's `jarRepositories.xml`. IntelliJ's embedder
+/// resolves against these, not only Maven Central.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct MavenRepository {
+    pub id: String,
+    pub url: String,
+}
+
 /// Every artifact of one resolve. The client sends this as a single request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct MavenBatch {
     pub artifacts: Vec<MavenArtifactRequest>,
+    pub repositories: Vec<MavenRepository>,
 }
 
 #[derive(Serialize)]
@@ -73,6 +82,7 @@ struct GradleWire<'a> {
 struct MavenWire<'a> {
     kind: &'static str,
     artifacts: &'a [MavenArtifactRequest],
+    repositories: &'a [MavenRepository],
 }
 
 #[derive(serde::Deserialize)]
@@ -109,6 +119,7 @@ pub fn resolve_maven(batch: &MavenBatch) -> io::Result<()> {
     let line = serde_json::to_string(&MavenWire {
         kind: "maven",
         artifacts: &batch.artifacts,
+        repositories: &batch.repositories,
     })
     .map_err(io::Error::other)?;
     // A missing artifact is recorded by the caller from the files on disk. The resolver still
