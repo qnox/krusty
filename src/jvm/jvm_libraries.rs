@@ -2788,9 +2788,7 @@ impl JvmLibraries {
                     continue;
                 };
                 let Some(getter_public) = ci
-                    .methods
-                    .iter()
-                    .find(|method| method.name == getter.name && method.descriptor == getter.desc)
+                    .method(&getter.name, &getter.desc)
                     .map(|method| method.is_public())
                 else {
                     continue;
@@ -2879,6 +2877,7 @@ impl JvmLibraries {
                     }
                     parameter_plans::callable(&mut getter, value_dispatch, false);
                     let setter = mp.setter.clone().and_then(|setter| {
+                        ci.method(&setter.name, &setter.desc)?;
                         let (physical_params, physical_ret) = parse_method_desc(&setter.desc)?;
                         if physical_params.len() != extension_index + 2 || physical_ret != Ty::Unit
                         {
@@ -3034,6 +3033,7 @@ impl JvmLibraries {
                     },
                 );
                 let setter = mp.setter.clone().and_then(|s| {
+                    ci.method(&s.name, &s.desc)?;
                     let (mut physical_params, physical_ret) = parse_method_desc(&s.desc)?;
                     if carrier_receiver {
                         if physical_params.is_empty() {
