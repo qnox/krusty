@@ -700,23 +700,20 @@ impl<'a> Checker<'a> {
     }
 
     /// Whether `x in a..b` has a REFERENCE value over a primitive range whose elements can actually
-    /// inhabit it (`x: Any` over `4..10`). The membership test then reduces to "is `x` a boxed element
-    /// of the range", so a value type unrelated to the boxed element (`x: String` over `4..10`) is
+    /// inhabit it (`x: Any` over `4..10`). The membership test then reduces to "is `x` an element
+    /// of the range", so a value type unrelated to the element's classifier (`x: String` over `4..10`) is
     /// excluded — that comparison is never non-trivially true and kotlinc rejects it.
     ///
     /// Only `Int`/`Long`/`Char` elements qualify, because the widened form is `Iterable<T>.contains`:
     /// a FLOATING-POINT range is a `ClosedFloatingPointRange`, not an `Iterable`, so kotlinc rejects
-    /// `x: Any in 1.0..2.0` outright; a `Byte`/`Short` range is really an `IntRange` (its elements box
-    /// to `Integer`, not to the bound's own wrapper); and an unsigned range's elements box to their
+    /// `x: Any in 1.0..2.0` outright; a `Byte`/`Short` range is really an `IntRange` (its elements are
+    /// `Int`s, not the bound's own type); and an unsigned range's elements box to their
     /// inline class, which krusty erases to the signed primitive.
     fn in_range_widened_value(&self, value: Ty, element: Ty) -> bool {
         if !matches!(element, Ty::Int | Ty::Long | Ty::Char) {
             return false;
         }
-        let Some(boxed) = element.boxed_ref() else {
-            return false;
-        };
-        value.is_reference() && self.when_objs_comparable(value.non_null(), boxed)
+        value.is_reference() && self.when_objs_comparable(value.non_null(), element)
     }
 
     pub(super) fn resolve_in_range_expression(
@@ -855,6 +852,15 @@ impl<'a> Checker<'a> {
                 } else if prim(&range_st)
                     && range_st == range_et
                     && self.in_range_widened_value(vt, range_st)
+                    && {
+                        // Resolve `contains` as for any other receiver; the widened form is only
+                        // the lowering of the generic `Iterable<T>.contains`. A precise overload
+                        // (`IntRange.contains(Int?)`) stays an ordinary call.
+                        let selected = self.range_contains_call(scope, e, range_ty, vt, value);
+                        let generic = selects_generic_element_contains(&selected);
+                        ordinary_contains = Some(selected);
+                        generic
+                    }
                 {
                     // A WIDENED value over a primitive range: `when (x: Any) { in 4..10 -> … }`. kotlinc
                     // lowers it to `CollectionsKt.contains(4..10, x)`, which is true exactly when `x` is a
@@ -1163,4 +1169,20 @@ struct InRangeOperands {
     expression: ExprId,
     kind: crate::ast::RangeKind,
     value_ty: Ty,
+}
+
+/// Whether the resolved `contains` is the declaration whose element parameter is the callable's own
+/// type parameter (`fun <T> Iterable<T>.contains(element: T)`), as opposed to a precise overload of
+/// the range. Decided from the declared generic signature, never from the erased representation.
+fn selects_generic_element_contains(selected: &Option<(Ty, ResolvedCall)>) -> bool {
+    let Some((Ty::Boolean, ResolvedCall::Extension(extension))) = selected else {
+        return false;
+    };
+    extension.callable.generic_sig.as_ref().is_some_and(|sig| {
+        sig.params.first().is_some_and(|element| {
+            element
+                .ty_param_name()
+                .is_some_and(|name| sig.formals.iter().any(|formal| formal.as_str() == name))
+        })
+    })
 }

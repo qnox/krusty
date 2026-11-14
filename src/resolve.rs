@@ -257,6 +257,7 @@ mod named_class_constructors;
 pub(crate) mod operator_calls;
 mod operator_declarations;
 mod opt_in_usage;
+mod primitive_reference;
 use operator_calls::{
     range_operator, OperatorOperand, ResolvedInRangeComparison, SelectedBuiltinOperatorAccess,
 };
@@ -48178,14 +48179,8 @@ impl<'a> Checker<'a> {
         if expected.is_erased_top() {
             return;
         }
-        // A primitive flowing into a reference supertype is checked through its boxed source type; the
-        // provider's type hierarchy decides whether that box implements `Number`, `Comparable`, etc.
-        if let (Some(TyKind::Obj(b, _)), TyKind::Obj(e, _)) =
-            (actual.boxed_ref().map(|ty| ty.kind()), expected.kind())
-        {
-            if self.obj_name_is_subtype(b, e) {
-                return;
-            }
+        if primitive_reference::reaches_reference(self, actual, expected) {
+            return;
         }
         // The dedicated `Ty::String` variant and its object form `Obj("kotlin/String")` denote the SAME
         // type (they share an erased key); a value of one flows into the other. A metadata-derived return
