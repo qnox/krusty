@@ -412,7 +412,12 @@ fn machine_type_parameters(ir: &IrFile, function: u32) -> Vec<IrTypeParameter> {
     if let Some(signature) = ir.signatures.get(&function) {
         candidates.extend(signature.type_params.iter().cloned());
     }
-    candidates.extend(ir.lambda_type_parameters(function).iter().cloned());
+    candidates.extend(
+        ir.recorded_lambda_type_parameters(function)
+            .into_iter()
+            .flatten()
+            .cloned(),
+    );
 
     let mut names = HashSet::default();
     candidates
