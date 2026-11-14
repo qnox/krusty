@@ -18,12 +18,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::super::{
-    CompletionIndex, DeclarationIdentity, DefinitionIndex, DependencyCandidate,
-    DependencySymbolIndex, DocumentAnalysis, DocumentSymbolIndex, FoldingRangeIndex, HoverIndex,
-    IndexOutcome, IndexedFile, LibraryDefinitionIndex, LocatedDependency, MaterializedDefinition,
-    ProjectSymbolIndex, SemanticTokenIndex, SignatureHelpIndex, WorkspaceSymbolIndex,
-    MAX_RETAINED_ANALYSIS_BYTES, MAX_WORKSPACE_SYMBOL_WIRE_BYTES, SEMANTIC_TOKEN_MODIFIERS,
-    SEMANTIC_TOKEN_TYPES,
+    CompletionIndex, DefinitionIndex, DependencyCandidate, DependencySymbolIndex, DocumentAnalysis,
+    DocumentSymbolIndex, FoldingRangeIndex, HoverIndex, IndexOutcome, IndexedFile,
+    LibraryDefinitionIndex, LocatedDependency, MaterializedDefinition, ProjectSymbolIndex,
+    SemanticTokenIndex, SignatureHelpIndex, WorkspaceSymbolIndex, MAX_RETAINED_ANALYSIS_BYTES,
+    MAX_WORKSPACE_SYMBOL_WIRE_BYTES, SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
 };
 use super::diagnostic_page::{
     limit_diagnostic_items, wire_diagnostic_message, workspace_diagnostic_response,
@@ -34,14 +33,14 @@ use super::line_index::{position_to_byte_offset_with_budget, LineIndex};
 pub use super::response_delivery::Dispatch;
 use super::response_delivery::{dispatch_sync as dispatch_messages, AsyncResponseDelivery};
 use super::response_page::{
-    array_messages, fit_completion_items, limit_signature_help, limit_text, location_messages,
-    partial_result_token, too_large, HOVER_TEXT_BYTES,
+    array_messages, fit_completion_items, limit_signature_help, limit_text, partial_result_token,
+    too_large, HOVER_TEXT_BYTES,
 };
 use super::semantic_token_response;
 use super::workspace_index::{WorkspaceDiagnosticStore, WorkspaceDiagnostics};
-use super::workspace_references::{WorkspaceReferenceHit, WorkspaceReferenceStore};
+use super::workspace_references::WorkspaceReferenceStore;
 use crate::analysis::serialized_json_wire_bytes;
-use crate::compiler_analysis::{DefinitionTarget, LibraryRef};
+use crate::compiler_analysis::LibraryRef;
 use crate::server::engine::{
     AnalysisBatch, AnalysisEngine, AnalysisJob, DumpJob, DumpOutcome, DumpResult, EngineBackend,
     EngineEvent, IndexBatch, MaterializeJob, MaterializeResult, SymbolIndexBatch,
@@ -51,7 +50,7 @@ use crate::uri::{file_uri_to_path, path_to_file_uri};
 use crate::worker::{source_set_fits, MAX_SOURCE_SET_BYTES};
 
 mod analysis_batch_application;
-use krusty::diag::{Diagnostic, DiagnosticKind, Severity, Span};
+use krusty::diag::{Diagnostic, DiagnosticKind, Severity};
 
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_HEADER_BYTES: usize = 8 * 1024;
@@ -408,11 +407,16 @@ impl Analysis for DocumentAnalyzer {
         let (mut analyses, support) = self.analyze_open_documents(&documents, &open);
         let mut uris = documents.iter().map(|(uri, _)| *uri).collect::<Vec<_>>();
         uris.extend(support.iter().map(|(uri, _)| uri.as_str()));
+        let mut sources = documents.iter().map(|(_, text)| *text).collect::<Vec<_>>();
+        sources.extend(support.iter().map(|(_, text)| text.as_str()));
         for analysis in &mut analyses {
             if analysis.workspace_references.entry_count() == 0 {
                 analysis.workspace_references = std::mem::take(&mut analysis.definitions);
             }
             analysis.workspace_references.bind_uris(&uris);
+            analysis
+                .workspace_references
+                .record_declaration_names(&sources);
         }
         let conclusive = analyses.len() == readable.len();
         let files = analyses
@@ -574,6 +578,8 @@ macro_rules! partial_token {
         }
     };
 }
+
+mod navigation;
 
 /// `(start line, start UTF-16 column, end line, end UTF-16 column,
 /// packed severity + interned message id)`.
@@ -964,30 +970,6 @@ struct RetainedDependencyLocation {
     path: PathBuf,
     start: Position,
     end: Position,
-}
-
-fn protocol_location(uri: &str, source: &str, span: Span) -> Value {
-    json!({
-        "uri": uri,
-        "range": {
-            "start": byte_offset_to_position(source, span.lo as usize),
-            "end": byte_offset_to_position(source, span.hi as usize),
-        }
-    })
-}
-
-fn protocol_range(uri: &str, range: [u32; 4]) -> Value {
-    json!({
-        "uri": uri,
-        "range": {
-            "start": {"line": range[0], "character": range[1]},
-            "end": {"line": range[2], "character": range[3]},
-        }
-    })
-}
-
-fn is_declaration_use(hit: &WorkspaceReferenceHit) -> bool {
-    hit.uri == hit.declaration.uri && hit.use_span == hit.declaration.span
 }
 
 pub struct LspService<B> {
@@ -2230,52 +2212,7 @@ where
         Dispatch::messages(vec![rpc_result(id, help)])
     }
 
-    fn definition(&mut self, id: Option<Value>, params: Value) -> Dispatch {
-        let Some(id) = id else {
-            return Dispatch::none();
-        };
-        let progress = partial_token!(id, params);
-        let Ok(params) = serde_json::from_value::<TextDocumentPositionParams>(params) else {
-            return invalid_params(Some(id));
-        };
-        let Some(open) = self.documents.get(&params.text_document.uri) else {
-            return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
-        };
-        let Some(offset) = open.offset_at(params.position) else {
-            return invalid_params(Some(id));
-        };
-        let locations = self.navigation_locations(&open.definitions, offset);
-        let library_ref = locations
-            .is_empty()
-            .then(|| open.library_definitions.get(offset).cloned())
-            .flatten();
-        if !locations.is_empty() || library_ref.is_none() {
-            return Dispatch::messages(array_messages(id, locations, progress.as_ref()));
-        }
-        const MAX_PENDING_MATERIALIZATIONS: usize = 128;
-        if self.pending_materializations.len() >= MAX_PENDING_MATERIALIZATIONS {
-            return Dispatch::messages(vec![rpc_error(
-                id,
-                -32000,
-                "too many pending dependency definitions",
-            )]);
-        }
-        let token = self.next_materialize_token;
-        self.next_materialize_token = self.next_materialize_token.wrapping_add(1);
-        let result = self.backend.materialize(MaterializeJob {
-            token,
-            reference: library_ref.unwrap(),
-        });
-        match result {
-            Some(result) => Dispatch::messages(vec![self.materialize_response(id, result)]),
-            None => {
-                self.pending_materializations.insert(token, id);
-                Dispatch::none()
-            }
-        }
-    }
-
-    fn materialize_response(&self, id: Value, result: MaterializeResult) -> Value {
+    pub(super) fn materialize_response(&self, id: Value, result: MaterializeResult) -> Value {
         let location = result.definition.and_then(|definition| {
             let uri = path_to_file_uri(&definition.path)?;
             Some(json!({
@@ -2339,236 +2276,6 @@ where
             pending.position,
             outcome.dump,
         ))
-    }
-
-    fn type_definition(&self, id: Option<Value>, params: Value) -> Dispatch {
-        let Some(id) = id else {
-            return Dispatch::none();
-        };
-        let progress = partial_token!(id, params);
-        let Ok(params) = serde_json::from_value::<TextDocumentPositionParams>(params) else {
-            return invalid_params(Some(id));
-        };
-        let Some(open) = self.documents.get(&params.text_document.uri) else {
-            return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
-        };
-        let Some(offset) = open.offset_at(params.position) else {
-            return invalid_params(Some(id));
-        };
-        let locations = self.navigation_locations(&open.type_definitions, offset);
-        Dispatch::messages(location_messages(id, locations, progress.as_ref()))
-    }
-
-    fn implementation(&self, id: Option<Value>, params: Value) -> Dispatch {
-        let Some(id) = id else {
-            return Dispatch::none();
-        };
-        let progress = partial_token!(id, params);
-        let Ok(params) = serde_json::from_value::<TextDocumentPositionParams>(params) else {
-            return invalid_params(Some(id));
-        };
-        let Some(open) = self.documents.get(&params.text_document.uri) else {
-            return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
-        };
-        let Some(offset) = open.offset_at(params.position) else {
-            return invalid_params(Some(id));
-        };
-        let locations = self.navigation_locations(&open.implementations, offset);
-        Dispatch::messages(location_messages(id, locations, progress.as_ref()))
-    }
-
-    fn navigation_locations(&self, index: &DefinitionIndex, offset: u32) -> Vec<Value> {
-        index
-            .get(offset)
-            .filter_map(|target| self.target_location(index, target))
-            .collect()
-    }
-
-    /// Resolve one definition target. A bound URI is matched against open text first and then
-    /// against the project symbol index, so a declaration that lives in another source set — or
-    /// only in a closed-file chunk — is still a location. An unbound target stays a file index
-    /// into the current source set.
-    fn target_location(&self, index: &DefinitionIndex, target: DefinitionTarget) -> Option<Value> {
-        if let Some(uri) = index.file_uri(target.file).map(str::to_owned) {
-            if let Some(source) = self.text_for_uri(&uri) {
-                return Some(protocol_location(&uri, source, target.span));
-            }
-            let range = self.project_symbols.declaration_range(&uri, target.span)?;
-            return Some(protocol_range(&uri, range));
-        }
-        let (uri, source) = self.source_set.get(target.file as usize)?;
-        Some(protocol_location(uri, source, target.span))
-    }
-
-    fn text_for_uri(&self, uri: &str) -> Option<&str> {
-        if let Some(open) = self.documents.get(uri) {
-            return Some(open.text.as_str());
-        }
-        self.source_set
-            .iter()
-            .find(|(candidate, _)| candidate == uri)
-            .map(|(_, source)| source.as_str())
-    }
-
-    fn references(&self, id: Option<Value>, params: Value) -> Dispatch {
-        let Some(id) = id else {
-            return Dispatch::none();
-        };
-        let progress = partial_token!(id, params);
-        let Ok(params) = serde_json::from_value::<ReferenceParams>(params) else {
-            return invalid_params(Some(id));
-        };
-        let Some(open) = self.documents.get(&params.text_document.uri) else {
-            return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
-        };
-        let Some(offset) = open.offset_at(params.position) else {
-            return invalid_params(Some(id));
-        };
-        let targets = open.definitions.get(offset).collect::<Vec<_>>();
-        if targets.is_empty() {
-            return Dispatch::messages(vec![rpc_result(id, json!([]))]);
-        }
-        // Every target has to carry an identity. A mix of bound and unbound targets still belongs
-        // to one source set, and the file-index search is what that source set can answer.
-        let mut identities = HashSet::new();
-        let mut unbound = false;
-        for target in &targets {
-            match open.definitions.declaration_identity(*target) {
-                Some(identity) => {
-                    identities.insert(identity);
-                }
-                None => unbound = true,
-            }
-        }
-        let locations = if unbound || identities.is_empty() {
-            self.reference_locations_by_file_index(&targets, params.context.include_declaration)
-        } else {
-            self.reference_locations_by_identity(&identities, params.context.include_declaration)
-        };
-        Dispatch::messages(array_messages(id, locations, progress.as_ref()))
-    }
-
-    /// References recorded before declaration identities existed: targets are file indexes in the
-    /// current source set, and only open documents are searched.
-    fn reference_locations_by_file_index(
-        &self,
-        targets: &[DefinitionTarget],
-        include_declaration: bool,
-    ) -> Vec<Value> {
-        let target_ids = targets.iter().copied().collect::<HashSet<_>>();
-        let uris = self.analyzed_uris();
-        let mut occurrences = Vec::new();
-        if include_declaration {
-            occurrences.extend(target_ids.iter().filter_map(|target| {
-                let (uri, _) = self.source_set.get(target.file as usize)?;
-                Some((uri.as_str(), target.span))
-            }));
-        }
-        for (source_file, uri) in uris.iter().enumerate() {
-            let document = &self.documents[*uri];
-            occurrences.extend(
-                document
-                    .definitions
-                    .occurrences_targeting(&target_ids)
-                    .filter(|(span, target)| {
-                        include_declaration
-                            || source_file as u32 != target.file
-                            || *span != target.span
-                    })
-                    .map(|(span, _)| (*uri, span)),
-            );
-        }
-        occurrences.sort_unstable_by_key(|(uri, span)| (*uri, span.lo, span.hi));
-        occurrences.dedup();
-        occurrences
-            .into_iter()
-            .filter_map(|(uri, span)| {
-                let source = self.text_for_uri(uri)?;
-                Some(protocol_location(uri, source, span))
-            })
-            .collect()
-    }
-
-    /// References whose targets were bound to a declaration identity. Open documents, closed-file
-    /// chunks, and the project symbol index are all searched by that identity.
-    fn reference_locations_by_identity(
-        &self,
-        identities: &HashSet<DeclarationIdentity>,
-        include_declaration: bool,
-    ) -> Vec<Value> {
-        let mut located = Vec::new();
-        if include_declaration {
-            for identity in identities {
-                self.push_declaration_location(&mut located, identity);
-            }
-        }
-        for uri in self.analyzed_uris() {
-            let document = &self.documents[uri];
-            for (span, target) in document.definitions.occurrences() {
-                let Some(identity) = document.definitions.declaration_identity(target) else {
-                    continue;
-                };
-                if !identities.contains(&identity) {
-                    continue;
-                }
-                if !include_declaration && uri == identity.uri && span == identity.span {
-                    continue;
-                }
-                self.push_source_location(&mut located, uri, span);
-            }
-        }
-        for hit in self.workspace_references.matching(identities) {
-            if self.documents.contains_key(&hit.uri) {
-                continue;
-            }
-            if !include_declaration && is_declaration_use(&hit) {
-                continue;
-            }
-            located.push((
-                hit.uri,
-                [
-                    hit.start.line,
-                    hit.start.character,
-                    hit.end.line,
-                    hit.end.character,
-                ],
-            ));
-        }
-        located.sort_unstable();
-        located.dedup();
-        located
-            .into_iter()
-            .map(|(uri, range)| protocol_range(&uri, range))
-            .collect()
-    }
-
-    fn push_declaration_location(
-        &self,
-        located: &mut Vec<(String, [u32; 4])>,
-        identity: &DeclarationIdentity,
-    ) {
-        if self.text_for_uri(&identity.uri).is_some() {
-            self.push_source_location(located, &identity.uri, identity.span);
-            return;
-        }
-        if let Some(range) = self
-            .project_symbols
-            .declaration_range(&identity.uri, identity.span)
-        {
-            located.push((identity.uri.clone(), range));
-        }
-    }
-
-    fn push_source_location(&self, located: &mut Vec<(String, [u32; 4])>, uri: &str, span: Span) {
-        let Some(source) = self.text_for_uri(uri) else {
-            return;
-        };
-        let start = byte_offset_to_position(source, span.lo as usize);
-        let end = byte_offset_to_position(source, span.hi as usize);
-        located.push((
-            uri.to_string(),
-            [start.line, start.character, end.line, end.character],
-        ));
     }
 
     fn rename(&self, id: Option<Value>, params: Value) -> Dispatch {
@@ -6070,148 +5777,6 @@ mod tests {
             "params": {"query": "OpenedType"}
         }));
         assert_eq!(opened.messages[0]["result"][0]["location"]["uri"], open_uri);
-    }
-
-    #[test]
-    fn definition_and_references_match_a_closed_file_across_source_sets() {
-        let decl_uri = "file:///Decl.kt";
-        let use_uri = "file:///Use.kt";
-        let other_uri = "file:///Other.kt";
-        let declaration = "package demo\nfun answer(): Int = 42\n";
-        let use_source = "package demo\nfun use(): Int = answer()\n";
-        let other = "package demo\nfun other(): Int = answer()\n";
-        let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let mut service = LspService::with_backend(RecordingBackend {
-            ready: true,
-            submitted,
-        });
-        service.force_initialized_for_test();
-        service.apply_symbol_index_batch(SymbolIndexBatch {
-            generation: 0,
-            attempted: vec![decl_uri.to_string()],
-            symbols: crate::WorkspaceSymbolIndex::from_disk_sources(&[(decl_uri, declaration)]),
-        });
-        service.open_document_for_test(decl_uri, declaration, 1);
-        service.open_document_for_test(use_uri, use_source, 1);
-        let _ = service.apply_analysis_batch(AnalysisBatch::from_job(
-            vec![
-                (decl_uri.into(), declaration.into(), 1),
-                (use_uri.into(), use_source.into(), 1),
-            ],
-            crate::analyze_for_lsp(&[declaration, use_source]),
-            Vec::new(),
-            false,
-        ));
-        // The source set that numbered the declaration is gone, and the file is closed. The
-        // symbol index is what still names it.
-        service.source_set.clear();
-        service.documents.remove(decl_uri);
-        service.analysis_dirty = false;
-
-        let mut closed_uses = crate::analyze_for_lsp(&[declaration, other])[1]
-            .definitions
-            .clone();
-        closed_uses.bind_uris(&[decl_uri, other_uri]);
-        let _ = service.apply_index_batch(IndexBatch {
-            generation: 0,
-            attempted: vec![other_uri.to_string()],
-            conclusive: true,
-            files: vec![IndexedFile {
-                uri: other_uri.to_string(),
-                diagnostics: Vec::new(),
-                text_hash: 1,
-                references: closed_uses,
-                text: other.to_string(),
-            }],
-        });
-
-        let definition = service.handle(json!({
-            "jsonrpc": "2.0",
-            "id": "definition",
-            "method": "textDocument/definition",
-            "params": {
-                "textDocument": {"uri": use_uri},
-                "position": {"line": 1, "character": 18}
-            }
-        }));
-        assert_eq!(
-            definition.messages[0]["result"],
-            json!([{
-                "uri": decl_uri,
-                "range": {
-                    "start": {"line": 1, "character": 4},
-                    "end": {"line": 1, "character": 10}
-                }
-            }])
-        );
-
-        // Same name span the open-file references test pins for `answer`, including the closed
-        // file whose source is `fun other(): Int = answer()`.
-        let references = service.handle(json!({
-            "jsonrpc": "2.0",
-            "id": "references",
-            "method": "textDocument/references",
-            "params": {
-                "textDocument": {"uri": use_uri},
-                "position": {"line": 1, "character": 18},
-                "context": {"includeDeclaration": true}
-            }
-        }));
-        assert_eq!(
-            references.messages[0]["result"],
-            json!([
-                {
-                    "uri": decl_uri,
-                    "range": {
-                        "start": {"line": 1, "character": 4},
-                        "end": {"line": 1, "character": 10}
-                    }
-                },
-                {
-                    "uri": other_uri,
-                    "range": {
-                        "start": {"line": 1, "character": 19},
-                        "end": {"line": 1, "character": 25}
-                    }
-                },
-                {
-                    "uri": use_uri,
-                    "range": {
-                        "start": {"line": 1, "character": 17},
-                        "end": {"line": 1, "character": 23}
-                    }
-                }
-            ])
-        );
-        let uses_only = service.handle(json!({
-            "jsonrpc": "2.0",
-            "id": "uses-only",
-            "method": "textDocument/references",
-            "params": {
-                "textDocument": {"uri": use_uri},
-                "position": {"line": 1, "character": 18},
-                "context": {"includeDeclaration": false}
-            }
-        }));
-        assert_eq!(
-            uses_only.messages[0]["result"],
-            json!([
-                {
-                    "uri": other_uri,
-                    "range": {
-                        "start": {"line": 1, "character": 19},
-                        "end": {"line": 1, "character": 25}
-                    }
-                },
-                {
-                    "uri": use_uri,
-                    "range": {
-                        "start": {"line": 1, "character": 17},
-                        "end": {"line": 1, "character": 23}
-                    }
-                }
-            ])
-        );
     }
 
     #[test]

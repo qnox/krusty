@@ -447,6 +447,11 @@ pub struct DefinitionIndex {
     /// Not on the worker wire: the worker is handed sources, never URIs.
     #[serde(default, skip)]
     bound_uris: HashMap<u32, String>,
+    /// Declaration name text at `(file, span.lo, span.hi)` when the source set was still in hand.
+    /// A later edit can put a different declaration on the same bytes; the name is what proves the
+    /// span still means this declaration.
+    #[serde(default, skip)]
+    declaration_names: HashMap<(u32, u32, u32), String>,
 }
 
 /// Classpath definitions keyed by their source occurrence.
@@ -1071,6 +1076,15 @@ impl ProjectSymbolIndex {
             .rev()
             .find_map(|segment| segment.declaration_range(uri, span))
     }
+
+    /// Newest layer first. The name currently recorded at `span`, so a retained use can tell that
+    /// the span still belongs to the declaration it was bound to.
+    pub fn declaration_name(&self, uri: &str, span: Span) -> Option<&str> {
+        self.segments
+            .iter()
+            .rev()
+            .find_map(|segment| segment.declaration_name(uri, span))
+    }
 }
 
 /// The match qualities the ladder walks, strongest first.
@@ -1543,6 +1557,16 @@ impl WorkspaceSymbolIndex {
             .iter()
             .find(|entry| entry[0] == file && entry[1] == span.lo && entry[2] == span.hi)?;
         Some([entry[3], entry[4], entry[5], entry[6]])
+    }
+
+    /// The declaration name whose selection span is `span` in `uri`.
+    pub fn declaration_name(&self, uri: &str, span: Span) -> Option<&str> {
+        let file = self.files.iter().position(|candidate| candidate == uri)? as u32;
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| entry[0] == file && entry[1] == span.lo && entry[2] == span.hi)?;
+        self.names.get(entry[10] as usize).map(String::as_str)
     }
 
     fn lowercase_name(&self, entry_index: u32) -> Option<&str> {
@@ -2729,6 +2753,7 @@ impl DefinitionIndex {
         Self {
             entries: vec![[u32::MAX; 5]; entry_count],
             bound_uris: HashMap::new(),
+            declaration_names: HashMap::new(),
         }
     }
 
@@ -2751,6 +2776,7 @@ impl DefinitionIndex {
         Self {
             entries,
             bound_uris: HashMap::new(),
+            declaration_names: HashMap::new(),
         }
     }
 
@@ -2863,10 +2889,46 @@ impl DefinitionIndex {
         })
     }
 
+    /// Snapshot each target's name from `sources`, which are aligned with the file indexes.
+    ///
+    /// Call after remapping, while those sources are still in hand. The snapshot is not on the
+    /// worker wire: the host has the texts the worker was given.
+    pub fn record_declaration_names(&mut self, sources: &[&str]) {
+        if !self.declaration_names.is_empty() {
+            return;
+        }
+        for entry in &self.entries {
+            let key = (entry[2], entry[3], entry[4]);
+            if self.declaration_names.contains_key(&key) {
+                continue;
+            }
+            let Some(name) = sources
+                .get(entry[2] as usize)
+                .and_then(|source| source.get(entry[3] as usize..entry[4] as usize))
+            else {
+                continue;
+            };
+            if name.is_empty() {
+                continue;
+            }
+            self.declaration_names.insert(key, name.to_string());
+        }
+    }
+
+    /// Name recorded for `target` when its source set was indexed.
+    pub fn declaration_name(&self, target: DefinitionTarget) -> Option<&str> {
+        self.declaration_names
+            .get(&(target.file, target.span.lo, target.span.hi))
+            .map(String::as_str)
+    }
+
     fn remap_files(&mut self, remaps: &[(u32, u32)]) {
         if remaps.is_empty() {
             return;
         }
+        // File indexes are about to change. A snapshot keyed by the old indexes would authenticate
+        // the wrong source. The host records names again after the remap.
+        self.declaration_names.clear();
         for entry in &mut self.entries {
             if let Ok(index) = remaps.binary_search_by_key(&entry[2], |(file, _)| *file) {
                 entry[2] = remaps[index].1;

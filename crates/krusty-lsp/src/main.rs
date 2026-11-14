@@ -1115,8 +1115,13 @@ impl WorkerHost {
         if !support_only {
             let mut uris = documents.iter().map(|(uri, _)| *uri).collect::<Vec<_>>();
             uris.extend(support.iter().map(|(uri, _)| uri.as_str()));
+            let mut sources = documents.iter().map(|(_, text)| *text).collect::<Vec<_>>();
+            sources.extend(support.iter().map(|(_, text)| text.as_str()));
             for analysis in &mut analyses {
                 analysis.workspace_references.bind_uris(&uris);
+                analysis
+                    .workspace_references
+                    .record_declaration_names(&sources);
             }
         }
         self.support_probe = false;
