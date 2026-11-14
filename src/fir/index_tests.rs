@@ -1036,6 +1036,64 @@ fn a_dependency_extension_publishes_its_kotlin_name() {
 }
 
 #[test]
+fn language_function_classifier_retains_external_invoke_override_edge() {
+    let provider = crate::klib_libraries::KlibLibraries::from_packages(Vec::new())
+        .expect("the language-owned function classifiers need no serialized KLIB");
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &[SourceInput::kotlin(
+            "class Target : (Int) -> String {\n\
+                 override fun invoke(value: Int): String = \"OK\"\n\
+             }\n",
+        )
+        .with_file_stem("LanguageFunctionInvokeOverride")],
+        crate::frontend::PlatformProvider::jvm(Box::new(provider)),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("Pass 1 must finalize")
+        .module
+        .index();
+    let implementation = (0..index.declaration_count())
+        .map(|raw| DeclarationId::from_raw(raw as u32))
+        .find(|declaration| {
+            index
+                .classifier_header(*declaration)
+                .is_some_and(|header| header.classifier.segment_ref() == "Target")
+        })
+        .expect("Target classifier");
+    let edge = index
+        .function_overrides(implementation)
+        .iter()
+        .find(|edge| edge.name.as_ref() == "invoke")
+        .expect("Target.invoke must retain the language interface edge");
+    assert!(matches!(
+        edge.overridden,
+        ResolvedFunctionOverrideTarget::External(_)
+    ));
+    assert!(edge.overridden_is_interface);
+    assert_eq!(
+        edge.overridden_semantic_role,
+        Some(crate::types::SemanticCallRole::KotlinFunctionInvoke)
+    );
+    assert_eq!(
+        edge.overridden_owner,
+        crate::types::type_name("kotlin/Function1")
+    );
+    assert_eq!(
+        edge.applied_parameters
+            .iter()
+            .map(|ty| ty.get())
+            .collect::<Vec<_>>(),
+        [crate::types::Ty::Int]
+    );
+}
+
+#[test]
 fn value_class_override_publishes_the_generic_interface_edge() {
     let (Some(stdlib), Some(jdk)) = (
         crate::toolchain::stdlib_jar(),
