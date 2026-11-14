@@ -12,7 +12,6 @@ use crate::backend::CheckedBackendCallables;
 pub(super) fn record_checked(
     callables: &mut CheckedBackendCallables,
     ir: &crate::ir::IrFile,
-    source: &dyn crate::symbol_source::SymbolSource,
 ) -> Result<(), crate::fir::ExternalCallableId> {
     let mut implementations = ir.external_builtin_implementations.clone();
     for (&identity, checked) in callables.klib_builtin_implementations() {
@@ -26,10 +25,5 @@ pub(super) fn record_checked(
             }
         }
     }
-    let implementations = crate::resolve::for_checked_external_members(
-        source,
-        callables.external_member_identities(),
-        &implementations,
-    )?;
     callables.record_checked_builtin_implementations(&implementations)
 }

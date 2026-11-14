@@ -2,7 +2,6 @@
 
 use crate::fir::{BuiltinImplementation, ExternalCallableId};
 use crate::symbol_resolver::{builtin_implementation_facts, ResolvedMember};
-use crate::symbol_source::SymbolSource;
 use crate::types::{SemanticCallableOwner, TypeName};
 
 use super::{Checker, ExprLowering, ResolvedCall, StmtLowering};
@@ -158,49 +157,6 @@ pub(super) fn for_checked_unit(checker: &Checker<'_>) -> Result<Facts, ExternalC
     Ok(facts)
 }
 
-/// Complete builtin facts for every exact external member already present in finalized IR. Inline
-/// KLIB templates and compiler-generated checked operations can introduce member identities after
-/// ordinary source-body checking, so the checker closes the same contract at the checked backend
-/// handoff before emission starts.
-pub(crate) fn for_checked_external_members(
-    source: &dyn SymbolSource,
-    identities: impl IntoIterator<Item = ExternalCallableId>,
-    already_checked: &Facts,
-) -> Result<Facts, ExternalCallableId> {
-    let mut facts = Facts::default();
-    for identity in identities {
-        if let Some(checked) = already_checked.get(&identity) {
-            facts.insert(identity, checked.clone());
-            continue;
-        }
-        let realization = source.external_callable(identity).ok_or(identity)?;
-        if realization.callable.external_identity != Some(identity) {
-            return Err(identity);
-        }
-        if realization.kind != crate::libraries::ExternalCallableKind::Member {
-            continue;
-        }
-        let Some(SemanticCallableOwner::Classifier(owner)) = realization.declaration_owner else {
-            return Err(identity);
-        };
-        let name = match realization.callable.external_property_identity {
-            Some(property) => {
-                let property = source.external_property(property).ok_or(identity)?;
-                if property.getter != identity && property.setter != Some(identity) {
-                    return Err(identity);
-                }
-                property.name
-            }
-            None => realization.callable.name,
-        };
-        facts.insert(
-            identity,
-            builtin_implementation_facts(source, owner, &name, identity),
-        );
-    }
-    Ok(facts)
-}
-
 fn record_property_setter(
     checker: &Checker<'_>,
     selected: &mut crate::fx_hash::HashMap<ExternalCallableId, (TypeName, Box<str>)>,
@@ -242,39 +198,4 @@ fn record_member(
         .entry(identity)
         .or_insert_with(|| (owner, member.member.name.clone().into_boxed_str()));
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn checked_external_member_facts_cover_exact_ir_references() {
-        let source = crate::libraries::EmptySymbolSource;
-        let (functions, _) = crate::symbol_resolver::declared_member_declarations(
-            &source,
-            crate::types::Ty::obj_name(crate::types::wk::any()),
-            "toString",
-        )
-        .into_parts();
-        let [function] = functions.overloads.as_slice() else {
-            panic!("the common class model declares one Any.toString member");
-        };
-        let identity = function
-            .callable
-            .external_identity
-            .expect("the member has a provider identity");
-
-        let facts = for_checked_external_members(&source, [identity], &Facts::default())
-            .expect("the exact checked member has complete override facts");
-        assert!(facts.contains_key(&identity));
-        assert!(matches!(
-            for_checked_external_members(
-                &source,
-                [ExternalCallableId::from_raw(u32::MAX)],
-                &Facts::default(),
-            ),
-            Err(identity) if identity == ExternalCallableId::from_raw(u32::MAX)
-        ));
-    }
 }
