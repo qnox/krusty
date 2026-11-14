@@ -265,10 +265,15 @@ fn property_plan(
         )
         .map_err(Some)?;
         let setter_substitutions = match setter {
-            Some(FirPropertyTarget::External {
-                property: setter_property,
-                ..
-            }) if setter_property == property_id => {
+            Some(setter)
+                if matches!(
+                    setter.as_ref(),
+                    FirPropertyTarget::External {
+                        property: setter_property,
+                        ..
+                    } if setter_property == property_id
+                ) =>
+            {
                 let Some(setter_target) = property_fact.setter else {
                     return reason(
                         "a mutable dependency property has no frozen setter identity".to_string(),
