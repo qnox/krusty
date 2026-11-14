@@ -1110,8 +1110,15 @@ impl WorkerHost {
         std::mem::swap(&mut self.project_sources, &mut self.index_project_sources);
         self.index_diagnostics_only = true;
         self.support_probe = support_only;
-        let (analyses, _support) =
+        let (mut analyses, support) =
             krusty_lsp::Analysis::analyze_open_documents(self, &documents, &indexed_uris);
+        if !support_only {
+            let mut uris = documents.iter().map(|(uri, _)| *uri).collect::<Vec<_>>();
+            uris.extend(support.iter().map(|(uri, _)| uri.as_str()));
+            for analysis in &mut analyses {
+                analysis.workspace_references.bind_uris(&uris);
+            }
+        }
         self.support_probe = false;
         self.index_diagnostics_only = false;
         std::mem::swap(&mut self.project_sources, &mut self.index_project_sources);
@@ -1135,6 +1142,7 @@ impl WorkerHost {
                 uri,
                 diagnostics: analysis.diagnostics,
                 text_hash: krusty_lsp::workspace_text_hash(&text),
+                references: analysis.workspace_references,
                 text,
             })
             .collect();

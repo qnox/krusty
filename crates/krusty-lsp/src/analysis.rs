@@ -428,9 +428,25 @@ pub struct Completion<'a> {
 /// `(source lo, source hi, target file, target lo, target hi)`.
 type DefinitionEntry = [u32; 5];
 
-#[derive(Clone, Default, Deserialize, Serialize)]
+/// A declaration named by its file and the span of its name.
+///
+/// A definition target's file number is an index into one analyzed source set. That number is
+/// meaningless in the next chunk. This identity is the file's URI plus the name span, which a
+/// closed-file symbol index records for the same declaration, so a reference and a go-to-definition
+/// can meet across source sets.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct DeclarationIdentity {
+    pub uri: String,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct DefinitionIndex {
     entries: Vec<DefinitionEntry>,
+    /// Source-set file index to URI. Empty until the supervisor binds the file list it knows.
+    /// Not on the worker wire: the worker is handed sources, never URIs.
+    #[serde(default, skip)]
+    bound_uris: HashMap<u32, String>,
 }
 
 /// Classpath definitions keyed by their source occurrence.
@@ -1047,6 +1063,14 @@ impl ProjectSymbolIndex {
     pub fn segment_count(&self) -> usize {
         self.segments.len()
     }
+
+    /// Newest layer first, so an edited buffer's declaration wins over the closed-file copy.
+    pub fn declaration_range(&self, uri: &str, span: Span) -> Option<[u32; 4]> {
+        self.segments
+            .iter()
+            .rev()
+            .find_map(|segment| segment.declaration_range(uri, span))
+    }
 }
 
 /// The match qualities the ladder walks, strongest first.
@@ -1506,6 +1530,19 @@ impl WorkspaceSymbolIndex {
         });
         self.by_name = by_name;
         self.by_initials = by_initials;
+    }
+
+    /// The protocol range of the declaration whose name occupies `span` in `uri`.
+    ///
+    /// Parse-only indexing records that name span, so a reference bound to the same URI and span
+    /// resolves here after the source set that numbered the file has been dropped.
+    pub fn declaration_range(&self, uri: &str, span: Span) -> Option<[u32; 4]> {
+        let file = self.files.iter().position(|candidate| candidate == uri)? as u32;
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| entry[0] == file && entry[1] == span.lo && entry[2] == span.hi)?;
+        Some([entry[3], entry[4], entry[5], entry[6]])
     }
 
     fn lowercase_name(&self, entry_index: u32) -> Option<&str> {
@@ -2691,6 +2728,7 @@ impl DefinitionIndex {
     pub(crate) fn wire_saturation_fixture(entry_count: usize) -> Self {
         Self {
             entries: vec![[u32::MAX; 5]; entry_count],
+            bound_uris: HashMap::new(),
         }
     }
 
@@ -2710,7 +2748,10 @@ impl DefinitionIndex {
         entries.sort_unstable();
         entries.dedup();
         entries.truncate(available);
-        Self { entries }
+        Self {
+            entries,
+            bound_uris: HashMap::new(),
+        }
     }
 
     fn from_occurrences(
@@ -2773,6 +2814,53 @@ impl DefinitionIndex {
 
     pub fn entry_count(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Every use this index recorded, in source order.
+    pub fn occurrences(&self) -> impl Iterator<Item = (Span, DefinitionTarget)> + '_ {
+        self.entries.iter().map(|entry| {
+            (
+                Span::new(entry[0], entry[1]),
+                DefinitionTarget {
+                    file: entry[2],
+                    span: Span::new(entry[3], entry[4]),
+                },
+            )
+        })
+    }
+
+    /// Remember which URI each source-set file index names.
+    ///
+    /// Call once, after navigation file indexes have been remapped into `uris`. A later chunk
+    /// cannot see those indexes; the URI and the declaration's name span still name it.
+    pub fn bind_uris(&mut self, uris: &[&str]) {
+        if !self.bound_uris.is_empty() || uris.is_empty() {
+            return;
+        }
+        let mut referenced = HashSet::new();
+        for entry in &self.entries {
+            referenced.insert(entry[2]);
+        }
+        for file in referenced {
+            let Some(uri) = uris.get(file as usize).copied() else {
+                continue;
+            };
+            if uri.is_empty() {
+                continue;
+            }
+            self.bound_uris.insert(file, uri.to_string());
+        }
+    }
+
+    pub fn file_uri(&self, file: u32) -> Option<&str> {
+        self.bound_uris.get(&file).map(String::as_str)
+    }
+
+    pub fn declaration_identity(&self, target: DefinitionTarget) -> Option<DeclarationIdentity> {
+        Some(DeclarationIdentity {
+            uri: self.file_uri(target.file)?.to_string(),
+            span: target.span,
+        })
     }
 
     fn remap_files(&mut self, remaps: &[(u32, u32)]) {
@@ -3351,14 +3439,19 @@ pub struct IndexOutcome {
     pub conclusive: bool,
 }
 
-/// One workspace file's indexing result. Only diagnostics and the text hash are retained; the
-/// rich per-document indices are derived while indexing and dropped, because a swept file is
-/// re-analysed interactively the moment it is opened.
+/// One workspace file's indexing result.
+///
+/// Diagnostics and declaration-identity references are retained. Hover, tokens, and the other
+/// navigation indexes are not: a swept file is re-analysed interactively when it is opened.
+/// Parse-only declarations stay in the project symbol index.
 #[derive(Clone, Debug)]
 pub struct IndexedFile {
     pub uri: String,
     pub diagnostics: Vec<Diagnostic>,
     pub text_hash: u64,
+    /// Uses in this file, with each target bound to a declaration identity when the chunk's URI
+    /// list was known. Empty for a caller that only supplied diagnostics.
+    pub references: DefinitionIndex,
     /// Retained only until the store resolves byte spans to line and UTF-16 column, then dropped.
     /// Resolving later would need the text again, and re-reading would race the sweep.
     pub text: String,
@@ -3372,6 +3465,10 @@ pub struct DocumentAnalysis {
     pub signature_help: SignatureHelpIndex,
     pub semantic_tokens: SemanticTokenIndex,
     pub definitions: DefinitionIndex,
+    /// Uses retained from a closed-file chunk. Interactive analysis leaves this empty and serves
+    /// references from `definitions`; indexing fills it so a chunk can be dropped without losing
+    /// the declaration identity of each use.
+    pub workspace_references: DefinitionIndex,
     pub type_definitions: DefinitionIndex,
     pub implementations: DefinitionIndex,
     pub library_definitions: LibraryDefinitionIndex,
@@ -3531,6 +3628,7 @@ impl DocumentAnalysis {
                 signature_help,
                 semantic_tokens,
                 definitions,
+                workspace_references: DefinitionIndex::default(),
                 library_definitions,
                 type_definitions: DefinitionIndex::default(),
                 implementations: DefinitionIndex::default(),
@@ -3552,6 +3650,7 @@ impl DocumentAnalysis {
             signature_help: SignatureHelpIndex::default(),
             semantic_tokens: SemanticTokenIndex::default(),
             definitions: DefinitionIndex::default(),
+            workspace_references: DefinitionIndex::default(),
             type_definitions: DefinitionIndex::default(),
             implementations: DefinitionIndex::default(),
             library_definitions: LibraryDefinitionIndex::default(),
@@ -3568,6 +3667,7 @@ impl DocumentAnalysis {
 
     pub fn remap_navigation_files(&mut self, remaps: &[(u32, u32)], retained_file_count: usize) {
         self.definitions.remap_files(remaps);
+        self.workspace_references.remap_files(remaps);
         self.type_definitions.remap_files(remaps);
         self.implementations.remap_files(remaps);
         self.workspace_symbols
@@ -3607,6 +3707,7 @@ impl DocumentAnalysis {
             &self.signature_help,
             &self.semantic_tokens,
             &self.definitions,
+            &self.workspace_references,
             &self.type_definitions,
             &self.implementations,
             &self.library_definitions,
@@ -3627,6 +3728,7 @@ impl DocumentAnalysis {
         self.signature_help = SignatureHelpIndex::default();
         self.semantic_tokens = SemanticTokenIndex::default();
         self.definitions = DefinitionIndex::default();
+        self.workspace_references = DefinitionIndex::default();
         self.type_definitions = DefinitionIndex::default();
         self.implementations = DefinitionIndex::default();
         self.library_definitions = LibraryDefinitionIndex::default();
@@ -4636,6 +4738,30 @@ mod tests {
             );
         }
         assert!(indexed.is_complete());
+    }
+
+    #[test]
+    fn a_definition_target_matches_the_closed_file_symbol_by_identity() {
+        let declaration = "package demo\nfun answer(): Int = 42\n";
+        let use_source = "package demo\nfun use(): Int = answer()\n";
+        let analyses = source_set_documents::analyze_for_lsp(&[declaration, use_source]);
+        let mut references = analyses[1].definitions.clone();
+        references.bind_uris(&["file:///Decl.kt", "file:///Use.kt"]);
+        let occurrence = references
+            .occurrences()
+            .find(|(span, _)| use_source.get(span.lo as usize..span.hi as usize) == Some("answer"))
+            .expect("the use names answer");
+        let identity = references
+            .declaration_identity(occurrence.1)
+            .expect("the target is bound to the declaration file");
+
+        assert_eq!(identity.uri, "file:///Decl.kt");
+        let symbols = WorkspaceSymbolIndex::from_disk_sources(&[("file:///Decl.kt", declaration)]);
+        assert_eq!(
+            symbols.declaration_range(&identity.uri, identity.span),
+            Some([1, 4, 1, 10]),
+            "the closed-file symbol selects the same name span go-to-definition returns"
+        );
     }
 
     /// Parse-only indexing keeps every file whatever its size: a declaration past several
