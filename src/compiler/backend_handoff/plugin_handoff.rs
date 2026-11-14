@@ -11,7 +11,6 @@ use crate::plugins::runtime_declarations::{
     BoundRuntimeFunction, PluginClassifier, PluginRuntime, RuntimeDeclaration, RuntimeFunction,
 };
 use crate::plugins::{CheckedSourceFacts, DependencyCallableShape, DependencyDeclaration};
-use crate::symbol_resolver::declared_member_callables;
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{Ty, TypeName};
 
@@ -107,7 +106,14 @@ impl PluginRuntime for HandoffRuntime<'_> {
                 FnKind::TopLevel,
             ),
             RuntimeDeclaration::Member(owner) => (
-                declared_member_callables(self.source, Ty::obj_name(owner), function.name),
+                // The plugin contract names the declaring classifier, so read its normalized
+                // declaration table directly.
+                self.source
+                    .classifier(owner)
+                    .and_then(|classifier| {
+                        classifier.declared_callables.get(function.name).cloned()
+                    })
+                    .unwrap_or(crate::libraries::Callables::None),
                 FnKind::Member,
             ),
             // A classifier's static functions take no receiver: they live in its own namespace.
@@ -121,6 +127,7 @@ impl PluginRuntime for HandoffRuntime<'_> {
         };
         let mut selected = declared.functions().iter().filter(|candidate| {
             candidate.kind == kind
+                && !candidate.flags.deprecated_hidden
                 && candidate.callable.params == function.params
                 && candidate.callable.ret == function.ret
         });
@@ -160,5 +167,79 @@ impl PluginRuntime for HandoffRuntime<'_> {
             supertypes: fact.supertypes.to_vec(),
             annotations: fact.annotations.to_vec(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::libraries::{
+        Callables, FunctionInfo, FunctionSet, LibraryCallable, ResolvedSymbols,
+    };
+    use crate::symbol_source::SymbolNamespace;
+    use std::rc::Rc;
+
+    struct Declarations(ResolvedSymbols);
+
+    impl SymbolSource for Declarations {
+        fn symbols(&self, _namespace: SymbolNamespace, _name: &str) -> Rc<ResolvedSymbols> {
+            Rc::new(self.0.clone())
+        }
+    }
+
+    struct NoClassifiers;
+
+    impl BackendClassifierSource for NoClassifiers {
+        fn classifier(
+            &self,
+            _classifier: TypeName,
+        ) -> Option<std::sync::Arc<crate::backend::BackendClassifierFact>> {
+            None
+        }
+    }
+
+    fn runtime(owner: TypeName, target: ExternalCallableId) -> (Declarations, RuntimeFunction) {
+        let mut callable =
+            LibraryCallable::library(owner, "run", vec![Ty::Int], Ty::Unit, Ty::Unit, "(I)V");
+        callable.external_identity = Some(target);
+        let candidate = FunctionInfo::plain(FnKind::TopLevel, None, callable);
+        (
+            Declarations(ResolvedSymbols {
+                callables: Callables::Functions(FunctionSet {
+                    overloads: vec![candidate],
+                }),
+                ..ResolvedSymbols::default()
+            }),
+            RuntimeFunction {
+                declaration: RuntimeDeclaration::Package(owner),
+                name: "run",
+                params: vec![Ty::Int],
+                ret: Ty::Unit,
+                appended: Vec::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn runtime_binding_uses_one_exact_declared_candidate() {
+        let owner = crate::types::type_name("example/Runtime");
+        let target = ExternalCallableId::from_raw(7);
+        let (declared, runtime) = runtime(owner, target);
+        let mut handoff = HandoffRuntime::new(&declared, &NoClassifiers);
+        assert_eq!(handoff.function(&runtime).unwrap().target, target);
+    }
+
+    #[test]
+    fn runtime_binding_rejects_ambiguous_exact_declarations() {
+        let owner = crate::types::type_name("example/Runtime");
+        let (mut declared, runtime) = runtime(owner, ExternalCallableId::from_raw(7));
+        let Callables::Functions(functions) = &mut declared.0.callables else {
+            unreachable!()
+        };
+        let mut duplicate = functions.overloads[0].clone();
+        duplicate.callable.external_identity = Some(ExternalCallableId::from_raw(8));
+        functions.overloads.push(duplicate);
+        let mut handoff = HandoffRuntime::new(&declared, &NoClassifiers);
+        assert!(handoff.function(&runtime).is_err());
     }
 }
