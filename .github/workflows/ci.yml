@@ -40,7 +40,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence
-          source=7c4e1d6a6
+          source=870cf98e0
           git diff --exit-code "$source" HEAD -- . ':!.github/workflows/ci.yml'
           git rev-parse "$source" > evidence/source-commit.txt
           sha256sum \
@@ -57,6 +57,7 @@ jobs:
           cat evidence/build.log
           tail -n 1 evidence/build.log > evidence/binary-path.txt
           cp "$(tail -n 1 evidence/build.log)" conformance-bin
+          cp conformance-bin evidence/conformance-bin
           sha256sum conformance-bin > evidence/binary.sha256
       - name: provision exact JVM, Native, and Wasm inputs
         run: |
