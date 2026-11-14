@@ -465,7 +465,6 @@ closures/localFunctionInInitBlock.kt
 collectionLiterals/primitiveArrays.kt
 collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
-collectionLiterals/unsignedArrays.kt
 collections/addCollectionStubWithCovariantOverride.kt
 collections/clashWithInternalMapMethod.kt
 collections/inSetWithSmartCast.kt

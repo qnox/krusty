@@ -239,7 +239,6 @@ closures/kt47894_inlineFunWithObjectWithNothing.kt
 collectionLiterals/primitiveArrays.kt
 collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
-collectionLiterals/unsignedArrays.kt
 collections/clashWithInternalMapMethod.kt
 collections/inheritFromAbstractMutableListInt.kt
 companionBlocksAndExtensions/abstractClasses.kt
