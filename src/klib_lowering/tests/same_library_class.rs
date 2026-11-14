@@ -1266,7 +1266,8 @@ fn helper_calling_class(helper: KlibPublicIdSignature) -> KlibIrDeclarationTree 
 fn reached_constructor_class_facts_keep_field_and_init_edges_separate_from_body_roots() {
     const FIELD: Shape = ("fieldEffect", &[], T::Int);
     const INIT: Shape = ("initEffect", &[], T::Int);
-    let shapes = [FIELD, INIT];
+    const UNUSED: Shape = ("unusedEffect", &[], T::Int);
+    let shapes = [FIELD, INIT, UNUSED];
     let build = |_: &str, body: &mut super::demo_package::Body| {
         let value = body.int(1);
         Some(vec![body.ret(value)])
@@ -1274,6 +1275,7 @@ fn reached_constructor_class_facts_keep_field_and_init_edges_separate_from_body_
     let signed = demo_with(&shapes, Vec::new(), build);
     let field_key = signed.callable("fieldEffect").identity().clone();
     let init_key = signed.callable("initEffect").identity().clone();
+    let unused_key = signed.callable("unusedEffect").identity().clone();
     let public = |key: &crate::libraries::KlibDependencyCallable| match &key.declaration {
         crate::libraries::KlibDeclarationSignature::Public(signature) => signature.clone(),
         _ => panic!("public effect"),
@@ -1315,7 +1317,7 @@ fn reached_constructor_class_facts_keep_field_and_init_edges_separate_from_body_
             public_symbol(KlibIrSymbolKind::Class, class_key),
             public_symbol(KlibIrSymbolKind::Constructor, constructor_key.clone()),
         ),
-        |arena, _| {
+        |arena, class_ty| {
             let int = arena.push_type(T::Int.klib());
             let mut call = |key: &crate::libraries::KlibDependencyCallable| {
                 arena.push_expr(
@@ -1333,7 +1335,35 @@ fn reached_constructor_class_facts_keep_field_and_init_edges_separate_from_body_
             };
             let field_call = call(&field_key);
             let init_call = call(&init_key);
+            let unused_call = call(&unused_key);
+            let unused_member = arena.push_function(KlibIrFunction {
+                base: private(base(file_local(KlibIrSymbolKind::Function, MEMBER_SLOT))),
+                name: "unused".into(),
+                constructor: false,
+                type_parameters: Vec::new(),
+                dispatch_receiver: Some(KlibIrParameter {
+                    base: base(file_local(
+                        KlibIrSymbolKind::ValueParameter,
+                        MEMBER_THIS_SLOT,
+                    )),
+                    name: "<this>".into(),
+                    ty: class_ty,
+                    vararg_element_type: None,
+                    default_value: None,
+                }),
+                context_parameters: Vec::new(),
+                extension_receiver: None,
+                regular_parameters: Vec::new(),
+                return_type: int,
+                overridden: Vec::new(),
+                companion_extension_class: None,
+                prepared_inline_file: None,
+                body: Some(KlibIrBody::Block(vec![KlibIrStatement::Expression(
+                    unused_call,
+                )])),
+            });
             vec![
+                KlibIrMember::Function(unused_member),
                 KlibIrMember::Field(field(MARK_SLOT, "effect", int, field_call)),
                 KlibIrMember::AnonymousInitializer {
                     base: base(file_local(KlibIrSymbolKind::Class, INITIALIZER_SLOT)),
