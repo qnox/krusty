@@ -41,6 +41,15 @@ pub(in crate::codegen) fn select(
     }
     let owner = library_member_owner(fact)?;
     let identity = classifiers.classifier(owner)?.klib_identity.clone()?;
+    // An overridable declaration on a final ordinary class has no subclass implementation to
+    // select. Its authenticated KLIB body remains a direct dependency call in both phases.
+    if fact
+        .klib_body_class_contract
+        .as_ref()
+        .is_some_and(|contract| contract.proves_final_class(&identity, owner))
+    {
+        return None;
+    }
     let Some(modifiers) = fact.klib_body_declaration_modifiers else {
         return Some(Err(
             "a selected class member without its authenticated declaration modality".into(),
