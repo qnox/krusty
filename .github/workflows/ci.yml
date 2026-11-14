@@ -279,9 +279,9 @@ jobs:
         with:
           path: target/cache/box-corpus
           # The checkout carries the box corpus, the mock JDK its tests compile against, the CLI
-          # corpus, the bytecode corpora, and the test-generator sources that select each target's
+          # corpus, the diagnostics test data, the bytecode corpora, and the test-generator sources that select each target's
           # cases. A key hit is never re-saved, so the key changes whenever those inputs do.
-          key: box-cli-and-generator-corpus-v3-${{ hashFiles('kotlin-versions', 'scripts/box_selection.py', 'tests/box_selection_sources.txt') }}
+          key: box-cli-diagnostics-and-generator-corpus-v4-${{ hashFiles('kotlin-versions', 'scripts/box_selection.py', 'tests/box_selection_sources.txt') }}
       # A hit must already hold every corpus input: provisioning then refuses to fetch.
       - name: forbid corpus fetches after a cache hit
         if: steps.box-corpus.outputs.cache-hit == 'true'
@@ -740,9 +740,9 @@ jobs:
         with:
           path: target/cache/box-corpus/${{ matrix.version }}
           # The checkout carries the box corpus, the mock JDK its tests compile against, the CLI
-          # corpus, the bytecode corpora, and the test-generator sources that select each target's
+          # corpus, the diagnostics test data, the bytecode corpora, and the test-generator sources that select each target's
           # cases. A key hit is never re-saved, so the key changes whenever those inputs do.
-          key: box-cli-and-generator-corpus-v3-${{ matrix.version }}-${{ hashFiles('kotlin-versions', 'scripts/box_selection.py', 'tests/box_selection_sources.txt') }}
+          key: box-cli-diagnostics-and-generator-corpus-v4-${{ matrix.version }}-${{ hashFiles('kotlin-versions', 'scripts/box_selection.py', 'tests/box_selection_sources.txt') }}
       # A hit must already hold every corpus input: provisioning then refuses to fetch.
       - name: forbid corpus fetches after a cache hit (${{ matrix.version }})
         if: steps.box-corpus.outputs.cache-hit == 'true'
@@ -831,6 +831,15 @@ jobs:
           just conformance-run "$PWD/conformance-bin" "${{ matrix.version }}" jvm-byte-equality.txt > pct.txt
           bash scripts/conformance-badge.sh fields conformance pct.txt "${{ matrix.version }}"
           bash scripts/conformance-badge.sh fields jvm-byte-equality jvm-byte-equality.txt "${{ matrix.version }}"
+      # kotlinc's diagnostics test data, scored by false accepts against
+      # tests/diagnostics_false_accepts. Its kotlinc results are box reference compiles, restored
+      # with the box references and saved with them after the JVM steps that fill that cache.
+      # This job runs only on merge-queue branches and dispatched master runs, like the other lanes.
+      - name: run diagnostics conformance ${{ matrix.version }}
+        if: matrix.target == 'jvm' && matrix.version == needs.build-tool-bins.outputs.max
+        env:
+          KRUSTY_DIAGNOSTICS_TIMEOUT_SECONDS: "10800"
+        run: just diagnostics-conformance "$PWD/conformance-bin" "${{ matrix.version }}"
       - name: run native box conformance ${{ matrix.version }}
         if: matrix.target == 'native'
         id: native_box
