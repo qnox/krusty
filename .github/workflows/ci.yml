@@ -112,11 +112,6 @@ jobs:
           done
           printf 'syntax-checked %s runtime sources for x86_64, aarch64, and riscv64\n' "${#sources[@]}" \
             | tee ../../evidence/c-preflight-summary.txt
-      - name: provision Native crash inspection tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! command -v gdb >/dev/null; then sudo apt-get update && sudo apt-get install -y gdb; fi
       - name: build conformance executable once
         id: build_conformance
         timeout-minutes: 40
@@ -146,10 +141,15 @@ jobs:
           cat /proc/sys/kernel/core_pattern > evidence/core-pattern-original.txt
           cat evidence/core-pattern-original.txt >> evidence/native-diagnostic-environment.txt
           cat /proc/sys/kernel/core_uses_pid >> evidence/native-diagnostic-environment.txt
-          sudo sysctl -w "kernel.core_pattern=$GITHUB_WORKSPACE/evidence/core.%e.%p" \
-            > evidence/core-pattern-active.txt
           ulimit -c unlimited
           ulimit -c >> evidence/native-diagnostic-environment.txt
+          if command -v gdb >/dev/null; then
+            echo 'gdb=available' >> evidence/native-diagnostic-environment.txt
+          elif command -v lldb >/dev/null; then
+            echo 'lldb=available' >> evidence/native-diagnostic-environment.txt
+          else
+            echo 'native-debugger=unavailable' >> evidence/native-diagnostic-environment.txt
+          fi
           python3 -u - "$tmpdir" evidence/native-executables <<'PY' > evidence/native-executable-watcher.log 2>&1 &
           import os, pathlib, shutil, sys, time
           root, output = map(pathlib.Path, sys.argv[1:])
@@ -192,17 +192,21 @@ jobs:
           kill "$watcher" 2>/dev/null
           wait "$watcher" 2>/dev/null
           set -e
-          find . -maxdepth 1 -type f -name 'core*' -print > core-files.txt
-          if command -v gdb >/dev/null; then
-            for executable in native-executables/*.elf; do
-              [ -f "$executable" ] || continue
-              sha256sum "$executable" >> native-executables.sha256
-              if command -v file >/dev/null; then
-                file "$executable" > "$(basename "$executable").file.txt"
-              fi
-              if command -v readelf >/dev/null; then
-                readelf -h -Ws "$executable" > "$(basename "$executable").symbols.txt" 2>&1 || true
-              fi
+          find . -maxdepth 3 -type f -name 'core*' -print > core-files.txt
+          if [[ "$(cat core-pattern-original.txt)" == \|* ]] && command -v coredumpctl >/dev/null; then
+            coredumpctl list --no-pager > coredumpctl-list.txt 2>&1 || true
+          fi
+          result=0
+          for executable in native-executables/*.elf; do
+            [ -f "$executable" ] || continue
+            sha256sum "$executable" >> native-executables.sha256
+            if command -v file >/dev/null; then
+              file "$executable" > "$(basename "$executable").file.txt"
+            fi
+            if command -v readelf >/dev/null; then
+              readelf -h -Ws "$executable" > "$(basename "$executable").symbols.txt" 2>&1 || true
+            fi
+            if command -v gdb >/dev/null; then
               env -i PATH="$PATH" gdb -q -batch -ex 'set pagination off' -ex run \
                 -ex 'thread apply all bt full' -ex 'info registers' -ex 'x/16i $pc-32' \
                 --args "$executable" > "gdb-run-$(basename "$executable").log" 2>&1 || true
@@ -211,19 +215,15 @@ jobs:
                   -ex 'info registers' -ex 'x/16i $pc-32' "$executable" "$core" \
                   > "gdb-$(basename "$core").log" 2>&1 || true
               done
-            done
-          fi
-          test "$jvm_status" -eq 0 && grep -q 'test result: ok. 1 passed; 0 failed;' jvm-delegatePropertyNameCapability.log
-          test "$native_status" -eq 0 && grep -q 'test result: ok. 1 passed; 0 failed;' native-klib-module-harness.log
-      - name: restore runner core pattern
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -s evidence/core-pattern-original.txt ]; then
-            original="$(cat evidence/core-pattern-original.txt)"
-            sudo sysctl -w "kernel.core_pattern=$original"
-          fi
+            elif command -v lldb >/dev/null; then
+              env -i PATH="$PATH" lldb --batch -o run -o bt -o 'register read' \
+                -o 'disassemble --pc --count 16' "$executable" \
+                > "lldb-run-$(basename "$executable").log" 2>&1 || true
+            fi
+          done
+          test "$jvm_status" -eq 0 && grep -q 'test result: ok. 1 passed; 0 failed;' jvm-delegatePropertyNameCapability.log || result=1
+          test "$native_status" -eq 0 && grep -q 'test result: ok. 1 passed; 0 failed;' native-klib-module-harness.log || result=1
+          exit "$result"
       - name: upload full validation evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
