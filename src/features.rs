@@ -186,11 +186,14 @@ const MODELED_FEATURES: &[&str] = &[
     "ForbidArrayOfNothingInLhsOfClassLiteral",
     "ForbidExternalEnumEntriesAndPrimaryConstructorProperties",
     "ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects",
+    "ForbidSamConstructorCallsWithMissingDependencySupertype",
     "ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds",
     "ForbidUselessTypeArgumentsIn25",
+    "ForbidUselessTypeArgumentsIn26",
     "ForbidValueClassRecursionViaTypeParameters",
     "FullValueClasses",
     "ImplicitSignedToUnsignedIntegerConversion",
+    "JvmInlineScopesNumbers",
     "JvmSupportRecursiveTypeOf",
     "MultiDollarInterpolation",
     "MultiPlatformProjects",
@@ -523,7 +526,7 @@ mod tests {
     /// Modeled before any supported release defines them: kotlinc added the feature in a release
     /// krusty does not support yet. An entry leaves this list when a supported release's table
     /// gains the feature, and the test below fails until it does.
-    const AHEAD_OF_SUPPORTED_RELEASES: &[&str] = &["NormalizeNaNValuesInConstContext"];
+    const AHEAD_OF_SUPPORTED_RELEASES: &[&str] = &[];
 
     #[test]
     fn modeled_features_are_sorted_kotlinc_features() {

@@ -1960,6 +1960,11 @@ pub struct File {
     /// `+AllowEagerSupertypeAccessibilityChecks`: a missing supertype found at a constructor call
     /// (or behind a dispatch receiver already reported) is an error rather than a warning.
     pub allow_eager_supertype_accessibility_checks: bool,
+    /// `ForbidSamConstructorCallsWithMissingDependencySupertype` when the reference release has
+    /// it. `None` on a release without the check. `Some(false)` warns at a SAM constructor or
+    /// SAM conversion whose interface is missing a dependency supertype; `Some(true)` makes that
+    /// an error.
+    pub sam_constructor_missing_dependency: Option<bool>,
     /// Before Kotlin language level 2.4, a lambda implementation keeps the body's inferred result
     /// separately from the caller-facing function result. The checked FIR boundary records that
     /// semantic choice so a backend never needs its own language-version switch.
