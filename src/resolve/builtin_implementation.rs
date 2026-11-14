@@ -4,7 +4,7 @@ use crate::fir::{BuiltinImplementation, BuiltinOverrideDeclaration, ExternalCall
 use crate::symbol_resolver::{builtin_overrides, ResolvedMember};
 use crate::types::{SemanticCallableOwner, TypeName};
 
-use super::{Checker, ExprLowering, ResolvedCall};
+use super::{Checker, ExprLowering, ResolvedCall, StmtLowering};
 
 pub(super) type Facts = crate::fx_hash::HashMap<ExternalCallableId, Box<[BuiltinImplementation]>>;
 
@@ -19,8 +19,8 @@ pub(super) fn for_checked_unit(checker: &Checker<'_>) -> Result<Facts, ExternalC
         .values()
         .filter_map(|call| call.external_declaration)
         .collect::<crate::fx_hash::HashSet<_>>();
-    nonvirtual.extend(checker.expr_lowers.values().filter_map(|lowering| {
-        let ExprLowering::SuperPropertyWrite { target } = lowering else {
+    nonvirtual.extend(checker.stmt_lowers.values().filter_map(|lowering| {
+        let StmtLowering::SuperPropertyWrite { target } = lowering else {
             return None;
         };
         target.external_declaration
