@@ -88,12 +88,10 @@ pub(super) fn concrete_generic_ret(gsig: &GenericSig) -> Option<Ty> {
             // collection + a primitive element resolves and unboxes — mirroring the suspend path. Without
             // it, a classpath property `items: List<Int>` reads as raw `java/util/List<Integer>`:
             // `xs.sum()` is unresolved and `for (x in xs) { s += x }` compares `Int` vs `java/lang/Integer`.
-            Some(canonicalize_jvm_collections(
-                crate::symbol_resolver::ty_subst(
-                    gsig.ret,
-                    &crate::types::TyParamBindings::default(),
-                ),
-            ))
+            Some(canonicalize_jvm_collections(crate::types::ty_subst(
+                gsig.ret,
+                &crate::types::TyParamBindings::default(),
+            )))
         }
         _ => None,
     }
@@ -135,9 +133,9 @@ pub(super) fn suspend_return_from_gsig(
                     // `suspend fun byId(): T` on a `Repo<Cfg>` receiver) is substituted under `binds` to the
                     // receiver's concrete argument (`T` → `Cfg`) — otherwise it erases to `Any` and every member
                     // access on the result fails ("member … on Any").
-                    _ => Some(canonicalize_jvm_collections(
-                        crate::symbol_resolver::ty_subst(other, binds),
-                    )),
+                    _ => Some(canonicalize_jvm_collections(crate::types::ty_subst(
+                        other, binds,
+                    ))),
                 }
             }
         }
