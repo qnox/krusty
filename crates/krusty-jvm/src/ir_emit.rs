@@ -2897,7 +2897,11 @@ fn emit_interface_class(
             continue;
         }
         let f = &ir.functions[fid as usize];
-        if !bodies_on_interface
+        // A property annotation carrier is a static declaration. `disable` and `enable` both
+        // publish the compatibility holder, and the carrier lives there with its own frame (no
+        // inserted interface receiver). `no-compatibility` has no holder, so the carrier stays
+        // on the interface.
+        if emits_default_impls
             && default_impls::emit_annotation_carrier(
                 ir,
                 fid,

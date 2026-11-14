@@ -251,6 +251,13 @@ fn forwarders(ir: &IrFile, c: &krusty::ir::IrClass, env: &EmitEnv) -> Vec<Inheri
             )?;
             forwarder.annotations =
                 declaration_annotations::selected(ir, default, &forwarder, env)?;
+            if let Some(annotations) =
+                declaration_annotations::superclass_method(c, &forwarder, env)
+            {
+                // The bridge overrides the superclass method. kotlinc copies that method's
+                // annotations, not the ones on the interface method the bridge calls.
+                forwarder.annotations = annotations;
+            }
             Some(forwarder)
         })
         .collect()
