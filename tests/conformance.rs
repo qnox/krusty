@@ -8,6 +8,8 @@
 #[global_allocator]
 static DHAT_ALLOC: krusty::dhat::Alloc = krusty::dhat::Alloc;
 
+mod failure_evidence;
+
 mod common;
 
 #[path = "common/asm_text.rs"]

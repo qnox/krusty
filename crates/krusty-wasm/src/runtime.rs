@@ -19,6 +19,8 @@
 mod exception_classes;
 mod object_equality;
 mod object_strings;
+mod root_any;
+mod string_order;
 
 pub(super) use object_strings::ObjectStrings;
 
@@ -26,6 +28,7 @@ use krusty::fx_hash::HashMap;
 
 use super::array_objects::ArrayObjects;
 use super::boxes::Boxes;
+use super::builtin_instances::BuiltinInstances;
 use super::builtin_members::BuiltinMembers;
 use super::callable_references::CallableReferences;
 use super::class_tokens::{ClassTokens, TokenRuntime};
@@ -38,6 +41,7 @@ use super::hashing::Hashing;
 use super::host::Host;
 use super::identity::IdentityObjects;
 use super::objects::ObjectRoot;
+use super::string_builders::StringBuilders;
 use super::type_objects::{TypeDescription, TypeObject, TypeObjects};
 
 /// Where a host write's bytes are staged in linear memory. The first 16 bytes are left for the
@@ -55,6 +59,8 @@ pub(super) struct Runtime {
     /// Every Kotlin array classifier's object type; `Array<T>` shares one reference storage.
     pub(super) arrays: ArrayObjects,
     pub(super) string_equals: u32,
+    /// `String.compareTo(String)`, once a call needs it.
+    string_compare: Option<u32>,
     pub(super) object_equals: u32,
     pub(super) string_concat: u32,
     pub(super) string_of_i32: u32,
@@ -70,6 +76,8 @@ pub(super) struct Runtime {
     /// The object model's root types and `kotlin.Any`'s members.
     pub(super) objects: ObjectRoot,
     pub(super) identity: IdentityObjects,
+    /// `kotlin.text.StringBuilder`, which the runtime lays out.
+    pub(super) string_builders: StringBuilders,
     /// Kotlin's `hashCode()` rules.
     pub(super) hashing: Hashing,
     pub(super) exceptions: ExceptionTransport,
@@ -79,6 +87,8 @@ pub(super) struct Runtime {
     pub(super) boxes: Boxes,
     /// The library members a call goes through that builtin classes implement.
     pub(super) builtin_members: BuiltinMembers,
+    /// The library interfaces something tests for that builtin values are instances of.
+    pub(super) builtin_instance_tests: BuiltinInstances,
     /// The table types of the function values this module creates.
     pub(super) functions: FunctionShapes,
     pub(super) callable_references: CallableReferences,
@@ -88,6 +98,8 @@ pub(super) struct Runtime {
     pub(super) class_tokens: ClassTokens,
     /// Offsets of string constants already in the data segment.
     constants: HashMap<Vec<u16>, u32>,
+    /// Dispatch and type information for directly allocated root `Any` instances.
+    root_any_table: Option<u32>,
 }
 
 impl Runtime {
@@ -134,6 +146,8 @@ impl Runtime {
         let array_to_string = module.declare();
         let arrays =
             ArrayObjects::declare(module, &mut objects, &identity, references, array_to_string);
+        let string_builders =
+            StringBuilders::declare(module, &mut objects, &identity, chars, string);
         let object_equals = module.declare();
         let callable_references = CallableReferences::declare(module, &objects, object_equals);
         let string_concat = module.declare();
@@ -153,6 +167,7 @@ impl Runtime {
             string,
             arrays,
             string_equals: module.declare(),
+            string_compare: None,
             object_equals,
             string_concat,
             string_of_i32: module.declare(),
@@ -167,16 +182,19 @@ impl Runtime {
             i64_div: module.declare(),
             objects,
             identity,
+            string_builders,
             hashing,
             class_tokens,
             exceptions,
             object_strings,
             boxes: Boxes::default(),
             builtin_members: BuiltinMembers::default(),
+            builtin_instance_tests: BuiltinInstances::default(),
             functions: FunctionShapes::default(),
             callable_references,
             type_objects: TypeObjects::default(),
             constants: HashMap::default(),
+            root_any_table: None,
         };
         runtime.define_string_equals(module);
         runtime.define_object_equals(module);

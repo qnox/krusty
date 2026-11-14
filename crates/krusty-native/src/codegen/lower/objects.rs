@@ -734,9 +734,15 @@ impl<'a> FileLowering<'a> {
         // Exception)` take `C`: matching a clause walks exactly this chain.
         let superclass = match (layout.superclass, layout.laid_out_superclass) {
             (Some(parent), _) => self.classes[parent as usize].descriptor,
-            (None, Some(laid_out)) => self
-                .type_descriptor(Ty::obj_name(laid_out))?
-                .ok_or("a superclass of the module with no descriptor")?,
+            (None, Some(laid_out)) => {
+                let symbol = self
+                    .laid_out
+                    .get(laid_out)
+                    .expect("the class model extends only a recorded class")
+                    .descriptor
+                    .clone();
+                self.import_data(&symbol)?
+            }
             (None, None) => {
                 match model::external_base(self.ir.classes[class as usize].superclass) {
                     Some(base) => self.import_data(base.descriptor)?,
@@ -2251,6 +2257,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if function.dispatch_receiver.is_none() {
             return Err(declined!("a class-static call (`{}`)", function.name));
         }
+        if self.file.model.is_direct(fid) {
+            return self.direct_method_call(fid, receiver, &arguments);
+        }
         let key = model::function_key(self.file.ir, class, fid);
         let Some(slot) = self.file.dispatch_of(class, &key) else {
             return Err(declined!(
@@ -2268,6 +2277,34 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(None);
         }
         self.dispatch_through(object, slot, &params, ret, &arguments)
+    }
+
+    /// A call of a method its class's table does not dispatch: a member of a dependency class
+    /// that no subclass can override, such as its constructor initializer or a final member.
+    fn direct_method_call(
+        &mut self,
+        fid: FunId,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<Option<Value>, Unsupported> {
+        let Some(id) = self.file.functions[fid as usize] else {
+            return Err(declined!(
+                "a direct call of the abstract method `{}`",
+                self.file.ir.functions[fid as usize].name
+            ));
+        };
+        let params = super::super::super::captures::carried_parameters(self.file.ir, fid);
+        let Some(object) = self.receiver(receiver)? else {
+            return Ok(None);
+        };
+        let mut arguments = vec![object];
+        arguments.extend(self.arguments(args, &params)?);
+        if self.terminated {
+            return Ok(None);
+        }
+        let func_ref = self.func_ref(id);
+        let call = self.emit_call(func_ref, &arguments)?;
+        Ok(self.builder.inst_results(call).first().copied())
     }
 
     /// The member or top-level realization a checked property operation names.
@@ -2587,12 +2624,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if super::super::super::intrinsics::is_stateless_runtime_object(classifier) {
             return Ok(Some(self.builder.ins().iconst(types::I64, 0)));
         }
-        if let Some(instance) = self.module_singleton(classifier)? {
-            return Ok(Some(instance));
-        }
-        // Another module's object is read through the entry its module exports.
+        // Another file's object is read through the entry its file exports.
         if self.file.ir.class_id_by_name(classifier).is_none() {
-            if let Some(symbol) = self.file.dependency_singletons.get(&classifier) {
+            let instance = krusty::backend::instance_links::InstanceEntry::Object(classifier);
+            if let Some(symbol) = self.file.dependency_instances.get(&instance) {
                 let id = self.file.import(symbol, &[], Ty::obj_name(classifier))?;
                 let func_ref = self.func_ref(id);
                 let call = self.emit_call(func_ref, &[])?;

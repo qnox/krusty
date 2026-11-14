@@ -223,10 +223,9 @@ pub struct FileInput<'a> {
     /// KLIB identity the dependency provider attaches to `Callee::External`.
     pub dependency_symbols:
         &'a HashMap<krusty::backend::KlibDependencyCallable, super::DependencyExport>,
-    /// The exported instance entry of each preceding source module's object, by its classifier.
-    pub dependency_singletons: &'a HashMap<krusty::types::TypeName, String>,
-    /// The exported entry answering each constant of a preceding file's enum.
-    pub dependency_enum_constants: &'a HashMap<krusty::backend::EnumConstant, String>,
+    /// The exported entry answering each object instance and enum constant another file
+    /// realizes.
+    pub dependency_instances: &'a HashMap<krusty::backend::instance_links::InstanceEntry, String>,
     /// The accessors synthesized for each reference to a dependency property, by site; see
     /// [`crate::dependency_references`].
     pub dependency_properties:
@@ -264,8 +263,7 @@ pub fn lower_file(
         dependency_exports,
         dependency_signatures,
         dependency_symbols,
-        dependency_singletons,
-        dependency_enum_constants,
+        dependency_instances,
         value_classes,
         slot_plan,
         module_facts,
@@ -343,6 +341,7 @@ pub fn lower_file(
         string_objects: HashMap::default(),
         classes: Vec::new(),
         accessors: HashMap::default(),
+        dependency_bridges: 0,
         statics: Vec::new(),
         lambdas: HashMap::default(),
         local_delegate_helpers: HashMap::default(),
@@ -363,9 +362,8 @@ pub fn lower_file(
         unit_kind,
         dependency_signatures,
         dependency_symbols,
-        dependency_singletons,
         dependency_interface_calls: Vec::new(),
-        dependency_enum_constants,
+        dependency_instances,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
     // receivers have a runtime-walkable representation and which shapes still decline; both are read while
@@ -409,7 +407,6 @@ pub fn lower_file(
     }
     lowering.define_property_entry_points(file_init)?;
     lowering.define_constructor_entry_points(file_init)?;
-    lowering.define_singleton_entry_points(file_init)?;
     lowering.define_value_box_entry_points()?;
     lowering.define_extension_entries(file_init)?;
     let defines_entry = selected.is_some();
@@ -451,19 +448,21 @@ pub fn lower_file(
 
 /// The classes of `ir` another file of the module extends, with their superclasses in this file:
 /// what a later file's subclass names by symbol, so their objects define those symbols for the
-/// link to find. A support unit's classes are no source file's to extend.
+/// link to find. Of a support unit's classes, the dependency classes the module plan numbers are
+/// the ones a source file extends.
 fn extended_elsewhere(
     ir: &IrFile,
     unit_kind: krusty::backend::CheckedIrUnitKind,
     module_facts: &krusty::backend::BackendModuleFacts,
 ) -> krusty::fx_hash::HashSet<krusty::ir::ClassId> {
     let mut extended = krusty::fx_hash::HashSet::default();
-    if unit_kind != krusty::backend::CheckedIrUnitKind::Source {
-        return extended;
-    }
     let classes = module_facts.classes();
+    let support = unit_kind != krusty::backend::CheckedIrUnitKind::Source;
     for (id, class) in ir.classes.iter().enumerate() {
         if class.is_interface || ir.local_class_name_provenance.contains_key(&(id as u32)) {
+            continue;
+        }
+        if support && !classes.is_dependency_class(class.fq_name) {
             continue;
         }
         if classes
@@ -529,6 +528,9 @@ struct FileLowering<'a> {
     classes: Vec<objects::ClassItems>,
     /// Synthesized field accessors the vtables reference, by slot.
     accessors: HashMap<Slot, FuncId>,
+    /// How many bridges of dependency interface members this file has defined, which names the
+    /// next one.
+    dependency_bridges: usize,
     /// The global slot of each top-level property, parallel to `ir.statics`.
     statics: Vec<DataId>,
     /// The emitted pieces of each lambda, by the expression that creates it.
@@ -592,10 +594,9 @@ struct FileLowering<'a> {
     /// Dependency interface members this file calls, numbered after the module's own interfaces.
     /// The identity bytes are what a dependent implementation records itself under.
     dependency_interface_calls: Vec<(u32, Vec<u8>)>,
-    /// The exported instance entry of each preceding source module's object, by its classifier.
-    dependency_singletons: &'a HashMap<krusty::types::TypeName, String>,
-    /// The exported entry answering each constant of a preceding file's enum.
-    dependency_enum_constants: &'a HashMap<krusty::backend::EnumConstant, String>,
+    /// The exported entry answering each object instance and enum constant another file
+    /// realizes.
+    dependency_instances: &'a HashMap<krusty::backend::instance_links::InstanceEntry, String>,
 }
 
 impl<'a> FileLowering<'a> {
@@ -679,7 +680,18 @@ impl<'a> FileLowering<'a> {
             // A file-level function, and a member another file calls directly, is reached across
             // the module by its `kt_mod_` symbol, which stays hidden. The public C name, when
             // there is one, is a separate export.
+            // A support unit keeps its functions to itself, except the methods of a dependency
+            // class a source file extends, which that file's tables inherit by symbol.
             let linkage = match self.unit_kind {
+                krusty::backend::CheckedIrUnitKind::DependencySupport
+                    if self.exported.iter().any(|&class| {
+                        self.ir.classes[class as usize]
+                            .methods
+                            .contains(&(index as krusty::ir::FunId))
+                    }) =>
+                {
+                    Linkage::Hidden
+                }
                 krusty::backend::CheckedIrUnitKind::DependencySupport => Linkage::Local,
                 krusty::backend::CheckedIrUnitKind::Source
                     if super::super::c_abi::is_file_level(self.ir, index)

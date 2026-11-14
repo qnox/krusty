@@ -17,10 +17,8 @@ use crate::metadata::klib_ir::KlibIrSignature;
 use crate::types::Ty;
 
 impl BodyLowering<'_> {
-    /// A source `while` (`post_test` false) or `do`-`while` loop. Checked FIR lowering lowers its
-    /// condition, then its body block, and records no type for the loop: it is a statement. The
-    /// condition is lowered first for a `do`-`while` too, so a condition that reads a variable
-    /// its body declares declines as a read of a value the body does not declare yet.
+    /// A source `while` (`post_test` false) or `do`-`while` loop, which records no type: it is a
+    /// statement.
     pub(super) fn loop_statement(
         &mut self,
         serialized: &KlibIrLoop,
@@ -41,12 +39,22 @@ impl BodyLowering<'_> {
         let Some(body) = serialized.body else {
             return unsupported("a loop without a body");
         };
-        let KlibIrExprKind::Block {
-            statements,
-            origin: None,
-        } = &self.arena.expr(body).kind
-        else {
-            return unsupported("a loop whose body is not a block");
+        // A body written without braces is serialized as its one statement. A `do`-`while` body
+        // is serialized as a composite, whose declarations its condition reads.
+        let single = [KlibIrStatement::Expression(body)];
+        let statements = match &self.arena.expr(body).kind {
+            KlibIrExprKind::Block {
+                statements,
+                origin: None,
+            } => statements.as_slice(),
+            KlibIrExprKind::Composite {
+                statements,
+                origin: None,
+            } if post_test => statements.as_slice(),
+            KlibIrExprKind::Block { .. } => {
+                return unsupported("a loop whose body is a block the compiler introduced")
+            }
+            _ => &single,
         };
         self.labeled_loop(serialized, post_test, statements, None)
     }
@@ -61,6 +69,11 @@ impl BodyLowering<'_> {
         }
         if let Some(array_loop) = super::super::for_loops::array_for_loop(self.arena, statements) {
             return self.array_loop(array_loop);
+        }
+        if let Some(indices_loop) =
+            super::super::for_loops::indices_for_loop(self.arena, statements)
+        {
+            return self.indices_loop(indices_loop);
         }
         if let Some(range_loop) = super::super::for_loops::range_for_loop(self.arena, statements) {
             if let Some(lowered) = self.range_loop(range_loop)? {
@@ -215,6 +228,119 @@ impl BodyLowering<'_> {
                 size_declaration,
                 lowered,
             ],
+            value: None,
+        }))
+    }
+
+    /// A `for` loop over `array.indices`, counted as kotlinc's `IndicesHandler` counts it: the
+    /// receiver is evaluated once, and the loop variable takes each value from zero until its
+    /// size. Only the array receiver is modelled; another receiver kind declines, because the
+    /// prewalk folded the loop's protocol calls.
+    fn indices_loop(
+        &mut self,
+        indices_loop: super::super::for_loops::IndicesForLoop<'_>,
+    ) -> Lowered<ExprId> {
+        let super::super::for_loops::IndicesForLoop {
+            getter,
+            receiver,
+            reversed,
+            inner: serialized,
+            body: statements,
+            binding,
+        } = indices_loop;
+        if let Some(reversed) = reversed {
+            let KlibIrSignature::Public(callee) = &reversed.symbol.signature else {
+                return Err(mismatch(
+                    "a reversed indices loop names a non-public callee",
+                ));
+            };
+            if !self.linker.reverses_progression(callee)? {
+                return unsupported("a `for` loop over indices through another progression call");
+            }
+        }
+        match self.linker.indices_receiver(getter)? {
+            Some(crate::libraries::IndicesReceiver::Array) => {}
+            Some(_) => return unsupported("a `for` loop over the indices of a non-array receiver"),
+            None => {
+                return unsupported(
+                    "a `for` loop over an extension property that is not an array's indices",
+                )
+            }
+        }
+        let variable = self.arena.variable(binding);
+        if variable.base.origin != "FOR_LOOP_VARIABLE" {
+            return unsupported("a destructured `for` loop over indices");
+        }
+        if self.semantic(variable.ty)? != Ty::Int {
+            return Err(mismatch(
+                "an indices loop's variable is not typed as the range's element",
+            ));
+        }
+        if self.loops.iter().any(|(id, _)| *id == serialized.id) {
+            return Err(mismatch("a loop repeats an enclosing loop's identity"));
+        }
+        let array_value = self.expression(receiver)?;
+        let array_ty = self.lowered_type(array_value);
+        if !array_ty.non_null().is_array() {
+            return Err(mismatch(
+                "the receiver of an array indices loop is no array",
+            ));
+        }
+        let array_slot = self.locals.anonymous_slot();
+        let array_declaration = self.ir.add_expr(IrExpr::Variable {
+            index: array_slot,
+            ty: array_ty,
+            init: Some(array_value),
+            named: false,
+        });
+        let array_read = self.ir.add_expr(IrExpr::GetValue(array_slot));
+        let size = self.ir.add_expr(IrExpr::Call {
+            callee: Box::new(Callee::Intrinsic {
+                operation: IrIntrinsic::ArraySize,
+                ret: Ty::Int,
+            }),
+            dispatch_receiver: Some(array_read),
+            args: Vec::new(),
+        });
+        let size = self.typed(size, Ty::Int);
+        // Counting down starts at the last index and ends at the first: `size - 1 downTo 0`.
+        let (operation, start, end) = if reversed.is_some() {
+            let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+            let last = self.ir.add_arithmetic(IrBinOp::Sub, size, one, Ty::Int);
+            let first = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+            (crate::fir::FirRangeOperation::DownTo, last, first)
+        } else {
+            let first = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+            (crate::fir::FirRangeOperation::Until, first, size)
+        };
+        let symbol = variable.base.symbol.clone();
+        let name = variable.name.clone();
+        let local = self.locals.slot(variable, Ty::Int)?;
+        self.locals.declare(&symbol, local)?;
+        self.locals.record_name(&symbol, &name);
+        let label = format!("$klib_loop_{}_{}", self.function.function, serialized.id);
+        self.loops.push((serialized.id, label.clone()));
+        let body = self.block_with_prefix(Vec::new(), &statements[1..]);
+        self.loops.pop();
+        let body = body?;
+        let counted = self
+            .ir
+            .add_expr(IrExpr::Checked(Box::new(IrCheckedOperation::RangeLoop {
+                variable: local.index,
+                variable_name: Some(name.into()),
+                counter: Ty::Int,
+                source: IrProgressionSource::Literal {
+                    operation,
+                    start,
+                    end,
+                },
+                unsigned_compare: None,
+                body,
+                label,
+                with_index: None,
+            })));
+        Ok(self.ir.add_expr(IrExpr::Block {
+            stmts: vec![array_declaration, counted],
             value: None,
         }))
     }
@@ -381,6 +507,19 @@ impl BodyLowering<'_> {
     }
 
     /// A loop labeled for the jumps that name `serialized`, whose body block holds `statements`.
+    /// A loop's body block, opening with the element `temporary` binds when there is one.
+    fn loop_body(
+        &mut self,
+        statements: &[KlibIrStatement],
+        temporary: Option<KlibIrVariableId>,
+    ) -> Lowered<ExprId> {
+        let (prefix, statements) = match temporary {
+            Some(binding) => (vec![self.unnamed_local(binding)?], &statements[1..]),
+            None => (Vec::new(), statements),
+        };
+        self.block_with_prefix(prefix, statements)
+    }
+
     fn labeled_loop(
         &mut self,
         serialized: &KlibIrLoop,
@@ -393,16 +532,15 @@ impl BodyLowering<'_> {
         }
         let label = format!("$klib_loop_{}_{}", self.function.function, serialized.id);
         self.loops.push((serialized.id, label.clone()));
-        let lowered = self
-            .operand(serialized.condition, Ty::Boolean)
-            .and_then(|cond| {
-                let (prefix, statements) = match temporary {
-                    Some(binding) => (vec![self.unnamed_local(binding)?], &statements[1..]),
-                    None => (Vec::new(), statements),
-                };
-                let body = self.block_with_prefix(prefix, statements)?;
-                Ok((cond, body))
-            });
+        // A `do`-`while` condition is in the scope of its body, so it may read a variable the
+        // body declares: the body is lowered first and declares it.
+        let lowered = if post_test {
+            self.loop_body(statements, temporary)
+                .and_then(|body| Ok((self.operand(serialized.condition, Ty::Boolean)?, body)))
+        } else {
+            self.operand(serialized.condition, Ty::Boolean)
+                .and_then(|cond| Ok((cond, self.loop_body(statements, temporary)?)))
+        };
         self.loops.pop();
         let (cond, body) = lowered?;
         Ok(self.ir.add_expr(IrExpr::While {

@@ -823,19 +823,16 @@ impl ProductionSignatureSemantics<'_> {
         crate::fir::DiagnosticId::from_raw(diagnostics.len() as u32)
     }
 
-    fn record_classifier_access_diagnostic_at(
+    /// A finding reported on every exit, once per `identity`.
+    fn record_unconditional_diagnostic_at(
         &self,
         declaration: crate::fir::DeclarationId,
         source: crate::fir::SourceFileId,
         span: Span,
-        classifier: crate::types::TypeName,
+        identity: crate::diag::DiagnosticIdentity,
         message: String,
     ) -> crate::fir::DiagnosticId {
         let file = source.raw();
-        let identity = crate::diag::DiagnosticIdentity::ClassifierAccess {
-            reference: span,
-            classifier,
-        };
         let mut diagnostics = self.diagnostics.borrow_mut();
         if let Some(index) = diagnostics
             .iter()
@@ -3270,10 +3267,10 @@ pub(crate) fn finalized_streamed_signature_index(
         let Some(classifier) = classifier else {
             continue;
         };
-        let entries = table.enums.entry(classifier).or_default();
-        if !entries.iter().any(|entry| entry == spelling) {
-            entries.push(spelling.to_owned());
-        }
+        let class = table.classes.get_mut(&classifier);
+        class
+            .expect("a collected enum")
+            .declare_enum_entry(spelling);
     }
     let empty_extension_receivers = HashMap::default();
     let empty_classifier_parents = classifier_parents::ParentInventory::default();

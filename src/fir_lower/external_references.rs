@@ -138,6 +138,11 @@ impl BodyLowering<'_> {
                                 value: self.ir.add_expr(IrExpr::GetValue(own_start + *source)),
                             }
                         }
+                        FirAdaptedReferenceArgument::Context => {
+                            return Err(FirLoweringFailure::UnsupportedExternalCallableReference(
+                                declaration,
+                            ));
+                        }
                         FirAdaptedReferenceArgument::Default => {
                             IrCheckedArgument::Default { parameter }
                         }
@@ -266,6 +271,7 @@ impl BodyLowering<'_> {
                 adapter: function,
                 captures: Vec::new(),
                 bound_receiver,
+                bound_contexts: 0,
                 function_type: reference_ty,
                 declaration_parameters: parameters
                     .iter()

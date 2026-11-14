@@ -24,6 +24,7 @@ mod constructor_debug;
 mod constructor_metadata;
 mod debug_local_names;
 mod declaration_collisions;
+mod declared_jvm_default;
 mod declared_type_nullability;
 mod default_call_operands;
 mod default_parameter_representation;

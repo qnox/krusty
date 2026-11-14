@@ -1,8 +1,10 @@
-//! The class `Signature` and `@Metadata` a `-Xlambdas=class` Kotlin function lambda carries.
+//! The class `Signature` and `@Metadata` a source lambda class carries, including a SAM class
+//! whose implementation is the lambda body.
 //!
 //! `Lambda.toString()` asks kotlin-reflect to read that record and render the function type.
-//! Without it, reflection falls back to the raw `FunctionN` interface. The record names the
-//! class's typed `invoke`, which the class declares beside the erased `FunctionN.invoke` bridge.
+//! Without it, reflection falls back to the raw function/SAM interface. The record names the
+//! class's typed lambda method (`invoke`, or the selected SAM method), which the class declares
+//! beside any erased bridge.
 
 use krusty::ir::type_reflection::type_parameters_named_by;
 use krusty::ir::{IrFile, IrParameterRole, IrTypeParameter};
@@ -24,6 +26,7 @@ pub(super) fn reflect_source(
     function_type: Ty,
     impl_fn: u32,
     origin: &krusty::ir::IrLambdaOrigin,
+    method_name: &str,
     formatter: &JvmSignatureFormatter<'_>,
 ) -> Result<ClassLambdaReflection, String> {
     let recorded = ir
@@ -83,7 +86,7 @@ pub(super) fn reflect_source(
         &krusty::metadata::lambda_function::LambdaFunction {
             function_name: krusty::metadata::lambda_function::function_name(origin.form),
             jvm_method: Some(krusty::metadata::lambda_function::JvmMethod {
-                name: "invoke",
+                name: method_name,
                 descriptor: record_descriptor.then_some(physical.as_str()),
             }),
             explicit_suspend: origin.explicit_suspend,

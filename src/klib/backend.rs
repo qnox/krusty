@@ -762,14 +762,6 @@ fn record_constructor_exports(
             class.constructors.len(),
         ));
     }
-    if (source.is_object || source.is_companion)
-        && class.visibility != crate::types::Visibility::Private
-    {
-        let id = ir
-            .class_id_by_name(source.fq_name_id())
-            .ok_or_else(|| format!("object {} has no IR identity", source.fq_name()))?;
-        exports.record_singleton(id);
-    }
     if source.is_interface
         || source.is_abstract
         || source.is_sealed

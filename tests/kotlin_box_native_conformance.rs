@@ -124,12 +124,13 @@ impl NativeLane {
         scratch: &Path,
         stem: &str,
         suffix: &str,
+        source: &str,
         program: box_lane::CompiledProgram,
     ) -> Outcome {
         let target = self.target.expect("checked by `unavailable`");
         let objects = program
             .artifacts
-            .into_iter()
+            .iter()
             .filter_map(|(name, object)| name.ends_with(".o").then_some(object))
             .collect::<Vec<_>>();
         if objects.is_empty() {
@@ -137,14 +138,24 @@ impl NativeLane {
                 "the frontend produced no checked file and said nothing".to_string(),
             );
         }
-        let object_refs = objects.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let object_refs = objects
+            .iter()
+            .map(|object| object.as_slice())
+            .collect::<Vec<_>>();
         let image = match krusty_native::link_program_with_libraries(
             &object_refs,
             &program.native_imports,
             target,
         ) {
             Ok(image) => image,
-            Err(error) => return Outcome::Failed(format!("link: {error}")),
+            Err(error) => {
+                return box_lane::retain_failure(
+                    &format!("native-{stem}-{suffix}"),
+                    source,
+                    &program.artifacts,
+                    Outcome::Failed(format!("link: {error}")),
+                );
+            }
         };
         let executable = scratch.join(format!(
             "{stem}-{suffix}-{}-{}",
@@ -164,6 +175,14 @@ impl NativeLane {
             }
         }
         let outcome = box_lane::run_program(Command::new(&executable).env_clear());
+        let mut artifacts = program.artifacts;
+        artifacts.push(("program.elf".into(), image));
+        let outcome = box_lane::retain_failure(
+            &format!("native-{stem}-{suffix}"),
+            source,
+            &artifacts,
+            outcome,
+        );
         let _ = std::fs::remove_file(&executable);
         outcome
     }
@@ -221,7 +240,7 @@ impl Lane for NativeLane {
             Ok(program) => program,
             Err(outcome) => return outcome,
         };
-        self.run_artifacts(scratch, stem, "single", program)
+        self.run_artifacts(scratch, stem, "single", directive_source, program)
     }
 
     fn compile_modules_and_run(
@@ -268,7 +287,7 @@ impl Lane for NativeLane {
             Ok(program) => program,
             Err(outcome) => return outcome,
         };
-        self.run_artifacts(scratch, stem, "modules", program)
+        self.run_artifacts(scratch, stem, "modules", directive_source, program)
     }
 }
 
@@ -464,6 +483,19 @@ fn native_generic_class_members_instantiate_their_declared_dependency_exports() 
         run_native_abi_case(source, stem),
         Outcome::Pass,
         "class and method formals must instantiate independently without changing the export ABI"
+    );
+}
+
+#[test]
+fn native_data_class_signed_array_members_are_lowered_from_the_library_klib() {
+    let source = include_str!("box_regressions/multimodule/dataClassSignedArrayMembers.kt");
+    let stem = "dataClassSignedArrayMembers";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must run the complete signed-array KLIB module graph");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "Native must lower generated signed-array data-class members from the producer KLIB"
     );
 }
 
@@ -690,5 +722,24 @@ fn native_virtual_explicit_getter_exports_run_the_override() {
         run_native_abi_case(source, stem),
         Outcome::Pass,
         "an open explicit getter must run the override"
+    );
+}
+
+#[test]
+fn native_generic_elvis_preserves_its_non_null_type_parameter() {
+    let source = include_str!("box_regressions/multimodule/genericElvisNullProof.kt");
+    let stem = "genericElvisNullProof";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the whole generic Elvis module graph");
+    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
+}
+
+#[test]
+fn native_string_comparison_runs_the_whole_portable_program_through_klib() {
+    let source = include_str!("box_regressions/stringCompareTo.kt");
+    assert_eq!(
+        run_native_portable_box(source, "StringComparisonProgram"),
+        Outcome::Pass,
+        "the Native KLIB driver must run every comparison control"
     );
 }

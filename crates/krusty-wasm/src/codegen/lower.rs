@@ -36,7 +36,9 @@ mod objects;
 mod scalar_instructions;
 mod scalar_value_classes;
 mod shared_cells;
+mod string_builders;
 pub(super) use shared_cells::cell_reference;
+pub(super) use string_builders::{declared_by_string_builder, is_string_builder};
 mod string_conversion;
 mod type_of;
 
@@ -56,6 +58,7 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySize
         || operation == krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
+        || operation == krusty::backend::BackendCompilerIntrinsic::StringCompare
         || matches!(
             operation,
             krusty::backend::BackendCompilerIntrinsic::ClassName(_)
@@ -188,9 +191,8 @@ pub(super) fn lower_file(
         let results = carrier(function.ret)?.into_iter().collect::<Vec<_>>();
         signatures.push(Some(module.func_type(params, results)));
     }
-    let enum_constant_entries =
-        callable_registry.link_enum_constants(dependency_exports, module)?;
-    let indices = callable_registry.declare_file(ir, module, &enum_constant_entries)?;
+    let instance_entries = callable_registry.link_instances(dependency_exports, module)?;
+    let indices = callable_registry.declare_file(ir, module, &instance_entries)?;
     let reference_file =
         runtime
             .callable_references
@@ -245,7 +247,7 @@ pub(super) fn lower_file(
             &mut classes,
             &mut super::interface_members::Destination {
                 module: &mut *module,
-                objects: &mut runtime.objects,
+                runtime: &mut *runtime,
                 callables: &mut *callable_registry,
             },
         )?;
@@ -1298,6 +1300,30 @@ impl<'a> Body<'a> {
                 args,
             } if let Callee::External {
                 target,
+                defaults,
+                extension_receiver_parameter: None,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    fact.compiler_operation()
+                        == Some(krusty::backend::BackendCompilerIntrinsic::StringCompare)
+                }) =>
+            {
+                let (Some(receiver), [other]) = (dispatch_receiver, args.as_slice()) else {
+                    return Err("an authenticated string comparison with malformed operands".into());
+                };
+                self.value(receiver, Ty::String)?;
+                self.value(*other, Ty::String)?;
+                let function = self.runtime.string_compare(self.module);
+                self.code.call(function);
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver,
+                args,
+            } if let Callee::External {
+                target,
                 ret,
                 defaults,
                 ..
@@ -1313,6 +1339,21 @@ impl<'a> Body<'a> {
                 ..
             } if let Some(member) = any_members::call_member(self.ir, self.callables, id) => {
                 self.dependency_any_member_call(member, receiver, &args)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver: Some(receiver),
+                args,
+            } if let Callee::External {
+                target, defaults, ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self
+                    .callables
+                    .callable(*target)
+                    .is_some_and(string_builders::declared_by_string_builder) =>
+            {
+                self.string_builder_call(*target, receiver, &args)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1513,7 +1554,11 @@ impl<'a> Body<'a> {
             IrExpr::EnumEntry { classifier, name } => {
                 let entry = self
                     .calls
-                    .dependency_enum_constant(classifier, &name)
+                    .instance(
+                        &krusty::backend::instance_links::InstanceEntry::EnumConstant(
+                            krusty::backend::EnumConstant { classifier, name },
+                        ),
+                    )
                     .ok_or_else(|| {
                         // Boundary conversion for a diagnostic.
                         format!(
@@ -1632,6 +1677,21 @@ impl<'a> Body<'a> {
                     && self.is_string_length_property(*target) =>
             {
                 self.intrinsic(IrIntrinsic::StringLength, Some(*receiver), &[])?;
+            }
+            IrExpr::Checked(ref checked_op)
+                if let krusty::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch: krusty::ir::IrPropertyDispatch::Ordinary,
+                    receiver: Some(receiver),
+                    arguments,
+                    parameters,
+                    ..
+                } = &**checked_op
+                    && parameters.is_empty()
+                    && arguments.is_empty()
+                    && self.is_string_builder_property(*target) =>
+            {
+                self.string_builder_property(*target, *receiver)?;
             }
             IrExpr::Checked(ref checked_op)
                 if let krusty::ir::IrCheckedOperation::PropertyWrite {

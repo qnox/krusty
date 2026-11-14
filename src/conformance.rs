@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 mod box_jdk;
 mod codegen_modes;
 mod compiler_arguments;
-mod leading_text;
+mod coroutine_support;
+mod native_box_configuration;
 mod reference_jvm;
 mod wasm_options;
 
@@ -20,8 +21,10 @@ pub use compiler_arguments::{
     reference_only_kotlinc_arguments_for_target, unit_compiler_configuration,
     unit_kotlinc_arguments, UnitCompilerConfiguration,
 };
-pub use leading_text::case_directive_region;
-use leading_text::LeadingText;
+pub use coroutine_support::{coroutine_sources, inject_coroutine_support};
+pub use native_box_configuration::{
+    native_box_configuration_applicable, native_def_contents_supported,
+};
 pub use reference_jvm::{
     reference_jvm_acceptance, reference_jvm_properties, ReferenceJvmAcceptance,
 };
@@ -113,6 +116,94 @@ pub fn directive(src: &str, name: &str) -> bool {
                 .next()
                 == Some(name)
     })
+}
+
+/// Payload after a runner directive. Kotlin accepts optional space (`//FILE:` and `// FILE:`).
+pub fn directive_payload<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    let rest = line.trim_start().strip_prefix("//")?.trim_start();
+    let rest = rest.strip_prefix(name)?;
+    rest.strip_prefix(':')
+}
+
+/// Whether any line declares `// <name>:`.
+pub fn contains_directive(src: &str, name: &str) -> bool {
+    src.lines()
+        .any(|line| directive_payload(line, name).is_some())
+}
+
+/// The case-wide directive region before the first `// MODULE:` header.
+pub fn case_directive_region(src: &str) -> &str {
+    let mut offset = 0;
+    for line in src.split_inclusive('\n') {
+        if directive_payload(line, "MODULE").is_some() {
+            return &src[..offset];
+        }
+        offset += line.len();
+    }
+    ""
+}
+
+/// One partitioned file's text at the test data's line numbers, as kotlinc's runner keeps it: the
+/// file's own `FILE` marker line stays in place, every line outside the file is blank, and code
+/// before the first file stays on that first file.
+#[derive(Default)]
+struct FileText {
+    text: String,
+    lines: usize,
+}
+
+impl FileText {
+    /// Open a file whose first own line is source line `at` (0-based). `preamble` holds the
+    /// source lines before the first file in this module; that file keeps the lines and directives.
+    fn open(saw_file: &mut bool, preamble: &str, at: usize) -> Self {
+        let mut file = Self::default();
+        if !*saw_file {
+            *saw_file = true;
+            file.text.push_str(preamble);
+            file.lines = preamble.lines().count();
+        }
+        while file.lines < at {
+            file.text.push('\n');
+            file.lines += 1;
+        }
+        file
+    }
+
+    fn push(&mut self, line: &str) {
+        self.text.push_str(line);
+        self.text.push('\n');
+        self.lines += 1;
+    }
+
+    fn take(&mut self) -> String {
+        self.lines = 0;
+        std::mem::take(&mut self.text)
+    }
+}
+
+/// `.kt` is Kotlin, `.java` is Java, pinned runtime companions stay execution resources, and every
+/// other explicit kind is rejected.
+fn explicit_file_kind(fname: &str) -> ExplicitFileKind {
+    let leaf = fname.rsplit(['/', '\\']).next().unwrap_or(fname);
+    let extension = leaf.rsplit_once('.').map(|(_, extension)| extension);
+    match extension {
+        Some("kt") => {
+            let stem = leaf.strip_suffix(".kt").unwrap_or(leaf);
+            ExplicitFileKind::Kotlin(stem.to_string())
+        }
+        Some("java") => ExplicitFileKind::Java(leaf.to_string()),
+        Some("js" | "mjs" | "c" | "h" | "cpp" | "m" | "def" | "modulemap") => {
+            ExplicitFileKind::Companion
+        }
+        _ => ExplicitFileKind::Unsupported(leaf.to_string()),
+    }
+}
+
+enum ExplicitFileKind {
+    Kotlin(String),
+    Java(String),
+    Companion,
+    Unsupported(String),
 }
 
 const EXACT_TYPE_HELPER: &str = r#"
@@ -573,49 +664,67 @@ pub struct ModuleBlock {
 /// `None` for shapes krusty's module model does not cover, so the conformance harness can skip them
 /// instead of mis-grading them.
 pub fn split_modules(src: &str) -> Option<Vec<ModuleBlock>> {
-    let mut mods: Vec<ModuleBlock> = Vec::new();
-    let mut cur_file: Option<(String, bool)> = None; // (name, is_java)
-    let mut cur = String::new();
-    let mut leading = LeadingText::default();
-    let flush =
-        |mods: &mut Vec<ModuleBlock>, cur_file: &mut Option<(String, bool)>, cur: &mut String| {
-            if let Some((fname, is_java)) = cur_file.take() {
-                if let Some(m) = mods.last_mut() {
-                    if is_java {
-                        m.java_files.push((fname, std::mem::take(cur)));
-                    } else {
-                        m.files.push((fname, std::mem::take(cur)));
-                    }
+    source_modules(src).filter(|modules| modules.len() >= 2)
+}
+
+/// Module declarations supplied to the compiler, including a single explicitly named module.
+///
+/// Code before the first declared `FILE` stays on that file, including when the file is Java.
+/// Unsupported scripts and unknown explicit kinds decline the whole partition. Pinned runtime
+/// companions (`.def`, headers, JavaScript) decline here too: this view does not rewrite them into
+/// Kotlin, and the original fixture text is left unchanged for the runtime.
+pub fn source_modules(src: &str) -> Option<Vec<ModuleBlock>> {
+    let mut modules: Vec<ModuleBlock> = Vec::new();
+    let mut current_file: Option<(String, bool)> = None;
+    let mut current = FileText::default();
+    let mut preamble = String::new();
+    let mut saw_file = false;
+    let flush = |modules: &mut Vec<ModuleBlock>,
+                 current_file: &mut Option<(String, bool)>,
+                 current: &mut FileText| {
+        if let Some((name, is_java)) = current_file.take() {
+            if let Some(module) = modules.last_mut() {
+                if is_java {
+                    module.java_files.push((name, current.take()));
+                } else {
+                    module.files.push((name, current.take()));
                 }
             }
-        };
-    for line in src.lines() {
-        let t = line.trim_start();
-        if let Some(rest) = t.strip_prefix("// MODULE:") {
-            flush(&mut mods, &mut cur_file, &mut cur);
-            leading.start_module(mods.is_empty());
-            // Header: `name(dependencies)(friends)(dependsOn)` — kotlinc's test-module syntax.
+        }
+    };
+
+    for (index, line) in src.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = directive_payload(line, "MODULE") {
+            flush(&mut modules, &mut current_file, &mut current);
+            if !modules.is_empty() {
+                preamble = "\n".repeat(index);
+                saw_file = false;
+            }
+            preamble.push('\n');
+
             let header = rest.trim();
             if header.matches('(').count() > 3 {
                 return None;
             }
             let name_end = header.find('(').unwrap_or(header.len());
             let name = header[..name_end].trim().to_string();
-            let mut groups: Vec<Vec<String>> = Vec::new();
-            let mut restpart = &header[name_end..];
-            while let Some(open) = restpart.find('(') {
-                let close = restpart[open..].find(')')?;
+            let mut groups = Vec::new();
+            let mut remainder = &header[name_end..];
+            while let Some(open) = remainder.find('(') {
+                let close = remainder[open..].find(')')?;
                 groups.push(
-                    restpart[open + 1..open + close]
+                    remainder[open + 1..open + close]
                         .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect(),
+                        .map(str::trim)
+                        .filter(|part| !part.is_empty())
+                        .map(str::to_string)
+                        .collect::<Vec<_>>(),
                 );
-                restpart = &restpart[open + close + 1..];
+                remainder = &remainder[open + close + 1..];
             }
             let mut groups = groups.into_iter();
-            mods.push(ModuleBlock {
+            modules.push(ModuleBlock {
                 name,
                 deps: groups.next().unwrap_or_default(),
                 friends: groups.next().unwrap_or_default(),
@@ -623,52 +732,35 @@ pub fn split_modules(src: &str) -> Option<Vec<ModuleBlock>> {
                 files: Vec::new(),
                 java_files: Vec::new(),
             });
-        } else if let Some(rest) = t.strip_prefix("// FILE:") {
-            flush(&mut mods, &mut cur_file, &mut cur);
-            let fname = rest.trim();
-            if fname.ends_with(".java") {
-                // Keep the full leaf name — javac requires it to match the public class.
-                let leaf = fname.rsplit('/').next().unwrap_or(fname).to_string();
-                leading.open_file(&mut cur);
-                cur_file = Some((leaf, true));
-            } else if fname.ends_with(".kt") {
-                let stem = fname
-                    .strip_suffix(".kt")
-                    .unwrap_or(fname)
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(fname)
-                    .to_string();
-                leading.open_file(&mut cur);
-                cur_file = Some((stem, false));
-            } else {
-                return None;
+        } else if let Some(rest) = directive_payload(line, "FILE") {
+            flush(&mut modules, &mut current_file, &mut current);
+            current = FileText::open(&mut saw_file, &preamble, index);
+            current.push(line);
+            match explicit_file_kind(rest.trim()) {
+                ExplicitFileKind::Kotlin(stem) => current_file = Some((stem, false)),
+                ExplicitFileKind::Java(leaf) => current_file = Some((leaf, true)),
+                ExplicitFileKind::Companion | ExplicitFileKind::Unsupported(_) => return None,
             }
-        } else if cur_file.is_some() {
-            cur.push_str(line);
-            cur.push('\n');
-        } else if !mods.is_empty() && !t.is_empty() && !t.starts_with("//") {
-            // Implicit file body straight after a `// MODULE:` header (no `// FILE:`) — KOTLIN by
-            // kotlinc's test convention; Java sources always carry an explicit `// FILE: X.java`.
-            cur_file = Some((mods.last().unwrap().name.clone(), false));
-            leading.open_file(&mut cur);
-            cur.push_str(line);
-            cur.push('\n');
-        } else {
-            leading.push(line);
+        } else if current_file.is_some() {
+            current.push(line);
+        } else if !modules.is_empty() && !trimmed.is_empty() && !trimmed.starts_with("//") {
+            // An implicit file body immediately under a module header is Kotlin source.
+            current = FileText::open(&mut saw_file, &preamble, index);
+            current_file = Some((modules.last()?.name.clone(), false));
+            current.push(line);
+        } else if !saw_file {
+            preamble.push_str(line);
+            preamble.push('\n');
         }
     }
-    flush(&mut mods, &mut cur_file, &mut cur);
-    // A source-less module is a legitimate hmpp intermediate source set (its dependents fold it in
-    // or depend on its representative); decline only when NO module has sources (a mis-parse).
-    if mods.len() < 2
-        || mods
-            .iter()
-            .all(|m| m.files.is_empty() && m.java_files.is_empty())
+    flush(&mut modules, &mut current_file, &mut current);
+    if modules
+        .iter()
+        .all(|module| module.files.is_empty() && module.java_files.is_empty())
     {
         return None;
     }
-    Some(mods)
+    Some(modules)
 }
 
 /// kotlinc's test infra compiles the `// WITH_COROUTINES` helpers as an implicit `support` module
@@ -677,7 +769,15 @@ pub fn split_modules(src: &str) -> Option<Vec<ModuleBlock>> {
 /// and give every module an implicit classpath dependency on it. No-op if the test declares its own
 /// `support` module.
 pub fn inject_support_module(mods: &mut Vec<ModuleBlock>, helpers: &str) {
-    if mods.iter().any(|m| m.name == "support") {
+    inject_support_source_files(
+        mods,
+        vec![("CoroutineUtil".to_string(), helpers.to_string())],
+    );
+}
+
+/// Give every source module access to a support module containing the selected source files.
+pub(super) fn inject_support_source_files(mods: &mut Vec<ModuleBlock>, sources: Vec<SourceBlock>) {
+    if mods.iter().any(|m| m.name == "support") || sources.is_empty() {
         return;
     }
     for m in mods.iter_mut() {
@@ -692,7 +792,7 @@ pub fn inject_support_module(mods: &mut Vec<ModuleBlock>, helpers: &str) {
             deps: Vec::new(),
             friends: Vec::new(),
             depends_on: Vec::new(),
-            files: vec![("CoroutineUtil".to_string(), helpers.to_string())],
+            files: sources,
             java_files: Vec::new(),
         },
     );
@@ -724,65 +824,70 @@ pub fn kotlin_source_blocks(
     src: &str,
     fallback_stem: &str,
 ) -> Result<Vec<KotlinSourceBlock>, String> {
-    if src.contains("// MODULE:") || src.contains("// FILE:") {
+    if contains_directive(src, "MODULE") || contains_directive(src, "FILE") {
         let mut blocks = Vec::new();
         let mut module: Option<String> = None;
         let mut file_name: Option<String> = None;
         let mut ignore_non_kotlin_file = false;
-        let mut body = String::new();
-        let mut leading = LeadingText::default();
+        let mut body = FileText::default();
+        let mut preamble = String::new();
+        let mut saw_file = false;
         let flush = |blocks: &mut Vec<KotlinSourceBlock>,
                      module: &Option<String>,
                      file_name: &mut Option<String>,
-                     body: &mut String| {
+                     body: &mut FileText| {
+            let source = body.take();
             if let Some(name) = file_name.take() {
                 blocks.push(KotlinSourceBlock {
                     module: module.clone(),
                     name,
-                    source: std::mem::take(body),
+                    source,
                 });
-            } else {
-                body.clear();
             }
         };
-        for line in src.lines() {
+
+        for (index, line) in src.lines().enumerate() {
             let trimmed = line.trim_start();
-            if let Some(header) = trimmed.strip_prefix("// MODULE:") {
+            if let Some(header) = directive_payload(line, "MODULE") {
                 flush(&mut blocks, &module, &mut file_name, &mut body);
-                leading.start_module(module.is_none());
+                if module.is_some() {
+                    preamble = "\n".repeat(index);
+                    saw_file = false;
+                }
+                preamble.push('\n');
                 let header = header.trim();
                 let name_end = header.find('(').unwrap_or(header.len());
                 module = Some(header[..name_end].trim().to_string());
                 ignore_non_kotlin_file = false;
-            } else if let Some(path) = trimmed.strip_prefix("// FILE:") {
+            } else if let Some(path) = directive_payload(line, "FILE") {
                 flush(&mut blocks, &module, &mut file_name, &mut body);
-                let path = path.trim();
-                if let Some(stem) = path.strip_suffix(".kt") {
-                    leading.open_file(&mut body);
-                    file_name = Some(stem.rsplit('/').next().unwrap_or(stem).to_string());
-                    ignore_non_kotlin_file = false;
-                } else {
-                    // Java, JavaScript, and other backend fixture files are not Kotlin source
-                    // blocks. The first declared file still takes the leading text with it.
-                    leading.open_file(&mut body);
-                    ignore_non_kotlin_file = true;
+                body = FileText::open(&mut saw_file, &preamble, index);
+                body.push(line);
+                match explicit_file_kind(path.trim()) {
+                    ExplicitFileKind::Kotlin(stem) => {
+                        file_name = Some(stem);
+                        ignore_non_kotlin_file = false;
+                    }
+                    ExplicitFileKind::Java(_) | ExplicitFileKind::Companion => {
+                        ignore_non_kotlin_file = true;
+                    }
+                    ExplicitFileKind::Unsupported(name) => {
+                        return Err(format!("unsupported explicit source file {name}"));
+                    }
                 }
             } else if file_name.is_some() {
-                body.push_str(line);
-                body.push('\n');
+                body.push(line);
             } else if module.is_some()
                 && !ignore_non_kotlin_file
                 && !trimmed.is_empty()
                 && !trimmed.starts_with("//")
             {
-                // The testdata convention permits one implicit Kotlin file immediately under a
-                // module header. Name it after the module, just like `split_modules`.
                 file_name = module.clone();
-                leading.open_file(&mut body);
-                body.push_str(line);
-                body.push('\n');
-            } else if !ignore_non_kotlin_file {
-                leading.push(line);
+                body = FileText::open(&mut saw_file, &preamble, index);
+                body.push(line);
+            } else if !saw_file {
+                preamble.push_str(line);
+                preamble.push('\n');
             }
         }
         flush(&mut blocks, &module, &mut file_name, &mut body);
@@ -795,53 +900,243 @@ pub fn kotlin_source_blocks(
     }])
 }
 
-/// Split a `// FILE:`-partitioned (single-module) test into Kotlin `(stem, content)` and Java
-/// `(leaf name incl. .java, content)` blocks. The text before the first marker joins the first
-/// declared block, Kotlin or Java ([`LeadingText`]). Non-`.java` files are treated as Kotlin (backend directives filter
-/// JS-target tests before this is reached), keeping the gate's historical behavior.
-pub fn split_files(src: &str) -> (Vec<SourceBlock>, Vec<SourceBlock>) {
-    let mut blocks: Vec<SourceBlock> = Vec::new();
-    let mut java_blocks: Vec<SourceBlock> = Vec::new();
-    let mut cur_name: Option<(String, bool)> = None; // (name, is_java)
-    let mut cur = String::new();
-    let mut leading = LeadingText::default();
-    let mut flush = |name: Option<(String, bool)>, cur: &mut String| {
-        if let Some((n, is_java)) = name {
+/// Split a `// FILE:`-partitioned (single-module) test into Kotlin and Java source blocks.
+/// Leading source and directives join the first declared file while retaining its original line
+/// numbers. Runtime companion files remain in the execution inventory; unsupported file kinds fail.
+pub fn split_files(src: &str) -> Result<(Vec<SourceBlock>, Vec<SourceBlock>), String> {
+    split_files_with_preamble(src, "main")
+}
+
+/// [`split_files`]. `preamble_stem` is retained for callers that already provide the corpus stem;
+/// leading text belongs to the first declared source file instead of a separate synthetic file.
+pub fn split_files_with_preamble(
+    src: &str,
+    _preamble_stem: &str,
+) -> Result<(Vec<SourceBlock>, Vec<SourceBlock>), String> {
+    let mut kotlin = Vec::new();
+    let mut java = Vec::new();
+    let mut current_name: Option<(String, bool)> = None;
+    let mut current = FileText::default();
+    let mut preamble = String::new();
+    let mut saw_file = false;
+    let flush = |kotlin: &mut Vec<SourceBlock>,
+                 java: &mut Vec<SourceBlock>,
+                 current_name: &mut Option<(String, bool)>,
+                 current: &mut FileText| {
+        let text = current.take();
+        if let Some((name, is_java)) = current_name.take() {
             if is_java {
-                java_blocks.push((n, std::mem::take(cur)));
+                java.push((name, text));
             } else {
-                blocks.push((n, std::mem::take(cur)));
+                kotlin.push((name, text));
             }
         }
     };
-    for line in src.lines() {
-        if let Some(rest) = line.trim_start().strip_prefix("// FILE:") {
-            flush(cur_name.take(), &mut cur);
-            let fname = rest.trim();
-            let is_java = fname.ends_with(".java");
-            let name = if is_java {
-                // Keep the full leaf file name — javac requires it to match the public class.
-                fname.rsplit('/').next().unwrap_or(fname).to_string()
+
+    for (index, line) in src.lines().enumerate() {
+        if let Some(rest) = directive_payload(line, "FILE") {
+            flush(&mut kotlin, &mut java, &mut current_name, &mut current);
+            let kind = explicit_file_kind(rest.trim());
+            if matches!(kind, ExplicitFileKind::Companion) {
+                current = FileText::open(&mut saw_file, &preamble, 0);
             } else {
-                fname
-                    .strip_suffix(".kt")
-                    .unwrap_or(fname)
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(fname)
-                    .to_string()
-            };
-            leading.open_file(&mut cur);
-            cur_name = Some((name, is_java));
-        } else if cur_name.is_some() {
-            cur.push_str(line);
-            cur.push('\n');
-        } else {
-            leading.push(line);
+                current = FileText::open(&mut saw_file, &preamble, index);
+                current.push(line);
+            }
+            match kind {
+                ExplicitFileKind::Kotlin(name) => current_name = Some((name, false)),
+                ExplicitFileKind::Java(name) => current_name = Some((name, true)),
+                ExplicitFileKind::Companion => {
+                    let name = rest.trim().rsplit(['/', '\\']).next().unwrap_or(rest.trim());
+                    current_name = Some((name.to_string(), false));
+                }
+                ExplicitFileKind::Unsupported(name) => {
+                    return Err(format!("unsupported explicit source file {name}"));
+                }
+            }
+        } else if current_name.is_some() {
+            current.push(line);
+        } else if !saw_file {
+            preamble.push_str(line);
+            preamble.push('\n');
         }
     }
-    flush(cur_name.take(), &mut cur);
-    (blocks, java_blocks)
+    flush(&mut kotlin, &mut java, &mut current_name, &mut current);
+    Ok((kotlin, java))
+}
+
+/// Wasm box files Kotlin's `WasmAdditionalSourceProvider` adds to an eligible original module:
+/// `arrayAsserts.kt`, `asserts.kt`, `fail.kt`, plus a sibling `_common.kt` when that file exists.
+///
+/// Eligibility is frozen from canonical module directives before synthetic coroutine support is
+/// injected. `NO_COMMON_FILES` opts a module out. Enabled `MultiPlatformProjects` together with any
+/// regular, friend, or `dependsOn` dependency opts that module out. Calls, comments, strings, and
+/// user declarations do not select the files.
+pub fn with_wasm_additional_sources(source: &str, case: &Path) -> Result<String, String> {
+    let regions = wasm_module_regions(source);
+    let preamble = regions
+        .first()
+        .map(|region| source[..region.start].to_string())
+        .unwrap_or_default();
+    let mut insertions = Vec::new();
+    for region in &regions {
+        let directives = format!("{preamble}{}", region.text(source));
+        if directive(&directives, "NO_COMMON_FILES") {
+            continue;
+        }
+        if multiplatform_projects_enabled(&directives) && region.has_dependency {
+            continue;
+        }
+        insertions.push(region.end);
+    }
+    if insertions.is_empty() {
+        return Ok(source.to_string());
+    }
+    let Some(extras) = wasm_additional_file_text(case)? else {
+        return Ok(source.to_string());
+    };
+    // A marker-less case is one file. Name it before appending provider files, or its text would
+    // become leading code on the first helper.
+    let (mut prepared, shift) =
+        if contains_directive(source, "FILE") || contains_directive(source, "MODULE") {
+            (source.to_string(), 0)
+        } else {
+            let stem = case
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("main");
+            let header = format!("// FILE: {stem}.kt\n");
+            let shift = header.len();
+            (format!("{header}{source}"), shift)
+        };
+    for end in insertions.into_iter().rev() {
+        prepared.insert_str(end + shift, &extras);
+    }
+    Ok(prepared)
+}
+
+struct WasmModuleRegion {
+    start: usize,
+    end: usize,
+    has_dependency: bool,
+}
+
+impl WasmModuleRegion {
+    fn text<'a>(&self, source: &'a str) -> &'a str {
+        &source[self.start..self.end]
+    }
+}
+
+fn wasm_module_regions(source: &str) -> Vec<WasmModuleRegion> {
+    let mut headers = Vec::new();
+    let mut offset = 0;
+    for line in source.split_inclusive('\n') {
+        if directive_payload(line, "MODULE").is_some() {
+            headers.push(offset);
+        }
+        offset += line.len();
+    }
+    if headers.is_empty() {
+        return vec![WasmModuleRegion {
+            start: 0,
+            end: source.len(),
+            has_dependency: false,
+        }];
+    }
+    headers
+        .iter()
+        .enumerate()
+        .map(|(index, start)| {
+            let end = headers.get(index + 1).copied().unwrap_or(source.len());
+            let header = source[*start..end].lines().next().unwrap_or("");
+            WasmModuleRegion {
+                start: *start,
+                end,
+                has_dependency: module_header_has_dependency(header),
+            }
+        })
+        .collect()
+}
+
+fn module_header_has_dependency(header: &str) -> bool {
+    let Some(rest) = directive_payload(header, "MODULE") else {
+        return false;
+    };
+    let mut rest = rest.trim();
+    let name_end = rest.find('(').unwrap_or(rest.len());
+    rest = &rest[name_end..];
+    while let Some(open) = rest.find('(') {
+        let Some(close) = rest[open..].find(')') else {
+            return false;
+        };
+        if rest[open + 1..open + close]
+            .split(',')
+            .any(|name| !name.trim().is_empty())
+        {
+            return true;
+        }
+        rest = &rest[open + close + 1..];
+    }
+    false
+}
+
+fn multiplatform_projects_enabled(source: &str) -> bool {
+    source.lines().any(|line| {
+        let Some(rest) = line.trim().strip_prefix("//") else {
+            return false;
+        };
+        let rest = rest.trim_start();
+        let payload = rest
+            .strip_prefix("LANGUAGE:")
+            .or_else(|| rest.strip_prefix("FREE_COMPILER_ARGS:"));
+        payload.is_some_and(|payload| {
+            payload
+                .split(|character: char| character.is_whitespace() || character == ',')
+                .any(|token| {
+                    token == "+MultiPlatformProjects" || token.ends_with(":+MultiPlatformProjects")
+                })
+        })
+    })
+}
+
+fn wasm_additional_file_text(case: &Path) -> Result<Option<String>, String> {
+    let root = case.ancestors().find(|dir| {
+        dir.join("wasm/wasm.tests/_additionalFilesForTests/commonFiles/asserts.kt")
+            .is_file()
+    });
+    let Some(root) = root else {
+        // Synthetic sources are not corpus cases. A real case lives under the checkout that
+        // contains these files, so a missing file there is still an error.
+        return Ok(None);
+    };
+    let common = root.join("wasm/wasm.tests/_additionalFilesForTests/commonFiles");
+    let mut text = String::new();
+    for name in ["arrayAsserts.kt", "asserts.kt", "fail.kt"] {
+        let path = common.join(name);
+        let body = std::fs::read_to_string(&path)
+            .map_err(|error| format!("read Wasm additional source {}: {error}", path.display()))?;
+        push_additional_file(&mut text, name, &body);
+    }
+    if let Some(directory) = case.parent() {
+        let local = directory.join("_common.kt");
+        if local.is_file() && local != case {
+            let body = std::fs::read_to_string(&local).map_err(|error| {
+                format!("read Wasm additional source {}: {error}", local.display())
+            })?;
+            push_additional_file(&mut text, "_common.kt", &body);
+        }
+    }
+    Ok(Some(text))
+}
+
+fn push_additional_file(out: &mut String, name: &str, body: &str) {
+    out.push_str("// FILE: ");
+    out.push_str(name);
+    out.push('\n');
+    out.push_str(body);
+    if !body.ends_with('\n') {
+        out.push('\n');
+    }
 }
 
 /// One source-set fragment of a folded hierarchical-multiplatform unit, in the unit's
@@ -1488,7 +1783,10 @@ fun box(): String = \"OK\"
         assert!(mods[0].deps.is_empty());
         assert_eq!(
             mods[0].files,
-            vec![("lib".to_string(), "class A\n".to_string())]
+            vec![(
+                "lib".to_string(),
+                "\n// FILE: lib.kt\nclass A\n".to_string()
+            )]
         );
         assert_eq!(mods[1].name, "main");
         assert_eq!(mods[1].deps, vec!["lib".to_string()]);
@@ -1496,8 +1794,56 @@ fun box(): String = \"OK\"
             mods[1].files,
             vec![(
                 "main".to_string(),
-                "fun box(): String = \"OK\"\n".to_string()
+                "\n\n\n\n// FILE: main.kt\nfun box(): String = \"OK\"\n".to_string()
             )]
+        );
+    }
+
+    #[test]
+    fn module_leading_text_keeps_case_and_unit_modes_on_the_first_file() {
+        let src = "\
+// WITH_STDLIB
+// MODULE: lib
+// JVM_DEFAULT_MODE: disable
+// FILE: Library.java
+public class Library {}
+// FILE: api.kt
+interface Api
+// MODULE: main(lib)
+// JVM_DEFAULT_MODE: enable
+// FILE: main.kt
+fun box(): String = \"OK\"
+";
+        let modules = split_modules(src).expect("module sources should split");
+        assert_eq!(modules[0].java_files.len(), 1);
+        assert_eq!(
+            modules[0].java_files[0].1,
+            "// WITH_STDLIB\n\n// JVM_DEFAULT_MODE: disable\n// FILE: Library.java\npublic class Library {}\n"
+        );
+        assert_eq!(
+            modules[0].files[0].1,
+            "\n\n\n\n\n// FILE: api.kt\ninterface Api\n"
+        );
+        assert_eq!(
+            modules[1].files[0].1,
+            "\n\n\n\n\n\n\n\n// JVM_DEFAULT_MODE: enable\n// FILE: main.kt\nfun box(): String = \"OK\"\n"
+        );
+        let lib_sources = modules[0]
+            .files
+            .iter()
+            .chain(&modules[0].java_files)
+            .map(|(_, source)| source.as_str());
+        let main_sources = modules[1].files.iter().map(|(_, source)| source.as_str());
+        assert_eq!(case_directive_region(src), "// WITH_STDLIB\n");
+        assert_eq!(
+            UnitCodegenModes::of_unit_in_case(case_directive_region(src), lib_sources)
+                .jvm_default,
+            crate::jvm::emit_modes::JvmDefaultMode::Disable
+        );
+        assert_eq!(
+            UnitCodegenModes::of_unit_in_case(case_directive_region(src), main_sources)
+                .jvm_default,
+            crate::jvm::emit_modes::JvmDefaultMode::Enable
         );
     }
 
@@ -1609,11 +1955,17 @@ fun box(): String = \"OK\"
         let mods = split_modules(src).expect("java-in-module test should split");
         assert_eq!(
             mods[0].java_files,
-            vec![("J.java".to_string(), "public class J {}\n".to_string())]
+            vec![(
+                "J.java".to_string(),
+                "\n// FILE: J.java\npublic class J {}\n".to_string()
+            )]
         );
         assert_eq!(
             mods[0].files,
-            vec![("lib".to_string(), "class A\n".to_string())]
+            vec![(
+                "lib".to_string(),
+                "\n\n\n// FILE: lib.kt\nclass A\n".to_string()
+            )]
         );
         assert!(mods[1].java_files.is_empty());
     }
@@ -1688,15 +2040,16 @@ fun a() = 1
 // FILE: b.kt
 fun box(): String = \"OK\"
 ";
-        let (kt, java) = split_files(src);
+        let (kt, java) = split_files(src).expect("partition");
         assert!(java.is_empty());
+        assert_eq!(kt.len(), 2);
+        assert_eq!(kt[0].0, "a");
         assert_eq!(
-            kt,
-            vec![
-                ("a".to_string(), "// WITH_STDLIB\nfun a() = 1\n".to_string()),
-                ("b".to_string(), "fun box(): String = \"OK\"\n".to_string()),
-            ]
+            kt[0].1,
+            "// WITH_STDLIB\n// FILE: a.kt\nfun a() = 1\n"
         );
+        assert_eq!(kt[1].0, "b");
+        assert_eq!(kt[1].1, "\n\n\n// FILE: b.kt\nfun box(): String = \"OK\"\n");
     }
 
     #[test]
@@ -1707,8 +2060,14 @@ public class J {}
 // FILE: main.kt
 fun box(): String = \"OK\"
 ";
-        let (kt, java) = split_files(src);
-        assert_eq!(java, vec![("J.java".into(), "public class J {}\n".into())]);
+        let (kt, java) = split_files(src).expect("partition");
+        assert_eq!(
+            java,
+            vec![(
+                "J.java".into(),
+                "// FILE: p/J.java\npublic class J {}\n".into()
+            )]
+        );
         assert_eq!(kt.len(), 1);
         assert_eq!(kt[0].0, "main");
     }
@@ -1716,15 +2075,126 @@ fun box(): String = \"OK\"
     #[test]
     fn split_files_nested_kotlin_path_uses_leaf_stem() {
         let src = "// FILE: foo/bar/x.kt\nfun x() = 2\n";
-        let (kt, _) = split_files(src);
+        let (kt, _) = split_files(src).expect("partition");
         assert_eq!(kt[0].0, "x");
     }
 
     #[test]
     fn split_files_no_markers_is_empty() {
-        let (kt, java) = split_files("fun box(): String = \"OK\"\n");
+        let (kt, java) = split_files("fun box(): String = \"OK\"\n").expect("partition");
         assert!(kt.is_empty());
         assert!(java.is_empty());
+    }
+
+    #[test]
+    fn split_files_keeps_leading_code_on_the_first_file_including_java() {
+        let (kt, java) =
+            split_files("fun lead() = 1\n// FILE: a.kt\nfun a() = 2\n").expect("partition");
+        assert!(java.is_empty());
+        assert_eq!(kt[0].1, "fun lead() = 1\n// FILE: a.kt\nfun a() = 2\n");
+        let (kt, java) =
+            split_files("fun lead() = 1\n// FILE: p/J.java\nclass J {}\n").expect("partition");
+        assert!(kt.is_empty());
+        assert_eq!(java[0].1, "fun lead() = 1\n// FILE: p/J.java\nclass J {}\n");
+    }
+
+    #[test]
+    fn split_files_rejects_unknown_kinds_and_keeps_runtime_companions() {
+        assert!(split_files("// FILE: a.kts\nfun box() = \"OK\"\n").is_err());
+        assert!(split_files("// FILE: data.txt\nhello\n").is_err());
+        let (kt, java) =
+            split_files("// FILE: a.kt\nfun box() = \"OK\"\n// FILE: helper.mjs\nexport {}\n")
+                .expect("partition");
+        assert!(java.is_empty());
+        assert_eq!(kt.len(), 2);
+        assert_eq!(kt[0].0, "a");
+        assert_eq!(kt[1].0, "helper.mjs");
+    }
+
+    #[test]
+    fn source_modules_keeps_a_single_declared_module() {
+        let src = "// MODULE: only\n// FILE: only.kt\nfun box(): String = \"OK\"\n";
+        assert!(split_modules(src).is_none());
+        assert_eq!(source_modules(src).expect("one module").len(), 1);
+    }
+
+    #[test]
+    fn kotlin_source_blocks_name_implicit_module_files_without_file_markers() {
+        let src = "// LANGUAGE: +MultiPlatformProjects\nval leading = 1\n// MODULE: common\nexpect fun f(): String\n// MODULE: main()()(common)\n// a comment\nactual fun f() = \"OK\"\n";
+        let blocks = kotlin_source_blocks(src, "Case").unwrap();
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| (block.module.as_deref(), block.name.as_str(), block.source.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    Some("common"),
+                    "common",
+                    "// LANGUAGE: +MultiPlatformProjects\nval leading = 1\n\nexpect fun f(): String\n"
+                ),
+                (
+                    Some("main"),
+                    "main",
+                    "\n\n\n\n\n// a comment\nactual fun f() = \"OK\"\n"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn wasm_additional_sources_follow_module_directives_only() {
+        let root = std::env::temp_dir().join(format!(
+            "krusty-wasm-additional-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let common = root.join("wasm/wasm.tests/_additionalFilesForTests/commonFiles");
+        std::fs::create_dir_all(&common).expect("fixture directory");
+        for (name, body) in [
+            ("arrayAsserts.kt", "fun assertArrayEquals() = Unit\n"),
+            ("asserts.kt", "fun assertEquals() = Unit\n"),
+            ("fail.kt", "fun fail() = Unit\n"),
+        ] {
+            std::fs::write(common.join(name), body).expect("global helper");
+        }
+        let case_dir = root.join("case");
+        std::fs::create_dir_all(&case_dir).expect("case directory");
+        std::fs::write(
+            case_dir.join("_common.kt"),
+            "package common\nfun shared() = 1\n",
+        )
+        .expect("local helper");
+        let case = case_dir.join("main.kt");
+        let augmented =
+            with_wasm_additional_sources("fun box() = \"OK\"\n", &case).expect("eligible");
+        assert!(augmented.starts_with("// FILE: main.kt\nfun box() = \"OK\"\n"));
+        assert!(augmented.contains("// FILE: arrayAsserts.kt\n"));
+        assert!(augmented.contains("// FILE: asserts.kt\n"));
+        assert!(augmented.contains("// FILE: fail.kt\n"));
+        assert!(augmented.contains("// FILE: _common.kt\npackage common\n"));
+        let skipped = with_wasm_additional_sources(
+            "// NO_COMMON_FILES\n// assertEquals(1, 1)\nfun box() = \"OK\"\n",
+            &case,
+        )
+        .expect("opt out");
+        assert!(!skipped.contains("arrayAsserts.kt"));
+        let multiplatform = "\
+// LANGUAGE: +MultiPlatformProjects
+// MODULE: common
+// FILE: a.kt
+fun shared() = 1
+// MODULE: platform()()(common)
+// FILE: main.kt
+fun box() = \"OK\"
+";
+        let prepared = with_wasm_additional_sources(multiplatform, &case).expect("mpp");
+        let common_at = prepared.find("// MODULE: common").expect("common");
+        let platform_at = prepared.find("// MODULE: platform").expect("platform");
+        assert!(prepared[common_at..platform_at].contains("// FILE: asserts.kt\n"));
+        assert!(!prepared[platform_at..].contains("// FILE: asserts.kt\n"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1739,14 +2209,33 @@ fun box(): String = \"OK\"
                 KotlinSourceBlock {
                     module: None,
                     name: "first".into(),
-                    source: "// TARGET_BACKEND: JS\nval first = 1\n".into(),
+                    source: "// TARGET_BACKEND: JS\n// FILE: first.kt\nval first = 1\n".into(),
                 },
                 KotlinSourceBlock {
                     module: None,
                     name: "second".into(),
-                    source: "val second = 2\n".into(),
+                    source: "\n\n\n\n\n// FILE: nested/second.kt\nval second = 2\n".into(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn kotlin_source_blocks_keep_java_first_file_preamble_out_of_kotlin() {
+        let src = "\
+// LAMBDAS: CLASS
+// FILE: Helper.java
+public class Helper {}
+// FILE: main.kt
+fun box(): String = \"OK\"
+";
+        assert_eq!(
+            kotlin_source_blocks(src, "fallback").unwrap(),
+            vec![KotlinSourceBlock {
+                module: None,
+                name: "main".into(),
+                source: "\n\n\n// FILE: main.kt\nfun box(): String = \"OK\"\n".into(),
+            }]
         );
     }
 
@@ -1760,12 +2249,12 @@ fun box(): String = \"OK\"
                 KotlinSourceBlock {
                     module: Some("lib".into()),
                     name: "same".into(),
-                    source: "val lib = 1\n".into(),
+                    source: "\n// FILE: same.kt\nval lib = 1\n".into(),
                 },
                 KotlinSourceBlock {
                     module: Some("main".into()),
                     name: "same".into(),
-                    source: "val main = 2\n".into(),
+                    source: "\n\n\n\n// FILE: same.kt\nval main = 2\n".into(),
                 },
             ]
         );

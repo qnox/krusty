@@ -126,53 +126,21 @@ impl Body<'_> {
     /// ordered as `Float.compare`/`Double.compare` order it: a total order with `-0.0` below `0.0`
     /// and every `NaN` equal to and above all else.
     fn compare(&mut self, operand: Ty, lhs: u32, rhs: u32) -> Result<(), Unsupported> {
-        let value = ordinary_numeric_carrier(operand)?;
-        let (value, greater, less) = match value {
-            Some(ValType::I32) => (ValType::I32, GT_S32, LT_S32),
-            Some(ValType::I64) => (ValType::I64, GT_S64, LT_S64),
-            // The canonical bits, with the magnitude bits of a negative value flipped, order as
-            // signed integers exactly as the values do.
-            Some(ValType::F32) => (ValType::I32, GT_S32, LT_S32),
-            Some(ValType::F64) => (ValType::I64, GT_S64, LT_S64),
-            _ => return Err(format!("`compareTo` on `{}`", describe(operand))),
-        };
-        let left = self.local(value);
-        let right = self.local(value);
+        ordinary_numeric_carrier(operand)?;
+        let key = crate::builtin_order::order_key(operand)
+            .ok_or_else(|| format!("`compareTo` on `{}`", describe(operand)))?;
+        let left = self.local(key);
+        let right = self.local(key);
         for (operand_id, local) in [(lhs, left), (rhs, right)] {
             self.value(operand_id, operand)?;
-            if self
-                .runtime
-                .hashing
-                .emit_float_bits(&mut self.code, operand)
-            {
-                self.code.local_tee(local).local_get(local);
-                match value {
-                    ValType::I32 => self
-                        .code
-                        .i32_const(31)
-                        .op(SHR_S32)
-                        .i32_const(1)
-                        .op(SHR_U32)
-                        .op(XOR32),
-                    _ => self
-                        .code
-                        .i64_const(63)
-                        .op(SHR_S64)
-                        .i64_const(1)
-                        .op(SHR_U64)
-                        .op(XOR64),
-                };
-            }
-            self.code.local_set(local);
+            crate::builtin_order::store_order_key(
+                &mut self.code,
+                &self.runtime.hashing,
+                operand,
+                local,
+            );
         }
-        self.code
-            .local_get(left)
-            .local_get(right)
-            .op(greater)
-            .local_get(left)
-            .local_get(right)
-            .op(less)
-            .op(SUB32);
+        crate::builtin_order::emit_key_order(&mut self.code, key, left, right);
         Ok(())
     }
 
