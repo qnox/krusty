@@ -31,6 +31,7 @@ fn template(
         declarations: libraries.declaration_bodies(),
         references: libraries.reference_bindings(),
         source: libraries,
+        type_hierarchy: None,
     };
     lower_inline_template(ir, selected, libraries.inline_declaration_bodies(), callees)
         .expect("a KLIB function")

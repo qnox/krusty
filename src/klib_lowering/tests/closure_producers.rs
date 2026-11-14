@@ -122,6 +122,7 @@ fn official_serialized_closure_frames_keep_raw_and_prepared_ownership() {
                     declarations: libraries.declaration_bodies(),
                     references: libraries.reference_bindings(),
                     source: &libraries,
+                    type_hierarchy: None,
                 },
             )
             .unwrap()

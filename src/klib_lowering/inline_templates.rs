@@ -64,6 +64,51 @@ pub struct TemplateCallees<'a> {
     /// declaration, its property and classifier records, and the class hierarchy that decides the
     /// subtyping a body leaves implicit.
     pub source: &'a dyn crate::symbol_source::SymbolSource,
+    /// Checker-frozen hierarchy for the selected inline body and its reachable callees.
+    pub(crate) type_hierarchy: Option<&'a crate::resolve::CheckedKlibTypeFacts>,
+}
+
+impl TemplateCallees<'_> {
+    fn applied_supertype(&self, sub: Ty, owner: crate::types::TypeName) -> Option<Ty> {
+        match self.type_hierarchy {
+            Some(hierarchy) => {
+                crate::assignable::applied_supertype(hierarchy, sub, Ty::obj_name(owner))
+            }
+            None => (sub.kotlin_class_internal() == Some(owner)).then_some(sub),
+        }
+    }
+
+    fn is_subtype(
+        &self,
+        parameters: &super::klib_types::KlibTypeParameters,
+        sub: Ty,
+        sup: Ty,
+    ) -> bool {
+        super::type_evidence::ordinary_subtype(
+            self.type_hierarchy.map(|facts| facts as _),
+            parameters,
+            sub,
+            sup,
+        )
+    }
+
+    fn same_type(&self, left: Ty, right: Ty) -> bool {
+        super::type_evidence::same_type(self.type_hierarchy.map(|facts| facts as _), left, right)
+    }
+
+    fn constructor_bound(
+        &self,
+        parameters: &super::klib_types::KlibTypeParameters,
+        argument: Ty,
+        bound: Ty,
+    ) -> bool {
+        super::type_evidence::satisfies(
+            self.type_hierarchy.map(|facts| facts as _),
+            parameters,
+            argument,
+            bound,
+        )
+    }
 }
 
 /// Lower the prepared-inline body of the dependency function `selected`, from `prepared`, into

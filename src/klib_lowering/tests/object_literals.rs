@@ -46,6 +46,7 @@ fn continuation_factory_lowers_as_an_anonymous_object() {
             declarations: libraries.declaration_bodies(),
             references: libraries.reference_bindings(),
             source: &libraries,
+            type_hierarchy: None,
         },
     )
     .expect("a klib declaration")

@@ -87,6 +87,18 @@ impl CheckedKlibTypeFacts {
     }
 }
 
+impl std::fmt::Debug for CheckedKlibTypeFacts {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CheckedKlibTypeFacts")
+            .field("classifiers", &self.classifiers.len())
+            .field("actualized_expects", &self.actualized_expects.len())
+            .field("flexible_upper_bounds", &self.flexible_upper_bounds.len())
+            .field("type_variable_bounds", &self.type_variable_bounds.len())
+            .finish()
+    }
+}
+
 impl TypeOracle for CheckedKlibTypeFacts {
     fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
         if let TyKind::Fun(_) = ty.non_null().kind() {

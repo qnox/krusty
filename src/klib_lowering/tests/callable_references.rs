@@ -239,6 +239,7 @@ fn assert_raw_and_prepared(
                     declarations: libraries.declaration_bodies(),
                     references: libraries.reference_bindings(),
                     source: libraries,
+                    type_hierarchy: None,
                 },
             )
             .unwrap()

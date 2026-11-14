@@ -213,6 +213,7 @@ fn assert_bound_lowering(libraries: &KlibLibraries) {
                     declarations: libraries.declaration_bodies(),
                     references: libraries.reference_bindings(),
                     source: libraries,
+                    type_hierarchy: None,
                 },
             )
             .unwrap()

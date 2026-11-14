@@ -67,6 +67,7 @@ fn two_interface_object_records_each_declaring_owner() {
             declarations: libraries.declaration_bodies(),
             references: libraries.reference_bindings(),
             source: &libraries,
+            type_hierarchy: None,
         },
     )
     .expect("a klib declaration")
