@@ -462,6 +462,11 @@ mod tests {
                 .filter(|path| !path.starts_with(&jvm_provider)),
         );
         paths.extend(rust_files_under("src/js"));
+        // These code generators live in workspace crates rather than the compiler crate, so the
+        // module dependency budgets below do not catch a direct path back into resolver APIs.
+        // Keep the same checked-facts boundary across every representation backend.
+        paths.extend(rust_files_under("crates/krusty-native/src/codegen"));
+        paths.extend(rust_files_under("crates/krusty-wasm/src/codegen"));
         for path in paths {
             if path
                 .components()
