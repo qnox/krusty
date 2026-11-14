@@ -95,10 +95,16 @@ pub(super) fn for_checked_unit(checker: &Checker<'_>) -> Result<Facts, ExternalC
         let Some(SemanticCallableOwner::Classifier(owner)) = setter.declaration_owner else {
             return Err(identity);
         };
-        let name = setter
-            .external_property_identity
-            .and_then(|property| checker.libraries.external_property(property))
-            .map_or_else(|| setter.name.clone(), |property| property.name);
+        let name = match setter.external_property_identity {
+            Some(property) => {
+                checker
+                    .libraries
+                    .external_property(property)
+                    .ok_or(identity)?
+                    .name
+            }
+            None => setter.name.clone(),
+        };
         selected
             .entry(identity)
             .or_insert_with(|| (owner, name.into_boxed_str()));
