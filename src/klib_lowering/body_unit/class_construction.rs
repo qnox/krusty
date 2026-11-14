@@ -44,9 +44,15 @@ impl<'u, 's> Linker<'u, 's> {
                 .expect("the plan authenticated its receiver")
                 .ty,
         )?;
+        let retained_initializer = plan
+            .superclass
+            .as_ref()
+            .filter(|call| call.materialized)
+            .and_then(|call| self.sources.externals.get(&call.constructor))
+            .and_then(|external| external.constructor_initializer_target());
         // A materialized superclass is materialized first, from its own admitted initialization.
         let superclass = match &plan.superclass {
-            Some(call) if call.materialized => {
+            Some(call) if call.materialized && retained_initializer.is_none() => {
                 let selected = match self.sources.callees.get(&call.constructor) {
                     Some(KlibCalleeFact::Selected(callables)) => callables[0],
                     _ => {
@@ -108,6 +114,23 @@ impl<'u, 's> Linker<'u, 's> {
             secondaries.push(materialized_secondary(&plan, &header, delegate, initialize));
             Some(secondaries.len() - 1)
         };
+        if let Some(target) = retained_initializer {
+            let target = crate::ir::IrExternalConstructorTarget::unresolved(target);
+            match secondary {
+                Some(ordinal) => {
+                    ir.external_secondary_super_constructors.insert(
+                        (
+                            classifier,
+                            u32::try_from(ordinal).expect("a constructor ordinal fits u32"),
+                        ),
+                        target,
+                    );
+                }
+                None => {
+                    ir.external_super_constructors.insert(classifier, target);
+                }
+            }
+        }
         self.classes.insert(identity.clone(), class);
         self.constructors.insert(
             identity.clone(),
@@ -154,10 +177,7 @@ impl<'u, 's> Linker<'u, 's> {
         let mut class = IrClass::synthetic(classifier);
         class.is_source_declared = true;
         class.supertypes.clone_from(&plan.supertypes);
-        class.is_open =
-            plan.header.contract.modality != crate::metadata::semantic::KotlinModality::Final;
-        class.is_abstract =
-            plan.header.contract.modality == crate::metadata::semantic::KotlinModality::Abstract;
+        set_materialized_modality(&mut class, plan.header.contract.modality);
         if let Some(call) = &plan.superclass {
             class.superclass = call.owner;
             class.super_ctor_params.clone_from(&call.params);
@@ -572,5 +592,59 @@ fn materialized_secondary(
         vc_params: false,
         param_checks: vec![None; params.len()],
         params,
+    }
+}
+
+fn set_materialized_modality(
+    class: &mut IrClass,
+    modality: crate::metadata::semantic::KotlinModality,
+) {
+    class.is_open = modality != crate::metadata::semantic::KotlinModality::Final;
+    class.is_abstract = modality.is_abstract();
+    class.is_sealed = modality == crate::metadata::semantic::KotlinModality::Sealed;
+}
+
+#[cfg(test)]
+mod modality_tests {
+    use super::*;
+
+    #[test]
+    fn sealed_materialization_retains_initializer_inventory_without_allocation() {
+        let identity = KlibDependencyCallable {
+            module: "producer".into(),
+            declaration: KlibDeclarationSignature::Public(KlibPublicIdSignature::classifier(
+                crate::types::type_name("sample/Sealed"),
+            )),
+        };
+        let mut unit = DependencyBodyUnit::default();
+        let mut class = IrClass::synthetic(crate::types::type_name("sample/Sealed"));
+        set_materialized_modality(
+            &mut class,
+            crate::metadata::semantic::KotlinModality::Sealed,
+        );
+        assert!(class.is_sealed);
+        unit.ir.classes.push(class);
+        unit.classes.insert(identity.clone(), 0);
+        unit.constructors.insert(
+            identity.clone(),
+            MaterializedConstructor {
+                initializer: 0,
+                secondary: None,
+            },
+        );
+        assert_eq!(
+            unit.initializing_constructors()
+                .map(|(identity, _)| identity)
+                .collect::<Vec<_>>(),
+            vec![&identity]
+        );
+        assert!(unit.allocating_constructors().next().is_none());
+        unit.ir.classes[0].is_abstract = false;
+        assert!(unit.allocating_constructors().next().is_none());
+        set_materialized_modality(
+            &mut unit.ir.classes[0],
+            crate::metadata::semantic::KotlinModality::Open,
+        );
+        assert_eq!(unit.allocating_constructors().count(), 1);
     }
 }

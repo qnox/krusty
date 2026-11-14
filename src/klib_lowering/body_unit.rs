@@ -57,6 +57,7 @@ enum DependencyExternalRealization {
     TargetIntrinsic(crate::libraries::CompilerIntrinsic),
     Constructor,
     AllocatingConstructor,
+    ConstructorInitializer,
     PropertyGetter,
     TargetMember,
     ProviderLeaf,
@@ -95,6 +96,23 @@ impl EmittedDependencyCallable {
             realization: DependencyExternalRealization::Constructor,
             ..Self::new(target, None, None)
         }
+    }
+
+    /// Actual emitted initialization code; this capability does not permit allocation.
+    pub(crate) fn constructor_initializer(target: ExternalCallableId) -> Self {
+        Self {
+            realization: DependencyExternalRealization::ConstructorInitializer,
+            ..Self::new(target, None, None)
+        }
+    }
+
+    pub(crate) fn constructor_initializer_target(self) -> Option<ExternalCallableId> {
+        matches!(
+            self.realization,
+            DependencyExternalRealization::ConstructorInitializer
+                | DependencyExternalRealization::AllocatingConstructor
+        )
+        .then_some(self.target)
     }
 
     pub(crate) fn allocating_constructor(target: ExternalCallableId) -> Self {
@@ -674,8 +692,10 @@ impl DependencyBodyUnit {
     pub(crate) fn allocating_constructors(
         &self,
     ) -> impl Iterator<Item = (&KlibDependencyCallable, MaterializedClassConstructor)> {
-        self.initializing_constructors()
-            .filter(|(_, constructor)| !self.ir.classes[constructor.class as usize].is_abstract)
+        self.initializing_constructors().filter(|(_, constructor)| {
+            let class = &self.ir.classes[constructor.class as usize];
+            !class.is_abstract && !class.is_sealed
+        })
     }
 
     /// A unit that reads the constants of `enums`, which earlier units materialized, through
@@ -1138,6 +1158,21 @@ impl CallLinker for Linker<'_, '_> {
                 "a constructor call selected a non-constructor provider declaration".to_owned(),
             ));
         }
+        if self
+            .sources
+            .externals
+            .get(&identity)
+            .is_some_and(|external| {
+                matches!(
+                    external.realization,
+                    DependencyExternalRealization::ConstructorInitializer
+                )
+            })
+        {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "an initializer-only dependency does not permit class allocation".to_owned(),
+            ));
+        }
         let declaration = self
             .sources
             .callees
@@ -1473,7 +1508,7 @@ impl CallLinker for Linker<'_, '_> {
             });
         }
         if let Some(&emitted) = self.sources.externals.get(&identity) {
-            if emitted.is_constructor() {
+            if emitted.is_constructor() || emitted.constructor_initializer_target().is_some() {
                 return Err(callee_declined(KlibBodyDeclineReason::SignatureMismatch(
                     "a constructor external is called as a function".to_owned(),
                 )));

@@ -155,6 +155,31 @@ impl Backend for WasmBackend {
         lower::is_direct_operation(operation)
     }
 
+    fn emitted_constructor_initializer(
+        &self,
+        state: &mut Self::State,
+        declaration: &krusty::backend::ConstructorInitializerDeclaration,
+    ) -> bool {
+        if state.declined {
+            return false;
+        }
+        let Some(started) = state.started.as_mut() else {
+            return false;
+        };
+        let Ok(Some((owner, _, signature))) = started
+            .classes
+            .published_initializer(&declaration.constructor, &started.module)
+        else {
+            return false;
+        };
+        owner == &declaration.class
+            && laid_out_classes::constructor_frame_matches(
+                &mut started.module,
+                &declaration.parameters,
+                signature,
+            )
+    }
+
     fn lower_ir_file(
         &self,
         mut file: CheckedIrFile<'_>,
@@ -236,7 +261,12 @@ impl Backend for WasmBackend {
                 &mut started.module,
             );
         } else {
-            started.classes.enter_dependency_support();
+            started.classes.enter_dependency_support(
+                &file.ir,
+                &file.callables,
+                &file.classifiers,
+                &mut started.module,
+            );
         }
         if state
             .slot_plan
