@@ -450,14 +450,11 @@ fn checked_klib_property_facts_use_the_exact_property_name() {
     };
     let libraries = stdlib(&root);
     let owner = type_name("kotlin/CharSequence");
-    let property =
-        &libraries.classifier(owner).unwrap().declared_callables["length"].properties()[0];
+    let classifier = libraries.classifier(owner).unwrap();
+    let property = &classifier.declared_callables["length"].properties()[0];
     let identity = property.getter.external_identity.unwrap();
-    let selected = libraries
-        .external_callable(identity)
-        .unwrap()
-        .klib_body_callable()
-        .unwrap();
+    let realization = libraries.external_callable(identity).unwrap();
+    let selected = realization.klib_body_callable().unwrap();
     let facts = KlibCalleeFacts::new([selected])
         .with_builtin_implementation_facts(&libraries)
         .unwrap();
