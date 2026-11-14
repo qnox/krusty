@@ -404,7 +404,7 @@ impl FileClasses {
                 constructors.push(Some((function, params)));
             }
             let mut constructor_identities = vec![None; constructors.len()];
-            for (exported, identity) in exports.constructors() {
+            for (exported, identity) in exports.constructor_declarations() {
                 if exported.class != id {
                     continue;
                 }

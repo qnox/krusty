@@ -244,6 +244,8 @@ pub struct DependencyExportSignatures {
     /// constructs through. A target realizes each as an ordinary exported callable (see
     /// `super::construction_entries`), since constructing an object needs its layout.
     constructors: Vec<(ExportedConstructor, KlibDependencyCallable)>,
+    /// Exact initializer declarations, including abstract classes with no allocation entry.
+    constructor_declarations: Vec<(ExportedConstructor, KlibDependencyCallable)>,
     /// Concrete default property accessors whose checked operations a target exports as bodies.
     property_accessors: Vec<(ExportedPropertyAccessor, KlibDependencyCallable)>,
     /// The entry a target realized answering each object instance and enum constant of this
@@ -407,7 +409,43 @@ impl DependencyExportSignatures {
         constructor: ExportedConstructor,
         identity: KlibDependencyCallable,
     ) {
+        self.record_constructor_declaration(constructor, identity.clone())
+            .expect("an allocation agrees with its authenticated initializer declaration");
         self.constructors.push((constructor, identity));
+    }
+
+    /// Record a physically defined initializer without promising an allocation entry.
+    pub(crate) fn record_constructor_declaration(
+        &mut self,
+        constructor: ExportedConstructor,
+        identity: KlibDependencyCallable,
+    ) -> Result<(), &'static str> {
+        if let Some((_, previous)) = self
+            .constructor_declarations
+            .iter()
+            .find(|(known, _)| *known == constructor)
+        {
+            if previous != &identity {
+                return Err(
+                    "one initializer ordinal has conflicting constructor declaration identities",
+                );
+            }
+            return Ok(());
+        }
+        if self
+            .constructor_declarations
+            .iter()
+            .any(|(known, previous)| previous == &identity && *known != constructor)
+        {
+            return Err("one constructor declaration identifies conflicting initializer ordinals");
+        }
+        self.constructor_declarations.push((constructor, identity));
+        Ok(())
+    }
+
+    /// Every exact constructor initializer declaration, independently of allocation support.
+    pub fn constructor_declarations(&self) -> &[(ExportedConstructor, KlibDependencyCallable)] {
+        &self.constructor_declarations
     }
 
     /// Every constructor this file publishes, in record order.

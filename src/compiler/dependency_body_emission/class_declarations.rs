@@ -56,6 +56,18 @@ pub(super) fn record(
         record_class_identity(class, identity, &mut identities, exports)?;
         classes.insert(classifier);
     }
+    for (identity, constructor) in unit.initializing_constructors() {
+        if exports.classifier(constructor.class).is_none() {
+            continue;
+        }
+        exports.record_constructor_declaration(
+            crate::backend::ExportedConstructor {
+                class: constructor.class,
+                secondary: constructor.secondary,
+            },
+            identity.clone(),
+        )?;
+    }
     for (identity, function) in unit.callable_functions() {
         let declaration = &ir.functions[function as usize];
         let Some(owner) = declaration.dispatch_receiver else {
