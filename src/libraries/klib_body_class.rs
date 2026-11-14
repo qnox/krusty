@@ -31,6 +31,21 @@ pub struct KlibBodyClassContract {
 }
 
 impl KlibBodyClassContract {
+    /// Whether the checked class belongs to this exact producer module and classifier.
+    pub fn matches_owner(&self, module: &str, classifier: TypeName) -> bool {
+        self.module == module && self.classifier == classifier
+    }
+
+    /// Whether this exact serialized ordinary class forbids subclass dispatch. Enum entries may
+    /// override their enum's members, so an enum's final modality is not sufficient evidence.
+    pub fn proves_final_class(&self, identity: &super::KlibClassIdentity, owner: TypeName) -> bool {
+        self.matches_owner(&identity.module, owner)
+            && self.signature == identity.signature
+            && self.kind == super::TypeKind::Class
+            && self.modality == KotlinModality::Final
+            && !self.is_expect
+    }
+
     /// Whether the common type model carries this class's instances as one of its builtin types,
     /// as it does an unsigned integer, rather than as an instance of a class.
     pub(crate) fn is_builtin_type(&self) -> bool {
@@ -88,4 +103,55 @@ pub(crate) struct KlibStoredField {
     pub(crate) ty: Ty,
     pub(crate) final_: bool,
     pub(crate) private: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::libraries::{KlibClassIdentity, TypeKind};
+
+    #[test]
+    fn final_dispatch_requires_the_exact_concrete_ordinary_class_contract() {
+        let (mut contract, _) = test_fixture::generic_member_declaration();
+        let identity = KlibClassIdentity {
+            module: contract.module.clone(),
+            signature: contract.signature.clone(),
+        };
+        let owner = contract.classifier;
+        assert!(!contract.proves_final_class(&identity, owner));
+        contract.modality = KotlinModality::Final;
+        assert!(contract.proves_final_class(&identity, owner));
+        let mut other_module = identity.clone();
+        other_module.module.push_str("-other");
+        assert!(!contract.proves_final_class(&other_module, owner));
+        let mut other_class = identity.clone();
+        other_class.signature =
+            KlibPublicIdSignature::classifier(crate::types::type_name("other/Owner"));
+        assert!(!contract.proves_final_class(&other_class, owner));
+        assert!(!contract.proves_final_class(&identity, crate::types::type_name("other/Owner")));
+        contract.is_expect = true;
+        assert!(!contract.proves_final_class(&identity, owner));
+        contract.is_expect = false;
+        for kind in [
+            TypeKind::Enum,
+            TypeKind::Interface,
+            TypeKind::Annotation,
+            TypeKind::Object,
+        ] {
+            contract.kind = kind;
+            assert!(!contract.proves_final_class(&identity, owner), "{kind:?}");
+        }
+        contract.kind = TypeKind::Class;
+        for modality in [
+            KotlinModality::Open,
+            KotlinModality::Abstract,
+            KotlinModality::Sealed,
+        ] {
+            contract.modality = modality;
+            assert!(
+                !contract.proves_final_class(&identity, owner),
+                "{modality:?}"
+            );
+        }
+    }
 }

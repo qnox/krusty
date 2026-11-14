@@ -74,6 +74,9 @@ const _: () = {
 pub(super) struct ClassItems {
     /// Its `KType`.
     pub(super) descriptor: DataId,
+    /// The classifier identity this descriptor was declared to publish, if its physical
+    /// declaration is linkable from another file.
+    pub(super) published_descriptor: Option<(krusty::backend::KlibClassIdentity, String)>,
     /// `kt_<class>__init(this, args…)`, absent for a class with no primary constructor: every
     /// `<init>` of one comes from its secondaries.
     pub(super) constructor: Option<FuncId>,
@@ -228,7 +231,11 @@ impl<'a> FileLowering<'a> {
     pub(super) fn declare_classes(&mut self) -> Result<(), Unsupported> {
         for class in 0..self.ir.classes.len() as ClassId {
             let base = self.class_base(class).to_string();
-            let descriptor = self.declare_descriptor(class, &base)?;
+            let (descriptor, linkable_symbol) = self.declare_descriptor(class, &base)?;
+            let published_descriptor =
+                linkable_symbol.zip(self.dependency_signatures.classifier(class).cloned());
+            let published_descriptor =
+                published_descriptor.map(|(symbol, identity)| (identity, symbol));
             let params: Vec<Ty> = std::iter::once(any())
                 .chain(constructor_parameters(self.ir, class))
                 .collect();
@@ -268,6 +275,7 @@ impl<'a> FileLowering<'a> {
             };
             self.classes.push(ClassItems {
                 descriptor,
+                published_descriptor,
                 constructor,
                 singleton,
                 secondaries,
@@ -804,7 +812,9 @@ impl<'a> FileLowering<'a> {
                 simple_name: simple_name.as_deref(),
                 class_names,
             },
-        )
+        )?;
+        let publication = self.classes[class as usize].published_descriptor.clone();
+        self.record_published_descriptor(class, descriptor, publication)
     }
 
     /// The names Kotlin reflection publishes for one declared classifier, from the declaration
@@ -1016,16 +1026,33 @@ impl<'a> FileLowering<'a> {
                     // A superclass an earlier file laid out, through the entry its file exports
                     // for the selected constructor.
                     None if self.model.layout(class).laid_out_superclass == Some(*owner) => {
-                        let (constructor, params) =
-                            self.laid_out_super_constructor(class, target.ordinal)?;
-                        if params.len() != target_params.len() {
-                            return Err(declined!(
-                                "a delegation to a superclass constructor with compiler-supplied \
-                                 parameters (`{}`)",
-                                owner.render()
-                            ));
-                        }
-                        (Some(constructor), target_params.clone())
+                        let source = self
+                            .classifiers
+                            .classifier(*owner)
+                            .is_some_and(|fact| fact.source);
+                        let (constructor, parameters) = if source {
+                            let (constructor, parameters) =
+                                self.laid_out_super_constructor(class, target.ordinal)?;
+                            if parameters.len() != target_params.len() {
+                                return Err(declined!(
+                                    "a same-module superclass constructor with a different selected frame (`{}`)",
+                                    owner.render()
+                                ));
+                            }
+                            (constructor, parameters)
+                        } else {
+                            let selected = self
+                                .ir
+                                .external_secondary_super_constructors
+                                .get(&(declaration.fq_name, ordinal as u32))
+                                .map(|target| target.declaration)
+                                .ok_or_else(|| declined!(
+                                    "a delegation to a dependency superclass without its exact selected constructor (`{}`)",
+                                    owner.render()
+                                ))?;
+                            self.dependency_super_constructor(class, selected, target_params)?
+                        };
+                        (Some(constructor), parameters)
                     }
                     None => {
                         return Err(declined!(
@@ -1549,8 +1576,38 @@ impl<'a> FileLowering<'a> {
             // A superclass an earlier file laid out is constructed through the entry its file
             // exports for the constructor the checker selected.
             None if layout.laid_out_superclass.is_some() => {
-                let (constructor, params) =
-                    self.laid_out_super_constructor(class, declaration.super_ctor.ordinal)?;
+                let source = self
+                    .classifiers
+                    .classifier(declaration.superclass)
+                    .is_some_and(|fact| fact.source);
+                let (constructor, params) = if source {
+                    let (constructor, parameters) =
+                        self.laid_out_super_constructor(class, declaration.super_ctor.ordinal)?;
+                    if parameters.len() != declaration.super_ctor_params.len() {
+                        return Err(declined!(
+                            "a same-module superclass constructor with a different selected frame (`{}`)",
+                            declaration.fq_name()
+                        ));
+                    }
+                    (constructor, parameters)
+                } else {
+                    let selected = self
+                        .ir
+                        .external_super_constructors
+                        .get(&declaration.fq_name_id())
+                        .map(|target| target.declaration)
+                        .ok_or_else(|| {
+                            declined!(
+                                "a dependency superclass without its exact selected constructor (`{}`)",
+                                declaration.fq_name()
+                            )
+                        })?;
+                    self.dependency_super_constructor(
+                        class,
+                        selected,
+                        &declaration.super_ctor_params,
+                    )?
+                };
                 if declaration.super_args.len() != params.len()
                     || self
                         .ir

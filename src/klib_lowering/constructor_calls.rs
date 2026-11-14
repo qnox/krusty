@@ -43,16 +43,7 @@ pub(super) fn authenticate(
     selected: KlibBodyCallable<'_>,
     bodies: &KlibDeclarationBodies,
 ) -> Result<ConstructorDeclaration, KlibBodyDeclineReason> {
-    if selected.kind() != ExternalCallableKind::Constructor
-        || selected.ret() != Ty::Unit
-        || selected.generic_signature().is_some()
-        || !selected.type_parameters().is_empty()
-        || !selected.reified_type_parameter_ordinals().is_empty()
-    {
-        return Err(mismatch(
-            "a constructor has an incompatible selected invocation contract",
-        ));
-    }
+    let declaration = authenticate_declaration(selected)?;
     let header = class_headers::authenticate(selected, bodies)?;
     let function = header.function;
     require_constructor_kind(function)?;
@@ -82,14 +73,7 @@ pub(super) fn authenticate(
             "the serialized constructor header disagrees with its declaration",
         ));
     }
-    let defaults = selected
-        .parameter_defaults()
-        .ok_or_else(|| mismatch("a constructor has no known declared default parameters"))?;
-    if defaults.len() != selected.params().len() {
-        return Err(mismatch(
-            "constructor default flags are not parallel to its parameters",
-        ));
-    }
+    let defaults = declaration.defaults;
     let mut symbols = HashSet::default();
     let mut varargs = VarargParameters::default();
     for (index, parameter) in function.regular_parameters.iter().enumerate() {
@@ -134,10 +118,101 @@ pub(super) fn authenticate(
             "a constructor result is not its declared class application",
         ));
     }
+    Ok(declaration)
+}
+
+/// Declaration authentication for an already defined initializer. This does not authorize
+/// materialization or allocation: the caller must hold the exact producer-definition capability.
+/// A known serialized declaration still follows the complete ordinary authentication path.
+pub(super) fn authenticate_retained(
+    selected: KlibBodyCallable<'_>,
+    bodies: &KlibDeclarationBodies,
+) -> Result<ConstructorDeclaration, KlibBodyDeclineReason> {
+    let declaration = authenticate_declaration(selected)?;
+    let class = class_headers::authenticate_contract(selected)?;
+    let known_class = bodies
+        .class_header(&selected.identity().module, &class.signature)
+        .map_err(mismatch)?
+        .is_some();
+    if known_class || bodies.function(selected.identity()).is_some() {
+        return authenticate(selected, bodies);
+    }
+    if class.kind != crate::libraries::TypeKind::Class
+        || class.is_value
+        || class.is_inner
+        || class.is_expect
+    {
+        return Err(mismatch(
+            "an emitted initializer has an incompatible declaring class",
+        ));
+    }
+    class_headers::class_parameter_identities(&class.parameters)?;
+    Ok(declaration)
+}
+
+fn authenticate_declaration(
+    selected: KlibBodyCallable<'_>,
+) -> Result<ConstructorDeclaration, KlibBodyDeclineReason> {
+    if selected.kind() != ExternalCallableKind::Constructor
+        || selected.name() != "<init>"
+        || selected.ret() != Ty::Unit
+        || selected.generic_signature().is_some()
+        || !selected.type_parameters().is_empty()
+        || !selected.reified_type_parameter_ordinals().is_empty()
+    {
+        return Err(mismatch(
+            "a constructor has an incompatible selected invocation contract",
+        ));
+    }
+    let class = class_headers::authenticate_contract(selected)?;
+    if selected.context_count() != 0
+        || selected.accessor().is_some()
+        || selected.singleton_dispatch().is_some()
+        || selected.singleton_classifier().is_some()
+        || selected.companion_receiver().is_some()
+        || selected.declaration_owner()
+            != Some(crate::types::SemanticCallableOwner::Classifier(
+                class.classifier,
+            ))
+        || selected.parameter_identities().len() != selected.params().len()
+    {
+        return Err(mismatch(
+            "a constructor has an incompatible declared parameter frame",
+        ));
+    }
+    let defaults = selected
+        .parameter_defaults()
+        .ok_or_else(|| mismatch("a constructor has no known declared default parameters"))?;
+    if defaults.len() != selected.params().len() {
+        return Err(mismatch(
+            "constructor default flags are not parallel to its parameters",
+        ));
+    }
+    let mut parameters = HashSet::default();
+    for parameter in selected.parameter_identities() {
+        let ResolvedParameterIdentity::Source(name) = parameter else {
+            return Err(mismatch(
+                "a constructor has incompatible declared parameter identities",
+            ));
+        };
+        if !parameters.insert(name.as_ref()) {
+            return Err(mismatch(
+                "a constructor has incompatible declared parameter identities",
+            ));
+        }
+    }
+    if selected
+        .vararg_index()
+        .is_some_and(|ordinal| ordinal >= selected.params().len())
+    {
+        return Err(mismatch(
+            "a constructor has an invalid declared vararg ordinal",
+        ));
+    }
     Ok(ConstructorDeclaration {
-        classifier: header.contract.classifier,
+        classifier: class.classifier,
         params: selected.params().to_vec(),
-        class_parameters: header.contract.parameters.clone(),
+        class_parameters: class.parameters.clone(),
         defaults,
         semantic_role: selected.semantic_role(),
     })

@@ -79,7 +79,7 @@ use krusty::ir::{
 use krusty::types::{Ty, TypeName};
 
 use super::super::classes::{self as model, AnyMember, ClassModel, Slot};
-use super::super::laid_out_classes::{LaidOutClass, LaidOutClasses};
+use super::super::laid_out_classes::{LaidOutClass, LaidOutClasses, ObjectFunction};
 use super::super::symbols::Symbols;
 use super::{Entry, BOX_RESULT_FRAME, PROGRAM_ENTRY};
 use crate::NativeTarget;
@@ -154,6 +154,8 @@ pub struct Lowered {
     pub abi: Vec<super::super::c_abi::Record>,
     /// What a later file of the module extending a class of this one reads of it.
     pub laid_out: Vec<(TypeName, LaidOutClass)>,
+    /// Actual externally linkable descriptor definitions, signed by their producer class records.
+    pub class_descriptors: Vec<(krusty::backend::KlibClassIdentity, String)>,
 }
 
 /// Build the ISA for `target`. Non-PIC, because the output is a static executable at a fixed
@@ -270,7 +272,13 @@ pub fn lower_file(
         laid_out,
     } = input;
     let class_model = model::build(ir, value_classes, slot_plan, laid_out)?;
-    let extended = extended_elsewhere(ir, unit_kind, module_facts);
+    let extended = extended_elsewhere(
+        ir,
+        unit_kind,
+        module_facts,
+        classifiers,
+        dependency_signatures,
+    )?;
     let exported = module_abi::exported_classes(&class_model, &extended);
     // Another file calls a default-argument entry by the one symbol its identity names.
     if let Some(declaration) = ir.default_entries.keys().find(|&&declaration| {
@@ -326,8 +334,10 @@ pub fn lower_file(
         laid_out,
         extended,
         exported,
+        class_descriptors: Vec::new(),
         extension_entries: HashMap::default(),
         extension_tables: HashMap::default(),
+        published_dependency_bridges: HashMap::default(),
         module: &mut module,
         symbols: super::super::symbols::symbols(ir, module_name, runtime_symbols.clone()),
         model: class_model,
@@ -420,6 +430,7 @@ pub fn lower_file(
     lowering.define_interface_identities()?;
 
     let records = lowering.laid_out_records()?;
+    let class_descriptors = std::mem::take(&mut lowering.class_descriptors);
     let comdat_objects = std::mem::take(&mut lowering.comdat_objects);
     let mut product = module.finish();
     for data in comdat_objects {
@@ -442,6 +453,7 @@ pub fn lower_file(
         defines_entry,
         abi,
         laid_out: records,
+        class_descriptors,
     })
 }
 
@@ -453,7 +465,9 @@ fn extended_elsewhere(
     ir: &IrFile,
     unit_kind: krusty::backend::CheckedIrUnitKind,
     module_facts: &krusty::backend::BackendModuleFacts,
-) -> krusty::fx_hash::HashSet<krusty::ir::ClassId> {
+    classifiers: &dyn krusty::backend::BackendClassifierSource,
+    signatures: &krusty::backend::DependencyExportSignatures,
+) -> Result<krusty::fx_hash::HashSet<krusty::ir::ClassId>, Unsupported> {
     let mut extended = krusty::fx_hash::HashSet::default();
     let classes = module_facts.classes();
     let support = unit_kind != krusty::backend::CheckedIrUnitKind::Source;
@@ -470,8 +484,25 @@ fn extended_elsewhere(
         {
             extended.insert(id as krusty::ir::ClassId);
         }
+        // A public open source classifier can be subclassed by a later KLIB consumer. Its
+        // physical layout and constructor/activation entries therefore need a provider-owned
+        // linkable record even when this source module has no local subclass.
+        let source_identity = match classifiers
+            .classifier(class.fq_name)
+            .filter(|fact| !support && fact.source && fact.is_extensible)
+        {
+            Some(fact) => super::super::laid_out_classes::producer_class_identity(
+                unit_kind,
+                signatures.classifier(id as krusty::ir::ClassId),
+                fact.klib_identity.as_ref(),
+            )?,
+            None => None,
+        };
+        if source_identity.is_some() {
+            extended.insert(id as krusty::ir::ClassId);
+        }
     }
-    extended
+    Ok(extended)
 }
 
 struct FileLowering<'a> {
@@ -491,6 +522,7 @@ struct FileLowering<'a> {
     module_facts: &'a krusty::backend::BackendModuleFacts,
     /// The classes earlier files of the source module laid out.
     laid_out: &'a LaidOutClasses,
+    class_descriptors: Vec<(krusty::backend::KlibClassIdentity, String)>,
     /// The classes of this file another file of the module extends.
     extended: krusty::fx_hash::HashSet<krusty::ir::ClassId>,
     /// The classes of `extended` and their superclasses here, whose table entries another file
@@ -500,6 +532,8 @@ struct FileLowering<'a> {
     extension_entries: HashMap<krusty::ir::ClassId, module_abi::ExtensionEntries>,
     /// What the vtable and interface table of each class in `extended` hold.
     extension_tables: HashMap<krusty::ir::ClassId, (Vec<FuncId>, Vec<FuncId>)>,
+    /// Linkable Native bridge bodies recorded by exact dependency-interface member identity.
+    published_dependency_bridges: HashMap<(krusty::ir::ClassId, Vec<u8>), ObjectFunction>,
     module: &'a mut ObjectModule,
     /// Symbols of this file's classes and functions.
     symbols: Symbols,
