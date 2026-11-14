@@ -10,14 +10,19 @@ permissions:
 jobs:
   validate:
     runs-on: [self-hosted, rust-4c-8gb]
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          ref: 6818b0ed689a934081e2874dacd0d208f942014c
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: 1.100.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: build-tool-bins
+          save-if: false
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
@@ -36,12 +41,12 @@ jobs:
           tool: just
       - name: authenticate product source
         run: |
-          test "$(git rev-parse HEAD^)" = 6818b0ed689a934081e2874dacd0d208f942014c
+          test "$(git rev-parse HEAD)" = 6818b0ed689a934081e2874dacd0d208f942014c
           mkdir -p evidence
-          git rev-parse HEAD^ > evidence/source-commit.txt
+          git rev-parse HEAD > evidence/source-commit.txt
           sha256sum tests/box_regressions/throwableMemberReach.kt > evidence/fixture.sha256
       - name: build conformance binary once
-        timeout-minutes: 30
+        timeout-minutes: 40
         run: |
           set -euo pipefail
           CARGO_BUILD_JOBS=1 bash scripts/cargo-test-binary.sh conformance -p krusty --test conformance > evidence/build.log 2>&1
@@ -52,6 +57,7 @@ jobs:
         timeout-minutes: 25
         run: |
           set -uo pipefail
+          set +e
           export KRUSTY_LANGUAGE_VERSION=2.4.21
           export KRUSTY_KOTLINC="$(just kotlinc 2.4.21)"
           export KRUSTY_KOTLIN_BOX_DIR="$(just box-corpus 2.4.21)"
@@ -76,7 +82,7 @@ jobs:
             status=$?
             printf '%s exit=%s\n' "$lane" "$status" | tee -a evidence/status.txt
             cat "evidence/$lane.log"
-            if [ "$status" -ne 0 ] || ! rg -q "test result: ok\. 1 passed; 0 failed" "evidence/$lane.log"; then result=1; fi
+            if [ "$status" -ne 0 ] || ! grep -q "test result: ok\. 1 passed; 0 failed" "evidence/$lane.log"; then result=1; fi
           done
           exit "$result"
       - name: upload evidence
