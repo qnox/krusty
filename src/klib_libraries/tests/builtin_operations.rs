@@ -11,6 +11,92 @@ use crate::symbol_source::SymbolNamespace;
 use crate::types::{type_name, ArrayFactoryKind, SemanticCallRole, Ty};
 
 #[test]
+fn language_function_invocations_have_opaque_classifier_owned_identities() {
+    use super::super::external_identities::ExternalIdentities;
+    use super::super::inventory::PackageInventory;
+
+    let inventory = PackageInventory::from_packages(Vec::new()).expect("empty KLIB inventory");
+    let identities = ExternalIdentities::default();
+    for owner in [
+        type_name("kotlin/Function1"),
+        type_name("kotlin/coroutines/SuspendFunction1"),
+    ] {
+        let symbols = declared_symbols(
+            &inventory,
+            &identities,
+            SymbolNamespace::Package(owner.parent().expect("function classifier package")),
+            owner.segment_ref(),
+        );
+        let classifier = symbols.classifier.expect("language classifier record");
+        let invocations = classifier
+            .declared_callables
+            .get("invoke")
+            .expect("language invoke declaration")
+            .functions();
+        let [invoke] = invocations else {
+            panic!("{owner} declares one language invoke candidate")
+        };
+        assert_eq!(
+            invoke.callable.semantic_role,
+            Some(SemanticCallRole::KotlinFunctionInvoke)
+        );
+        assert_eq!(
+            invoke.callable.declaration_owner,
+            Some(crate::types::SemanticCallableOwner::Classifier(owner))
+        );
+        let identity = invoke
+            .callable
+            .external_identity
+            .expect("opaque invocation identity");
+        let realization = identities
+            .realization(identity)
+            .expect("published realization");
+        assert_eq!(
+            realization.callable.semantic_role,
+            Some(SemanticCallRole::KotlinFunctionInvoke)
+        );
+        assert_eq!(
+            realization.callable.declaration_owner,
+            Some(crate::types::SemanticCallableOwner::Classifier(owner))
+        );
+        assert_eq!(
+            realization.kind,
+            crate::libraries::ExternalCallableKind::Member
+        );
+        assert!(realization.declaration_signature.is_none());
+        assert!(realization.dependency_callable.is_none());
+        assert_eq!(
+            realization.callable.suspend,
+            owner.matches("kotlin/coroutines/SuspendFunction1")
+        );
+        let repeated = declared_symbols(
+            &inventory,
+            &identities,
+            SymbolNamespace::Package(owner.parent().expect("function classifier package")),
+            owner.segment_ref(),
+        );
+        let repeated = repeated
+            .classifier
+            .expect("repeated language classifier record")
+            .declared_callables["invoke"]
+            .functions()[0]
+            .callable
+            .external_identity;
+        assert_eq!(repeated, Some(identity), "the provider identity is stable");
+        let static_members = declared_symbols(
+            &inventory,
+            &identities,
+            SymbolNamespace::Classifier(owner),
+            "invoke",
+        );
+        assert!(
+            static_members.callables.functions().is_empty(),
+            "an instance member is not published as a classifier-associated callable"
+        );
+    }
+}
+
+#[test]
 fn klib_string_plus_requires_selected_stdlib_authority() {
     use crate::symbol_source::SymbolSource;
     let Some(trusted) = native_stdlib() else {

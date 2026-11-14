@@ -227,7 +227,7 @@ pub struct EnumConstant {
 /// One constructor [`DependencyExportSignatures`] publishes: the class and which of its
 /// constructors, `None` for the primary one and the ordinal in `IrClass::secondary_ctors` for a
 /// secondary one.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ExportedConstructor {
     pub class: crate::ir::ClassId,
     pub secondary: Option<usize>,

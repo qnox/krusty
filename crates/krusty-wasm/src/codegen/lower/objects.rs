@@ -35,6 +35,7 @@ use super::{carrier, Body, FileContext, Unsupported, STRING};
 pub(super) const STRING_HEAP: HeapType = HeapType::Concrete(1);
 
 mod override_bridges;
+mod root_any;
 mod unrealized_members;
 
 pub(super) use unrealized_members::holds_unprinted_values;
@@ -127,6 +128,9 @@ impl Body<'_> {
             return constructed;
         }
         let Some(class) = self.classes.and(self.ir.class_id_by_name(internal)) else {
+            if let Some(constructed) = self.cross_file_construction(site, internal, args) {
+                return constructed;
+            }
             // Boundary conversion for a diagnostic.
             return Err(format!(
                 "construction of the library class `{}`",
@@ -188,6 +192,47 @@ impl Body<'_> {
         }
         self.code.call(constructor).local_get(object);
         Ok(())
+    }
+
+    /// `C(args)` of a class another file of the module declares: a call of the entry that file
+    /// realizes for the constructor the checker selected, which allocates and initializes the
+    /// instance. `None` when `internal` has no such constructor, so the library-class decline
+    /// applies.
+    fn cross_file_construction(
+        &mut self,
+        site: u32,
+        internal: krusty::types::TypeName,
+        args: &[u32],
+    ) -> Option<Result<(), Unsupported>> {
+        let constructor = *self.ir.module_constructions.selected.get(&site)?;
+        let function = self.calls.instance(
+            &krusty::backend::instance_links::InstanceEntry::Constructor {
+                module: self.module_name.into(),
+                declaration: constructor,
+            },
+        )?;
+        // What the entry takes: an inner class's enclosing instance, then the declared parameters.
+        let record = self.ir.module_constructions.records.get(&constructor)?;
+        let parameters: Vec<Ty> = record
+            .outer
+            .map(Ty::obj_name)
+            .into_iter()
+            .chain(record.parameters.iter().copied())
+            .collect();
+        Some((|| {
+            if parameters.len() != args.len() {
+                // Boundary conversion for a diagnostic.
+                return Err(format!(
+                    "a constructor call with omitted arguments (`{}`)",
+                    internal.render().replace('/', ".")
+                ));
+            }
+            for (argument, parameter) in args.iter().zip(parameters.iter()) {
+                self.value(*argument, *parameter)?;
+            }
+            self.code.call(function);
+            Ok(())
+        })())
     }
 
     /// Push a new instance of `class`: its identity hash, and every field at its default value.
@@ -1158,6 +1203,10 @@ impl Body<'_> {
     /// `interface` — or null, when `nullable`. Its instances are the program's classes below it and
     /// the builtin values its builtin subclasses carry (`crate::builtin_instances`).
     fn library_interface_test(&mut self, interface: TypeName, nullable: bool) {
+        if let Some(arity) = self.function_arity(Ty::obj_name(interface)) {
+            self.function_type_test(arity, nullable, false);
+            return;
+        }
         let subtypes = self.classifiers.builtin_subtypes(interface);
         self.runtime.builtin_instances(interface, subtypes);
         self.interface_test(interface, nullable);
@@ -1219,41 +1268,48 @@ impl Body<'_> {
         let value = self.local(REFERENCE);
         self.value(arg, any())?;
         self.code.local_tee(value);
-        match tested.kind() {
-            TyKind::STRING => {
-                self.code.ref_test(nullable, STRING_HEAP);
-            }
-            TyKind::Obj(name, _) if name == krusty::types::wk::any() => {
-                self.code.ref_test(nullable, HeapType::Eq);
-            }
-            TyKind::Obj(name, _)
-                if self
-                    .classifiers
-                    .classifier(name)
-                    .is_some_and(|fact| fact.runtime_exception.is_some()) =>
-            {
-                let structure =
-                    self.runtime
-                        .exception_class(self.module, self.classifiers, name)?;
-                self.code.ref_test(nullable, HeapType::Concrete(structure));
-            }
-            // Each array classifier is an object type of its own, so the test is its type's:
-            // `UIntArray` is not an `IntArray`, though one wraps the other's storage.
-            _ if tested.is_array() => {
-                let (form, _) = self.array_form(tested)?;
-                self.code
-                    .ref_test(nullable, HeapType::Concrete(form.object));
-            }
-            _ => match (self.interface_of_type(tested), self.class_of_type(tested)) {
-                (Some(interface), _) => self.interface_test(interface, nullable),
-                (None, Some(class)) => self.instance_test(class, nullable)?,
-                (None, None) => match self.library_interface_of_type(tested) {
-                    Some(interface) => self.library_interface_test(interface, nullable),
-                    None => {
-                        return Err(format!("a type test against `{}`", super::describe(tested)));
-                    }
+        if let Some(arity) = self.function_arity(tested) {
+            self.function_type_test(arity, nullable, self.is_suspend_function_type(tested));
+        } else {
+            match tested.kind() {
+                TyKind::STRING => {
+                    self.code.ref_test(nullable, STRING_HEAP);
+                }
+                TyKind::Obj(name, _) if name == krusty::types::wk::any() => {
+                    self.code.ref_test(nullable, HeapType::Eq);
+                }
+                TyKind::Obj(name, _)
+                    if self
+                        .classifiers
+                        .classifier(name)
+                        .is_some_and(|fact| fact.runtime_exception.is_some()) =>
+                {
+                    let structure =
+                        self.runtime
+                            .exception_class(self.module, self.classifiers, name)?;
+                    self.code.ref_test(nullable, HeapType::Concrete(structure));
+                }
+                // Each nominal array classifier retains its own object type, independently
+                // of the signed storage that an unsigned view shares.
+                _ if tested.is_array() => {
+                    let (form, _) = self.array_form(tested)?;
+                    self.code
+                        .ref_test(nullable, HeapType::Concrete(form.object));
+                }
+                _ => match (self.interface_of_type(tested), self.class_of_type(tested)) {
+                    (Some(interface), _) => self.interface_test(interface, nullable),
+                    (None, Some(class)) => self.instance_test(class, nullable)?,
+                    (None, None) => match self.library_interface_of_type(tested) {
+                        Some(interface) => self.library_interface_test(interface, nullable),
+                        None => {
+                            return Err(format!(
+                                "a type test against `{}`",
+                                super::describe(tested)
+                            ));
+                        }
+                    },
                 },
-            },
+            }
         }
         match op {
             IrTypeOp::NotInstanceOf => {

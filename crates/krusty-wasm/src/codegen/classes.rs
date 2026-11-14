@@ -268,6 +268,9 @@ pub(super) struct FileClasses {
     /// How each class implements each member of a dependency's interface, as interface recording
     /// found it.
     pub(super) dependency_implementations: Vec<Vec<(MemberRef, DependencyImplementation)>>,
+    /// Checked callable arities, independent of whether their method adapters were emitted.
+    pub(super) function_arities: Vec<Vec<usize>>,
+    pub(super) suspend_function_arities: Vec<Vec<usize>>,
     /// Why a class with no instances of its own cannot be extended by a later file: what its
     /// table or interface entries needed that this form does not provide.
     pub(super) refusals: Vec<Option<Unsupported>>,
@@ -344,6 +347,7 @@ impl FileClasses {
         ir: &IrFile,
         functions: &[Option<u32>],
         signatures: &[Option<u32>],
+        exports: &krusty::backend::DependencyExportSignatures,
     ) -> Vec<(TypeName, LaidOutClass)> {
         let callables: HashMap<FunId, CallableId> = ir
             .checked_callable_functions
@@ -400,6 +404,17 @@ impl FileClasses {
                 params.extend(secondary.params.iter().copied());
                 constructors.push(Some((function, params)));
             }
+            let mut constructor_identities = vec![None; constructors.len()];
+            for (exported, identity) in exports.constructors() {
+                if exported.class != id {
+                    continue;
+                }
+                let ordinal = exported.secondary.map_or(0, |secondary| secondary + 1);
+                let Some(slot) = constructor_identities.get_mut(ordinal) else {
+                    continue;
+                };
+                *slot = Some(identity.clone());
+            }
             let mut activation = self
                 .laid_out_superclass(id)
                 .map(|superclass| superclass.activation.clone())
@@ -449,6 +464,16 @@ impl FileClasses {
                     entries: self.entries[id as usize].clone(),
                     ancestors: self.ancestors[id as usize].clone(),
                     constructors,
+                    constructor_entries: std::iter::once(self.forms[id as usize].constructor)
+                        .chain(
+                            self.forms[id as usize]
+                                .secondaries
+                                .iter()
+                                .copied()
+                                .map(Some),
+                        )
+                        .collect(),
+                    constructor_identities,
                     methods,
                     activation,
                     table: LaidOutSuperclass {
@@ -460,6 +485,8 @@ impl FileClasses {
                     interface_bodies: self.interface_bodies[id as usize].clone(),
                     dependency_implementations: self.dependency_implementations[id as usize]
                         .clone(),
+                    function_arities: self.function_arities[id as usize].clone(),
+                    suspend_function_arities: self.suspend_function_arities[id as usize].clone(),
                     refusal: self.refusals[id as usize].clone(),
                 },
             ));
@@ -556,16 +583,101 @@ fn check_supported(ir: &IrFile, id: ClassId) -> Result<(), Unsupported> {
     // Stored by-value captures use the same checked pre-super field transport.
     } else if !constructor_prefix::supported(ir, id) {
         "a class capturing its surroundings"
-    } else if class
-        .supertypes
-        .iter()
-        .any(|supertype| supertype.non_null().is_fun())
-    {
-        "a class implementing a function type"
     } else {
         return Ok(());
     };
     Err(format!("{construct} (`{name}`)"))
+}
+
+/// A function invocation override is accepted only when its frozen owner role, source arity,
+/// suspend bit, and semantic role all agree. Both arrow and nominal supertypes use this predicate.
+fn has_checked_function_invoke(
+    ir: &IrFile,
+    classifiers: &dyn BackendClassifierSource,
+    id: ClassId,
+    expected_owner: Option<TypeName>,
+    arity: usize,
+    suspend: bool,
+) -> bool {
+    let class = &ir.classes[id as usize];
+    let Ok(arity) = u8::try_from(arity) else {
+        return false;
+    };
+    let expected_role = if suspend {
+        krusty::types::ClassifierRole::SuspendFunctionOfArity(arity)
+    } else {
+        krusty::types::ClassifierRole::FunctionOfArity(arity)
+    };
+    ir.function_overrides
+        .get(&class.fq_name_id())
+        .into_iter()
+        .flatten()
+        .any(|edge| {
+            expected_owner.is_none_or(|owner| edge.overridden_owner == owner)
+                && classifiers
+                    .classifier(edge.overridden_owner)
+                    .is_some_and(|fact| fact.role == Some(expected_role))
+                && edge.overridden_is_interface
+                && matches!(
+                    edge.overridden,
+                    krusty::fir::ResolvedFunctionOverrideTarget::External(_)
+                )
+                && edge.overridden_semantic_role
+                    == Some(krusty::types::SemanticCallRole::KotlinFunctionInvoke)
+                && edge.declared_parameters.len() == usize::from(arity)
+                && edge.suspend == suspend
+        })
+}
+
+/// Require a checked invocation edge for every function-type supertype, whichever spelling the
+/// source used. The checked edge authenticates the implementation; the frozen classifier role
+/// authenticates the function family and its source arity.
+fn check_function_invocation_support(
+    ir: &IrFile,
+    classifiers: &dyn BackendClassifierSource,
+    id: ClassId,
+) -> Result<(), Unsupported> {
+    let class = &ir.classes[id as usize];
+    for supertype in &class.supertypes {
+        if let krusty::types::TyKind::Fun(signature) = supertype.non_null().kind() {
+            if !has_checked_function_invoke(
+                ir,
+                classifiers,
+                id,
+                None,
+                signature.params.len(),
+                signature.suspend,
+            ) {
+                return Err(format!(
+                    "a class implementing a function type without its checked invocation (`{}`)",
+                    class.fq_name()
+                ));
+            }
+            continue;
+        }
+        let Some(owner) = supertype.non_null().obj_internal() else {
+            continue;
+        };
+        let Some(fact) = classifiers.classifier(owner) else {
+            continue;
+        };
+        let (arity, suspend) = match fact.role {
+            Some(krusty::types::ClassifierRole::FunctionOfArity(arity)) => {
+                (usize::from(arity), false)
+            }
+            Some(krusty::types::ClassifierRole::SuspendFunctionOfArity(arity)) => {
+                (usize::from(arity), true)
+            }
+            _ => continue,
+        };
+        if !has_checked_function_invoke(ir, classifiers, id, Some(owner), arity, suspend) {
+            return Err(format!(
+                "a function classifier supertype without its checked invocation (`{}`)",
+                class.fq_name()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Reject a class overriding a runtime exception's property. Its message and cause are fields the
@@ -624,6 +736,7 @@ pub(super) fn declare(
     } = beyond;
     for class in 0..ir.classes.len() {
         check_supported(ir, class as ClassId)?;
+        check_function_invocation_support(ir, classifiers, class as ClassId)?;
         check_exception_storage(ir, classifiers, class as ClassId)?;
     }
     let tables = class_tables::build_numbered(
@@ -875,6 +988,8 @@ pub(super) fn declare(
         ancestors: ancestry,
         interface_bodies: vec![HashMap::default(); classes],
         dependency_implementations: vec![Vec::new(); classes],
+        function_arities: vec![Vec::new(); classes],
+        suspend_function_arities: vec![Vec::new(); classes],
         refusals,
     })
 }

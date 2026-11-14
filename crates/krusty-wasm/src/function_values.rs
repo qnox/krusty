@@ -13,18 +13,16 @@
 use krusty::fx_hash::HashMap;
 
 use super::encode::{CompositeType, Module, SubType, ValType};
-use super::objects::{immutable, REFERENCE, TYPE_INFO_FIELD};
+use super::interface_dispatch::MemberRef;
+use super::objects::{immutable, REFERENCE};
 use super::runtime::Runtime;
-
-/// The dispatch table field holding a function value's entry: after the interface table and the
-/// type information, which a function value has none of.
-pub(super) const INVOKE_FIELD: u32 = TYPE_INFO_FIELD + 1;
 
 /// The table type of every function value of one arity, and the type of its entry.
 #[derive(Clone, Copy)]
 pub(super) struct FunctionShape {
     pub(super) table: u32,
     pub(super) invoke: u32,
+    pub(super) protocol: MemberRef,
 }
 
 /// The function shapes this module has declared, by arity.
@@ -39,6 +37,7 @@ impl Runtime {
         if let Some(shape) = self.functions.by_arity.get(&arity) {
             return *shape;
         }
+        let protocol = self.objects.interfaces.function_invoke(module, arity);
         let objects = &self.objects;
         // The receiver, which is the function value itself, then the arguments.
         let invoke = module.func_type(vec![REFERENCE; arity + 1], vec![REFERENCE]);
@@ -57,7 +56,11 @@ impl Runtime {
             supertype: Some(objects.any_table),
             open: false,
         });
-        let shape = FunctionShape { table, invoke };
+        let shape = FunctionShape {
+            table,
+            invoke,
+            protocol,
+        };
         self.functions.by_arity.insert(arity, shape);
         shape
     }

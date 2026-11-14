@@ -31,6 +31,11 @@ pub struct KlibBodyClassContract {
 }
 
 impl KlibBodyClassContract {
+    /// Whether the checked class belongs to this exact producer module and classifier.
+    pub fn matches_owner(&self, module: &str, classifier: TypeName) -> bool {
+        self.module == module && self.classifier == classifier
+    }
+
     /// Whether the common type model carries this class's instances as one of its builtin types,
     /// as it does an unsigned integer, rather than as an instance of a class.
     pub(crate) fn is_builtin_type(&self) -> bool {

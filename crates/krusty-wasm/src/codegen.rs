@@ -202,6 +202,11 @@ impl Backend for WasmBackend {
             decline(state, declined.construct().to_string());
             return Vec::new();
         }
+        krusty::backend::construction_entries::publish_constructors(
+            &mut file.ir,
+            (file.module_name, file.classifiers.module()),
+            &mut file.dependency_exports,
+        );
         krusty::backend::construction_entries::realize(&mut file.ir, &mut file.dependency_exports);
         if let Err(error) =
             krusty::backend::property_entries::realize(&mut file.ir, &mut file.dependency_exports)
@@ -223,7 +228,9 @@ impl Backend for WasmBackend {
             // cross-file reservations from the current source module.
             started.callables.enter_source_module(file.module_name);
             started.properties.enter_source_module(file.module_name);
-            started.classes.enter_source_module(file.module_name);
+            started
+                .classes
+                .enter_source_module(file.module_name, &file.ir, &file.callables);
         } else {
             started.classes.enter_dependency_support();
         }

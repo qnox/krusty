@@ -53,9 +53,9 @@ fn native_object(source: &str, stem: &str) -> Option<Vec<u8>> {
     objects.pop()
 }
 
-/// Calls to the allocator from the program's own code. A module constructor's exported entry point
-/// (`kt_modctor_*`) allocates for whichever file constructs that class, so its allocation says
-/// nothing about where this file's constructions place their objects and is not counted.
+/// Calls to the allocator from the program's own code. A constructor's entry (`*__init__new`)
+/// allocates for whichever file constructs that class, so its allocation says nothing about where
+/// this file's constructions place their objects and is not counted.
 fn allocation_relocations(object: &[u8]) -> usize {
     let file = object::File::parse(object).expect("the native object parses");
     let entry_points: Vec<_> = file
@@ -63,7 +63,7 @@ fn allocation_relocations(object: &[u8]) -> usize {
         .filter(|symbol| {
             symbol
                 .name()
-                .is_ok_and(|name| name.starts_with("kt_modctor_"))
+                .is_ok_and(|name| name.ends_with("__init__new"))
         })
         .filter_map(|symbol| {
             let section = symbol.section_index()?;
