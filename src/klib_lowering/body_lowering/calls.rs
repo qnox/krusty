@@ -624,7 +624,7 @@ impl BodyLowering<'_> {
 impl BodyLowering<'_> {
     fn unintercepted_suspension_call(
         &mut self,
-        selected: super::super::UninterceptedSuspensionCall,
+        selected: super::UninterceptedSuspensionCall,
         access: &KlibIrMemberAccess,
         ty: Ty,
     ) -> Lowered<ExprId> {
