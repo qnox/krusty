@@ -1285,11 +1285,17 @@ pub fn run(lane: &dyn Lane) {
 
     let bytes = super::box_klib_bytes::ByteRun::new(lane);
     let started = Instant::now();
+    let progress = super::box_lane_profile::ProgressReporter::new(
+        lane.label(),
+        files.len(),
+        Duration::from_secs(60),
+    );
     let timed_outcomes: Vec<((&PathBuf, Outcome), Duration)> = pool.install(|| {
         files
             .par_iter()
             .map(|file| {
                 let case_started = Instant::now();
+                let _case_progress = progress.start_case(relative(file));
                 // A panic inside the compiler is a failure of THAT case, recorded like any other
                 // so one bug does not hide the picture for the rest of the corpus; the test still
                 // fails.
@@ -1323,6 +1329,7 @@ pub fn run(lane: &dyn Lane) {
             })
             .collect()
     });
+    drop(progress);
     let wall = started.elapsed();
     let case_times = timed_outcomes
         .iter()
