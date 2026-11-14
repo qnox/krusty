@@ -622,9 +622,64 @@ mod tests {
         assert!(MAVEN_CLIENT.contains("repositorySystem.resolveDependencies("));
         assert!(MAVEN_CLIENT.contains("new DependencyRequest("));
         assert!(MAVEN_CLIENT.contains("Maven3XServerEmbedder.resolveArtifacts"));
+        assert!(MAVEN_CLIENT.contains("system.newResolutionRepositories(session, added)"));
         assert!(!MAVEN_CLIENT.contains("ProcessBuilder"));
         assert!(!MAVEN_CLIENT.contains("mvn"));
         assert!(!MAVEN_CLIENT.contains("dependency:resolve"));
+    }
+
+    #[test]
+    fn project_repositories_are_normalized_through_the_session() {
+        let jars = maven_classpath_jars().expect("Maven embedder jars");
+        let directory =
+            std::env::temp_dir().join(format!("krusty-maven-normalize-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let client = directory.join("MavenResolverClient.java");
+        let protocol = directory.join("Protocol.java");
+        let test = directory.join("ProjectRepositoryNormalizationTest.java");
+        std::fs::write(&client, MAVEN_CLIENT).unwrap();
+        std::fs::write(&protocol, PROTOCOL).unwrap();
+        std::fs::write(
+            &test,
+            include_str!("../../java/krusty/tooling/ProjectRepositoryNormalizationTest.java"),
+        )
+        .unwrap();
+        let compile_path = std::env::join_paths(&jars).unwrap();
+        let javac = std::process::Command::new(java_bin("javac"))
+            .arg("-encoding")
+            .arg("UTF-8")
+            .arg("-proc:none")
+            .arg("-cp")
+            .arg(&compile_path)
+            .arg("-d")
+            .arg(&directory)
+            .arg(&protocol)
+            .arg(&client)
+            .arg(&test)
+            .output()
+            .expect("javac");
+        assert!(
+            javac.status.success(),
+            "javac: {}",
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let mut runtime_jars = vec![directory.clone()];
+        runtime_jars.extend(jars);
+        let runtime = std::env::join_paths(&runtime_jars).unwrap();
+        let java = std::process::Command::new(java_bin("java"))
+            .arg("-cp")
+            .arg(&runtime)
+            .arg("krusty.tooling.ProjectRepositoryNormalizationTest")
+            .output()
+            .expect("java");
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            java.status.success(),
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
     }
 
     #[test]

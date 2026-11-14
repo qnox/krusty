@@ -14,7 +14,7 @@ use super::provider::{ProbeError, ProjectProvider};
 use super::runner::{CommandRunner, BUILD_TOOL_TIMEOUT, SCAN_PROBE_TIMEOUT};
 use super::tooling::{self, Distribution, GradleBuildAction};
 
-const PROBE_VERSION: &str = "8";
+const PROBE_VERSION: &str = "9";
 /// `GradleConnector.newConnector`. Failures name this entry point.
 const TOOLING_ENTRY: &str = "org.gradle.tooling.GradleConnector";
 /// Cold `krustyModel` configuration of a repository the size of the Kotlin compiler. Used only by
@@ -53,6 +53,62 @@ def krustyArchive = { task ->
     } catch (ignored) {
     }
     return null
+}
+// Paths a jar task packages, taken from its copy spec. Null when that spec cannot be read.
+// An empty set means the task packages nothing. Resolving these paths does not run the jar.
+def krustyPackagedOutputs = { jarTask ->
+    if (jarTask == null) {
+        return [] as Set
+    }
+    try {
+        def roots = [] as Set
+        def collect
+        collect = { spec ->
+            if (spec == null) {
+                return
+            }
+            def paths = spec.sourcePaths
+            if (paths != null) {
+                paths.each { path ->
+                    if (path instanceof File) {
+                        roots << path.absolutePath
+                    } else if (path != null) {
+                        try {
+                            path.files?.each { file ->
+                                if (file instanceof File) {
+                                    roots << file.absolutePath
+                                }
+                            }
+                        } catch (ignored) {
+                        }
+                    }
+                }
+            }
+            try {
+                spec.children?.each { child -> collect(child) }
+            } catch (ignored) {
+            }
+        }
+        collect(jarTask.mainSpec)
+        return roots
+    } catch (ignored) {
+        return null
+    }
+}
+def krustyCompilationOutputs = { compilation ->
+    def outputs = [] as Set
+    try {
+        compilation?.output?.classesDirs?.files?.each { outputs << it.absolutePath }
+    } catch (ignored) {
+    }
+    try {
+        def resources = compilation?.output?.resourcesDir
+        if (resources != null) {
+            outputs << resources.absolutePath
+        }
+    } catch (ignored) {
+    }
+    return outputs
 }
 allprojects { project ->
     project.tasks.register("krustyModel") {
@@ -126,7 +182,20 @@ allprojects { project ->
                             try { associates = compilation.associateWith.collect { it.output?.classesDirs?.files }.flatten().findAll { it != null }.collect { it.absolutePath } } catch (ignored) {}
                             def compilerArgs = []
                             try { compilerArgs = compilation.compileTaskProvider.get().compilerOptions?.freeCompilerArgs?.getOrElse([]) ?: [] } catch (ignored) {}
+                            // ${target}Jar packages the main compilation. A test compilation of the
+                            // same target has its own output and must not inherit that archive.
                             def jarTask = project.tasks.findByName("${target.name}Jar") ?: project.tasks.findByName("jar")
+                            def archive = null
+                            if (jarTask != null) {
+                                def packaged = krustyPackagedOutputs(jarTask)
+                                if (packaged == null) {
+                                    if (compilation.name == "main") {
+                                        archive = krustyArchive(jarTask)
+                                    }
+                                } else if (!krustyCompilationOutputs(compilation).disjoint(packaged)) {
+                                    archive = krustyArchive(jarTask)
+                                }
+                            }
                             kotlinCompilations << [
                                 target    : target.name,
                                 name      : compilation.name,
@@ -134,7 +203,7 @@ allprojects { project ->
                                 roots     : roots.toList().sort(),
                                 classpath : compilation.compileDependencyFiles?.collect { it.absolutePath } ?: [],
                                 output    : compilation.output?.classesDirs?.files?.collect { it.absolutePath } ?: [],
-                                archive   : krustyArchive(jarTask),
+                                archive   : archive,
                                 isTest    : compilation.name.toLowerCase().contains("test"),
                                 associates: associates,
                                 jvmTarget : (target.platformType?.name == "jvm") ? (compilation.compilerOptions?.options?.jvmTarget?.getOrNull()?.target) : null,
@@ -1261,6 +1330,116 @@ Execution failed for task ':app:krustyModel'.
         let lib_module = model.module(&ModuleId::new(":lib", "main")).unwrap();
         assert_eq!(lib_module.classpath, vec![only_classes.clone()]);
         assert_eq!(model.compile_classpath(lib_module), vec![only_classes],);
+    }
+
+    /// `jvmJar` packages the main compilation of a JVM target. The test compilation of that
+    /// target has its own class directory, and the production jar is not that directory's archive.
+    #[test]
+    fn a_production_jar_is_recorded_only_for_the_compilation_it_packages() {
+        let tree = TempTree::new("gradle-kmp-archive");
+        tree.write("settings.gradle.kts", "");
+        tree.write("gradlew", "#!/bin/sh\n");
+        let (_, action) = probe_action(
+            &GradleProvider::new(tree.root()),
+            FakeRunner::stdout("BUILD SUCCESSFUL\n"),
+        );
+        let script_at = action
+            .arguments
+            .iter()
+            .position(|arg| arg == "--init-script")
+            .expect("init script");
+        let script = std::fs::read_to_string(&action.arguments[script_at + 1]).unwrap();
+        assert!(
+            script.contains("krustyPackagedOutputs"),
+            "the archive is the jar task's packaged output"
+        );
+        assert!(script.contains("krustyCompilationOutputs"), "{script}");
+        assert!(
+            !script.contains("archive   : krustyArchive(jarTask)"),
+            "a target jar is not recorded for every compilation of that target"
+        );
+        assert!(
+            script.contains("compilation.name == \"main\""),
+            "when the copy spec cannot be read, only the main compilation keeps the target jar"
+        );
+        assert!(!script.contains("krustyDownload"), "{script}");
+
+        let main_classes = tree.path("shared/build/classes/kotlin/jvm/main");
+        let test_classes = tree.path("shared/build/classes/kotlin/jvm/test");
+        std::fs::create_dir_all(&main_classes).unwrap();
+        std::fs::create_dir_all(&test_classes).unwrap();
+        let jar = tree.path("shared/build/libs/shared-jvm.jar");
+        std::fs::create_dir_all(jar.parent().unwrap()).unwrap();
+        std::fs::write(&jar, "jar").unwrap();
+        let app_classes = tree.path("app/build/classes/kotlin/main");
+        let source = kmp_archive_model(&tree, &main_classes, &test_classes, &jar, &app_classes);
+        let model = parse_model(tree.root(), &source).unwrap();
+
+        let main = model.module(&ModuleId::new(":shared", "jvm/main")).unwrap();
+        let test = model.module(&ModuleId::new(":shared", "jvm/test")).unwrap();
+        assert_eq!(main.archive.as_deref(), Some(jar.as_path()));
+        assert!(
+            test.archive.is_none(),
+            "the test compilation does not package the production jar"
+        );
+        assert_eq!(
+            model.compile_classpath(test),
+            vec![test_classes.clone(), main_classes.clone(), jar.clone()],
+            "test output stays a class directory when the production jar exists"
+        );
+        let app = model.module(&ModuleId::new(":app", "main")).unwrap();
+        assert_eq!(model.compile_classpath(app), vec![jar.clone()]);
+
+        std::fs::remove_file(&jar).unwrap();
+        let model = parse_model(tree.root(), &source).unwrap();
+        let app = model.module(&ModuleId::new(":app", "main")).unwrap();
+        assert_eq!(
+            model.compile_classpath(app),
+            vec![main_classes.clone()],
+            "a missing production jar stands in with the main classes, not the test classes"
+        );
+        let test = model.module(&ModuleId::new(":shared", "jvm/test")).unwrap();
+        assert_eq!(
+            model.compile_classpath(test),
+            vec![test_classes, main_classes.clone()]
+        );
+    }
+
+    fn kmp_archive_model(
+        tree: &TempTree,
+        main_classes: &Path,
+        test_classes: &Path,
+        jar: &Path,
+        app_classes: &Path,
+    ) -> String {
+        let shared = format!(
+            concat!(
+                r#"{{"path":":shared","name":"shared","projectDir":"{}","javaHome":"/jdk21","jvmTarget":"21","kotlincArgs":[],"sourceSets":[],"kotlinCompilations":["#,
+                r#"{{"target":"jvm","name":"main","platform":"jvm","roots":["{}/src/jvmMain/kotlin"],"classpath":[],"output":["{}"],"archive":"{}","isTest":false,"associates":[],"jvmTarget":"21"}},"#,
+                r#"{{"target":"jvm","name":"test","platform":"jvm","roots":["{}/src/jvmTest/kotlin"],"classpath":["{}"],"output":["{}"],"isTest":true,"associates":["{}"],"jvmTarget":"21"}}"#,
+                r#"],"androidVariants":[],"projectDeps":[]}}"#,
+            ),
+            tree.path("shared").display(),
+            tree.path("shared").display(),
+            main_classes.display(),
+            jar.display(),
+            tree.path("shared").display(),
+            test_classes.display(),
+            test_classes.display(),
+            main_classes.display(),
+        );
+        let app = format!(
+            concat!(
+                r#"{{"path":":app","name":"app","projectDir":"{}","javaHome":"/jdk21","jvmTarget":"21","kotlincArgs":[],"sourceSets":["#,
+                r#"{{"name":"main","roots":["{}/src/main/kotlin"],"classpath":["{}"],"output":["{}"],"projectDeps":[":shared"]}}"#,
+                r#"],"kotlinCompilations":[],"androidVariants":[],"projectDeps":[":shared"]}}"#,
+            ),
+            tree.path("app").display(),
+            tree.path("app").display(),
+            jar.display(),
+            app_classes.display(),
+        );
+        format!("{SENTINEL}{shared}\n{SENTINEL}{app}\n")
     }
 
     #[test]

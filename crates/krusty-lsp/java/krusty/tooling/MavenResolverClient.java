@@ -128,15 +128,23 @@ public final class MavenResolverClient {
     }
 
     /**
-     * Project repositories from {@code jarRepositories.xml} are added the way IntelliJ's
-     * embedder does. Their update policy is always: a {@code .lastUpdated} marker left by a
-     * failed Central lookup must not hide a JetBrains-only coordinate.
+     * Project repositories from {@code jarRepositories.xml} join the session repositories
+     * the way IntelliJ's embedder does. Their update policy is always: a {@code .lastUpdated}
+     * marker left by a failed Central lookup must not hide a JetBrains-only coordinate.
+     * Each new repository passes through {@link RepositorySystem#newResolutionRepositories}
+     * so the session's mirror, proxy, and server credentials apply before a request uses it.
      */
     private static List<RemoteRepository> repositoriesFor(Map<String, Object> request) {
-        List<RemoteRepository> remotes = new ArrayList<>(repositories);
+        return resolutionRepositories(
+            repositorySystem, session, repositories, projectRepositories(request)
+        );
+    }
+
+    private static List<RemoteRepository> projectRepositories(Map<String, Object> request) {
         RepositoryPolicy always = new RepositoryPolicy(
             true, RepositoryPolicy.UPDATE_POLICY_ALWAYS, RepositoryPolicy.CHECKSUM_POLICY_WARN
         );
+        List<RemoteRepository> requested = new ArrayList<>();
         for (Map<String, Object> repository : Protocol.objects(request, "repositories")) {
             String url = Protocol.text(repository, "url");
             if (url.isEmpty()) {
@@ -146,18 +154,49 @@ public final class MavenResolverClient {
             if (id.isEmpty()) {
                 id = url;
             }
-            boolean known = false;
-            for (RemoteRepository remote : remotes) {
-                if (url.equals(remote.getUrl())) {
-                    known = true;
-                    break;
-                }
+            requested.add(repository(id, url, always));
+        }
+        return requested;
+    }
+
+    /**
+     * Normalize {@code projectRepositories} on {@code session} and append them to the
+     * repositories the session already resolved. A URL the session already has is left
+     * as that resolved entry.
+     */
+    static List<RemoteRepository> resolutionRepositories(
+        RepositorySystem system,
+        RepositorySystemSession session,
+        List<RemoteRepository> sessionRepositories,
+        List<RemoteRepository> projectRepositories
+    ) {
+        List<RemoteRepository> added = new ArrayList<>();
+        for (RemoteRepository repository : projectRepositories) {
+            String url = repository.getUrl();
+            if (url == null
+                || url.isEmpty()
+                || listed(sessionRepositories, url)
+                || listed(added, url)) {
+                continue;
             }
-            if (!known) {
-                remotes.add(repository(id, url, always));
+            added.add(repository);
+        }
+        if (added.isEmpty()) {
+            return sessionRepositories;
+        }
+        List<RemoteRepository> normalized = system.newResolutionRepositories(session, added);
+        List<RemoteRepository> remotes = new ArrayList<>(sessionRepositories);
+        remotes.addAll(normalized);
+        return remotes;
+    }
+
+    private static boolean listed(List<RemoteRepository> repositories, String url) {
+        for (RemoteRepository repository : repositories) {
+            if (url.equals(repository.getUrl())) {
+                return true;
             }
         }
-        return remotes;
+        return false;
     }
 
     private static void ensureSession() throws Exception {
@@ -182,18 +221,7 @@ public final class MavenResolverClient {
         created.setLocalRepositoryManager(
             repositorySystem.newLocalRepositoryManager(created, new LocalRepository(local))
         );
-        DefaultMirrorSelector mirrors = new DefaultMirrorSelector();
-        for (Mirror mirror : settings.getMirrors()) {
-            mirrors.add(
-                mirror.getId(),
-                mirror.getUrl(),
-                mirror.getMirrorOf(),
-                false,
-                mirror.getMirrorOfLayouts(),
-                null
-            );
-        }
-        created.setMirrorSelector(mirrors);
+        created.setMirrorSelector(mirrorSelector(settings));
         DefaultAuthenticationSelector authentication = new DefaultAuthenticationSelector();
         for (Server server : settings.getServers()) {
             if (server.getUsername() == null) {
@@ -230,6 +258,33 @@ public final class MavenResolverClient {
         created.setProxySelector(proxies);
         repositories = repositorySystem.newResolutionRepositories(created, remoteRepositories(settings));
         session = created;
+    }
+
+    /**
+     * {@code add(id, url, type, repositoryManager, blocked, mirrorOfIds, mirrorOfTypes)}.
+     * Maven's {@code mirrorOf} is the repository-id pattern, not the content type.
+     */
+    static DefaultMirrorSelector mirrorSelector(Settings settings) {
+        DefaultMirrorSelector mirrors = new DefaultMirrorSelector();
+        for (Mirror mirror : settings.getMirrors()) {
+            String mirrorOf = mirror.getMirrorOf();
+            if (mirrorOf == null
+                || mirrorOf.isEmpty()
+                || mirror.getUrl() == null
+                || mirror.getUrl().isEmpty()) {
+                continue;
+            }
+            mirrors.add(
+                mirror.getId(),
+                mirror.getUrl(),
+                null,
+                false,
+                false,
+                mirrorOf,
+                mirror.getMirrorOfLayouts()
+            );
+        }
+        return mirrors;
     }
 
     private static Settings settings() {
