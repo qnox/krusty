@@ -1944,13 +1944,29 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                                 sibling.get(),
                                 joined.get(),
                             );
+                                // A dependency call that left a result-only formal open
+                                // (`emptyMap()`) is completed, not symbolic; its recorded
+                                // selection says so and names the sibling face it takes.
+                                let open =
+                                    call_selection_origin(graph, operand).and_then(|origin| {
+                                        semantics.open_result_expectation(scope, origin, sibling)
+                                    });
                                 if current == sibling
-                                    || (!current.get().mentions_ty_param() && joined != current)
+                                    || (!current.get().mentions_ty_param()
+                                        && open.is_none()
+                                        && joined != current)
                                 {
                                     continue;
                                 }
+                                let expectation = open.unwrap_or(sibling);
                                 let Some(Ok(rebound)) = evaluate_expression_with_expected(
-                                    semantics, operand, sibling, graph, demand, memo, computing,
+                                    semantics,
+                                    operand,
+                                    expectation,
+                                    graph,
+                                    demand,
+                                    memo,
+                                    computing,
                                 ) else {
                                     continue;
                                 };
