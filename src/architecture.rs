@@ -512,6 +512,14 @@ mod tests {
     }
 
     #[test]
+    fn klib_support_bodies_carry_checked_builtin_implementation_facts() {
+        let path = source_path("src/compiler/dependency_body_emission.rs");
+        let text = fs::read_to_string(&path).expect("read KLIB body handoff");
+        assert!(text.contains("record_checked"));
+        assert!(!text.contains("record_dependency_support"));
+    }
+
+    #[test]
     fn plugin_runtime_binding_uses_provider_declarations() {
         let path = source_path("src/compiler/backend_handoff/plugin_handoff.rs");
         let text = fs::read_to_string(&path).expect("read plugin runtime handoff");
