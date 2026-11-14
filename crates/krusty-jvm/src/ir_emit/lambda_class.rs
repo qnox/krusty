@@ -28,15 +28,19 @@ pub(super) fn emit_lambda_class(
     // The class's generic header: `Object`, then the function type it implements — except when
     // kotlinc's `hasNothingInNonContravariantPosition` leaves that supertype raw (no `Signature`).
     let formatter = JvmSignatureFormatter::new(ir, env);
-    // A `-Xlambdas=class` lambda extends `Lambda` and carries kotlinc's reflection record of the
-    // source lambda; a class the runtime factory forces extends `Object` and carries none.
-    let reflection = match &lambda.kotlin_lambda {
+    // A source lambda class carries kotlinc's reflection record. It extends `Lambda` only for
+    // `-Xlambdas=class`; a SAM class uses the source record while extending `Object`.
+    let reflection = match &lambda.lambda_origin {
         Some(origin) => {
             match class_lambda_reflection::reflect_source(
                 ir,
                 lambda.function_type,
                 lambda.invoke,
                 origin,
+                lambda
+                    .sam
+                    .as_ref()
+                    .map_or("invoke", |target| target.method.as_str()),
                 &formatter,
             ) {
                 Ok(reflection) => Some(reflection),
@@ -48,7 +52,7 @@ pub(super) fn emit_lambda_class(
         }
         None => None,
     };
-    let superclass = if lambda.kotlin_lambda.is_some() {
+    let superclass = if lambda.lambda_origin.is_some() && lambda.sam.is_none() {
         LAMBDA
     } else {
         OBJECT
@@ -189,7 +193,7 @@ pub(super) fn emit_lambda_class(
         slot += slot_words(capture.ty);
     }
     code.aload(0);
-    if lambda.kotlin_lambda.is_some() {
+    if lambda.lambda_origin.is_some() && lambda.sam.is_none() {
         // `Lambda(arity)`: the source arity the lambda's function type declares.
         code.push_int(i32::from(arity), &mut cw);
         let lambda_init = cw.methodref(LAMBDA, "<init>", "(I)V");

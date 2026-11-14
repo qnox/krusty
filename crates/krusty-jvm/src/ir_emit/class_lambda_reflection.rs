@@ -24,6 +24,7 @@ pub(super) fn reflect_source(
     function_type: Ty,
     impl_fn: u32,
     origin: &krusty::ir::IrLambdaOrigin,
+    method_name: &str,
     formatter: &JvmSignatureFormatter<'_>,
 ) -> Result<ClassLambdaReflection, String> {
     let recorded = ir
@@ -83,7 +84,7 @@ pub(super) fn reflect_source(
         &krusty::metadata::lambda_function::LambdaFunction {
             function_name: krusty::metadata::lambda_function::function_name(origin.form),
             jvm_method: Some(krusty::metadata::lambda_function::JvmMethod {
-                name: "invoke",
+                name: method_name,
                 descriptor: record_descriptor.then_some(physical.as_str()),
             }),
             explicit_suspend: origin.explicit_suspend,
