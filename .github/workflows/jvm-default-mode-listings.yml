@@ -1,0 +1,76 @@
+name: jvm-default-mode-listings
+
+on:
+  push:
+    branches: [ci/jvm-default-mode-listings]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: [self-hosted, rust-4c-8gb]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: zulu
+          java-version: |
+            8
+            11
+            17
+            21
+            25
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - name: find installed just
+        id: just
+        shell: bash
+        run: if command -v just > /dev/null; then echo "found=true" >> "$GITHUB_OUTPUT"; fi
+      - name: install just
+        if: steps.just.outputs.found != 'true'
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: just
+      - name: authenticate source and build conformance binary once
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          test "$(git rev-parse HEAD^)" = b122ae0c32dd349dc78abd9fbdd9b79184556da3
+          git rev-parse HEAD^ > evidence/source-commit.txt
+          CARGO_BUILD_JOBS=1 bash scripts/cargo-test-binary.sh conformance -p krusty --test conformance > evidence/build.log 2>&1
+          cat evidence/build.log
+          cp "$(tail -n 1 evidence/build.log)" conformance-bin
+          sha256sum conformance-bin > evidence/binary.sha256
+      - name: run complete strict bytecode listing corpus at each exact version
+        timeout-minutes: 25
+        run: |
+          set -uo pipefail
+          export RUST_MIN_STACK=134217728
+          result=0
+          for version in 2.4.0 2.4.10 2.4.20 2.4.21; do
+            export KRUSTY_LANGUAGE_VERSION="$version"
+            export KRUSTY_KOTLINC="$(just kotlinc "$version")"
+            export KRUSTY_KOTLIN_BOX_DIR="$(just box-corpus "$version")"
+            timeout 300 ./conformance-bin --exact kotlin_bytecode_listing_conformance::krusty_reproduces_kotlincs_bytecode_listing_corpus --nocapture > "evidence/$version.log" 2>&1
+            status=$?
+            printf '%s\t%s\n' "$version" "$status" | tee -a evidence/status.tsv
+            cat "evidence/$version.log"
+            if [ "$status" -ne 0 ] || ! rg -q "test result:" "evidence/$version.log"; then result=1; fi
+          done
+          exit "$result"
+      - name: upload complete listing evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: jvm-default-mode-listings
+          path: evidence/
+          if-no-files-found: error
