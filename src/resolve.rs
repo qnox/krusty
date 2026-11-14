@@ -257,6 +257,7 @@ mod named_class_constructors;
 pub(crate) mod operator_calls;
 mod operator_declarations;
 mod opt_in_usage;
+mod primitive_reference;
 use operator_calls::{
     range_operator, OperatorOperand, ResolvedInRangeComparison, SelectedBuiltinOperatorAccess,
 };
@@ -48178,19 +48179,7 @@ impl<'a> Checker<'a> {
         if expected.is_erased_top() {
             return;
         }
-        // A primitive flowing into a reference supertype is checked through its own Kotlin
-        // classifier's applied hierarchy: the builtin `kotlin/Int` is a `Number` and a
-        // `Comparable<Int>`, so it reaches `Comparable<Int>` but not `Comparable<String>`.
-        let scalar = actual.is_numeric_or_char() || actual == Ty::Boolean || actual.is_unsigned();
-        if scalar
-            && matches!(expected.kind(), TyKind::Obj(..))
-            && crate::assignable::is_subtype(
-                &crate::assignable::TyCtx::new(),
-                self,
-                actual,
-                expected,
-            )
-        {
+        if primitive_reference::reaches_reference(self, actual, expected) {
             return;
         }
         // The dedicated `Ty::String` variant and its object form `Obj("kotlin/String")` denote the SAME
