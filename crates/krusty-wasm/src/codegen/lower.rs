@@ -58,6 +58,7 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySize
         || operation == krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
+        || operation == krusty::backend::BackendCompilerIntrinsic::StringCompare
         || matches!(
             operation,
             krusty::backend::BackendCompilerIntrinsic::ClassName(_)
@@ -1292,6 +1293,30 @@ impl<'a> Body<'a> {
                     return Err("an authenticated array store with malformed operands".into());
                 };
                 self.array_set(receiver, *index, *value)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver,
+                args,
+            } if let Callee::External {
+                target,
+                defaults,
+                extension_receiver_parameter: None,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    fact.compiler_operation()
+                        == Some(krusty::backend::BackendCompilerIntrinsic::StringCompare)
+                }) =>
+            {
+                let (Some(receiver), [other]) = (dispatch_receiver, args.as_slice()) else {
+                    return Err("an authenticated string comparison with malformed operands".into());
+                };
+                self.value(receiver, Ty::String)?;
+                self.value(*other, Ty::String)?;
+                let function = self.runtime.string_compare(self.module);
+                self.code.call(function);
             }
             IrExpr::Call {
                 callee: ref call_callee,
