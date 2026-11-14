@@ -1,0 +1,57 @@
+name: gradle-wrapper-verification
+on:
+  push:
+    branches: [ci/gradle-wrapper-verification]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: [self-hosted, rust-4c-8gb]
+    timeout-minutes: 40
+    env:
+      GRADLE_USER_HOME: ${{ runner.temp }}/krusty-gradle-wrapper-verification
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78
+        with:
+          distribution: zulu
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c
+        with:
+          cache-read-only: true
+      - name: authenticate source and wrapper
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = d555f11cae9da7067973462b46cdda042146b353
+          mkdir evidence
+          git rev-parse HEAD^ > evidence/source.txt
+          sha256sum tools/krusty-gradle/gradle/wrapper/gradle-wrapper.jar tools/krusty-gradle/gradle/wrapper/gradle-wrapper.properties > evidence/wrapper.sha256
+          cp tools/krusty-gradle/gradle/verification-metadata.xml evidence/verification-before.xml
+          grep -q 'compileOnly("org.jetbrains.kotlin:kotlin-gradle-plugin-api:2.4.0")' tools/krusty-gradle/build.gradle.kts
+      - name: resolve exact declared artifacts and build the plugin metadata
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          tools/krusty-gradle/gradlew --no-daemon -p tools/krusty-gradle -PkrustyPluginVersion=0.0.0-verification --write-verification-metadata sha256 clean test publishAllPublicationsToReleaseRepository > evidence/metadata-generation.log 2>&1
+          cat evidence/metadata-generation.log
+      - name: validate portable distribution with strict dependency verification
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          scripts/package-gradle-plugin.sh 0.0.0-verification "$PWD/dist-gradle" > evidence/strict-package.log 2>&1
+          cat evidence/strict-package.log
+      - name: retain complete metadata and test evidence
+        if: always()
+        run: |
+          cp tools/krusty-gradle/gradle/verification-metadata.xml evidence/verification-metadata.xml
+          cp tools/krusty-gradle/gradle.lockfile evidence/gradle.lockfile
+          cp -R tools/krusty-gradle/build/test-results evidence/test-results 2>/dev/null || true
+          git diff -- tools/krusty-gradle > evidence/product.diff
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: gradle-wrapper-verification
+          path: evidence/
+          if-no-files-found: error
