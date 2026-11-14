@@ -689,6 +689,7 @@ KRef kt_observable(KRef initial, KRef on_change);
    with a message naming its descriptor. */
 KRef kt_rw_property_get(KRef self, KRef name);
 KRef kt_rw_property_get_property(KRef self, KRef property);
+KRef kt_kcallable_name(KRef callable);
 void kt_rw_property_set(KRef self, KRef property, KRef value);
 
 /* ---- comparable ranges ------------------------------------------------------------------------

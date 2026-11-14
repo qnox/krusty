@@ -164,6 +164,8 @@ fn an_int_array_of_is_the_primitive_array_factory() {
 
 #[test]
 fn a_kcallable_name_property_is_the_callable_reference_name() {
+    use crate::symbol_source::SymbolSource;
+
     let Some(libraries) = native_stdlib() else {
         return;
     };
@@ -179,6 +181,32 @@ fn a_kcallable_name_property_is_the_callable_reference_name() {
         .map(|property| property.getter.semantic_role)
         .collect();
     assert_eq!(roles, [Some(SemanticCallRole::KotlinCallableReferenceName)]);
+
+    let getter = &record.declared_callables["name"].properties()[0].getter;
+    let selected = libraries
+        .external_callable(getter.external_identity.expect("published getter identity"))
+        .expect("the provider retains the published getter");
+    let identity = selected
+        .dependency_callable
+        .as_ref()
+        .expect("the selected getter has its exact KLIB identity");
+    assert!(matches!(
+        &identity.declaration,
+        crate::libraries::KlibDeclarationSignature::Accessor(_)
+    ));
+    let (roundtrip_identity, roundtrip) = libraries
+        .external_callable_by_dependency(identity)
+        .expect("the exact accessor identity resolves through its provider");
+    assert_eq!(
+        Some(roundtrip_identity),
+        getter.external_identity,
+        "reverse lookup preserves the provider's selected accessor identity"
+    );
+    assert_eq!(
+        roundtrip.klib_body_callable().unwrap().semantic_role(),
+        Some(SemanticCallRole::KotlinCallableReferenceName),
+        "the selected KCallable.name accessor retains its provider role"
+    );
 }
 
 #[test]
