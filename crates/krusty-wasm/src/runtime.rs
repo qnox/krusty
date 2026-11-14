@@ -40,6 +40,7 @@ use super::function_values::FunctionShapes;
 use super::hashing::Hashing;
 use super::host::Host;
 use super::identity::IdentityObjects;
+use super::mutable_list::MutableList;
 use super::objects::ObjectRoot;
 use super::string_builders::StringBuilders;
 use super::type_objects::{TypeDescription, TypeObject, TypeObjects};
@@ -70,6 +71,7 @@ pub(super) struct Runtime {
     pub(super) string_of_char: u32,
     pub(super) string_of_boolean: u32,
     pub(super) string_or_null: u32,
+    pub(super) lists: MutableList,
     pub(super) write_string: u32,
     pub(super) i32_div: u32,
     pub(super) i64_div: u32,
@@ -177,6 +179,11 @@ impl Runtime {
             string_of_char: module.declare(),
             string_of_boolean: module.declare(),
             string_or_null: module.declare(),
+            lists: MutableList {
+                structure: 0,
+                table: 0,
+                elements: 0,
+            },
             write_string: module.declare(),
             i32_div: module.declare(),
             i64_div: module.declare(),
@@ -213,6 +220,8 @@ impl Runtime {
         runtime
             .hashing
             .define(module, &runtime.objects, runtime.string, runtime.chars);
+        let lists = runtime.declare_mutable_list(module, references);
+        runtime.lists = lists;
         runtime
     }
 
