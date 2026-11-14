@@ -104,9 +104,39 @@ jobs:
             tail -n 1 "$logfile"
           }
           set -e
-          unitbin="$(build_one compiler-unit compiler-unit-tests)"
+          # The gate profile's optimized cfg(test) rustc process peaks near the 8 GiB
+          # self-hosted runner limit. Build only this library unit-test binary with the existing
+          # coverage profile (opt-level 1, debug info/LTO off); conformance stays on gate below.
+          snapshot
+          printf '%s\n' 'coverage' > "$EVIDENCE/compiler-unit-profile.txt"
+          unit_log="$EVIDENCE/compiler-unit-build.log"
+          cargo test --profile coverage --no-run -p krusty --lib --message-format=json \
+            > "$unit_log" 2>&1 &
+          unit_pid=$!
+          (
+            while kill -0 "$unit_pid" 2>/dev/null; do
+              snapshot
+              sleep 5
+            done
+          ) &
+          monitor_pid=$!
+          set +e
+          wait "$unit_pid"
+          unit_status=$?
+          set -e
+          kill "$monitor_pid" 2>/dev/null || true
+          wait "$monitor_pid" 2>/dev/null || true
+          snapshot
+          cat "$unit_log" >&2
+          printf '%s\n' "$unit_status" > "$EVIDENCE/compiler-unit-build.exit-code"
+          if [ "$unit_status" -ne 0 ]; then exit "$unit_status"; fi
+          unitbin="$(jq -Rr 'fromjson? | select(.reason == "compiler-artifact" and .profile.test == true and .target.name == "krusty" and .executable != null) | .executable' "$unit_log" | tail -n 1)"
+          if [ ! -x "$unitbin" ]; then
+            echo "could not locate krusty library test binary in cargo artifact stream" >&2
+            exit 1
+          fi
+          printf '%s\n' "$unitbin" > "$EVIDENCE/unit-binary.txt"
           conformancebin="$(build_one conformance conformance-bin)"
-          echo "$unitbin" > "$EVIDENCE/unit-binary.txt"
           echo "$conformancebin" > "$EVIDENCE/conformance-binary.txt"
           echo "UNITBIN=$(realpath "$unitbin")" >> "$GITHUB_ENV"
           echo "CONFORMANCEBIN=$(realpath "$conformancebin")" >> "$GITHUB_ENV"
