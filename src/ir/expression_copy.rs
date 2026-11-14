@@ -20,6 +20,9 @@ pub(super) trait InheritedFacts {
     /// Move an operation-owned fact to a relocated expression, retiring it from the old slot.
     /// The default retains source-owned facts; operation owners in a relocation plan override it.
     fn relocate(&mut self, _source: ExprId, _target: ExprId) {}
+
+    /// Remove expression-keyed facts for every node at or after a truncated arena boundary.
+    fn truncate_from(&mut self, first: ExprId);
 }
 
 impl<V: Clone, S: BuildHasher> InheritedFacts for HashMap<ExprId, V, S> {
@@ -33,6 +36,10 @@ impl<V: Clone, S: BuildHasher> InheritedFacts for HashMap<ExprId, V, S> {
         if let Some(value) = self.remove(&source) {
             self.entry(target).or_insert(value);
         }
+    }
+
+    fn truncate_from(&mut self, first: ExprId) {
+        self.retain(|expression, _| *expression < first);
     }
 }
 
@@ -48,22 +55,39 @@ impl<S: BuildHasher> InheritedFacts for HashSet<ExprId, S> {
             self.insert(target);
         }
     }
+
+    fn truncate_from(&mut self, first: ExprId) {
+        self.retain(|expression| *expression < first);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ExpressionFactAction {
+    Copy,
+    Relocate,
+    Truncate(ExprId),
 }
 
 /// Give `target`, a structural copy of `source`, every fact a copy inherits.
 #[deny(unused_variables)]
 pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
-    expression_facts(ir, source, target, false);
+    expression_facts(ir, source, target, ExpressionFactAction::Copy);
 }
 
 /// Give `target` a structural copy of `source`'s facts, then move operation-owned facts from the
 /// old expression identity. Source/value facts remain available to the replacement expression.
 pub(super) fn relocate_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
-    expression_facts(ir, source, target, true);
+    expression_facts(ir, source, target, ExpressionFactAction::Relocate);
+}
+
+/// Remove facts owned by the exhaustive expression-copy classification when an arena suffix is
+/// rolled back. Declaration-owned records remain untouched.
+pub(crate) fn truncate_expression_facts(ir: &mut IrFile, first: ExprId) {
+    expression_facts(ir, first, first, ExpressionFactAction::Truncate(first));
 }
 
 #[deny(unused_variables)]
-fn expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId, relocating: bool) {
+fn expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId, action: ExpressionFactAction) {
     let IrFile {
         // Facts about the expression itself. A copy is the same source operation, so it inherits
         // its origin, position, types, checked selections and lowering roles.
@@ -423,9 +447,37 @@ fn expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId, relocating:
         lambda_exits,
     ];
     for facts in inherited {
-        facts.inherit(source, target);
+        match action {
+            ExpressionFactAction::Copy | ExpressionFactAction::Relocate => {
+                facts.inherit(source, target)
+            }
+            ExpressionFactAction::Truncate(first) => facts.truncate_from(first),
+        }
     }
-    inherit_declaration_argument_boundaries(exprs, declaration_argument_boundaries, source, target);
+    match action {
+        ExpressionFactAction::Copy => {
+            inherit_declaration_argument_boundaries(
+                exprs,
+                declaration_argument_boundaries,
+                source,
+                target,
+            );
+        }
+        ExpressionFactAction::Relocate => {
+            inherit_declaration_argument_boundaries(
+                exprs,
+                declaration_argument_boundaries,
+                source,
+                target,
+            );
+            declaration_argument_boundaries.remove(&source);
+        }
+        ExpressionFactAction::Truncate(first) => {
+            declaration_argument_boundaries.retain(|expression, boundaries| {
+                *expression < first && boundaries.iter().all(|boundary| boundary.argument < first)
+            })
+        }
+    }
     let operation_facts: &mut [(&mut dyn InheritedFacts, bool)] = &mut [
         (compiled_inline_calls, true),
         (module_inline_calls, true),
@@ -471,15 +523,20 @@ fn expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId, relocating:
         (semantic_call_roles, false),
     ];
     for (facts, copy_on_clone) in operation_facts {
-        if *copy_on_clone {
-            facts.inherit(source, target);
+        match action {
+            ExpressionFactAction::Copy => {
+                if *copy_on_clone {
+                    facts.inherit(source, target);
+                }
+            }
+            ExpressionFactAction::Relocate => {
+                if *copy_on_clone {
+                    facts.inherit(source, target);
+                }
+                facts.relocate(source, target);
+            }
+            ExpressionFactAction::Truncate(first) => facts.truncate_from(first),
         }
-        if relocating {
-            facts.relocate(source, target);
-        }
-    }
-    if relocating {
-        declaration_argument_boundaries.remove(&source);
     }
 }
 
@@ -520,7 +577,7 @@ mod tests {
     use super::super::{Callee, IrConst, IrExpr, IrFile};
     use super::{copy_expression_facts, relocate_expression_facts};
     use crate::fir::SourceFileId;
-    use crate::types::{Ty, type_name};
+    use crate::types::{type_name, Ty};
 
     #[test]
     fn a_copy_inherits_the_facts_its_owning_modules_record() {

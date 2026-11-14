@@ -116,6 +116,13 @@ pub(super) struct RangeMembershipHeader {
     pub(super) ret: Ty,
 }
 
+/// The exact provider-selected `suspendCoroutineUninterceptedOrReturn<T>` call shape.
+pub(super) struct UninterceptedSuspensionCall {
+    pub(super) parameter: Ty,
+    pub(super) result: Ty,
+    pub(super) formal: crate::types::TyParamName,
+}
+
 /// Joins the calls a body makes of public dependency declarations to the functions they invoke.
 pub(super) trait CallLinker {
     /// Whether this exact provider-assigned dependency callable is declared `suspend`. A selected
@@ -131,6 +138,15 @@ pub(super) trait CallLinker {
         &self,
         _callee: &crate::libraries::KlibDeclarationSignature,
     ) -> Lowered<Option<super::primitive_calls::CommonPrimitiveCall>> {
+        Ok(None)
+    }
+
+    /// The provider-selected compiler suspension intrinsic, if this template linker owns its
+    /// identity and has authenticated its serialized header.
+    fn unintercepted_suspension(
+        &self,
+        _callee: &crate::libraries::KlibDeclarationSignature,
+    ) -> Lowered<Option<UninterceptedSuspensionCall>> {
         Ok(None)
     }
 

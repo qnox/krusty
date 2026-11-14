@@ -218,4 +218,25 @@ impl InheritedFacts for InlineExpansions {
         result_boundaries.inherit(source, target);
         retained_unit_lines.inherit(source, target);
     }
+
+    fn truncate_from(&mut self, first: ExprId) {
+        let Self {
+            copies,
+            unread_operands,
+            provenance,
+            declared_inline_types,
+            result_boundaries,
+            retained_unit_lines,
+        } = self;
+        for facts in [
+            copies as &mut dyn InheritedFacts,
+            unread_operands,
+            provenance,
+            declared_inline_types,
+            result_boundaries,
+            retained_unit_lines,
+        ] {
+            facts.truncate_from(first);
+        }
+    }
 }

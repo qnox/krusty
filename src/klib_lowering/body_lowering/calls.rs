@@ -67,6 +67,9 @@ impl BodyLowering<'_> {
             }
             BuiltinCallDisposition::Dependency => {
                 let signature = crate::libraries::KlibDeclarationSignature::Public(callee.clone());
+                if let Some(suspension) = self.linker.unintercepted_suspension(&signature)? {
+                    return self.unintercepted_suspension_call(suspension, access, ty);
+                }
                 if let Some(primitive) = self.linker.common_primitive(&signature)? {
                     return self.primitive_call(primitive, access, ty);
                 }
@@ -619,6 +622,69 @@ impl BodyLowering<'_> {
 }
 
 impl BodyLowering<'_> {
+    fn unintercepted_suspension_call(
+        &mut self,
+        selected: super::super::UninterceptedSuspensionCall,
+        access: &KlibIrMemberAccess,
+        ty: Ty,
+    ) -> Lowered<ExprId> {
+        let [Some(type_argument)] = access.type_arguments.as_slice() else {
+            return Err(mismatch(
+                "an unintercepted suspension call has another type-argument shape",
+            ));
+        };
+        let type_argument = self.semantic(*type_argument)?;
+        let mut bindings = crate::fx_hash::HashMap::default();
+        bindings.insert(selected.formal, type_argument);
+        let parameter = crate::types::ty_subst_keep_unbound(selected.parameter, &bindings);
+        let result = crate::types::ty_subst_keep_unbound(selected.result, &bindings);
+        let operands = self.call_operands(
+            access,
+            ty,
+            CalleeShape {
+                receiver: None,
+                params: &[parameter],
+                ret: result,
+                context_count: 0,
+                class_type_parameters: &[],
+                parameter_defaults: &[],
+            },
+        )?;
+        let logical_result = operands.ret;
+        let [block] = operands.args.as_slice() else {
+            return Err(mismatch(
+                "an unintercepted suspension call has another operand shape",
+            ));
+        };
+        let IrExpr::Lambda {
+            impl_fn,
+            inline_body,
+            ..
+        } = &mut self.ir.exprs[*block as usize]
+        else {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "an unintercepted suspension block that is not a KLIB closure",
+            ));
+        };
+        let body = self
+            .ir
+            .functions
+            .get(*impl_fn as usize)
+            .and_then(|function| function.body);
+        let Some(body) = body else {
+            return Err(KlibBodyDeclineReason::NoBody);
+        };
+        *inline_body = Some(body);
+        let invocation = self.ir.invoke_with_current_continuation(*block).ok_or(
+            KlibBodyDeclineReason::UnsupportedOperation(
+                "an unintercepted suspension block with another invocation shape",
+            ),
+        )?;
+        self.ir
+            .mark_unintercepted_suspension(invocation, logical_result);
+        Ok(invocation)
+    }
+
     /// A call of a dependency property's accessor, lowered as checked FIR lowers a source access
     /// of the property: a read through its getter, a write through its setter.
     fn accessor_call(

@@ -241,4 +241,31 @@ impl InheritedFacts for GeneratedLineMarks {
         inline_result_adaptation_boundaries.inherit(source, target);
         early_result_adaptations.inherit(source, target);
     }
+
+    fn truncate_from(&mut self, first: ExprId) {
+        let Self {
+            implicit_return_ends,
+            evaluated_result_ends,
+            fallthrough_returns,
+            accessor_body_exits,
+            dispatches,
+            positionless,
+            invocation_result_adaptations,
+            inline_result_adaptation_boundaries,
+            early_result_adaptations,
+        } = self;
+        for facts in [
+            implicit_return_ends as &mut dyn InheritedFacts,
+            evaluated_result_ends,
+            fallthrough_returns,
+            accessor_body_exits,
+            dispatches,
+            positionless,
+            invocation_result_adaptations,
+            inline_result_adaptation_boundaries,
+            early_result_adaptations,
+        ] {
+            facts.truncate_from(first);
+        }
+    }
 }

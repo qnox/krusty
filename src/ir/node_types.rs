@@ -89,6 +89,10 @@ impl InheritedFacts for IrNodeTypeColumn {
             self.get_mut(target).physical = Some(physical);
         }
     }
+
+    fn truncate_from(&mut self, first: ExprId) {
+        self.nodes.truncate(first as usize);
+    }
 }
 
 impl IrFile {
@@ -174,10 +178,5 @@ impl IrFile {
                 *ty = rewrite(*ty);
             }
         }
-    }
-
-    /// Forget the types of every expression from `first` on, as when the arena is truncated there.
-    pub(crate) fn truncate_types(&mut self, first: ExprId) {
-        self.types.nodes.truncate(first as usize);
     }
 }

@@ -168,4 +168,8 @@ impl InheritedFacts for CompiledInlineCalls {
         let Self { lowering: _, calls } = self;
         calls.relocate(source, target);
     }
+
+    fn truncate_from(&mut self, first: ExprId) {
+        self.calls.truncate_from(first);
+    }
 }
