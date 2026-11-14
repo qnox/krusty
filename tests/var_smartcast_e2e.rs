@@ -576,6 +576,14 @@ fn closure_writes_of_the_smart_cast_type_keep_it_stable() {
 }
 
 #[test]
+fn string_builder_closure_writes_of_the_smart_cast_type_keep_it_stable() {
+    same_box(
+        "closure_write_conforming_string_builder",
+        include_str!("box_regressions/closureWriteConformingSmartCastStringBuilder.kt"),
+    );
+}
+
+#[test]
 fn closure_writes_outside_the_smart_cast_type_decline_it() {
     const SRC: &str = "open class Base { fun base(): Int = 1 }\n\
 fun nullableValueWrite(next: Base?): Int {\n\
