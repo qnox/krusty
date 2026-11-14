@@ -250,9 +250,7 @@ impl LaidOutClasses {
     /// out again by every file its body is inlined into, each copy a type of its own, so no single
     /// record stands for it and a subclass of it declines.
     pub(super) fn insert(&mut self, class: TypeName, laid_out: LaidOutClass) {
-        if !self.support {
-            self.publish_source(laid_out.clone());
-        }
+        self.publish_source(laid_out.clone());
         let records = if self.support {
             &mut self.dependencies
         } else {

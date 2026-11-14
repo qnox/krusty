@@ -190,6 +190,33 @@ impl SingletonMemberReceiver {
     }
 }
 
+/// Declaration identity and semantic accessor role are independent of its implementation shape.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum MemberDeclaration {
+    Function(KlibDependencyCallable),
+    Accessor {
+        identity: KlibDependencyCallable,
+        setter: bool,
+    },
+}
+
+impl MemberDeclaration {
+    fn identity(&self) -> &KlibDependencyCallable {
+        match self {
+            Self::Function(identity) | Self::Accessor { identity, .. } => identity,
+        }
+    }
+    fn slot_identity(&self) -> Vec<u8> {
+        match self {
+            Self::Function(identity) => super::interface_identity::member_identity(identity),
+            Self::Accessor { identity, setter } => {
+                super::interface_identity::property_member_identity(identity, *setter)
+                    .expect("an accessor declaration has its authenticated property signature")
+            }
+        }
+    }
+}
+
 /// Exact module-qualified identities of this file's callable realizations.
 ///
 /// The key is a stable common-IR declaration identity, not a spelling. The value joins the source
@@ -200,7 +227,7 @@ pub struct DependencyExportSignatures {
     classifiers: HashMap<crate::ir::ClassId, crate::libraries::KlibClassIdentity>,
     callables: HashMap<FunId, KlibDependencyCallable>,
     /// Declaration identities of visible non-static members, including bodyless abstract ones.
-    member_declarations: HashMap<FunId, KlibDependencyCallable>,
+    member_declarations: HashMap<FunId, MemberDeclaration>,
     /// The interface subset whose implementations participate in interface dispatch.
     interface_members: HashSet<FunId>,
     interface_properties: HashMap<crate::fir::PropertyId, KlibDependencyCallable>,
@@ -305,13 +332,23 @@ impl DependencyExportSignatures {
     pub fn interface_member(&self, function: FunId) -> Option<&KlibDependencyCallable> {
         self.interface_members
             .contains(&function)
-            .then(|| self.member_declarations.get(&function))
+            .then(|| self.member_declaration(function))
             .flatten()
     }
 
     /// A member declaration identity, independently of executable target code.
     pub fn member_declaration(&self, function: FunId) -> Option<&KlibDependencyCallable> {
-        self.member_declarations.get(&function)
+        self.member_declarations
+            .get(&function)
+            .map(MemberDeclaration::identity)
+    }
+
+    /// Canonical callable or property-accessor identity of a physical member slot. A support
+    /// function implementing an accessor retains its semantic property role here.
+    pub fn member_slot_identity(&self, function: FunId) -> Option<Vec<u8>> {
+        self.member_declarations
+            .get(&function)
+            .map(MemberDeclaration::slot_identity)
     }
 
     /// The published getter identity of a property an interface of this file declares, with or
@@ -404,7 +441,27 @@ impl DependencyExportSignatures {
         function: FunId,
         identity: KlibDependencyCallable,
     ) {
-        let previous = self.member_declarations.insert(function, identity);
+        self.record_member(function, MemberDeclaration::Function(identity));
+    }
+
+    pub(crate) fn record_accessor_member_declaration(
+        &mut self,
+        function: FunId,
+        identity: KlibDependencyCallable,
+        setter: bool,
+    ) {
+        assert!(
+            matches!(
+                identity.declaration,
+                crate::libraries::KlibDeclarationSignature::Accessor(_)
+            ),
+            "an accessor member requires its exact property signature"
+        );
+        self.record_member(function, MemberDeclaration::Accessor { identity, setter });
+    }
+
+    fn record_member(&mut self, function: FunId, declaration: MemberDeclaration) {
+        let previous = self.member_declarations.insert(function, declaration);
         assert!(
             previous.is_none(),
             "one member publishes one KLIB declaration identity"
