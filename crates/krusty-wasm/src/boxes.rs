@@ -247,9 +247,7 @@ impl Runtime {
         let classifier = result_companion_classifier();
         let identity = &self.identity;
         let class_names = krusty::backend::class_names::member_class_names(classifier);
-        let to_string = self
-            .object_strings
-            .identity_to_string(module, classifier, &class_names);
+        let to_string = self.identity_to_string(module, classifier, &class_names);
         let objects = &mut self.objects;
         let structure = module.subtype(SubType {
             composite: CompositeType::Struct(vec![
