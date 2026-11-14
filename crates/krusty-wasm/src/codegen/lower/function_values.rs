@@ -311,8 +311,11 @@ impl Body<'_> {
         self.code
             .ref_cast(false, HeapType::Concrete(object))
             .struct_get(object, 0)
-            .ref_cast(false, HeapType::Concrete(shape.table))
-            .struct_get(shape.table, INVOKE_FIELD)
+            .ref_cast(
+                false,
+                HeapType::Concrete(self.runtime.objects.function_table),
+            )
+            .struct_get(self.runtime.objects.function_table, INVOKE_FIELD)
             .call_ref(shape.invoke);
         self.coerce_emitted_value(any, ret)
     }
@@ -343,7 +346,12 @@ impl Body<'_> {
         self.code
             .ref_cast(false, HeapType::Concrete(object))
             .struct_get(object, 0)
-            .ref_test(false, HeapType::Concrete(shape.table))
+            .ref_cast(
+                false,
+                HeapType::Concrete(self.runtime.objects.function_table),
+            )
+            .struct_get(self.runtime.objects.function_table, INVOKE_FIELD)
+            .ref_test(false, HeapType::Concrete(shape.invoke))
             .if_(BlockType::Empty)
             .else_()
             .unreachable()
