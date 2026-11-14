@@ -674,7 +674,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Err(outside());
         }
         let record = self.file.laid_out.get(owner).ok_or_else(|| outside())?;
-        let (function, params, result) = match declaration {
+        let (function, params, _) = match declaration {
             Some(krusty::fir::ResolvedFunctionOverrideTarget::Module(callable)) => {
                 record.methods.get(&callable).cloned().ok_or_else(|| {
                     declined!(
