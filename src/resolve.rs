@@ -35,6 +35,7 @@ use scope::{ContextReceiver, ContextReceiverKind, FlowExclusion, NarrowPath, Ns}
 mod abstract_obligations;
 mod argument_parameter_mapping;
 mod builtin_implementation;
+mod coroutine_runtime;
 use argument_parameter_mapping::{
     call_argument_parameter_indices, call_argument_parameter_indices_result,
     named_whole_array_varargs,
@@ -2836,6 +2837,7 @@ pub struct SymbolTable {
 pub(crate) struct PassTwoSymbols {
     compilation_id: u64,
     libraries: std::rc::Rc<dyn SemanticPlatform>,
+    coroutine_runtime: Option<crate::ir::IrCoroutineRuntime>,
     native_plugins: crate::plugins::registry::NativePlugins,
 }
 
@@ -2849,6 +2851,11 @@ impl PassTwoSymbols {
         std::rc::Rc::clone(&self.libraries)
     }
 
+    /// The runtime declarations selected by resolution for suspend lowering.
+    pub(crate) fn coroutine_runtime(&self) -> Option<crate::ir::IrCoroutineRuntime> {
+        self.coroutine_runtime
+    }
+
     pub(crate) fn native_plugins(&self) -> &crate::plugins::registry::NativePlugins {
         &self.native_plugins
     }
@@ -2856,9 +2863,11 @@ impl PassTwoSymbols {
 
 impl SymbolTable {
     pub(crate) fn into_pass_two_symbols(self) -> PassTwoSymbols {
+        let coroutine_runtime = coroutine_runtime::selected(&*self.libraries);
         PassTwoSymbols {
             compilation_id: self.compilation_id,
             libraries: std::rc::Rc::from(self.libraries),
+            coroutine_runtime,
             native_plugins: self.native_plugins,
         }
     }
