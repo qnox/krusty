@@ -2,10 +2,10 @@
 
 use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{
-    Callee, ClassId, ExprId, IrCheckedOperation, IrExpr, IrField, IrFile, IrPropertyDispatch,
-    for_each_child,
+    for_each_child, Callee, ClassId, ExprId, IrCheckedOperation, IrExpr, IrField, IrFile,
+    IrPropertyDispatch,
 };
-use crate::types::{Ty, continuation_passing, wk};
+use crate::types::{continuation_passing, wk, Ty};
 
 use super::label_reentry::{MachineStorage, ReentryDecline};
 use super::suspension_points::{recorded_suspension_result, suspend_call_fid};
@@ -300,6 +300,12 @@ impl MachineStorage for ContinuationFields {
         let Some(logical_result) =
             recorded_suspension_result(ir, call).or_else(|| ir.checked_type(call))
         else {
+            crate::trace_compiler!(
+                "suspend",
+                "machine call adapter has no logical result for expression={call} suspension={:?} node={:?}",
+                ir.suspend_calls.get(&call),
+                ir.expr(call),
+            );
             return Err(ReentryDecline::UnsupportedCallShape);
         };
         let source_declaration = if ir.suspend_calls.contains_key(&call) {
@@ -341,7 +347,14 @@ impl MachineStorage for ContinuationFields {
                         params.push(continuation_ty);
                         *ret = any;
                     }
-                    _ => return Err(ReentryDecline::UnsupportedCallShape),
+                    _ => {
+                        crate::trace_compiler!(
+                            "suspend",
+                            "machine call adapter rejects expression={call} selected callee={callee:?} suspension={:?} args={args:?}",
+                            ir.suspend_calls.get(&call),
+                        );
+                        return Err(ReentryDecline::UnsupportedCallShape);
+                    }
                 }
                 args.push(completion);
                 copied
@@ -356,7 +369,14 @@ impl MachineStorage for ContinuationFields {
                 args.push(Some(completion));
                 copied
             }
-            _ => return Err(ReentryDecline::UnsupportedCallShape),
+            node => {
+                crate::trace_compiler!(
+                    "suspend",
+                    "machine call adapter rejects suspension expression={call} node={node:?} suspension={:?}",
+                    ir.suspend_calls.get(&call),
+                );
+                return Err(ReentryDecline::UnsupportedCallShape);
+            }
         };
         ir.call_declared_ret.insert(call, any);
         ir.take_physical_type(call);

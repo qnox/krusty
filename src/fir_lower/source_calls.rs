@@ -471,7 +471,15 @@ impl BodyLowering<'_> {
                 substitutions,
                 extension_receiver_parameter,
                 source_line,
-            })?;
+            });
+            let Some(expanded) = expanded else {
+                crate::trace_compiler!(
+                    "suspend",
+                    "external suspend inline-plan realization declined target={target:?} suspend={suspend} parameters={parameter_types:?} result={:?}",
+                    result.get(),
+                );
+                return None;
+            };
             self.settle_inline_expansion_positions(first_expanded);
             self.ir.inline_regions.insert(expanded);
             return Some(expanded);
@@ -484,19 +492,28 @@ impl BodyLowering<'_> {
                 Some(template) => {
                     // A selected template is an obligation: a call it cannot expand fails the
                     // file, never retried as a call of the dependency function.
-                    return self.dependency_inline_call(dependency_inline::DependencyInlineCall {
-                        target,
-                        template,
-                        parameter_types: &parameter_types,
-                        dispatch_receiver,
-                        dispatch_type: declaring_receiver
-                            .or(receiver_ty)
-                            .map(|receiver| receiver.get()),
-                        extension_receiver,
-                        extension_receiver_parameter,
-                        arguments,
-                        substitutions,
-                    });
+                    let expanded =
+                        self.dependency_inline_call(dependency_inline::DependencyInlineCall {
+                            target,
+                            template,
+                            parameter_types: &parameter_types,
+                            dispatch_receiver,
+                            dispatch_type: declaring_receiver
+                                .or(receiver_ty)
+                                .map(|receiver| receiver.get()),
+                            extension_receiver,
+                            extension_receiver_parameter,
+                            arguments,
+                            substitutions,
+                        });
+                    if expanded.is_none() {
+                        crate::trace_compiler!(
+                            "suspend",
+                            "external suspend dependency-inline realization declined target={target:?} parameters={parameter_types:?} result={:?}",
+                            result.get(),
+                        );
+                    }
+                    return expanded;
                 }
                 // A declaration without a legal call has no fallback when its body cannot be
                 // expanded: the call is unsupported rather than an ordinary dependency call.
@@ -510,12 +527,7 @@ impl BodyLowering<'_> {
                 None => {}
             }
         }
-        let SelectedSemanticOperands {
-            statements,
-            receiver,
-            args,
-            mut defaults,
-        } = self.selected_semantic_operands(SelectedOperandRequest {
+        let Some(selected) = self.selected_semantic_operands(SelectedOperandRequest {
             receiver_ty,
             parameter_types: &parameter_types,
             dispatch_receiver,
@@ -525,7 +537,20 @@ impl BodyLowering<'_> {
             preserve_inline_lambdas: inline.can_inline(),
             extension_receiver_parameter,
             mode: SelectedOperandMode::DirectWhenOrdered,
-        })?;
+        }) else {
+            crate::trace_compiler!(
+                "suspend",
+                "external suspend operand selection declined target={target:?} parameters={parameter_types:?} result={:?} receiver={receiver_ty:?} dispatch={dispatch_receiver:?} extension={extension_receiver:?} extension_parameter={extension_receiver_parameter:?} inline={inline:?} args={arguments:?}",
+                result.get(),
+            );
+            return None;
+        };
+        let SelectedSemanticOperands {
+            statements,
+            receiver,
+            args,
+            mut defaults,
+        } = selected;
         let boundary_defaults = defaults.clone();
         let boundary_parameters = parameter_types.clone();
         // The external FIR target temporarily inserts a MEMBER EXTENSION receiver into its parameter
@@ -535,6 +560,10 @@ impl BodyLowering<'_> {
         if let Some(extension_parameter) = extension_receiver_parameter {
             for default in &mut defaults {
                 if *default == extension_parameter {
+                    crate::trace_compiler!(
+                        "suspend",
+                        "external suspend call omitted its extension receiver target={target:?} parameter={extension_parameter} defaults={boundary_defaults:?}",
+                    );
                     return None;
                 }
                 if *default > extension_parameter {

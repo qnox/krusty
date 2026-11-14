@@ -68,28 +68,49 @@ pub(crate) fn add_continuation_parameters_with_runtime(
     // A non-suspend synthetic entry (most notably a default stub) can also contain a call that
     // reaches a suspension. It has no continuation parameter to capture, so keep declining that
     // shape until its producer supplies the call-frame contract.
-    if ir
-        .functions
-        .iter()
-        .enumerate()
-        .any(|(function, declaration)| {
-            !suspend_set.contains(&(function as u32))
-                && declaration.body.is_some_and(|body| {
-                    body_needs_state_machine(ir, body, &suspend_set, &completing)
-                })
-        })
+    if let Some((function, body)) =
+        ir.functions
+            .iter()
+            .enumerate()
+            .find_map(|(function, declaration)| {
+                (!suspend_set.contains(&(function as u32)))
+                    .then_some(declaration.body)
+                    .flatten()
+                    .filter(|&body| body_needs_state_machine(ir, body, &suspend_set, &completing))
+                    .map(|body| (function, body))
+            })
     {
+        crate::trace_compiler!(
+            "suspend",
+            "common coroutine preparation found suspension in non-suspend function index={function} name={:?} body={body} node={:?}",
+            ir.functions[function].name,
+            ir.expr(body),
+        );
         return Err(ContinuationDecline::Suspends);
     }
     if !machine_functions.is_empty() && runtime.is_none() {
+        crate::trace_compiler!(
+            "suspend",
+            "common coroutine preparation needs a state machine but has no selected runtime; functions={:?}",
+            machine_functions
+                .iter()
+                .map(|&function| (function, ir.functions[function as usize].name.as_str()))
+                .collect::<Vec<_>>(),
+        );
         return Err(ContinuationDecline::Suspends);
     }
     for function in suspend_functions {
         add_continuation_parameter(ir, function);
     }
     for function in machine_functions {
-        super::state_machine::realize(ir, function, &suspend_set)
-            .map_err(|_| ContinuationDecline::Suspends)?;
+        if let Err(error) = super::state_machine::realize(ir, function, &suspend_set) {
+            crate::trace_compiler!(
+                "suspend",
+                "state-machine realization declined function={function} name={:?} error={error:?}",
+                ir.functions[function as usize].name,
+            );
+            return Err(ContinuationDecline::Suspends);
+        }
     }
     pass_continuations(ir, &suspend_set);
     Ok(())

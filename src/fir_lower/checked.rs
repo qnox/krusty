@@ -681,7 +681,7 @@ impl BodyLowering<'_> {
                 extension_receiver_parameter,
             } => {
                 let arguments = self.external_arguments(&call.arguments, parameters)?;
-                self.external_call(super::source_calls::ExternalCallRequest {
+                let lowered = self.external_call(super::source_calls::ExternalCallRequest {
                     target: *declaration,
                     singleton_dispatch: *singleton_dispatch,
                     default_provider: *default_provider,
@@ -704,8 +704,17 @@ impl BodyLowering<'_> {
                     extension_receiver,
                     arguments: &arguments,
                     source_line: Some(source_line),
-                })
-                .ok_or(FirLoweringFailure::UnsupportedExternalCall(*declaration))
+                });
+                if lowered.is_none() {
+                    crate::trace_compiler!(
+                        "suspend",
+                        "checked external call declined target={declaration:?} suspend={suspend} default_provider={default_provider:?} inline={inline:?} inline_plan={} parameters={parameters:?} result={result:?} declared_result={declared_result:?} receiver={receiver:?} declared_receiver={declared_receiver:?} dispatch={dispatch_receiver:?} extension={extension_receiver:?} extension_parameter={extension_receiver_parameter:?} substitutions={:?} arguments={:?}",
+                        inline_plan.is_some(),
+                        call.substitutions,
+                        call.arguments,
+                    );
+                }
+                lowered.ok_or(FirLoweringFailure::UnsupportedExternalCall(*declaration))
             }
             FirCallTarget::Super {
                 qualifier,

@@ -75,9 +75,29 @@ pub fn split_at_suspensions(
         next_label: 1,
     };
     for &stmt in &stmts {
-        split.count(ir, stmt)?;
+        if let Err(error) = split.count(ir, stmt) {
+            crate::trace_compiler!(
+                "suspend",
+                "continuation splitter count declined statement={stmt} error={error:?} node={:?}",
+                ir.expr(stmt),
+            );
+            return Err(error);
+        }
     }
-    let stmts = split.list(ir, &stmts)?;
+    let stmts = match split.list(ir, &stmts) {
+        Ok(stmts) => stmts,
+        Err(error) => {
+            crate::trace_compiler!(
+                "suspend",
+                "continuation splitter rewrite declined body={body} error={error:?} source_statements={:?}",
+                stmts
+                    .iter()
+                    .map(|&stmt| (stmt, ir.expr(stmt)))
+                    .collect::<Vec<_>>(),
+            );
+            return Err(error);
+        }
+    };
     ir.exprs[body as usize] = IrExpr::Block { stmts, value: None };
     Ok(split.next_label - 1)
 }

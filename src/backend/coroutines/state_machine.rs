@@ -7,12 +7,12 @@ use crate::ir::{
     IrGenericSig, IrLocalClassNameProvenance, IrModuleSource, IrParameterIdentity,
     IrPropertyOverride, IrTypeOp, IrTypeParameter,
 };
-use crate::types::{Ty, TypeName, type_name, wk};
+use crate::types::{type_name, wk, Ty, TypeName};
 
 use super::class_storage::{
-    ContinuationFields, external_type_substitution, plan_frame_values, realize_frame_values,
+    external_type_substitution, plan_frame_values, realize_frame_values, ContinuationFields,
 };
-use super::label_reentry::{ReentryDecline, split_at_suspensions};
+use super::label_reentry::{split_at_suspensions, ReentryDecline};
 use super::value_namespace::max_value_index;
 
 #[derive(Clone, Copy)]
@@ -36,14 +36,26 @@ pub(super) fn realize(
     let Some(body) = ir.functions[function as usize].body else {
         return Ok(());
     };
-    let runtime = ir
-        .coroutine_runtime
-        .ok_or(ReentryDecline::UnsupportedCallShape)?;
+    let runtime = ir.coroutine_runtime.ok_or_else(|| {
+        crate::trace_compiler!(
+            "suspend",
+            "state-machine function={function} name={:?} has no selected coroutine runtime",
+            ir.functions[function as usize].name,
+        );
+        ReentryDecline::UnsupportedCallShape
+    })?;
     let (source_parameters, function_result) = ir
         .suspend_declared_sigs
         .get(&function)
         .cloned()
-        .ok_or(ReentryDecline::UnsupportedCallShape)?;
+        .ok_or_else(|| {
+            crate::trace_compiler!(
+                "suspend",
+                "state-machine function={function} name={:?} has no source declared signature",
+                ir.functions[function as usize].name,
+            );
+            ReentryDecline::UnsupportedCallShape
+        })?;
     let source_values = super::value_namespace::function_value_types(ir, function, body);
     let type_parameters = machine_type_parameters(ir, function);
     let parameter_names = type_parameters
@@ -62,6 +74,11 @@ pub(super) fn realize(
             })
         });
     if has_unowned_type_parameter {
+        crate::trace_compiler!(
+            "suspend",
+            "state-machine function={function} name={:?} has unowned type parameter: source_parameters={source_parameters:?} result={function_result:?} source_values={source_values:?} machine_parameters={type_parameters:?}",
+            ir.functions[function as usize].name,
+        );
         return Err(ReentryDecline::UnsupportedCallShape);
     }
     let source_receiver = ir.functions[function as usize]
@@ -79,6 +96,15 @@ pub(super) fn realize(
                         != Some(&element)
             });
     if has_unplanned_shared_parameter || body_contains_unplanned_shared_cell(ir, body) {
+        crate::trace_compiler!(
+            "suspend",
+            "state-machine function={function} name={:?} has unplanned shared-cell carrier: shared_parameters={:?} source_values={source_values:?}",
+            ir.functions[function as usize].name,
+            ir.shared_capture_parameters
+                .iter()
+                .filter(|((owner, _), _)| *owner == function)
+                .collect::<Vec<_>>(),
+        );
         // Every shared capture parameter must have the matching semantic element type in the
         // source value namespace. Its frame field is then emitted as the existing target-owned
         // shared-cell carrier.
@@ -136,10 +162,15 @@ pub(super) fn realize(
         .fields
         .push(IrField::new("label".to_string(), Ty::Int).with_is_private(false));
     let constructor_value_count = receiver_slots + source_parameters.len() as u32 + 1;
-    let completion_field = *frame
-        .slots
-        .get(&completion_slot)
-        .ok_or(ReentryDecline::UnsupportedCallShape)?;
+    let completion_field = *frame.slots.get(&completion_slot).ok_or_else(|| {
+        crate::trace_compiler!(
+            "suspend",
+            "state-machine function={function} name={:?} omitted completion value slot={completion_slot} from frame plan: slots={:?}",
+            ir.functions[function as usize].name,
+            frame.slots,
+        );
+        ReentryDecline::UnsupportedCallShape
+    })?;
     let storage = ContinuationFields {
         class,
         machine_ty,
@@ -149,8 +180,24 @@ pub(super) fn realize(
         suspend_functions: suspend_functions.clone(),
     };
     let next_value = max_value_index(ir).saturating_add(1);
-    let labels = split_at_suspensions(ir, body, suspend_functions, &storage, next_value)?;
+    let labels = match split_at_suspensions(ir, body, suspend_functions, &storage, next_value) {
+        Ok(labels) => labels,
+        Err(error) => {
+            crate::trace_compiler!(
+                "suspend",
+                "state-machine function={function} name={:?} splitter declined body={body} error={error:?} body_node={:?}",
+                ir.functions[function as usize].name,
+                ir.expr(body),
+            );
+            return Err(error);
+        }
+    };
     if labels == 0 {
+        crate::trace_compiler!(
+            "suspend",
+            "state-machine function={function} name={:?} splitter accepted zero suspension labels",
+            ir.functions[function as usize].name,
+        );
         return Err(ReentryDecline::UnsupportedCallShape);
     }
     realize_frame_values(ir, &frame, class, machine_ty);
