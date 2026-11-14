@@ -43,6 +43,7 @@ mod parameter_plans;
 mod platform_abi;
 mod provider_normalization;
 #[cfg(test)]
+#[path = "jvm_libraries/tests/provider_normalization.rs"]
 mod provider_normalization_tests;
 mod raw_types;
 use provider_normalization::normalize_tail;

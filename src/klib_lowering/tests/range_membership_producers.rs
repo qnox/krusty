@@ -75,3 +75,56 @@ fn official_mixed_element_membership_declines_as_unsupported() {
     super::demo_package::assert_unit_is_empty(&unit);
     std::fs::remove_dir_all(work).unwrap();
 }
+
+/// Range members may materialize their progression's initialization. CharProgression.last calls
+/// the selected Int.toChar from a field initializer, not its constructor's serialized body.
+#[test]
+fn char_range_body_graph_freezes_its_exact_initializer_conversion_edge() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let owner = libraries
+        .classifier(type_name("kotlin/Int"))
+        .expect("Int declaration");
+    let [conversion] = owner.declared_callables["toChar"].functions() else {
+        panic!("one zero-argument Int.toChar declaration")
+    };
+    let conversion = libraries
+        .external_callable(conversion.callable.external_identity.unwrap())
+        .unwrap();
+    let conversion = conversion.klib_body_callable().unwrap();
+    let progression = libraries
+        .classifier(type_name("kotlin/ranges/CharProgression"))
+        .expect("CharProgression declaration");
+    let [constructor] = progression.constructors.as_slice() else {
+        panic!("one progression constructor");
+    };
+    let constructor = libraries
+        .external_callable(constructor.external_identity.unwrap())
+        .unwrap();
+    let membership = frozen(&libraries, "kotlin/text", "isSurrogate", Ty::Char, &[]);
+    for selected in [
+        constructor.klib_body_callable().unwrap(),
+        membership.klib_body_callable().unwrap(),
+    ] {
+        let facts = crate::resolve::for_checked_klib_bodies(
+            &libraries,
+            libraries.declaration_bodies(),
+            [selected],
+        )
+        .expect("the selected range graph has complete checked declarations");
+        assert!(
+            facts
+                .reached_constructors
+                .contains(constructor.klib_body_callable().unwrap().identity()),
+            "the exact progression constructor is not reached from {:?}",
+            selected.identity()
+        );
+        assert!(
+            facts.member_edges.contains_key(conversion.identity()),
+            "the exact Int.toChar initializer edge is missing from {:?}",
+            selected.identity()
+        );
+    }
+}

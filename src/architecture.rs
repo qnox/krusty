@@ -517,20 +517,51 @@ mod tests {
         let text = fs::read_to_string(&path).expect("read KLIB body handoff");
         assert!(text.contains("record_checked"));
         assert!(!text.contains("record_dependency_support"));
+        assert!(text.contains("checked_dependency_facts"));
+        for forbidden in [
+            "with_builtin_implementation_facts(platform)",
+            "symbol_resolver::",
+            "klib_dependency_member_call_edge(",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "KLIB body emission must consume facts stored before backend entry: {forbidden}"
+            );
+        }
+
+        let handoff = source_path("src/compiler/backend_handoff.rs");
+        let text = fs::read_to_string(&handoff).expect("read checked backend handoff");
+        let checked_facts = text
+            .find("record_klib_dependency_facts")
+            .expect("freeze KLIB body checker facts before backend emission");
+        let backend_facts = text
+            .find("super::builtin_implementations::record_checked")
+            .expect("finish checked callable facts at the handoff");
+        assert!(
+            checked_facts < backend_facts,
+            "KLIB body facts must be stored before checked callable completeness is enforced"
+        );
 
         let roots = source_path("src/compiler/dependency_body_emission/emitted_roots.rs");
         let text = fs::read_to_string(&roots).expect("read KLIB emitted roots");
-        assert!(text.contains("klib_dependency_member_call_edge"));
         for forbidden in [
             "SymbolResolver",
             "symbol_resolver::",
             "member_declarations_in_hierarchy(",
+            "klib_dependency_member_call_edge(",
         ] {
             assert!(
                 !text.contains(forbidden),
-                "KLIB body planning must consume checked member edge facts: {forbidden}"
+                "KLIB body planning must consume facts stored at checker handoff: {forbidden}"
             );
         }
+
+        let checked = source_path("src/backend/dependency_facts.rs");
+        let text = fs::read_to_string(&checked).expect("read checked KLIB dependency facts");
+        assert!(text.contains("klib_type_hierarchy"));
+        let checker = source_path("src/resolve/dependency_body_call_edges.rs");
+        let text = fs::read_to_string(&checker).expect("read KLIB body hierarchy checker");
+        assert!(text.contains("klib_type_facts::freeze"));
     }
 
     #[test]
@@ -826,9 +857,7 @@ mod tests {
         // Dependency bodies lower into common IR that Native and Wasm consume alike. The tests
         // beside the lowering may also reach the frontend to lower equivalent source.
         // A template body links its callees through the calling compilation's normalized
-        // provider (`symbol_source`) and decides the subtyping the body leaves implicit over the
-        // common class hierarchy (`assignable`, read through `symbol_resolver`'s provider
-        // oracle). All three are target-neutral semantic contracts, never a backend's.
+        // provider (`symbol_source`) and consumes the class hierarchy facts frozen by resolution.
         let allowed = [
             "assignable",
             "fir",
@@ -836,15 +865,18 @@ mod tests {
             "klib_libraries",
             "libraries",
             "metadata",
-            "symbol_resolver",
             "symbol_source",
             "types",
         ];
-        assert_allowed_crate_modules("src/klib_lowering.rs", &allowed);
+        let mut test_allowed = allowed.to_vec();
+        test_allowed.push("symbol_resolver");
+        assert_allowed_crate_modules("src/klib_lowering.rs", &test_allowed);
         for path in rust_files_under("src/klib_lowering") {
             let test_module = path.file_name() == Some(std::ffi::OsStr::new("tests.rs"))
                 || path.starts_with(source_path("src/klib_lowering/tests"));
-            if !test_module {
+            if test_module {
+                assert_allowed_crate_modules_in_file(&path, &test_allowed);
+            } else {
                 assert_allowed_crate_modules_in_file(&path, &allowed);
             }
         }
