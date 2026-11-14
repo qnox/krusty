@@ -15,4 +15,8 @@ pub struct IrCoroutineRuntime {
     pub suspended: ExternalPropertyId,
     /// `kotlin.Result<T>.getOrThrow()`.
     pub get_or_throw: ExternalCallableId,
+    /// `kotlin.coroutines.Continuation.resumeWith(Result<Any?>)`.
+    pub resume_with: ExternalCallableId,
+    /// `kotlin.Result.failure(Throwable)`, used to deliver an exception from a resumed body.
+    pub result_failure: ExternalCallableId,
 }

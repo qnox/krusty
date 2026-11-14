@@ -128,8 +128,11 @@ impl Backend for WasmBackend {
         true
     }
 
-    fn lowers_coroutines_on_common_ir(&self) -> bool {
-        true
+    fn common_ir_preparation(&self) -> Option<krusty::backend::CommonIrPreparation> {
+        Some(krusty::backend::CommonIrPreparation {
+            counted_loops: COUNTED_LOOPS,
+            enums: krusty::backend::enums::Contract::KotlinWasm,
+        })
     }
 
     fn numbers_slots(&self) -> bool {
@@ -182,24 +185,6 @@ impl Backend for WasmBackend {
             parameters == krusty::backend::MainEntryParameters::Arguments
         }) {
             decline(state, "a `main` that takes its arguments".to_string());
-            return Vec::new();
-        }
-        krusty::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
-        // Before default arguments: a constant leaving constructor arguments out is then an
-        // ordinary construction for that lowering.
-        krusty::backend::enums::publish_constants(&mut file.ir, &mut file.dependency_exports);
-        krusty::backend::enums::realize(&mut file.ir, krusty::backend::enums::Contract::KotlinWasm);
-        krusty::backend::default_arguments::realize(
-            &mut file.ir,
-            &mut file.callables,
-            |function| file.dependency_exports.callable(function).is_some(),
-        );
-        // After default arguments, so a `$default` entry's call of the declaration is the one
-        // that gains the continuation, and before dispatch entries, which copy the signature.
-        if let Err(declined) =
-            krusty::backend::coroutines::add_continuation_parameters(&mut file.ir)
-        {
-            decline(state, declined.construct().to_string());
             return Vec::new();
         }
         krusty::backend::construction_entries::realize(&mut file.ir, &mut file.dependency_exports);

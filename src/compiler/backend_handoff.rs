@@ -25,8 +25,7 @@ pub(super) struct ModuleEmission<'a> {
     pub stems: &'a [String],
     /// Where each checked node came from, for a backend to place what it reports.
     pub origins: &'a crate::fir::OriginStore,
-    /// The backend lowers suspend functions with the shared common-IR coroutine passes
-    /// ([`crate::backend::Backend::lowers_coroutines_on_common_ir`]).
+    /// The backend's common-IR preparation policy includes the shared coroutine passes.
     pub common_ir_coroutines: bool,
 }
 
@@ -131,4 +130,45 @@ pub(super) fn checked_ir_file<'a>(
         stems: module.stems,
         origins: module.origins,
     })
+}
+
+/// Run common IR preparations after the target's exact dependency exports have been attached, but
+/// before target lowering computes its emission closure. `provider` remains live here, so the
+/// final callable freeze includes calls introduced by common lowering. Dependency-support units
+/// can use this entry point after their checked unit and exact exports have been constructed.
+pub(super) fn prepare_common_ir(
+    file: &mut CheckedIrFile<'_>,
+    provider: &dyn crate::symbol_source::SymbolSource,
+    preparation: crate::backend::CommonIrPreparation,
+) -> Result<(), crate::backend::CommonIrPreparationError> {
+    if !file.ir.suspend_funs.is_empty() && file.ir.coroutine_runtime.is_none() {
+        file.ir.coroutine_runtime = coroutine_runtime::select(provider);
+    }
+    crate::backend::counted_loops::realize(&mut file.ir, preparation.counted_loops);
+    crate::backend::enums::publish_constants(&mut file.ir, &mut file.dependency_exports);
+    crate::backend::enums::realize(&mut file.ir, preparation.enums);
+    crate::backend::default_arguments::realize(&mut file.ir, &mut file.callables, |function| {
+        file.dependency_exports.callable(function).is_some()
+    });
+    crate::backend::coroutines::add_continuation_parameters(&mut file.ir)
+        .map_err(crate::backend::CommonIrPreparationError::Suspend)?;
+
+    let plugin_runtime = file.callables.plugin_runtime_bindings();
+    let mut callables = CheckedBackendCallables::freeze(&file.ir, provider).map_err(|error| {
+        crate::backend::CommonIrPreparationError::Invariant(format!(
+            "cannot freeze prepared dependency declarations: {error:?}"
+        ))
+    })?;
+    super::builtin_implementations::record(&mut callables, provider);
+    callables
+        .freeze_plugin_runtime_callables(plugin_runtime, |identity| {
+            provider.external_callable(identity)
+        })
+        .map_err(|error| {
+            crate::backend::CommonIrPreparationError::Invariant(format!(
+                "cannot refreeze plugin runtime declaration facts: {error:?}"
+            ))
+        })?;
+    file.callables = callables;
+    Ok(())
 }

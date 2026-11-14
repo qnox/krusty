@@ -25,7 +25,11 @@ impl MachineStorage for Slots {
         ir.add_expr(IrExpr::Const(IrConst::Null))
     }
 
-    fn call_with_continuation(&self, ir: &mut IrFile, call: ExprId) -> ExprId {
+    fn call_with_continuation(
+        &self,
+        ir: &mut IrFile,
+        call: ExprId,
+    ) -> Result<ExprId, ReentryDecline> {
         let IrExpr::Call {
             callee,
             dispatch_receiver,
@@ -35,11 +39,11 @@ impl MachineStorage for Slots {
             panic!("a direct call");
         };
         args.push(ir.add_expr(IrExpr::GetValue(2)));
-        ir.add_expr(IrExpr::Call {
+        Ok(ir.add_expr(IrExpr::Call {
             callee,
             dispatch_receiver,
             args,
-        })
+        }))
     }
 }
 
