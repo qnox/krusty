@@ -1903,35 +1903,88 @@ pub(super) fn throwable_field(owner: krusty::types::TypeName, name: &str) -> Opt
 /// there is no object, and nothing dereferences it.
 pub(super) fn is_stateless_runtime_object(classifier: krusty::types::TypeName) -> bool {
     // The stdlib's standard delegates. `Delegates` declares no state and every member of it this
-    // runtime answers takes its arguments alone. `Result.Companion` is the receiver of the inline
-    // `success` and `failure` an expanded `runCatching` reaches, whose bodies never read it.
+    // runtime answers takes its arguments alone.
     classifier.matches("kotlin/properties/Delegates")
-        || classifier.matches("kotlin/Result$Companion")
 }
 
 /// The runtime entry point answering the companion object of a BUILT-IN type, if this names one.
 ///
-/// Each is declared in no file krusty compiles and carries no state — every member of one is a
-/// constant the frontend folds — so what a program can observe about it is its IDENTITY. The
+/// Each is runtime-owned and carries no instance state. Its members are folded or realized
+/// separately, while values retain the companion's identity. The
 /// runtime holds one static object per companion, with a descriptor of its own so that
 /// `Int.Companion === Long.Companion` is false.
 ///
 /// Apart from [`is_stateless_runtime_object`], which answers a NULL for an object nothing reads:
 /// that will not do here, because `o === Int.Companion` is exactly what the corpus asks.
 pub(super) fn builtin_companion(classifier: krusty::types::TypeName) -> Option<&'static str> {
+    builtin_companion_symbols(classifier).map(|(instance, _)| instance)
+}
+
+pub(super) fn builtin_companion_descriptor(
+    classifier: krusty::types::TypeName,
+) -> Option<&'static str> {
+    builtin_companion_symbols(classifier).map(|(_, descriptor)| descriptor)
+}
+
+fn builtin_companion_symbols(
+    classifier: krusty::types::TypeName,
+) -> Option<(&'static str, &'static str)> {
     [
-        ("kotlin/Byte$Companion", "kt_byte_companion"),
-        ("kotlin/Short$Companion", "kt_short_companion"),
-        ("kotlin/Int$Companion", "kt_int_companion"),
-        ("kotlin/Long$Companion", "kt_long_companion"),
-        ("kotlin/Char$Companion", "kt_char_companion"),
-        ("kotlin/Boolean$Companion", "kt_boolean_companion"),
-        ("kotlin/Float$Companion", "kt_float_companion"),
-        ("kotlin/Double$Companion", "kt_double_companion"),
-        ("kotlin/String$Companion", "kt_string_companion"),
+        (
+            "kotlin/Byte$Companion",
+            "kt_byte_companion",
+            "kt_type_byte_companion",
+        ),
+        (
+            "kotlin/Short$Companion",
+            "kt_short_companion",
+            "kt_type_short_companion",
+        ),
+        (
+            "kotlin/Int$Companion",
+            "kt_int_companion",
+            "kt_type_int_companion",
+        ),
+        (
+            "kotlin/Long$Companion",
+            "kt_long_companion",
+            "kt_type_long_companion",
+        ),
+        (
+            "kotlin/Char$Companion",
+            "kt_char_companion",
+            "kt_type_char_companion",
+        ),
+        (
+            "kotlin/Boolean$Companion",
+            "kt_boolean_companion",
+            "kt_type_boolean_companion",
+        ),
+        (
+            "kotlin/Float$Companion",
+            "kt_float_companion",
+            "kt_type_float_companion",
+        ),
+        (
+            "kotlin/Double$Companion",
+            "kt_double_companion",
+            "kt_type_double_companion",
+        ),
+        (
+            "kotlin/String$Companion",
+            "kt_string_companion",
+            "kt_type_string_companion",
+        ),
+        (
+            "kotlin/Result$Companion",
+            "kt_result_companion",
+            "kt_type_result_companion",
+        ),
     ]
     .into_iter()
-    .find_map(|(owner, symbol)| classifier.matches(owner).then_some(symbol))
+    .find_map(|(owner, instance, descriptor)| {
+        classifier.matches(owner).then_some((instance, descriptor))
+    })
 }
 
 /// The runtime entry point answering a stdlib object the runtime lays out itself, if this names one.

@@ -2614,9 +2614,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if classifier == krusty::types::wk::unit() {
             return self.runtime_call("kt_unit", &[], any(), &[]);
         }
-        // An object the runtime realizes entirely has no instance and needs none: every member of
-        // it is answered without reading the receiver. One provider materializes that receiver
-        // before the call reaches the table that says so, and this is what it materializes.
         // The companion object of a BUILT-IN type. Its members are constants the frontend folds,
         // so the object itself is only ever an identity — and that identity is asked about:
         // `o === Int.Companion` is a corpus case, and `Int` written as a value is the same object.
