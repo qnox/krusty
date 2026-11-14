@@ -258,6 +258,7 @@ impl ExternalIdentities {
             &mut callable,
         );
         member.external_identity = callable.external_identity;
+        member.declaration_owner = callable.declaration_owner;
     }
 
     fn intern_property(

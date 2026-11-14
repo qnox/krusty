@@ -51,6 +51,14 @@ fn any_equals_relation_is_published_for_every_classifier_placement() {
         "unexpected diagnostics: {:?}",
         diagnostics.diags
     );
+    assert!(
+        analysis.types[0]
+            .as_ref()
+            .expect("checked source")
+            .builtin_implementations
+            .contains_key(&core_identity),
+        "the checker records builtin facts for an external override target even without a call"
+    );
     let streamed = analysis
         .streamed
         .take()

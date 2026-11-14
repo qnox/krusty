@@ -349,6 +349,15 @@ fn check_default_source(input: DefaultSourceInput<'_>, state: DefaultSourceState
             diags,
         )
     });
+    if let Err(identity) = store.record_builtin_implementations(&info.builtin_implementations) {
+        diags.error(
+            crate::diag::Span::new(0, 0),
+            format!(
+                "internal error: inconsistent builtin implementation facts for external member {identity:?}"
+            ),
+        );
+        return false;
+    }
     let provider_declarations = items.iter().map(|item| item.provider).collect::<Vec<_>>();
     if let Err(declarations) = crate::resolve::publish_checked_default_local_signatures(
         file,
@@ -468,6 +477,15 @@ pub(super) fn from_checked_analysis(
             return None;
         };
         let info = types.get(raw_source).and_then(Option::as_ref)?;
+        if let Err(identity) =
+            inline_bodies.record_builtin_implementations(&info.builtin_implementations)
+        {
+            crate::trace_compiler!(
+                "fir",
+                "Pass 1 checked inline implementation facts conflict for {identity:?}",
+            );
+            return None;
+        }
         if let Err(declarations) = crate::resolve::publish_checked_inline_local_signatures(
             file, source, symbols, info, &mut index, owners, None,
         ) {
@@ -658,6 +676,17 @@ pub(super) fn streaming(
                 symbols,
                 diags,
             );
+            if let Err(identity) =
+                inline_bodies.record_builtin_implementations(&info.builtin_implementations)
+            {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    format!(
+                        "internal error: inconsistent builtin implementation facts for external member {identity:?}"
+                    ),
+                );
+                return None;
+            }
             let file = files.get(raw_source)?;
             if let Err(declarations) = crate::resolve::publish_checked_inline_local_signatures(
                 file,
@@ -769,7 +798,13 @@ fn finish(
         unexpected.0, 0,
         "Pass 1 may retain only semantically inline checked bodies"
     );
-    inline_bodies.retain_defaults(&default_arguments);
+    if let Err(identity) = inline_bodies.retain_defaults(&default_arguments) {
+        crate::trace_compiler!(
+            "fir",
+            "Pass 1 checked default implementation facts conflict for {identity:?}",
+        );
+        return None;
+    }
     index.release_source_coordinates();
     assert!(
         !index.retains_source_coordinates(),

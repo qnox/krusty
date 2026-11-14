@@ -16,6 +16,10 @@ pub struct InlineBodyStore {
     /// The retained inline callables each callable's checked defaults call, by the declaration
     /// that owns those defaults. They must be templates before the defaults are lowered.
     default_dependencies: std::collections::BTreeMap<CallableId, (BodyOwnerId, Vec<CallableId>)>,
+    builtin_implementations: crate::fx_hash::HashMap<
+        crate::fir::ExternalCallableId,
+        Box<[crate::fir::BuiltinImplementation]>,
+    >,
 }
 
 /// Checked signature expressions retained from Pass 1 until their owning source is lowered. Unlike
@@ -24,9 +28,32 @@ pub struct InlineBodyStore {
 #[derive(Debug, Default)]
 pub struct DefaultArgumentStore {
     bodies: std::collections::BTreeMap<CallableId, Vec<FirBody>>,
+    builtin_implementations: crate::fx_hash::HashMap<
+        crate::fir::ExternalCallableId,
+        Box<[crate::fir::BuiltinImplementation]>,
+    >,
 }
 
 impl InlineBodyStore {
+    pub(crate) fn record_builtin_implementations(
+        &mut self,
+        facts: &crate::fx_hash::HashMap<
+            crate::fir::ExternalCallableId,
+            Box<[crate::fir::BuiltinImplementation]>,
+        >,
+    ) -> Result<(), crate::fir::ExternalCallableId> {
+        merge_builtin_implementations(&mut self.builtin_implementations, facts)
+    }
+
+    pub(crate) fn builtin_implementations(
+        &self,
+    ) -> &crate::fx_hash::HashMap<
+        crate::fir::ExternalCallableId,
+        Box<[crate::fir::BuiltinImplementation]>,
+    > {
+        &self.builtin_implementations
+    }
+
     pub fn insert(&mut self, callable: ResolvedCallableHeader, body: FirBody) {
         assert!(
             callable.is_inline(),
@@ -56,7 +83,14 @@ impl InlineBodyStore {
 
     /// Keep a copy of each retained inline callable's checked defaults, and record the retained
     /// inline callables every default calls.
-    pub(crate) fn retain_defaults(&mut self, defaults: &DefaultArgumentStore) {
+    pub(crate) fn retain_defaults(
+        &mut self,
+        defaults: &DefaultArgumentStore,
+    ) -> Result<(), crate::fir::ExternalCallableId> {
+        merge_builtin_implementations(
+            &mut self.builtin_implementations,
+            &defaults.builtin_implementations,
+        )?;
         for (callable, fragments) in &defaults.bodies {
             if self.bodies.contains_key(callable) {
                 self.defaults.insert(*callable, fragments.clone());
@@ -75,6 +109,7 @@ impl InlineBodyStore {
                     .insert(*callable, (fragments[0].owner(), dependencies));
             }
         }
+        Ok(())
     }
 
     /// The retained inline callables that the checked defaults declared in `source` call.
@@ -160,6 +195,25 @@ impl InlineBodyStore {
 }
 
 impl DefaultArgumentStore {
+    pub(crate) fn record_builtin_implementations(
+        &mut self,
+        facts: &crate::fx_hash::HashMap<
+            crate::fir::ExternalCallableId,
+            Box<[crate::fir::BuiltinImplementation]>,
+        >,
+    ) -> Result<(), crate::fir::ExternalCallableId> {
+        merge_builtin_implementations(&mut self.builtin_implementations, facts)
+    }
+
+    pub(crate) fn builtin_implementations(
+        &self,
+    ) -> &crate::fx_hash::HashMap<
+        crate::fir::ExternalCallableId,
+        Box<[crate::fir::BuiltinImplementation]>,
+    > {
+        &self.builtin_implementations
+    }
+
     pub(crate) fn bodies(&self, callable: CallableId) -> impl Iterator<Item = &FirBody> {
         self.bodies.get(&callable).into_iter().flatten()
     }
@@ -259,4 +313,26 @@ impl DefaultArgumentStore {
             .map(|body| std::mem::size_of::<CallableId>() + body.storage_payload_bytes())
             .sum()
     }
+}
+
+fn merge_builtin_implementations(
+    destination: &mut crate::fx_hash::HashMap<
+        crate::fir::ExternalCallableId,
+        Box<[crate::fir::BuiltinImplementation]>,
+    >,
+    source: &crate::fx_hash::HashMap<
+        crate::fir::ExternalCallableId,
+        Box<[crate::fir::BuiltinImplementation]>,
+    >,
+) -> Result<(), crate::fir::ExternalCallableId> {
+    for (&identity, facts) in source {
+        if let Some(existing) = destination.get(&identity) {
+            if existing != facts {
+                return Err(identity);
+            }
+        } else {
+            destination.insert(identity, facts.clone());
+        }
+    }
+    Ok(())
 }

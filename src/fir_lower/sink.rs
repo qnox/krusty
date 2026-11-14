@@ -59,6 +59,7 @@ pub enum FirFileLoweringFailure {
     DuplicateBody(CallableId),
     DuplicateNonCallableBody(DeclarationId),
     InlineBodyOwnerMismatch(CallableId),
+    BuiltinImplementationConflict(crate::fir::ExternalCallableId),
     InvalidDelegatedCallShape {
         expected: u32,
         actual: u32,
@@ -335,6 +336,9 @@ impl<'a> CommonIrBodySink<'a> {
         index: &ResolvedModuleIndex,
         bodies: &InlineBodyStore,
     ) -> Result<(), FirFileLoweringFailure> {
+        self.ir
+            .record_external_builtin_implementations(bodies.builtin_implementations())
+            .map_err(FirFileLoweringFailure::BuiltinImplementationConflict)?;
         // A retained body-local template whose exact owner is still deferred has no common-IR
         // callable yet; its first checked caller may materialize it through
         // `accept_inline_dependencies` after owner publication and declaration refresh. The final
@@ -694,6 +698,9 @@ impl<'a> CommonIrBodySink<'a> {
         inline_bodies: &InlineBodyStore,
         bodies: &mut crate::fir::DefaultArgumentStore,
     ) -> Result<(), FirFileLoweringFailure> {
+        self.ir
+            .record_external_builtin_implementations(bodies.builtin_implementations())
+            .map_err(FirFileLoweringFailure::BuiltinImplementationConflict)?;
         let ready = bodies.take_for_source_matching(index, self.source, |_, body| {
             let declaration = DeclarationId::from_raw(body.owner().raw());
             matches!(

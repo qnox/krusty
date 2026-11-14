@@ -2748,6 +2748,7 @@ impl JvmLibraries {
             // realization consumed after checked FIR has supplied both receivers.
             self.register_external_callable(&mut callable, FnKind::Member, declaration_owner);
             member.external_identity = callable.external_identity;
+            member.declaration_owner = callable.declaration_owner;
             member.inline_body_plan = callable.inline_body_plan;
         }
         for member in &mut classifier.companion {
@@ -2769,6 +2770,7 @@ impl JvmLibraries {
             callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
             self.register_external_callable(&mut callable, FnKind::TopLevel, declaration_owner);
             member.external_identity = callable.external_identity;
+            member.declaration_owner = callable.declaration_owner;
             member.inline_body_plan = callable.inline_body_plan;
         }
         for declarations in classifier.declared_callables.values_mut() {
