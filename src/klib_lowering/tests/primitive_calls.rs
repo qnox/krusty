@@ -627,9 +627,10 @@ fn an_external_array_size_leaf_keeps_its_authenticated_property_read() {
         .getter
         .external_identity
         .expect("Array.size has an exact provider identity");
-    let selected = libraries
+    let external = libraries
         .external_callable(target)
-        .expect("the exact Array.size getter")
+        .expect("the exact Array.size getter");
+    let selected = external
         .klib_body_callable()
         .expect("the getter has a KLIB declaration contract");
     assert_eq!(
