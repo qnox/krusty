@@ -10,8 +10,8 @@
 
 use super::*;
 use krusty::ir::TypeCheckRole;
-use krusty::types::TyKind;
 use krusty::types::TypeName;
+use krusty::types::{CollectionKind, TyKind};
 
 /// What an `is` against a type Kotlin settles by itself answers.
 #[derive(Clone, Copy)]
@@ -815,9 +815,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         // `ArrayList()`, the runtime's growable list. Declared in no file either, like `Any` and
         // the throwables above, so the runtime allocates it rather than the generator laying one
-        // out. The capacity overload is a HINT with nothing observable depending on it; a copy
-        // constructor takes a collection and declines, because sharing that collection's storage
-        // would let a write through the new list reach it.
+        // out. The capacity overload is a HINT with nothing observable depending on it. Its copy
+        // constructor uses the selected Collection parameter's declaration and the runtime's
+        // ordinary collection walk, which copies into independent list storage.
         if self.file.standard_collection_implementation(internal)
             == Some(super::classifier_shapes::StandardCollectionImplementation::List)
         {
@@ -836,6 +836,31 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         any(),
                         &[capacity],
                     )
+                }
+                ([argument], Some([parameter]))
+                    if parameter
+                        .non_null()
+                        .obj_internal()
+                        .and_then(|owner| self.file.collection_declaration(owner))
+                        .is_some_and(|declaration| {
+                            declaration.reads(&[CollectionKind::Collection])
+                        }) =>
+                {
+                    let source = self.reference(*argument)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    let Some(copy) = self.runtime_call("kt_mutable_list_new", &[], any(), &[])?
+                    else {
+                        return Ok(None);
+                    };
+                    self.runtime_call(
+                        "kt_mutable_list_add_all",
+                        &[any(), any()],
+                        Ty::Unit,
+                        &[copy, source],
+                    )?;
+                    Ok(Some(copy))
                 }
                 _ => Err(declined!("this constructor of `{name}`")),
             };

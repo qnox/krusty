@@ -787,12 +787,12 @@ impl BodyLowering<'_, '_, '_> {
                 "value" => ("kt_indexed_value_value", any()),
                 _ => return None,
             }
-        } else if is_list(self.file, ty) && !self.file.implements_collection_of(ty) {
+        } else if is_list(self.file, ty) && !self.file.has_source_implementor_of(ty) {
             match name {
                 "getSize" | "size" => ("kt_list_size", Ty::Int),
                 _ => return None,
             }
-        } else if is_collection(self.file, ty) && !self.file.implements_collection_of(ty) {
+        } else if is_collection(self.file, ty) && !self.file.has_source_implementor_of(ty) {
             match name {
                 "getSize" | "size" => ("kt_collection_size", Ty::Int),
                 _ => return None,
@@ -863,9 +863,9 @@ impl BodyLowering<'_, '_, '_> {
         // A LIST's OWN members — indexed access, size, removal — are about the runtime's list
         // REPRESENTATION rather than about walking, and no thunk of a class's would reach one. A
         // file putting a class of its own behind a list declines them; see
-        // [`FileLowering::implements_collection_of`].
+        // [`FileLowering::has_source_implementor_of`].
         let list = is_list(self.file, ty);
-        if !(list || is_collection(self.file, ty)) || self.file.implements_collection_of(ty) {
+        if !(list || is_collection(self.file, ty)) || self.file.has_source_implementor_of(ty) {
             return None;
         }
         let declaration = classifier_shapes::collection_declaration(
@@ -908,7 +908,7 @@ impl BodyLowering<'_, '_, '_> {
         // elements instead, which is a different question with a different answer
         // (`codegen/box/bridges/strListContains.kt`). Where the file implements nothing of the
         // shape the receiver is the runtime's own and the walk IS the member.
-        if self.file.implements_collection_of(ty)
+        if self.file.has_source_implementor_of(ty)
             && ty.non_null().obj_internal().is_some_and(|internal| {
                 classifier_shapes::mapped_collection(self.file.classifiers, internal).is_some_and(
                     |collection| {
@@ -1096,14 +1096,14 @@ impl BodyLowering<'_, '_, '_> {
             CollectionAlgorithm::SortWith
                 if args.len() == 1
                     && is_list(self.file, receiver_ty)
-                    && !self.file.implements_collection_of(receiver_ty) =>
+                    && !self.file.has_source_implementor_of(receiver_ty) =>
             {
                 ("kt_list_sort_with", vec![any(), any()], Ty::Unit, args)
             }
             CollectionAlgorithm::PlusAssignElement
                 if args.len() == 1
                     && is_list(self.file, receiver_ty)
-                    && !self.file.implements_collection_of(receiver_ty) =>
+                    && !self.file.has_source_implementor_of(receiver_ty) =>
             {
                 (
                     "kt_mutable_list_plus_assign",
@@ -1115,7 +1115,7 @@ impl BodyLowering<'_, '_, '_> {
             CollectionAlgorithm::PlusAssignAll
                 if args.len() == 1
                     && is_list(self.file, receiver_ty)
-                    && !self.file.implements_collection_of(receiver_ty) =>
+                    && !self.file.has_source_implementor_of(receiver_ty) =>
             {
                 (
                     "kt_mutable_list_add_all",
@@ -1137,14 +1137,13 @@ impl BodyLowering<'_, '_, '_> {
     /// receiver against each, dispatch on that implementor's own slot when it matches, and fall
     /// through to the runtime entry point otherwise.
     ///
-    /// Zero arguments on purpose. An argument would have to cross at the DECLARATION's carriers in
-    /// one arm and at the runtime entry point's in the other, and reconciling those is more than
-    /// the receiver test this is. `iterator`, `hasNext` and `next` take none, which is every member
-    /// in this group.
+    /// Operands are evaluated once, then converted from their call-site carriers to each exact
+    /// override's declared carriers or to the runtime entry point's carriers. Special-bridge
+    /// members stay out: their wide declaration may answer differently before reaching an
+    /// override, and this dispatch has no bridge in front of an implementor's arm.
     ///
-    /// `None` when the member takes arguments, when the runtime has no entry point for it, or when
-    /// any implementor does not supply it — a partial chain would fall through to the runtime for
-    /// an object the runtime cannot answer for.
+    /// `None` when there is no runtime entry point or any implementor lacks the exact override
+    /// edge; a partial chain could hand an object to a runtime entry point that cannot answer it.
     pub(super) fn implemented_member(
         &mut self,
         internal: krusty::types::TypeName,
@@ -1167,10 +1166,8 @@ impl BodyLowering<'_, '_, '_> {
             return None;
         }
         let ty = self.checked_type(receiver)?;
-        // Which runtime entry point would have answered this. Three tables reach a member of a
-        // runtime-known type: the ITERATION one, keyed on the receiver representation and complete
-        // declaration signature; the SCALAR one, keyed on the owner AND the parameter types, because that is
-        // what tells `s[i]` from a member of the same name over something else; and the map one.
+        // Which runtime entry point would have answered this. These selectors use receiver
+        // representation and the complete selected declaration, including its owner and params.
         let owner = super::super::super::intrinsics::DeclarationOwner::callable(internal, None);
         let declaration_shape = signature
             .owner
@@ -1194,6 +1191,19 @@ impl BodyLowering<'_, '_, '_> {
                 )
             })
             .or_else(|| super::super::super::intrinsics::scalar_member(owner, name, params))
+            // `Collection` declares a small set of members whose runtime bodies are shared
+            // across all collection representations. When this file supplies a Collection
+            // implementor, dispatch its exact override slot first and use that same runtime
+            // entry point only for objects the runtime makes. Without this arm, the ordinary
+            // `Collection.isEmpty` call falls through to the generic interface path, which
+            // correctly refuses to treat a source class as a runtime-owned collection.
+            .or_else(|| {
+                let declaration = classifier_shapes::collection_declaration(
+                    self.file.classifiers,
+                    signature.owner.semantic_classifier()?,
+                )?;
+                collection_symbol(declaration, signature)
+            })
             .or_else(|| super::maps::runtime_symbol(self.file, internal, signature))
             // `Comparable.compareTo` is answered from the DESCRIPTOR rather than from a table
             // keyed on a shape, so it is named here rather than found: one member, one entry
