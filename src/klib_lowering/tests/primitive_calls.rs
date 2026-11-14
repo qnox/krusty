@@ -344,8 +344,42 @@ fn klib_primitive_planning_and_body_lowering_use_the_same_authenticated_shape() 
         1,
         "no primitive implementation is emitted"
     );
-    // The read stays the selected property's ordinary read; no call of an operation stands in.
     let accessor = primitive.accessor().unwrap().property;
+    let mut externals = crate::fx_hash::HashMap::default();
+    externals.insert(
+        primitive.identity().clone(),
+        super::super::EmittedDependencyCallable::target_realization(
+            target,
+            CompilerIntrinsic::ArraySize,
+        ),
+    );
+    let mut external_unit = DependencyBodyUnit::default();
+    let external_function = external_unit
+        .lower_function_with_intrinsics_and_externals(
+            root,
+            &bodies,
+            &facts,
+            &crate::klib_libraries::KlibIntrinsicFacts::empty(),
+            &externals,
+        )
+        .unwrap();
+    validated(external_unit.ir());
+    assert_eq!(
+        lowered_body(&external_unit, external_function),
+        lowered_body(&unit, function),
+        "a target-owned Array.size leaf keeps the checked property-read lowering"
+    );
+    assert_eq!(
+        external_unit
+            .ir()
+            .exprs
+            .iter()
+            .filter(|expression| matches!(expression, IrExpr::Checked(operation) if matches!(&**operation, crate::ir::IrCheckedOperation::ExternalPropertyRead { target: found, .. } if *found == accessor)))
+            .count(),
+        1,
+        "the authenticated getter identity remains an external property read"
+    );
+    // The read stays the selected property's ordinary read; no call of an operation stands in.
     let reads = unit
         .ir()
         .exprs
@@ -577,4 +611,62 @@ fn klib_member_primitives_survive_both_frozen_views() {
             Some(expected)
         );
     }
+}
+
+#[test]
+fn an_external_array_size_leaf_keeps_its_authenticated_property_read() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let array = libraries
+        .classifier(type_name("kotlin/Array"))
+        .expect("the standard library declares Array");
+    let target = array.declared_callables["size"].properties()[0]
+        .getter
+        .external_identity
+        .expect("Array.size has an exact provider identity");
+    let selected = libraries
+        .external_callable(target)
+        .expect("the exact Array.size getter")
+        .klib_body_callable()
+        .expect("the getter has a KLIB declaration contract");
+    assert_eq!(
+        selected.compiler_intrinsic(),
+        Some(CompilerIntrinsic::ArraySize)
+    );
+
+    let facts = KlibCalleeFacts::new([selected]);
+    let property_read = facts
+        .target_property_read(
+            selected.identity(),
+            libraries.declaration_bodies(),
+            CompilerIntrinsic::ArraySize,
+        )
+        .expect("the selected getter authenticates")
+        .expect("Array.size is the exact target-owned property operation");
+    assert!(matches!(
+        property_read.operation,
+        super::super::primitive_calls::CommonPrimitive::PropertyRead(CompilerIntrinsic::ArraySize)
+    ));
+    assert_eq!(
+        property_read.property,
+        selected.accessor().map(|accessor| accessor.property)
+    );
+    assert!(facts
+        .target_property_read(
+            selected.identity(),
+            libraries.declaration_bodies(),
+            CompilerIntrinsic::StringLength,
+        )
+        .expect("a different intrinsic is a nonmatch")
+        .is_none());
+    assert!(facts
+        .target_property_read(
+            selected.identity(),
+            libraries.declaration_bodies(),
+            CompilerIntrinsic::PrimitiveUnary(PrimitiveUnaryIntrinsic::Negate),
+        )
+        .expect("ordinary target intrinsics are not property accessors")
+        .is_none());
 }

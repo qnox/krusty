@@ -496,6 +496,47 @@ impl<'a> KlibCalleeFacts<'a> {
         }
     }
 
+    /// Authenticate the two target-owned builtin property reads whose serialized accessor is
+    /// deliberately left outside the dependency-body unit. This keeps an exact `Array.size` or
+    /// `String.length` target edge as its ordinary checked property read; other target intrinsics
+    /// remain external calls and are not folded into common IR.
+    pub(crate) fn target_property_read(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+        operation: crate::libraries::CompilerIntrinsic,
+    ) -> Result<
+        Option<super::primitive_calls::CommonPrimitiveCall>,
+        super::decline::KlibBodyDeclineReason,
+    > {
+        use crate::libraries::CompilerIntrinsic::{ArraySize, StringLength};
+        if !matches!(operation, ArraySize | StringLength) {
+            return Ok(None);
+        }
+        let selected = match self.get(identity) {
+            Some(KlibCalleeFact::Ambiguous) => {
+                return Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
+                    "conflicting provider contracts for a target property getter".to_owned(),
+                ));
+            }
+            Some(KlibCalleeFact::Selected(callables)) => callables[0],
+            None => return Ok(None),
+        };
+        if selected.compiler_intrinsic() != Some(operation) {
+            return Ok(None);
+        }
+        let Some(primitive) = super::primitive_calls::authenticate(selected, bodies)? else {
+            return Ok(None);
+        };
+        if !matches!(
+            primitive.operation,
+            super::primitive_calls::CommonPrimitive::PropertyRead(found) if found == operation
+        ) {
+            return Ok(None);
+        }
+        Ok(Some(primitive))
+    }
+
     /// Index the frozen views of a caller's selected dependency declarations.
     pub fn new(callables: impl IntoIterator<Item = KlibBodyCallable<'a>>) -> Self {
         let mut facts = Self::default();
