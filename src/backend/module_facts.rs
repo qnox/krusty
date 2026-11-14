@@ -330,6 +330,14 @@ impl BackendModuleFacts {
                         .has(crate::fir::DeclarationFlags::ANNOTATION_CLASS)
                     && !header.flags.has(crate::fir::DeclarationFlags::ABSTRACT)
             });
+            let declared_supertypes = classifier
+                .declared_supertypes()
+                .filter_map(|ty| {
+                    crate::libraries::function_classifiers::supertype_classifier(ty.get())
+                        .non_null()
+                        .obj_internal()
+                })
+                .collect::<Box<[_]>>();
             source_supertypes.insert(
                 classifier.classifier,
                 (
@@ -337,14 +345,7 @@ impl BackendModuleFacts {
                         .then(|| index.declaration_anchor(declaration))
                         .flatten()
                         .map(|anchor| anchor.source),
-                    classifier
-                        .declared_supertypes()
-                        .filter_map(|ty| {
-                            crate::libraries::function_classifiers::supertype_classifier(ty.get())
-                                .non_null()
-                                .obj_internal()
-                        })
-                        .collect::<Box<[_]>>(),
+                    declared_supertypes.clone(),
                 ),
             );
             if index.is_body_local_declaration(declaration) {
@@ -423,10 +424,7 @@ impl BackendModuleFacts {
                 kind,
                 crate::libraries::TypeKind::Interface | crate::libraries::TypeKind::Annotation
             );
-            let mut direct_supertypes = classifier
-                .declared_supertypes()
-                .filter_map(|ty| ty.get().non_null().obj_internal())
-                .collect::<Vec<_>>();
+            let mut direct_supertypes = declared_supertypes.into_vec();
             if direct_supertypes.is_empty()
                 && classifier.classifier != crate::types::type_name("kotlin/Any")
             {

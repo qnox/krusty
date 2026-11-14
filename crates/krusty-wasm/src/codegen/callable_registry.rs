@@ -278,6 +278,33 @@ impl CallableRegistry {
                     let Some(access) = callables.dependency_accessor(operation) else {
                         continue;
                     };
+                    if access.receiver.is_some()
+                        && access.dispatches()
+                        && !access.callable.is_member_extension()
+                        && !super::lower::library_members::target_owns_call(
+                            ir,
+                            callables,
+                            expression,
+                            access.callable,
+                        )
+                    {
+                        let role = if access.writes() {
+                            super::lower::library_members::MemberRole::Setter
+                        } else {
+                            super::lower::library_members::MemberRole::Getter
+                        };
+                        if let Some(member) = super::lower::library_members::published_class::select(
+                            access.callable,
+                            role,
+                            || access.callee().map_err(str::to_owned),
+                            classifiers,
+                            classes,
+                            wasm,
+                        ) {
+                            member?;
+                            continue;
+                        }
+                    }
                     if !access
                         .callable
                         .dependency_callable
@@ -342,13 +369,11 @@ impl CallableRegistry {
                         // `typeOf` keeps its checked call, and emission makes the `KType` it names.
                         continue;
                     }
-                    if super::lower::declared_by_string_builder(callable) {
-                        // The runtime lays `StringBuilder` out and realizes its members.
-                        continue;
-                    }
-                    if super::lower::any_members::call_member(ir, callables, expression).is_some() {
-                        // `kotlin.Any`'s members, and the declarations overriding them, are
-                        // realized through the receiver's own representation.
+                    if super::lower::library_members::target_owns_call(
+                        ir, callables, expression, callable,
+                    ) {
+                        // The same positive runtime ownership check precedes class dispatch
+                        // during both dependency prewalking and body emission.
                         continue;
                     }
                     if dispatch_receiver.is_some()
@@ -358,7 +383,7 @@ impl CallableRegistry {
                         if let Some(member) = super::lower::library_members::published_class::select(
                             callable,
                             super::lower::library_members::MemberRole::Function,
-                            callee,
+                            || Ok(callee.clone()),
                             classifiers,
                             classes,
                             wasm,
