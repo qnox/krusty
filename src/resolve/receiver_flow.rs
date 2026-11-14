@@ -566,7 +566,7 @@ impl Checker<'_> {
             .args
             .iter()
             .map(|&argument| {
-                self.lambda_probe_ty(scope, argument).unwrap_or_else(|| {
+                self.lambda_probe_ty(argument).unwrap_or_else(|| {
                     if matches!(self.file.expr(argument), Expr::CallableRef { .. }) {
                         Ty::Error
                     } else {
@@ -652,7 +652,7 @@ impl Checker<'_> {
     /// The type an argument contributes before its callee's parameter type is known. A callable
     /// reference and a lambda literal stay postponed; every other argument is checked once.
     fn probe_or_check_argument(&mut self, scope: &CheckerScope<'_>, argument: ExprId) -> Ty {
-        self.lambda_probe_ty(scope, argument).unwrap_or_else(|| {
+        self.lambda_probe_ty(argument).unwrap_or_else(|| {
             if matches!(self.file.expr(argument), Expr::CallableRef { .. }) {
                 Ty::Error
             } else {

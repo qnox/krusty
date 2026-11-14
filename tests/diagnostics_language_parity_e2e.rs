@@ -236,3 +236,92 @@ fn a_script_return_is_prohibited_in_its_result_position_like_kotlinc() {
         &[],
     );
 }
+
+/// Only a contextual one-parameter function type introduces a lambda's implicit `it`. Without one
+/// (an `Any` expectation, a `() -> R` parameter, a conditional branch, or no expectation at all) a
+/// lambda that omits its parameter list declares no parameter and `it` is unresolved. A lexical
+/// `it` is still captured, and a contextual one-parameter function type still binds it.
+#[test]
+fn implicit_it_needs_a_one_parameter_function_type_like_kotlinc() {
+    let source = "fun take(f: () -> Unit) {}\n\
+                  fun anyExpected() { val f: Any = { it } }\n\
+                  fun noParameters() { take { it } }\n\
+                  fun branch() { val g = if (true) { { it } } else null }\n\
+                  fun bare() { val f = { it.toString() } }\n\
+                  fun captured(it: Int) = { it + 1 }\n\
+                  fun contextual() = listOf(1).map { { it } }";
+    let stdlib = common::stdlib_jar();
+    let result =
+        common::compiler_diagnostics(&[("ImplicitIt.kt", source)], std::slice::from_ref(&stdlib));
+    assert_ne!(result.krusty_code, 0, "krusty silently accepted source");
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc unexpectedly accepted source"
+    );
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    assert_eq!(krusty_errors, errors(&result.reference_stderr));
+    assert_eq!(
+        krusty_errors
+            .iter()
+            .map(|error| (error.line, error.column, error.message.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (2, 36, "unresolved reference 'it'."),
+            (3, 29, "unresolved reference 'it'."),
+            (4, 38, "unresolved reference 'it'."),
+            (5, 24, "unresolved reference 'it'."),
+        ]
+    );
+}
+
+/// A lambda that omits its parameter list fits both `() -> Unit` and `(Int) -> Unit`, whether or
+/// not its body spells `it`, so the call is ambiguous. A written parameter list, even an empty
+/// `{ -> }`, fixes the arity and selects one overload.
+#[test]
+fn lambda_arity_comes_from_its_written_parameter_list_like_kotlinc() {
+    let source = "fun f(g: () -> Unit) = 0\n\
+                  fun f(g: (Int) -> Unit) = 1\n\
+                  fun spelled() = f { it }\n\
+                  fun empty() = f { }\n\
+                  fun arrow(): Int = f { -> }\n\
+                  fun named(): Int = f { x -> }";
+    let sources = [("LambdaArity.kt", source)];
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(&sources, std::slice::from_ref(&stdlib));
+    assert_eq!(
+        result.reference_code, 1,
+        "kotlinc: {}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        result.krusty_code, 1,
+        "krusty: {}{}",
+        result.krusty_stdout, result.krusty_stderr
+    );
+    let expected = common::reference_error_blocks(&sources, &[]);
+    assert_eq!(
+        common::krusty_error_blocks_with_args(&sources, &[]),
+        expected
+    );
+    assert_eq!(
+        expected,
+        [
+            "LambdaArity.kt:3:17: overload resolution ambiguity between candidates:",
+            "| fun f(g: () -> Unit): Int",
+            "| fun f(g: (Int) -> Unit): Int",
+            "LambdaArity.kt:3:21: unresolved reference 'it'.",
+            "LambdaArity.kt:4:15: overload resolution ambiguity between candidates:",
+            "| fun f(g: () -> Unit): Int",
+            "| fun f(g: (Int) -> Unit): Int",
+        ]
+    );
+}
+
+/// Every contextual one-parameter function type still binds `it`.
+#[test]
+fn implicit_it_with_a_one_parameter_function_type_runs_like_kotlinc() {
+    let source = include_str!("box_regressions/implicitItContext.kt");
+    assert_eq!(common::kotlinc_box_result(source), "OK");
+    common::expect_box_ok_with_stdlib(source, "ImplicitItContext");
+}

@@ -554,7 +554,7 @@ impl<'a> Checker<'a> {
                 if matches!(self.file.expr(site), Expr::Binary { .. }) =>
             {
                 drop(resolver);
-                self.report_callable_ambiguity(site, name, &candidates);
+                self.report_callable_ambiguity(scope, site, name, &candidates);
                 self.binary_operator_reported = true;
                 return None;
             }

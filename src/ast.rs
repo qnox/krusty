@@ -2406,11 +2406,6 @@ impl File {
         }
     }
 
-    pub fn expr_uses_name(&self, e: ExprId, name: &str) -> bool {
-        let names: crate::fx_hash::HashSet<&str> = std::iter::once(name).collect();
-        expr_refs_name(self, e, &names)
-    }
-
     pub fn expr_uses_any_name(&self, e: ExprId, names: &crate::fx_hash::HashSet<&str>) -> bool {
         expr_refs_name(self, e, names)
     }
