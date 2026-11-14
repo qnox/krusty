@@ -22,7 +22,7 @@ use crate::objects::REFERENCE;
 use crate::target::WasmTarget;
 use krusty::backend::class_names::{member_class_names, ClassNames};
 use krusty::fx_hash::HashMap;
-use krusty::types::TypeName;
+use krusty::types::{Ty, TypeName};
 
 /// Function indices of the string rendering of objects.
 pub(crate) struct ObjectStrings {
@@ -151,6 +151,84 @@ impl Runtime {
         let locals = Vec::new();
         module.define(function, Function { ty, locals, code });
         self.object_strings.slots.insert((class, kind), function);
+    }
+
+    /// Define `function`, the `toString` slot of an unsigned array class: its simple name and its
+    /// storage array's contents as the value class renders them, `UIntArray(storage=[1, 2])`,
+    /// each element read as the signed number the storage array holds. `object` is the class's array object type and
+    /// `storage` the signed array its elements live in.
+    pub(crate) fn define_unsigned_array_to_string(
+        &mut self,
+        module: &mut Module,
+        function: u32,
+        (object, storage): (u32, u32),
+        (name, element): (&str, Ty),
+    ) {
+        let ty = self.objects.any_slot_types[2];
+        let concat = self.string_concat;
+        let (elements, index, text) = (1, 2, 3);
+        let mut code = Code::default();
+        self.ascii_constant(module, &mut code, &format!("{name}(storage=["));
+        code.local_set(text)
+            .local_get(0)
+            .ref_cast(false, HeapType::Concrete(object))
+            .struct_get(object, crate::array_objects::STORAGE_FIELD)
+            .local_set(elements)
+            .i32_const(0)
+            .local_set(index)
+            .block(BlockType::Empty)
+            .loop_(BlockType::Empty)
+            .local_get(index)
+            .local_get(elements)
+            .ref_as_non_null()
+            .array_len()
+            .op(GE_S32)
+            .br_if(1)
+            .local_get(index)
+            .if_(BlockType::Empty)
+            .local_get(text)
+            .ref_as_non_null();
+        self.ascii_constant(module, &mut code, ", ");
+        code.call(concat)
+            .local_set(text)
+            .end()
+            .local_get(text)
+            .ref_as_non_null()
+            .local_get(elements)
+            .ref_as_non_null()
+            .local_get(index);
+        // The storage is the signed array of the same width, so each element prints as the
+        // signed number: `UIntArray(storage=[-1])` holds the maximum.
+        match element {
+            Ty::UByte | Ty::UShort => {
+                code.array_get_s(storage).call(self.string_of_i32);
+            }
+            Ty::ULong => {
+                code.array_get(storage).call(self.string_of_i64);
+            }
+            _ => {
+                code.array_get(storage).call(self.string_of_i32);
+            }
+        }
+        code.call(concat)
+            .local_set(text)
+            .local_get(index)
+            .i32_const(1)
+            .op(ADD32)
+            .local_set(index)
+            .br(0)
+            .end()
+            .end()
+            .local_get(text)
+            .ref_as_non_null();
+        self.ascii_constant(module, &mut code, "])");
+        code.call(concat);
+        let locals = vec![
+            ValType::nullable(storage),
+            ValType::I32,
+            self.nullable_string_type(),
+        ];
+        module.define(function, Function { ty, locals, code });
     }
 
     fn define_any_to_string(&mut self, module: &mut Module) {

@@ -164,7 +164,8 @@ pub(super) fn build_class_metadata_with_facts(
             // consumers must reject this metadata instead of assuming the legacy `$DefaultImpls`
             // realization, so kotlinc attaches a compiler-version requirement to every interface.
             compiler_version_requirement: (c.is_interface
-                && opts.jvm_default == JvmDefaultMode::NoCompatibility)
+                && crate::declared_jvm_default::of_class(c, opts.jvm_default)
+                    == JvmDefaultMode::NoCompatibility)
                 .then_some(
                     krusty::metadata::version_requirements::VersionRequirement::compiler(1, 4, 0),
                 ),
@@ -334,7 +335,10 @@ impl<'a> JvmClassRealization<'a> {
             // interface and whether a `$DefaultImpls` compatibility copy exists.
             class_flags: c
                 .is_interface
-                .then(|| opts.jvm_default.interface_jvm_class_flags())
+                .then(|| {
+                    crate::declared_jvm_default::of_class(c, opts.jvm_default)
+                        .interface_jvm_class_flags()
+                })
                 .flatten(),
             local_properties: locals.of(c.fq_name_id()),
             plugin_metadata: Some(krusty::plugins::class_metadata::PluginClassMetadata {
