@@ -22,6 +22,7 @@ use collection_canonicalization::{
     canonicalize_jvm_collections, overlay_metadata_collection_names,
 };
 #[cfg(test)]
+#[path = "jvm_libraries/tests/contract_dsl_tests.rs"]
 mod contract_dsl_tests;
 mod dependency_access_policy;
 mod dependency_deprecation;
