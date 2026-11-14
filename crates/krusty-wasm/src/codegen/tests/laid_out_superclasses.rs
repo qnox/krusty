@@ -128,6 +128,13 @@ fn root_any_construction_keeps_identity_and_interface_dispatch() {
         let (outputs, diagnostics) =
             compile_program_with_provider(target, Entry::Box, &[source], Box::new(libraries));
         assert_eq!(diagnostics, Vec::<String>::new());
-        assert_eq!(outputs.len(), 1);
+        let names = outputs
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["main.wasm", "main.mjs"]);
+        assert_eq!(&outputs[0].1[..8], b"\0asm\x01\0\0\0");
+        let loader = std::str::from_utf8(&outputs[1].1).expect("utf-8 loader");
+        assert!(loader.contains("./main.wasm"), "{loader}");
     }
 }
