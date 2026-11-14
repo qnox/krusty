@@ -3,6 +3,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use syn::parse::Parser;
 
     #[test]
     fn frontend_facade_uses_only_frontend_dependencies() {
@@ -474,14 +475,92 @@ mod tests {
             }
             let text = fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-            let production = text.split("#[cfg(test)]").next().unwrap_or(&text);
-            for forbidden in ["SymbolResolver", "symbol_resolver::", "resolve_symbol("] {
-                assert!(
-                    !production.contains(forbidden),
-                    "{} calls frontend selection from production backend code: {forbidden}",
-                    path.display(),
-                );
+            let offenders = backend_resolver_uses(&text);
+            assert!(
+                offenders.is_empty(),
+                "{} calls frontend selection from production backend code: {forbidden}",
+                path.display(),
+                forbidden = offenders.join(", "),
+            );
+        }
+    }
+
+    #[test]
+    fn backend_resolver_guard_keeps_scanning_after_test_modules() {
+        let source = r###"
+            #[cfg(test)]
+            mod tests {
+                use crate::resolve::SymbolResolver;
             }
+
+            fn production() {
+                crate::symbol_resolver::resolve_symbol();
+            }
+        "###;
+
+        assert_eq!(
+            backend_resolver_uses(source),
+            ["symbol_resolver::", "resolve_symbol("],
+        );
+    }
+
+    #[test]
+    fn backend_resolver_guard_ignores_test_items_and_non_code_text() {
+        let cases: &[(&str, &str, &[&str])] = &[
+            (
+                "comments and strings are not code",
+                r#"// SymbolResolver symbol_resolver::resolve_symbol()
+                   const MESSAGE: &str = "SymbolResolver symbol_resolver:: resolve_symbol(";"#,
+                &[],
+            ),
+            (
+                "nested test-only module and impl items are skipped",
+                r#"#[cfg(test)] mod tests { use crate::resolve::SymbolResolver; }
+                   impl Example { #[cfg(all(test, feature = "x"))]
+                       fn test_only() { crate::resolve::SymbolResolver::resolve_symbol(); }
+                   }"#,
+                &[],
+            ),
+            (
+                "not test is production",
+                "#[cfg(not(test))] fn f() { crate::resolve::SymbolResolver::resolve_symbol(); }",
+                &["SymbolResolver", "resolve_symbol("],
+            ),
+            (
+                "any test with an unknown feature is not provably test-only",
+                "#[cfg(any(test, feature = \"x\"))] fn f() { crate::resolve::SymbolResolver::resolve_symbol(); }",
+                &["SymbolResolver", "resolve_symbol("],
+            ),
+            (
+                "all test and a feature is test-only",
+                "#[cfg(all(test, feature = \"x\"))] fn f() { crate::resolve::SymbolResolver::resolve_symbol(); }",
+                &[],
+            ),
+            (
+                "method calls are checked",
+                "fn f(resolver: Resolver) { resolver.resolve_symbol(); }",
+                &["resolve_symbol("],
+            ),
+            (
+                "macro expression tokens are checked",
+                "fn f() { identity!(crate::symbol_resolver::resolve_symbol()); }",
+                &["symbol_resolver::", "resolve_symbol("],
+            ),
+            (
+                "macro definition tokens are checked",
+                "macro_rules! m { () => { crate::symbol_resolver::resolve_symbol() }; }",
+                &["symbol_resolver::", "resolve_symbol("],
+            ),
+            (
+                "macro literal tokens are not code",
+                "fn f() { identity!(r#\"SymbolResolver symbol_resolver:: resolve_symbol(\"#); }",
+                &[],
+            ),
+        ];
+
+        for (case, source, expected) in cases {
+            let found = backend_resolver_uses(source);
+            assert_eq!(found.as_slice(), *expected, "{case}");
         }
     }
 
@@ -1185,6 +1264,197 @@ mod tests {
         modules_for_roots(text, &[env!("CARGO_PKG_NAME")])
     }
 
+    fn backend_resolver_uses(text: &str) -> Vec<&'static str> {
+        let file =
+            syn::parse_file(text).unwrap_or_else(|err| panic!("failed to parse Rust: {err}"));
+        let mut visitor = BackendResolverVisitor::default();
+        syn::visit::visit_file(&mut visitor, &file);
+        ["SymbolResolver", "symbol_resolver::", "resolve_symbol("]
+            .into_iter()
+            .filter(|forbidden| visitor.found.contains(forbidden))
+            .collect()
+    }
+
+    #[derive(Default)]
+    struct BackendResolverVisitor {
+        found: BTreeSet<&'static str>,
+    }
+
+    impl BackendResolverVisitor {
+        fn check_ident(&mut self, ident: &str) {
+            match ident {
+                "SymbolResolver" => {
+                    self.found.insert("SymbolResolver");
+                }
+                "symbol_resolver" => {
+                    self.found.insert("symbol_resolver::");
+                }
+                "resolve_symbol" => {
+                    self.found.insert("resolve_symbol(");
+                }
+                _ => {}
+            }
+        }
+
+        fn check_path(&mut self, path: &syn::Path) {
+            for segment in &path.segments {
+                self.check_ident(&segment.ident.to_string());
+            }
+        }
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for BackendResolverVisitor {
+        fn visit_item(&mut self, item: &'ast syn::Item) {
+            if !has_cfg_test(item_attrs(item)) {
+                syn::visit::visit_item(self, item);
+            }
+        }
+
+        fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+            if !has_cfg_test(impl_item_attrs(item)) {
+                syn::visit::visit_impl_item(self, item);
+            }
+        }
+
+        fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+            if !has_cfg_test(trait_item_attrs(item)) {
+                syn::visit::visit_trait_item(self, item);
+            }
+        }
+
+        fn visit_foreign_item(&mut self, item: &'ast syn::ForeignItem) {
+            if !has_cfg_test(foreign_item_attrs(item)) {
+                syn::visit::visit_foreign_item(self, item);
+            }
+        }
+
+        fn visit_stmt(&mut self, stmt: &'ast syn::Stmt) {
+            let attrs = match stmt {
+                syn::Stmt::Local(local) => Some(local.attrs.as_slice()),
+                syn::Stmt::Macro(statement) => Some(statement.attrs.as_slice()),
+                syn::Stmt::Item(_) | syn::Stmt::Expr(_, _) => None,
+            };
+            if !attrs.is_some_and(has_cfg_test) {
+                syn::visit::visit_stmt(self, stmt);
+            }
+        }
+
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            self.check_path(path);
+            syn::visit::visit_path(self, path);
+        }
+
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            self.check_ident(&call.method.to_string());
+            syn::visit::visit_expr_method_call(self, call);
+        }
+
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            let parser = |input: syn::parse::ParseStream| scan_macro_tokens(input, self);
+            parser
+                .parse2(mac.tokens.clone())
+                .expect("macro token tree is scannable");
+        }
+
+        fn visit_use_tree(&mut self, tree: &'ast syn::UseTree) {
+            match tree {
+                syn::UseTree::Path(path) => self.check_ident(&path.ident.to_string()),
+                syn::UseTree::Name(name) => self.check_ident(&name.ident.to_string()),
+                syn::UseTree::Rename(rename) => {
+                    self.check_ident(&rename.ident.to_string());
+                    self.check_ident(&rename.rename.to_string());
+                }
+                syn::UseTree::Group(_) | syn::UseTree::Glob(_) => {}
+            }
+            syn::visit::visit_use_tree(self, tree);
+        }
+    }
+
+    fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
+        match item {
+            syn::Item::Const(item) => &item.attrs,
+            syn::Item::Enum(item) => &item.attrs,
+            syn::Item::ExternCrate(item) => &item.attrs,
+            syn::Item::Fn(item) => &item.attrs,
+            syn::Item::ForeignMod(item) => &item.attrs,
+            syn::Item::Impl(item) => &item.attrs,
+            syn::Item::Macro(item) => &item.attrs,
+            syn::Item::Mod(item) => &item.attrs,
+            syn::Item::Static(item) => &item.attrs,
+            syn::Item::Struct(item) => &item.attrs,
+            syn::Item::Trait(item) => &item.attrs,
+            syn::Item::TraitAlias(item) => &item.attrs,
+            syn::Item::Type(item) => &item.attrs,
+            syn::Item::Union(item) => &item.attrs,
+            syn::Item::Use(item) => &item.attrs,
+            _ => &[],
+        }
+    }
+
+    fn impl_item_attrs(item: &syn::ImplItem) -> &[syn::Attribute] {
+        match item {
+            syn::ImplItem::Const(item) => &item.attrs,
+            syn::ImplItem::Fn(item) => &item.attrs,
+            syn::ImplItem::Macro(item) => &item.attrs,
+            syn::ImplItem::Type(item) => &item.attrs,
+            _ => &[],
+        }
+    }
+
+    fn trait_item_attrs(item: &syn::TraitItem) -> &[syn::Attribute] {
+        match item {
+            syn::TraitItem::Const(item) => &item.attrs,
+            syn::TraitItem::Fn(item) => &item.attrs,
+            syn::TraitItem::Macro(item) => &item.attrs,
+            syn::TraitItem::Type(item) => &item.attrs,
+            _ => &[],
+        }
+    }
+
+    fn foreign_item_attrs(item: &syn::ForeignItem) -> &[syn::Attribute] {
+        match item {
+            syn::ForeignItem::Fn(item) => &item.attrs,
+            syn::ForeignItem::Static(item) => &item.attrs,
+            syn::ForeignItem::Type(item) => &item.attrs,
+            syn::ForeignItem::Macro(item) => &item.attrs,
+            _ => &[],
+        }
+    }
+
+    fn scan_macro_tokens(
+        input: syn::parse::ParseStream<'_>,
+        visitor: &mut BackendResolverVisitor,
+    ) -> syn::Result<()> {
+        while !input.is_empty() {
+            if input.peek(syn::Ident) {
+                let ident: syn::Ident = input.parse()?;
+                visitor.check_ident(&ident.to_string());
+            } else if input.peek(syn::Lit) {
+                let _: syn::Lit = input.parse()?;
+            } else if input.peek(syn::token::Paren) {
+                let content;
+                syn::parenthesized!(content in input);
+                scan_macro_tokens(&content, visitor)?;
+            } else if input.peek(syn::token::Brace) {
+                let content;
+                syn::braced!(content in input);
+                scan_macro_tokens(&content, visitor)?;
+            } else if input.peek(syn::token::Bracket) {
+                let content;
+                syn::bracketed!(content in input);
+                scan_macro_tokens(&content, visitor)?;
+            } else {
+                input.step(|cursor| {
+                    cursor
+                        .token_tree()
+                        .map(|(_, next)| ((), next))
+                        .ok_or_else(|| cursor.error("expected a macro token"))
+                })?;
+            }
+        }
+        Ok(())
+    }
+
     fn modules_for_roots(text: &str, roots: &[&str]) -> BTreeSet<String> {
         let file =
             syn::parse_file(text).unwrap_or_else(|err| panic!("failed to parse Rust: {err}"));
@@ -1308,18 +1578,72 @@ mod tests {
     }
 
     fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {
-        attrs.iter().any(|attr| {
-            attr.path().is_ident("cfg") && {
-                let mut found = false;
-                let _ = attr.parse_nested_meta(|meta| {
-                    if meta.path.is_ident("test") {
-                        found = true;
-                    }
-                    Ok(())
-                });
-                found
+        attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("cfg") && cfg_is_false_without_test(&attr.meta))
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum CfgValue {
+        True,
+        False,
+        Unknown,
+    }
+
+    fn cfg_is_false_without_test(meta: &syn::Meta) -> bool {
+        match meta {
+            syn::Meta::List(list) if list.path.is_ident("cfg") => {
+                let nested =
+                    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated;
+                nested.parse2(list.tokens.clone()).is_ok_and(|metas| {
+                    combine_cfg_values(metas.iter().map(cfg_value), true) == CfgValue::False
+                })
             }
-        })
+            _ => false,
+        }
+    }
+
+    fn cfg_value(meta: &syn::Meta) -> CfgValue {
+        match meta {
+            syn::Meta::Path(path) if path.is_ident("test") => CfgValue::False,
+            syn::Meta::Path(_) | syn::Meta::NameValue(_) => CfgValue::Unknown,
+            syn::Meta::List(list) => {
+                let nested =
+                    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated;
+                let Ok(metas) = nested.parse2(list.tokens.clone()) else {
+                    return CfgValue::Unknown;
+                };
+                match list.path.get_ident().map(ToString::to_string).as_deref() {
+                    Some("all") => combine_cfg_values(metas.iter().map(cfg_value), true),
+                    Some("any") => combine_cfg_values(metas.iter().map(cfg_value), false),
+                    Some("not") if metas.len() == 1 => match cfg_value(&metas[0]) {
+                        CfgValue::True => CfgValue::False,
+                        CfgValue::False => CfgValue::True,
+                        CfgValue::Unknown => CfgValue::Unknown,
+                    },
+                    _ => CfgValue::Unknown,
+                }
+            }
+        }
+    }
+
+    fn combine_cfg_values(values: impl Iterator<Item = CfgValue>, all: bool) -> CfgValue {
+        let values: Vec<_> = values.collect();
+        if all {
+            if values.contains(&CfgValue::False) {
+                CfgValue::False
+            } else if values.iter().all(|value| *value == CfgValue::True) {
+                CfgValue::True
+            } else {
+                CfgValue::Unknown
+            }
+        } else if values.contains(&CfgValue::True) {
+            CfgValue::True
+        } else if values.iter().all(|value| *value == CfgValue::False) {
+            CfgValue::False
+        } else {
+            CfgValue::Unknown
+        }
     }
 
     /// The JVM backend's sources: the class-file layer in `src/jvm` and the IR emission in the
