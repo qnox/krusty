@@ -109,7 +109,6 @@ jvm8/defaults/enable/bridgeInInterfaceWithProperties.kt
 jvm8/defaults/enable/deprecation.kt
 jvm8/defaults/enable/deprecationWithDefault.kt
 jvm8/defaults/enable/generatedBridgeGenericSpecializedInline.kt
-jvm8/defaults/enable/interfaceProperty.kt
 jvm8/defaults/enable/specialization/primitiveAndAny.kt
 jvm8/defaults/enable/specialization/primitiveAndNullable.kt
 jvmOverloadsAndParametersAnnotations.kt
