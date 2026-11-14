@@ -2043,6 +2043,14 @@ typedef struct KNotNullVar {
 
 static const uint32_t kt_not_null_var_offsets[] = {offsetof(KNotNullVar, value)};
 
+static KRef kt_not_null_var_get(KRef value, KRef name) {
+    if (value == NULL) {
+        kt_raise_uninitialized_property(name);
+        return NULL;
+    }
+    return value;
+}
+
 /* Identity, as Kotlin leaves them: `NotNullVar` is no data class, and `toString` is `Any`'s. */
 static const kt_fn kt_not_null_var_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,
                                            (kt_fn)kt_any_to_string};
@@ -2121,11 +2129,55 @@ KRef kt_rw_property_get(KRef self, KRef name) {
                               "Delegates.observable()\n");
     }
     KRef value = ((const KNotNullVar *)self)->value;
-    if (value == NULL) {
-        kt_raise_uninitialized_property(name);
+    return kt_not_null_var_get(value, name);
+}
+
+KRef kt_rw_property_get_property(KRef self, KRef property) {
+    if (self == NULL) {
+        kt_null_receiver();
         return NULL;
     }
-    return value;
+    if (self->header.type == &kt_type_observable) {
+        return ((const KObservable *)self)->value;
+    }
+    if (self->header.type != &kt_type_not_null_var) {
+        KT_FAIL_ON_DESCRIPTOR("krusty: a ReadWriteProperty read of a ", self->header.type,
+                              ", which is neither Delegates.notNull() nor "
+                              "Delegates.observable()\n");
+        return NULL;
+    }
+    KRef value = ((const KNotNullVar *)self)->value;
+    if (value != NULL) {
+        return value;
+    }
+
+    if (property == NULL) {
+        kt_null_receiver();
+        return NULL;
+    }
+    if (!kt_is_instance(property, &kt_type_kproperty)) {
+        KT_FAIL_ON_DESCRIPTOR("krusty: a ReadWriteProperty read through a KProperty whose type "
+                             "is not a property reference: ",
+                             property->header.type);
+        return NULL;
+    }
+    const KType *name_type = property->header.type;
+    while (name_type != NULL && name_type->callable_name == NULL) {
+        name_type = name_type->super;
+    }
+    if (name_type == NULL) {
+        KT_FAIL_ON_DESCRIPTOR("krusty: a ReadWriteProperty read through a KProperty whose type "
+                             "does not publish a callable-name body: ",
+                             property->header.type);
+        return NULL;
+    }
+    KRef name = name_type->callable_name(property);
+    /* The callable name is program code and may throw. Do not replace that exception with
+       NotNullVar's uninitialized-property error. */
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    return kt_not_null_var_get(value, name);
 }
 
 void kt_rw_property_set(KRef self, KRef property, KRef value) {

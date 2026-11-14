@@ -140,6 +140,8 @@ pub struct ResolvedDelegatedProperty {
 pub struct ResolvedDelegatedPropertyDeclaration {
     pub target: ResolvedPropertyOverrideTarget,
     pub owner: TypeName,
+    /// Exact language role of the property's selected getter.
+    pub getter_semantic_role: Option<crate::types::SemanticCallRole>,
     /// Unsubstituted declared type, the one the overridden accessors are erased from.
     pub ty: ResolvedTy,
     /// The declaration as viewed through the delegating classifier's applied hierarchy.

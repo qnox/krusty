@@ -23,9 +23,17 @@
 //! Keying on the receiver is sound for the same reason it is for ranges — a file declaring a class
 //! that implements one of these interfaces overrides a dependency method, and is declined whole.
 
-use super::implementor_dispatch::ImplementorArm;
+use super::implementor_dispatch::{
+    ImplementorArm, ReadWritePropertyCallFrame, ReadWritePropertyRuntimeCall,
+};
 use super::*;
 use krusty::types::CollectionKind;
+
+fn is_k_property_parameter(ty: Ty) -> bool {
+    ty.non_null()
+        .obj_internal()
+        .is_some_and(super::classifier_shapes::is_k_property)
+}
 
 /// Whether a type is one of the list shapes the runtime builds.
 ///
@@ -403,6 +411,51 @@ impl BodyLowering<'_, '_, '_> {
             }
             _ => None,
         }
+    }
+
+    /// Keep runtime-created delegates on their established adapter while routing every other
+    /// receiver through the canonical frozen dependency-interface slot.
+    pub(super) fn dependency_read_write_property_member(
+        &mut self,
+        identity: &krusty::libraries::KlibDependencyCallable,
+        signature: super::super::super::intrinsics::FunctionSignature<'_>,
+        receiver: u32,
+        args: &[u32],
+        params: &[Ty],
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let operation = match (signature.name, signature.params, signature.ret, args) {
+            ("getValue", [_, property_ty], declared, [_, property])
+                if declared.is_reference() && is_k_property_parameter(*property_ty) =>
+            {
+                ReadWritePropertyRuntimeCall::Get {
+                    property_name: self.property_reference_name(*property),
+                }
+            }
+            ("setValue", [_, property_ty, _], Ty::Unit, [_, _, _])
+                if is_k_property_parameter(*property_ty) =>
+            {
+                ReadWritePropertyRuntimeCall::Set
+            }
+            _ => {
+                return Err(declined!(
+                    "the member `{}.{}` on the dependency ReadWriteProperty slot",
+                    signature.owner.physical().render().replace('/', "."),
+                    signature.name,
+                ));
+            }
+        };
+        self.dependency_read_write_property_stub(
+            identity,
+            signature,
+            ReadWritePropertyCallFrame {
+                receiver,
+                arguments: args,
+                applied_params: params,
+                applied_result: ret,
+            },
+            operation,
+        )
     }
 
     /// `ReadOnlyProperty.getValue` on a delegate this FILE declares.

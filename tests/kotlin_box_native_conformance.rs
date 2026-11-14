@@ -346,6 +346,19 @@ fn native_class_properties_export_their_checked_accessors() {
     }
 }
 
+#[test]
+fn native_runtime_and_library_delegates_receive_dynamic_property_names() {
+    let source = include_str!("fixtures/native/delegatePropertyNameCapability.kt");
+    let stem = "delegatePropertyNameCapability";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the complete property-name module graph");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "runtime and source KLIB delegates must read the exact KProperty name"
+    );
+}
+
 /// A required inline dependency function whose body cannot become a template rejects its caller:
 /// it is never compiled as a direct call of the dependency function.
 // PLATFORM-SPECIFIC: Native expands required KLIB inline bodies in common IR; JVM uses bytecode.

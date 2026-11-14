@@ -35,8 +35,10 @@ typedef bool     kt_boolean;
    cast is defined C, where a cast through `void *` is not. */
 typedef void (*kt_fn)(void);
 
-/* Named here so the walking members below can be typed; the reference typedefs come further on. */
+/* Named here so the walking members and typed KRef callbacks below can be declared. */
 struct KObject;
+typedef struct KObject KObject;
+typedef KObject *KRef;
 
 typedef struct KType {
     const char *name;                  /* qualified Kotlin name, for toString */
@@ -126,6 +128,9 @@ typedef struct KType {
        implementing no interface of the program has none: nothing dispatches through it here.
        Appended, like the names above, so no existing initializer moves. */
     const kt_fn *itable;
+    /* Exact checked callable-name body for this class, when present. The runtime's delegate
+       adapter uses this typed entry instead of assuming a vtable slot on an arbitrary KProperty. */
+    KRef (*callable_name)(KRef self);
 } KType;
 
 /* The compiler writes each descriptor field at a fixed offset (`ktype` in
@@ -133,7 +138,8 @@ typedef struct KType {
 _Static_assert(offsetof(KType, class_names) == 148, "KType.class_names moved");
 _Static_assert(offsetof(KType, collection_size) == 152, "KType.collection_size moved");
 _Static_assert(offsetof(KType, itable) == 160, "KType.itable moved");
-_Static_assert(sizeof(KType) == 168, "KType changed size");
+_Static_assert(offsetof(KType, callable_name) == 168, "KType.callable_name moved");
+_Static_assert(sizeof(KType) == 176, "KType changed size");
 
 /* What a descriptor publishes about its class's names, in `KType.class_names`.
 
@@ -192,9 +198,6 @@ size_t kt_gc_global_roots(void);
 /* ---- values ---------------------------------------------------------------------------------- */
 
 /* Every Kotlin reference is one of these. `NULL` is Kotlin's `null`. */
-typedef struct KObject KObject;
-typedef KObject *KRef;
-
 /* ---- classes ----------------------------------------------------------------------------------- */
 
 /* The root of every class, defined by the runtime. Its vtable holds the defaults: `equals` is
@@ -678,6 +681,7 @@ KRef kt_observable(KRef initial, KRef on_change);
    observable passes to its callback. Any object other than those two delegates ends the program
    with a message naming its descriptor. */
 KRef kt_rw_property_get(KRef self, KRef name);
+KRef kt_rw_property_get_property(KRef self, KRef property);
 void kt_rw_property_set(KRef self, KRef property, KRef value);
 
 /* ---- comparable ranges ------------------------------------------------------------------------

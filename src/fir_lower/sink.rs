@@ -111,6 +111,7 @@ fn lower_property_override_plans(
             overridden: edge.overridden,
             overridden_owner: edge.overridden_owner,
             overridden_is_interface: edge.overridden_is_interface,
+            overridden_getter_semantic_role: edge.overridden_getter_semantic_role,
             name: edge.name.to_string(),
             declared_type: edge.declared_type.get(),
             applied_type: edge.applied_type.get(),

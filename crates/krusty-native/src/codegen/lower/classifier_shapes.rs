@@ -68,6 +68,10 @@ pub(super) fn is_read_write_property(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/properties/ReadWriteProperty"])
 }
 
+pub(super) fn is_k_property(internal: TypeName) -> bool {
+    is_identity(internal, &["kotlin/reflect/KProperty"])
+}
+
 pub(super) fn is_read_only_property(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/properties/ReadOnlyProperty"])
 }
