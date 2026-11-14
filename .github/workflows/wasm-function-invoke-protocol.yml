@@ -41,7 +41,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence
-          source=7114d3431d6eaaa25fee00181c36e576f981a984
+          source=7114d34312688db6105d8d1c71b6daa3f3c0e2a9
           git diff --exit-code "$source" HEAD -- . ':!.github/workflows/wasm-function-invoke-protocol.yml'
           git rev-parse "$source" > evidence/source-commit.txt
           sha256sum \
