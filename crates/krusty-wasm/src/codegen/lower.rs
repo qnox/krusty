@@ -1958,11 +1958,11 @@ impl<'a> Body<'a> {
             && (matches!(self.ir.expr(lhs), IrExpr::Const(IrConst::Null))
                 || matches!(self.ir.expr(rhs), IrExpr::Const(IrConst::Null)));
         if (matches!(op, IrBinOp::RefEq | IrBinOp::RefNe) || null_guard)
-            && matches!(carrier(left)?, Some(ValType::Ref { .. }))
-            && matches!(carrier(right)?, Some(ValType::Ref { .. }))
+            && (left == Ty::Unit || matches!(carrier(left)?, Some(ValType::Ref { .. })))
+            && (right == Ty::Unit || matches!(carrier(right)?, Some(ValType::Ref { .. })))
         {
-            self.expression(lhs)?;
-            self.expression(rhs)?;
+            self.value(lhs, any())?;
+            self.value(rhs, any())?;
             self.code.ref_eq();
             if matches!(op, IrBinOp::Ne | IrBinOp::RefNe) {
                 self.code.op(EQZ32);
