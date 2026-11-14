@@ -728,3 +728,12 @@ fn native_string_comparison_runs_the_whole_portable_program_through_klib() {
         "the Native KLIB driver must run every comparison control"
     );
 }
+
+#[test]
+fn native_generic_elvis_preserves_its_non_null_type_parameter() {
+    let source = include_str!("box_regressions/multimodule/genericElvisNullProof.kt");
+    let stem = "genericElvisNullProof";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the whole generic Elvis module graph");
+    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
+}
