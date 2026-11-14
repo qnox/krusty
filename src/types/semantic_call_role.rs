@@ -19,6 +19,8 @@ pub enum SemanticCallRole {
     /// The `length` property `kotlin.String` declares, its count of UTF-16 code units. The
     /// declaration is `@IntrinsicConstEvaluation`: a read of a constant string is constant.
     KotlinStringLength,
+    /// The lexicographic UTF-16 comparison declared by `kotlin.String`.
+    KotlinStringCompareTo,
     /// The `name` property `kotlin.Enum` declares. A read on a direct entry is that entry's
     /// declaration name, a constant kotlinc evaluates without initializing the enum.
     KotlinEnumName,

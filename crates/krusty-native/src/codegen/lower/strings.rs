@@ -57,6 +57,25 @@ impl BodyLowering<'_, '_, '_> {
         self.runtime_call("kt_string_plus", &[any(), any()], ret, &[left, right])
     }
 
+    /// `left.compareTo(right)` on two strings: the runtime orders their UTF-16 units.
+    pub(super) fn string_compare(
+        &mut self,
+        left: u32,
+        right: u32,
+    ) -> Result<Option<Value>, Unsupported> {
+        let left = self.reference(left)?;
+        let right = self.reference(right)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.runtime_call(
+            "kt_string_compare_to",
+            &[any(), any()],
+            Ty::Int,
+            &[left, right],
+        )
+    }
+
     /// A read of TEXT's `length` — `CharSequence`'s, a builder's, or a string's.
     ///
     /// One runtime function answers all three, because one runtime reader (`kt_text_of`) reaches

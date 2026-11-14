@@ -92,6 +92,9 @@ pub(crate) fn semantic_call_role(
         }
         return None;
     }
+    if super::builtin_member_realization::string_compare_intrinsic(&declaration).is_some() {
+        return Some(SemanticCallRole::KotlinStringCompareTo);
+    }
     if let Some(operation) =
         crate::libraries::intrinsic_const_numeric::member_operation(&declaration)
     {
@@ -217,6 +220,31 @@ mod tests {
             None,
             "the signature without the exact builtin owner has no role"
         );
+
+        assert_eq!(
+            semantic_call_role(declaration(
+                crate::types::wk::string(),
+                "compareTo",
+                &[Ty::String],
+                Ty::Int,
+            )),
+            Some(SemanticCallRole::KotlinStringCompareTo)
+        );
+        for (owner, parameter, result) in [
+            (
+                crate::types::type_name("sample/String"),
+                Ty::String,
+                Ty::Int,
+            ),
+            (crate::types::wk::string(), nullable_any, Ty::Int),
+            (crate::types::wk::string(), Ty::String, Ty::Long),
+        ] {
+            assert_eq!(
+                semantic_call_role(declaration(owner, "compareTo", &[parameter], result)),
+                None,
+                "a different owner or signature does not declare string comparison"
+            );
+        }
 
         let parameter = Ty::ty_param("T", Ty::obj_name(any));
         let parameters = [parameter];
