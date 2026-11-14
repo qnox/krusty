@@ -19,6 +19,7 @@ use krusty::libraries::{ExternalCallableKind, KlibDependencyCallable};
 use krusty::types::SemanticCallableOwner;
 use krusty::types::{Ty, TypeName};
 
+use super::super::boxes::BoxAdapter;
 use super::super::encode::FieldType;
 use super::super::interface_dispatch::MemberRef;
 use super::classes::OwnedBase;
@@ -26,6 +27,23 @@ use super::interface_members::Signature;
 
 /// A function and the signature it is carried as.
 pub(super) type Placed = (u32, Signature);
+
+/// Program-owned operations that adapt one physical signature to another, without provider types.
+#[derive(Clone, Debug)]
+pub(super) struct SignatureAdapters {
+    /// Indexed by physical parameter, including an empty receiver entry at index zero.
+    pub(super) parameters: Vec<Option<BoxAdapter>>,
+    pub(super) result: Option<BoxAdapter>,
+}
+
+impl SignatureAdapters {
+    pub(super) fn none(parameter_count: usize) -> Self {
+        Self {
+            parameters: vec![None; parameter_count],
+            result: None,
+        }
+    }
+}
 
 /// One class an earlier file of the source module laid out.
 #[derive(Clone, Debug)]
@@ -73,6 +91,7 @@ pub(super) enum DependencyImplementation {
         slot: u32,
         declared: Signature,
         implemented: Signature,
+        adapters: SignatureAdapters,
     },
     /// A function no class slot holds: a default.
     Function(u32),
