@@ -65,7 +65,24 @@ pub struct IrPropertyFunctionReference {
     pub binding: crate::fir::FirCallableReferenceBinding,
     pub bound_extension_receiver: bool,
     pub mutable: bool,
+    /// The program uses this value as the `KProperty` itself, not only as a function to invoke
+    /// (a [`PropertyReferenceObjects::FunctionValues`] target's reference read reflectively).
+    pub reflective: bool,
     pub substitutions: Vec<IrCheckedSubstitution>,
+}
+
+/// How common lowering realizes a source property reference used as a `KProperty` value.
+///
+/// A backend whose reference objects carry the property's declaration and accessors itself keeps
+/// the checked [`IrCheckedOperation::PropertyReference`]. A backend whose every reference object is
+/// a function value has the reference materialized as one: an [`IrCallableReference`] whose
+/// adapter reads the property, as a function-typed reference's does, marked
+/// [`IrPropertyFunctionReference::reflective`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PropertyReferenceObjects {
+    #[default]
+    Checked,
+    FunctionValues,
 }
 
 /// The property declaration a function-typed property reference reads: the identity two such

@@ -637,11 +637,17 @@ impl BodyLowering<'_> {
         }
         let dispatch_receiver = self.receiver(dispatch_receiver)?;
         let extension_receiver = self.receiver(extension_receiver)?;
-        if !reflective {
+        // A target whose reference objects are function values reads every reference through
+        // one, a reflective `KProperty` value included.
+        if !reflective
+            || self.ir.property_reference_objects
+                == crate::ir::PropertyReferenceObjects::FunctionValues
+        {
             if let Some(function) = self.materialize_property_function_reference(
                 &reference,
                 dispatch_receiver,
                 extension_receiver,
+                reflective,
             )? {
                 return Ok(function);
             }

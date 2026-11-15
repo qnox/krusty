@@ -10,6 +10,14 @@ use crate::encode::{CompositeType, SubType};
 use crate::function_values::INVOKE_FIELD;
 use crate::objects::immutable;
 
+/// The class of a new function value, the entry its table names and how many operands that entry
+/// takes after the value itself.
+pub(super) struct FunctionValueClass {
+    pub(super) class: crate::interface_dispatch::ClassRef,
+    pub(super) entry: u32,
+    pub(super) arity: usize,
+}
+
 /// What `==` on a function value compares.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum FunctionEquality {
@@ -22,7 +30,8 @@ pub(super) enum FunctionEquality {
 impl Body<'_> {
     /// A new function value whose body is `function`, carrying `captures` as its leading
     /// arguments, of the checked type `instance`. With `sam`, the value is also an instance of that
-    /// `fun interface`, whose member it implements. Answers the class the value is an instance of.
+    /// `fun interface`, whose member it implements. Answers the class the value is an instance of
+    /// and the entry its table names.
     pub(super) fn function_value(
         &mut self,
         function: FunId,
@@ -30,7 +39,7 @@ impl Body<'_> {
         equality: FunctionEquality,
         instance: Option<Ty>,
         sam: Option<&krusty::ir::IrSamTarget>,
-    ) -> Result<crate::interface_dispatch::ClassRef, Unsupported> {
+    ) -> Result<FunctionValueClass, Unsupported> {
         let declaration = self
             .ir
             .functions
@@ -187,7 +196,11 @@ impl Body<'_> {
             self.code.local_get(local);
         }
         self.code.struct_new(structure);
-        Ok(class)
+        Ok(FunctionValueClass {
+            class,
+            entry: invoke,
+            arity: own.len(),
+        })
     }
 
     /// A new function value for the callable reference `id`. Its adapter takes the referenced
@@ -204,7 +217,11 @@ impl Body<'_> {
             .chain(reference.bound_receiver)
             .collect();
         let kind = self.callable_reference_kind(reference)?;
-        let class = self.function_value(
+        let FunctionValueClass {
+            class,
+            entry,
+            arity,
+        } = self.function_value(
             reference.adapter,
             &captures,
             FunctionEquality::Declaration {
@@ -222,6 +239,14 @@ impl Body<'_> {
             reference,
         ) {
             self.runtime.reference_name(self.module, class, &name)?;
+        }
+        // A `KProperty` value reads its property through `get` as its entry does.
+        if matches!(
+            &reference.target,
+            krusty::ir::IrCallableReferenceTarget::Property(property) if property.reflective
+        ) {
+            self.runtime
+                .property_reference_read(self.module, class, arity, entry)?;
         }
         Ok(())
     }
