@@ -1051,10 +1051,12 @@ impl<'a> BodyLowering<'a> {
         }
         // A prepared copy also erases the type parameters of the inline functions it already
         // expanded, so the value may be typed with the erasure's bound: a supertype of `declared`.
+        // A value of a subtype of `declared`, as `suspendCoroutine` passes its `SafeContinuation`
+        // to a `(Continuation<T>) -> Unit` block, is one by subsumption.
+        let parameters = self.header.type_parameters();
         if actual != self.header.erased(declared)
-            && !self
-                .linker
-                .is_subtype(self.header.type_parameters(), declared, actual)
+            && !self.linker.is_subtype(parameters, declared, actual)
+            && !self.linker.is_subtype(parameters, actual, declared)
         {
             return Err(KlibBodyDeclineReason::ImplicitConversion);
         }
