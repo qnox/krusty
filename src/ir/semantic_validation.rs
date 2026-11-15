@@ -110,10 +110,22 @@ fn validate_callee(callee: &Callee) -> Result<(), UndeterminedIrType> {
         }
         Callee::CrossFile { params, ret, .. }
         | Callee::Module { params, ret, .. }
-        | Callee::ModuleDefaultEntry { params, ret, .. }
         | Callee::Super { params, ret, .. } => {
             reject_all("callee parameter", params.iter().copied())?;
             reject("callee result", *ret)
+        }
+        Callee::ModuleDefaultEntry {
+            receiver,
+            params,
+            ret,
+            ..
+        } => {
+            reject_all("callee parameter", params.iter().copied())?;
+            reject("callee result", *ret)?;
+            if let Some(receiver) = receiver {
+                reject("callee dispatch receiver", *receiver)?;
+            }
+            Ok(())
         }
         Callee::ModuleWithDefaults {
             params,

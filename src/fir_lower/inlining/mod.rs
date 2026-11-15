@@ -1874,10 +1874,21 @@ fn specialize_callee(
         }
         Callee::CrossFile { params, ret, .. }
         | Callee::Module { params, ret, .. }
-        | Callee::ModuleDefaultEntry { params, ret, .. }
         | Callee::Super { params, ret, .. } => {
             specialize_tys(params, bindings);
             specialize_ty(ret, bindings);
+        }
+        Callee::ModuleDefaultEntry {
+            receiver,
+            params,
+            ret,
+            ..
+        } => {
+            specialize_tys(params, bindings);
+            specialize_ty(ret, bindings);
+            if let Some(receiver) = receiver {
+                specialize_ty(receiver, bindings);
+            }
         }
         Callee::ModuleWithDefaults {
             params,

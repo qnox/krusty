@@ -255,10 +255,11 @@ impl BodyLowering<'_, '_, '_> {
             Callee::ModuleDefaultEntry {
                 target,
                 provider,
+                receiver,
                 params,
                 ret,
             } if dispatch_receiver.is_none() => {
-                self.module_default_entry_call(*provider, *target, params, *ret, args)
+                self.module_default_entry_call(*provider, *target, *receiver, params, *ret, args)
             }
             // A static method owned by a class is, to this generator, a function with a symbol —
             // the owner is a JVM placement fact, and there is no flat facade here for it to be

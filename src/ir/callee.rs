@@ -87,15 +87,18 @@ pub enum Callee {
         /// masks independently from the receiver consumes this fact directly.
         extension_receiver_parameter: Option<u32>,
     },
-    /// The default-argument entry of a top-level callable in another source unit of the current
-    /// module, published by the file that declares `target` under the identity of `provider`, the
-    /// declaration whose defaults it evaluates. The argument vector holds the whole parameter
-    /// frame of `params`, with an [`IrExpr::AbsentArgument`](super::IrExpr::AbsentArgument) for
-    /// each omitted parameter, followed by the omission mask words. A backend maps the identity to
-    /// its physical entry; it does not rebuild the masks or the frame.
+    /// The default-argument entry of a callable in another source unit of the current module,
+    /// published by the file that declares `target` under the identity of `provider`, the
+    /// declaration whose defaults it evaluates. The entry is an ordinary function, so the call has
+    /// no dispatch receiver: a member's entry takes the receiver, of type `receiver`, as its first
+    /// operand and dispatches itself. The argument vector holds that receiver, then the whole
+    /// parameter frame of `params`, with an [`IrExpr::AbsentArgument`](super::IrExpr::AbsentArgument)
+    /// for each omitted parameter, followed by the omission mask words. A backend maps the
+    /// identity to its physical entry; it does not rebuild the masks or the frame.
     ModuleDefaultEntry {
         target: crate::fir::CallableId,
         provider: crate::fir::CallableId,
+        receiver: Option<Ty>,
         params: Vec<Ty>,
         ret: Ty,
     },

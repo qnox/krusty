@@ -3,8 +3,7 @@
 //! [`IrExpr::AbsentArgument`] in each omitted one, and the omission masks after them.
 //!
 //! A call this lowering cannot realize keeps its checked form, so the backend's own decline
-//! names it: a member-extension receiver, a `super` call, an inherited default whose provider is
-//! in another file, and a dependency callable. Constructions are rewritten by
+//! names it: a member-extension receiver, a `super` call, and a dependency callable. Constructions are rewritten by
 //! [`super::constructor_calls`].
 
 use crate::fir::ResolvedFunctionOverrideTarget;
@@ -27,8 +26,12 @@ enum Rewrite {
         frame: Frame,
     },
     /// A call of the entry another file of the module publishes, a
-    /// [`Callee::ModuleDefaultEntry`].
-    ModuleEntry { callee: Callee, frame: Frame },
+    /// [`Callee::ModuleDefaultEntry`], with the receiver a member's entry takes first.
+    ModuleEntry {
+        callee: Callee,
+        receiver: Option<ExprId>,
+        frame: Frame,
+    },
 }
 
 /// Rewrite `site` when it is a call with omitted arguments this lowering realizes.
@@ -40,7 +43,11 @@ pub(super) fn rewrite(ir: &mut IrFile, entries: &mut Entries, site: ExprId) {
             receiver,
             frame,
         }) => to_entry(ir, entries, site, declaration, form, receiver, frame),
-        Some(Rewrite::ModuleEntry { callee, frame }) => to_module_entry(ir, site, callee, frame),
+        Some(Rewrite::ModuleEntry {
+            callee,
+            receiver,
+            frame,
+        }) => to_module_entry(ir, site, callee, receiver, frame),
         None => {}
     }
 }
@@ -78,9 +85,11 @@ fn rewrite_of(ir: &IrFile, site: ExprId) -> Option<Rewrite> {
                 ..
             } => Some(Rewrite::ModuleEntry {
                 frame: frame(args, defaults, params.len())?,
+                receiver: None,
                 callee: Callee::ModuleDefaultEntry {
                     target: *target,
                     provider: *provider,
+                    receiver: None,
                     params: params.clone(),
                     ret: *ret,
                 },
@@ -95,17 +104,32 @@ fn rewrite_of(ir: &IrFile, site: ExprId) -> Option<Rewrite> {
             // An override inherits the defaults of the member it overrides; the provider's entry
             // fills them and dispatches through the slot the override shares.
             let Callee::ModuleWithDefaults {
+                target,
                 default_provider: ResolvedFunctionOverrideTarget::Module(provider),
                 params,
+                ret,
                 defaults,
-                dispatch_receiver_ty: Some(_),
+                dispatch_receiver_ty: Some(receiver_ty),
                 extension_receiver_parameter: None,
                 ..
             } = &**callee
             else {
                 return None;
             };
-            let declaration = *ir.checked_callable_functions.get(provider)?;
+            // A provider another file declares publishes its entry under its identity.
+            let Some(&declaration) = ir.checked_callable_functions.get(provider) else {
+                return Some(Rewrite::ModuleEntry {
+                    frame: frame(args, defaults, params.len())?,
+                    receiver: Some(*receiver),
+                    callee: Callee::ModuleDefaultEntry {
+                        target: *target,
+                        provider: *provider,
+                        receiver: Some(*receiver_ty),
+                        params: params.clone(),
+                        ret: *ret,
+                    },
+                });
+            };
             let function = &ir.functions[declaration as usize];
             if function.dispatch_receiver.is_none() || function.params.len() != params.len() {
                 return None;
@@ -203,13 +227,21 @@ fn to_entry(
     );
 }
 
-/// Call the entry another file of the module publishes for `callee`'s provider.
-fn to_module_entry(ir: &mut IrFile, site: ExprId, callee: Callee, frame: Frame) {
+/// Call the entry another file of the module publishes for `callee`'s provider, passing a
+/// member's `receiver` before the frame.
+fn to_module_entry(
+    ir: &mut IrFile,
+    site: ExprId,
+    callee: Callee,
+    receiver: Option<ExprId>,
+    frame: Frame,
+) {
     let Callee::ModuleDefaultEntry { params, ret, .. } = &callee else {
         unreachable!("a module default entry call")
     };
     let result = *ret;
-    let args = arguments(ir, &params.clone(), frame);
+    let mut args = receiver.into_iter().collect::<Vec<_>>();
+    args.extend(arguments(ir, &params.clone(), frame));
     replace(
         ir,
         site,

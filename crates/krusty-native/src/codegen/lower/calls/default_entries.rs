@@ -5,12 +5,13 @@ use super::*;
 
 impl BodyLowering<'_, '_, '_> {
     /// A call of the default-argument entry another file of the module publishes under
-    /// `provider`: the whole parameter frame, an absent operand in each omitted slot, then the
-    /// mask words, exactly as the shared lowering arranged them.
+    /// `provider`: a member's receiver, the whole parameter frame, an absent operand in each
+    /// omitted slot, then the mask words, exactly as the shared lowering arranged them.
     pub(super) fn module_default_entry_call(
         &mut self,
         provider: krusty::fir::CallableId,
         target: krusty::fir::CallableId,
+        receiver: Option<Ty>,
         params: &[Ty],
         ret: Ty,
         args: &[u32],
@@ -19,7 +20,8 @@ impl BodyLowering<'_, '_, '_> {
             self.file.module_name,
             provider,
         );
-        let mut frame = params.to_vec();
+        let mut frame = receiver.into_iter().collect::<Vec<_>>();
+        frame.extend_from_slice(params);
         frame.extend(std::iter::repeat_n(
             Ty::Int,
             krusty::backend::default_arguments::mask_words(params.len()),

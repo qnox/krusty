@@ -131,7 +131,6 @@ bridges/internalMethodOverrideInFriendModule.kt
 bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
 bridges/internalMethodOverridePublishedApi.kt
-bridges/kt46389.kt
 bridges/multipleModules1.kt
 bridges/noBridgeOnMutableCollectionInheritance.kt
 bridges/special.kt
@@ -845,12 +844,9 @@ dataObjects/toString.kt
 dataflow/scope1.kt
 dataflow/uninitialized_val.kt
 deadCodeElimination/emptyVariableRange.kt
-defaultArguments/complexInheritance.kt
 defaultArguments/constructor/anonymousObjectAsDefaultParam.kt
 defaultArguments/defaultArgumentsInFunctionWithExpressionAsBody.kt
 defaultArguments/function/defaultLambdaInline.kt
-defaultArguments/kt48391.kt
-defaultArguments/protected.kt
 delegatedProperty/DelegationByFunctionWithEnumUpperBound.kt
 delegatedProperty/callableReferenceAsSecondArgumentOfDelegate.kt
 delegatedProperty/correctFieldsOrder.kt
@@ -911,7 +907,6 @@ delegation/delegationDifferentModule.kt
 delegation/delegationDifferentModule2.kt
 delegation/ifWithCallableReferenceInLazy.kt
 delegation/kt30102_comparable.kt
-delegation/withDefaultsMultipleFilesOrder.kt
 devirtualization/anonymousObject.kt
 devirtualization/inline_getter.kt
 devirtualization/lateinitInterface.kt
@@ -1444,7 +1439,6 @@ multiplatform/k2/basic/expectActualTypeParameters.kt
 multiplatform/k2/basic/expectInterfaceInSupertypes.kt
 multiplatform/k2/basic/extensionAndFakeOverride.kt
 multiplatform/k2/basic/interfaceMethodFromSuperTypeIsImplementedInOtherExpectSuperClass.kt
-multiplatform/k2/basic/intersectionOverrideWithDefaultParameterInCommonModule.kt
 multiplatform/k2/basic/localIntersectionOverrideWithDefaultParameterInCommonModule.kt
 multiplatform/k2/basic/localSubstitutionOverrideInCommonModule.kt
 multiplatform/k2/basic/nameBasedDestructuringFullForm.kt
@@ -2404,11 +2398,8 @@ suspendConversion/suspendConversionOfAliasedType.kt
 suspendConversion/suspendConversionOnVarargElements.kt
 suspendConversion/suspendConversionWithFunInterfaces.kt
 syntheticAccessors/accessorForAbstractProtected.kt
-syntheticAccessors/accessorForGenericMethodWithDefaults.kt
 syntheticAccessors/accessorForProtectedInvokeVirtual.kt
 syntheticAccessors/accessorForProtectedPropertyReference.kt
-syntheticAccessors/functionsWithDefaultValues/memberFunction.kt
-syntheticAccessors/functionsWithDefaultValues/memberFunctionTransitiveCase.kt
 syntheticAccessors/kt10047.kt
 syntheticAccessors/kt9958.kt
 syntheticAccessors/kt9958Interface.kt

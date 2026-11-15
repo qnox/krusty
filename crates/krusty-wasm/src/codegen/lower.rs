@@ -1218,14 +1218,19 @@ impl<'a> Body<'a> {
                 dispatch_receiver: None,
                 args,
             } if let Callee::ModuleDefaultEntry {
-                provider, params, ..
+                provider,
+                receiver,
+                params,
+                ..
             } = &**call_callee =>
             {
                 let function = self
                     .calls
                     .module_default(*provider)
                     .ok_or_else(|| "an unregistered source default entry".to_string())?;
-                let mut frame = params.clone();
+                // A member's entry takes the receiver it dispatches on before the frame.
+                let mut frame = receiver.iter().copied().collect::<Vec<_>>();
+                frame.extend_from_slice(params);
                 frame.extend(std::iter::repeat_n(
                     Ty::Int,
                     krusty::backend::default_arguments::mask_words(params.len()),

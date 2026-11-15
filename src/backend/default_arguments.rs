@@ -6,8 +6,9 @@
 //! (`fun f(a: Int, b: Int = a + 1)`), so it runs in the declaration's frame. Each declaration with
 //! defaults gets one entry, an ordinary function of its file taking `[receiver?] + parameters`
 //! and one `Int` mask word per 32 parameters ([`entries`]); each call that omits arguments calls it
-//! with placeholders and constant masks ([`call_sites`]). A top-level entry is published to the
-//! other files of the module under the identity of the declaration that provides its defaults.
+//! with placeholders and constant masks ([`call_sites`]). A top-level or member entry is
+//! published to the other files of the module under the identity of the declaration that
+//! provides its defaults.
 //!
 //! A constructor's entry is one more constructor of its class, taking the same frame and masks
 //! after the class's compiler-supplied prefix and delegating `this(…)` to the constructor

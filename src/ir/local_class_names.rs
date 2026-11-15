@@ -501,7 +501,19 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
             tys(params, names);
             *ret = ty(*ret, names);
         }
-        Callee::Module { params, ret, .. } | Callee::ModuleDefaultEntry { params, ret, .. } => {
+        Callee::Module { params, ret, .. } => {
+            tys(params, names);
+            *ret = ty(*ret, names);
+        }
+        Callee::ModuleDefaultEntry {
+            receiver,
+            params,
+            ret,
+            ..
+        } => {
+            if let Some(receiver) = receiver {
+                *receiver = ty(*receiver, names);
+            }
             tys(params, names);
             *ret = ty(*ret, names);
         }

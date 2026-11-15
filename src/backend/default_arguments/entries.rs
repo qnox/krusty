@@ -175,15 +175,20 @@ pub fn published_entry(ir: &IrFile, declaration: FunId) -> Option<FunId> {
 
 /// The identities other files of the module call `declaration`'s entry by: the declaration whose
 /// defaults it evaluates. An `actual` declaration's entry is keyed by its `expect`, which is what
-/// the callers selected; one whose defaults come from a dependency has no module identity.
+/// the callers selected; one whose defaults come from a dependency has no module identity. A
+/// member's entry is published like a top-level one and takes the receiver it dispatches on.
 pub fn published_identities(ir: &IrFile, declaration: FunId) -> Vec<CallableId> {
-    if ir.functions[declaration as usize]
-        .dispatch_receiver
-        .is_some()
-    {
+    if !is_publishable(ir, declaration) {
         return Vec::new();
     }
     let mut identities = match ir.inherited_param_default_provider(declaration) {
+        // An override's defaults are its overridden member's, whose own file publishes the entry
+        // that fills them and dispatches to this one.
+        Some(ResolvedFunctionOverrideTarget::Module(provider))
+            if overrides(ir, declaration, provider) =>
+        {
+            Vec::new()
+        }
         Some(ResolvedFunctionOverrideTarget::Module(provider)) => vec![provider],
         Some(ResolvedFunctionOverrideTarget::External(_)) => Vec::new(),
         None => ir
@@ -195,6 +200,22 @@ pub fn published_identities(ir: &IrFile, declaration: FunId) -> Vec<CallableId> 
     };
     identities.sort_unstable_by_key(|callable| callable.raw());
     identities
+}
+
+/// Whether member `declaration` implements `provider` by an override edge: its own, one a subclass
+/// records when `declaration` implements a supertype member it does not itself override, or the
+/// edge of a delegation forwarder.
+fn overrides(ir: &IrFile, declaration: FunId, provider: CallableId) -> bool {
+    ir.function_overrides.values().flatten().any(|edge| {
+        let implements = edge.implementation_function == Some(declaration)
+            || match edge.implementation {
+                ResolvedFunctionOverrideTarget::Module(implementation) => {
+                    ir.checked_callable_functions.get(&implementation) == Some(&declaration)
+                }
+                ResolvedFunctionOverrideTarget::External(_) => false,
+            };
+        implements && edge.overridden == ResolvedFunctionOverrideTarget::Module(provider)
+    })
 }
 
 /// How the entry of `declaration` reaches it, when this lowering can build one.
