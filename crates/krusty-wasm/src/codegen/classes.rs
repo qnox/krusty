@@ -781,6 +781,11 @@ fn check_function_invocation_support(
     id: ClassId,
 ) -> Result<(), Unsupported> {
     let class = &ir.classes[id as usize];
+    // An interface has no instances to invoke: a class implementing it is the one that must
+    // carry the checked invocation, and it is checked as that class's own supertype.
+    if class.is_interface {
+        return Ok(());
+    }
     for supertype in &class.supertypes {
         if let krusty::types::TyKind::Fun(signature) = supertype.non_null().kind() {
             if !has_checked_function_invoke(
