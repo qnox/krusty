@@ -1002,12 +1002,26 @@ impl<'a> BodyLowering<'a> {
         if is_value_of(actual, declared) {
             return Ok(lowered);
         }
+        let parameters = self.header.type_parameters();
+        // A value of a subtype of `declared`, as `suspendCoroutine` passes its `SafeContinuation`
+        // to a `(Continuation<T>) -> Unit` block, is one by subsumption. It passes as the checked
+        // source argument does: a reference into a non-null reference parameter unchanged, and any
+        // other value, such as a boxed primitive, with the coercion the checker records for it.
+        if self.linker.is_subtype(parameters, actual, declared) {
+            let unchanged = actual.is_reference()
+                && declared.is_reference()
+                && !declared.is_nullable()
+                && !declared.accepts_numeric(actual);
+            return Ok(if unchanged {
+                lowered
+            } else {
+                self.coercion(lowered, declared)
+            });
+        }
         // A prepared copy also erases the type parameters of the inline functions it already
         // expanded, so the value may be typed with the erasure's bound: a supertype of `declared`.
         if actual != self.header.erased(declared)
-            && !self
-                .linker
-                .is_subtype(self.header.type_parameters(), declared, actual)
+            && !self.linker.is_subtype(parameters, declared, actual)
         {
             return Err(KlibBodyDeclineReason::ImplicitConversion);
         }
