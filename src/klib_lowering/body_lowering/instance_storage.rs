@@ -287,4 +287,25 @@ impl<'a> BodyLowering<'a> {
         };
         Ok(self.typed(lowered, ty))
     }
+
+    /// The body of the function that stores a top-level property's initial value: its serialized
+    /// initializer, evaluated once by its file's initialization and stored in its static.
+    pub(in super::super) fn initialize_static(
+        mut self,
+        field: super::StaticField,
+        initializer: KlibIrExprId,
+    ) -> Lowered<ExprId> {
+        let value = self.operand(initializer, field.ty)?;
+        let store = self.ir.add_expr(IrExpr::SetStatic {
+            index: field.index,
+            value,
+        });
+        self.ir.set_logical_type(store, Ty::Unit);
+        let body = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![store],
+            value: None,
+        });
+        self.ir.callable_scopes.insert(body);
+        Ok(body)
+    }
 }

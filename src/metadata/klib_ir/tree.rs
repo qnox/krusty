@@ -846,6 +846,24 @@ pub enum KlibIrMember {
     TypeAlias(KlibIrTypeAlias),
 }
 
+impl KlibIrMember {
+    /// Whether `function` is this top-level declaration itself or an accessor of the property it
+    /// declares, rather than a member of a class or a function local to a body.
+    pub fn declares_top_level(&self, function: KlibIrFunctionId) -> bool {
+        match self {
+            Self::Function(declared) => *declared == function,
+            Self::Property(property) => {
+                property.getter == Some(function) || property.setter == Some(function)
+            }
+            Self::Field(_)
+            | Self::Class(_)
+            | Self::EnumEntry(_)
+            | Self::AnonymousInitializer { .. }
+            | Self::TypeAlias(_) => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct KlibIrTypeAlias {
     pub base: KlibIrDeclarationBase,

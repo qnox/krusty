@@ -11,3 +11,13 @@ fn dependency_top_level_properties_share_one_storage_location() {
         DependencyConsumer::Native,
     );
 }
+
+#[test]
+fn dependency_file_private_properties_run_their_file_initialization_once() {
+    assert_official_dependency_closures(
+        include_str!("../fixtures/klib_closure_frames/FilePrivateProperties.kt"),
+        include_str!("../fixtures/klib_closure_frames/FilePrivatePropertyConsumer.kt"),
+        "DependencyFilePrivateProperties",
+        DependencyConsumer::Native,
+    );
+}

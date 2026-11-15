@@ -197,6 +197,11 @@ pub struct DependencyBodyUnit {
     local_functions: HashMap<super::same_library_class::LocalIdentity, LocalFunction>,
     /// The static each top-level property's backing field is stored in, by that field.
     statics: HashMap<static_properties::StaticIdentity, u32>,
+    /// The initialization of each library file whose top-level functions this unit emits and whose
+    /// initialization runs code, by its library and serialized file.
+    file_initializations: HashMap<static_properties::FileIdentity, FunId>,
+    /// The functions that already run their file's initialization first, or need none.
+    initialized_functions: HashSet<FunId>,
     builtins: IrBuiltinOperators,
 }
 
@@ -240,6 +245,8 @@ impl Default for DependencyBodyUnit {
             local_classes: HashMap::default(),
             local_functions: HashMap::default(),
             statics: HashMap::default(),
+            file_initializations: HashMap::default(),
+            initialized_functions: HashSet::default(),
             builtins: IrBuiltinOperators::new(),
         }
     }
@@ -281,6 +288,8 @@ struct PendingBody<'a> {
     )>,
     value_member: Option<MemberClass<'a>>,
     local_body: Option<super::same_library_class::LocalBody<'a>>,
+    /// The static a top-level property's initialization stores, and its serialized initializer.
+    static_initialization: Option<(StaticField, crate::metadata::klib_ir::tree::KlibIrExprId)>,
 }
 
 /// The declaration of a body this unit emits, and for a value class member, its class.
@@ -736,6 +745,8 @@ impl DependencyBodyUnit {
             local_classes: &mut self.local_classes,
             local_functions: &mut self.local_functions,
             statics: &mut self.statics,
+            file_initializations: &mut self.file_initializations,
+            initialized_functions: &mut self.initialized_functions,
             pending: &mut pending,
             root: callable,
             active_module: callable.identity().module.clone(),
@@ -767,7 +778,18 @@ impl DependencyBodyUnit {
                 }
             })
             .map_err(|reason| KlibBodyDecline::new(callable.signature().clone(), reason))?;
-        while let Some(body) = linker.pending.pop_front() {
+        loop {
+            let Some(body) = linker.pending.pop_front() else {
+                // Every body is lowered. Each top-level function among them first runs its file's
+                // initialization, which may queue the bodies of that initialization.
+                linker
+                    .initialize_files(&mut self.ir)
+                    .map_err(|reason| KlibBodyDecline::new(callable.signature().clone(), reason))?;
+                if linker.pending.is_empty() {
+                    break;
+                }
+                continue;
+            };
             linker.active_module.clone_from(&body.identity.module);
             linker.active_identity.clone_from(&body.identity);
             linker.active_value_class.clone_from(&body.value_member);
@@ -783,7 +805,9 @@ impl DependencyBodyUnit {
                 &mut self.ir,
                 &mut linker,
             );
-            let lowered = if let Some(local) = &body.local_body {
+            let lowered = if let Some((field, initializer)) = body.static_initialization {
+                lowering.initialize_static(field, initializer)
+            } else if let Some(local) = &body.local_body {
                 match local {
                     super::same_library_class::LocalBody::Initialize(plan) => {
                         lowering.initialize_local(plan)
@@ -853,6 +877,8 @@ struct Linker<'u, 's> {
     >,
     local_functions: &'u mut HashMap<super::same_library_class::LocalIdentity, LocalFunction>,
     statics: &'u mut HashMap<static_properties::StaticIdentity, u32>,
+    file_initializations: &'u mut HashMap<static_properties::FileIdentity, FunId>,
+    initialized_functions: &'u mut HashSet<FunId>,
     pending: &'u mut VecDeque<PendingBody<'s>>,
     /// The declaration this lowering was asked for, which its own recursive calls select.
     root: KlibBodyCallable<'s>,
@@ -2141,6 +2167,7 @@ impl<'s> Linker<'_, 's> {
             initialization: None,
             value_member,
             local_body: None,
+            static_initialization: None,
         });
         Ok(declared)
     }
@@ -2352,6 +2379,10 @@ impl UnitCheckpoint {
             .retain(|_, function| (function.function as usize) < unit.ir.functions.len());
         unit.statics
             .retain(|_, index| (*index as usize) < unit.ir.statics.len());
+        unit.file_initializations
+            .retain(|_, function| *function < first);
+        unit.initialized_functions
+            .retain(|function| *function < first);
         unit.ir.function_overrides.retain(|owner, _| {
             unit.ir
                 .classes
