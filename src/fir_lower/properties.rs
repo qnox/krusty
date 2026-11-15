@@ -1182,8 +1182,23 @@ fn materialize_member_property(
         );
         return Ok(());
     }
+    // A retained body's capture-storage property is the capture's constructor-prefix field. A
+    // capture only constructor code reads (a super-constructor argument) is a parameter kept in no
+    // field, as kotlinc keeps it, so its storage property declares no field of its own either.
+    let fieldless_capture = property.flags.has(DeclarationFlags::CAPTURE_STORAGE)
+        && ir.classes[class_id as usize]
+            .ctor_args
+            .iter()
+            .any(|argument| {
+                argument.field_index.is_none()
+                    && argument
+                        .capture
+                        .as_ref()
+                        .is_some_and(|capture| *capture.source_name == *property.name)
+            });
     let has_storage = !class_flags.has(DeclarationFlags::INTERFACE)
         && property.delegate.is_none()
+        && !fieldless_capture
         && (property.flags.has(DeclarationFlags::PROPERTY_PARAMETER)
             || property.initializer.is_some()
             || property.flags.has(DeclarationFlags::LATEINIT)
