@@ -307,7 +307,6 @@ callableReference/function/booleanNotIntrinsic.kt
 callableReference/function/classMemberFromCompanionObject.kt
 callableReference/function/coercionToUnit.kt
 callableReference/function/enumValueOfMethod.kt
-callableReference/function/extensionFunctionAsASuperTypePassToSAMInterface.kt
 callableReference/function/genericCallableReferenceArgumentsNonJVM.kt
 callableReference/function/genericCallableReferenceWithReifiedTypeParam.kt
 callableReference/function/genericCallableReferencesWithNullableTypes.kt
@@ -318,7 +317,6 @@ callableReference/function/kt32462.kt
 callableReference/function/local/enumExtendsTrait.kt
 callableReference/function/local/localFunctionName.kt
 callableReference/function/overloadedFunVsVal.kt
-callableReference/function/referenceToCompanionMember.kt
 callableReference/function/sortListOfStrings.kt
 callableReference/genericConstructorReference.kt
 callableReference/genericLocalClassConstructorReference.kt
@@ -376,8 +374,6 @@ casts/castGenericNull.kt
 casts/functions/asFunKBig.kt
 casts/functions/asFunKSmall.kt
 casts/functions/isFunKBig.kt
-casts/functions/isFunKSmall.kt
-casts/functions/isFunKSmallNonJS.kt
 casts/functions/reifiedAsFunKBig.kt
 casts/functions/reifiedAsFunKSmall.kt
 casts/functions/reifiedIsFunKBig.kt
@@ -409,7 +405,6 @@ classLiteral/bound/primitives.kt
 classLiteral/classEquality.kt
 classes/comanionObjectFieldVsClassField.kt
 classes/implementComparableInSubclass.kt
-classes/kt1535.kt
 classes/kt1538.kt
 classes/kt2417.kt
 classes/kt2566_2.kt
@@ -432,8 +427,6 @@ closures/capturedVarsOptimization/withCoroutines.kt
 closures/capturedVarsOptimization/withCoroutinesNoStdLib.kt
 closures/closureInsideClosure/propertyAndFunctionNameClash.kt
 closures/closureInsideConstrucor.kt
-closures/closureOnTopLevel1.kt
-closures/closureOnTopLevel2.kt
 closures/closuresAsSingleton.kt
 closures/crossinlineLocalDeclaration.kt
 closures/kt11634_4.kt
@@ -472,7 +465,6 @@ contextParameters/substitutedContextReceivers.kt
 contextParameters/suspendContextParemetersWithExtension.kt
 contextParameters/suspendContextualWithExtension.kt
 contextParameters/useFromAnotherModuleSuspending.kt
-contextParameters/withExtensionReceiverInSupertype.kt
 contracts/contractForCast.kt
 contracts/destructuredVariable.kt
 contracts/forLoop.kt
@@ -1299,8 +1291,6 @@ exceptions/kt69534.kt
 exceptions/rethrow.kt
 exceptions/throw0.kt
 exceptions/throw_from_catch.kt
-extensionFunctions/extensionFunctionAsASupertypeOfValueClass.kt
-extensionFunctions/extensionFunctionAsATypeLocal.kt
 extensionFunctions/extensionFunctionAsSupertype.kt
 extensionFunctions/extensionFunctionDifferentReceivers.kt
 extensionFunctions/extensionFunctionFakeOverride.kt
@@ -1311,7 +1301,6 @@ extensionFunctions/kt3285.kt
 extensionFunctions/kt475.kt
 extensionFunctions/kt865.kt
 extensionFunctions/memberExtensionEqualsHashCodeToStringInInterface.kt
-extensionFunctions/nestedExtensionFunctionAsASupertype.kt
 extensionFunctions/shared.kt
 extensionFunctions/suspendConversionForExtensionFunAsAFunType.kt
 extensionFunctions/suspendConversionForExtensionFunAsAPropertyType.kt
@@ -1369,13 +1358,10 @@ funInterface/kt77685.kt
 funInterface/kt79092-sam.kt
 funInterface/kt79092.kt
 funInterface/multimodule.kt
-funInterface/noConversionForSubtype.kt
-funInterface/noConversionForSubtypeGeneric.kt
 funInterface/nonAbstractMethod.kt
 funInterface/nonTrivialProjectionInSuperType.kt
 funInterface/nullableSam.kt
 funInterface/primitiveConversions.kt
-funInterface/subtypeOfFunctionalTypeToFunInterfaceConversion.kt
 funInterface/suspendFunInterfaceConversionCodegen.kt
 function/arithmetic.kt
 function/defaults.kt
@@ -1409,7 +1395,6 @@ function/sum_mixed.kt
 function/sum_silly.kt
 function/unreachableStatementAfterReturn.kt
 functions/bigArity/function255.kt
-functions/bigArity/instanceOfCallableReference.kt
 functions/bigArity/invokeLambda.kt
 functions/bigArity/subclass.kt
 functions/functionExpression/functionExpression.kt
@@ -2306,8 +2291,6 @@ multiplatform/k2/basic/expectActualOverloads.kt
 multiplatform/k2/basic/expectActualTypeParameters.kt
 multiplatform/k2/basic/expectInterfaceInSupertypes.kt
 multiplatform/k2/basic/extensionAndFakeOverride.kt
-multiplatform/k2/basic/extensionFunctionAsASupertype.kt
-multiplatform/k2/basic/extensionFunctionAsASupertypeConversion.kt
 multiplatform/k2/basic/interfaceMethodFromSuperTypeIsImplementedInOtherExpectSuperClass.kt
 multiplatform/k2/basic/localIntersectionOverrideWithDefaultParameterInCommonModule.kt
 multiplatform/k2/basic/localSubstitutionOverrideInCommonModule.kt
