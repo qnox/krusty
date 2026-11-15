@@ -73,6 +73,45 @@ fn default_null_checks_lower_branch_local_returns_in_prepared_inline_blocks() {
 }
 
 #[test]
+fn selected_suspend_inline_template_keeps_its_unintercepted_suspension_block() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(type_name("kotlin/coroutines")),
+        "suspendCoroutine",
+    );
+    let selected = symbols
+        .callables
+        .functions()
+        .iter()
+        .filter(|function| function.callable.suspend && function.callable.inline.must_inline())
+        .collect::<Vec<_>>();
+    let [selected] = selected.as_slice() else {
+        panic!("expected one selected suspend inline `suspendCoroutine`");
+    };
+    let target = selected
+        .callable
+        .external_identity
+        .expect("a KLIB suspend function carries its provider identity");
+    let selected = libraries
+        .external_callable(target)
+        .expect("the provider realizes the selected identity");
+    let mut ir = IrFile::default();
+
+    let template = template(&mut ir, &libraries, &selected)
+        .unwrap_or_else(|decline| panic!("suspendCoroutine: {decline}"));
+
+    assert!(ir.inline_only_fns.contains(&template.function));
+    assert!(!ir.intrinsic_suspension_points.is_empty());
+    assert!(ir.intrinsic_suspension_points.keys().all(
+        |expression| matches!(ir.expr(*expression), IrExpr::InvokeFunction { func, .. }
+            if matches!(ir.expr(*func), IrExpr::Lambda { inline_body: Some(_), .. }))
+    ));
+}
+
+#[test]
 fn array_sum_template_keeps_its_selected_receiver_contract() {
     extension_template(
         "kotlin/collections",
@@ -312,7 +351,7 @@ fn a_scope_function_body_is_a_generic_template_that_splices_its_lambda() {
             "takeIf",
             &["T"][..],
             "scope {scope {return@Some(0) when[invoke(v1!: (T) -> Boolean, v0!: T): Boolean -> \
-             ImplicitCoercion<T?>(v0!: T), else -> Null: Null]: T?: Nothing}: Nothing}",
+             ImplicitCoercion<T?>(v0!: T): T?, else -> Null: Null]: T?: Nothing}: Nothing}",
         ),
     ] {
         let selected = kotlin_function(&libraries, name);
@@ -589,6 +628,7 @@ fn a_dependency_property_read_reads_the_provider_property() {
                     arguments,
                     parameters,
                     result,
+                    substitutions: _,
                     source_receiver,
                 } => Some((
                     *target,

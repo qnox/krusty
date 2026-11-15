@@ -44,7 +44,10 @@ pub use dependency_metadata::{
     SingletonExtensionUnreadReceiver, SingletonMemberReceiver,
 };
 pub(crate) use dependency_metadata::{ExportedConstructor, ExportedPropertyAccessor};
-pub use dependency_signature::{instantiate_dependency_signature, DependencyFunctionSignature};
+pub use dependency_signature::{
+    authenticate_dependency_coroutine_call, instantiate_dependency_signature,
+    DependencyFunctionSignature,
+};
 
 /// The parameter form [`Entry::selected`] reports beside the selected function.
 pub use crate::ir::MainEntryParameters;
@@ -116,6 +119,22 @@ impl CheckedIrFile<'_> {
 /// One emitted artifact: a target-relative path and its bytes (e.g. `Foo.class`, a `.wasm` module).
 pub type Artifact = (String, Vec<u8>);
 
+/// Target-owned policy for common IR lowerings which run before emission closure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommonIrPreparation {
+    pub counted_loops: counted_loops::CountedLoopPolicy,
+    pub enums: enums::Contract,
+}
+
+/// An unsupported checked shape or a failed invariant during common-IR preparation.
+/// Capability declines and compiler inconsistencies retain distinct diagnostic channels.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CommonIrPreparationError {
+    Suspend(coroutines::ContinuationDecline),
+    /// A compiler-owned preparation invariant failed after source-shape validation.
+    Invariant(String),
+}
+
 pub trait Backend {
     /// Cross-file state accumulated while lowering.
     type State: Default;
@@ -130,11 +149,33 @@ pub trait Backend {
         false
     }
 
-    /// Whether this backend lowers suspend functions on common IR with the shared coroutine
-    /// passes, and so calls the stdlib declarations the handoff selects for them
-    /// ([`crate::ir::IrCoroutineRuntime`]). A backend with its own coroutine pass leaves this off.
-    fn lowers_coroutines_on_common_ir(&self) -> bool {
-        false
+    /// Target-specific pieces of the common lowering sequence, applied before emission closure.
+    fn common_ir_preparation(&self) -> Option<CommonIrPreparation> {
+        None
+    }
+
+    /// The diagnostic declining a `construct` this backend cannot lower yet. Each backend names
+    /// itself, so a harness can tell a capability decline from a frontend error.
+    fn capability_decline(&self, construct: &str) -> String {
+        format!("krusty: the IR backend does not support {construct} yet")
+    }
+
+    /// Report a capability decline or invariant failure from common-IR preparation.
+    fn report_common_ir_preparation_error(
+        &self,
+        decline: &CommonIrPreparationError,
+        diags: &mut DiagSink,
+    ) {
+        match decline {
+            CommonIrPreparationError::Suspend(declined) => diags.error(
+                crate::diag::Span::new(0, 0),
+                self.capability_decline(declined.construct()),
+            ),
+            CommonIrPreparationError::Invariant(error) => diags.error(
+                crate::diag::Span::new(0, 0),
+                format!("internal error: {error}"),
+            ),
+        }
     }
 
     /// Whether this backend numbers the dispatch slots of the module's classes itself, so a file

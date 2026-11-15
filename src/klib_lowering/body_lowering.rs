@@ -116,14 +116,37 @@ pub(super) struct RangeMembershipHeader {
     pub(super) ret: Ty,
 }
 
+/// The exact provider-selected `suspendCoroutineUninterceptedOrReturn<T>` call shape.
+pub(super) struct UninterceptedSuspensionCall {
+    pub(super) parameter: Ty,
+    pub(super) result: Ty,
+    pub(super) formal: crate::types::TyParamName,
+}
+
 /// Joins the calls a body makes of public dependency declarations to the functions they invoke.
 pub(super) trait CallLinker {
+    /// Whether this exact provider-assigned dependency callable is declared `suspend`. A selected
+    /// suspend call in a KLIB body keeps its source result type in common IR; the common coroutine
+    /// preparation later supplies the target continuation ABI.
+    fn is_suspend_callable(&self, _target: crate::fir::ExternalCallableId) -> bool {
+        false
+    }
+
     /// The same authenticated primitive call shape that dependency planning treats as a leaf.
     /// Template linkers retain their ordinary checked external-call boundary by default.
     fn common_primitive(
         &self,
         _callee: &crate::libraries::KlibDeclarationSignature,
     ) -> Lowered<Option<super::primitive_calls::CommonPrimitiveCall>> {
+        Ok(None)
+    }
+
+    /// The provider-selected compiler suspension intrinsic, if this template linker owns its
+    /// identity and has authenticated its serialized header.
+    fn unintercepted_suspension(
+        &self,
+        _callee: &crate::libraries::KlibDeclarationSignature,
+    ) -> Lowered<Option<UninterceptedSuspensionCall>> {
         Ok(None)
     }
 
@@ -241,6 +264,12 @@ pub(super) trait CallLinker {
     /// Proves that `classifier` is a dependency object, whose value a body may read.
     fn singleton(&self, classifier: TypeName) -> Lowered<()>;
 
+    /// Whether the target owns the representation of `classifier`, which a class of this unit
+    /// extends without the unit materializing it. A linker that knows no such class says no.
+    fn target_represents(&self, _classifier: TypeName) -> bool {
+        false
+    }
+
     /// The dependency enum class whose constant `entry` a body reads, with that constant's name.
     /// A linker that materializes no class declines the read.
     fn enum_entry(
@@ -318,6 +347,13 @@ pub(super) struct LinkedAccessor {
     pub(super) context_count: usize,
     /// As [`LinkedCallee::class_type_parameters`].
     pub(super) class_type_parameters: Vec<String>,
+    /// The exact provider-selected external accessor called by this property operation, when the
+    /// target is a dependency property.
+    pub(super) callable: Option<crate::fir::ExternalCallableId>,
+    /// This accessor's own formal identities and bounds, distinct from declaring-class formals.
+    pub(super) type_parameters: Vec<crate::types::TyParamName>,
+    pub(super) type_parameter_bounds: Vec<Vec<Ty>>,
+    pub(super) reified_type_parameters: Vec<u32>,
 }
 
 /// What an accessor call reaches.
@@ -367,6 +403,9 @@ pub(super) struct BodyLowering<'a> {
     instance_storage: Option<instance_storage::InstanceStorageFrame<'a>>,
     /// Enclosing values a member of an object literal reads through its constructor fields.
     captures: HashMap<KlibIrSymbol, object_literals::CaptureField>,
+    /// The members of the object literals being lowered, by serialized signature.
+    object_members:
+        HashMap<crate::metadata::klib_ir::KlibIrSignature, object_literals::ObjectMember>,
     /// The member function whose `return`s are being lowered, when that is not the template.
     member_return: Option<KlibIrSymbol>,
     /// The result type of [`Self::member_return`].
@@ -401,6 +440,7 @@ impl<'a> BodyLowering<'a> {
             captures: HashMap::default(),
             member_return: None,
             member_result: None,
+            object_members: HashMap::default(),
         }
     }
 
@@ -770,22 +810,39 @@ impl<'a> BodyLowering<'a> {
         if actual.is_nullable() && !expected.is_nullable() {
             return false;
         }
-        let Some(name) = actual.non_null().kotlin_class_internal() else {
-            return false;
-        };
-        let Some(class) = self.ir.classes.iter().find(|class| {
-            class.fq_name == name && (class.is_anonymous_object || class.is_local_class)
-        }) else {
-            return false;
-        };
         let parameters = self.header.type_parameters();
-        class
-            .supertypes
-            .iter()
-            .any(|supertype| self.linker.is_subtype(parameters, *supertype, expected))
-            || self
-                .linker
-                .is_subtype(parameters, Ty::obj_name(class.superclass), expected)
+        self.local_class_supertypes(actual)
+            .is_some_and(|mut supertypes| {
+                supertypes.any(|supertype| self.linker.is_subtype(parameters, supertype, expected))
+            })
+    }
+
+    /// The direct supertypes recorded for the local or anonymous class lowered in this body that
+    /// the non-null `actual` names; `None` when it names no such class.
+    fn local_class_supertypes(&self, actual: Ty) -> Option<impl Iterator<Item = Ty> + '_> {
+        let name = actual.non_null().kotlin_class_internal()?;
+        let class = self.ir.classes.iter().find(|class| {
+            class.fq_name == name && (class.is_anonymous_object || class.is_local_class)
+        })?;
+        Some(
+            class
+                .supertypes
+                .iter()
+                .copied()
+                .chain(std::iter::once(Ty::obj_name(class.superclass))),
+        )
+    }
+
+    /// The generic class `owner` as `sub` applies it through its hierarchy: through the supertypes
+    /// recorded for a local or anonymous class lowered in this body, or the calling compilation's
+    /// class model otherwise.
+    fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
+        match self.local_class_supertypes(sub) {
+            Some(mut supertypes) => {
+                supertypes.find_map(|supertype| self.linker.applied_supertype(supertype, owner))
+            }
+            None => self.linker.applied_supertype(sub, owner),
+        }
     }
 
     /// Whether `supertype` counts as a supertype of `subtype`: one recorded for a local or
@@ -994,10 +1051,12 @@ impl<'a> BodyLowering<'a> {
         }
         // A prepared copy also erases the type parameters of the inline functions it already
         // expanded, so the value may be typed with the erasure's bound: a supertype of `declared`.
+        // A value of a subtype of `declared`, as `suspendCoroutine` passes its `SafeContinuation`
+        // to a `(Continuation<T>) -> Unit` block, is one by subsumption.
+        let parameters = self.header.type_parameters();
         if actual != self.header.erased(declared)
-            && !self
-                .linker
-                .is_subtype(self.header.type_parameters(), declared, actual)
+            && !self.linker.is_subtype(parameters, declared, actual)
+            && !self.linker.is_subtype(parameters, actual, declared)
         {
             return Err(KlibBodyDeclineReason::ImplicitConversion);
         }

@@ -36,6 +36,7 @@ use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol};
 use crate::types::{Ty, TypeName};
 
 mod class_construction;
+pub(crate) use class_construction::superclass_constructor_ordinal;
 mod enum_materialization;
 mod local_class;
 
@@ -126,7 +127,7 @@ impl EmittedDependencyCallable {
         }
     }
 
-    fn realizes_getter(self) -> bool {
+    fn realizes_accessor(self) -> bool {
         matches!(
             self.realization,
             DependencyExternalRealization::EmittedBody
@@ -859,7 +860,7 @@ impl CallLinker for Linker<'_, '_> {
         &self,
         signature: &KlibDeclarationSignature,
     ) -> Result<Option<super::primitive_calls::CommonPrimitiveCall>, KlibBodyDeclineReason> {
-        self.primitive_at(signature, |facts, identity, bodies| {
+        self.primitive_at(signature, true, |facts, identity, bodies| {
             facts.common_primitive(identity, bodies)
         })
     }
@@ -868,7 +869,7 @@ impl CallLinker for Linker<'_, '_> {
         &self,
         signature: &KlibDeclarationSignature,
     ) -> Result<Option<super::primitive_calls::CommonPrimitiveCall>, KlibBodyDeclineReason> {
-        self.primitive_at(signature, |facts, identity, bodies| {
+        self.primitive_at(signature, false, |facts, identity, bodies| {
             facts.range_literal_bounds(identity, bodies)
         })
     }
@@ -1216,9 +1217,11 @@ impl CallLinker for Linker<'_, '_> {
         if self.sources.callees.target_represents(classifier) {
             return Ok(());
         }
-        Err(KlibBodyDeclineReason::UnsupportedOperation(
-            "an object value",
-        ))
+        Err(KlibBodyDeclineReason::UnsupportedObjectValue(classifier))
+    }
+
+    fn target_represents(&self, classifier: TypeName) -> bool {
+        self.sources.callees.target_represents(classifier)
     }
 
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
@@ -1320,6 +1323,10 @@ impl CallLinker for Linker<'_, '_> {
                 ret: linked.ret,
                 context_count: linked.context_count,
                 class_type_parameters: linked.class_type_parameters,
+                callable: None,
+                type_parameters: Vec::new(),
+                type_parameter_bounds: Vec::new(),
+                reified_type_parameters: Vec::new(),
             });
         }
         // An accessor with a body of a class the unit materializes is emitted here, as the class's
@@ -1339,7 +1346,14 @@ impl CallLinker for Linker<'_, '_> {
                 ret: linked.ret,
                 context_count: linked.context_count,
                 class_type_parameters: linked.class_type_parameters,
+                callable: None,
+                type_parameters: Vec::new(),
+                type_parameter_bounds: Vec::new(),
+                reified_type_parameters: Vec::new(),
             });
+        }
+        if let Some(linked) = self.top_level_accessor(ir, &identity)? {
+            return Ok(linked);
         }
         // A complete retained export or positive target plan owns this edge. Other accessors
         // retain the explicit unsupported boundary instead of acquiring a header-only body path.
@@ -1347,7 +1361,7 @@ impl CallLinker for Linker<'_, '_> {
             .sources
             .externals
             .get(&identity)
-            .is_some_and(|external| external.realizes_getter())
+            .is_some_and(|external| external.realizes_accessor())
         {
             return Err(unsupported());
         }
@@ -1360,11 +1374,34 @@ impl CallLinker for Linker<'_, '_> {
             }
             None => return Err(KlibBodyDeclineReason::Unjoined),
         };
-        super::accessor_calls::authenticate(selected, self.sources.bodies)?.ok_or(
-            KlibBodyDeclineReason::UnsupportedOperation(
-                "a dependency property accessor without a getter contract",
-            ),
-        )
+        let mut linked = super::accessor_calls::authenticate(selected, self.sources.bodies)?
+            .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                "a dependency property accessor without an exact accessor contract",
+            ))?;
+        let (callable, realization) = self
+            .sources
+            .declarations
+            .external_callable_by_dependency(&identity)
+            .ok_or(KlibBodyDeclineReason::Unjoined)?;
+        let selected_accessor = selected.accessor().ok_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch(
+                "the selected accessor has no property identity".to_owned(),
+            )
+        })?;
+        let realized_accessor = realization.klib_body_accessor.as_ref().ok_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch(
+                "the selected external callable is not a property accessor".to_owned(),
+            )
+        })?;
+        if realized_accessor.property != selected_accessor.property
+            || realized_accessor.role != selected_accessor.role
+        {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "the external callable resolves another accessor of the property".to_owned(),
+            ));
+        }
+        linked.callable = Some(callable);
+        Ok(linked)
     }
 
     fn requires_declaration(
@@ -1730,6 +1767,68 @@ impl<'s> Linker<'_, 's> {
             ret: linked.ret,
             context_count: linked.context_count,
             class_type_parameters: linked.class_type_parameters,
+            callable: None,
+            type_parameters: Vec::new(),
+            type_parameter_bounds: Vec::new(),
+            reified_type_parameters: Vec::new(),
+        }))
+    }
+
+    /// The accessor of a top-level property, when the unit emits its body: a non-generic
+    /// accessor with a body that no retained export realizes is emitted here, as a top-level
+    /// function the support body calls is.
+    fn top_level_accessor(
+        &mut self,
+        ir: &mut IrFile,
+        identity: &KlibDependencyCallable,
+    ) -> Result<Option<LinkedAccessor>, KlibBodyDeclineReason> {
+        if self.sources.externals.contains_key(identity) {
+            return Ok(None);
+        }
+        let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(identity) else {
+            return Ok(None);
+        };
+        let Some(accessor) = callables[0].accessor() else {
+            return Ok(None);
+        };
+        let write = accessor.role == crate::libraries::KlibAccessorRole::Setter;
+        let Some((arena, declaration)) = self.sources.bodies.function(identity) else {
+            return Ok(None);
+        };
+        if declaration.dispatch_receiver.is_some()
+            || !matches!(declaration.body, Some(KlibIrBody::Block(_)))
+        {
+            return Ok(None);
+        }
+        let selected = selected_callable_for_header(
+            Some(SelectedKlibCallables::Variants(callables)),
+            None,
+            arena,
+            declaration,
+        )?;
+        if selected
+            .and_then(|selected| selected.generic_signature())
+            .is_some_and(|signature| !signature.formals.is_empty())
+        {
+            return Ok(None);
+        }
+        let function = match self.functions.get(identity) {
+            Some(function) => *function,
+            None => self.declare(ir, identity, selected, arena, declaration)?,
+        };
+        let declared = &ir.functions[function as usize];
+        Ok(Some(LinkedAccessor {
+            target: LinkedAccessorTarget::Local(function),
+            write,
+            receiver: None,
+            params: declared.params.clone(),
+            ret: declared.ret,
+            context_count: ir.declared_parameters(function).context_count,
+            class_type_parameters: Vec::new(),
+            callable: None,
+            type_parameters: Vec::new(),
+            type_parameter_bounds: Vec::new(),
+            reified_type_parameters: Vec::new(),
         }))
     }
 
@@ -2348,6 +2447,7 @@ impl Linker<'_, '_> {
     fn primitive_at(
         &self,
         signature: &KlibDeclarationSignature,
+        allow_target_property_read: bool,
         select: PrimitiveSelection,
     ) -> Result<Option<super::primitive_calls::CommonPrimitiveCall>, KlibBodyDeclineReason> {
         // Keep the existing public-call obligation and canonical ambiguity diagnostics. A
@@ -2370,14 +2470,34 @@ impl Linker<'_, '_> {
                 ))
             }
         };
-        let primitive = select(self.sources.callees, &identity, self.sources.bodies)?;
-        Ok(
-            if self.sources.externals.contains_key(&identity) || &identity == self.root.identity() {
-                None
-            } else {
-                primitive
-            },
-        )
+        let selected = select(self.sources.callees, &identity, self.sources.bodies)?;
+        let primitive = if let Some(external) = self.sources.externals.get(&identity) {
+            let property_read = external.target_intrinsic().filter(|operation| {
+                allow_target_property_read
+                    && matches!(
+                        operation,
+                        crate::libraries::CompilerIntrinsic::ArraySize
+                            | crate::libraries::CompilerIntrinsic::StringLength
+                    )
+            });
+            property_read
+                .map(|operation| {
+                    self.sources.callees.target_property_read(
+                        &identity,
+                        self.sources.bodies,
+                        operation,
+                    )
+                })
+                .transpose()?
+                .flatten()
+        } else {
+            selected
+        };
+        Ok(if &identity == self.root.identity() {
+            None
+        } else {
+            primitive
+        })
     }
 
     /// The top-level function private to the active body's file that `identity` names. No
