@@ -1930,6 +1930,7 @@ mod tests {
                 let files = uris
                     .iter()
                     .map(|uri| IndexedFile {
+                        references: crate::DefinitionIndex::default(),
                         uri: (*uri).to_string(),
                         diagnostics: Vec::new(),
                         text_hash: 7,
@@ -2350,6 +2351,7 @@ mod tests {
                 let files = uris
                     .iter()
                     .map(|uri| IndexedFile {
+                        references: crate::DefinitionIndex::default(),
                         uri: (*uri).to_string(),
                         diagnostics: Vec::new(),
                         text_hash: 0,
@@ -2404,6 +2406,7 @@ mod tests {
                     files: uris
                         .iter()
                         .map(|uri| IndexedFile {
+                            references: crate::DefinitionIndex::default(),
                             uri: (*uri).to_string(),
                             diagnostics: Vec::new(),
                             text_hash: 0,

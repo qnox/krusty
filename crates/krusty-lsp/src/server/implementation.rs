@@ -33,11 +33,12 @@ use super::line_index::{position_to_byte_offset_with_budget, LineIndex};
 pub use super::response_delivery::Dispatch;
 use super::response_delivery::{dispatch_sync as dispatch_messages, AsyncResponseDelivery};
 use super::response_page::{
-    array_messages, fit_completion_items, limit_signature_help, limit_text, location_messages,
-    partial_result_token, too_large, HOVER_TEXT_BYTES,
+    array_messages, fit_completion_items, limit_signature_help, limit_text, partial_result_token,
+    too_large, HOVER_TEXT_BYTES,
 };
 use super::semantic_token_response;
 use super::workspace_index::{WorkspaceDiagnosticStore, WorkspaceDiagnostics};
+use super::workspace_references::WorkspaceReferenceStore;
 use crate::analysis::serialized_json_wire_bytes;
 use crate::compiler_analysis::LibraryRef;
 use crate::server::engine::{
@@ -403,7 +404,20 @@ impl Analysis for DocumentAnalyzer {
             .map(|(uri, text)| (uri.as_str(), text.as_str()))
             .collect();
         let open: Vec<&str> = documents.iter().map(|(uri, _)| *uri).collect();
-        let (analyses, _support) = self.analyze_open_documents(&documents, &open);
+        let (mut analyses, support) = self.analyze_open_documents(&documents, &open);
+        let mut uris = documents.iter().map(|(uri, _)| *uri).collect::<Vec<_>>();
+        uris.extend(support.iter().map(|(uri, _)| uri.as_str()));
+        let mut sources = documents.iter().map(|(_, text)| *text).collect::<Vec<_>>();
+        sources.extend(support.iter().map(|(_, text)| text.as_str()));
+        for analysis in &mut analyses {
+            if analysis.workspace_references.entry_count() == 0 {
+                analysis.workspace_references = std::mem::take(&mut analysis.definitions);
+            }
+            analysis.workspace_references.bind_uris(&uris);
+            analysis
+                .workspace_references
+                .record_declaration_names(&sources);
+        }
         let conclusive = analyses.len() == readable.len();
         let files = analyses
             .into_iter()
@@ -412,6 +426,7 @@ impl Analysis for DocumentAnalyzer {
                 uri,
                 diagnostics: analysis.diagnostics,
                 text_hash: workspace_text_hash(&text),
+                references: analysis.workspace_references,
                 text,
             })
             .collect();
@@ -563,6 +578,8 @@ macro_rules! partial_token {
         }
     };
 }
+
+mod navigation;
 
 /// `(start line, start UTF-16 column, end line, end UTF-16 column,
 /// packed severity + interned message id)`.
@@ -982,6 +999,9 @@ pub struct LspService<B> {
     /// Candidates already asked for, so a keystroke does not queue the same render twice.
     requested_dependencies: HashSet<String>,
     workspace_diagnostics: WorkspaceDiagnosticStore,
+    /// Uses from closed-file chunks, keyed by declaration identity rather than a source-set file
+    /// index. Open documents answer from their own definition indexes.
+    workspace_references: WorkspaceReferenceStore,
     backend: B,
     analysis_dirty: bool,
     analysis_retry_at: Option<Instant>,
@@ -1040,6 +1060,7 @@ where
             located_dependencies: HashMap::new(),
             requested_dependencies: HashSet::new(),
             workspace_diagnostics: WorkspaceDiagnosticStore::default(),
+            workspace_references: WorkspaceReferenceStore::default(),
             backend,
             analysis_dirty: false,
             analysis_retry_at: None,
@@ -1185,6 +1206,8 @@ where
             files,
             conclusive,
         } = batch;
+        self.workspace_references
+            .merge(generation, &attempted, conclusive, &files);
         let outcome = self.workspace_diagnostics.merge(
             generation,
             &attempted,
@@ -1368,6 +1391,7 @@ where
         self.located_dependencies.clear();
         self.requested_dependencies.clear();
         self.workspace_diagnostics.reset_to(generation);
+        self.workspace_references.reset_to(generation);
         // Clearing old-model results is itself a diagnostic change. Pull clients must be told even
         // when the replacement model produces no files or its first analysis is still pending.
         self.diagnostic_refresh().into_iter().collect()
@@ -2188,52 +2212,7 @@ where
         Dispatch::messages(vec![rpc_result(id, help)])
     }
 
-    fn definition(&mut self, id: Option<Value>, params: Value) -> Dispatch {
-        let Some(id) = id else {
-            return Dispatch::none();
-        };
-        let progress = partial_token!(id, params);
-        let Ok(params) = serde_json::from_value::<TextDocumentPositionParams>(params) else {
-            return invalid_params(Some(id));
-        };
-        let Some(open) = self.documents.get(&params.text_document.uri) else {
-            return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
-        };
-        let Some(offset) = open.offset_at(params.position) else {
-            return invalid_params(Some(id));
-        };
-        let locations = self.navigation_locations(&open.definitions, offset);
-        let library_ref = locations
-            .is_empty()
-            .then(|| open.library_definitions.get(offset).cloned())
-            .flatten();
-        if !locations.is_empty() || library_ref.is_none() {
-            return Dispatch::messages(array_messages(id, locations, progress.as_ref()));
-        }
-        const MAX_PENDING_MATERIALIZATIONS: usize = 128;
-        if self.pending_materializations.len() >= MAX_PENDING_MATERIALIZATIONS {
-            return Dispatch::messages(vec![rpc_error(
-                id,
-                -32000,
-                "too many pending dependency definitions",
-            )]);
-        }
-        let token = self.next_materialize_token;
-        self.next_materialize_token = self.next_materialize_token.wrapping_add(1);
-        let result = self.backend.materialize(MaterializeJob {
-            token,
-            reference: library_ref.unwrap(),
-        });
-        match result {
-            Some(result) => Dispatch::messages(vec![self.materialize_response(id, result)]),
-            None => {
-                self.pending_materializations.insert(token, id);
-                Dispatch::none()
-            }
-        }
-    }
-
-    fn materialize_response(&self, id: Value, result: MaterializeResult) -> Value {
+    pub(super) fn materialize_response(&self, id: Value, result: MaterializeResult) -> Value {
         let location = result.definition.and_then(|definition| {
             let uri = path_to_file_uri(&definition.path)?;
             Some(json!({
@@ -2297,136 +2276,6 @@ where
             pending.position,
             outcome.dump,
         ))
-    }
-
-    fn type_definition(&self, id: Option<Value>, params: Value) -> Dispatch {
-        let Some(id) = id else {
-            return Dispatch::none();
-        };
-        let progress = partial_token!(id, params);
-        let Ok(params) = serde_json::from_value::<TextDocumentPositionParams>(params) else {
-            return invalid_params(Some(id));
-        };
-        let Some(open) = self.documents.get(&params.text_document.uri) else {
-            return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
-        };
-        let Some(offset) = open.offset_at(params.position) else {
-            return invalid_params(Some(id));
-        };
-        let locations = self.navigation_locations(&open.type_definitions, offset);
-        Dispatch::messages(location_messages(id, locations, progress.as_ref()))
-    }
-
-    fn implementation(&self, id: Option<Value>, params: Value) -> Dispatch {
-        let Some(id) = id else {
-            return Dispatch::none();
-        };
-        let progress = partial_token!(id, params);
-        let Ok(params) = serde_json::from_value::<TextDocumentPositionParams>(params) else {
-            return invalid_params(Some(id));
-        };
-        let Some(open) = self.documents.get(&params.text_document.uri) else {
-            return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
-        };
-        let Some(offset) = open.offset_at(params.position) else {
-            return invalid_params(Some(id));
-        };
-        let locations = self.navigation_locations(&open.implementations, offset);
-        Dispatch::messages(location_messages(id, locations, progress.as_ref()))
-    }
-
-    fn navigation_locations(&self, index: &DefinitionIndex, offset: u32) -> Vec<Value> {
-        let targets = index.get(offset).collect::<Vec<_>>();
-        if targets.is_empty() {
-            return Vec::new();
-        }
-        targets
-            .into_iter()
-            .filter_map(|target| {
-                let (uri, source) = self.source_set.get(target.file as usize)?;
-                Some(json!({
-                    "uri": uri,
-                    "range": {
-                        "start": byte_offset_to_position(
-                            source,
-                            target.span.lo as usize
-                        ),
-                        "end": byte_offset_to_position(
-                            source,
-                            target.span.hi as usize
-                        ),
-                    }
-                }))
-            })
-            .collect()
-    }
-
-    fn references(&self, id: Option<Value>, params: Value) -> Dispatch {
-        let Some(id) = id else {
-            return Dispatch::none();
-        };
-        let progress = partial_token!(id, params);
-        let Ok(params) = serde_json::from_value::<ReferenceParams>(params) else {
-            return invalid_params(Some(id));
-        };
-        let Some(open) = self.documents.get(&params.text_document.uri) else {
-            return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
-        };
-        let Some(offset) = open.offset_at(params.position) else {
-            return invalid_params(Some(id));
-        };
-        let targets = open.definitions.get(offset).collect::<Vec<_>>();
-        if targets.is_empty() {
-            return Dispatch::messages(vec![rpc_result(id, json!([]))]);
-        }
-        let target_ids = targets.into_iter().collect::<HashSet<_>>();
-        let uris = self.analyzed_uris();
-
-        let mut occurrences = Vec::new();
-        if params.context.include_declaration {
-            occurrences.extend(target_ids.iter().filter_map(|target| {
-                let (uri, _) = self.source_set.get(target.file as usize)?;
-                Some((uri.as_str(), target.span))
-            }));
-        }
-        for (source_file, uri) in uris.iter().enumerate() {
-            let document = &self.documents[*uri];
-            occurrences.extend(
-                document
-                    .definitions
-                    .occurrences_targeting(&target_ids)
-                    .filter(|(span, target)| {
-                        params.context.include_declaration
-                            || source_file as u32 != target.file
-                            || *span != target.span
-                    })
-                    .map(|(span, _)| (*uri, span)),
-            );
-        }
-        occurrences.sort_unstable_by_key(|(uri, span)| (*uri, span.lo, span.hi));
-        occurrences.dedup();
-        let locations = occurrences
-            .into_iter()
-            .filter_map(|(uri, span)| {
-                let source = self
-                    .documents
-                    .get(uri)
-                    .map(|document| document.text.as_str())
-                    .or_else(|| {
-                        self.source_set.iter().find_map(|(source_uri, source)| {
-                            (source_uri == uri).then_some(source.as_str())
-                        })
-                    })?;
-                Some(json!({
-                    "uri": uri,
-                    "range": {
-                        "start": byte_offset_to_position(source, span.lo as usize),
-                        "end": byte_offset_to_position(source, span.hi as usize),
-                    }
-                }))
-            })
-            .collect::<Vec<_>>();
-        Dispatch::messages(array_messages(id, locations, progress.as_ref()))
     }
 
     fn rename(&self, id: Option<Value>, params: Value) -> Dispatch {
@@ -7396,6 +7245,7 @@ mod tests {
             attempted: vec!["file:///w/Swept.kt".to_string()],
             conclusive: true,
             files: vec![IndexedFile {
+                references: crate::DefinitionIndex::default(),
                 uri: "file:///w/Swept.kt".to_string(),
                 diagnostics: vec![Diagnostic {
                     span: krusty::diag::Span::new(4, 9),
@@ -7440,6 +7290,7 @@ mod tests {
             attempted: vec![uri.clone()],
             conclusive: true,
             files: vec![IndexedFile {
+                references: crate::DefinitionIndex::default(),
                 uri: uri.clone(),
                 diagnostics: vec![Diagnostic {
                     span: krusty::diag::Span::new(0, 1),
@@ -7488,6 +7339,7 @@ mod tests {
             attempted: vec!["file:///new/A.kt".to_string()],
             conclusive: true,
             files: vec![IndexedFile {
+                references: crate::DefinitionIndex::default(),
                 uri: "file:///new/A.kt".to_string(),
                 diagnostics: Vec::new(),
                 text_hash: 1,
@@ -7525,6 +7377,7 @@ mod tests {
             attempted: vec![uri.to_string()],
             conclusive: true,
             files: vec![IndexedFile {
+                references: crate::DefinitionIndex::default(),
                 uri: uri.to_string(),
                 diagnostics: Vec::new(),
                 text_hash: 1,
@@ -7565,6 +7418,7 @@ mod tests {
             attempted: vec![indexed_uri.to_string()],
             conclusive: true,
             files: vec![IndexedFile {
+                references: crate::DefinitionIndex::default(),
                 uri: indexed_uri.to_string(),
                 diagnostics: vec![Diagnostic {
                     span: krusty::diag::Span::new(0, 1),
@@ -7632,6 +7486,7 @@ mod tests {
             attempted: vec![uri.to_string()],
             conclusive: true,
             files: vec![IndexedFile {
+                references: crate::DefinitionIndex::default(),
                 uri: uri.to_string(),
                 diagnostics: vec![Diagnostic {
                     span: krusty::diag::Span::new(0, 1),
@@ -7673,6 +7528,7 @@ mod tests {
             attempted: vec!["file:///w/Swept.kt".to_string()],
             conclusive: true,
             files: vec![IndexedFile {
+                references: crate::DefinitionIndex::default(),
                 uri: "file:///w/Swept.kt".to_string(),
                 diagnostics: vec![Diagnostic {
                     span: krusty::diag::Span::new(0, 3),
@@ -7725,6 +7581,7 @@ mod tests {
             attempted: vec!["file:///w/Swept.kt".to_string()],
             conclusive: true,
             files: vec![IndexedFile {
+                references: crate::DefinitionIndex::default(),
                 uri: "file:///w/Swept.kt".to_string(),
                 diagnostics: vec![Diagnostic {
                     span: krusty::diag::Span::new(0, 3),
@@ -7779,6 +7636,7 @@ mod tests {
             attempted: vec!["file:///w/Swept.kt".to_string()],
             conclusive: true,
             files: vec![IndexedFile {
+                references: crate::DefinitionIndex::default(),
                 uri: "file:///w/Swept.kt".to_string(),
                 diagnostics: vec![Diagnostic {
                     span: krusty::diag::Span::new(0, 3),
@@ -7834,6 +7692,7 @@ mod tests {
             attempted: vec!["file:///w/Open.kt".to_string()],
             conclusive: true,
             files: vec![IndexedFile {
+                references: crate::DefinitionIndex::default(),
                 uri: "file:///w/Open.kt".to_string(),
                 diagnostics: vec![Diagnostic {
                     span: krusty::diag::Span::new(0, 1),
@@ -7873,6 +7732,7 @@ mod tests {
             attempted: vec![uri.clone()],
             conclusive: true,
             files: vec![IndexedFile {
+                references: crate::DefinitionIndex::default(),
                 uri: uri.clone(),
                 diagnostics: vec![Diagnostic {
                     span: krusty::diag::Span::new(0, 1),
