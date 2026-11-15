@@ -20,6 +20,7 @@ mod exception_classes;
 mod object_equality;
 mod object_strings;
 mod root_any;
+mod string_order;
 
 pub(super) use object_strings::ObjectStrings;
 
