@@ -252,6 +252,9 @@ pub struct BackendModuleFacts {
     /// of the module reads one through the entry its declaring file publishes, and links that read
     /// by this fact before the declaring file is lowered (see `super::module_links`).
     source_enum_constants: HashMap<TypeName, Box<[Box<str>]>>,
+    /// The constructors of this module another file may build an instance through, by their
+    /// checked declaration: see [`constructible_from_another_file`].
+    source_constructors: HashSet<crate::fir::DeclarationId>,
     /// Each `expect` classifier an `actual typealias` actualizes, mapped to the alias's target.
     /// Common code types the `expect` as its own classifier; every target realizes the target.
     actualized_expects: HashMap<TypeName, TypeName>,
@@ -293,6 +296,7 @@ impl BackendModuleFacts {
         let mut source_supertypes = HashMap::default();
         let mut source_class_members = HashMap::default();
         let mut source_enum_constants = HashMap::default();
+        let mut source_constructors = HashSet::default();
         let mut actualized_expects = HashMap::default();
         let mut actualized_nested_expects = HashMap::default();
         for raw in 0..index.declaration_count() {
@@ -304,6 +308,9 @@ impl BackendModuleFacts {
                     crate::libraries::ClassifierDeclarationKey::TypeAlias(alias.identity),
                     alias.declaration_name.clone(),
                 );
+            }
+            if constructible_from_another_file(index, declaration) {
+                source_constructors.insert(declaration);
             }
             let Some(classifier) = index.classifier_header(declaration) else {
                 continue;
@@ -575,6 +582,7 @@ impl BackendModuleFacts {
             source_class_members,
             dependency_implementors: dependency_implementors(&source_supertypes),
             source_enum_constants,
+            source_constructors,
             actualized_expects,
             actualized_nested_expects,
         })
@@ -625,6 +633,7 @@ impl BackendModuleFacts {
             source_class_members: HashMap::default(),
             dependency_implementors: HashMap::default(),
             source_enum_constants: HashMap::default(),
+            source_constructors: HashSet::default(),
             actualized_expects: HashMap::default(),
             actualized_nested_expects: HashMap::default(),
         })
@@ -634,7 +643,8 @@ impl BackendModuleFacts {
         self.classifiers.get(&classifier).cloned()
     }
 
-    /// Whether a file of this module declares `instance`: an object, or a constant of an enum.
+    /// Whether a file of this module declares `instance`: an object, a constant of an enum, or a
+    /// constructor another file may build through.
     pub fn declares_instance(&self, instance: &super::instance_links::InstanceEntry) -> bool {
         match instance {
             super::instance_links::InstanceEntry::Object(classifier) => self
@@ -645,6 +655,9 @@ impl BackendModuleFacts {
                 .source_enum_constants
                 .get(&constant.classifier)
                 .is_some_and(|constants| constants.contains(&constant.name)),
+            super::instance_links::InstanceEntry::Constructor { declaration, .. } => {
+                self.source_constructors.contains(declaration)
+            }
         }
     }
 
@@ -1213,6 +1226,55 @@ fn visit_inline_plan(plan: &InlineBodyPlan, visit: &mut impl FnMut(Ty)) {
             visit_callable(&recovery.failure.callable, &mut *visit);
         }
     }
+}
+
+/// Whether `constructor` is a constructor of an ordinary class that another file builds an
+/// instance through its declaring file's entry: a non-private constructor without context
+/// parameters of a class that is not abstract, `sealed`, an `enum`, an object, an annotation or an
+/// interface. An `inner` class's entry takes its enclosing instance first.
+fn constructible_from_another_file(
+    index: &crate::fir::ResolvedModuleIndex,
+    constructor: crate::fir::DeclarationId,
+) -> bool {
+    use crate::fir::DeclarationFlags as Flag;
+    let Some(header) = index.declaration_header(constructor) else {
+        return false;
+    };
+    if header.kind != crate::fir::DeclarationKind::Constructor
+        || header.visibility == crate::types::Visibility::Private
+        || header.flags.has(Flag::EXPECT)
+    {
+        return false;
+    }
+    let Some(owner) = index
+        .declaration_anchor(constructor)
+        .and_then(|anchor| anchor.owner)
+    else {
+        return false;
+    };
+    let (Some(owner_header), Some(_)) = (
+        index.declaration_header(owner),
+        index.classifier_header(owner),
+    ) else {
+        return false;
+    };
+    ![
+        Flag::INTERFACE,
+        Flag::ANNOTATION_CLASS,
+        Flag::ENUM,
+        Flag::SINGLETON,
+        Flag::ABSTRACT,
+        Flag::SEALED,
+        Flag::LOCAL_CLASS,
+        Flag::ANONYMOUS_OBJECT,
+        Flag::EXPECT,
+    ]
+    .iter()
+    .any(|flag| owner_header.flags.has(*flag))
+        && index
+            .callable_for_declaration(constructor)
+            .is_some_and(|callable| callable.shape.context_parameter_count == 0)
+        && !index.is_body_local_declaration(owner)
 }
 
 #[cfg(test)]

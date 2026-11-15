@@ -523,7 +523,7 @@ fn an_enum_publishes_an_entry_answering_each_constant() {
         .map(|(instance, entry)| {
             let constant = instance
                 .enum_constant()
-                .expect("an enum publishes no object entry");
+                .unwrap_or_else(|| panic!("an enum publishes only constant entries: {instance:?}"));
             (constant.classifier, &*constant.name, *entry)
         })
         .collect::<Vec<_>>();
