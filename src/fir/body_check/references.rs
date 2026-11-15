@@ -1114,6 +1114,7 @@ impl BodyFirChecker<'_> {
                 .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
             return Ok(FirExprKind::CallableReference {
                 target: FirCallableReferenceTarget::ArrayFactory {
+                    declaration,
                     operation,
                     array_type,
                     element_type: resolved(element_type)?,

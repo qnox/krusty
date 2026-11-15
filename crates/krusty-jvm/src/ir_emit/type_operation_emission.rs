@@ -117,7 +117,7 @@ impl Emitter<'_> {
                 let arg = self.instance_check_operand(arg);
                 self.emit_type_op_operand(arg, code)
             }
-            _ => self.emit_type_op_operand(arg, code),
+            _ => self.emit_cast_operand(arg, code),
         };
         if op == IrTypeOp::ImplicitCoercion {
             self.mark_intrinsic_instruction(expression, code);
@@ -743,6 +743,29 @@ impl Emitter<'_> {
             current = operand;
         }
         uncast
+    }
+
+    /// The operand of a cast. A function value's `invoke` result reaches the cast in its erased
+    /// `Object` slot, as kotlinc's cast consumes it: the cast names the only class, never the
+    /// function type's result first. That result is a value class's box (`kotlin/UIntArray`),
+    /// whose class a primitive-array value class's own JVM type (`[I`, its carrier) cannot name.
+    fn emit_cast_operand(&mut self, operand: ExprId, code: &mut CodeBuilder) -> (Ty, Ty) {
+        let IrExpr::InvokeFunction { ret, .. } = *self.ir.expr(operand) else {
+            return self.emit_type_op_operand(operand, code);
+        };
+        if matches!(ret, Ty::Unit | Ty::Nothing)
+            || !ir_ty_to_jvm(&ret).is_reference()
+            || self.transformed_result(operand).is_some()
+        {
+            return self.emit_type_op_operand(operand, code);
+        }
+        self.erased_invocations.insert(operand);
+        self.emit_value(operand, code);
+        self.erased_invocations.remove(&operand);
+        (
+            Ty::obj("java/lang/Object"),
+            self.ir.logical_type(operand).unwrap_or(ret),
+        )
     }
 
     pub(super) fn emit_type_op_operand(
