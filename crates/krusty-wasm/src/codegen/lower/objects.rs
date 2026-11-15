@@ -298,6 +298,23 @@ impl Body<'_> {
         &mut self,
         classifier: krusty::types::TypeName,
     ) -> Result<(), Unsupported> {
+        // `Unit` is the runtime's one instance, the same value a `Unit` expression becomes where
+        // a reference is expected. A dependency body reads that object by name.
+        if classifier == krusty::types::wk::unit() {
+            let unit = self.runtime.unit_object(self.module);
+            self.code.global_get(unit);
+            return Ok(());
+        }
+        // `EmptyList` and `EmptyMap` are the stdlib's singleton objects. This target lays the
+        // collections out itself, so each read builds the empty runtime value.
+        if classifier.matches("kotlin/collections/EmptyList") {
+            self.runtime.lists.construct_empty(&mut self.code);
+            return Ok(());
+        }
+        if classifier.matches("kotlin/collections/EmptyMap") {
+            self.runtime.maps.construct(&mut self.code);
+            return Ok(());
+        }
         if self.ir.class_id_by_name(classifier).is_none() {
             if let Some(entry) =
                 self.calls

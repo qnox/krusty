@@ -396,7 +396,10 @@ pub(super) fn classifier_name(module: &str, signature: &KlibIrSignature) -> Opti
     )
 }
 
-/// The classifier `module` itself declares at `signature`, when that declaration is a class.
+/// The classifier `module` itself declares at `signature`, when that declaration is a class, an
+/// object, or an interface. An object is the singleton its file reads; its class is materialized
+/// by the read. An interface is the type an `is` check names; the unit materializes it so the
+/// check has a descriptor, and no call of it is dispatched through that descriptor.
 pub(super) fn classifier(
     bodies: &KlibDeclarationBodies,
     module: &str,
@@ -417,7 +420,7 @@ pub(super) fn classifier(
         return Err(unsupported("a non-public value class"));
     }
     match class_kind(class.base.flags) {
-        TypeKind::Class => Ok(Some(name)),
+        TypeKind::Class | TypeKind::Object | TypeKind::Interface => Ok(Some(name)),
         _ => Err(unsupported("a non-public classifier other than a class")),
     }
 }
@@ -914,10 +917,19 @@ fn member_overrides(
                 "an override of a declaration other than a function",
             ));
         }
-        let KlibIrSignature::Public(signature) = &symbol.signature else {
-            return Err(unsupported("an override of a non-public declaration"));
+        // A property override names the accessor. A file-local symbol is still another
+        // declaration than the interface member the class implements.
+        let declaration = match &symbol.signature {
+            KlibIrSignature::Public(signature) => {
+                KlibDeclarationSignature::Public(signature.clone())
+            }
+            KlibIrSignature::Accessor(signature) => {
+                KlibDeclarationSignature::Accessor(signature.clone())
+            }
+            KlibIrSignature::FileLocal { .. } => {
+                return Err(unsupported("an override of a non-public declaration"));
+            }
         };
-        let declaration = KlibDeclarationSignature::Public(signature.clone());
         let identity = match scope.bodies.linked_origin(scope.module, &declaration) {
             KlibCalleeOrigin::Exact(identity) => identity,
             KlibCalleeOrigin::Missing => {

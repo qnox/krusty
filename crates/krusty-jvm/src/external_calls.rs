@@ -1045,7 +1045,12 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::ResultFailure(_)
                 | krusty::libraries::CompilerIntrinsic::TextTrim
                 | krusty::libraries::CompilerIntrinsic::StringCompare
-                | krusty::libraries::CompilerIntrinsic::CollectionSizeOrDefault,
+                | krusty::libraries::CompilerIntrinsic::CollectionSizeOrDefault
+                | krusty::libraries::CompilerIntrinsic::WasmArrayCopy
+                | krusty::libraries::CompilerIntrinsic::PairComponent { .. }
+                | krusty::libraries::CompilerIntrinsic::ArrayIterator
+                | krusty::libraries::CompilerIntrinsic::CheckRangeIndexes
+                | krusty::libraries::CompilerIntrinsic::HashMapEntry(_),
             ) => {
                 unreachable!("a target KLIB library helper cannot reach JVM call realization")
             }

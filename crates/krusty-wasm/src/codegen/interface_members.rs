@@ -886,6 +886,18 @@ impl FileRecorder<'_, '_, '_> {
             .into_iter()
             .flatten()
             .map(|applied| applied.classifier);
+        self.program
+            .runtime
+            .objects
+            .interfaces
+            .label(record, class.fq_name());
+        if !class.is_source_declared {
+            self.program
+                .runtime
+                .objects
+                .interfaces
+                .represented_elsewhere(record);
+        }
         for interface in module.chain(hierarchy).chain(class.interfaces.iter()) {
             self.program
                 .runtime

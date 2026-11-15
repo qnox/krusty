@@ -12,6 +12,7 @@
 //! once, when the backend is finalized.
 
 mod array_access;
+mod array_iterators;
 mod array_objects;
 mod boxes;
 mod builtin_instances;
@@ -27,8 +28,11 @@ mod hashing;
 mod host;
 mod identity;
 mod interface_dispatch;
+mod lists;
+mod maps;
 mod numeric_conversions;
 mod objects;
+mod pairs;
 mod runtime;
 mod string_builders;
 mod target;

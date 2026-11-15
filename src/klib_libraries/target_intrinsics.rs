@@ -498,6 +498,11 @@ pub(super) fn authenticate(
     placement: crate::libraries::CallablePlacement,
     declaration: &KotlinFunction,
 ) -> Option<KlibIntrinsicShape> {
+    if platform == Some(TargetIntrinsicPlatform::Wasm) {
+        if let Some(shape) = wasm_array_copy(placement, declaration) {
+            return Some(shape);
+        }
+    }
     if declaration.context_count != 0
         || !declaration.context_kinds.is_empty()
         || !declaration.formals.is_empty()
@@ -514,7 +519,11 @@ pub(super) fn authenticate(
     }
     match platform? {
         TargetIntrinsicPlatform::Native => native(placement, declaration),
-        TargetIntrinsicPlatform::Wasm => wasm(placement, declaration),
+        TargetIntrinsicPlatform::Wasm => pair_component(placement, declaration)
+            .or_else(|| array_iterator(placement, declaration))
+            .or_else(|| check_range_indexes(placement, declaration))
+            .or_else(|| hash_map_entry(placement, declaration))
+            .or_else(|| wasm(placement, declaration)),
     }
 }
 
@@ -683,6 +692,281 @@ fn native(
         receiver: shape.1,
         params: shape.2,
         ret: shape.3,
+    })
+}
+
+/// `kotlin.Array.iterator`. The class is generic, so its body is not materialized; the Wasm
+/// runtime walks the array object.
+fn array_iterator(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    let crate::libraries::CallablePlacement::Member {
+        owner,
+        owner_is_interface: false,
+    } = placement
+    else {
+        return None;
+    };
+    if !owner.matches("kotlin/Array")
+        || declaration.name != "iterator"
+        || declaration.receiver.is_some()
+        || !declaration.params.is_empty()
+        || !declaration.is_operator
+        || declaration.is_external
+    {
+        return None;
+    }
+    let crate::metadata::semantic::KotlinType::Class { internal, args, .. } = &declaration.ret
+    else {
+        return None;
+    };
+    if internal != "kotlin/collections/Iterator" || args.len() != 1 {
+        return None;
+    }
+    Some(KlibIntrinsicShape {
+        operation: CompilerIntrinsic::ArrayIterator,
+        kind: ExternalCallableKind::Member,
+        receiver: Some(Ty::obj_name(owner)),
+        params: Vec::new(),
+        ret: Ty::obj_args_name(
+            type_name("kotlin/collections/Iterator"),
+            &[Ty::ty_param(
+                "T",
+                Ty::nullable(Ty::obj_name(crate::types::wk::any())),
+            )],
+        ),
+    })
+}
+
+/// `kotlin.Pair.component1` and `component2`. The class is generic, so its body is not
+/// materialized; the Wasm runtime reads the component from the pair struct it allocates.
+fn pair_component(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    let crate::libraries::CallablePlacement::Member {
+        owner,
+        owner_is_interface: false,
+    } = placement
+    else {
+        return None;
+    };
+    if !owner.matches("kotlin/Pair")
+        || declaration.receiver.is_some()
+        || !declaration.params.is_empty()
+        || !declaration.is_operator
+        || declaration.is_external
+    {
+        return None;
+    }
+    let second = match declaration.name.as_str() {
+        "component1" => false,
+        "component2" => true,
+        _ => return None,
+    };
+    let crate::metadata::semantic::KotlinType::Param { name, nullable, .. } = &declaration.ret
+    else {
+        return None;
+    };
+    let bound = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+    let parameter = Ty::ty_param(name, bound);
+    Some(KlibIntrinsicShape {
+        operation: CompilerIntrinsic::PairComponent { second },
+        kind: ExternalCallableKind::Member,
+        receiver: Some(Ty::obj_name(owner)),
+        params: Vec::new(),
+        ret: if *nullable {
+            Ty::nullable(parameter)
+        } else {
+            parameter
+        },
+    })
+}
+
+/// `AbstractList.Companion.checkRangeIndexes(fromIndex, toIndex, size)`. The companion object is
+/// not materialized, so the Wasm runtime performs the two range checks itself.
+fn check_range_indexes(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    let crate::libraries::CallablePlacement::Member {
+        owner,
+        owner_is_interface: false,
+    } = placement
+    else {
+        return None;
+    };
+    if !owner.matches("kotlin/collections/AbstractList$Companion")
+        || declaration.name != "checkRangeIndexes"
+        || declaration.receiver.is_some()
+        || declaration.is_operator
+        || declaration.is_external
+    {
+        return None;
+    }
+    let [from_index, to_index, size] = declaration.params.as_slice() else {
+        return None;
+    };
+    if semantic_type(from_index) != Some(Ty::Int)
+        || semantic_type(to_index) != Some(Ty::Int)
+        || semantic_type(size) != Some(Ty::Int)
+        || !exact_type(&declaration.ret, "kotlin/Unit")
+    {
+        return None;
+    }
+    Some(KlibIntrinsicShape {
+        operation: CompilerIntrinsic::CheckRangeIndexes,
+        kind: ExternalCallableKind::Member,
+        receiver: Some(Ty::obj_name(owner)),
+        params: vec![Ty::Int, Ty::Int, Ty::Int],
+        ret: Ty::Unit,
+    })
+}
+
+/// `HashMap` and `LinkedHashMap` entry operations. Both classes are generic, so a support unit
+/// does not materialize them; the Wasm runtime stores the entries and answers these members.
+fn hash_map_entry(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    use crate::libraries::HashMapOperation;
+
+    let crate::libraries::CallablePlacement::Member {
+        owner,
+        owner_is_interface: false,
+    } = placement
+    else {
+        return None;
+    };
+    if (!owner.matches("kotlin/collections/HashMap")
+        && !owner.matches("kotlin/collections/LinkedHashMap"))
+        || declaration.receiver.is_some()
+        || declaration.is_external
+    {
+        return None;
+    }
+    let (operation, params, ret) = match declaration.name.as_str() {
+        "get" => {
+            let [key] = declaration.params.as_slice() else {
+                return None;
+            };
+            (
+                HashMapOperation::Get,
+                vec![erased_parameter(key)?],
+                erased_parameter(&declaration.ret)?,
+            )
+        }
+        "containsKey" => {
+            let [key] = declaration.params.as_slice() else {
+                return None;
+            };
+            if semantic_type(&declaration.ret) != Some(Ty::Boolean) {
+                return None;
+            }
+            (
+                HashMapOperation::ContainsKey,
+                vec![erased_parameter(key)?],
+                Ty::Boolean,
+            )
+        }
+        "put" => {
+            let [key, value] = declaration.params.as_slice() else {
+                return None;
+            };
+            (
+                HashMapOperation::Put,
+                vec![erased_parameter(key)?, erased_parameter(value)?],
+                erased_parameter(&declaration.ret)?,
+            )
+        }
+        _ => return None,
+    };
+    Some(KlibIntrinsicShape {
+        operation: CompilerIntrinsic::HashMapEntry(operation),
+        kind: ExternalCallableKind::Member,
+        receiver: Some(Ty::obj_name(owner)),
+        params,
+        ret,
+    })
+}
+
+/// A class type parameter, erased to the nullable `Any` bound the provider gives an unbounded one.
+fn erased_parameter(ty: &KotlinType) -> Option<Ty> {
+    let KotlinType::Param { name, nullable, .. } = ty else {
+        return None;
+    };
+    let parameter = Ty::ty_param(name, Ty::nullable(Ty::obj_name(crate::types::wk::any())));
+    Some(if *nullable {
+        Ty::nullable(parameter)
+    } else {
+        parameter
+    })
+}
+
+/// `kotlin.wasm.internal.wasm_array_copy<T>(destination, destinationIndex, source, sourceIndex, length)`.
+///
+/// The stdlib declares it as an ordinary function whose body returns `implementedAsIntrinsic`.
+/// The type argument is the Wasm array class (`WasmAnyArray`, `WasmIntArray`, …). Authentication
+/// is the package, the name and this shape; the body is not an implementation.
+fn wasm_array_copy(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    let crate::libraries::CallablePlacement::Package(package) = placement else {
+        return None;
+    };
+    if package != type_name("kotlin/wasm/internal")
+        || declaration.name != "wasm_array_copy"
+        || declaration.receiver.is_some()
+        || declaration.formals.len() != 1
+        || declaration.formals[0].reified
+        || declaration.context_count != 0
+        || !declaration.context_kinds.is_empty()
+        || declaration.is_suspend
+        || declaration.is_inline
+        || declaration.is_expect
+        || declaration.is_operator
+        || declaration.is_infix
+        || declaration.vararg.is_some()
+        || declaration
+            .param_defaults
+            .iter()
+            .any(|defaulted| *defaulted)
+    {
+        return None;
+    }
+    let [destination, destination_index, source, source_index, length] =
+        declaration.params.as_slice()
+    else {
+        return None;
+    };
+    let formal = &declaration.formals[0];
+    let is_formal = |ty: &KotlinType| {
+        matches!(
+            ty,
+            KotlinType::Param { id, nullable: false, .. } if *id == formal.id
+        )
+    };
+    if !is_formal(destination)
+        || !is_formal(source)
+        || semantic_type(destination_index) != Some(Ty::Int)
+        || semantic_type(source_index) != Some(Ty::Int)
+        || semantic_type(length) != Some(Ty::Int)
+        || !exact_type(&declaration.ret, "kotlin/Unit")
+    {
+        return None;
+    }
+    let parameter = Ty::ty_param(
+        &formal.name,
+        Ty::nullable(Ty::obj_name(crate::types::wk::any())),
+    );
+    Some(KlibIntrinsicShape {
+        operation: CompilerIntrinsic::WasmArrayCopy,
+        kind: ExternalCallableKind::TopLevel,
+        receiver: None,
+        params: vec![parameter, Ty::Int, parameter, Ty::Int, Ty::Int],
+        ret: Ty::Unit,
     })
 }
 
@@ -1407,5 +1691,227 @@ mod tests {
             gc_unsafe("Kotlin_Int_toStringRadix"),
         );
         assert!(authenticate(native, text, &swapped).is_none());
+    }
+
+    #[test]
+    fn wasm_array_copy_requires_its_package_and_generic_shape() {
+        use crate::metadata::semantic::{KotlinTypeParameter, KotlinTypeParameterId};
+        use crate::types::TypeVariance;
+
+        let wasm = Some(TargetIntrinsicPlatform::Wasm);
+        let internal =
+            crate::libraries::CallablePlacement::Package(type_name("kotlin/wasm/internal"));
+        let formal = KotlinTypeParameter {
+            id: KotlinTypeParameterId(7),
+            name: "T".to_owned(),
+            bounds: vec![KotlinType::class("kotlin/Any")],
+            variance: TypeVariance::Invariant,
+            only_input: false,
+            reified: false,
+        };
+        let parameter = KotlinType::Param {
+            name: "T".to_owned(),
+            id: formal.id,
+            nullable: false,
+        };
+        let mut exact = declaration(
+            "wasm_array_copy",
+            &[],
+            "kotlin/Unit",
+            wasm_annotation("ARRAY_COPY"),
+        );
+        exact.formals = vec![formal];
+        exact.params = vec![
+            parameter.clone(),
+            KotlinType::class("kotlin/Int"),
+            parameter,
+            KotlinType::class("kotlin/Int"),
+            KotlinType::class("kotlin/Int"),
+        ];
+        exact.param_names = (0..5).map(|index| format!("p{index}")).collect();
+        exact.param_defaults = vec![false; 5];
+        exact.is_external = false;
+        let parameter = Ty::ty_param("T", Ty::nullable(Ty::obj_name(crate::types::wk::any())));
+        assert_eq!(
+            authenticate(wasm, internal, &exact),
+            Some(KlibIntrinsicShape {
+                operation: CompilerIntrinsic::WasmArrayCopy,
+                kind: ExternalCallableKind::TopLevel,
+                receiver: None,
+                params: vec![parameter, Ty::Int, parameter, Ty::Int, Ty::Int],
+                ret: Ty::Unit,
+            })
+        );
+        assert!(authenticate(None, internal, &exact).is_none());
+        let elsewhere = crate::libraries::CallablePlacement::Package(type_name("kotlin"));
+        assert!(authenticate(wasm, elsewhere, &exact).is_none());
+        exact.formals[0].reified = true;
+        assert!(authenticate(wasm, internal, &exact).is_none());
+        exact.formals[0].reified = false;
+        exact.name = "array_copy".to_owned();
+        assert!(authenticate(wasm, internal, &exact).is_none());
+    }
+
+    #[test]
+    fn pair_component_requires_the_pair_member_and_a_type_parameter_result() {
+        use crate::metadata::semantic::KotlinTypeParameterId;
+
+        let wasm = Some(TargetIntrinsicPlatform::Wasm);
+        let pair = crate::libraries::CallablePlacement::Member {
+            owner: type_name("kotlin/Pair"),
+            owner_is_interface: false,
+        };
+        let mut exact = declaration("component2", &[], "kotlin/Any", wasm_annotation("UNUSED"));
+        exact.is_external = false;
+        exact.is_operator = true;
+        exact.ret = KotlinType::Param {
+            name: "B".to_owned(),
+            id: KotlinTypeParameterId(2),
+            nullable: false,
+        };
+        let component = Ty::ty_param("B", Ty::nullable(Ty::obj_name(crate::types::wk::any())));
+        assert_eq!(
+            authenticate(wasm, pair, &exact),
+            Some(KlibIntrinsicShape {
+                operation: CompilerIntrinsic::PairComponent { second: true },
+                kind: ExternalCallableKind::Member,
+                receiver: Some(Ty::obj_name(type_name("kotlin/Pair"))),
+                params: Vec::new(),
+                ret: component,
+            })
+        );
+        assert!(authenticate(None, pair, &exact).is_none());
+        exact.name = "component1".to_owned();
+        assert!(matches!(
+            authenticate(wasm, pair, &exact),
+            Some(KlibIntrinsicShape {
+                operation: CompilerIntrinsic::PairComponent { second: false },
+                ..
+            })
+        ));
+        exact.name = "copy".to_owned();
+        assert!(authenticate(wasm, pair, &exact).is_none());
+        exact.name = "component2".to_owned();
+        exact.is_operator = false;
+        assert!(authenticate(wasm, pair, &exact).is_none());
+    }
+
+    #[test]
+    fn array_iterator_requires_the_array_member() {
+        use crate::metadata::semantic::{KotlinFunctionTypeShape, KotlinTypeParameterId};
+
+        let wasm = Some(TargetIntrinsicPlatform::Wasm);
+        let array = crate::libraries::CallablePlacement::Member {
+            owner: type_name("kotlin/Array"),
+            owner_is_interface: false,
+        };
+        let mut exact = declaration(
+            "iterator",
+            &[],
+            "kotlin/collections/Iterator",
+            wasm_annotation("UNUSED"),
+        );
+        exact.is_external = false;
+        exact.is_operator = true;
+        exact.ret = KotlinType::Class {
+            internal: "kotlin/collections/Iterator".to_owned(),
+            args: vec![KotlinType::Param {
+                name: "T".to_owned(),
+                id: KotlinTypeParameterId(1),
+                nullable: true,
+            }],
+            nullable: false,
+            shape: KotlinFunctionTypeShape::default(),
+        };
+        assert!(matches!(
+            authenticate(wasm, array, &exact),
+            Some(KlibIntrinsicShape {
+                operation: CompilerIntrinsic::ArrayIterator,
+                kind: ExternalCallableKind::Member,
+                ..
+            })
+        ));
+        assert!(authenticate(None, array, &exact).is_none());
+        exact.name = "size".to_owned();
+        assert!(authenticate(wasm, array, &exact).is_none());
+    }
+
+    #[test]
+    fn check_range_indexes_requires_the_companion_member() {
+        let wasm = Some(TargetIntrinsicPlatform::Wasm);
+        let companion = crate::libraries::CallablePlacement::Member {
+            owner: type_name("kotlin/collections/AbstractList$Companion"),
+            owner_is_interface: false,
+        };
+        let mut exact = declaration(
+            "checkRangeIndexes",
+            &["kotlin/Int", "kotlin/Int", "kotlin/Int"],
+            "kotlin/Unit",
+            wasm_annotation("UNUSED"),
+        );
+        exact.is_external = false;
+        assert_eq!(
+            authenticate(wasm, companion, &exact),
+            Some(KlibIntrinsicShape {
+                operation: CompilerIntrinsic::CheckRangeIndexes,
+                kind: ExternalCallableKind::Member,
+                receiver: Some(Ty::obj_name(type_name(
+                    "kotlin/collections/AbstractList$Companion"
+                ))),
+                params: vec![Ty::Int, Ty::Int, Ty::Int],
+                ret: Ty::Unit,
+            })
+        );
+        assert!(authenticate(None, companion, &exact).is_none());
+        exact.name = "checkElementIndex".to_owned();
+        assert!(authenticate(wasm, companion, &exact).is_none());
+        exact.name = "checkRangeIndexes".to_owned();
+        exact.is_external = true;
+        assert!(authenticate(wasm, companion, &exact).is_none());
+    }
+
+    #[test]
+    fn hash_map_entry_requires_the_map_member() {
+        use crate::libraries::HashMapOperation;
+        use crate::metadata::semantic::KotlinTypeParameterId;
+
+        let wasm = Some(TargetIntrinsicPlatform::Wasm);
+        let hash_map = crate::libraries::CallablePlacement::Member {
+            owner: type_name("kotlin/collections/HashMap"),
+            owner_is_interface: false,
+        };
+        let mut exact = declaration("get", &[], "kotlin/Any", wasm_annotation("UNUSED"));
+        exact.is_external = false;
+        exact.is_operator = true;
+        exact.params = vec![KotlinType::Param {
+            name: "K".to_owned(),
+            id: KotlinTypeParameterId(1),
+            nullable: false,
+        }];
+        exact.param_names = vec!["key".to_owned()];
+        exact.param_defaults = vec![false];
+        exact.ret = KotlinType::Param {
+            name: "V".to_owned(),
+            id: KotlinTypeParameterId(2),
+            nullable: true,
+        };
+        let key = Ty::ty_param("K", Ty::nullable(Ty::obj_name(crate::types::wk::any())));
+        let value = Ty::nullable(Ty::ty_param(
+            "V",
+            Ty::nullable(Ty::obj_name(crate::types::wk::any())),
+        ));
+        assert_eq!(
+            authenticate(wasm, hash_map, &exact),
+            Some(KlibIntrinsicShape {
+                operation: CompilerIntrinsic::HashMapEntry(HashMapOperation::Get),
+                kind: ExternalCallableKind::Member,
+                receiver: Some(Ty::obj_name(type_name("kotlin/collections/HashMap"))),
+                params: vec![key],
+                ret: value,
+            })
+        );
+        assert!(authenticate(None, hash_map, &exact).is_none());
+        exact.name = "size".to_owned();
+        assert!(authenticate(wasm, hash_map, &exact).is_none());
     }
 }

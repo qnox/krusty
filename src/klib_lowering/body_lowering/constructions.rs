@@ -34,6 +34,16 @@ impl BodyLowering<'_> {
         if symbol.kind != KlibIrSymbolKind::Class {
             return Err(mismatch("an object value's symbol is not a class"));
         }
+        if let KlibIrSignature::FileLocal { .. } = &symbol.signature {
+            let classifier = self.linker.local_object(self.ir, &symbol.signature)?;
+            let object = Ty::obj_name(classifier);
+            if ty != object {
+                return Err(mismatch("an object value is typed apart from its object"));
+            }
+            let value = self.ir.add_expr(IrExpr::SingletonValue { classifier });
+            self.ir.set_logical_type(value, object);
+            return Ok(value);
+        }
         let KlibIrSignature::Public(object) = &symbol.signature else {
             return unsupported("a file-private object value");
         };

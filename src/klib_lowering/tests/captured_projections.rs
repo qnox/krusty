@@ -12,6 +12,24 @@ use crate::types::{type_name, Ty, TypeName, TypeVariance};
 
 /// The provider realization of the member `name` of `classifier`, which the libraries declare
 /// once.
+fn constructors(
+    libraries: &KlibLibraries,
+    classifier: &str,
+) -> Vec<crate::libraries::ExternalCallableRealization> {
+    let class = libraries
+        .classifier(crate::types::type_name(classifier))
+        .unwrap();
+    class
+        .constructors
+        .iter()
+        .map(|constructor| {
+            libraries
+                .external_callable(constructor.external_identity.expect("constructor identity"))
+                .expect("constructor realization")
+        })
+        .collect()
+}
+
 fn member(
     libraries: &KlibLibraries,
     classifier: &str,
@@ -827,4 +845,155 @@ fn an_argument_through_a_contravariant_receiver_is_checked_against_the_bound_ins
         })
         .collect::<Vec<_>>();
     assert_eq!(added, [1]);
+}
+
+/// `emptyMap` returns the file-local `EmptyMap` object cast to `Map`. The object is not a public
+/// classifier, so the unit materializes the singleton the read names.
+#[test]
+fn empty_map_lowers_its_file_local_object() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(type_name("kotlin/collections")),
+        "emptyMap",
+    );
+    let function = symbols
+        .callables
+        .functions()
+        .first()
+        .expect("kotlin.collections.emptyMap");
+    let realization = libraries
+        .external_callable(
+            function
+                .callable
+                .external_identity
+                .expect("emptyMap identity"),
+        )
+        .expect("emptyMap realization");
+    let root = realization
+        .klib_body_callable()
+        .expect("emptyMap body contract");
+    let mut unit = DependencyBodyUnit::default();
+    let lowered = unit
+        .lower_function_with_intrinsics_and_externals(
+            root,
+            libraries.declaration_bodies(),
+            &KlibCalleeFacts::default(),
+            libraries.intrinsic_facts(),
+            &Default::default(),
+        )
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    validated(unit.ir());
+    let ir = unit.ir();
+    let classifier = ir.exprs.iter().find_map(|expression| match expression {
+        IrExpr::SingletonValue { classifier } => Some(*classifier),
+        _ => None,
+    });
+    let Some(classifier) = classifier else {
+        panic!(
+            "emptyMap did not read an object:\n{}",
+            lowered_body(&unit, lowered)
+        );
+    };
+    let class = ir
+        .class_id_by_name(classifier)
+        .expect("the file-local object is materialized in the unit");
+    assert!(ir.classes[class as usize].is_object);
+    assert!(
+        ir.exprs.iter().any(|expression| matches!(
+            expression,
+            IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::CastNonNull,
+                ..
+            }
+        )),
+        "emptyMap casts the object to Map:\n{}",
+        lowered_body(&unit, lowered)
+    );
+}
+
+/// `getOrImplicitDefault` asks `is MapWithDefault` before reading the map. `MapWithDefault` is a
+/// file-local interface, so the check names a classifier this unit materializes, and the member
+/// call on that interface diverges instead of asking for a constructor the interface has not got.
+#[test]
+fn get_or_implicit_default_names_its_file_local_interface() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(type_name("kotlin/collections")),
+        "getOrImplicitDefault",
+    );
+    let function = symbols
+        .callables
+        .functions()
+        .iter()
+        .find(|function| function.semantic_receiver().is_some())
+        .expect("kotlin.collections.getOrImplicitDefault");
+    let fact = frozen_function(
+        &libraries,
+        "kotlin/collections",
+        "getOrImplicitDefault",
+        function.semantic_receiver(),
+        function.semantic_params().as_ref(),
+    );
+    let root = fact
+        .klib_body_callable()
+        .expect("getOrImplicitDefault body contract");
+    let mut providers = vec![
+        member(&libraries, "kotlin/collections/Map", "get"),
+        member(&libraries, "kotlin/collections/Map", "containsKey"),
+    ];
+    providers.extend(constructors(&libraries, "kotlin/NoSuchElementException"));
+    let leaves = providers
+        .iter()
+        .map(|provider| provider.klib_body_callable().unwrap())
+        .collect::<Vec<_>>();
+    let externals = providers
+        .iter()
+        .zip(&leaves)
+        .enumerate()
+        .map(|(index, (provider, leaf))| {
+            let target = crate::fir::ExternalCallableId::from_raw(100 + index as u32);
+            let external = if provider.kind == crate::libraries::ExternalCallableKind::Constructor {
+                super::super::EmittedDependencyCallable::allocating_constructor(target)
+            } else {
+                super::super::EmittedDependencyCallable::target_member(target)
+            };
+            (leaf.identity().clone(), external)
+        })
+        .collect();
+    let oracle = crate::symbol_resolver::SourceOracle(&libraries);
+    let facts = KlibCalleeFacts::with_declarations([root], leaves.iter().copied())
+        .with_member_edges(super::non_overriding_edges(leaves.iter().copied()))
+        .with_type_oracle(&oracle);
+    let mut unit = DependencyBodyUnit::default();
+    unit.lower_function_with_intrinsics_and_externals(
+        root,
+        libraries.declaration_bodies(),
+        &facts,
+        crate::klib_libraries::KlibIntrinsicFacts::empty(),
+        &externals,
+    )
+    .unwrap_or_else(|decline| panic!("{decline}"));
+    validated(unit.ir());
+    let ir = unit.ir();
+    let checked = ir.exprs.iter().find_map(|expression| match expression {
+        IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::InstanceOf,
+            type_operand,
+            ..
+        } => type_operand.kotlin_class_internal(),
+        _ => None,
+    });
+    let Some(classifier) = checked else {
+        panic!("getOrImplicitDefault did not test an interface");
+    };
+    let class = ir
+        .class_id_by_name(classifier)
+        .expect("the file-local interface is materialized in the unit");
+    assert!(ir.classes[class as usize].is_abstract);
 }

@@ -144,8 +144,44 @@ impl Backend for WasmBackend {
         classifier: krusty::backend::DependencyClassifier,
     ) -> bool {
         classifier == krusty::types::wk::string()
+            || classifier == krusty::types::wk::unit()
             || lower::is_string_builder(classifier)
             || lower::runtime_lays_out(classifier)
+            // The linked stdlib lays these out and exports their members. A support body calls
+            // that export; re-emitting the member would read a layout this target does not have.
+            // `Unit` is the runtime's one instance, which an inlined `apply` reads by name.
+            // `Pair` is generic, so its class is not materialized. The runtime lays it out;
+            // `component1`/`component2` and `first`/`second` read that struct.
+            || classifier.matches("kotlin/Pair")
+            || classifier.matches("kotlin/collections/ArrayList")
+            || classifier.matches("kotlin/collections/HashMap")
+            || classifier.matches("kotlin/collections/LinkedHashMap")
+            || classifier.matches("kotlin/collections/HashSet")
+            || classifier.matches("kotlin/collections/LinkedHashSet")
+            // `copyInto` calls `AbstractList.Companion.checkRangeIndexes`. The companion is the
+            // stdlib's; its member is an export, and the class itself stays a source base.
+            || classifier.matches("kotlin/collections/AbstractList$Companion")
+            || classifier.matches("kotlin/collections/EmptyList")
+            || classifier.matches("kotlin/collections/EmptyMap")
+            || classifier.matches("kotlin/collections/EmptySet")
+            // Kotlin arrays are this runtime's objects. A dependency body still calls members
+            // the array intrinsics do not cover (`contains`, `iterator`); those are the stdlib
+            // exports. `size`, `get` and `set` stay the array intrinsics, and `storage` is the
+            // field behind the object.
+            || krusty::types::Ty::obj_name(classifier).is_array()
+    }
+
+    fn realizes_dependency_getter(
+        &self,
+        signature: krusty::backend::DependencyGetterSignature<'_>,
+    ) -> bool {
+        // `Array.storage` (and each primitive array's) is the Wasm array this runtime already
+        // lays out behind the Kotlin array object. The stdlib getter reads that field.
+        signature.parameters.is_empty()
+            && ((signature.name == "storage"
+                && krusty::types::Ty::obj_name(signature.owner).is_array())
+                || (matches!(signature.name, "first" | "second")
+                    && signature.owner.matches("kotlin/Pair")))
     }
 
     fn realizes_dependency_intrinsic(
@@ -398,6 +434,7 @@ mod tests {
     use super::{WasmBackend, WasmTarget};
     use krusty::backend::{Artifact, Entry};
     use krusty::diag::DiagSink;
+
     use krusty::libraries::EmptySymbolSource;
     use krusty::source::SourceInput;
 

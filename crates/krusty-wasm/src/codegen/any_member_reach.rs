@@ -4,7 +4,8 @@
 //! Every file lowers into one module, so a receiver whose static type does not close its classes
 //! within the file (`Any?`, a type parameter, an interface or an open class) can be an object
 //! another file creates: an instance of a class whose table traps, or a runtime value that file
-//! creates and this target cannot print (a floating box, a function value). A file proves its own
+//! creates and this target cannot print (a floating box). A function value is not one of those.
+//! A file proves its own
 //! calls against its own classes and values while it is lowered
 //! (`lower::objects::unrealized_members`). This record carries the rest across files: each file's
 //! calls that could leave it, and each file's slots with no body, and the module declines when one

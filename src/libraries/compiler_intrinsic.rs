@@ -19,6 +19,17 @@ pub enum ClassNameKind {
     Qualified,
 }
 
+/// Which entry operation of a runtime `HashMap` or `LinkedHashMap` a declaration is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HashMapOperation {
+    /// `get(key): V?`.
+    Get,
+    /// `containsKey(key): Boolean`.
+    ContainsKey,
+    /// `put(key, value): V?`.
+    Put,
+}
+
 /// Storage supplied by a target for an authenticated stdlib collection factory. The selected
 /// declaration distinguishes one array element from a packed array of elements before substitution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +90,26 @@ pub enum CompilerIntrinsic {
     /// element store for the same reason as [`Self::ArrayGet`].
     ArraySet,
     ArraySize,
+    /// `kotlin.wasm.internal.wasm_array_copy`, the Wasm stdlib's array-to-array copy. The
+    /// declaration is generic over the Wasm array class and its body only names the intrinsic
+    /// marker; the Wasm emitter replaces the call with `array.copy`.
+    WasmArrayCopy,
+    /// `kotlin.Pair.component1` or `component2`. The Wasm runtime lays `Pair` out and reads the
+    /// component; `second` selects `component2`.
+    PairComponent {
+        second: bool,
+    },
+    /// `kotlin.Array.iterator`. The Wasm runtime walks the array object; `Iterator.hasNext` and
+    /// `Iterator.next` on that walker are the same walk.
+    ArrayIterator,
+    /// `AbstractList.Companion.checkRangeIndexes(fromIndex, toIndex, size)`. The companion is an
+    /// object, so its body is not materialized. A negative start or an end past `size` throws
+    /// `IndexOutOfBoundsException`; a start past the end throws `IllegalArgumentException`.
+    CheckRangeIndexes,
+    /// `HashMap` or `LinkedHashMap` `get`, `containsKey`, or `put`. Both classes are generic, so
+    /// their bodies are not materialized. A target that lays the map out answers the operation
+    /// from that storage; `Map` and `MutableMap` reach the same storage through interface dispatch.
+    HashMapEntry(HashMapOperation),
     CharCode,
     StringLength,
     /// `String.get(Int): Char`, the index operator on a string.

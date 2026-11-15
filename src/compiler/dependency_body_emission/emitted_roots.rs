@@ -194,9 +194,13 @@ pub(super) fn declarations(
         } else {
             None
         };
-        let external_member = outside_edge
-            .as_ref()
-            .is_some_and(|edge| capabilities.target_realizes_bodyless || realizes_any_member(edge));
+        // A classifier the target represents is realized outside the unit, including on a target
+        // that does not realize every bodyless declaration. Its members are the stdlib exports
+        // the support body calls. Any other outside edge is a leaf only when the target realizes
+        // bodyless declarations, or when the member is one of `kotlin.Any`.
+        let external_member = outside_edge.as_ref().is_some_and(|edge| {
+            member || capabilities.target_realizes_bodyless || realizes_any_member(edge)
+        });
         // A call of a member realized outside the unit carries the facts the member hierarchy
         // decorates a source call of it with; the edge is what authorizes the call.
         if let Some(edge) = outside_edge.filter(|_| external_member) {
