@@ -1349,7 +1349,6 @@ fakeOverride/intersectionInLocal.kt
 fakeOverride/privateFakeOverrides0.kt
 fakeOverride/privateFakeOverrides1.kt
 fakeOverride/substitutionInLocal.kt
-fakeOverride/varianceOverload.kt
 fieldRename/delegates.kt
 finally/kt4134.kt
 finally/notChainCatch.kt
@@ -2309,7 +2308,6 @@ lower/forLoopsLowering/vars.kt
 lower/forLoopsLowering/withIndex.kt
 lower/forLoopsLowering/withIndexUInt.kt
 lower/localDelegatedProperty.kt
-mangling/internal.kt
 mangling/internalOverrideSuperCall.kt
 mangling/multipleConstructors.kt
 mangling/parentheses.kt
@@ -2327,7 +2325,6 @@ multiDecl/forIterator/longIterator/MultiDeclForComponentMemberExtensions.kt
 multiDecl/forIterator/longIterator/MultiDeclForComponentMemberExtensionsInExtensionFunction.kt
 multiDecl/kt9828_hashMap.kt
 multiplatform/k2/aliasSuperTypeInLazy.kt
-multiplatform/k2/annotations/expectAnnotationCallInLibrary.kt
 multiplatform/k2/anonymousObjectAndSpecificImplementationInDeserializedIr.kt
 multiplatform/k2/basic/contextInFakeOverride.kt
 multiplatform/k2/basic/delegatedByExpectExtensionProperty.kt
@@ -3518,7 +3515,6 @@ secondaryConstructors/withReturnUnit.kt
 serialization/deserializedMembers.kt
 serialization/serializedCharConstant.kt
 serialization/serializedDefaultArgs.kt
-serialization/serializedDoWhile.kt
 serialization/serializedEnumOrdinal.kt
 serialization/serializedVararg.kt
 size/add.kt

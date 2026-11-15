@@ -970,7 +970,6 @@ fakeOverride/intersectionInLocal.kt
 fakeOverride/privateFakeOverrides0.kt
 fakeOverride/privateFakeOverrides1.kt
 fakeOverride/substitutionInLocal.kt
-fakeOverride/varianceOverload.kt
 fir/inferenceWithTypeAliasFromOtherModule.kt
 fir/kt68806.kt
 fir/multipleDefaultsFalsePositiveDelegation.kt
@@ -1426,10 +1425,8 @@ lower/forLoopsLowering/vars.kt
 lower/forLoopsLowering/withIndex.kt
 lower/forLoopsLowering/withIndexUInt.kt
 lower/localDelegatedProperty.kt
-mangling/internal.kt
 mangling/multipleConstructors.kt
 multiplatform/k2/aliasSuperTypeInLazy.kt
-multiplatform/k2/annotations/expectAnnotationCallInLibrary.kt
 multiplatform/k2/anonymousObjectAndSpecificImplementationInDeserializedIr.kt
 multiplatform/k2/basic/contextInFakeOverride.kt
 multiplatform/k2/basic/delegatedByExpectExtensionProperty.kt
