@@ -58,6 +58,17 @@ pub(crate) enum LocatedMember<'a> {
     },
 }
 
+/// The top-level property that declares one backing field, and the arena that owns both.
+pub(crate) enum LocatedStaticField<'a> {
+    Missing,
+    Several,
+    One {
+        arena: &'a KlibIrArena,
+        property: &'a crate::metadata::klib_ir::tree::KlibIrProperty,
+        field: &'a crate::metadata::klib_ir::tree::KlibIrField,
+    },
+}
+
 pub(crate) struct KlibClassMember<'a> {
     pub(crate) arena: &'a KlibIrArena,
     pub(crate) class: &'a crate::metadata::klib_ir::tree::KlibIrClass,
@@ -599,6 +610,74 @@ impl KlibDeclarationBodies {
     ) -> Option<(&'a KlibIrArena, &'a KlibIrFunction)> {
         let library = *self.modules.get(module)?;
         self.libraries[library].local_function(signature)
+    }
+
+    /// The top-level property one of whose accessors is exactly `identity`, with the arena that
+    /// owns it, and whether that accessor is its setter.
+    pub(crate) fn top_level_accessor_property(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Option<(
+        &KlibIrArena,
+        &crate::metadata::klib_ir::tree::KlibIrProperty,
+        bool,
+    )> {
+        let signature = ir_signature(&identity.declaration);
+        let library = *self
+            .owners
+            .get(&(identity.module.clone(), signature.clone()))?;
+        self.libraries[library].trees().iter().find_map(|tree| {
+            let KlibIrMember::Property(property) = &tree.declaration else {
+                return None;
+            };
+            let declares = |accessor: Option<crate::metadata::klib_ir::tree::KlibIrFunctionId>| {
+                accessor
+                    .is_some_and(|id| tree.arena.function(id).base.symbol.signature == signature)
+            };
+            if declares(property.getter) {
+                Some((&tree.arena, property, false))
+            } else if declares(property.setter) {
+                Some((&tree.arena, property, true))
+            } else {
+                None
+            }
+        })
+    }
+
+    /// The top-level property `module` itself serializes whose backing field is `field`.
+    ///
+    /// A backing field is read only by bodies of its own library, so producer dependencies are
+    /// not searched.
+    pub(crate) fn module_static_field<'a>(
+        &'a self,
+        module: &str,
+        field: &KlibIrSymbol,
+    ) -> LocatedStaticField<'a> {
+        let Some(&library) = self.modules.get(module) else {
+            return LocatedStaticField::Missing;
+        };
+        let mut found = LocatedStaticField::Missing;
+        for tree in self.libraries[library].trees() {
+            let KlibIrMember::Property(property) = &tree.declaration else {
+                continue;
+            };
+            let Some(backing) = property
+                .backing_field
+                .as_ref()
+                .filter(|backing| backing.base.symbol == *field)
+            else {
+                continue;
+            };
+            if !matches!(found, LocatedStaticField::Missing) {
+                return LocatedStaticField::Several;
+            }
+            found = LocatedStaticField::One {
+                arena: &tree.arena,
+                property,
+                field: backing,
+            };
+        }
+        found
     }
 
     /// The class in `module` that declares the file-local function `signature` directly.
