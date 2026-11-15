@@ -309,7 +309,6 @@ callableReference/function/booleanNotIntrinsic.kt
 callableReference/function/classMemberFromCompanionObject.kt
 callableReference/function/coercionToUnit.kt
 callableReference/function/enumValueOfMethod.kt
-callableReference/function/extensionFunctionAsASuperTypePassToSAMInterface.kt
 callableReference/function/genericCallableReferenceArgumentsNonJVM.kt
 callableReference/function/genericCallableReferenceWithReifiedTypeParam.kt
 callableReference/function/genericCallableReferencesWithNullableTypes.kt
@@ -413,7 +412,6 @@ classLiteral/classEquality.kt
 classes/comanionObjectFieldVsClassField.kt
 classes/implementComparableInSubclass.kt
 classes/initializerBlockDImpl.kt
-classes/kt1535.kt
 classes/kt1538.kt
 classes/kt1980.kt
 classes/kt2417.kt
@@ -444,7 +442,6 @@ closures/closureInsideConstrucor.kt
 closures/closuresAsSingleton.kt
 closures/crossinlineLocalDeclaration.kt
 closures/kt11634_4.kt
-closures/kt47894_inlineFunWithObjectWithNothing.kt
 closures/localFunInInit.kt
 closures/localFunctionInInitBlock.kt
 collectionLiterals/primitiveArrays.kt
@@ -1312,7 +1309,6 @@ exceptions/kt69534.kt
 exceptions/rethrow.kt
 exceptions/throw0.kt
 exceptions/throw_from_catch.kt
-extensionFunctions/extensionFunctionAsASupertypeOfValueClass.kt
 extensionFunctions/extensionFunctionDifferentReceivers.kt
 extensionFunctions/extensionFunctionFakeOverride.kt
 extensionFunctions/extensionFunctionInValueClass.kt
@@ -1386,7 +1382,6 @@ funInterface/nonAbstractMethod.kt
 funInterface/nonTrivialProjectionInSuperType.kt
 funInterface/nullableSam.kt
 funInterface/primitiveConversions.kt
-funInterface/subtypeOfFunctionalTypeToFunInterfaceConversion.kt
 funInterface/suspendFunInterfaceConversionCodegen.kt
 function/arithmetic.kt
 function/defaults.kt
@@ -1657,7 +1652,6 @@ inline/statementAsLastExprInBlock.kt
 inline/statementsAfterReturn.kt
 inline/thisImplicitlyCaptured.kt
 inline/thisLiteralAliasing.kt
-inline/twiceInlinedObject.kt
 inline/typeParameterSymbolIsUnbound.kt
 inline/vararg.kt
 inlineArgsInPlace/arrayDequeRemoveAll.kt
@@ -3447,7 +3441,6 @@ regressions/resolvedCallForGetOperator.kt
 reified/callChain.kt
 reified/callableReferenceInlinedFun.kt
 reified/callableReferenceInlinedFunFromOtherModule.kt
-reified/capture.kt
 reified/catchParameter/nestedReifiedCatch.kt
 reified/catchParameter/nullableExceptionType.kt
 reified/catchParameter/reificationClash.kt
