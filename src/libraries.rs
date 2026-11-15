@@ -112,7 +112,7 @@ use crate::types::{SemanticCallRole, SemanticCallableOwner, Ty, TyKind, TypeName
 pub(crate) use array_factories::kotlin_array_factory_kind;
 pub(crate) use class_name_property::realize_class_name_property;
 pub use compiler_intrinsic::{
-    ClassNameKind, CompilerIntrinsic, HashMapOperation, IndicesReceiver, ListStorageConstruction,
+    ClassNameKind, CompilerIntrinsic, IndicesReceiver, ListStorageConstruction,
     ResultFailureIntrinsic,
 };
 pub(crate) use core_builtins::add_core_builtin_declarations;

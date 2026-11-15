@@ -53,16 +53,6 @@ pub(super) struct ArrayObjects {
 }
 
 impl ArrayObjects {
-    /// The object type of `Array<T>`, shared by every reference array.
-    pub(super) fn reference_object(&self) -> u32 {
-        self.reference.object
-    }
-
-    /// The Wasm array type holding `Array<T>`'s elements.
-    pub(super) fn reference_storage(&self) -> u32 {
-        self.reference.storage
-    }
-
     pub(super) fn declare(
         module: &mut Module,
         objects: &mut ObjectRoot,

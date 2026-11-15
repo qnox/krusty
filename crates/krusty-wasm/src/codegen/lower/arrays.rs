@@ -19,9 +19,7 @@ use super::*;
 
 const I32_ADD: u8 = 0x6a;
 const I32_GE_U: u8 = 0x4f;
-const I32_GT_S: u8 = 0x4b;
 const I32_LT_S: u8 = 0x48;
-const I32_OR: u8 = 0x72;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ArrayViewConversion {
@@ -88,120 +86,6 @@ impl Body<'_> {
         self.array_storage(form);
         self.code.array_len();
         Ok(())
-    }
-
-    pub(super) fn is_array_storage_property(
-        &self,
-        target: krusty::fir::ExternalPropertyId,
-    ) -> bool {
-        self.callables.property(target).is_some_and(|property| {
-            property.name.as_ref() == "storage"
-                && krusty::types::Ty::obj_name(property.owner).is_array()
-        })
-    }
-
-    /// `array.storage`: the Wasm array behind the Kotlin array object.
-    pub(super) fn checked_array_storage(
-        &mut self,
-        operation: &IrCheckedOperation,
-    ) -> Result<(), Unsupported> {
-        let IrCheckedOperation::ExternalPropertyRead {
-            dispatch: IrPropertyDispatch::Ordinary,
-            receiver: Some(receiver),
-            arguments,
-            parameters,
-            source_receiver: Some(source),
-            ..
-        } = operation
-        else {
-            return Err(
-                "an authenticated array storage read with a mismatched getter frame".into(),
-            );
-        };
-        if !arguments.is_empty() || !parameters.is_empty() || !source.non_null().is_array() {
-            return Err(
-                "an authenticated array storage read with a mismatched getter frame".into(),
-            );
-        }
-        let (receiver, source) = (*receiver, *source);
-        let (form, _) = self.array_form(source)?;
-        let operand = self
-            .type_of(receiver)?
-            .ok_or_else(|| "an array operand without a checked type".to_string())?;
-        self.value(receiver, operand)?;
-        self.array_storage(form);
-        Ok(())
-    }
-
-    /// `wasm_array_copy(destination, destinationIndex, source, sourceIndex, length)`.
-    ///
-    /// The operands are already the Wasm arrays (`Array.storage`), and the type argument names
-    /// which array class they are.
-    pub(super) fn wasm_array_copy(
-        &mut self,
-        params: &[Ty],
-        args: &[u32],
-    ) -> Result<(), Unsupported> {
-        let [destination, destination_index, source, source_index, length] = *args else {
-            return Err("an authenticated wasm array copy with malformed operands".into());
-        };
-        let [destination_ty, destination_index_ty, source_ty, source_index_ty, length_ty] = *params
-        else {
-            return Err("an authenticated wasm array copy with malformed operands".into());
-        };
-        if destination_index_ty != Ty::Int || source_index_ty != Ty::Int || length_ty != Ty::Int {
-            return Err("an authenticated wasm array copy with a non-integral index".into());
-        }
-        let storage = self.wasm_array_storage(destination_ty)?;
-        if self.wasm_array_storage(source_ty)? != storage {
-            return Err("a wasm array copy between two array classes".into());
-        }
-        self.value(destination, destination_ty)?;
-        // A storage value held as `eq` is still this array class's storage. `array.copy` names
-        // that exact array type.
-        self.code.ref_cast(
-            true,
-            super::super::super::encode::HeapType::Concrete(storage),
-        );
-        self.value(destination_index, Ty::Int)?;
-        self.value(source, source_ty)?;
-        self.code.ref_cast(
-            true,
-            super::super::super::encode::HeapType::Concrete(storage),
-        );
-        self.value(source_index, Ty::Int)?;
-        self.value(length, Ty::Int)?;
-        self.code.array_copy(storage, storage);
-        Ok(())
-    }
-
-    fn wasm_array_storage(&mut self, ty: Ty) -> Result<u32, Unsupported> {
-        let name = ty.non_null().kotlin_class_internal().ok_or_else(|| {
-            "a wasm array copy whose operand is not a wasm array class".to_string()
-        })?;
-        let array = if name.matches("kotlin/wasm/internal/WasmAnyArray") {
-            Ty::array(Ty::nullable(Ty::obj_name(krusty::types::wk::any())))
-        } else if name.matches("kotlin/wasm/internal/WasmByteArray") {
-            Ty::array(Ty::Byte)
-        } else if name.matches("kotlin/wasm/internal/WasmShortArray") {
-            Ty::array(Ty::Short)
-        } else if name.matches("kotlin/wasm/internal/WasmIntArray") {
-            Ty::array(Ty::Int)
-        } else if name.matches("kotlin/wasm/internal/WasmLongArray") {
-            Ty::array(Ty::Long)
-        } else if name.matches("kotlin/wasm/internal/WasmFloatArray") {
-            Ty::array(Ty::Float)
-        } else if name.matches("kotlin/wasm/internal/WasmDoubleArray") {
-            Ty::array(Ty::Double)
-        } else if name.matches("kotlin/wasm/internal/WasmCharArray") {
-            Ty::array(Ty::Char)
-        } else {
-            return Err(format!(
-                "a wasm array copy of `{}`",
-                name.render().replace('/', ".")
-            ));
-        };
-        Ok(self.array_form(array)?.0.storage)
     }
 
     /// The form of `array`'s values and the element type its storage holds.
@@ -479,23 +363,6 @@ impl Body<'_> {
         Ok(())
     }
 
-    /// `array.iterator()`: a walker over this reference array.
-    pub(super) fn array_iterator(&mut self, receiver: u32) -> Result<(), Unsupported> {
-        let array = self
-            .type_of(receiver)?
-            .ok_or_else(|| "an array iterator without a receiver type".to_string())?;
-        let (form, _) = self.array_form(array)?;
-        if form.object != self.runtime.array_iterators.array {
-            return Err("an iterator of an array this runtime does not walk".to_string());
-        }
-        self.value(receiver, array)?;
-        self.code
-            .ref_cast(false, HeapType::Concrete(form.object))
-            .i32_const(0)
-            .struct_new(self.runtime.array_iterators.object);
-        Ok(())
-    }
-
     pub(super) fn array_get(&mut self, receiver: u32, index: u32) -> Result<(), Unsupported> {
         let (array, form, stored) = self.array_operand(receiver)?;
         let element = array
@@ -602,107 +469,6 @@ impl Body<'_> {
             self.runtime.string,
         )?;
         self.code.throw(self.runtime.exceptions.tag).end();
-        Ok(())
-    }
-
-    /// `AbstractList.Companion.checkRangeIndexes`. The arguments are evaluated first. A negative
-    /// `fromIndex` or a `toIndex` past `size` throws `IndexOutOfBoundsException`; a `fromIndex`
-    /// past `toIndex` throws `IllegalArgumentException`. The messages name the three bounds.
-    pub(super) fn check_range_indexes(
-        &mut self,
-        receiver: Option<u32>,
-        from_index: u32,
-        to_index: u32,
-        size: u32,
-    ) -> Result<(), Unsupported> {
-        // The companion is a library object this target does not emit. The check uses only
-        // the three bounds.
-        let _ = receiver;
-        let from_index = self.range_bound(from_index)?;
-        let to_index = self.range_bound(to_index)?;
-        let size = self.range_bound(size)?;
-        self.code
-            .local_get(from_index)
-            .i32_const(0)
-            .op(I32_LT_S)
-            .local_get(to_index)
-            .local_get(size)
-            .op(I32_GT_S)
-            .op(I32_OR)
-            .if_(BlockType::Empty);
-        self.throw_range_exception(
-            RuntimeExceptionKind::IndexOutOfBounds,
-            from_index,
-            to_index,
-            Some(size),
-        )?;
-        self.code.end();
-        self.code
-            .local_get(from_index)
-            .local_get(to_index)
-            .op(I32_GT_S)
-            .if_(BlockType::Empty);
-        self.throw_range_exception(
-            RuntimeExceptionKind::IllegalArgument,
-            from_index,
-            to_index,
-            None,
-        )?;
-        self.code.end();
-        Ok(())
-    }
-
-    fn range_bound(&mut self, bound: u32) -> Result<u32, Unsupported> {
-        let local = self.local(ValType::I32);
-        self.value(bound, Ty::Int)?;
-        self.code.local_set(local);
-        Ok(local)
-    }
-
-    /// Throw the range exception whose message is `fromIndex: <from>, toIndex: <to>[, size: <size>]`
-    /// or `fromIndex: <from> > toIndex: <to>`.
-    fn throw_range_exception(
-        &mut self,
-        kind: RuntimeExceptionKind,
-        from_index: u32,
-        to_index: u32,
-        size: Option<u32>,
-    ) -> Result<(), Unsupported> {
-        let structure =
-            self.runtime
-                .exception_class(self.module, self.classifiers, kind.classifier())?;
-        let between = match size {
-            Some(_) => ", toIndex: ",
-            None => " > toIndex: ",
-        };
-        self.string_constant("fromIndex: ");
-        self.code
-            .local_get(from_index)
-            .call(self.runtime.string_of_i32)
-            .call(self.runtime.string_concat);
-        self.string_constant(between);
-        self.code.call(self.runtime.string_concat);
-        self.code
-            .local_get(to_index)
-            .call(self.runtime.string_of_i32)
-            .call(self.runtime.string_concat);
-        if let Some(size) = size {
-            self.string_constant(", size: ");
-            self.code.call(self.runtime.string_concat);
-            self.code
-                .local_get(size)
-                .call(self.runtime.string_of_i32)
-                .call(self.runtime.string_concat);
-        }
-        let message = self.local(STRING);
-        self.code.local_set(message);
-        self.runtime.exceptions.construct_class(
-            &mut self.code,
-            structure,
-            Some(message),
-            self.runtime.string,
-        )?;
-        self.code.throw(self.runtime.exceptions.tag);
         Ok(())
     }
 }

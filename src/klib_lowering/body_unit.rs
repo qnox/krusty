@@ -729,7 +729,6 @@ impl DependencyBodyUnit {
             active_identity: callable.identity().clone(),
             active_value_class: None,
             sources,
-            pending_local_interfaces: std::cell::RefCell::default(),
         };
         let root = sources
             .bodies
@@ -819,9 +818,6 @@ impl DependencyBodyUnit {
             })?;
             self.ir.functions[body.function as usize].body = Some(lowered);
         }
-        linker
-            .install_pending_local_interfaces(&mut self.ir)
-            .map_err(|reason| KlibBodyDecline::new(callable.signature().clone(), reason))?;
         Ok(root)
     }
 }
@@ -856,40 +852,6 @@ struct Linker<'u, 's> {
     /// private member it calls.
     active_value_class: Option<MemberClass<'s>>,
     sources: Sources<'s>,
-    /// File-local interfaces a body named, with the module that serializes each one. Installed
-    /// once the unit's bodies have lowered, so an `is` check against one has a descriptor. A
-    /// decline restores the unit without them.
-    pending_local_interfaces: std::cell::RefCell<Vec<(String, KlibIrSignature)>>,
-}
-
-impl Linker<'_, '_> {
-    /// Materialize each file-local interface a lowered body named, once. The descriptor is what
-    /// an `is` check tests. Nothing in this unit implements the interface, so the check is false
-    /// for every value the unit can build.
-    fn install_pending_local_interfaces(
-        &self,
-        ir: &mut IrFile,
-    ) -> Result<(), KlibBodyDeclineReason> {
-        let pending = self.pending_local_interfaces.borrow().clone();
-        for (module, signature) in pending {
-            let Some(name) =
-                super::same_library_class::classifier(self.sources.bodies, &module, &signature)?
-            else {
-                continue;
-            };
-            if ir.class_id_by_name(name).is_some() {
-                continue;
-            }
-            // A class descriptor, not an interface in the module plan. `is` compares the
-            // receiver's type with this descriptor. No value this unit builds carries it, so the
-            // check is false, and the descriptor needs no module-wide interface number.
-            let mut installed = crate::ir::IrClass::synthetic(name);
-            installed.is_abstract = true;
-            installed.has_primary_ctor = false;
-            ir.add_class(installed);
-        }
-        Ok(())
-    }
 }
 
 impl CallLinker for Linker<'_, '_> {
@@ -1079,54 +1041,7 @@ impl CallLinker for Linker<'_, '_> {
         &self,
         signature: &KlibIrSignature,
     ) -> Result<Option<TypeName>, KlibBodyDeclineReason> {
-        let name = super::same_library_class::classifier(
-            self.sources.bodies,
-            &self.active_module,
-            signature,
-        )?;
-        if name.is_some() {
-            if let Some((_, class)) = self
-                .sources
-                .bodies
-                .module_local_class(&self.active_module, signature)
-            {
-                if crate::metadata::semantic::class_kind(class.base.flags)
-                    == crate::libraries::TypeKind::Interface
-                {
-                    self.pending_local_interfaces
-                        .borrow_mut()
-                        .push((self.active_module.clone(), signature.clone()));
-                }
-            }
-        }
-        Ok(name)
-    }
-
-    fn file_local_interface_member(
-        &self,
-        signature: &KlibIrSignature,
-    ) -> Result<bool, KlibBodyDeclineReason> {
-        let Some((_, class)) = self
-            .sources
-            .bodies
-            .module_class_declaring(&self.active_module, signature)
-        else {
-            return Ok(false);
-        };
-        Ok(crate::metadata::semantic::class_kind(class.base.flags)
-            == crate::libraries::TypeKind::Interface)
-    }
-
-    fn local_interface_type(&self, ty: Ty) -> bool {
-        let Some(name) = ty.non_null().kotlin_class_internal() else {
-            return false;
-        };
-        self.pending_local_interfaces
-            .borrow()
-            .iter()
-            .any(|(module, signature)| {
-                super::same_library_class::classifier_name(module, signature) == Some(name)
-            })
+        super::same_library_class::classifier(self.sources.bodies, &self.active_module, signature)
     }
 
     fn link_local_constructor(
@@ -1304,49 +1219,6 @@ impl CallLinker for Linker<'_, '_> {
         Err(KlibBodyDeclineReason::UnsupportedOperation(
             "an object value",
         ))
-    }
-
-    fn local_object(
-        &mut self,
-        ir: &mut IrFile,
-        signature: &KlibIrSignature,
-    ) -> Result<TypeName, KlibBodyDeclineReason> {
-        // A file-local object is not a public classifier the target lays out. The read materializes
-        // the singleton in this unit, the same way a file-local class is materialized for a
-        // constructor call. Its members stay private to the unit until a call selects one.
-        let Some(name) = super::same_library_class::classifier(
-            self.sources.bodies,
-            &self.active_module,
-            signature,
-        )?
-        else {
-            return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                "a file-private object value",
-            ));
-        };
-        if ir.class_id_by_name(name).is_some() {
-            return Ok(name);
-        }
-        let Some((_, class)) = self
-            .sources
-            .bodies
-            .module_local_class(&self.active_module, signature)
-        else {
-            return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                "a file-private object value",
-            ));
-        };
-        if crate::metadata::semantic::class_kind(class.base.flags)
-            != crate::libraries::TypeKind::Object
-        {
-            return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                "a file-private object value",
-            ));
-        }
-        let mut installed = crate::ir::IrClass::synthetic(name);
-        installed.is_object = true;
-        ir.add_class(installed);
-        Ok(name)
     }
 
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {

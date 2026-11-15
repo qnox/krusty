@@ -26,7 +26,6 @@ pub(super) use object_strings::ObjectStrings;
 
 use krusty::fx_hash::HashMap;
 
-use super::array_iterators::ArrayIterators;
 use super::array_objects::ArrayObjects;
 use super::boxes::Boxes;
 use super::builtin_instances::BuiltinInstances;
@@ -41,10 +40,7 @@ use super::function_values::FunctionShapes;
 use super::hashing::Hashing;
 use super::host::Host;
 use super::identity::IdentityObjects;
-use super::lists::Lists;
-use super::maps::Maps;
 use super::objects::ObjectRoot;
-use super::pairs::Pairs;
 use super::string_builders::StringBuilders;
 use super::type_objects::{TypeDescription, TypeObject, TypeObjects};
 
@@ -82,14 +78,6 @@ pub(super) struct Runtime {
     pub(super) identity: IdentityObjects,
     /// `kotlin.text.StringBuilder`, which the runtime lays out.
     pub(super) string_builders: StringBuilders,
-    /// `kotlin.Pair`, which the runtime lays out.
-    pub(super) pairs: Pairs,
-    /// `HashMap` and `LinkedHashMap`, which the runtime lays out as one struct.
-    pub(super) maps: Maps,
-    /// `ArrayList` and the array wrapper `asArrayList` fills it from.
-    pub(super) lists: Lists,
-    /// A walker over `Array<T>`.
-    pub(super) array_iterators: ArrayIterators,
     /// Kotlin's `hashCode()` rules.
     pub(super) hashing: Hashing,
     pub(super) exceptions: ExceptionTransport,
@@ -160,18 +148,6 @@ impl Runtime {
             ArrayObjects::declare(module, &mut objects, &identity, references, array_to_string);
         let string_builders =
             StringBuilders::declare(module, &mut objects, &identity, chars, string);
-        let pairs = Pairs::declare(module, &mut objects, &identity);
-        let array_iterators = ArrayIterators::declare(
-            module,
-            arrays.reference_object(),
-            arrays.reference_storage(),
-        );
-        let maps = Maps::declare(module);
-        let lists = Lists::declare(
-            module,
-            arrays.reference_object(),
-            arrays.reference_storage(),
-        );
         let object_equals = module.declare();
         let callable_references = CallableReferences::declare(module, &objects, object_equals);
         let string_concat = module.declare();
@@ -207,10 +183,6 @@ impl Runtime {
             objects,
             identity,
             string_builders,
-            pairs,
-            maps,
-            lists,
-            array_iterators,
             hashing,
             class_tokens,
             exceptions,
@@ -226,8 +198,6 @@ impl Runtime {
         };
         runtime.define_string_equals(module);
         runtime.define_object_equals(module);
-        runtime.maps.define(module, runtime.object_equals);
-        runtime.lists.define(module);
         runtime.define_string_concat(module);
         runtime.define_decimal(module, runtime.string_of_i64, true);
         runtime.define_decimal(module, runtime.string_of_u64, false);

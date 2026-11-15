@@ -79,12 +79,7 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::UnsignedDivide { .. }
         | CompilerIntrinsic::UnsignedRemainder { .. }
         | CompilerIntrinsic::ResultFailure(_)
-        | CompilerIntrinsic::PrimitiveIteratorNext
-        | CompilerIntrinsic::WasmArrayCopy
-        | CompilerIntrinsic::PairComponent { .. }
-        | CompilerIntrinsic::ArrayIterator
-        | CompilerIntrinsic::CheckRangeIndexes
-        | CompilerIntrinsic::HashMapEntry(_) => return None,
+        | CompilerIntrinsic::PrimitiveIteratorNext => return None,
     })
 }
 

@@ -192,20 +192,6 @@ impl Body<'_> {
             {
                 return self.string_builder_construction(target, args);
             }
-            if internal.matches("kotlin/Pair") {
-                return self.pair_construction(args);
-            }
-            if internal.matches("kotlin/collections/HashMap")
-                || internal.matches("kotlin/collections/LinkedHashMap")
-            {
-                return self.hash_map_construction(args);
-            }
-            if internal.contains("ArrayAsCollection") || self.array_collection_wrapper(internal) {
-                return self.array_wrapper_construction(args);
-            }
-            if internal.matches("kotlin/collections/ArrayList") {
-                return self.array_list_construction(args);
-            }
             if let Some(constructed) =
                 external.and_then(|target| self.dependency_construction(target, internal, args))
             {

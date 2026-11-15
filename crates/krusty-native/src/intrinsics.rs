@@ -1931,16 +1931,12 @@ pub(super) fn builtin_companion(classifier: krusty::types::TypeName) -> Option<&
 
 /// The runtime entry point answering a stdlib object the runtime lays out itself, if this names one.
 ///
-/// `EmptySet` and `EmptyMap` are the shared read-only empty collections the runtime's own
-/// `emptySet()` and `emptyMap()` answer, so a library body reading either object reads that one.
+/// `EmptySet` is the one shared read-only empty set the runtime's own `emptySet()` answers, so a
+/// library body reading the object reads that one.
 pub(super) fn runtime_object(classifier: krusty::types::TypeName) -> Option<&'static str> {
-    if classifier.matches("kotlin/collections/EmptySet") {
-        Some("kt_set_empty")
-    } else if classifier.matches("kotlin/collections/EmptyMap") {
-        Some("kt_map_empty")
-    } else {
-        None
-    }
+    classifier
+        .matches("kotlin/collections/EmptySet")
+        .then_some("kt_set_empty")
 }
 
 /// A member of a COMPANION the runtime realizes, whose receiver carries nothing.

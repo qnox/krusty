@@ -48,8 +48,6 @@ pub(super) struct InterfaceDispatch {
     /// Each member of a library classifier something names, by its KLIB identity.
     library: HashMap<Vec<u8>, MemberRef>,
     classes: Vec<ClassRecord>,
-    /// The source name of each class, when the file that recorded it had one.
-    labels: Vec<String>,
     /// The `is` function of each interface something tests, in the order they were asked for.
     tests: Vec<(TypeName, u32)>,
     /// Each runtime representation with no interface table, by its struct, and the interfaces
@@ -80,10 +78,6 @@ struct ClassRecord {
     /// The global its dispatch table reads its interface table from.
     itable: u32,
     interfaces: Vec<TypeName>,
-    /// Whether a called library member must have an implementation on this class. A
-    /// compiler-generated class the runtime replaces with its own representation does not: the
-    /// value that flows is that representation, not this struct.
-    requires_members: bool,
 }
 
 /// How a stub reaches the implementations of its member.
@@ -218,9 +212,7 @@ impl InterfaceDispatch {
             ancestors,
             itable,
             interfaces: Vec::new(),
-            requires_members: true,
         });
-        self.labels.push(String::new());
         (class, itable)
     }
 
@@ -296,42 +288,21 @@ impl InterfaceDispatch {
             let Some(owner) = member.library_owner else {
                 continue;
             };
-            let unimplemented = self.classes.iter().enumerate().find(|(class, record)| {
-                record.requires_members
-                    && record.interfaces.contains(&owner)
+            let unimplemented = self.classes.iter().enumerate().any(|(class, record)| {
+                record.interfaces.contains(&owner)
                     && !member
                         .implementations
                         .iter()
-                        .any(|(known, _)| known.0 as usize == *class)
+                        .any(|(known, _)| known.0 as usize == class)
             });
-            if let Some((class, _)) = unimplemented {
-                let name = self
-                    .labels
-                    .get(class)
-                    .map(String::as_str)
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or("an unnamed class");
+            if unimplemented {
                 return Some(format!(
-                    "a call of a `{}` member on `{name}`, which does not implement it",
+                    "a call of a `{}` member on an instance that does not implement it",
                     owner.render()
                 ));
             }
         }
         None
-    }
-
-    /// A compiler-generated class whose struct is not the value of its interfaces.
-    pub(super) fn represented_elsewhere(&mut self, class: ClassRef) {
-        if let Some(record) = self.classes.get_mut(class.0 as usize) {
-            record.requires_members = false;
-        }
-    }
-
-    /// The name diagnostics use for `class`.
-    pub(super) fn label(&mut self, class: ClassRef, name: String) {
-        if let Some(label) = self.labels.get_mut(class.0 as usize) {
-            *label = name;
-        }
     }
 
     /// Record that `class`'s instances are instances of `interface`.

@@ -212,22 +212,6 @@ pub(super) trait CallLinker {
         Ok(None)
     }
 
-    /// Whether `signature` is a member of a file-local interface of the body being lowered.
-    /// Such a member has no constructor and no dispatch table in this unit. The call still has
-    /// to lower: its arguments run, and the call itself diverges.
-    fn file_local_interface_member(
-        &self,
-        _signature: &crate::metadata::klib_ir::KlibIrSignature,
-    ) -> Lowered<bool> {
-        Ok(false)
-    }
-
-    /// Whether `ty` names a file-local interface this body has already mentioned. A smart cast
-    /// to that interface is one the declaring compilation proved with `is`.
-    fn local_interface_type(&self, _ty: crate::types::Ty) -> bool {
-        false
-    }
-
     /// The constructor a file-local construction invokes. Template linkers keep the refusal.
     fn link_local_constructor(
         &mut self,
@@ -256,17 +240,6 @@ pub(super) trait CallLinker {
 
     /// Proves that `classifier` is a dependency object, whose value a body may read.
     fn singleton(&self, classifier: TypeName) -> Lowered<()>;
-
-    /// The file-local object `signature` names in the library of the body being lowered.
-    /// Materializes that object in `ir` when the linker owns the unit, and returns its classifier.
-    /// Template linkers keep the refusal: an expanded template reads an object the source selected.
-    fn local_object(
-        &mut self,
-        _ir: &mut IrFile,
-        _signature: &crate::metadata::klib_ir::KlibIrSignature,
-    ) -> Lowered<TypeName> {
-        unsupported("a file-private object value")
-    }
 
     /// The dependency enum class whose constant `entry` a body reads, with that constant's name.
     /// A linker that materializes no class declines the read.

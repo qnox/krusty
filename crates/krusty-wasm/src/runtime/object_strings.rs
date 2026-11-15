@@ -65,7 +65,6 @@ impl Runtime {
         self.define_any_to_string(module);
         self.define_enum_name(module);
         self.define_identity_string(module);
-        self.define_pair_to_string(module);
         self.define_throwable_string(module);
     }
 
@@ -275,23 +274,6 @@ impl Runtime {
         let ty = self.objects.any_slot_types[2];
         let locals = Vec::new();
         module.define(self.object_strings.enum_name, Function { ty, locals, code });
-    }
-
-    /// `kotlin.Pair`'s `toString` slot. The pair table names this function, so its type is the
-    /// slot's, not the erased `Any.toString` dispatcher.
-    fn define_pair_to_string(&mut self, module: &mut Module) {
-        let mut code = Code::default();
-        self.ascii_constant(module, &mut code, "kotlin.Pair");
-        code.local_get(0).call(self.object_strings.identity_string);
-        let ty = self.objects.any_slot_types[2];
-        module.define(
-            self.pairs.to_string,
-            Function {
-                ty,
-                locals: Vec::new(),
-                code,
-            },
-        );
     }
 
     /// `name + "@" + identityHashCode().toString()`.

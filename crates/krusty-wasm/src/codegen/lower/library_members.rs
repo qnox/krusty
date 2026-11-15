@@ -14,7 +14,7 @@ use krusty::backend::interface_identity::{member_identity, property_member_ident
 use krusty::backend::{BackendCallableFact, CheckedBackendCallables};
 use krusty::libraries::ExternalCallableKind;
 use krusty::libraries::MemberRealization;
-use krusty::types::{SemanticCallableOwner, Ty, TypeName};
+use krusty::types::{SemanticCallableOwner, TypeName};
 
 use super::super::interface_members::{accessor_types, member_signature, Signature};
 use super::*;
@@ -169,16 +169,6 @@ impl Body<'_> {
             &signature,
             &fact.builtin_implementations,
         )?;
-        if let Some(step) = array_iterator_step(&fact) {
-            self.implement_array_iterator(member, step)?;
-            self.implement_list_iterator(member, list_walk_has_next(step))?;
-        }
-        if let Some(operation) = hash_map_interface_operation(&fact) {
-            self.implement_hash_map(member, operation)?;
-        }
-        if let Some(slot) = list_interface_operation(&fact) {
-            self.implement_list(member, slot)?;
-        }
         self.value(receiver, objects::any())?;
         for (&arg, &param) in args.iter().zip(params) {
             self.value(arg, param)?;
@@ -192,108 +182,5 @@ impl Body<'_> {
                 Ok(())
             }
         }
-    }
-
-    fn implement_array_iterator(
-        &mut self,
-        member: super::super::super::interface_dispatch::MemberRef,
-        step: super::super::super::array_iterators::WalkStep,
-    ) -> Result<(), Unsupported> {
-        let function = match self.runtime.array_iterators.function(step) {
-            Some(function) => function,
-            None => {
-                let member_type = self.runtime.objects.interfaces.ty(member);
-                let function = self
-                    .runtime
-                    .array_iterators
-                    .define(self.module, member_type, step);
-                self.runtime.array_iterators.remember(step, function);
-                function
-            }
-        };
-        let object = self.runtime.array_iterators.object;
-        self.runtime
-            .objects
-            .interfaces
-            .implement_representation(member, object, function)?;
-        Ok(())
-    }
-}
-
-fn list_walk_has_next(step: super::super::super::array_iterators::WalkStep) -> bool {
-    matches!(
-        step,
-        super::super::super::array_iterators::WalkStep::HasNext
-    )
-}
-
-/// `List.get`, `Collection.isEmpty`, `Collection.size`, `Iterable.iterator`, or `MutableList.add`.
-/// A runtime `ArrayList` answers each of them. `get` is the index operator, so its parameter is
-/// `Int`, which keeps it apart from `Map.get`.
-fn list_interface_operation(
-    fact: &BackendCallableFact,
-) -> Option<super::super::super::lists::ListSlot> {
-    use super::super::super::lists::ListSlot;
-
-    let owner = library_member_owner(fact)?;
-    let list = owner.matches("kotlin/collections/List")
-        || owner.matches("kotlin/collections/MutableList")
-        || owner.matches("kotlin/collections/Collection")
-        || owner.matches("kotlin/collections/MutableCollection");
-    let iterable = owner.matches("kotlin/collections/Iterable")
-        || owner.matches("kotlin/collections/MutableIterable")
-        || list;
-    match (fact.name.as_str(), fact.params.as_slice()) {
-        ("get", [Ty::Int]) if list => Some(ListSlot::Get),
-        ("isEmpty", []) if list && fact.ret == Ty::Boolean => Some(ListSlot::IsEmpty),
-        ("size", []) if list && fact.ret == Ty::Int => Some(ListSlot::Size),
-        ("iterator", []) if iterable => Some(ListSlot::Iterator),
-        ("add", [_])
-            if (owner.matches("kotlin/collections/MutableList")
-                || owner.matches("kotlin/collections/MutableCollection"))
-                && fact.ret == Ty::Boolean =>
-        {
-            Some(ListSlot::Add)
-        }
-        _ => None,
-    }
-}
-
-/// `Map.get`, `Map.containsKey`, or `MutableMap.put`, which a runtime map answers by
-/// representation. `MutableMap` inherits `get` and `containsKey`, so a call through it names
-/// the same operations.
-fn hash_map_interface_operation(
-    fact: &BackendCallableFact,
-) -> Option<krusty::libraries::HashMapOperation> {
-    use krusty::libraries::HashMapOperation;
-
-    let owner = library_member_owner(fact)?;
-    let on_map =
-        owner.matches("kotlin/collections/Map") || owner.matches("kotlin/collections/MutableMap");
-    if !on_map {
-        return None;
-    }
-    match (fact.name.as_str(), fact.params.len()) {
-        ("get", 1) => Some(HashMapOperation::Get),
-        ("containsKey", 1) if fact.ret == Ty::Boolean => Some(HashMapOperation::ContainsKey),
-        ("put", 2) if owner.matches("kotlin/collections/MutableMap") => Some(HashMapOperation::Put),
-        _ => None,
-    }
-}
-
-/// `Iterator.hasNext` or `Iterator.next`, which an array walker answers by representation.
-fn array_iterator_step(
-    fact: &BackendCallableFact,
-) -> Option<super::super::super::array_iterators::WalkStep> {
-    use super::super::super::array_iterators::WalkStep;
-
-    let owner = library_member_owner(fact)?;
-    if !owner.matches("kotlin/collections/Iterator") || !fact.params.is_empty() {
-        return None;
-    }
-    match fact.name.as_str() {
-        "hasNext" if fact.ret == Ty::Boolean => Some(WalkStep::HasNext),
-        "next" => Some(WalkStep::Next),
-        _ => None,
     }
 }

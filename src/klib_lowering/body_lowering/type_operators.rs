@@ -187,12 +187,6 @@ impl BodyLowering<'_> {
         ) {
             return true;
         }
-        // `is MapWithDefault` smart-casts the receiver to that file-local interface. The
-        // interface is not in the public hierarchy, and the declaring compilation already proved
-        // the cast.
-        if self.linker.local_interface_type(target) {
-            return true;
-        }
         let classifier = |ty: Ty| match ty.non_null().kind() {
             TyKind::Obj(name, _) => Some(name),
             _ => None,

@@ -14,8 +14,8 @@ use super::{
 };
 use crate::fir::FirTypeParameterRef;
 use crate::ir::{
-    Callee, ExprId, IrBinOp, IrCheckedOperation, IrCheckedSubstitution, IrConst, IrExpr,
-    IrIntrinsic, IrPropertyDispatch,
+    Callee, ExprId, IrBinOp, IrCheckedOperation, IrCheckedSubstitution, IrExpr, IrIntrinsic,
+    IrPropertyDispatch,
 };
 use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::klib_ir::tree::{
@@ -37,16 +37,6 @@ impl BodyLowering<'_> {
         let callee = match &access.symbol.signature {
             KlibIrSignature::Public(callee) => callee,
             KlibIrSignature::FileLocal { .. } => {
-                // A file-local interface has no constructor and no dispatch table. The call's
-                // arguments still run. The call itself diverges: the only instances of such an
-                // interface would be classes this unit has not materialized, and an `is` check
-                // against the interface is false for every value this unit can build.
-                if self
-                    .linker
-                    .file_local_interface_member(&access.symbol.signature)?
-                {
-                    return self.diverging_interface_member(access, ty);
-                }
                 let linked = self
                     .linker
                     .link_local_function(self.ir, &access.symbol.signature)?;
@@ -558,30 +548,6 @@ impl BodyLowering<'_> {
         self.linked_call(linked, access, ty)
     }
 
-    /// Arguments of a file-local interface member, then a divergence. The member has no body and
-    /// no dispatch slot in this unit. The expression's type is the call's type: the throw is a
-    /// `Nothing` producer, and the call site's checked type is the type the caller uses.
-    fn diverging_interface_member(
-        &mut self,
-        access: &KlibIrMemberAccess,
-        ty: Ty,
-    ) -> Lowered<ExprId> {
-        let mut stmts = Vec::new();
-        for argument in arguments(access).into_iter().flatten() {
-            stmts.push(self.expression(argument)?);
-        }
-        let message = self.ir.add_expr(IrExpr::Const(IrConst::String(
-            "a file-local interface member".into(),
-        )));
-        self.ir.set_logical_type(message, Ty::String);
-        let thrown = self.ir.add_expr(IrExpr::Throw { operand: message });
-        self.ir.set_logical_type(thrown, Ty::Nothing);
-        stmts.push(thrown);
-        let block = self.ir.add_expr(IrExpr::Block { stmts, value: None });
-        self.ir.set_logical_type(block, Ty::Nothing);
-        Ok(self.typed(block, ty))
-    }
-
     pub(super) fn linked_call(
         &mut self,
         linked: LinkedCallee,
@@ -667,12 +633,6 @@ impl BodyLowering<'_> {
             self.ir
                 .external_singleton_dispatches
                 .insert(call, classifier);
-        }
-        // A generic callee's declared result stays on the call. The value the caller sees is a
-        // coercion to the substituted result, and a backend reads the declared result from the
-        // call when that call has no checked type of its own.
-        if let Some(declared) = declared_ret {
-            self.ir.call_declared_ret.insert(call, declared);
         }
         // The result of a generic local function is its declared type parameter; the call's
         // value is that result at the call's type arguments.

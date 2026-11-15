@@ -31,11 +31,8 @@ mod function_values;
 mod generated_members;
 mod intrinsic_operations;
 pub(super) mod library_members;
-mod lists;
 mod local_delegates;
-mod maps;
 mod objects;
-mod pairs;
 mod scalar_instructions;
 mod scalar_value_classes;
 mod shared_cells;
@@ -60,17 +57,6 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         || operation == krusty::backend::BackendCompilerIntrinsic::ArrayGet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySize
-        || operation == krusty::backend::BackendCompilerIntrinsic::WasmArrayCopy
-        || matches!(
-            operation,
-            krusty::backend::BackendCompilerIntrinsic::PairComponent { .. }
-        )
-        || operation == krusty::backend::BackendCompilerIntrinsic::ArrayIterator
-        || operation == krusty::backend::BackendCompilerIntrinsic::CheckRangeIndexes
-        || matches!(
-            operation,
-            krusty::backend::BackendCompilerIntrinsic::HashMapEntry(_)
-        )
         || operation == krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
         || operation == krusty::backend::BackendCompilerIntrinsic::StringCompare
         || matches!(
@@ -1289,107 +1275,6 @@ impl<'a> Body<'a> {
             }
             IrExpr::Call {
                 callee: ref call_callee,
-                dispatch_receiver: None,
-                args,
-            } if let Callee::External {
-                target,
-                params,
-                defaults,
-                ..
-            } = &**call_callee
-                && defaults.is_empty()
-                && self.callables.callable(*target).is_some_and(|fact| {
-                    fact.compiler_operation()
-                        == Some(krusty::backend::BackendCompilerIntrinsic::WasmArrayCopy)
-                }) =>
-            {
-                self.wasm_array_copy(params, &args)?;
-            }
-            IrExpr::Call {
-                callee: ref call_callee,
-                dispatch_receiver: Some(receiver),
-                args,
-            } if let Callee::External {
-                target,
-                defaults,
-                ret,
-                ..
-            } = &**call_callee
-                && defaults.is_empty()
-                && args.is_empty()
-                && let Some(krusty::backend::BackendCompilerIntrinsic::PairComponent {
-                    second,
-                }) = self
-                    .callables
-                    .callable(*target)
-                    .and_then(|fact| fact.compiler_operation()) =>
-            {
-                let field = if second {
-                    super::super::pairs::SECOND_FIELD
-                } else {
-                    super::super::pairs::FIRST_FIELD
-                };
-                self.pair_field(receiver, field, *ret)?;
-            }
-            IrExpr::Call {
-                callee: ref call_callee,
-                dispatch_receiver: Some(receiver),
-                args,
-            } if let Callee::External {
-                target, defaults, ..
-            } = &**call_callee
-                && defaults.is_empty()
-                && args.is_empty()
-                && self.callables.callable(*target).is_some_and(|fact| {
-                    fact.compiler_operation()
-                        == Some(krusty::backend::BackendCompilerIntrinsic::ArrayIterator)
-                }) =>
-            {
-                self.array_iterator(receiver)?;
-            }
-            IrExpr::Call {
-                callee: ref call_callee,
-                dispatch_receiver,
-                args,
-            } if let Callee::External {
-                target,
-                params,
-                defaults,
-                ..
-            } = &**call_callee
-                && defaults.is_empty()
-                && params.as_slice() == [Ty::Int, Ty::Int, Ty::Int]
-                && self.callables.callable(*target).is_some_and(|fact| {
-                    fact.compiler_operation()
-                        == Some(krusty::backend::BackendCompilerIntrinsic::CheckRangeIndexes)
-                }) =>
-            {
-                let [from_index, to_index, size] = args.as_slice() else {
-                    return Err("an authenticated range check with malformed operands".into());
-                };
-                self.check_range_indexes(dispatch_receiver, *from_index, *to_index, *size)?;
-            }
-            IrExpr::Call {
-                callee: ref call_callee,
-                dispatch_receiver: Some(receiver),
-                args,
-            } if let Callee::External {
-                target,
-                params,
-                ret,
-                defaults,
-                ..
-            } = &**call_callee
-                && defaults.is_empty()
-                && let Some(krusty::backend::BackendCompilerIntrinsic::HashMapEntry(operation)) =
-                    self.callables
-                        .callable(*target)
-                        .and_then(|fact| fact.compiler_operation()) =>
-            {
-                self.hash_map_entry(operation, receiver, &args, params, *ret)?;
-            }
-            IrExpr::Call {
-                callee: ref call_callee,
                 dispatch_receiver,
                 args,
             } if let Callee::External {
@@ -1719,32 +1604,6 @@ impl<'a> Body<'a> {
                     && self.is_array_size_property(*target) =>
             {
                 self.checked_array_size(checked_op)?;
-            }
-            IrExpr::Checked(ref checked_op)
-                if let krusty::ir::IrCheckedOperation::ExternalPropertyRead { target, .. } =
-                    &**checked_op
-                    && self.is_array_storage_property(*target) =>
-            {
-                self.checked_array_storage(checked_op)?;
-            }
-            IrExpr::Checked(ref checked_op)
-                if let krusty::ir::IrCheckedOperation::ExternalPropertyRead {
-                    target,
-                    dispatch: krusty::ir::IrPropertyDispatch::Ordinary,
-                    receiver: Some(receiver),
-                    arguments,
-                    parameters,
-                    result,
-                    ..
-                } = &**checked_op
-                    && parameters.is_empty()
-                    && arguments.is_empty()
-                    && self.pair_property_field(*target).is_some() =>
-            {
-                let Some(field) = self.pair_property_field(*target) else {
-                    return Err("a `Pair` property that is not `first` or `second`".to_string());
-                };
-                self.pair_field(*receiver, field, *result)?;
             }
             IrExpr::Checked(ref checked_op)
                 if let krusty::ir::IrCheckedOperation::ExternalPropertyRead {

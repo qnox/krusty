@@ -23,10 +23,9 @@
 //! inherits `kotlin.Any`'s own `hashCode` gets its identity hash; one that inherits `toString` gets
 //! `kotlin.Enum`'s, its `name`, `kotlin.Throwable`'s for a class extending a runtime exception, or
 //! otherwise `kotlin.Any`'s default rendering. Both defaults print the name Kotlin gives the source
-//! class (`krusty::backend::class_names::source_class_names`). A source class with no such name
-//! keeps the trap of a member with no body, and [`FileClasses::realizes`] says so. A
-//! compiler-generated class that was never a source classifier prints its physical identity, so an
-//! erased `toString` in the same file is not declined for it.
+//! class (`krusty::backend::class_names::source_class_names`). A compiler-generated class has no
+//! such name, so its slot holds the trap of a member with no body, and [`FileClasses::realizes`]
+//! says so.
 //!
 //! **Interfaces.** Interface members are numbered once for the module, from the declaration
 //! headers (`class_tables::module_interfaces`), and kept out of the class tables: a call through
@@ -46,7 +45,7 @@
 
 use krusty::fx_hash::HashMap;
 
-use krusty::backend::class_names::{member_class_names, source_class_names};
+use krusty::backend::class_names::source_class_names;
 use krusty::backend::class_tables::module_classes::ModuleClasses;
 use krusty::backend::class_tables::module_slots::ModuleSlotPlan;
 use krusty::backend::class_tables::{
@@ -1025,23 +1024,6 @@ impl TableEntries<'_> {
     }
 }
 
-/// The name `toString` prints for `class`. A source classifier uses the name Kotlin gives it. A
-/// compiler-generated class that was never declared in source uses its physical identity, which is
-/// the only name this file recorded for it.
-fn to_string_names(
-    ir: &IrFile,
-    class: ClassId,
-) -> Option<krusty::backend::class_names::ClassNames> {
-    if let Some(names) = source_class_names(ir, class) {
-        return Some(names);
-    }
-    let declaration = &ir.classes[class as usize];
-    if declaration.is_source_declared || declaration.annotation_impl_of.is_some() {
-        return None;
-    }
-    Some(member_class_names(declaration.fq_name_id()))
-}
-
 /// The body the table of `class` holds for `kotlin.Any`'s `member`, which the class inherits
 /// through `base`; `None` when this backend has none (see the module documentation).
 fn inherited_any_member(
@@ -1060,11 +1042,11 @@ fn inherited_any_member(
         (AnyMember::HashCode, _) => runtime.identity.hash_code,
         (AnyMember::ToString, OwnedBase::Enum) => runtime.object_strings.enum_name,
         (AnyMember::ToString, OwnedBase::None) => {
-            let names = to_string_names(ir, class)?;
+            let names = source_class_names(ir, class)?;
             runtime.identity_to_string(module, ir.classes[class as usize].fq_name_id(), &names)
         }
         (AnyMember::ToString, OwnedBase::Exception(_)) => {
-            let names = to_string_names(ir, class)?;
+            let names = source_class_names(ir, class)?;
             runtime.throwable_to_string(module, ir.classes[class as usize].fq_name_id(), &names)
         }
     })
