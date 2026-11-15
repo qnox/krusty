@@ -142,6 +142,13 @@ pub(super) trait CallLinker {
     /// may be folded into a common-IR operation.
     fn requires_declaration(&self, callee: &KlibPublicIdSignature) -> Lowered<bool>;
 
+    /// Whether the serialized declaration of `callee` carries a body. A function this unit
+    /// declares gets its body only when its queued entry is lowered, so the declaration, not the
+    /// lowered function, proves a member concrete. A linker that cannot read it declines.
+    fn declares_implementation(&self, _callee: &KlibPublicIdSignature) -> Lowered<bool> {
+        unsupported("a `super` call whose member's implementation this linker cannot read")
+    }
+
     /// The serialized header of the member `callee` an `in` over a range literal calls, read
     /// only to prove it is the range's own membership operator: its dispatch receiver, value
     /// parameters and result. `None` keeps the membership an ordinary checked call, as template

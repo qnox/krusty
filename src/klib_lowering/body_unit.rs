@@ -874,6 +874,17 @@ impl CallLinker for Linker<'_, '_> {
         })
     }
 
+    fn declares_implementation(
+        &self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<bool, KlibBodyDeclineReason> {
+        let identity = self.callee_identity(callee)?;
+        self.sources
+            .bodies
+            .function_has_body(&identity)
+            .ok_or_else(|| KlibBodyDeclineReason::UnsupportedCallee(Box::new(callee.clone())))
+    }
+
     fn range_membership_header(
         &self,
         callee: &KlibPublicIdSignature,

@@ -26,6 +26,15 @@ use crate::types::{EqualityMode, Ty, TyKind};
 
 use super::super::decline::KlibBodyDeclineReason;
 
+/// How a call of a member reaches its implementation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CallDispatch {
+    /// Through the receiver's dispatch table when a subclass may override the member.
+    Virtual,
+    /// To the declared implementation itself: a `super` call.
+    Direct,
+}
+
 impl BodyLowering<'_> {
     /// A call of a compiler built-in operator or of a dependency function. A built-in operator
     /// lowers as checked FIR lowers the source operator it serializes; a dependency function
@@ -540,7 +549,6 @@ impl BodyLowering<'_> {
         })
     }
 
-    /// A call of a dependency function, which the unit lowers too.
     /// `super<Q>.f(…)`: the qualifier's own implementation of `f`, called on the receiver without
     /// dispatch, as checked FIR lowers a source `super` call. The KLIB names the member through
     /// the qualifier, so the callee must be a member `Q` declares, and only an implementation this
@@ -567,46 +575,19 @@ impl BodyLowering<'_> {
             ));
         }
         let linked = self.linker.link(self.ir, callee)?;
-        let Callee::Local(function) = linked.callee else {
+        if !matches!(linked.callee, Callee::Local(_)) {
             return unsupported("a `super` call of a member this unit does not implement");
-        };
-        if self.ir.functions[function as usize].body.is_none() {
+        }
+        if linked.receiver.is_none() {
+            return Err(mismatch("a `super` call names a member without a receiver"));
+        }
+        if !self.linker.declares_implementation(callee)? {
             return Err(mismatch("a `super` call names an abstract member"));
         }
-        let linked = self.substituted(linked, access)?;
-        let operands = self.call_operands(
-            access,
-            ty,
-            CalleeShape {
-                receiver: linked.receiver,
-                params: &linked.params,
-                ret: linked.ret,
-                context_count: linked.context_count,
-                class_type_parameters: &linked.class_type_parameters,
-                parameter_defaults: &[],
-            },
-        )?;
-        if operands.receiver.is_none() || !operands.omitted.is_empty() {
-            return Err(mismatch(
-                "a `super` call is called with another shape than its member's",
-            ));
-        }
-        let call = self.ir.add_expr(IrExpr::Call {
-            callee: Box::new(Callee::Local(function)),
-            dispatch_receiver: operands.receiver,
-            args: operands.args,
-        });
-        if let Some(role) = linked.edge.semantic_role {
-            self.ir.semantic_call_roles.insert(call, role);
-        }
-        let declared = self.ir.functions[function as usize].ret;
-        Ok(if declared == operands.ret {
-            call
-        } else {
-            self.coercion(call, operands.ret)
-        })
+        self.linked_call_with(linked, access, ty, CallDispatch::Direct)
     }
 
+    /// A call of a dependency function, which the unit lowers too.
     fn dependency_call(
         &mut self,
         callee: &KlibPublicIdSignature,
@@ -622,6 +603,18 @@ impl BodyLowering<'_> {
         linked: LinkedCallee,
         access: &KlibIrMemberAccess,
         ty: Ty,
+    ) -> Lowered<ExprId> {
+        self.linked_call_with(linked, access, ty, CallDispatch::Virtual)
+    }
+
+    /// [`Self::linked_call`], with the dispatch the call site names: a `super` call reaches the
+    /// qualifier's implementation itself, never a subclass's override.
+    fn linked_call_with(
+        &mut self,
+        linked: LinkedCallee,
+        access: &KlibIrMemberAccess,
+        ty: Ty,
+        dispatch: CallDispatch,
     ) -> Lowered<ExprId> {
         let linked = self.substituted(linked, access)?;
         let operands = self.call_operands(
@@ -665,6 +658,7 @@ impl BodyLowering<'_> {
         // A member dispatch reaches on an instance of a class this unit materializes, which a
         // subclass may override, is called through the class's dispatch table.
         let overridable = match (&callee, dispatch_receiver) {
+            _ if dispatch == CallDispatch::Direct => None,
             (Callee::Local(function), Some(receiver)) => self
                 .ir
                 .overridable_method(*function)
