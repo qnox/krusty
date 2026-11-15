@@ -1898,9 +1898,17 @@ fn lift_capturing_lambda(
     else {
         return Ok(());
     };
-    let aligned = ir.classes[class as usize].fields.len() as u32
-        == ir.classes[class as usize].constructor_prefix_count;
-    if !aligned {
+    // The lifted captures' fields follow the prefix's. Every field must be a prefix value's
+    // field, so the next field index is past them; a prefix value the constructor keeps in no
+    // field (a capture only a super-constructor argument reads) has none.
+    let declaration = &ir.classes[class as usize];
+    let prefix_fields = declaration
+        .ctor_args
+        .iter()
+        .take(declaration.constructor_prefix_count as usize)
+        .filter(|argument| argument.field_index.is_some())
+        .count();
+    if declaration.fields.len() != prefix_fields {
         return Ok(());
     }
     remove_capture(
