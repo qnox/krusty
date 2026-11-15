@@ -861,3 +861,203 @@ fn reflection_declarations_publish_their_semantic_roles() {
         ))
     );
 }
+
+#[test]
+fn kotlin_property_accessors_publish_their_exact_method_annotations() {
+    use crate::metadata::class_builder::{
+        ClassTail, JvmClassSignatures, JvmPropertySignature, PropMeta,
+    };
+    use crate::types::Visibility;
+
+    let directory = std::env::temp_dir().join(format!(
+        "krusty-accessor-annotations-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let owner = type_name("fixture/AnnotatedAccessors");
+    let property = |name: &str| PropMeta {
+        name: name.into(),
+        ty: Ty::Int,
+        context_params: vec![],
+        spellings: Default::default(),
+        is_var: true,
+        visibility: Visibility::Public,
+        has_constant: false,
+        is_const: false,
+        modifiers: crate::ir::IrPropertyModifiers {
+            declared_getter: true,
+            declared_setter: true,
+            ..Default::default()
+        },
+        setter_visibility: Visibility::Public,
+        return_value_status: Default::default(),
+        tparam: None,
+        receiver: None,
+        type_params: vec![],
+        setter_parameter_name: None,
+        annotations: Default::default(),
+        field_annotations: Default::default(),
+        accessor_annotations: Default::default(),
+        companion: false,
+    };
+    let (d1, d2) = crate::metadata::class_builder::build_class(
+        &crate::metadata::class_id::ResolvedClassId::declared(
+            owner,
+            type_name("fixture"),
+            &["AnnotatedAccessors"],
+        ),
+        &[],
+        &[
+            property("p"),
+            property("plain"),
+            property("missing"),
+            property("half"),
+        ],
+        &[],
+        &[],
+        &ClassTail::default(),
+        &JvmClassSignatures {
+            properties: vec![
+                JvmPropertySignature {
+                    getter: Some(("readSlot".into(), "()I".into())),
+                    setter: Some(("writeSlot".into(), "(I)V".into())),
+                    synthetic_method: Some(("propertyMarker".into(), "()V".into())),
+                    ..Default::default()
+                },
+                JvmPropertySignature {
+                    getter: Some(("readPlain".into(), "()I".into())),
+                    setter: Some(("writePlain".into(), "(I)V".into())),
+                    ..Default::default()
+                },
+                JvmPropertySignature {
+                    getter: Some(("missingRead".into(), "()I".into())),
+                    setter: Some(("missingWrite".into(), "(I)V".into())),
+                    ..Default::default()
+                },
+                JvmPropertySignature {
+                    getter: Some(("readHalf".into(), "()I".into())),
+                    setter: Some(("missingWrite".into(), "(I)V".into())),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        },
+    )
+    .expect("class metadata");
+    let mut writer =
+        crate::jvm::classfile::ClassWriter::new("fixture/AnnotatedAccessors", "java/lang/Object");
+    for (name, descriptor) in [
+        ("readSlot", "()I"),
+        ("readSlot", "(I)I"),
+        ("readPlain", "()I"),
+        ("readHalf", "()I"),
+    ] {
+        let mut body = crate::jvm::classfile::CodeBuilder::new(2);
+        body.push_int(0, &mut writer);
+        body.ireturn();
+        writer.add_method(crate::jvm::classfile::ACC_PUBLIC, name, descriptor, &body);
+    }
+    for (name, descriptor) in [
+        ("writeSlot", "(I)V"),
+        ("writePlain", "(I)V"),
+        ("propertyMarker", "()V"),
+    ] {
+        let mut body = crate::jvm::classfile::CodeBuilder::new(2);
+        body.ret_void();
+        writer.add_method(crate::jvm::classfile::ACC_PUBLIC, name, descriptor, &body);
+    }
+    for (name, descriptor, annotation) in [
+        ("readSlot", "()I", "Lfixture/Read;"),
+        ("readSlot", "(I)I", "Lfixture/Decoy;"),
+        ("writeSlot", "(I)V", "Lfixture/Write;"),
+        ("propertyMarker", "()V", "Lfixture/PropertyOnly;"),
+    ] {
+        writer.add_method_visible_marker_annotation(name, descriptor, annotation);
+    }
+    writer.set_kotlin_metadata(
+        1,
+        crate::jvm::classfile::MetadataStamp {
+            version: [2, 2, 0],
+            pre_release: false,
+        },
+        48,
+        &crate::metadata::encoding::bytes_to_strings(&d1),
+        &d2,
+    );
+    let path = directory.join("fixture/AnnotatedAccessors.class");
+    std::fs::create_dir_all(path.parent().expect("package")).expect("package directory");
+    std::fs::write(&path, writer.finish()).expect("dependency class");
+    for classifier_first in [false, true] {
+        let libraries = initialized_libraries(std::rc::Rc::new(super::Classpath::new(vec![
+            directory.clone(),
+        ])));
+        if classifier_first {
+            assert!(crate::symbol_source::SymbolSource::classifier(&libraries, owner).is_some());
+        }
+        for (name, expected_getter, expected_setter) in [
+            (
+                "p",
+                vec![type_name("fixture/Read")],
+                vec![type_name("fixture/Write")],
+            ),
+            ("plain", vec![], vec![]),
+        ] {
+            let declarations = crate::symbol_resolver::declared_member_callables(
+                &libraries,
+                Ty::obj_name(owner),
+                name,
+            );
+            let [property] = declarations.properties() else {
+                panic!("one property declaration: {name}")
+            };
+            let setter = property.setter.as_ref().expect("mutable property");
+            assert_eq!(
+                property.getter.annotations, expected_getter,
+                "getter {name}; classifier_first={classifier_first}"
+            );
+            assert_eq!(
+                setter.annotations, expected_setter,
+                "setter {name}; classifier_first={classifier_first}"
+            );
+            for (accessor, expected) in [
+                (&property.getter, &expected_getter),
+                (setter.as_ref(), &expected_setter),
+            ] {
+                let id = accessor.external_identity.expect("exact accessor identity");
+                let selected = libraries
+                    .cp
+                    .external_callable(id)
+                    .expect("published accessor fact");
+                assert_eq!(
+                    &selected.callable.annotations, expected,
+                    "exact selected identity retains the same annotations"
+                );
+            }
+        }
+    }
+    let libraries = initialized_libraries(std::rc::Rc::new(super::Classpath::new(vec![
+        directory.clone()
+    ])));
+    let missing = crate::symbol_resolver::declared_member_callables(
+        &libraries,
+        Ty::obj_name(owner),
+        "missing",
+    );
+    assert!(
+        missing.properties().is_empty(),
+        "metadata alone cannot publish an unrealized getter as unannotated"
+    );
+    let half =
+        crate::symbol_resolver::declared_member_callables(&libraries, Ty::obj_name(owner), "half");
+    let [half] = half.properties() else {
+        panic!("the defined getter remains available")
+    };
+    assert!(
+        half.setter.is_none(),
+        "metadata alone cannot publish an unrealized setter as unannotated"
+    );
+    std::fs::remove_dir_all(directory).expect("remove accessor fixture");
+}
