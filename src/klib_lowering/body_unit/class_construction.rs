@@ -22,6 +22,38 @@ impl<'u, 's> Linker<'u, 's> {
         else {
             return Ok(());
         };
+        self.materialize_plan(ir, identity, plan)
+    }
+
+    /// Materialize the object `class` with its instance, created by its private primary
+    /// constructor, which `identity` names. The unit publishes the object's instance as the
+    /// object's own file would.
+    pub(super) fn materialize_object(
+        &mut self,
+        ir: &mut IrFile,
+        identity: &KlibDependencyCallable,
+        class: &'s crate::libraries::KlibBodyClassContract,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        if self.classes.contains_key(identity) {
+            return Ok(());
+        }
+        let Some(plan) = super::super::class_initialization::object_plan(
+            class,
+            self.sources.bodies,
+            self.sources.callees,
+        )?
+        else {
+            return Ok(());
+        };
+        self.materialize_plan(ir, identity, plan)
+    }
+
+    fn materialize_plan(
+        &mut self,
+        ir: &mut IrFile,
+        identity: &KlibDependencyCallable,
+        plan: super::super::class_initialization::ClassInitialization<'s, 's>,
+    ) -> Result<(), KlibBodyDeclineReason> {
         let classifier = plan.storage.declaration.classifier;
         // Each secondary constructor of a class without a primary one initializes the class this
         // unit already materialized for another of them.
@@ -176,6 +208,7 @@ impl<'u, 's> Linker<'u, 's> {
         let classifier = plan.storage.declaration.classifier;
         let mut class = IrClass::synthetic(classifier);
         class.is_source_declared = true;
+        class.is_object = plan.header.contract.kind == crate::libraries::TypeKind::Object;
         class.supertypes.clone_from(&plan.supertypes);
         set_materialized_modality(&mut class, plan.header.contract.modality);
         if let Some(call) = &plan.superclass {
@@ -334,16 +367,20 @@ impl<'u, 's> Linker<'u, 's> {
             module: contract.module.clone(),
             declaration: KlibDeclarationSignature::Public(primary.clone()),
         };
-        let constructor = match self.sources.callees.get(&identity) {
-            Some(KlibCalleeFact::Selected(callables)) => callables[0],
-            _ => {
-                return Err(KlibBodyDeclineReason::SignatureMismatch(
-                    "a class member's primary constructor has no unique provider declaration"
-                        .to_owned(),
-                ))
-            }
-        };
-        self.materialize_class(ir, &identity, constructor)?;
+        if contract.kind == crate::libraries::TypeKind::Object {
+            // An object's instance is the one its own private constructor created.
+            self.materialize_object(ir, &identity, contract)?;
+        } else {
+            let constructor =
+                match self.sources.callees.get(&identity) {
+                    Some(KlibCalleeFact::Selected(callables)) => callables[0],
+                    _ => return Err(KlibBodyDeclineReason::SignatureMismatch(
+                        "a class member's primary constructor has no unique provider declaration"
+                            .to_owned(),
+                    )),
+                };
+            self.materialize_class(ir, &identity, constructor)?;
+        }
         let class =
             *self
                 .classes
