@@ -304,6 +304,14 @@ impl Module {
 
     /// Whether a reserved function index already has its physical body. Imported functions are
     /// complete by definition; a local declaration remains incomplete until [`Module::define`].
+    /// The instruction bytes of the defined function `index`, for a test that inspects one
+    /// lowered body apart from the runtime the module also carries.
+    #[cfg(test)]
+    pub(super) fn function_code(&self, index: u32) -> Option<&[u8]> {
+        let local = (index as usize).checked_sub(self.imports.len())?;
+        Some(&self.functions.get(local)?.as_ref()?.code.bytes)
+    }
+
     pub(super) fn function_is_defined(&self, index: u32) -> bool {
         let Some(local) = (index as usize).checked_sub(self.imports.len()) else {
             return true;

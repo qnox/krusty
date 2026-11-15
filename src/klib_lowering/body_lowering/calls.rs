@@ -571,7 +571,7 @@ impl BodyLowering<'_> {
             stmts.push(self.expression(argument)?);
         }
         let message = self.ir.add_expr(IrExpr::Const(IrConst::String(
-            crate::kt_string::KtString::from("a file-local interface member"),
+            "a file-local interface member".into(),
         )));
         self.ir.set_logical_type(message, Ty::String);
         let thrown = self.ir.add_expr(IrExpr::Throw { operand: message });

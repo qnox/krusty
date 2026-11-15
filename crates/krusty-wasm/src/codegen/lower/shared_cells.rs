@@ -217,10 +217,10 @@ mod tests {
     use krusty::ir::{Callee, IrConst, IrExpr, IrFile, IrFunction};
     use krusty::types::Ty;
 
-    /// The encoded module of one function whose body declares the cell `0` holding an `Int`,
+    /// The instruction bytes of one function whose body declares the cell `0` holding an `Int`,
     /// writes `1` into it, and either ends there or answers the write: a source assignment
     /// statement is checked as `Unit`, while an unchecked write evaluates to what it stored.
-    fn module_of_one_write(checked: Option<Ty>, ret: Ty) -> Vec<u8> {
+    fn code_of_one_write(checked: Option<Ty>, ret: Ty) -> Vec<u8> {
         let mut ir = IrFile::default();
         let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
         let cell = ir.add_expr(IrExpr::RefNew {
@@ -261,8 +261,17 @@ mod tests {
         let mut started = super::super::super::Started::new(WasmTarget::Wasi);
         let properties = krusty::backend::local_properties::realize(&mut ir)
             .expect("the body declares no local delegated property");
-        super::super::lower_alone(&ir, &properties, &mut started).expect("the cell body lowers");
-        started.module.encode()
+        let lowered = super::super::lower_alone(&ir, &properties, &mut started)
+            .expect("the cell body lowers");
+        let write = lowered.functions[0].expect("`write` is a physical function");
+        let mut code = started
+            .module
+            .function_code(write)
+            .expect("`write` is defined")
+            .to_vec();
+        // The encoder closes every body with `end`.
+        code.push(0x0b);
+        code
     }
 
     /// Whether `bytes` holds `struct.set <any type> 0` directly followed by `tail`.
@@ -276,14 +285,14 @@ mod tests {
 
     #[test]
     fn a_write_checked_as_unit_leaves_nothing_on_the_stack() {
-        let bytes = module_of_one_write(Some(Ty::Unit), Ty::Unit);
+        let bytes = code_of_one_write(Some(Ty::Unit), Ty::Unit);
         assert!(has_struct_set_followed_by(&bytes, |rest| rest.first() == Some(&0x0b)));
         assert!(!has_struct_set_followed_by(&bytes, |rest| rest.first() == Some(&0x20)));
     }
 
     #[test]
     fn an_unchecked_write_answers_the_value_it_stored() {
-        let bytes = module_of_one_write(None, Ty::Int);
+        let bytes = code_of_one_write(None, Ty::Int);
         assert!(has_struct_set_followed_by(&bytes, |rest| {
             rest.first() == Some(&0x20) && rest.get(2) == Some(&0x0b)
         }));

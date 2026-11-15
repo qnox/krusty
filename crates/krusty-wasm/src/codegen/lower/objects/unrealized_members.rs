@@ -3,8 +3,8 @@
 //! Every object answers `equals`, `hashCode` and `toString` through its table, and most tables
 //! hold a body for each (see `super::super::super::classes` and `crate::runtime`). A few
 //! still hold the trap of a member with no body: `toString` of a floating box, for which no printer
-//! writes Kotlin's form, and `toString` of a source class the compiler generated, which Kotlin
-//! gives no source name the default prints. Lowering declines a call that
+//! writes Kotlin's form; `toString` of a function value; and `toString` of a class the compiler
+//! generated, which Kotlin gives no source name the default prints. Lowering declines a call that
 //! could reach one rather than emit a trap the program would run into.
 //!
 //! A value statically of a class of this file is an instance of that class's hierarchy; one of a
@@ -142,15 +142,18 @@ fn runtime_exception_lacks_body(member: AnyMember) -> bool {
 }
 
 /// Whether a reference of `ir` can hold a runtime object whose `toString` has no body: a floating
-/// box, which only a floating value the file emits becomes. A function value is not one of those:
-/// a direct `toString` of a function type still declines, and the erased calls a collection body
-/// makes print strings and scalar boxes.
+/// box, which only a floating value the file emits becomes, or a function value, which only a
+/// lambda or a callable reference the file emits creates.
 pub(in super::super) fn holds_unprinted_values(ir: &IrFile) -> bool {
     krusty::ir::emitted_body_roots(ir)
         .into_iter()
         .flat_map(|root| krusty::ir::value_namespace_expressions(ir, root))
         .any(|expression| {
-            ir.checked_type(expression)
+            matches!(
+                ir.expr(expression),
+                IrExpr::Lambda { .. } | IrExpr::CallableReference(_)
+            ) || ir
+                .checked_type(expression)
                 .and_then(|ty| box_prints(ty.non_null()))
                 == Some(false)
         })
