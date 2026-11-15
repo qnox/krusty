@@ -13,9 +13,26 @@ impl KlibIrArena {
     ) -> Vec<&'a KlibIrSymbol> {
         let mut pending = Vec::new();
         let mut functions = HashSet::default();
+        self.push_lexical_body(function, &mut functions, &mut pending);
+        self.lexical_values_from(pending, functions)
+    }
+
+    /// The value symbols a field initializer mentions, as [`Self::lexical_value_symbols`] does
+    /// for a body.
+    pub(crate) fn lexical_value_symbols_of_expression(
+        &self,
+        initializer: KlibIrExprId,
+    ) -> Vec<&KlibIrSymbol> {
+        self.lexical_values_from(vec![initializer], HashSet::default())
+    }
+
+    fn lexical_values_from(
+        &self,
+        mut pending: Vec<KlibIrExprId>,
+        mut functions: HashSet<KlibIrSymbol>,
+    ) -> Vec<&KlibIrSymbol> {
         let mut expressions = HashSet::default();
         let mut values = Vec::new();
-        self.push_lexical_body(function, &mut functions, &mut pending);
         while let Some(id) = pending.pop() {
             if !expressions.insert(id) {
                 continue;
