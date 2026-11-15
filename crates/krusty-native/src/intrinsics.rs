@@ -1931,31 +1931,6 @@ pub(super) fn runtime_object(classifier: krusty::types::TypeName) -> Option<&'st
         .then_some("kt_set_empty")
 }
 
-/// A member of `Delegates` whose implementation the runtime supplies without using its receiver.
-///
-/// Reading `Delegates` still materializes the KLIB object, so identity is preserved. These calls
-/// use only their arguments, which is why they are separate from [`runtime_member`], which leads
-/// every call with the receiver.
-pub(super) fn runtime_companion_member(
-    owner: DeclarationOwner,
-    name: &str,
-    params: &[Ty],
-) -> Option<&'static str> {
-    if !owner.classifier_matches("kotlin/properties/Delegates") {
-        return None;
-    }
-    match (name, params) {
-        // `Delegates.notNull()`. The delegate starts empty, and the implementation takes no
-        // arguments, so the runtime supplies it without calling a member on the object.
-        ("notNull", []) => Some("kt_not_null_var"),
-        // `observable(initial) { property, old, new -> … }`: the initial value and the callback,
-        // both references, and the `KProperty` it later hands that callback is the one the
-        // delegation passes to `setValue` — nothing here reads it.
-        ("observable", [_, _]) => Some("kt_observable"),
-        _ => None,
-    }
-}
-
 /// The runtime function realizing the interface member `signature` on an instance of `class`, a
 /// class the runtime makes that implements the interface: the realization of the class's own
 /// member of that signature, which overrides it. Called as [`runtime_member`]'s function is.

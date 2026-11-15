@@ -1678,15 +1678,6 @@ void kt_list_sort_with(KRef list, KRef comparator) {
     }
 }
 
-KRef kt_invoke_three(KRef function, KRef first, KRef second, KRef third) {
-    if (function == NULL || function->header.type->vtable == NULL ||
-        function->header.type->vtable_length <= KT_SLOT_INVOKE) {
-        KT_FAIL("krusty: a function value was expected here\n");
-    }
-    return ((KRef(*)(KRef, KRef, KRef, KRef))function->header.type->vtable[KT_SLOT_INVOKE])(
-        function, first, second, third);
-}
-
 /* Whether a predicate answered true for an element. The answer arrives BOXED, because a function
    value's `invoke` hands back a reference whatever its declared return type is.
 
