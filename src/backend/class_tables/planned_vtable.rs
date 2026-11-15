@@ -189,6 +189,20 @@ pub(super) fn planned_class_table(
                     target: function(target)?,
                 },
             },
+            PlannedSlot::DeclaredBridge {
+                ref parameters,
+                result,
+                target_slot,
+                target,
+            } => match lowered(target) {
+                None if elsewhere(slot) => Slot::Inherited { slot: slot as u32 },
+                _ => Slot::DeclaredBridge {
+                    parameters: parameters.clone(),
+                    result,
+                    target_slot,
+                    target: function(target)?,
+                },
+            },
             PlannedSlot::FunctionBridge {
                 arity,
                 target_slot,

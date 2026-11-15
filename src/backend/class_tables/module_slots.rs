@@ -91,6 +91,13 @@ pub(crate) enum PlannedSlot {
         target_slot: u32,
         target: CallableId,
     },
+    /// See [`super::Slot::DeclaredBridge`].
+    DeclaredBridge {
+        parameters: Box<[Ty]>,
+        result: Ty,
+        target_slot: u32,
+        target: CallableId,
+    },
     /// See [`super::Slot::FunctionBridge`].
     FunctionBridge {
         arity: usize,
@@ -291,6 +298,12 @@ impl ModuleSlotPlan {
             PlannedSlot::Reserved
             | PlannedSlot::Inherited { .. }
             | PlannedSlot::FunctionBridge { .. } => Some(PlannedSignature::Untyped),
+            PlannedSlot::DeclaredBridge {
+                parameters, result, ..
+            } => Some(PlannedSignature::Member {
+                parameters,
+                result: *result,
+            }),
             PlannedSlot::Member(key) => member(key),
             PlannedSlot::Bridge { declared, .. } => member(&PlanKey::Callable(*declared)),
             PlannedSlot::AccessorBridge {
@@ -534,7 +547,7 @@ impl Planner<'_> {
         let fixed = any_replaces.or((invoke && carries_references).then_some(FUNCTION_SLOT));
         let function_bridge = (fixed.is_none() && invoke).then_some(carriers.0.len());
         let mut class_replaces = None;
-        let mut bridged = Vec::new();
+        let mut bridged: Vec<(_, _, Box<[Ty]>, Ty)> = Vec::new();
         for edge in &edges {
             if edge.overridden_is_interface {
                 continue;
@@ -557,7 +570,7 @@ impl Planner<'_> {
             if self.same(carriers, declared) {
                 class_replaces = Some(slot);
             } else {
-                bridged.push((slot, overridden));
+                bridged.push((slot, overridden, declared.0.into(), declared.1));
             }
         }
         let slot = place(
@@ -569,15 +582,11 @@ impl Planner<'_> {
         if function_bridge.is_none() && bridged.is_empty() {
             return Ok(());
         }
-        // A bridge is a function of the declaring file, converting to and forwarding from module
-        // declarations; a dependency class's own overrides are carried as they are declared.
-        let module_callable = |callable| match callable {
-            ResolvedFunctionOverrideTarget::Module(callable) => Ok(callable),
-            ResolvedFunctionOverrideTarget::External(_) => {
-                Err("an override carried differently from the dependency member it overrides")
-            }
+        // A bridge is a function of the declaring file, converting to and forwarding from the
+        // override it stands for, which is always a declaration of this module.
+        let ResolvedFunctionOverrideTarget::Module(target) = callable else {
+            return Err("a dependency member overridden by no declaration of this module".into());
         };
-        let target = module_callable(callable)?;
         if let Some(arity) = function_bridge {
             entries[FUNCTION_SLOT as usize] = PlannedSlot::FunctionBridge {
                 arity,
@@ -585,11 +594,20 @@ impl Planner<'_> {
                 target,
             };
         }
-        for (base_slot, declared) in bridged {
-            entries[base_slot as usize] = PlannedSlot::Bridge {
-                declared: module_callable(declared)?,
-                target_slot: slot,
-                target,
+        for (base_slot, declared, parameters, result) in bridged {
+            entries[base_slot as usize] = match declared {
+                ResolvedFunctionOverrideTarget::Module(declared) => PlannedSlot::Bridge {
+                    declared,
+                    target_slot: slot,
+                    target,
+                },
+                // A base no file of the module declares wears the carriers the plan recorded.
+                ResolvedFunctionOverrideTarget::External(_) => PlannedSlot::DeclaredBridge {
+                    parameters,
+                    result,
+                    target_slot: slot,
+                    target,
+                },
             };
         }
         Ok(())

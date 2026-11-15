@@ -22,8 +22,9 @@ pub(super) fn define_override_bridges(
     runtime: &mut Runtime,
 ) -> Result<(), Unsupported> {
     let ir = context.ir;
-    for &(bridge, function, ty) in &classes.bridges {
-        let OverrideBridge { class, member } = bridge;
+    for (bridge, function, ty) in &classes.bridges {
+        let (function, ty) = (*function, *ty);
+        let OverrideBridge { class, member } = bridge.clone();
         let (declared, implemented, target_slot, direct) = match member {
             BridgedMember::Method {
                 declared,
@@ -43,6 +44,27 @@ pub(super) fn define_override_bridges(
                     (base.params.clone(), base.ret),
                     (implementation.params.clone(), implementation.ret),
                     target_slot,
+                    Some(target),
+                )
+            }
+            BridgedMember::DeclaredMethod {
+                parameters,
+                result,
+                target_slot,
+                target,
+            } => {
+                let implementation = &ir.functions[target as usize];
+                if parameters.len() != implementation.params.len() {
+                    return Err(format!(
+                        "an override bridge whose operands disagree with the member it overrides \
+                         (`{}`)",
+                        implementation.name
+                    ));
+                }
+                (
+                    (parameters.to_vec(), result),
+                    (implementation.params.clone(), implementation.ret),
+                    Some(target_slot),
                     Some(target),
                 )
             }

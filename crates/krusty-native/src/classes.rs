@@ -266,6 +266,13 @@ pub(super) enum Slot {
         target_slot: Option<u32>,
         target: FunId,
     },
+    /// See [`class_tables::Slot::DeclaredBridge`].
+    DeclaredBridge {
+        parameters: Box<[Ty]>,
+        result: Ty,
+        target_slot: u32,
+        target: FunId,
+    },
     /// See [`class_tables::Slot::FunctionBridge`]; the runtime names the number it stands in
     /// `KT_SLOT_INVOKE`.
     FunctionBridge {
@@ -332,6 +339,17 @@ impl Slot {
                 target,
             } => Self::Bridge {
                 declared,
+                target_slot,
+                target,
+            },
+            class_tables::Slot::DeclaredBridge {
+                parameters,
+                result,
+                target_slot,
+                target,
+            } => Self::DeclaredBridge {
+                parameters,
+                result,
                 target_slot,
                 target,
             },

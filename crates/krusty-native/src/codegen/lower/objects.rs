@@ -295,6 +295,7 @@ impl<'a> FileLowering<'a> {
                         | Slot::AnnotationMember { .. }
                         | Slot::ValueBridge { .. }
                         | Slot::Bridge { .. }
+                        | Slot::DeclaredBridge { .. }
                         | Slot::FunctionBridge { .. }
                         | Slot::AccessorBridge { .. }
                 )
@@ -325,6 +326,24 @@ impl<'a> FileLowering<'a> {
                     },
                     &params,
                     ret,
+                )?;
+                self.accessors.insert(slot, id);
+                continue;
+            }
+            if let Slot::DeclaredBridge {
+                parameters,
+                result,
+                target_slot,
+                target,
+            } = &slot
+            {
+                // The BASE's signature, as the plan recorded it for a base no file declares.
+                let mut params = vec![any()];
+                params.extend(parameters.iter().copied());
+                let id = self.declare_local_function(
+                    &format!("kt_declared_bridge_{target}_{target_slot}"),
+                    &params,
+                    *result,
                 )?;
                 self.accessors.insert(slot, id);
                 continue;
@@ -687,6 +706,7 @@ impl<'a> FileLowering<'a> {
                 | Slot::AnnotationMember { .. }
                 | Slot::ValueBridge { .. }
                 | Slot::Bridge { .. }
+                | Slot::DeclaredBridge { .. }
                 | Slot::FunctionBridge { .. }
                 | Slot::AccessorBridge { .. } => self.accessors[slot],
             });
@@ -1252,6 +1272,23 @@ impl<'a> FileLowering<'a> {
         } = slot
         {
             return self.define_bridge(*declared, *target_slot, *target, id);
+        }
+        if let Slot::DeclaredBridge {
+            parameters,
+            result,
+            target_slot,
+            target,
+        } = slot
+        {
+            let forwarded = super::super::super::captures::carried_parameters(self.ir, *target);
+            let forwarded_ret = self.ir.functions[*target as usize].ret;
+            return self.define_converting_bridge(
+                (parameters, *result),
+                (&forwarded, forwarded_ret),
+                super::object_entries::BridgeTarget::Slot(*target_slot),
+                &format!("bridge to `{}`", self.ir.functions[*target as usize].name),
+                id,
+            );
         }
         if let Slot::FunctionBridge {
             arity,

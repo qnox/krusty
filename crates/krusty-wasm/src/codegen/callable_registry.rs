@@ -14,8 +14,8 @@ use krusty::backend::{
     DependencyMemberReceiver, KlibDependencyCallable, SingletonExtensionUnreadReceiver,
     SingletonMemberReceiver,
 };
-use krusty::fir::{CallableId, ExternalCallableId};
-use krusty::ir::{Callee, ExprId, IrExpr, IrFile};
+use krusty::fir::{CallableId, ExternalCallableId, ResolvedFunctionOverrideTarget};
+use krusty::ir::{Callee, ExprId, IrExpr, IrFile, IrSuperCallKind};
 
 use super::super::encode::Module;
 use super::lower::Unsupported;
@@ -336,6 +336,28 @@ impl CallableRegistry {
                     targets
                         .module_defaults
                         .insert(*provider, self.module_default_index(*provider, wasm));
+                }
+                // `super.f()` of a dependency class's method runs that declaration's own body,
+                // through the entry its module exports under the selected identity.
+                Callee::Super {
+                    declaration: Some(ResolvedFunctionOverrideTarget::External(target)),
+                    kind: IrSuperCallKind::Function,
+                    ..
+                } => {
+                    let Some(identity) = callables
+                        .callable(*target)
+                        .and_then(|callable| callable.dependency_callable.as_ref())
+                    else {
+                        continue;
+                    };
+                    let Some(&index) = self.dependencies.get(identity) else {
+                        continue;
+                    };
+                    let signature = self.signatures.get(identity).ok_or_else(|| {
+                        "an emitted dependency member without its declared signature".to_owned()
+                    })?;
+                    targets.external.insert(*target, index);
+                    targets.signatures.insert(*target, signature.clone());
                 }
                 Callee::External {
                     target,

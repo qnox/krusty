@@ -135,6 +135,14 @@ impl FileLowering<'_> {
             .get(slot as usize)
             .cloned()
             .ok_or_else(|| format!("a walk through slot {slot}, which no table has"))?;
+        if let Slot::DeclaredBridge { parameters, .. } = &entry {
+            return match parameters.as_ref() {
+                [parameter] => Ok(*parameter),
+                _ => Err(declined!(
+                    "a walk through a bridge of a dependency member that takes no one operand"
+                )),
+            };
+        }
         let fid = match entry {
             // A value class's own member wears its own signature behind the bridge that unboxes
             // the receiver.
@@ -168,6 +176,7 @@ impl FileLowering<'_> {
             // A stand-in for a base whose signature has another representation wears that base's,
             // which is what a caller reading the slot gets.
             Slot::Bridge { declared, .. } => Ok(self.ir.functions[declared as usize].ret),
+            Slot::DeclaredBridge { result, .. } => Ok(result),
             other => Err(declined!("a walk through the vtable entry {other:?}")),
         }
     }
