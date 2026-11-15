@@ -8,6 +8,7 @@ use crate::libraries::{
     ExternalCallableKind, ExternalCallableRealization, KlibBodyCallable, KlibDependencyCallable,
     SemanticPlatform,
 };
+use crate::types::Ty;
 use std::collections::VecDeque;
 
 /// The declarations a unit's closure freezes, and the call edge facts of its members realized
@@ -294,6 +295,46 @@ pub(super) fn declarations(
                 .flatten()
             {
                 state.pending.push_back((primary, None));
+            }
+            // A member of a value class materializes the class, whose boxed instances dispatch to
+            // its overrides: each one with an exact provider declaration, as are the declarations
+            // it overrides, is walked with the class. The unit leaves any other slot unrealized.
+            // A value class the type model classifies as a builtin scalar or array (an unsigned
+            // number or array) has no box of the unit's: its boxes are the target's.
+            if selected.class_contract().is_some_and(|class| {
+                let modeled = Ty::obj_name(class.classifier).canonical_semantic();
+                class.is_value && !modeled.is_builtin_scalar() && !modeled.is_array()
+            }) && selected.kind() == ExternalCallableKind::Member
+            {
+                let overrides = facts
+                    .value_class_overrides(selected, bodies)
+                    .map_err(|reason| format!("an invalid value class member: {reason:?}"))?;
+                for value_override in overrides {
+                    let provided = |identity: &KlibDependencyCallable| {
+                        platform.external_callable_by_dependency(identity)
+                    };
+                    if provided(&value_override.identity).is_none()
+                        || !value_override
+                            .overridden
+                            .iter()
+                            .all(|overridden| provided(overridden).is_some())
+                    {
+                        continue;
+                    }
+                    for overridden in value_override.overridden {
+                        if state.declared.insert(overridden.clone()) {
+                            state
+                                .declarations
+                                .push(provided(&overridden).expect("checked above"));
+                        }
+                    }
+                    if state.dispatched.insert(value_override.identity.clone()) {
+                        state.pending.push_back((
+                            value_override.identity,
+                            selected.class_contract().cloned(),
+                        ));
+                    }
+                }
             }
             // A member of an object reads the instance the object's own initialization created,
             // which materializes the object once with every member dispatch reaches. So does a
