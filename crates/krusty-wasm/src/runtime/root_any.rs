@@ -23,7 +23,7 @@ impl Runtime {
                 .ok_or("root Any has no qualified name")?,
             simple: names.simple.clone().ok_or("root Any has no simple name")?,
         };
-        let to_string = self.identity_to_string(module, class, &class_names);
+        let to_string = self.identity_to_string(module, &class_names);
         let mut init = Code::default();
         for function in [
             self.objects.identity_equals,
