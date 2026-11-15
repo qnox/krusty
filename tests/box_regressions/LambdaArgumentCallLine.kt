@@ -68,14 +68,17 @@ fun reordered(x: String) = two(
 )
 
 // A constructor call is not a call here: its own argument keeps the lambda's line, and an
-// enclosing call still moves it.
+// enclosing call still moves it. That call is a source function, so the program does not
+// depend on a stdlib collection body.
+fun wrap(box: Box) = box
+
 fun constructed(x: String) = Box(
     {
         log.append(x)
     }
 )
 
-fun constructedInCall(x: String) = listOf(
+fun constructedInCall(x: String) = wrap(
     Box(
         {
             log.append(x)
@@ -162,7 +165,7 @@ fun box(): String {
     branch("e", false)()
     reordered("f")()
     constructed("g").f()
-    constructedInCall("h")[0].f()
+    constructedInCall("h").f()
     array("i")[0]()
     variable("j")()
     local("k")()
