@@ -201,7 +201,10 @@ impl BodyLowering<'_> {
                 bound_receiver: None,
                 bound_contexts: 0,
                 function_type: reference_ty,
-                declaration_parameters: parameters.iter().map(|parameter| parameter.get()).collect(),
+                declaration_parameters: parameters
+                    .iter()
+                    .map(|parameter| parameter.get())
+                    .collect(),
                 declaration_result: array_type.get(),
                 declaration_suspend: false,
                 adaptation: adaptation.cloned().map(Box::new),
