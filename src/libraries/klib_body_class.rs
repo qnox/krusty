@@ -134,11 +134,7 @@ mod tests {
         contract.is_expect = true;
         assert!(!contract.proves_final_class(&identity, owner));
         contract.is_expect = false;
-        for kind in [
-            TypeKind::Enum,
-            TypeKind::Interface,
-            TypeKind::Annotation,
-        ] {
+        for kind in [TypeKind::Enum, TypeKind::Interface, TypeKind::Annotation] {
             contract.kind = kind;
             assert!(!contract.proves_final_class(&identity, owner), "{kind:?}");
         }
