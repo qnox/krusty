@@ -42,11 +42,15 @@ pub(super) fn record(
             if !contract.matches_owner(&constructor.module, classifier)
                 || contract.kind != TypeKind::Object
                 || contract.signature.member_id().is_some()
-                || contract.primary_constructor.as_ref().map(|primary| {
-                    KlibDeclarationSignature::Public(primary.clone())
-                }) != Some(constructor.declaration.clone())
+                || contract
+                    .primary_constructor
+                    .as_ref()
+                    .map(|primary| KlibDeclarationSignature::Public(primary.clone()))
+                    != Some(constructor.declaration.clone())
             {
-                return Err("a materialized object changed its exact constructor or classifier role");
+                return Err(
+                    "a materialized object changed its exact constructor or classifier role",
+                );
             }
             let identity = KlibClassIdentity {
                 module: contract.module.clone(),

@@ -272,7 +272,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         // A member the class's table does not dispatch is a direct call, as in a call through the
         // class itself.
         if self.file.model.is_direct(function)
-            || !self.file.ir.classes[class as usize].methods.contains(&function)
+            || !self.file.ir.classes[class as usize]
+                .methods
+                .contains(&function)
         {
             return self.direct_method_call(function, receiver, args);
         }
