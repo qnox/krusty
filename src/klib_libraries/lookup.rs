@@ -9,6 +9,7 @@ use super::classifier_records::{associated_callables, classifier_record};
 use super::declaration_signatures::{SignedFunction, SignedProperty};
 use super::external_identities::ExternalIdentities;
 use super::inventory::PackageInventory;
+use super::language_function_classifiers::function_classifier_record;
 use crate::libraries::{
     declared_function, declared_property, function_classifiers, CallablePlacement, Callables,
     ClassifierDeclaration, ExternalCallableKind, FnKind, FunctionInfo, FunctionSet,
@@ -72,7 +73,7 @@ pub(super) fn declared_symbols(
                 .map(std::sync::Arc::new)
                 .or_else(|| {
                     function_classifiers::classifier(alias.target)
-                        .map(function_classifiers::synthetic)
+                        .map(|function| function_classifier_record(identities, function))
                 });
             (
                 Some(alias.target),
@@ -90,7 +91,7 @@ pub(super) fn declared_symbols(
         (None, None) => match language_function_classifier(namespace, name) {
             Some(function) => (
                 Some(function.identity()),
-                Some(function_classifiers::synthetic(function)),
+                Some(function_classifier_record(identities, function)),
                 Some(ClassifierDeclaration::Ordinary(function.identity())),
             ),
             None => (None, None, None),

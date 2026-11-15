@@ -130,8 +130,14 @@ pub struct ModuleSlotPlan {
 pub enum PlannedSignature<'p> {
     /// `kotlin.Any`'s own member at its fixed slot.
     Any(AnyMember),
-    /// The reserved function slot, or one holding a function-type bridge: no file types it.
+    /// The reserved function slot of a class implementing no function type: no file types it.
     Untyped,
+    /// The function slot of a class implementing a function type of `arity`: the `invoke` every
+    /// function value of that arity is called through, whose shape a target owns. The class's
+    /// own `invoke` stands there, or a bridge to it ([`super::Slot::FunctionBridge`]).
+    FunctionInvoke {
+        arity: usize,
+    },
     Member {
         parameters: &'p [Ty],
         result: Ty,
@@ -263,8 +269,16 @@ impl ModuleSlotPlan {
         };
         match table.entries.get(slot as usize)? {
             PlannedSlot::Any(any) => Some(PlannedSignature::Any(*any)),
-            PlannedSlot::Reserved | PlannedSlot::FunctionBridge { .. } => {
-                Some(PlannedSignature::Untyped)
+            PlannedSlot::Reserved => Some(PlannedSignature::Untyped),
+            PlannedSlot::FunctionBridge { arity, .. } => {
+                Some(PlannedSignature::FunctionInvoke { arity: *arity })
+            }
+            PlannedSlot::Member(key) if slot == FUNCTION_SLOT => {
+                self.signatures
+                    .get(key)
+                    .map(|(parameters, _)| PlannedSignature::FunctionInvoke {
+                        arity: parameters.len(),
+                    })
             }
             PlannedSlot::Member(key) => member(key),
             PlannedSlot::Bridge { declared, .. } => member(&PlanKey::Callable(*declared)),

@@ -19,6 +19,7 @@ mod declaration_signatures;
 mod direct_c_calls;
 mod external_identities;
 mod inventory;
+mod language_function_classifiers;
 mod lookup;
 pub(crate) mod parameter_defaults;
 mod platform;

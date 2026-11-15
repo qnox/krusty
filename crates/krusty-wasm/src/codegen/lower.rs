@@ -253,7 +253,14 @@ pub(super) fn lower_file(
         )?;
         Some(classes)
     };
-    let planned_tables = planned_tables(ir, plan, module_tables, module, &runtime.objects);
+    let planned_tables = planned_tables(
+        ir,
+        plan,
+        module_tables,
+        module,
+        &runtime.objects,
+        &mut runtime.functions,
+    );
     let reach = std::cell::RefCell::new(FileReach::default());
     let delegates = local_delegates::prepare(ir, module, runtime);
     let context = FileContext {
@@ -432,6 +439,7 @@ fn planned_tables(
     tables: &mut super::module_tables::ModuleTables,
     module: &mut Module,
     objects: &super::super::objects::ObjectRoot,
+    functions: &mut super::super::function_values::FunctionShapes,
 ) -> HashMap<TypeName, Result<super::module_tables::ModuleTable, Unsupported>> {
     let mut planned = HashMap::default();
     for expression in krusty::ir::emitted_body_roots(ir)
@@ -447,7 +455,7 @@ fn planned_tables(
         if ir.class_id_by_name(*owner).is_some() || planned.contains_key(owner) {
             continue;
         }
-        if let Some(table) = tables.table(plan, *owner, module, objects) {
+        if let Some(table) = tables.table(plan, *owner, module, objects, functions) {
             planned.insert(*owner, table);
         }
     }
@@ -1131,6 +1139,7 @@ impl<'a> Body<'a> {
                 update,
                 post_test,
                 label,
+                inline_return_frame: _,
             } => self.while_(cond, body, update, post_test, label)?,
             IrExpr::Break { label } => {
                 let target = self.find_loop(label.as_deref())?.exit;

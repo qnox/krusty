@@ -186,8 +186,7 @@ pub(crate) fn specialization_ordinal(
                 candidate.parent.is_none()
                     && specialization_location(ir, candidate, facade, modes).as_ref()
                         == Some(&location)
-                    && candidate.inline_callee_source_name
-                        == specialization.inline_callee_source_name
+                    && inlined_method(candidate) == inlined_method(specialization)
             }
         };
         if same_stem {
@@ -213,7 +212,7 @@ fn specialized_class_ordinal(
         && anonymous_peer(
             ir,
             &location,
-            &specialization.inline_callee_source_name,
+            &inlined_method(specialization),
             facade,
             modes,
         )
@@ -226,7 +225,7 @@ fn specialized_class_ordinal(
         return expansion_ordinal(
             ir,
             &location,
-            &specialization.inline_callee_source_name,
+            &inlined_method(specialization),
             order,
             facade,
             modes,
@@ -234,6 +233,17 @@ fn specialized_class_ordinal(
         );
     }
     specialization_ordinal(ir, implementation, facade, modes)
+}
+
+/// The name of the method an expansion inlined, which names the classes it regenerates
+/// (`…$$inlined$<method>$N`): the callee's own name, or its `$default` entry when the call left an
+/// argument to its default, as kotlinc's `NameGenerator` is keyed by the inlined method.
+fn inlined_method(specialization: &krusty::ir::IrSpecializedFunction) -> String {
+    if specialization.inline_callee_default_entry {
+        format!("{}$default", specialization.inline_callee_source_name)
+    } else {
+        specialization.inline_callee_source_name.clone()
+    }
 }
 
 fn anonymous_view(
@@ -247,6 +257,7 @@ fn anonymous_view(
         caller_source_name: specialization.caller_source_name.clone(),
         inline_callee: specialization.inline_callee,
         inline_callee_source_name: specialization.inline_callee_source_name.clone(),
+        inline_callee_default_entry: specialization.inline_callee_default_entry,
         parent: None,
         consumed_inline_capture: false,
     }
@@ -262,7 +273,7 @@ fn anonymous_peer(
     ir.specialized_anonymous_classes
         .values()
         .any(|specialization| {
-            specialization.inline_callee_source_name == callee
+            inlined_method(&anonymous_view(specialization)) == callee
                 && specialization_location(ir, &anonymous_view(specialization), facade, modes)
                     .as_ref()
                     == Some(location)
@@ -294,7 +305,7 @@ fn expansion_ordinal(
             || (current_lambda_class != Some(*function)
                 && !materialized
                 && !super::method_access::lambda_impl_uses_class_strategy(ir, *function, modes))
-            || specialization.inline_callee_source_name != callee
+            || inlined_method(specialization) != callee
             || specialization_location(ir, specialization, facade, modes).as_ref() != Some(location)
         {
             continue;
@@ -304,7 +315,7 @@ fn expansion_ordinal(
         }
     }
     for specialization in ir.specialized_anonymous_classes.values() {
-        if specialization.inline_callee_source_name != callee
+        if inlined_method(&anonymous_view(specialization)) != callee
             || specialization_location(ir, &anonymous_view(specialization), facade, modes).as_ref()
                 != Some(location)
         {
@@ -333,7 +344,7 @@ pub(crate) fn anonymous_class_name(
     let ordinal = expansion_ordinal(
         ir,
         &(owner.clone(), caller.clone()),
-        &specialization.inline_callee_source_name,
+        &inlined_method(&view),
         specialization.order,
         facade,
         modes,
@@ -345,7 +356,7 @@ pub(crate) fn anonymous_class_name(
         name.push_str(&caller);
     }
     name.push_str("$$inlined$");
-    name.push_str(&specialization.inline_callee_source_name);
+    name.push_str(&inlined_method(&view));
     name.push('$');
     name.push_str(&ordinal.to_string());
     Some(name)
@@ -373,7 +384,7 @@ fn specialized_class_name(
                 name.push_str(caller);
             }
             name.push_str("$$inlined$");
-            name.push_str(&specialization.inline_callee_source_name);
+            name.push_str(&inlined_method(specialization));
             name.push('$');
             name.push_str(&ordinal.to_string());
             Some(name)

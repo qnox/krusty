@@ -220,6 +220,7 @@ impl BodyLowering<'_> {
             update: Some(update),
             post_test: false,
             label: Some(label),
+            inline_return_frame: false,
         });
         Ok(self.ir.add_expr(IrExpr::Block {
             stmts: vec![
@@ -549,6 +550,7 @@ impl BodyLowering<'_> {
             update: None,
             post_test,
             label: Some(label),
+            inline_return_frame: false,
         }))
     }
 

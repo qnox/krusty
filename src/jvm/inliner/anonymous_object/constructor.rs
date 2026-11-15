@@ -169,6 +169,22 @@ pub(super) fn reads_captured_fields_from_this(
     true
 }
 
+/// Rename every access in `code` to the field `from` of `owner` to `to`.
+pub(super) fn rename_field(code: &mut MethodNode, owner: &str, from: &str, to: &str) {
+    for entry in &mut code.nodes {
+        if let Node::Insn(Insn::Field {
+            owner: field_owner,
+            name,
+            ..
+        }) = entry
+        {
+            if field_owner == owner && name == from {
+                *name = to.to_string();
+            }
+        }
+    }
+}
+
 impl Constructor {
     /// The captured fields the original constructor stores the arguments at `arguments` of
     /// `call_desc` in; an argument it keeps in no field has none.
@@ -194,6 +210,20 @@ impl Constructor {
             slot += descriptor_words(argument);
         }
         Ok(fields)
+    }
+
+    /// The captured field the constructor, called through `call_desc`, stores its argument at
+    /// `index` in: the field a copy that inlines a lambda passed there reads it from.
+    pub(super) fn field_of_argument(&self, call_desc: &str, index: usize) -> Option<&str> {
+        let slot = 1 + argument_descriptors(call_desc)?
+            .get(..index)?
+            .iter()
+            .map(|argument| descriptor_words(argument))
+            .sum::<u16>();
+        self.fields
+            .iter()
+            .find(|field| field.slot == slot)
+            .map(|field| field.name.as_str())
     }
 
     /// kotlinc's constructor for a copy that inlines the lambdas passed as the arguments at

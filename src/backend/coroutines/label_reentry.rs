@@ -218,6 +218,7 @@ impl Split<'_> {
                 update,
                 post_test,
                 label,
+                inline_return_frame,
             } => {
                 let first = self.next_label;
                 let count = self.count(ir, body)?;
@@ -249,6 +250,7 @@ impl Split<'_> {
                     update,
                     post_test,
                     label,
+                    inline_return_frame,
                 });
                 Ok(ir.add_expr(IrExpr::Block {
                     stmts: vec![resuming, looped],

@@ -1,11 +1,12 @@
-//! The bodies of the representation bridges a class table holds (see `Slot::Bridge` and
-//! `Slot::AccessorBridge`): a function of the overridden member's signature that converts each
-//! operand to the override's carrier, forwards through the override's own slot, and converts the
-//! result back.
+//! The bodies of the representation bridges a class table holds (see `Slot::Bridge`,
+//! `Slot::AccessorBridge` and `Slot::FunctionBridge`): a function of the overridden member's
+//! signature, or of a function value's `invoke`, that converts each operand to the override's
+//! carrier, forwards through the override's own slot, and converts the result back.
 //!
 //! Forwarding by dispatch rather than by calling the override is what keeps a further override
 //! reachable through the base: that subclass replaces the target slot, not the bridge.
 
+use krusty::ir::{FunId, IrFile};
 use krusty::types::Ty;
 
 use super::super::super::super::encode::{Function, HeapType, Module};
@@ -31,17 +32,9 @@ pub(super) fn define_override_bridges(
                 target,
             } => {
                 let base = &ir.functions[declared as usize];
-                let implementation = &ir.functions[target as usize];
-                if base.params.len() != implementation.params.len() {
-                    return Err(format!(
-                        "an override bridge whose operands disagree with the member it overrides \
-                         (`{}`)",
-                        implementation.name
-                    ));
-                }
                 (
                     (base.params.clone(), base.ret),
-                    (implementation.params.clone(), implementation.ret),
+                    implementation_types(ir, target, base.params.len())?,
                     target_slot,
                     Some(target),
                 )
@@ -57,6 +50,20 @@ pub(super) fn define_override_bridges(
                 Some(target_slot),
                 None,
             ),
+            // A function value's operands and result are references (`crate::function_values`).
+            BridgedMember::Function {
+                arity,
+                target_slot,
+                target,
+            } => {
+                let any = Ty::obj_name(krusty::types::wk::any());
+                (
+                    (vec![any; arity], any),
+                    implementation_types(ir, target, arity)?,
+                    Some(target_slot),
+                    Some(target),
+                )
+            }
         };
         let mut parameters = vec![Ty::obj_name(ir.classes[class as usize].fq_name)];
         parameters.extend(declared.0.iter().copied());
@@ -100,4 +107,21 @@ pub(super) fn define_override_bridges(
         module.define(function, Function { ty, locals, code });
     }
     Ok(())
+}
+
+/// The operands and result of the override `target` a bridge forwards to, which must take as
+/// many operands as the member it stands in for.
+fn implementation_types(
+    ir: &IrFile,
+    target: FunId,
+    operands: usize,
+) -> Result<(Vec<Ty>, Ty), Unsupported> {
+    let implementation = &ir.functions[target as usize];
+    if implementation.params.len() != operands {
+        return Err(format!(
+            "an override bridge whose operands disagree with the member it overrides (`{}`)",
+            implementation.name
+        ));
+    }
+    Ok((implementation.params.clone(), implementation.ret))
 }

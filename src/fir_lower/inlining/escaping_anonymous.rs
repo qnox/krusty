@@ -31,6 +31,8 @@ pub struct CallSite<'a> {
     pub caller_source_name: &'a str,
     pub inline_callee: crate::ir::IrInlineCallee,
     pub inline_callee_source_name: &'a str,
+    /// The expanded call goes through the callee's default entry.
+    pub inline_callee_default_entry: bool,
     /// For each of the callee's operands, by its value slot: the caller's `crossinline` parameter
     /// the expansion binds it to, when it is one.
     pub crossinline_operands: &'a [Option<u32>],
@@ -165,6 +167,7 @@ fn remap_reachable_implementations(
                 caller_source_name: expansion.site.caller_source_name.to_string(),
                 inline_callee: expansion.site.inline_callee,
                 inline_callee_source_name: expansion.site.inline_callee_source_name.to_string(),
+                inline_callee_default_entry: expansion.site.inline_callee_default_entry,
                 parent: detached.parent,
                 consumed_inline_capture: false,
             },
@@ -489,6 +492,7 @@ fn specialized_class(
             caller_source_name: expansion.site.caller_source_name.to_string(),
             inline_callee: expansion.site.inline_callee,
             inline_callee_source_name: expansion.site.inline_callee_source_name.to_string(),
+            inline_callee_default_entry: expansion.site.inline_callee_default_entry,
             crossinline_operands: expansion.site.crossinline_operands.to_vec(),
             method_clones: cloned,
             bindings: expansion.bindings.clone(),
@@ -886,6 +890,7 @@ fn publish_one_copy(
             caller_source_name: &spec.caller_source_name,
             inline_callee: spec.inline_callee,
             inline_callee_source_name: &spec.inline_callee_source_name,
+            inline_callee_default_entry: spec.inline_callee_default_entry,
             crossinline_operands: &spec.crossinline_operands,
         },
     )?;

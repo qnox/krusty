@@ -310,7 +310,6 @@ callableReference/function/booleanNotIntrinsic.kt
 callableReference/function/classMemberFromCompanionObject.kt
 callableReference/function/coercionToUnit.kt
 callableReference/function/enumValueOfMethod.kt
-callableReference/function/extensionFunctionAsASuperTypePassToSAMInterface.kt
 callableReference/function/genericCallableReferenceArgumentsNonJVM.kt
 callableReference/function/genericCallableReferenceWithReifiedTypeParam.kt
 callableReference/function/genericCallableReferencesWithNullableTypes.kt
@@ -415,7 +414,6 @@ classLiteral/classEquality.kt
 classes/comanionObjectFieldVsClassField.kt
 classes/implementComparableInSubclass.kt
 classes/initializerBlockDImpl.kt
-classes/kt1535.kt
 classes/kt1538.kt
 classes/kt1980.kt
 classes/kt2417.kt
@@ -443,12 +441,9 @@ closures/capturedVarsOptimization/withCoroutines.kt
 closures/capturedVarsOptimization/withCoroutinesNoStdLib.kt
 closures/closureInsideClosure/propertyAndFunctionNameClash.kt
 closures/closureInsideConstrucor.kt
-closures/closureOnTopLevel1.kt
-closures/closureOnTopLevel2.kt
 closures/closuresAsSingleton.kt
 closures/crossinlineLocalDeclaration.kt
 closures/kt11634_4.kt
-closures/kt47894_inlineFunWithObjectWithNothing.kt
 closures/localFunInInit.kt
 closures/localFunctionInInitBlock.kt
 collectionLiterals/companionBlockOf.kt
@@ -522,7 +517,6 @@ contextParameters/substitutedContextReceivers.kt
 contextParameters/suspendContextParemetersWithExtension.kt
 contextParameters/suspendContextualWithExtension.kt
 contextParameters/useFromAnotherModuleSuspending.kt
-contextParameters/withExtensionReceiverInSupertype.kt
 contracts/contractForCast.kt
 contracts/destructuredVariable.kt
 contracts/forLoop.kt
@@ -1366,20 +1360,15 @@ exceptions/kt69534.kt
 exceptions/rethrow.kt
 exceptions/throw0.kt
 exceptions/throw_from_catch.kt
-extensionFunctions/extensionFunctionAsASupertypeOfValueClass.kt
-extensionFunctions/extensionFunctionAsATypeLocal.kt
-extensionFunctions/extensionFunctionAsSupertype.kt
 extensionFunctions/extensionFunctionDifferentReceivers.kt
 extensionFunctions/extensionFunctionFakeOverride.kt
 extensionFunctions/extensionFunctionInValueClass.kt
 extensionFunctions/extensionFunctionWithExtensionAsAReceiver.kt
-extensionFunctions/extensionFunctionWithInlineModifier.kt
 extensionFunctions/kt23675.kt
 extensionFunctions/kt3285.kt
 extensionFunctions/kt475.kt
 extensionFunctions/kt865.kt
 extensionFunctions/memberExtensionEqualsHashCodeToStringInInterface.kt
-extensionFunctions/nestedExtensionFunctionAsASupertype.kt
 extensionFunctions/shared.kt
 extensionFunctions/suspendConversionForExtensionFunAsAFunType.kt
 extensionFunctions/suspendConversionForExtensionFunAsAPropertyType.kt
@@ -1454,13 +1443,10 @@ funInterface/kt77685.kt
 funInterface/kt79092-sam.kt
 funInterface/kt79092.kt
 funInterface/multimodule.kt
-funInterface/noConversionForSubtype.kt
-funInterface/noConversionForSubtypeGeneric.kt
 funInterface/nonAbstractMethod.kt
 funInterface/nonTrivialProjectionInSuperType.kt
 funInterface/nullableSam.kt
 funInterface/primitiveConversions.kt
-funInterface/subtypeOfFunctionalTypeToFunInterfaceConversion.kt
 funInterface/suspendFunInterfaceConversionCodegen.kt
 funInterface/suspendFunctionAndFunInterfaceSharedClassSplit.kt
 function/arithmetic.kt
@@ -1707,7 +1693,6 @@ inline/lambdaInLambda.kt
 inline/lambdaReassignment.kt
 inline/lambdaReassignmentWithCapture.kt
 inline/lateinitProperty.kt
-inline/localDeclarationsClash.kt
 inline/localInlineExtensionFunction.kt
 inline/localInlineFunction.kt
 inline/localInlineFunctionComplex.kt
@@ -1733,7 +1718,6 @@ inline/statementAsLastExprInBlock.kt
 inline/statementsAfterReturn.kt
 inline/thisImplicitlyCaptured.kt
 inline/thisLiteralAliasing.kt
-inline/twiceInlinedObject.kt
 inline/typeParameterSymbolIsUnbound.kt
 inline/vararg.kt
 inlineArgsInPlace/arrayDequeRemoveAll.kt
@@ -2413,8 +2397,6 @@ multiplatform/k2/basic/expectActualOverloads.kt
 multiplatform/k2/basic/expectActualTypeParameters.kt
 multiplatform/k2/basic/expectInterfaceInSupertypes.kt
 multiplatform/k2/basic/extensionAndFakeOverride.kt
-multiplatform/k2/basic/extensionFunctionAsASupertype.kt
-multiplatform/k2/basic/extensionFunctionAsASupertypeConversion.kt
 multiplatform/k2/basic/interfaceMethodFromSuperTypeIsImplementedInOtherExpectSuperClass.kt
 multiplatform/k2/basic/intersectionOverrideWithDefaultParameterInCommonModule.kt
 multiplatform/k2/basic/localIntersectionOverrideWithDefaultParameterInCommonModule.kt
@@ -3535,7 +3517,6 @@ regressions/resolvedCallForGetOperator.kt
 reified/callChain.kt
 reified/callableReferenceInlinedFun.kt
 reified/callableReferenceInlinedFunFromOtherModule.kt
-reified/capture.kt
 reified/catchParameter/nestedReifiedCatch.kt
 reified/catchParameter/nullableExceptionType.kt
 reified/catchParameter/reificationClash.kt
@@ -3754,8 +3735,6 @@ underscoredTypeArguments/backTicked.kt
 underscoredTypeArguments/simple.kt
 unit/kt3634.kt
 unit/kt4212.kt
-unitConversion/unitConversionForSubtype.kt
-unitConversion/unitConversionWithSamSubtype.kt
 unitConversion/unitConversionWithSuspend.kt
 unsignedTypes/boxConstValOfUnsignedType.kt
 unsignedTypes/boxedUnsignedEqualsZero.kt

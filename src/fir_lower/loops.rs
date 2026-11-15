@@ -167,6 +167,7 @@ impl BodyLowering<'_> {
             update: None,
             post_test,
             label: Some(self.control_label(0, target)?),
+            inline_return_frame: false,
         }))
     }
 
@@ -503,6 +504,7 @@ impl BodyLowering<'_> {
             update: Some(update),
             post_test: false,
             label: Some(self.control_label(0, target)?),
+            inline_return_frame: false,
         });
         let mut statements = Vec::with_capacity(4);
         statements.extend(iterable_declaration);
@@ -581,6 +583,7 @@ impl BodyLowering<'_> {
             update: None,
             post_test: false,
             label: Some(self.control_label(0, target)?),
+            inline_return_frame: false,
         });
         // kotlinc rebuilds only a `withIndex()` loop over an iterator, whose body then declares
         // its variables in the loop's own scope.

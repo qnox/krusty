@@ -210,6 +210,7 @@ impl BodyLowering<'_> {
             update: Some(update),
             post_test: false,
             label: None,
+            inline_return_frame: false,
         }));
 
         let result = self.ir.add_expr(IrExpr::GetValue(array_slot));

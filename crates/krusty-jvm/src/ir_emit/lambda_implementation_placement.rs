@@ -181,11 +181,13 @@ pub(crate) fn reparent_lambda_impls(ir: &mut IrFile) {
 
 /// Whether this common-IR function has no standalone JVM declaration.
 ///
-/// Both sets are explicit lowering/discovery decisions. In particular, `body == None` is not enough:
+/// The sets are explicit lowering/discovery decisions. In particular, `body == None` is not enough:
 /// it also represents real abstract declarations, while an inline-splice implementation loses its
-/// body only after the body has been consumed into its call site.
+/// body only after the body has been consumed into its call site. A must-inline implementation the
+/// discovery emit found a real closure for is rescued: that closure calls it.
 pub(super) fn standalone_method_is_elided(ir: &IrFile, fid: u32, env: &super::EmitEnv) -> bool {
-    ir.inline_only_fns.contains(&fid) || env.run.dead_lambdas.borrow().contains(&fid)
+    (ir.inline_only_fns.contains(&fid) && !env.run.rescued_lambdas.borrow().contains(&fid))
+        || env.run.dead_lambdas.borrow().contains(&fid)
 }
 
 #[cfg(test)]
@@ -244,6 +246,7 @@ mod tests {
                     krusty::fir::CallableId::from_raw(0),
                 ),
                 inline_callee_source_name: "inlineCall".to_string(),
+                inline_callee_default_entry: false,
                 parent: None,
                 consumed_inline_capture: false,
             },
@@ -313,6 +316,7 @@ mod tests {
                     krusty::fir::CallableId::from_raw(0),
                 ),
                 inline_callee_source_name: "inlineCall".to_string(),
+                inline_callee_default_entry: false,
                 parent: None,
                 consumed_inline_capture: false,
             },
@@ -415,6 +419,7 @@ mod tests {
                     krusty::fir::CallableId::from_raw(0),
                 ),
                 inline_callee_source_name: "inlineCall".to_string(),
+                inline_callee_default_entry: false,
                 parent: None,
                 consumed_inline_capture: false,
             },

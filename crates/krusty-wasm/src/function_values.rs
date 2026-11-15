@@ -13,7 +13,7 @@
 use krusty::fx_hash::HashMap;
 
 use super::encode::{CompositeType, Module, SubType, ValType};
-use super::objects::{immutable, REFERENCE, TYPE_INFO_FIELD};
+use super::objects::{immutable, ObjectRoot, REFERENCE, TYPE_INFO_FIELD};
 use super::runtime::Runtime;
 
 /// The dispatch table field holding a function value's entry: after the interface table and the
@@ -36,10 +36,21 @@ pub(super) struct FunctionShapes {
 impl Runtime {
     /// The shape of a function value taking `arity` arguments, declared on first use.
     pub(super) fn function_shape(&mut self, module: &mut Module, arity: usize) -> FunctionShape {
-        if let Some(shape) = self.functions.by_arity.get(&arity) {
+        self.functions.shape(module, &self.objects, arity)
+    }
+}
+
+impl FunctionShapes {
+    /// The shape of a function value taking `arity` arguments, declared on first use.
+    pub(super) fn shape(
+        &mut self,
+        module: &mut Module,
+        objects: &ObjectRoot,
+        arity: usize,
+    ) -> FunctionShape {
+        if let Some(shape) = self.by_arity.get(&arity) {
             return *shape;
         }
-        let objects = &self.objects;
         // The receiver, which is the function value itself, then the arguments.
         let invoke = module.func_type(vec![REFERENCE; arity + 1], vec![REFERENCE]);
         let fields = objects
@@ -52,13 +63,14 @@ impl Runtime {
                 immutable(ValType::reference(invoke)),
             ])
             .collect();
+        // Open: the table of a class implementing a function type of this arity extends it.
         let table = module.subtype(SubType {
             composite: CompositeType::Struct(fields),
             supertype: Some(objects.any_table),
-            open: false,
+            open: true,
         });
         let shape = FunctionShape { table, invoke };
-        self.functions.by_arity.insert(arity, shape);
+        self.by_arity.insert(arity, shape);
         shape
     }
 }

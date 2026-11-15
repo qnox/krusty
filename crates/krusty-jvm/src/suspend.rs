@@ -1539,17 +1539,7 @@ fn build_state_machine(
             value: None,
         },
     );
-    let cond_true = k(ir, IrExpr::Const(IrConst::Boolean(true)));
-    let while_loop = k(
-        ir,
-        IrExpr::While {
-            cond: cond_true,
-            body: loop_body,
-            update: None,
-            post_test: false,
-            label: None,
-        },
-    );
+    let while_loop = ir.add_endless_loop(loop_body, None);
     let mut body_stmts = vec![var_cont, var_suspended];
     body_stmts.extend(prologue_decls);
     body_stmts.push(while_loop);
@@ -2564,6 +2554,7 @@ impl Flat<'_> {
                 update,
                 post_test,
                 label,
+                ..
             } = &self.ir.exprs[stmt as usize]
             {
                 if expr_calls_suspend(self.ir, *cond, self.suspend)
