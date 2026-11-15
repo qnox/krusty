@@ -1131,7 +1131,7 @@ mod tests {
         let selected = arena.function(root);
         assert_eq!(
             arena
-                .emitted_callable_symbols(
+                .emitted_function_uses(
                     selected,
                     EmittedCallForms {
                         closure: |_, expression| match expression.kind {
@@ -1143,6 +1143,7 @@ mod tests {
                         implied_callee: |_, _| None,
                     }
                 )
+                .0
                 .into_iter()
                 .cloned()
                 .collect::<Vec<_>>(),
@@ -1150,7 +1151,7 @@ mod tests {
         );
         assert_eq!(
             arena
-                .emitted_callable_symbols(
+                .emitted_function_uses(
                     selected,
                     EmittedCallForms {
                         closure: |_, _| None,
@@ -1159,6 +1160,7 @@ mod tests {
                         implied_callee: |_, _| None,
                     }
                 )
+                .0
                 .into_iter()
                 .cloned()
                 .collect::<Vec<_>>(),

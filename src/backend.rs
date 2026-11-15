@@ -133,6 +133,15 @@ pub trait Backend {
         false
     }
 
+    /// True only after the target defined this exact object's real instance getter successfully.
+    fn emitted_object_instance(
+        &self,
+        _state: &Self::State,
+        _declaration: &instance_links::ObjectDeclaration,
+    ) -> bool {
+        false
+    }
+
     /// Whether this backend lowers suspend functions on common IR with the shared coroutine
     /// passes, and so calls the stdlib declarations the handoff selects for them
     /// ([`crate::ir::IrCoroutineRuntime`]). A backend with its own coroutine pass leaves this off.

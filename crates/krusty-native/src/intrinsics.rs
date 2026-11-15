@@ -1889,30 +1889,12 @@ pub(super) fn throwable_field(owner: krusty::types::TypeName, name: &str) -> Opt
     }
 }
 
-/// Whether this is an object the runtime realizes ENTIRELY, so it has no instance of its own.
-///
-/// `kotlin.properties.Delegates` is one: it holds no state, and every member of it is answered
-/// directly (see [`runtime_companion_member`]), so nothing ever reads the value a reference to it
-/// would carry. A provider that materializes the receiver before the call reaches that table needs
-/// something to materialize, and for such an object the honest answer is the null reference —
-/// there is no object, and nothing dereferences it.
-pub(super) fn is_stateless_runtime_object(classifier: krusty::types::TypeName) -> bool {
-    // The stdlib's standard delegates. `Delegates` declares no state and every member of it this
-    // runtime answers takes its arguments alone. `Result.Companion` is the receiver of the inline
-    // `success` and `failure` an expanded `runCatching` reaches, whose bodies never read it.
-    classifier.matches("kotlin/properties/Delegates")
-        || classifier.matches("kotlin/Result$Companion")
-}
-
 /// The runtime entry point answering the companion object of a BUILT-IN type, if this names one.
 ///
 /// Each is declared in no file krusty compiles and carries no state — every member of one is a
 /// constant the frontend folds — so what a program can observe about it is its IDENTITY. The
 /// runtime holds one static object per companion, with a descriptor of its own so that
 /// `Int.Companion === Long.Companion` is false.
-///
-/// Apart from [`is_stateless_runtime_object`], which answers a NULL for an object nothing reads:
-/// that will not do here, because `o === Int.Companion` is exactly what the corpus asks.
 pub(super) fn builtin_companion(classifier: krusty::types::TypeName) -> Option<&'static str> {
     [
         ("kotlin/Byte$Companion", "kt_byte_companion"),

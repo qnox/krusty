@@ -68,6 +68,10 @@ pub(super) fn is_read_write_property(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/properties/ReadWriteProperty"])
 }
 
+pub(super) fn is_k_property(internal: TypeName) -> bool {
+    is_identity(internal, &["kotlin/reflect/KProperty"])
+}
+
 pub(super) fn is_read_only_property(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/properties/ReadOnlyProperty"])
 }
@@ -162,10 +166,10 @@ pub(super) fn runtime_member_classes() -> [(TypeName, &'static str); 1] {
 
 /// Whether the runtime, not a library class body, lays out `internal`: the root class, `Unit`, the
 /// companions of the built-in types, the bases a source class's layout extends (`Number` and the
-/// throwables), the shared empty set, text, the arrays, the unsigned integers (carried as the value
-/// they wrap), the builder it constructs, the integral ranges and progressions, and the standard
-/// collection implementations. A dependency body's call of such
-/// a member, or read of such an object, is lowered here as a source one is.
+/// throwables), the shared empty set, text, the arrays,
+/// the unsigned integers (carried as the value they wrap), the builder it constructs, the integral
+/// ranges and progressions, and the standard collection implementations. A dependency body's call
+/// of such a member, or read of such an object, is lowered here as a source one is.
 pub(in super::super) fn represents_dependency_classifier(internal: TypeName) -> bool {
     super::super::super::intrinsics::is_any(internal)
         || internal == krusty::types::wk::unit()

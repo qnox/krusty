@@ -778,6 +778,7 @@ fn publish_inherited_interface_property_plans(
                     overridden,
                     overridden_owner: supertype.classifier,
                     overridden_is_interface: true,
+                    overridden_getter_semantic_role: declared.getter.semantic_role,
                     name: name.clone().into_boxed_str(),
                     declared_type: resolved_ty(declared.ty, "inherited interface property type"),
                     applied_type: resolved_ty(
@@ -948,6 +949,7 @@ fn append_property_override_edges(
                 overridden,
                 overridden_owner: supertype.classifier,
                 overridden_is_interface,
+                overridden_getter_semantic_role: declared.getter.semantic_role,
                 name: name.into(),
                 declared_type: resolved_ty(
                     declared.ty,

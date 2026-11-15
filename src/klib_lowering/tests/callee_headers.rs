@@ -1354,13 +1354,14 @@ fn a_later_support_unit_selects_the_matching_singleton_edge_variant() {
     inherited_record.singleton_dispatch = Some(SingletonDispatch {
         classifier: crate::types::type_name("demo/OtherBox"),
     });
-    inherited_record.klib_body_class_contract = Some(other_box_contract());
+    let inherited_class_contract = other_box_contract();
     let selected = selected_record
         .klib_body_callable()
         .expect("the selected member is signed");
     let inherited = inherited_record
         .klib_body_callable()
-        .expect("the inherited selection is signed to the same declaration");
+        .expect("the inherited selection is signed to the same declaration")
+        .with_singleton_class_contract(Some(&inherited_class_contract));
     let box_ty = Ty::obj_name(crate::types::type_name("demo/Box"));
     assert_eq!(selected.singleton_dispatch(), Some(box_ty));
     assert_eq!(
@@ -1426,6 +1427,111 @@ fn a_later_support_unit_selects_the_matching_singleton_edge_variant() {
 }
 
 #[test]
+fn object_member_edge_and_header_keep_the_same_canonical_owner_contract() {
+    use crate::metadata::semantic::KotlinModality;
+
+    let member = demo_signature(Some("Box"), "get", &[], &[T::Int]);
+    let demo = demo_with(
+        &MEMBER_CALLER,
+        vec![box_member_tree(member.clone())],
+        |_, body| {
+            let receiver = body.param(0);
+            let value = body.param(1);
+            let call = body.call_signature(member.clone(), vec![receiver, value], None, T::Int);
+            Some(vec![body.ret(call)])
+        },
+    );
+    let mut owner_record = demo.facts["a"].clone();
+    owner_record.name = "get".to_owned();
+    as_box_member(&mut owner_record);
+    owner_record.params = vec![T::Int.semantic()];
+    owner_record
+        .generic_sig
+        .as_mut()
+        .expect("normalized signature")
+        .params = vec![T::Int.semantic()];
+    owner_record.parameter_identities =
+        vec![ResolvedParameterIdentity::Source("a".into())].into_boxed_slice();
+    owner_record.klib_body_class_contract.as_mut().unwrap().kind =
+        crate::libraries::TypeKind::Object;
+    owner_record.declaration_signature = Some(KlibDeclarationSignature::Public(member.clone()));
+    owner_record.dependency_callable = Some(KlibDependencyCallable {
+        module: "demo".to_owned(),
+        declaration: KlibDeclarationSignature::Public(member),
+    });
+
+    let mut edge_record = owner_record.clone();
+    edge_record.singleton_dispatch = Some(SingletonDispatch {
+        classifier: crate::types::type_name("demo/Box"),
+    });
+    let edge_class_contract = edge_record
+        .klib_body_class_contract
+        .clone()
+        .expect("provider class contract");
+    let owner = owner_record
+        .klib_body_callable()
+        .expect("the declaration header is signed");
+    let edge = edge_record
+        .klib_body_callable()
+        .expect("the singleton edge is signed")
+        .with_singleton_class_contract(Some(&edge_class_contract));
+
+    assert!(owner.same_declaration_contract(edge));
+    assert_eq!(
+        owner.class_contract(),
+        owner_record.klib_body_class_contract.as_ref()
+    );
+    assert_eq!(edge.class_contract(), Some(&edge_class_contract));
+    for callables in [[owner, edge], [edge, owner]] {
+        let facts = KlibCalleeFacts::new(callables);
+        let Some(super::super::callee_facts::KlibCalleeFact::Selected(variants)) =
+            facts.get(owner.identity())
+        else {
+            panic!("a receiver edge and its declaration header share one owner contract");
+        };
+        assert_eq!(variants.len(), 2);
+    }
+
+    let plain_edge = edge_record
+        .klib_body_callable()
+        .expect("the same receiver edge can omit a redundant class fact");
+    let same_edge_fact = KlibCalleeFacts::new([plain_edge, edge]);
+    let Some(super::super::callee_facts::KlibCalleeFact::Selected(variants)) =
+        same_edge_fact.get(owner.identity())
+    else {
+        panic!("an absent edge fact and its identical canonical fallback agree");
+    };
+    assert_eq!(variants.len(), 1);
+
+    let wrong_edge_class = other_box_contract();
+    let conflicting_edge = edge_record
+        .klib_body_callable()
+        .expect("the conflicting receiver edge has the same declaration")
+        .with_singleton_class_contract(Some(&wrong_edge_class));
+    let conflicting_edges = KlibCalleeFacts::new([edge, conflicting_edge]);
+    assert!(matches!(
+        conflicting_edges.get(owner.identity()),
+        Some(super::super::callee_facts::KlibCalleeFact::Ambiguous)
+    ));
+
+    let mut changed_owner_record = owner_record.clone();
+    changed_owner_record
+        .klib_body_class_contract
+        .as_mut()
+        .expect("provider class contract")
+        .modality = KotlinModality::Open;
+    let changed_owner = changed_owner_record
+        .klib_body_callable()
+        .expect("the changed declaration remains signed");
+    assert!(!owner.same_declaration_contract(changed_owner));
+    let conflicting = KlibCalleeFacts::with_declarations([edge], [owner, changed_owner]);
+    assert!(matches!(
+        conflicting.get(owner.identity()),
+        Some(super::super::callee_facts::KlibCalleeFact::Ambiguous)
+    ));
+}
+
+#[test]
 fn a_root_group_publishes_the_singleton_variant_which_matches_its_header() {
     let member = demo_signature(Some("Box"), "get", &[], &[T::Int]);
     let demo = demo_with(&CALLER, vec![box_member_tree(member.clone())], |_, body| {
@@ -1447,13 +1553,14 @@ fn a_root_group_publishes_the_singleton_variant_which_matches_its_header() {
     inherited_record.singleton_dispatch = Some(SingletonDispatch {
         classifier: crate::types::type_name("demo/OtherBox"),
     });
-    inherited_record.klib_body_class_contract = Some(other_box_contract());
+    let inherited_class_contract = other_box_contract();
     let selected = selected_record
         .klib_body_callable()
         .expect("the selected member is signed");
     let inherited = inherited_record
         .klib_body_callable()
-        .expect("the inherited selection is signed to the same declaration");
+        .expect("the inherited selection is signed to the same declaration")
+        .with_singleton_class_contract(Some(&inherited_class_contract));
     let callees = KlibCalleeFacts::new([inherited, selected]);
     let externals = Default::default();
     let mut unit = DependencyBodyUnit::default();

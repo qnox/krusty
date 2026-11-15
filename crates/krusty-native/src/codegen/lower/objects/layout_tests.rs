@@ -11,6 +11,7 @@ fn descriptor_offsets_match_the_c_declaration() {
         ("class_names", ktype::CLASS_NAMES as usize),
         ("collection_size", ktype::COLLECTION_SIZE as usize),
         ("itable", ktype::ITABLE as usize),
+        ("callable_name", ktype::CALLABLE_NAME as usize),
     ];
     for (field, offset) in pinned {
         let assertion = format!("_Static_assert(offsetof(KType, {field}) == {offset},");

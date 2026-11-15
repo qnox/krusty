@@ -428,6 +428,7 @@ impl<'a> FileLowering<'a> {
                 superclass: any_type,
                 interfaces: &interfaces,
                 reference_target: None,
+                callable_name: Some(name),
                 walk: super::objects::WalkMembers::default(),
                 qualified_name: None,
                 simple_name: None,
@@ -619,6 +620,7 @@ impl<'a> FileLowering<'a> {
                 superclass: any_type,
                 interfaces: &markers,
                 reference_target: Some((marker, receiver_offset.unwrap_or(0))),
+                callable_name: Some(name),
                 walk: super::objects::WalkMembers::default(),
                 qualified_name: None,
                 simple_name: None,
@@ -916,11 +918,12 @@ impl BodyLowering<'_, '_, '_> {
         Ok(Some(instance))
     }
 
-    /// A member of a property reference, answered through the object's own table.
+    /// A checked reflection member, answered through its selected receiver capability.
     ///
-    /// Returns `None` unless the selected declaration's provider attached an exact reflection
-    /// operation role. Native maps that checked role to its object ABI; it never reclassifies the
-    /// receiver or callable spelling.
+    /// `KCallable.name` uses the descriptor's authenticated name callback because source
+    /// `KProperty` implementations need not share generated-reference slot numbering. `get` and
+    /// `set` still use the generated reference object's fixed slots. Returns `None` unless the
+    /// selected declaration's provider attached the exact reflection operation role.
     pub(super) fn reference_member(
         &mut self,
         role: Option<krusty::types::SemanticCallRole>,
@@ -928,8 +931,30 @@ impl BodyLowering<'_, '_, '_> {
         args: &[u32],
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
+        if role == Some(krusty::types::SemanticCallRole::KotlinCallableReferenceName)
+            && args.is_empty()
+        {
+            return Some(self.callable_name(receiver, ret));
+        }
         let slot = reference_slot(role, args.len())?;
         Some(self.reference_call(slot, receiver, args, ret))
+    }
+
+    /// Read `KCallable.name` through the exact name body published by the receiver's descriptor.
+    ///
+    /// Generated property-reference objects and source classes implementing `KProperty` have
+    /// different class-table layouts, so the reference-object `NAME` slot is not a valid general
+    /// dispatch index. The descriptor callback is selected from the authenticated callable-name
+    /// role while the class model is built and follows the descriptor's superclass chain.
+    fn callable_name(&mut self, receiver: u32, ret: Ty) -> Result<Option<Value>, Unsupported> {
+        let object = self.reference(receiver)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let Some(name) = self.runtime_call("kt_kcallable_name", &[any()], any(), &[object])? else {
+            return Ok(None);
+        };
+        self.convert(name, Some(any()), ret)
     }
 
     /// Call a top-level extension accessor: the receiver, then the written value for a setter.
@@ -964,15 +989,19 @@ impl BodyLowering<'_, '_, '_> {
         Ok(self.builder.inst_results(call).first().copied())
     }
 
-    /// Whether a checked read of `target` is answered by a reference object's slot: its selected
-    /// getter carries a reference role that takes no operands. Other getter roles are not this
-    /// lowering's, and the read goes on to the path that owns them.
-    pub(super) fn reads_reference_slot(&self, target: krusty::fir::ExternalPropertyId) -> bool {
+    /// Whether a checked read of `target` uses the reflection-reference member path. `get` and
+    /// `set` use generated reference slots; `KCallable.name` uses the descriptor callback so
+    /// ordinary source `KProperty` implementations keep their own table layouts.
+    pub(super) fn reads_reference_member(&self, target: krusty::fir::ExternalPropertyId) -> bool {
         self.file
             .callables
             .property(target)
             .and_then(|property| self.file.callables.callable(property.getter))
-            .is_some_and(|getter| reference_slot(getter.semantic_role, 0).is_some())
+            .is_some_and(|getter| {
+                getter.semantic_role
+                    == Some(krusty::types::SemanticCallRole::KotlinCallableReferenceName)
+                    || reference_slot(getter.semantic_role, 0).is_some()
+            })
     }
 
     /// A checked read of a dependency property whose selected getter carries a reference role.
@@ -1111,7 +1140,6 @@ impl BodyLowering<'_, '_, '_> {
 fn reference_slot(role: Option<krusty::types::SemanticCallRole>, operands: usize) -> Option<u32> {
     use krusty::types::SemanticCallRole;
     match role? {
-        SemanticCallRole::KotlinCallableReferenceName if operands == 0 => Some(NAME),
         SemanticCallRole::KotlinPropertyReferenceGet(arity) if operands == usize::from(arity) => {
             Some(GET)
         }

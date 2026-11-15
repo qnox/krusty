@@ -664,6 +664,17 @@ fn record_class_function_exports(
             classes: &chain,
             native_interop_library: false,
         };
+        if source.is_object || source.is_companion {
+            exports
+                .record_object_declaration(crate::backend::instance_links::ObjectDeclaration {
+                    classifier: source.fq_name_id(),
+                    identity: exports
+                        .classifier(class_id)
+                        .ok_or("an object lost its writer-owned classifier identity")?
+                        .clone(),
+                })
+                .map_err(str::to_owned)?;
+        }
         for (declaration, origin) in class.functions.iter().zip(&record.method_origins) {
             if declaration.visibility == crate::types::Visibility::Private {
                 continue;

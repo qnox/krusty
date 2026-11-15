@@ -131,6 +131,8 @@ pub struct CodegenModule {
         krusty::backend::instance_links::InstanceEntry,
         String,
     >,
+    defined_objects: krusty::fx_hash::HashSet<krusty::backend::instance_links::ObjectDeclaration>,
+    declined: bool,
     next_dependency_symbol: usize,
     next_dependency_support_object: usize,
     next_disambiguated_source_object: usize,
@@ -227,6 +229,14 @@ impl Backend for CraneliftBackend {
         lower::represents_dependency_classifier(classifier)
     }
 
+    fn emitted_object_instance(
+        &self,
+        state: &Self::State,
+        declaration: &krusty::backend::instance_links::ObjectDeclaration,
+    ) -> bool {
+        !state.declined && state.defined_objects.contains(declaration)
+    }
+
     fn lower_ir_file(
         &self,
         mut file: CheckedIrFile<'_>,
@@ -267,6 +277,7 @@ impl Backend for CraneliftBackend {
                     declined.construct()
                 ),
             );
+            state.declined = true;
             return Vec::new();
         }
         krusty::backend::construction_entries::publish_constructors(
@@ -279,6 +290,7 @@ impl Backend for CraneliftBackend {
             krusty::backend::property_entries::realize(&mut file.ir, &mut file.dependency_exports)
         {
             report_decline(&lower::Unsupported::from(error), &file, diags);
+            state.declined = true;
             return Vec::new();
         }
         krusty::backend::dispatch_entries::realize(&mut file.ir, &file.dependency_exports);
@@ -308,6 +320,7 @@ impl Backend for CraneliftBackend {
                              cannot read ({error}) yet"
                         ),
                     );
+                    state.declined = true;
                     return Vec::new();
                 }
             }
@@ -331,6 +344,7 @@ impl Backend for CraneliftBackend {
                     krusty::diag::Span::new(0, 0),
                     format!("krusty: the native backend does not support {unsupported} yet"),
                 );
+                state.declined = true;
                 return Vec::new();
             }
         };
@@ -357,6 +371,7 @@ impl Backend for CraneliftBackend {
                         krusty::diag::Span::new(0, 0),
                         format!("krusty: the native backend does not support {unsupported} yet"),
                     );
+                    state.declined = true;
                     return Vec::new();
                 }
             };
@@ -397,6 +412,7 @@ impl Backend for CraneliftBackend {
                         krusty::diag::Span::new(0, 0),
                         format!("internal error: {error}"),
                     );
+                    state.declined = true;
                     return Vec::new();
                 }
             };
@@ -425,6 +441,7 @@ impl Backend for CraneliftBackend {
                         Ok(identity) => identity,
                         Err(error) => {
                             diags.error(krusty::diag::Span::new(0, 0), error);
+                            state.declined = true;
                             return Vec::new();
                         }
                     }
@@ -456,6 +473,7 @@ impl Backend for CraneliftBackend {
                     krusty::diag::Span::new(0, 0),
                     "internal error: two source declarations export one module-qualified KLIB identity",
                 );
+                state.declined = true;
                 return Vec::new();
             }
             dependency_exports.insert(
@@ -485,6 +503,7 @@ impl Backend for CraneliftBackend {
                     krusty::diag::Span::new(0, 0),
                     format!("internal error: {error}"),
                 );
+                state.declined = true;
                 return Vec::new();
             }
         };
@@ -498,6 +517,7 @@ impl Backend for CraneliftBackend {
                         krusty::diag::Span::new(0, 0),
                         format!("internal error: {error}"),
                     );
+                    state.declined = true;
                     return Vec::new();
                 }
             };
@@ -567,6 +587,7 @@ impl Backend for CraneliftBackend {
             Ok(lowered) => lowered,
             Err(declined) => {
                 report_decline(&declined, &file, diags);
+                state.declined = true;
                 return Vec::new();
             }
         };
@@ -578,6 +599,7 @@ impl Backend for CraneliftBackend {
                         "krusty: this module declares the entry point in both {first} and {source_stem}"
                     ),
                 );
+                state.declined = true;
                 return Vec::new();
             }
             state.entry_file = Some(source_stem);
@@ -586,6 +608,7 @@ impl Backend for CraneliftBackend {
             state.laid_out.publish_descriptor(identity, symbol);
         }
         state.abi.extend(lowered.abi);
+        state.defined_objects.extend(lowered.defined_objects);
         for (class, record) in lowered.laid_out {
             state.laid_out.insert(class, record);
         }
@@ -665,6 +688,44 @@ pub const COUNTED_LOOPS: krusty::backend::counted_loops::CountedLoopPolicy =
 #[cfg(test)]
 mod tests {
     use super::CodegenModule;
+
+    #[test]
+    fn object_instance_acknowledgements_are_canonical_and_false_after_decline() {
+        use krusty::backend::Backend;
+        use krusty::metadata::id_signature::{class_signature, ClassScope, DeclarationContainer};
+        use krusty::metadata::semantic::KotlinType;
+        let backend = super::CraneliftBackend::new(crate::NativeTarget::new(
+            crate::Arch::X86_64,
+            crate::Os::Linux,
+        ));
+        let mut state = CodegenModule::default();
+        let declaration = krusty::backend::instance_links::ObjectDeclaration {
+            classifier: krusty::types::type_name("demo/Object"),
+            identity: krusty::libraries::KlibClassIdentity {
+                module: "producer".into(),
+                signature: class_signature(
+                    DeclarationContainer {
+                        package: &["demo".into()],
+                        classes: &[],
+                        native_interop_library: false,
+                    },
+                    &ClassScope::<KotlinType> {
+                        name: "Object",
+                        type_parameters: Vec::new(),
+                        expect: false,
+                    },
+                ),
+            },
+        };
+        assert!(!backend.emitted_object_instance(&state, &declaration));
+        state.defined_objects.insert(declaration.clone());
+        assert!(backend.emitted_object_instance(&state, &declaration));
+        let mut foreign = declaration.clone();
+        foreign.identity.module = "other-producer".into();
+        assert!(!backend.emitted_object_instance(&state, &foreign));
+        state.declined = true;
+        assert!(!backend.emitted_object_instance(&state, &declaration));
+    }
 
     #[test]
     fn dependency_support_object_stems_skip_source_collisions() {

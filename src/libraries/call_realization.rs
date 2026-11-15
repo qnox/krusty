@@ -126,6 +126,9 @@ pub struct KlibBodyCallable<'a> {
     /// uses its semantic type to validate and consume the serialized receiver; target storage
     /// remains outside this target-free contract.
     singleton_dispatch: Option<Ty>,
+    /// Receiver-only class evidence selected for this call edge. The canonical owner contract
+    /// remains in `class_contract` and participates in declaration identity checks.
+    singleton_class_contract: Option<&'a super::KlibBodyClassContract>,
     /// Exact singleton classifier selected for this call edge. Its semantic type can be a mapped
     /// primitive, so later phases cannot reconstruct the classifier from the type.
     singleton_classifier: Option<TypeName>,
@@ -206,6 +209,7 @@ impl<'a> KlibBodyCallable<'a> {
             class_contract,
             accessor,
             singleton_dispatch: singleton.map(SingletonDispatch::ty),
+            singleton_class_contract: None,
             singleton_classifier: singleton.map(|dispatch| dispatch.classifier),
             companion_receiver,
             declaration_owner,
@@ -293,7 +297,17 @@ impl<'a> KlibBodyCallable<'a> {
     }
 
     pub(crate) fn class_contract(self) -> Option<&'a super::KlibBodyClassContract> {
-        self.class_contract
+        self.singleton_class_contract.or(self.class_contract)
+    }
+
+    /// Attach receiver-only class evidence while keeping the provider-owned declaration
+    /// contract intact for comparisons with other selected views.
+    pub(crate) fn with_singleton_class_contract(
+        mut self,
+        contract: Option<&'a super::KlibBodyClassContract>,
+    ) -> Self {
+        self.singleton_class_contract = contract;
+        self
     }
 
     pub(crate) fn accessor(self) -> Option<&'a super::KlibBodyAccessor> {
@@ -302,16 +316,6 @@ impl<'a> KlibBodyCallable<'a> {
 
     pub(crate) fn singleton_classifier(self) -> Option<TypeName> {
         self.singleton_classifier
-    }
-
-    /// The class contract that belongs to the declaration, with a singleton edge's own class
-    /// removed. That class is the singleton the edge dispatches to, so two edges of one
-    /// declaration may name different singleton classes and still be the same declaration.
-    fn declaration_class_contract(self) -> Option<&'a super::KlibBodyClassContract> {
-        match (self.singleton_classifier, self.class_contract) {
-            (Some(singleton), Some(class)) if class.classifier == singleton => None,
-            _ => self.class_contract,
-        }
     }
 
     /// Whether two selected edges describe the same dependency declaration before their
@@ -335,7 +339,7 @@ impl<'a> KlibBodyCallable<'a> {
             && self.compiler_intrinsic == other.compiler_intrinsic
             && self.range_construction == other.range_construction
             && self.declaration_modifiers == other.declaration_modifiers
-            && self.declaration_class_contract() == other.declaration_class_contract()
+            && self.class_contract == other.class_contract
             && self.companion_receiver == other.companion_receiver
             && self.declaration_owner == other.declaration_owner
             && self.identity == other.identity

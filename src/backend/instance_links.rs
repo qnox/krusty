@@ -34,6 +34,13 @@ pub enum InstanceEntry {
     },
 }
 
+/// Canonical declaration evidence; only a target's defined instance entry grants publication.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ObjectDeclaration {
+    pub classifier: TypeName,
+    pub identity: crate::libraries::KlibClassIdentity,
+}
+
 impl InstanceEntry {
     /// The enum constant this entry reads, or `None` for any other kind of instance.
     pub fn enum_constant(&self) -> Option<&EnumConstant> {

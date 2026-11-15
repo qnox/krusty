@@ -508,6 +508,7 @@ impl BodyLowering<'_> {
                     overridden: target,
                     overridden_owner: record.owner,
                     overridden_is_interface: interface,
+                    overridden_getter_semantic_role: record.semantic_role,
                     name: name.to_owned(),
                     declared_type: record.declared_result,
                     applied_type: record.applied_result,

@@ -601,6 +601,7 @@ fn delegated_property(
     let mut overridden = vec![ResolvedDelegatedPropertyDeclaration {
         target: declared.target,
         owner: declaration.owner,
+        getter_semantic_role: declaration.getter.semantic_role,
         ty: ResolvedTy::new(declared.ty).ok()?,
         applied_ty: ResolvedTy::new(property_type).ok()?,
         receiver: match declared.receiver {
@@ -633,6 +634,7 @@ fn delegated_property(
             overridden.push(ResolvedDelegatedPropertyDeclaration {
                 target: declared.target,
                 owner: inherited.owner,
+                getter_semantic_role: inherited.getter.semantic_role,
                 ty: ResolvedTy::new(declared.ty).ok()?,
                 applied_ty: ResolvedTy::new(applied_ty).ok()?,
                 receiver: declared.receiver.map(ResolvedTy::new).transpose().ok()?,

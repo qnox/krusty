@@ -31,9 +31,21 @@ pub struct KlibBodyClassContract {
 }
 
 impl KlibBodyClassContract {
+    pub(crate) fn identity(&self) -> super::KlibClassIdentity {
+        super::KlibClassIdentity {
+            module: self.module.clone(),
+            signature: self.signature.clone(),
+        }
+    }
+
     /// Whether the checked class belongs to this exact producer module and classifier.
     pub fn matches_owner(&self, module: &str, classifier: TypeName) -> bool {
         self.module == module && self.classifier == classifier
+    }
+
+    /// Whether the authenticated declaration is an object rather than a class or interface.
+    pub fn is_object(&self) -> bool {
+        self.kind == super::TypeKind::Object
     }
 
     /// Whether this exact serialized ordinary class forbids subclass dispatch. Enum entries may
@@ -66,15 +78,15 @@ impl KlibBodyClassContract {
     }
 
     /// Whether a support unit materializes this class and emits its members as functions of the
-    /// class it materializes: a value class, or a class without type parameters that is not
-    /// sealed. A builtin type of the common type model is neither, and neither is `kotlin.Any`,
-    /// the root of every class, which each target lays out itself.
+    /// class it materializes: a value class, or a class or object without type parameters that
+    /// is not sealed. A builtin type of the common type model is neither, and neither is
+    /// `kotlin.Any`, the root of every class, which each target lays out itself.
     pub(crate) fn emits_members(&self) -> bool {
         if self.is_builtin_type() || self.classifier == crate::types::wk::any() {
             return false;
         }
         self.is_value
-            || (self.kind == super::TypeKind::Class
+            || (matches!(self.kind, super::TypeKind::Class | super::TypeKind::Object)
                 && matches!(
                     self.modality,
                     KotlinModality::Final | KotlinModality::Open | KotlinModality::Abstract
@@ -111,6 +123,16 @@ pub(crate) struct KlibStoredField {
 mod tests {
     use super::*;
     use crate::libraries::{KlibClassIdentity, TypeKind};
+    use crate::types::type_name;
+
+    #[test]
+    fn class_contract_matches_its_module_qualified_owner() {
+        let (contract, identity) = test_fixture::generic_member_declaration();
+
+        assert!(contract.matches_owner(&identity.module, type_name("sample/Owner")));
+        assert!(!contract.matches_owner("other", type_name("sample/Owner")));
+        assert!(!contract.matches_owner(&identity.module, type_name("sample/Other")));
+    }
 
     #[test]
     fn final_dispatch_requires_the_exact_concrete_ordinary_class_contract() {

@@ -143,7 +143,8 @@ impl Backend for WasmBackend {
         &self,
         classifier: krusty::backend::DependencyClassifier,
     ) -> bool {
-        classifier == krusty::types::wk::string()
+        classifier == krusty::types::wk::unit()
+            || classifier == krusty::types::wk::string()
             || lower::is_string_builder(classifier)
             || lower::runtime_lays_out(classifier)
     }
@@ -153,6 +154,19 @@ impl Backend for WasmBackend {
         operation: krusty::backend::BackendCompilerIntrinsic,
     ) -> bool {
         lower::is_direct_operation(operation)
+    }
+
+    fn emitted_object_instance(
+        &self,
+        state: &Self::State,
+        declaration: &krusty::backend::instance_links::ObjectDeclaration,
+    ) -> bool {
+        !state.declined
+            && state.started.as_ref().is_some_and(|started| {
+                started
+                    .callables
+                    .has_defined_object(declaration, &started.module)
+            })
     }
 
     fn emitted_constructor_initializer(
@@ -319,6 +333,9 @@ impl Backend for WasmBackend {
             decline(state, construct);
             return Vec::new();
         }
+        started
+            .callables
+            .record_defined_objects(&file.dependency_exports, &started.module);
         state.initializers.extend(lowered.initializer);
         if let Some((function, _)) = selected {
             let entry = match lowered.functions.get(function as usize).copied() {

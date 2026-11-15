@@ -47,6 +47,7 @@ pub(crate) use callee_facts::CallEdge;
 pub use callee_facts::KlibCalleeFacts;
 pub(crate) use class_initialization::delegated_superclass_constructor;
 pub(crate) use closure_forms::emitted_closure_function;
+pub(crate) use klib_types::classifier_name;
 
 /// The serialized forms common body lowering realizes without the declaration edges they name.
 pub(crate) const EMITTED_CALL_FORMS: crate::metadata::klib_ir::tree::EmittedCallForms =

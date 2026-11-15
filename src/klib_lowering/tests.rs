@@ -22,6 +22,7 @@ mod generic_receiver_hierarchy;
 mod inline_templates;
 mod object_literal_overrides;
 mod object_literals;
+mod object_value_roots;
 mod parameter_defaults;
 mod primitive_calls;
 mod range_membership_producers;

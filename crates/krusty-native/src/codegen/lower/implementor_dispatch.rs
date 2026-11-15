@@ -5,6 +5,19 @@
 
 use super::*;
 
+pub(super) enum ReadWritePropertyRuntimeCall {
+    Get { property_name: Option<String> },
+    Set,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ReadWritePropertyCallFrame<'a> {
+    pub(super) receiver: u32,
+    pub(super) arguments: &'a [u32],
+    pub(super) applied_params: &'a [Ty],
+    pub(super) applied_result: Ty,
+}
+
 /// A class of this file that implements a dependency declaration, and the slot it does it in.
 pub(super) struct ImplementorArm {
     class: ClassId,
@@ -156,6 +169,115 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         })
     }
 
+    /// A frozen ReadWriteProperty slot handles library-materialized delegates; the two existing
+    /// runtime-owned delegate layouts keep using their established helper ABI. The runtime
+    /// descriptors are tested first, and every other object reaches the same canonical interface
+    /// slot used by ordinary dependency calls.
+    pub(super) fn dependency_read_write_property_stub(
+        &mut self,
+        identity: &krusty::libraries::KlibDependencyCallable,
+        signature: super::super::super::intrinsics::FunctionSignature<'_>,
+        frame: ReadWritePropertyCallFrame<'_>,
+        operation: ReadWritePropertyRuntimeCall,
+    ) -> Result<Option<Value>, Unsupported> {
+        let number = self.file.dependency_interface_number(identity);
+        let Some(object) = self.receiver(frame.receiver)? else {
+            return Ok(None);
+        };
+        let arguments = self.arguments(frame.arguments, frame.applied_params)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let operands: Vec<(Value, Option<Ty>)> = arguments
+            .iter()
+            .zip(frame.applied_params)
+            .map(|(&value, &param)| (value, Some(param)))
+            .collect();
+        let declared_params = signature.params;
+        let declared_ret = signature.ret;
+        let descriptors = ["kt_type_not_null_var", "kt_type_observable"];
+        self.dispatch_runtime_types(
+            &descriptors,
+            object,
+            &operands,
+            frame.applied_result,
+            move |body, object, _index, references| match &operation {
+                ReadWritePropertyRuntimeCall::Get {
+                    property_name: Some(name),
+                } => {
+                    let name = body.string_literal(name.as_bytes())?;
+                    let Some(value) = body.runtime_call(
+                        "kt_rw_property_get",
+                        &[any(), any()],
+                        any(),
+                        &[object, name],
+                    )?
+                    else {
+                        return Ok(None);
+                    };
+                    body.convert(value, Some(any()), frame.applied_result)
+                }
+                ReadWritePropertyRuntimeCall::Get {
+                    property_name: None,
+                } => {
+                    let Some(value) = body.runtime_call(
+                        "kt_rw_property_get_property",
+                        &[any(), any()],
+                        any(),
+                        &[object, references[2]],
+                    )?
+                    else {
+                        return Ok(None);
+                    };
+                    body.convert(value, Some(any()), frame.applied_result)
+                }
+                ReadWritePropertyRuntimeCall::Set => body.runtime_call(
+                    "kt_rw_property_set",
+                    &[any(), any(), any()],
+                    Ty::Unit,
+                    &[object, references[2], references[3]],
+                ),
+            },
+            move |body| {
+                if arguments.len() != frame.applied_params.len()
+                    || frame.applied_params.len() != declared_params.len()
+                {
+                    return Err(declined!(
+                        "the applied ReadWriteProperty call frame does not match its declaration"
+                    ));
+                }
+                let mut slot_arguments = Vec::with_capacity(arguments.len());
+                for ((&argument, &applied), &declared) in arguments
+                    .iter()
+                    .zip(frame.applied_params)
+                    .zip(declared_params)
+                {
+                    let Some(argument) = body.convert(argument, Some(applied), declared)? else {
+                        return Ok(None);
+                    };
+                    if body.terminated {
+                        return Ok(None);
+                    }
+                    slot_arguments.push(argument);
+                }
+                let Some(result) = body.dispatch_through(
+                    object,
+                    model::Dispatch::Interface(number),
+                    declared_params,
+                    declared_ret,
+                    &slot_arguments,
+                )?
+                else {
+                    return Ok(None);
+                };
+                if body.terminated {
+                    return Ok(None);
+                }
+                body.convert(result, Some(declared_ret), frame.applied_result)
+            },
+        )
+    }
+
     /// Hand `object` to the runtime function of the first of `runtime`'s classes it is an instance
     /// of, with `operands` (each value and its physical type), answering `answer`; an object of
     /// none of them is `otherwise`'s.
@@ -167,7 +289,38 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         answer: Ty,
         otherwise: impl FnOnce(&mut Self) -> Result<Option<Value>, Unsupported>,
     ) -> Result<Option<Value>, Unsupported> {
-        if runtime.is_empty() {
+        let descriptors: Vec<_> = runtime.iter().map(|(descriptor, _)| *descriptor).collect();
+        self.dispatch_runtime_types(
+            &descriptors,
+            object,
+            operands,
+            answer,
+            |body, _object, index, references| {
+                let function = runtime[index].1;
+                let produced =
+                    body.runtime_call(function, &vec![any(); references.len()], any(), references)?;
+                match produced {
+                    Some(value) if !body.terminated => body.convert(value, Some(any()), answer),
+                    _ => Ok(None),
+                }
+            },
+            otherwise,
+        )
+    }
+
+    /// Try exact runtime descriptor cases before taking `otherwise`, converting each operand to
+    /// the reference ABI once per branch. This is shared by generic dependency calls and the
+    /// runtime-owned ReadWriteProperty adapters.
+    fn dispatch_runtime_types(
+        &mut self,
+        descriptors: &[&'static str],
+        object: Value,
+        operands: &[(Value, Option<Ty>)],
+        answer: Ty,
+        mut runtime: impl FnMut(&mut Self, Value, usize, &[Value]) -> Result<Option<Value>, Unsupported>,
+        otherwise: impl FnOnce(&mut Self) -> Result<Option<Value>, Unsupported>,
+    ) -> Result<Option<Value>, Unsupported> {
+        if descriptors.is_empty() {
             return otherwise(self);
         }
         self.null_check(object)?;
@@ -176,7 +329,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if let Some(clif) = carried.clif() {
             self.builder.append_block_param(merge, clif);
         }
-        for &(descriptor, function) in runtime {
+        for (index, descriptor) in descriptors.iter().enumerate() {
             let descriptor = self.file.import_data(descriptor)?;
             let type_address = self.data_address(descriptor);
             let matches = self
@@ -201,12 +354,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 };
                 references.push(reference);
             }
-            let produced =
-                self.runtime_call(function, &vec![any(); references.len()], any(), &references)?;
-            let produced = match produced {
-                Some(value) if !self.terminated => self.convert(value, Some(any()), answer)?,
-                _ => None,
-            };
+            let produced = runtime(self, object, index, &references)?;
             self.jump_to_merge(merge, carried, produced);
             self.continue_in(rest);
             self.builder.seal_block(rest);

@@ -220,7 +220,7 @@ impl BodyLowering<'_, '_, '_> {
         if krusty::backend::enums::base_member(self.file.callables, target).is_some() {
             return None;
         }
-        if self.reads_reference_slot(target) {
+        if self.reads_reference_member(target) {
             return self
                 .file
                 .callables

@@ -724,7 +724,7 @@ mod tests {
             object.local("g", text, 16),
             object.local("h", text, 24),
         ];
-        const TYPE: u64 = 168;
+        const TYPE: u64 = 176;
         let mut marks = Vec::new();
         for mark in TYPE_MARKS {
             marks.extend_from_slice(&[mark; ITABLE_OFFSET as usize]);
