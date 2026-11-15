@@ -962,6 +962,26 @@ fn member_overrides(
                 "an override of a supertype this library does not authenticate",
             ));
         };
+        // Locating the member by its signature does not prove membership. The declaring class's
+        // raw header must hold it directly: a function as a member, an accessor in its own
+        // property group and in the slot of its shape.
+        let KlibIrSignature::Public(owner_signature) = &owner.base.symbol.signature else {
+            return Err(mismatch(
+                "an overridden member's class has no public signature",
+            ));
+        };
+        match scope
+            .bodies
+            .class_member_header(&identity, owner_signature, None)
+        {
+            Ok(Some(member)) if std::ptr::eq(member.function, declared) => {}
+            Ok(_) => {
+                return Err(mismatch(
+                    "an overridden member is not a direct member of its class's header",
+                ))
+            }
+            Err(reason) => return Err(mismatch(reason)),
+        }
         if !declared.type_parameters.is_empty() || declared.constructor {
             return Err(unsupported(
                 "an override of a generic or constructor declaration",
