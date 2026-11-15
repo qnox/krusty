@@ -3,7 +3,7 @@ use crate::libraries::{GenericSig, SemanticPlatform};
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TyKind, TypeName};
 
-use super::{infer_generic_return_bindings, semantic_arg_assignable};
+use super::{infer_generic_return_bindings_from_symbols, semantic_arg_assignable};
 
 #[derive(Clone, Debug)]
 pub(crate) enum CallArgKind {
@@ -365,8 +365,10 @@ impl CallArgKind {
         let admits = |actual: Ty, bound: Ty| {
             actual == bound || semantic_arg_assignable(src, &bound, &actual)
         };
-        let infer = |signature: &GenericSig| {
-            infer_generic_return_bindings(signature, parameter, admits).is_some_and(|bindings| {
+        // The same expected-result relation used when checking the selected argument owns
+        // applied supertypes and provider-declared platform collection faces during selection.
+        infer_generic_return_bindings_from_symbols(src, generic_sig, parameter, admits).is_some_and(
+            |bindings| {
                 expected_result_keeps_call_evidence(
                     ProvisionalResult {
                         ty: *provisional,
@@ -376,25 +378,8 @@ impl CallArgKind {
                     parameter,
                     &bindings,
                 )
-            })
-        };
-        if infer(generic_sig) {
-            return true;
-        }
-        // An expected parameter may constrain a generic construction through an applied
-        // supertype (`ArrayList<T>` consumed as `Iterable<Int>`). Applicability must admit that
-        // contextual result before the checker can re-run the nested construction with the
-        // selected parameter; direct result unification alone sees different classifiers.
-        let Some(applied) = crate::assignable::applied_supertype(
-            &super::SourceOracle(src),
-            generic_sig.ret,
-            parameter,
-        ) else {
-            return false;
-        };
-        let mut projected = generic_sig.as_ref().clone();
-        projected.ret = applied;
-        infer(&projected)
+            },
+        )
     }
 
     /// Whether expected-result inference is the only possible source of the nested call's result
@@ -562,6 +547,62 @@ mod tests {
         );
 
         assert!(!call.result_is_input_constrained());
+    }
+
+    #[test]
+    fn a_nested_producer_binds_through_the_provider_platform_collection_face() {
+        let (Some(stdlib), Some(jdk)) = (
+            crate::toolchain::stdlib_jar(),
+            crate::toolchain::jdk_modules(),
+        ) else {
+            return;
+        };
+        let source = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![stdlib, jdk]),
+        ))
+        .expect("JVM provider initialization");
+        let formal = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let signature = GenericSig {
+            formals: vec!["T".into()],
+            formal_bounds: vec![vec![]],
+            receiver: None,
+            params: vec![],
+            ret: Ty::obj_args("kotlin/collections/List", &[formal]),
+            return_policy: Default::default(),
+        };
+        let producer = CallArgKind::ExpectedTypeCallable {
+            provisional: signature.ret,
+            provisional_open: true,
+            generic_sig: std::sync::Arc::new(signature.clone()),
+        };
+        let mutable = Ty::obj_args(
+            "kotlin/collections/MutableCollection",
+            &[Ty::out_projection(Ty::String)],
+        );
+        let platform = Ty::platform_nullable(mutable);
+        assert!(producer.binds_result_to(&source, platform));
+        assert!(!producer.binds_result_to(&source, mutable));
+        assert!(!producer.binds_result_to(&source, Ty::Int));
+
+        // A platform parameter cannot discard nullability established by the nested call's
+        // inputs. Retain that evidence against the original result declaration after projecting
+        // the result's generic superclass during inference.
+        let constrained = CallArgKind::ExpectedTypeCallable {
+            provisional: Ty::obj_args("kotlin/collections/List", &[Ty::nullable(Ty::String)]),
+            provisional_open: false,
+            generic_sig: std::sync::Arc::new(GenericSig {
+                params: vec![formal],
+                ..signature
+            }),
+        };
+        assert!(!constrained.binds_result_to(&source, platform));
+        assert!(constrained.binds_result_to(
+            &source,
+            Ty::platform_nullable(Ty::obj_args(
+                "kotlin/collections/MutableCollection",
+                &[Ty::out_projection(Ty::nullable(Ty::String))],
+            )),
+        ));
     }
 
     #[test]

@@ -572,6 +572,10 @@ fn runtime_interface_descriptors(
 }
 
 impl<'a> FileLowering<'a> {
+    pub(super) fn collection_declaration(&self, owner: TypeName) -> Option<CollectionDeclaration> {
+        collection_declaration(self.classifiers, owner)
+    }
+
     pub(super) fn collection_shape(&self, internal: TypeName) -> Option<CollectionShape> {
         collection_shape(self.classifiers, internal)
     }
@@ -713,6 +717,46 @@ impl<'a> FileLowering<'a> {
     pub(super) fn implements_collection_of(&self, ty: Ty) -> bool {
         self.collection_shape_of(ty)
             .is_some_and(|shape| self.implemented_collections.contains(&shape))
+    }
+
+    /// Whether a source class can stand behind this exact static classifier.
+    ///
+    /// `implements_collection_of` intentionally summarizes by representation shape for walks,
+    /// whose runtime entry points may see any object with that shape. A member dispatch must be
+    /// narrower: a source `Collection` implementation does not make a runtime `List` receiver a
+    /// source object.
+    pub(super) fn has_source_implementor_of(&self, ty: Ty) -> bool {
+        let Some(internal) = ty.non_null().obj_internal() else {
+            return false;
+        };
+        self.ir.classes.iter().any(|class| {
+            if class.is_interface {
+                return false;
+            }
+            let mut pending = vec![class.fq_name];
+            let mut visited = krusty::fx_hash::HashSet::default();
+            while let Some(current) = pending.pop() {
+                if current == internal {
+                    return true;
+                }
+                if !visited.insert(current) {
+                    continue;
+                }
+                if let Some(source) = self
+                    .ir
+                    .classes
+                    .iter()
+                    .find(|source| source.fq_name == current)
+                {
+                    pending.push(source.superclass);
+                    pending.extend(source.interfaces.iter());
+                    pending.extend(source.supertypes.iter().filter_map(|ty| ty.obj_internal()));
+                } else if let Some(fact) = self.classifiers.classifier(current) {
+                    pending.extend(fact.supertypes.iter().copied());
+                }
+            }
+            false
+        })
     }
 }
 
