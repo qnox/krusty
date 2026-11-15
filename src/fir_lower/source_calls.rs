@@ -271,6 +271,7 @@ impl BodyLowering<'_> {
             invocation,
             super::inlining::LambdaParameterBinding::Declared {
                 callee: Some(callee),
+                specialization: None,
             },
         )?;
         // The primitive is `@InlineOnly`: where the block's body starts on the call's line,

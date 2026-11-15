@@ -999,6 +999,7 @@ impl BodyLowering<'_> {
                 invocation,
                 LambdaParameterBinding::Declared {
                     callee: Some(&callee),
+                    specialization: Some(&bindings),
                 },
             )
             .expect("the complete declared-lambda splice list was preflighted before commit");
@@ -1290,7 +1291,17 @@ impl BodyLowering<'_> {
             }
             _ => return None,
         };
-        let parameter_types = self.ir.functions.get(impl_fn as usize)?.params.clone();
+        let mut parameter_types = self.ir.functions.get(impl_fn as usize)?.params.clone();
+        if let LambdaParameterBinding::Declared {
+            specialization: Some(bindings),
+            ..
+        } = binding
+        {
+            let formals = bindings.keys().cloned().collect::<Vec<_>>();
+            for ty in &mut parameter_types {
+                *ty = crate::types::ty_subst_formals(*ty, &formals, bindings);
+            }
+        }
 
         let receiver_parameter = self
             .ir
@@ -1428,6 +1439,7 @@ impl BodyLowering<'_> {
         // callable it was passed to.
         if let LambdaParameterBinding::Declared {
             callee: Some(callee),
+            ..
         } = binding
         {
             declarations.push(self.inline_marker(
