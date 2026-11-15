@@ -30,6 +30,16 @@ fn wasm_official_dependency_class_members_lower_from_their_bodies() {
     );
 }
 
+/// A final class's secondary constructors delegate to its primary one: each construction lowers
+/// from the official producer's bodies, the delegated initialization first.
+#[test]
+fn wasm_official_dependency_secondary_constructors_delegate_to_the_primary() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencySecondaryConstructors.kt"),
+        "DependencySecondaryConstructors",
+    );
+}
+
 /// Run the shared two-module program through the product producer, then compile its consumer
 /// against the library the exact official Wasm compiler produces and run it, on every target.
 fn run_against_official_producer(source: &str, name: &str) {
