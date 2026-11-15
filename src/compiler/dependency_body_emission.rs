@@ -106,6 +106,7 @@ pub(super) fn emit_dependencies<B: Backend>(
     let type_oracle = crate::symbol_resolver::SourceOracle(platform);
     let target_represents_classifier =
         |classifier| backend.represents_dependency_classifier(classifier);
+    let dispatched_classes = backend.dispatched_dependency_classes();
     let callees = KlibCalleeFacts::new(selected.iter().copied())
         .with_type_oracle(&type_oracle)
         .with_target_classifiers(&target_represents_classifier);
@@ -262,7 +263,7 @@ pub(super) fn emit_dependencies<B: Backend>(
         )
         .with_member_edges(member_edges)
         .with_read_objects(read_objects)
-        .with_builtin_implementation_facts(platform)
+        .with_builtin_implementation_facts(platform, &dispatched_classes)
         {
             Ok(callees) => callees,
             Err(identity) => {
@@ -574,9 +575,12 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         };
-        if let Err(identity) =
-            super::builtin_implementations::record_checked(&mut callables, unit.ir(), platform)
-        {
+        if let Err(identity) = super::builtin_implementations::record_checked(
+            &mut callables,
+            unit.ir(),
+            platform,
+            &dispatched_classes,
+        ) {
             diags.error(
                 Span::new(0, 0),
                 format!(

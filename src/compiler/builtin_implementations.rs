@@ -13,11 +13,13 @@ pub(super) fn record_checked(
     callables: &mut CheckedBackendCallables,
     ir: &crate::ir::IrFile,
     source: &dyn crate::symbol_source::SymbolSource,
+    represented: &[crate::types::TypeName],
 ) -> Result<(), crate::fir::ExternalCallableId> {
     let implementations = crate::resolve::for_checked_external_members(
         source,
         callables.external_member_identities(),
         &ir.external_builtin_implementations,
+        represented,
     )?;
     callables.record_checked_builtin_implementations(&implementations)
 }

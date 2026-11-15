@@ -1,7 +1,9 @@
 //! Builtin implementations selected for external members used by a checked source unit.
 
 use crate::fir::{BuiltinImplementation, ExternalCallableId};
-use crate::symbol_resolver::{builtin_implementation_facts, ResolvedMember};
+use crate::symbol_resolver::{
+    builtin_implementation_facts, represented_implementation_facts, ResolvedMember,
+};
 use crate::symbol_source::SymbolSource;
 use crate::types::{SemanticCallableOwner, TypeName};
 
@@ -161,44 +163,70 @@ pub(super) fn for_checked_unit(checker: &Checker<'_>) -> Result<Facts, ExternalC
 /// Complete builtin facts for every exact external member already present in finalized IR. Inline
 /// KLIB templates and compiler-generated checked operations can introduce member identities after
 /// ordinary source-body checking, so the checker closes the same contract at the checked backend
-/// handoff before emission starts.
+/// handoff before emission starts. Each member also carries the overrides of the target's
+/// `represented` classes below its owner, which only the handoff knows.
 pub(crate) fn for_checked_external_members(
     source: &dyn SymbolSource,
     identities: impl IntoIterator<Item = ExternalCallableId>,
     already_checked: &Facts,
+    represented: &[TypeName],
 ) -> Result<Facts, ExternalCallableId> {
     let mut facts = Facts::default();
     for identity in identities {
-        if let Some(checked) = already_checked.get(&identity) {
-            facts.insert(identity, checked.clone());
+        let checked = already_checked.get(&identity);
+        if checked.is_some() && represented.is_empty() {
+            facts.insert(identity, checked.cloned().unwrap_or_default());
             continue;
         }
-        let realization = source.external_callable(identity).ok_or(identity)?;
-        if realization.callable.external_identity != Some(identity) {
-            return Err(identity);
-        }
-        if realization.kind != crate::libraries::ExternalCallableKind::Member {
-            continue;
-        }
-        let Some(SemanticCallableOwner::Classifier(owner)) = realization.declaration_owner else {
-            return Err(identity);
-        };
-        let name = match realization.callable.external_property_identity {
-            Some(property) => {
-                let property = source.external_property(property).ok_or(identity)?;
-                if property.getter != identity && property.setter != Some(identity) {
-                    return Err(identity);
-                }
-                property.name
+        let Some((owner, name)) = selected_member(source, identity)? else {
+            if let Some(checked) = checked {
+                facts.insert(identity, checked.clone());
             }
-            None => realization.callable.name,
+            continue;
         };
-        facts.insert(
+        let mut implementations = match checked {
+            Some(checked) => checked.to_vec(),
+            None => builtin_implementation_facts(source, owner, &name, identity).into_vec(),
+        };
+        implementations.extend(represented_implementation_facts(
+            source,
+            represented,
+            owner,
+            &name,
             identity,
-            builtin_implementation_facts(source, owner, &name, identity),
-        );
+        ));
+        facts.insert(identity, implementations.into_boxed_slice());
     }
     Ok(facts)
+}
+
+/// The declaring classifier and Kotlin name of the external member `identity`, a property's for
+/// an accessor; `None` when `identity` is no member.
+fn selected_member(
+    source: &dyn SymbolSource,
+    identity: ExternalCallableId,
+) -> Result<Option<(TypeName, String)>, ExternalCallableId> {
+    let realization = source.external_callable(identity).ok_or(identity)?;
+    if realization.callable.external_identity != Some(identity) {
+        return Err(identity);
+    }
+    if realization.kind != crate::libraries::ExternalCallableKind::Member {
+        return Ok(None);
+    }
+    let Some(SemanticCallableOwner::Classifier(owner)) = realization.declaration_owner else {
+        return Err(identity);
+    };
+    let name = match realization.callable.external_property_identity {
+        Some(property) => {
+            let property = source.external_property(property).ok_or(identity)?;
+            if property.getter != identity && property.setter != Some(identity) {
+                return Err(identity);
+            }
+            property.name
+        }
+        None => realization.callable.name,
+    };
+    Ok(Some((owner, name)))
 }
 
 fn record_property_setter(
@@ -265,7 +293,7 @@ mod tests {
             .external_identity
             .expect("the member has a provider identity");
 
-        let facts = for_checked_external_members(&source, [identity], &Facts::default())
+        let facts = for_checked_external_members(&source, [identity], &Facts::default(), &[])
             .expect("the exact checked member has complete override facts");
         assert!(facts.contains_key(&identity));
         assert!(matches!(
@@ -273,6 +301,7 @@ mod tests {
                 &source,
                 [ExternalCallableId::from_raw(u32::MAX)],
                 &Facts::default(),
+                &[],
             ),
             Err(identity) if identity == ExternalCallableId::from_raw(u32::MAX)
         ));

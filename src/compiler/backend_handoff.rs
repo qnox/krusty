@@ -28,6 +28,9 @@ pub(super) struct ModuleEmission<'a> {
     /// The backend lowers suspend functions with the shared common-IR coroutine passes
     /// ([`crate::backend::Backend::lowers_coroutines_on_common_ir`]).
     pub common_ir_coroutines: bool,
+    /// The dependency classes whose supertype members the backend dispatches itself
+    /// ([`crate::backend::Backend::dispatched_dependency_classes`]).
+    pub dispatched_classes: &'a [crate::types::TypeName],
 }
 
 /// Freeze `ir`'s backend view, or report an internal error when a dependency identity the IR holds
@@ -73,6 +76,7 @@ pub(super) fn checked_ir_file<'a>(
         &mut callables,
         &ir,
         symbols.semantic_platform(),
+        module.dispatched_classes,
     ) {
         diags.error(
             Span::new(0, 0),
