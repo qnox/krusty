@@ -72,6 +72,21 @@ pub(super) struct LambdaMethods {
     functions: krusty::fx_hash::HashSet<FunId>,
 }
 
+/// Compiler adapters omit their source method signature, except a realized SAM callable
+/// reference whose checked method captures the enclosing declaration's generic result.
+pub(super) fn erases_adapter_signature(ir: &IrFile, function: FunId) -> bool {
+    ir.lambda_class_provenance(function)
+        == Some(krusty::ir::type_reflection::LambdaClassProvenance::SynthesizedAdapter)
+        && !ir.class_method_owners.get(&function).is_some_and(|owners| {
+            owners.iter().any(|&owner| {
+                ir.classes[owner as usize]
+                    .lambda
+                    .as_ref()
+                    .is_some_and(|lambda| lambda.invoke == function && lambda.sam_reference)
+            })
+        })
+}
+
 /// The semantic roles a realized class has besides the lambda's implementation.
 #[derive(Clone, Default)]
 struct ClassRole {
@@ -83,6 +98,8 @@ struct ClassRole {
     lambda_origin: Option<krusty::ir::IrLambdaOrigin>,
     /// The functional interface a SAM-converted lambda implements in place of `FunctionN`.
     sam: Option<Box<krusty::ir::IrSamTarget>>,
+    /// A checked callable-reference adapter implements the SAM directly in explicit class mode.
+    sam_reference: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -630,6 +647,11 @@ pub(super) fn realize(
                 _ => None,
             });
         if let Some(target) = sam {
+            let sam_reference = modes.sam_conversions == crate::ir_emit::LambdaMode::Class
+                && !target.function_adapter
+                && !target.wraps_function_value
+                && ir.lambda_class_provenance(fid)
+                    == Some(krusty::ir::type_reflection::LambdaClassProvenance::SynthesizedAdapter);
             // A SAM conversion is a class exactly where `LambdaMetafactory` cannot adapt the
             // lambda to the interface method. Lambdas an inline function or a delegate owns keep
             // their own realization.
@@ -638,7 +660,7 @@ pub(super) fn realize(
                 || inline_scoped
                 || runtime_reified
                 || inline_anonymous
-                || !ir.lambda_origins.contains_key(&fid)
+                || (!ir.lambda_origins.contains_key(&fid) && !sam_reference)
                 || (modes.sam_conversions == crate::ir_emit::LambdaMode::Indy
                     && !factory_adaptation::sam_conflict(ir, classifiers, &target))
             {
@@ -669,6 +691,7 @@ pub(super) fn realize(
                         // Explicit class mode carries source reflection metadata. An indy
                         // factory-conflict class keeps kotlinc's metadata-free realization.
                         lambda_origin,
+                        sam_reference,
                         sam: Some(target),
                         ..ClassRole::default()
                     },
@@ -838,6 +861,7 @@ pub(super) fn realize(
                         scope: inline_scope,
                         lambda_origin: kotlin_lambda,
                         sam: None,
+                        sam_reference: false,
                     },
                 );
             }
@@ -1257,6 +1281,7 @@ fn declare_class(
         scope: inline_scope,
         lambda_origin,
         sam,
+        sam_reference,
     } = role;
     let mut class = krusty::ir::IrClass::synthetic(site.class);
     class.superclass = krusty::types::type_name(if lambda_origin.is_some() && sam.is_none() {
@@ -1380,6 +1405,7 @@ fn declare_class(
         bridge: krusty::ir::IrInvokeBridge::logical(signature.params.clone(), signature.ret),
         lambda_origin,
         sam,
+        sam_reference,
     });
     ir.add_class(class)
 }
@@ -1558,6 +1584,7 @@ mod method_domain_tests {
             bridge: krusty::ir::IrInvokeBridge::logical(vec![], Ty::Unit),
             lambda_origin: None,
             sam: None,
+            sam_reference: false,
         });
         closure.methods = vec![3, 4];
         ir.classes.push(closure);

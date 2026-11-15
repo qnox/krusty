@@ -147,6 +147,10 @@ pub(super) fn realize(ir: &mut IrFile, callable_under: &Under, renamed_functions
             .enumerate()
             .map(|(i, logical)| {
                 let target = fr.target_param_tys.get(i + target_offset)?;
+                // A primitive-array value class keeps its semantic name through erasure
+                // (`UIntArray`), yet the selected callable takes its carrier (`int[]`).
+                let target = &super::representation::carrier_slot(*target, callable_under)
+                    .unwrap_or(*target);
                 let fq = logical.non_null().obj_internal()?;
                 // `FunctionN.invoke` always receives the logical value as an Object. Adapt it to
                 // the selected callable's *physical* parameter, not merely to a type with different
@@ -168,10 +172,14 @@ pub(super) fn realize(ir: &mut IrFile, callable_under: &Under, renamed_functions
             // branch for a primitive target slot and produces an impossible stack-map join.
             .map(|parameter| parameter.is_nullable())
             .collect();
+        // The same physical slot decides the result: a `UIntArray` result leaves the target as
+        // its `int[]` carrier and is boxed for `FunctionN.invoke`'s `Object`.
+        let target_ret = super::representation::carrier_slot(fr.target_ret_ty, callable_under)
+            .unwrap_or(fr.target_ret_ty);
         fr.box_ret = fr.ret_ty.non_null().obj_internal().and_then(|fq| {
             (callable_under.contains_key(&fq)
                 && target_decl_ret.non_null().obj_internal() == Some(fq)
-                && fr.ret_ty != fr.target_ret_ty)
+                && fr.ret_ty != target_ret)
                 .then_some(fq)
         });
         fr.invoke_renamed = fr

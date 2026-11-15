@@ -522,22 +522,12 @@ fn package_exports(
         let Some(layout) = ir.local_property_layouts.get(&source.property) else {
             continue;
         };
-        // Storage owned by a receiverless package property: its default accessors are the
-        // checked storage operations a target exports as bodies. A classifier-associated or
-        // `const` property publishes its value, not an accessor.
-        let (getter, setter, storage) = match layout {
-            crate::ir::IrLocalPropertyLayout::TopLevelStorage {
-                getter,
-                setter,
-                qualifier,
-                ..
-            } => (
-                *getter,
-                *setter,
-                qualifier.is_none() && !source.is_const && !declaration.is_expect,
-            ),
+        let (getter, setter) = match layout {
+            crate::ir::IrLocalPropertyLayout::TopLevelStorage { getter, setter, .. } => {
+                (*getter, *setter)
+            }
             crate::ir::IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. } => {
-                (Some(*getter), *setter, false)
+                (Some(*getter), *setter)
             }
             crate::ir::IrLocalPropertyLayout::Member { .. }
             | crate::ir::IrLocalPropertyLayout::MemberExtension { .. } => continue,
@@ -559,23 +549,13 @@ fn package_exports(
                 return None;
             }
         }
-        for (callable, accessor, modifiers, present) in [
-            (
-                getter,
-                MetadataAccessor::Getter,
-                &declaration.getter_modifiers,
-                true,
-            ),
-            (
-                setter,
-                MetadataAccessor::Setter,
-                &declaration.setter_modifiers,
-                declaration.is_var,
-            ),
-        ] {
-            if !present {
-                continue;
-            }
+        for (callable, accessor) in [
+            getter.map(|getter| (getter, MetadataAccessor::Getter)),
+            setter.map(|setter| (setter, MetadataAccessor::Setter)),
+        ]
+        .into_iter()
+        .flatten()
+        {
             let signature =
                 match package_property_accessor_signature(container, declaration, accessor) {
                     Ok(signature) => signature,
@@ -589,33 +569,6 @@ fn package_exports(
                         return None;
                     }
                 };
-            let Some(callable) = callable else {
-                if storage
-                    && modifiers.is_default
-                    && modifiers.visibility != crate::types::Visibility::Private
-                    && !modifiers.is_external
-                    && !declaration.is_external
-                {
-                    let operation = match accessor {
-                        MetadataAccessor::Getter => {
-                            crate::backend::ExportedPropertyAccessor::Getter(source.property)
-                        }
-                        MetadataAccessor::Setter => {
-                            crate::backend::ExportedPropertyAccessor::Setter(source.property)
-                        }
-                    };
-                    exports.record_property_accessor(
-                        operation,
-                        crate::libraries::KlibDependencyCallable {
-                            module: module_name.to_owned(),
-                            declaration: crate::libraries::KlibDeclarationSignature::Accessor(
-                                signature,
-                            ),
-                        },
-                    );
-                }
-                continue;
-            };
             if crate::backend::has_standalone_dependency_code(ir, callable) {
                 exports.record_callable(
                     callable,
@@ -625,6 +578,97 @@ fn package_exports(
                             signature,
                         ),
                     },
+                );
+            }
+        }
+        if let crate::ir::IrLocalPropertyLayout::TopLevelStorage {
+            storage,
+            getter,
+            setter,
+            qualifier: None,
+        } = layout
+        {
+            let Some(storage) = ir.statics.get(*storage as usize) else {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    "internal error: a package property has no checked storage",
+                );
+                return None;
+            };
+            let ordinary_storage = source.has_backing_field
+                && !source.is_const
+                && !declaration.is_const
+                && !declaration.is_external
+                && !declaration.is_expect
+                && storage.owner.is_none()
+                && !storage.property_delegate;
+            let default_getter = ordinary_storage
+                && getter.is_none()
+                && storage.accessors.getter == crate::ir::IrStaticAccessor::Default
+                && declaration.getter_modifiers.is_default
+                && !declaration.getter_modifiers.is_external
+                && declaration.getter_modifiers.visibility != crate::types::Visibility::Private;
+            if default_getter {
+                let identity = match package_property_accessor_signature(
+                    container,
+                    declaration,
+                    MetadataAccessor::Getter,
+                ) {
+                    Ok(signature) => crate::libraries::KlibDependencyCallable {
+                        module: module_name.to_owned(),
+                        declaration: crate::libraries::KlibDeclarationSignature::Accessor(
+                            signature,
+                        ),
+                    },
+                    Err(error) => {
+                        diags.error(
+                            crate::diag::Span::new(0, 0),
+                            format!(
+                                "internal error: cannot sign generated KLIB property getter: {error}"
+                            ),
+                        );
+                        return None;
+                    }
+                };
+                exports.record_property_accessor(
+                    crate::backend::ExportedPropertyAccessor::Getter(source.property),
+                    identity,
+                );
+            }
+            let default_setter = ordinary_storage
+                && source.mutable
+                && source.setter_visibility != crate::types::Visibility::Private
+                && setter.is_none()
+                && storage.accessors.setter == crate::ir::IrStaticAccessor::Default
+                && declaration.is_var
+                && declaration.setter_modifiers.is_default
+                && declaration.setter_modifiers.visibility != crate::types::Visibility::Private
+                && !declaration.setter_modifiers.is_external;
+            if default_setter {
+                let identity = match package_property_accessor_signature(
+                    container,
+                    declaration,
+                    MetadataAccessor::Setter,
+                ) {
+                    Ok(signature) => crate::libraries::KlibDependencyCallable {
+                        module: module_name.to_owned(),
+                        declaration: crate::libraries::KlibDeclarationSignature::Accessor(
+                            signature,
+                        ),
+                    },
+                    Err(error) => {
+                        diags.error(
+                            crate::diag::Span::new(0, 0),
+                            format!(
+                                "internal error: cannot sign generated KLIB property setter: {error}"
+                            ),
+                        );
+                        return None;
+                    }
+                };
+                exports.record_property_accessor(
+                    crate::backend::ExportedPropertyAccessor::Setter(source.property),
+                    identity,
                 );
             }
         }

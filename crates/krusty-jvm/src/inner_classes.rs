@@ -857,6 +857,7 @@ mod tests {
             bridge: krusty::ir::IrInvokeBridge::logical(Vec::new(), Ty::Unit),
             lambda_origin: None,
             sam: None,
+            sam_reference: false,
         });
         ir.add_class(closure);
         implementation
