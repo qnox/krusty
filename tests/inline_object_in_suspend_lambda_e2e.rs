@@ -3,40 +3,13 @@
 //! implementation has no body left; the object's copy for the call site still names that consumed
 //! implementation, and its copy has no method of its own to emit.
 //!
-//! kotlinc 2.4 writes classes for this program that fail verification (KT-86095); the reference
-//! comparison is the 2.5 corpus case `coroutines/kt86095.kt`. This pins krusty's own run.
+//! kotlinc 2.4 writes classes for this program that fail verification (KT-86095), so the shared
+//! box regression is bounded to kotlinc 2.5 and later, where it runs on every backend against
+//! kotlinc. This also pins krusty's own JVM run on every release.
 
 use super::common;
 
-const PROGRAM: &str = r#"
-import kotlin.coroutines.*
-
-abstract class Runner {
-    internal abstract suspend fun run(): String
-}
-
-suspend fun suspended() {}
-
-inline fun makeRunner(crossinline value: () -> String) =
-    object : Runner() {
-        override suspend fun run(): String {
-            suspended()
-            return value()
-        }
-    }
-
-fun builder(block: suspend () -> Unit) {
-    block.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })
-}
-
-fun box(): String {
-    var result = "fail"
-    builder {
-        result = makeRunner { "O" }.run() + makeRunner { "K" }.run()
-    }
-    return result
-}
-"#;
+const PROGRAM: &str = include_str!("box_regressions/InlineObjectInSuspendLambda.kt");
 
 #[test]
 fn an_inline_object_in_a_suspend_lambda_keeps_its_consumed_lambda_consumed() {
