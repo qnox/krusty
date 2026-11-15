@@ -1279,6 +1279,47 @@ impl Drop for ReleaseBuild {
     }
 }
 
+/// A public block property of an interface is a static method of that interface. The read in
+/// `box()` names it with an `InterfaceMethodref`; a `Methodref` fails to link.
+#[test]
+fn interface_block_property_is_read_through_an_interface_method() {
+    const SRC: &str = "interface I {\n\
+        \x20   companion {\n\
+        \x20       val blockA: String = \"O\"\n\
+        \x20   }\n\
+        }\n\
+        fun box() = I.blockA + \"K\"\n";
+    assert_eq!(run(SRC).expect("interface block property"), "OK");
+}
+
+/// Delegated block properties stay on the classifiers that declare them. Two `var a by …`
+/// members, one on a class and one on an interface, would otherwise both publish `getA` on the
+/// file facade.
+#[test]
+fn delegated_block_properties_stay_on_their_declaring_classifiers() {
+    const SRC: &str = "import kotlin.properties.ReadWriteProperty\n\
+        import kotlin.reflect.KProperty\n\
+        class Store(var value: String) : ReadWriteProperty<Any?, String> {\n\
+        \x20   override fun getValue(thisRef: Any?, property: KProperty<*>) = value\n\
+        \x20   override fun setValue(thisRef: Any?, property: KProperty<*>, v: String) { value = v }\n\
+        }\n\
+        class C {\n\
+        \x20   companion {\n\
+        \x20       var a: String by Store(\"O\")\n\
+        \x20   }\n\
+        }\n\
+        interface I {\n\
+        \x20   companion {\n\
+        \x20       var a: String by Store(\"K\")\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   val r = C.a + I.a\n\
+        \x20   return if (r == \"OK\") \"OK\" else r\n\
+        }\n";
+    assert_eq!(run(SRC).expect("delegated block properties"), "OK");
+}
+
 /// On the 2.5 reference, a delegated companion property's `x$delegate` hoisted to its class is
 /// part of the companion's initialization: it is stored before the companion's later properties
 /// read it, even when a block property follows the companion object.

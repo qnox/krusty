@@ -849,17 +849,20 @@ fn emit_jvm_interface_companion_surface(
     delegated_property_array::declare_in_interface(env, c.fq_name, cw);
     jvm_static_members::emit_companion_bridges(ir, c, cw, env);
 
-    let clinit_statics: Vec<(u32, &krusty::ir::IrStatic, krusty::ir::ExprId)> = ir
+    let mut clinit_statics: Vec<(u32, &krusty::ir::IrStatic, krusty::ir::ExprId)> = ir
         .statics
         .iter()
         .enumerate()
         .filter(|(_, s)| s.owner_matches(&fq_name))
         .filter_map(|(index, s)| Some((index as u32, s, static_fields::clinit_initializer(ir, s)?)))
         .collect();
+    // Generated statics initialize after the declared ones, as a class `<clinit>` does.
+    clinit_statics.sort_by_key(|&(_, s, _)| s.source_order == u32::MAX);
     let array = delegated_property_array::exists(env, c.fq_name);
     if c.companion_class.is_some() || !clinit_statics.is_empty() || array {
         cw.reserve_method_name("<clinit>");
         cw.seed_utf8("()V");
+        let companion_initializer = ir.companion_clinit_body(c.fq_name);
         let mut emitter = Emitter::new(
             ir,
             cw,
@@ -878,20 +881,48 @@ fn emit_jvm_interface_companion_surface(
         if array {
             emitter.cw.omit_method_lines("<clinit>", "()V");
         }
-        emit_companion_init(emitter.cw, &mut clinit, &fq_name, c);
+        // The same program order a class uses: block properties written before the companion
+        // object are stored before `$$INSTANCE` is read, which is what runs the companion's
+        // own initializer. Interface companions keep that body on the companion object.
         let mut clinit_lines = Vec::new();
-        for &(static_index, s, init) in &clinit_statics {
-            let pc = clinit.bytes.len() as u16;
-            if let Some(&line) = c
-                .companion_class
-                .as_ref()
-                .and_then(|companion| ir.prop_decl_lines.get(&(*companion, s.name.clone())))
-            {
-                if line != 0 {
-                    clinit_lines.push((pc, line));
+        for step in static_fields::class_initializer_steps(ir, c, &clinit_statics) {
+            match step {
+                static_fields::ClassInitializerStep::ConstructCompanion => {
+                    emit_companion_init(emitter.cw, &mut clinit, &fq_name, c);
+                }
+                static_fields::ClassInitializerStep::CompanionBody => {
+                    if let Some(body) = companion_initializer {
+                        emitter.emit_companion_clinit_body(
+                            c,
+                            &fq_name,
+                            body,
+                            &mut clinit,
+                            &mut clinit_lines,
+                        );
+                    }
+                }
+                static_fields::ClassInitializerStep::Store(static_index, s) => {
+                    let Some(init) = static_fields::clinit_initializer(ir, s) else {
+                        continue;
+                    };
+                    let pc = clinit.bytes.len() as u16;
+                    if let Some(&line) = c
+                        .companion_class
+                        .as_ref()
+                        .and_then(|companion| ir.prop_decl_lines.get(&(*companion, s.name.clone())))
+                    {
+                        if line != 0 {
+                            clinit_lines.push((pc, line));
+                        }
+                    }
+                    emitter.emit_static_initializer_store(
+                        &fq_name,
+                        static_index,
+                        init,
+                        &mut clinit,
+                    );
                 }
             }
-            emitter.emit_static_initializer_store(&fq_name, static_index, init, &mut clinit);
         }
         clinit.ret_void();
         clinit.ensure_locals(emitter.frame.max());
@@ -2859,7 +2890,38 @@ fn emit_interface_class(
     let enable_compat = jvm_default == JvmDefaultMode::Enable;
     let mut jd_bridge_fids: Vec<u32> = Vec::new();
     let member_fids = member_schedule::interface_functions(ir, c);
+    // A companion-block property's compiler-default accessor is not a declared function. The
+    // class member schedule emits it; an interface publishes the same accessor, in that order,
+    // or the call sites that name `getX` link to a method the interface never declared.
+    let block_accessors: Vec<(u32, u32, static_fields::StaticAccessor)> =
+        source_ordered_members(ir, c, None)
+            .into_iter()
+            .filter_map(|member| match member {
+                SourceOrderedMember::StaticDefaultAccessor(index, accessor) => {
+                    Some((ir.statics[index as usize].source_order, index, accessor))
+                }
+                _ => None,
+            })
+            .collect();
+    let mut next_block_accessor = 0usize;
     for &fid in &member_fids {
+        let function_order = ir.fn_source_order.get(&fid).copied().unwrap_or(u32::MAX);
+        while let Some(&(source_order, index, accessor)) = block_accessors.get(next_block_accessor)
+        {
+            if source_order >= function_order {
+                break;
+            }
+            static_fields::emit_default_static_accessor(
+                ir,
+                &fq_name,
+                &mut cw,
+                env,
+                opts.param_assertions,
+                index,
+                accessor,
+            );
+            next_block_accessor += 1;
+        }
         if standalone_method_is_elided(ir, fid, env) {
             continue;
         }
@@ -2994,6 +3056,18 @@ fn emit_interface_class(
                 }
             }
         }
+    }
+    while let Some(&(_, index, accessor)) = block_accessors.get(next_block_accessor) {
+        static_fields::emit_default_static_accessor(
+            ir,
+            &fq_name,
+            &mut cw,
+            env,
+            opts.param_assertions,
+            index,
+            accessor,
+        );
+        next_block_accessor += 1;
     }
     // A collection special bridge follows the declared member it adapts and precedes the
     // compatibility access bridge for that member (`size()` before `access$getSize$jd`).

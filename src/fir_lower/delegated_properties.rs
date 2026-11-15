@@ -59,6 +59,11 @@ pub(super) fn materialize_top_level_delegate(
             property.declaration,
         ));
     }
+    // A `companion { var a by … }` member belongs to the class that declared the block, the
+    // same place a block property with its own initializer does. Leaving it on the file facade
+    // gives every such `a` one `getA` on the facade.
+    let block_owner = super::properties::companion_block_owner(index, property_id, &property, ir)?;
+    let static_owner = block_owner.map(|class| ir.classes[class as usize].fq_name_id());
     let initializer =
         property
             .delegate
@@ -110,9 +115,12 @@ pub(super) fn materialize_top_level_delegate(
         format!("{}$delegate", property.name),
         plan.storage_type.get(),
         storage_initializer,
-        None,
+        static_owner,
         source_order,
     )?;
+    if block_owner.is_some() {
+        ir.companion_blocks.mark_storage(delegate_static);
+    }
     let owner_ty = extension_receiver.unwrap_or(Ty::Null);
     let getter_body = ir.exprs.len();
     let receiver = delegate_storage_read(
@@ -219,6 +227,26 @@ pub(super) fn materialize_top_level_delegate(
             delegate: Some(delegate_static),
         },
     );
+    if let Some(owner) = block_owner {
+        super::properties::place_companion_block_accessors(
+            ir,
+            owner,
+            std::iter::once(getter).chain(setter),
+        );
+        super::properties::record_companion_block_property(
+            index,
+            ir,
+            owner,
+            property_id,
+            &property,
+            super::properties::CompanionBlockRealization {
+                storage: Some(delegate_static),
+                getter: Some(getter),
+                setter,
+                source_order,
+            },
+        );
+    }
     stamp_generated_property_nodes(ir, first_generated, cause);
     Ok(())
 }
