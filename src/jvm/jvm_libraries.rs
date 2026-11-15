@@ -1890,6 +1890,7 @@ impl JvmLibraries {
                 super::mapped_builtin_declarations::overlay_constructor_semantics(
                     &mut constructors,
                     self.cp.builtin_constructors_name(internal_name),
+                    super::jvm_class_map::mapped_builtin_is_one_way(internal_name),
                 );
             }
             // Members and supertypes must switch provenance together. Presence of the decoded
@@ -2381,17 +2382,14 @@ impl JvmLibraries {
                 .filter(|field| field.access & ACC_STATIC != 0)
                 .map(|field| field.name.clone())
                 .collect();
-            let inheritance = crate::libraries::ClassifierInheritance {
-                is_abstract: ci.is_abstract() || ci.is_interface(),
-                is_extensible: !ci.is_final() && !ci.is_interface(),
-                has_no_arg_constructor: constructors.iter().any(|constructor| {
-                    constructor.params.is_empty()
-                        && matches!(
-                            constructor.visibility,
-                            crate::types::Visibility::Public | crate::types::Visibility::Protected
-                        )
-                }),
-            };
+            // A mapped builtin's modality is its Kotlin declaration's: `AtomicInt` is final although
+            // `java.util.concurrent.atomic.AtomicInteger` is not.
+            let builtin_access = self.cp.builtin_classifier_shape_name(internal_name);
+            let class_access = builtin_access
+                .filter(|_| is_mapped_builtin)
+                .map_or(ci.access, |shape| shape.3);
+            let inheritance =
+                builtin_classifier_shapes::classifier_inheritance(class_access, &constructors);
             let members = members
                 .into_iter()
                 .chain(builtin_members)

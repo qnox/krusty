@@ -520,20 +520,27 @@ pub(super) fn is_property_realization(
 
 /// Overlay source-semantic constructor facts onto the matching physical constructors.
 ///
-/// Constructors that exist only on the JVM remain available: Kotlin's JVM builtins customizer may
-/// expose platform constructors beyond the common builtins declaration. Conversely, a declaration
-/// without a physical match is not published from this path because it has no JVM realization.
+/// Constructors that exist only on the JVM remain available when the JVM class is also a face of
+/// the builtin: Kotlin's JVM builtins customizer may expose platform constructors beyond the common
+/// builtins declaration. A one-way builtin (`AtomicArray`) publishes only its declared constructors,
+/// so `AtomicReferenceArray(int)`, which fills its elements with null, stays out of reach. A
+/// declaration without a physical match is not published from this path because it has no JVM
+/// realization.
 pub(super) fn overlay_constructor_semantics(
-    physical: &mut [LibraryMember],
+    physical: &mut Vec<LibraryMember>,
     semantic: Vec<LibraryMember>,
+    declared_only: bool,
 ) {
+    let mut realized = vec![false; physical.len()];
     for declaration in semantic {
-        let Some(realization) = physical
-            .iter_mut()
-            .find(|candidate| realizes_constructor(candidate, &declaration))
+        let Some(index) = physical
+            .iter()
+            .position(|candidate| realizes_constructor(candidate, &declaration))
         else {
             continue;
         };
+        realized[index] = true;
+        let realization = &mut physical[index];
 
         // Keep descriptor/owner/physical types from the classfile realization. Everything below is
         // declaration semantics and therefore comes from Kotlin builtins metadata.
@@ -542,6 +549,10 @@ pub(super) fn overlay_constructor_semantics(
         realization.generic_sig = declaration.generic_sig;
         realization.visibility = declaration.visibility;
         realization.call_sig = declaration.call_sig;
+    }
+    if declared_only {
+        let mut realized = realized.into_iter();
+        physical.retain(|_| realized.next().unwrap_or(false));
     }
 }
 
@@ -609,7 +620,7 @@ mod tests {
         semantic.call_sig =
             CallSig::metadata_member(1, vec!["message".to_string()], vec![false], None);
 
-        overlay_constructor_semantics(&mut physical, vec![semantic]);
+        overlay_constructor_semantics(&mut physical, vec![semantic], false);
 
         assert_eq!(physical[0].params, [Ty::nullable(Ty::String)]);
         assert_eq!(

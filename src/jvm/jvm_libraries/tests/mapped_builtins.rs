@@ -70,6 +70,29 @@ fn atomics_map_onto_the_jdk_one_way() {
             .contains_name(type_name("kotlin/concurrent/atomics/AtomicInt")),
         "a Java AtomicInteger is not a Kotlin AtomicInt"
     );
+    assert!(
+        !kotlin.inheritance.is_extensible,
+        "a Kotlin AtomicInt is final"
+    );
+    assert!(
+        java.inheritance.is_extensible,
+        "a Java AtomicInteger is open"
+    );
+    assert!(!kotlin.inheritance.has_no_arg_constructor);
+    assert!(java.inheritance.has_no_arg_constructor);
+
+    let array = libraries
+        .classifier_record(type_name("kotlin/concurrent/atomics/AtomicArray"))
+        .expect("AtomicArray classifier");
+    assert_eq!(
+        array
+            .constructors
+            .iter()
+            .map(|constructor| constructor.descriptor.as_str())
+            .collect::<Vec<_>>(),
+        ["([Ljava/lang/Object;)V"],
+        "an AtomicArray constructs only as its Kotlin declaration states"
+    );
 }
 
 #[test]
