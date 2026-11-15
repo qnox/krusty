@@ -1155,6 +1155,25 @@ impl Body<'_> {
         Ok(Some(storage))
     }
 
+    /// The physical class selected by a current-file identity or an exact frozen KLIB identity.
+    pub(super) fn class_structure(&self, ty: Ty) -> Result<Option<u32>, Unsupported> {
+        if self.interface_of_type(ty).is_some() {
+            return Ok(None);
+        }
+        if let Some(class) = self.class_of_type(ty) {
+            return Ok(Some(self.file_classes()?.structure(class)));
+        }
+        let Some(identity) = ty
+            .non_null()
+            .obj_internal()
+            .and_then(|name| self.classifiers.classifier(name))
+            .and_then(|fact| fact.klib_identity.clone())
+        else {
+            return Ok(None);
+        };
+        self.laid_out_classes.published_structure(&identity)
+    }
+
     /// `x as C`: the value, cast to class `C` of this file or to an interface of the module.
     pub(super) fn cast(&mut self, arg: u32, target: Ty, non_null: bool) -> Result<(), Unsupported> {
         self.value(arg, any())?;
@@ -1169,8 +1188,9 @@ impl Body<'_> {
                 .unreachable()
                 .end();
         } else {
-            let class = self.class_of_type(target).expect("checked by the caller");
-            let structure = self.file_classes()?.structure(class);
+            let structure = self
+                .class_structure(target)?
+                .ok_or_else(|| "a class cast without its selected physical layout".to_owned())?;
             self.code.ref_cast(!non_null, HeapType::Concrete(structure));
         }
         Ok(())
@@ -1289,9 +1309,14 @@ impl Body<'_> {
                 self.code
                     .ref_test(nullable, HeapType::Concrete(form.object));
             }
-            _ => match (self.interface_of_type(tested), self.class_of_type(tested)) {
+            _ => match (
+                self.interface_of_type(tested),
+                self.class_structure(tested)?,
+            ) {
                 (Some(interface), _) => self.interface_test(interface, nullable),
-                (None, Some(class)) => self.instance_test(class, nullable)?,
+                (None, Some(structure)) => {
+                    self.code.ref_test(nullable, HeapType::Concrete(structure));
+                }
                 (None, None) => match self.library_interface_of_type(tested) {
                     Some(interface) => self.library_interface_test(interface, nullable),
                     None => {
@@ -1318,19 +1343,6 @@ impl Body<'_> {
             }
             _ => {}
         }
-        Ok(())
-    }
-
-    /// Replace the reference on the stack with whether it is an instance of `class` — or null,
-    /// when `nullable`.
-    fn instance_test(&mut self, class: ClassId, nullable: bool) -> Result<(), Unsupported> {
-        let declaration = &self.ir.classes[class as usize];
-        if declaration.is_interface {
-            self.interface_test(declaration.fq_name, nullable);
-            return Ok(());
-        }
-        let structure = self.file_classes()?.structure(class);
-        self.code.ref_test(nullable, HeapType::Concrete(structure));
         Ok(())
     }
 
@@ -1850,10 +1862,61 @@ impl Body<'_> {
     /// The constructor `ordinal` of the superclass of `class` an earlier file laid out, and the
     /// parameters it takes.
     fn laid_out_constructor(
-        &self,
+        &mut self,
         class: ClassId,
         ordinal: u32,
+        external: Option<krusty::fir::ExternalCallableId>,
     ) -> Result<(u32, Vec<Ty>), Unsupported> {
+        if let Some(external) = external {
+            let parent = self.ir.classes[class as usize].superclass;
+            let fact = self
+                .callables
+                .callable(external)
+                .ok_or("a selected superclass initializer without its frozen declaration")?;
+            if !fact.is_constructor()
+                || fact.declaration_owner
+                    != Some(krusty::types::SemanticCallableOwner::Classifier(parent))
+            {
+                return Err(
+                    "a selected superclass initializer with a different constructor owner".into(),
+                );
+            }
+            let identity = fact
+                .dependency_callable
+                .as_ref()
+                .ok_or("a selected superclass initializer without its canonical identity")?;
+            let (owner, function, signature) = self
+                .laid_out_classes
+                .published_initializer(identity, self.module)?
+                .ok_or("a selected superclass initializer without its published constructor")?;
+            if self
+                .classifiers
+                .classifier(parent)
+                .and_then(|fact| fact.klib_identity.clone())
+                .as_ref()
+                != Some(owner)
+            {
+                return Err(
+                    "a selected superclass initializer with a different producer class".into(),
+                );
+            }
+            let parameters = fact
+                .declared_params
+                .as_deref()
+                .unwrap_or(&fact.params)
+                .to_vec();
+            if !super::super::laid_out_classes::constructor_frame_matches(
+                self.module,
+                &parameters,
+                signature,
+            ) {
+                return Err(
+                    "a selected superclass initializer differing from its defined producer frame"
+                        .into(),
+                );
+            }
+            return Ok((function, parameters));
+        }
         self.file_classes()?
             .laid_out_superclass(class)
             .and_then(|superclass| superclass.constructors.get(ordinal as usize))
@@ -1944,8 +2007,14 @@ impl Body<'_> {
                 self.delegate(constructor, &params, 0, &declaration.super_args)?;
             }
             None if self.file_classes()?.laid_out_superclass(class).is_some() => {
-                let (constructor, params) =
-                    self.laid_out_constructor(class, declaration.super_ctor.ordinal)?;
+                let (constructor, params) = self.laid_out_constructor(
+                    class,
+                    declaration.super_ctor.ordinal,
+                    self.ir
+                        .external_super_constructors
+                        .get(&declaration.fq_name_id())
+                        .map(|edge| edge.declaration),
+                )?;
                 self.delegate(constructor, &params, 0, &declaration.super_args)?;
             }
             None if self.file_classes()?.exception_base(class).is_some() => {
@@ -2071,7 +2140,17 @@ impl Body<'_> {
                     self.delegate(constructor, &params, 0, &secondary.delegate_args)?;
                 }
                 None if self.file_classes()?.laid_out_superclass(class).is_some() => {
-                    let (constructor, params) = self.laid_out_constructor(class, target.ordinal)?;
+                    let (constructor, params) = self.laid_out_constructor(
+                        class,
+                        target.ordinal,
+                        self.ir
+                            .external_secondary_super_constructors
+                            .get(&(
+                                declaration.fq_name_id(),
+                                u32::try_from(ordinal).expect("a constructor ordinal fits u32"),
+                            ))
+                            .map(|edge| edge.declaration),
+                    )?;
                     self.delegate(constructor, &params, 0, &secondary.delegate_args)?;
                 }
                 None if self.file_classes()?.exception_base(class).is_some() => {

@@ -2,8 +2,8 @@
 //!
 //! A function value is an object. Common lowering has already moved its body into a function of
 //! the file whose LEADING parameters are the captured values and whose trailing ones are the
-//! lambda's own, so the object only holds the captures. Its dispatch table extends `$AnyTable` with
-//! one more field, the function a call enters.
+//! lambda's own, so the object only holds the captures. Its dispatch table extends
+//! `$FunctionTable` with one typed function-reference field, the entry a call enters.
 //!
 //! **That function takes and returns references**, as `FunctionN.invoke` does on the JVM: a call
 //! site knows the value's arity and its Kotlin type, not which lambda it holds, so every function
@@ -13,12 +13,12 @@
 use krusty::fx_hash::HashMap;
 
 use super::encode::{CompositeType, Module, SubType, ValType};
-use super::objects::{immutable, REFERENCE, TYPE_INFO_FIELD};
+use super::objects::{immutable, FUNCTION_FIELD, REFERENCE};
 use super::runtime::Runtime;
 
 /// The dispatch table field holding a function value's entry: after the interface table and the
 /// type information, which a function value has none of.
-pub(super) const INVOKE_FIELD: u32 = TYPE_INFO_FIELD + 1;
+pub(super) const INVOKE_FIELD: u32 = FUNCTION_FIELD;
 
 /// The table type of every function value of one arity, and the type of its entry.
 #[derive(Clone, Copy)]
@@ -54,7 +54,7 @@ impl Runtime {
             .collect();
         let table = module.subtype(SubType {
             composite: CompositeType::Struct(fields),
-            supertype: Some(objects.any_table),
+            supertype: Some(objects.function_table),
             open: false,
         });
         let shape = FunctionShape { table, invoke };

@@ -11,9 +11,220 @@ pub(super) struct SuperTarget<'c> {
     pub(super) name: &'c str,
     pub(super) kind: krusty::ir::IrSuperCallKind,
     pub(super) declaration: Option<krusty::fir::ResolvedFunctionOverrideTarget>,
+    /// Checked call-site frame for a dependency super call, including class substitutions.
+    pub(super) parameters: Option<Vec<krusty::types::Ty>>,
+    pub(super) result: Option<krusty::types::Ty>,
+}
+
+/// One authenticated dependency operation that may be consumed by a published source-class slot.
+pub(super) struct PublishedDependencyCall<'a> {
+    pub(super) target: krusty::fir::ExternalCallableId,
+    pub(super) key: krusty::backend::class_tables::module_slots::PlanKey,
+    pub(super) slot_identity: krusty::fir::ExternalCallableId,
+    pub(super) fact: krusty::backend::BackendCallableFact,
+    pub(super) callee: Result<krusty::ir::Callee, &'static str>,
+    pub(super) receiver: Option<u32>,
+    pub(super) args: &'a [u32],
 }
 
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
+    /// A checked call to an overridable member of an exported source class must enter the class
+    /// table. Its declaration may also have a direct linkable body, but calling that body would
+    /// skip the most-derived override in the consumer module.
+    pub(super) fn published_dependency_member_call(
+        &mut self,
+        call: PublishedDependencyCall<'_>,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        use krusty::backend::class_tables::module_slots::{PlanKey, PlannedSignature};
+        use krusty::types::SemanticCallableOwner;
+
+        let PublishedDependencyCall {
+            target,
+            key,
+            slot_identity,
+            fact,
+            callee,
+            receiver,
+            args,
+        } = call;
+        if matches!(
+            &callee,
+            Ok(krusty::ir::Callee::External { defaults, .. }) if !defaults.is_empty()
+        ) {
+            // The exact dependency default bridge owns this call and dispatches after evaluating
+            // the declaring module's defaults.
+            return None;
+        }
+        let receiver = receiver?;
+        if !fact.is_member_function()
+            || fact.owner_is_interface
+            || fact.source_receiver.is_some()
+            || fact.member_realization != krusty::libraries::MemberRealization::Dispatch
+            || fact.compiler_intrinsic.is_some()
+            || fact.direct_c_function.is_some()
+        {
+            return None;
+        }
+        let Some(SemanticCallableOwner::Classifier(owner)) = fact.declaration_owner else {
+            return None;
+        };
+        let classifier = self.file.classifiers.classifier(owner)?;
+        let identity = classifier.klib_identity.as_ref()?;
+        if fact
+            .klib_body_class_contract
+            .as_ref()
+            .is_some_and(|contract| contract.proves_final_class(identity, owner))
+        {
+            // A final class has no consumer-side override. Keep its existing direct realization.
+            return None;
+        }
+        let Some(record) = self.file.laid_out.get(owner) else {
+            // Runtime/Kotlin library classes also carry exact KLIB identities, but no Native
+            // source-object layout. They retain their existing runtime or direct realization.
+            return None;
+        };
+        if record.class_identity.as_ref() != Some(identity) {
+            return Some(Err(declined!(
+                "a published class layout of `{}` with a different identity",
+                owner.render()
+            )));
+        }
+        let Some(table) = self.file.slot_plan.table(owner) else {
+            return Some(Err(declined!(
+                "a published dispatch table for `{}`",
+                owner.render()
+            )));
+        };
+        let table = match table {
+            Ok(table) => table,
+            Err(reason) => {
+                return Some(Err(declined!(
+                    "a published dispatch table for `{}` ({reason})",
+                    owner.render()
+                )))
+            }
+        };
+        let Some(&slot) = table.slots.get(&key) else {
+            return Some(Err(declined!(
+                "the selected overridable member slot of `{}`",
+                owner.render()
+            )));
+        };
+        let Some(PlannedSignature::Member {
+            parameters: slot_parameters,
+            result: slot_result,
+        }) = self.file.slot_plan.slot_signature(table, slot)
+        else {
+            return Some(Err(declined!(
+                "the selected member frame of `{}`",
+                owner.render()
+            )));
+        };
+        let slot_parameters = slot_parameters.to_vec();
+        let callee = match callee {
+            Ok(callee) => callee,
+            Err(reason) => return Some(Err(Unsupported::from(reason))),
+        };
+        let selected = krusty::backend::instantiate_dependency_signature(&fact, &callee)
+            .map_err(Unsupported::from);
+        let selected = match selected {
+            Ok(selected) => selected,
+            Err(error) => return Some(Err(error)),
+        };
+        let declared_parameters = fact
+            .declared_params
+            .as_deref()
+            .unwrap_or(fact.params.as_slice());
+        let declared_result = fact.declared_ret.unwrap_or(fact.ret);
+        let krusty::ir::Callee::External {
+            params: checked_parameters,
+            ret: checked_result,
+            ..
+        } = &callee
+        else {
+            return Some(Err(declined!("a checked external member call")));
+        };
+        if selected.parameters.as_ref() != checked_parameters.as_slice()
+            || selected.result != *checked_result
+            || declared_parameters != slot_parameters.as_slice()
+            || declared_result != slot_result
+        {
+            return Some(Err(declined!(
+                "a selected call frame that disagrees with the published slot for `{}`",
+                owner.render()
+            )));
+        }
+        let checked_result = *checked_result;
+        let physical_result = fact.physical_ret;
+        let mut physical_parameters = Vec::with_capacity(fact.physical_params.len() + 1);
+        physical_parameters.push(Ty::obj_name(owner));
+        physical_parameters.extend(fact.physical_params.iter().copied());
+        let expected = match self
+            .file
+            .signature_of(&physical_parameters, physical_result)
+        {
+            Ok(expected) => expected,
+            Err(error) => return Some(Err(error)),
+        };
+        let mut slot_abi_parameters = Vec::with_capacity(slot_parameters.len() + 1);
+        slot_abi_parameters.push(any());
+        slot_abi_parameters.extend(slot_parameters.iter().copied());
+        let expected_slot = match self.file.signature_of(&slot_abi_parameters, slot_result) {
+            Ok(expected) => expected,
+            Err(error) => return Some(Err(error)),
+        };
+        // The base slot can be abstract and therefore need no linked body of its own. The
+        // physical signature is authenticated by the provider's frozen frame and the exact
+        // declaration slot binding; a consumer override supplies the runtime vtable entry.
+        if expected.call_conv != expected_slot.call_conv
+            || expected.params != expected_slot.params
+            || expected.returns != expected_slot.returns
+        {
+            return Some(Err(declined!(
+                "a selected physical frame that disagrees with slot {slot} of `{}`",
+                owner.render()
+            )));
+        }
+        // The key must describe the selected declaration, not merely an equal-name member.
+        let key_matches = match key {
+            PlanKey::DependencyCallable(selected) => selected == target && slot_identity == target,
+            PlanKey::DependencyGetter(selected) => selected == target && selected == slot_identity,
+            PlanKey::DependencySetter(selected) => selected == slot_identity,
+            _ => false,
+        };
+        if !key_matches {
+            return Some(Err(declined!(
+                "a mismatched selected dependency slot identity"
+            )));
+        }
+        Some((|| {
+            let object = self.reference(receiver)?;
+            let arguments = self.arguments(args, &slot_parameters)?;
+            if self.terminated {
+                return Ok(None);
+            }
+            let Some(value) = self.dispatch_through(
+                object,
+                model::Dispatch::Class(slot),
+                &slot_parameters,
+                slot_result,
+                &arguments,
+            )?
+            else {
+                return Ok(None);
+            };
+            if physical_result == Ty::Unit {
+                if checked_result != Ty::Unit {
+                    return Err(declined!(
+                        "a Unit member slot with a non-Unit selected result"
+                    ));
+                }
+                return Ok(None);
+            }
+            self.convert(value, Some(physical_result), checked_result)
+        })())
+    }
+
     /// A call of one exact method of a class this file declares. The method is the callee's
     /// function, and the slot is that function's own slot.
     pub(super) fn own_class_member(
@@ -366,6 +577,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             name,
             kind,
             declaration,
+            parameters,
+            result,
         } = target;
         if super::super::super::intrinsics::is_any(owner) {
             let symbol = match (name, args.len()) {
@@ -385,7 +598,18 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return self.runtime_call(symbol, &params, ret, &arguments);
         }
         if self.file.ir.class_id_by_name(owner).is_none() {
-            return self.laid_out_direct_call(owner, kind, declaration, name, receiver, args);
+            return self.laid_out_direct_call(
+                SuperTarget {
+                    owner,
+                    name,
+                    kind,
+                    declaration,
+                    parameters,
+                    result,
+                },
+                receiver,
+                args,
+            );
         }
         let class = self.file.class_of(owner, "a `super` call to a method of")?;
         match kind {
@@ -427,36 +651,141 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// record names.
     fn laid_out_direct_call(
         &mut self,
-        owner: TypeName,
-        kind: krusty::ir::IrSuperCallKind,
-        declaration: Option<krusty::fir::ResolvedFunctionOverrideTarget>,
-        name: &str,
+        target: SuperTarget<'_>,
         receiver: u32,
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
+        let SuperTarget {
+            owner,
+            name,
+            kind,
+            declaration,
+            parameters,
+            result: selected_result,
+        } = target;
+        let selected_parameters = parameters.as_deref();
         let outside = || {
             declined!(
                 "a `super` call to a method of `{}`, which is not declared in this file",
                 owner.render()
             )
         };
-        let (
-            krusty::ir::IrSuperCallKind::Function,
-            Some(krusty::fir::ResolvedFunctionOverrideTarget::Module(callable)),
-        ) = (kind, declaration)
-        else {
+        if kind != krusty::ir::IrSuperCallKind::Function {
             return Err(outside());
-        };
-        let Some((function, params, _)) = self
-            .file
-            .laid_out
-            .get(owner)
-            .and_then(|record| record.methods.get(&callable))
-            .cloned()
-        else {
-            return Err(declined!(
-                "a `super` call to `{name}`, which the file declaring it does not export"
-            ));
+        }
+        let record = self.file.laid_out.get(owner).ok_or_else(&outside)?;
+        let (function, params, _) = match declaration {
+            Some(krusty::fir::ResolvedFunctionOverrideTarget::Module(callable)) => {
+                record.methods.get(&callable).cloned().ok_or_else(|| {
+                    declined!(
+                        "a `super` call to `{name}`, which the file declaring it does not export"
+                    )
+                })?
+            }
+            Some(krusty::fir::ResolvedFunctionOverrideTarget::External(target)) => {
+                let fact = self.file.callables.callable(target).ok_or_else(outside)?;
+                if !fact.is_member_function()
+                    || fact.declaration_owner
+                        != Some(krusty::types::SemanticCallableOwner::Classifier(owner))
+                {
+                    return Err(outside());
+                }
+                let identity = self
+                    .file
+                    .callables
+                    .declaration_identity(target)
+                    .ok_or_else(outside)?;
+                let function = record
+                    .published_methods
+                    .get(identity)
+                    .cloned()
+                    .ok_or_else(|| {
+                        declined!(
+                            "a `super` call to `{name}`, which the file declaring it does not export"
+                        )
+                    })?;
+                let selected_parameters = selected_parameters.ok_or_else(outside)?;
+                let selected_result = selected_result.ok_or_else(outside)?;
+                let checked = krusty::ir::Callee::External {
+                    target,
+                    default_provider: None,
+                    params: selected_parameters.to_vec(),
+                    ret: selected_result,
+                    substitutions: Vec::new(),
+                    defaults: Vec::new(),
+                    extension_receiver_parameter: None,
+                };
+                // The class application on this selected call is checked FIR data. Reuse the
+                // shared dependency signature validator so a Base<Int> call cannot be compared
+                // or emitted as if the producer declared Base<Int> rather than Base<T>.
+                let instantiated =
+                    krusty::backend::instantiate_dependency_signature(fact, &checked)
+                        .map_err(Unsupported::from)?;
+                if instantiated.parameters.as_ref() != selected_parameters
+                    || instantiated.result != selected_result
+                {
+                    return Err(declined!(
+                        "a `super` call to `{name}` whose checked class application disagrees with its declaration"
+                    ));
+                }
+                let parameters = fact
+                    .declared_params
+                    .as_deref()
+                    .unwrap_or(fact.params.as_slice());
+                let parameters = parameters.to_vec();
+                let physical_parameters = fact.physical_params.clone();
+                let physical_result = fact.physical_ret;
+                if parameters.len() != selected_parameters.len()
+                    || physical_parameters.len() != parameters.len()
+                {
+                    return Err(declined!(
+                        "a `super` call to `{name}` whose declared and physical frames disagree"
+                    ));
+                }
+                let mut expected_parameters = Vec::with_capacity(physical_parameters.len() + 1);
+                expected_parameters.push(Ty::obj_name(owner));
+                expected_parameters.extend(physical_parameters.iter().copied());
+                let expected = self
+                    .file
+                    .signature_of(&expected_parameters, physical_result)?;
+                let ObjectFunction::Linked { signature, .. } = &function else {
+                    return Err(outside());
+                };
+                if signature.call_conv != expected.call_conv
+                    || signature.params != expected.params
+                    || signature.returns != expected.returns
+                {
+                    return Err(declined!(
+                        "a `super` call to `{name}` whose selected semantic frame differs from the published Native frame"
+                    ));
+                }
+                let id = self.file.import_object_function(&function)?;
+                let object = self
+                    .coerce(receiver, Ty::obj_name(owner))?
+                    .ok_or_else(|| declined!("a `Unit` receiver for a `super` call to `{name}`"))?;
+                let mut arguments = vec![object];
+                arguments.extend(self.arguments(args, &parameters)?);
+                if self.terminated {
+                    return Ok(None);
+                }
+                let func_ref = self.func_ref(id);
+                let call = self.emit_call(func_ref, &arguments)?;
+                if physical_result == Ty::Unit {
+                    if selected_result != Ty::Unit {
+                        return Err(declined!(
+                            "a `super` call to `{name}` whose selected result disagrees with its physical result"
+                        ));
+                    }
+                    return Ok(None);
+                }
+                let Some(value) = self.builder.inst_results(call).first().copied() else {
+                    return Err(declined!(
+                        "a `super` call to `{name}` whose linked method has no result"
+                    ));
+                };
+                return self.convert(value, Some(physical_result), selected_result);
+            }
+            None => return Err(outside()),
         };
         let id = self.file.import_object_function(&function)?;
         let Some(object) = self.receiver(receiver)? else {
