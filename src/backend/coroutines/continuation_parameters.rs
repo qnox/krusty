@@ -268,10 +268,7 @@ fn suspend_method_slot(
 /// so the value is `null`.
 fn pass_continuations(ir: &mut IrFile, suspend_set: &HashSet<u32>) {
     let sites: Vec<ExprId> = (0..ir.exprs.len() as ExprId)
-        .filter(|&expression| {
-            !ir.call_declared_ret.contains_key(&expression)
-                && direct_suspend_callee(ir, expression, suspend_set).is_some()
-        })
+        .filter(|&expression| direct_suspend_callee(ir, expression, suspend_set).is_some())
         .collect();
     if sites.is_empty() {
         return;
