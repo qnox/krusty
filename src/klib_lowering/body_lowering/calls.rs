@@ -277,7 +277,7 @@ impl BodyLowering<'_> {
             let operand = self.expression(array)?;
             let rendered = self.ir.add_expr(IrExpr::Call {
                 callee: Box::new(Callee::Intrinsic {
-                    operation: IrIntrinsic::DataClassArrayToString {
+                    operation: IrIntrinsic::GeneratedPropertyArrayToString {
                         ty: Ty::array(element),
                     },
                     ret: Ty::String,
