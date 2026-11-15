@@ -68,18 +68,22 @@ pub(crate) fn add_continuation_parameters_with_runtime(
     // A non-suspend synthetic entry (most notably a default stub) can also contain a call that
     // reaches a suspension. It has no continuation parameter to capture, so keep declining that
     // shape until its producer supplies the call-frame contract.
-    if ir
-        .functions
-        .iter()
-        .enumerate()
-        .any(|(function, declaration)| {
-            !suspend_set.contains(&(function as u32))
-                && declaration.body.is_some_and(|body| {
-                    body_needs_state_machine(ir, body, &suspend_set, &completing)
-                })
-        })
+    if let Some((_, declaration)) =
+        ir.functions
+            .iter()
+            .enumerate()
+            .find(|(function, declaration)| {
+                !suspend_set.contains(&(*function as u32))
+                    && declaration.body.is_some_and(|body| {
+                        body_needs_state_machine(ir, body, &suspend_set, &completing)
+                    })
+            })
     {
-        crate::trace_compiler!("suspend", "a non-suspend function reaches a suspension");
+        crate::trace_compiler!(
+            "suspend",
+            "the non-suspend function `{}` reaches a suspension",
+            declaration.name
+        );
         return Err(ContinuationDecline::Suspends);
     }
     if !machine_functions.is_empty() && runtime.is_none() {
@@ -96,7 +100,8 @@ pub(crate) fn add_continuation_parameters_with_runtime(
         super::state_machine::realize(ir, function, &suspend_set).map_err(|reason| {
             crate::trace_compiler!(
                 "suspend",
-                "function {function} has no state machine: {reason:?}"
+                "the function `{}` has no state machine: {reason:?}",
+                ir.functions[function as usize].name
             );
             ContinuationDecline::Suspends
         })?;

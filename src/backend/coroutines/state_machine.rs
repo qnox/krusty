@@ -44,6 +44,7 @@ pub(super) fn realize(
         .get(&function)
         .cloned()
         .ok_or(ReentryDecline::UnsupportedCallShape)?;
+    super::machine_normalization::normalize(ir, function, body, function_result, suspend_functions);
     let source_values = super::value_namespace::function_value_types(ir, function, body);
     let type_parameters = machine_type_parameters(ir, function);
     let parameter_names = type_parameters

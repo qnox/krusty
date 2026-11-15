@@ -26,6 +26,7 @@ mod continuation_parameters;
 mod control_flow;
 mod hoisting;
 mod label_reentry;
+mod machine_normalization;
 mod state_machine;
 mod statement_normalization;
 mod suspension_points;
