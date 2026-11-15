@@ -89,18 +89,6 @@ impl KlibBodyClassContract {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::test_fixture::generic_member_declaration;
-
-    #[test]
-    fn a_generic_ordinary_class_can_be_materialized_with_its_declared_formals() {
-        let (class, _) = generic_member_declaration();
-        assert!(!class.parameters.formals.is_empty());
-        assert!(class.emits_members());
-    }
-}
-
 /// A complete declared instance layout. Its field ordinals belong to this exact producer class;
 /// retaining the layout grants no constructor, initializer, singleton or descriptor definition.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,6 +110,14 @@ pub(crate) struct KlibStoredField {
 mod tests {
     use super::*;
     use crate::libraries::{KlibClassIdentity, TypeKind};
+    use test_fixture::generic_member_declaration;
+
+    #[test]
+    fn a_generic_ordinary_class_can_be_materialized_with_its_declared_formals() {
+        let (class, _) = generic_member_declaration();
+        assert!(!class.parameters.formals.is_empty());
+        assert!(class.emits_members());
+    }
 
     #[test]
     fn final_dispatch_requires_the_exact_concrete_ordinary_class_contract() {

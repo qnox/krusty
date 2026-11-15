@@ -189,6 +189,19 @@ fn a_string_reads_its_own_length_and_chars_through_char_sequence() {
             assert_eq!(operation(&declaration.callable), Some(intrinsic));
             assert_eq!(declaration.identity.params.as_ref(), params);
             assert_eq!(declaration.identity.ret, ret);
+
+            let facts = builtin_implementation_facts(&libraries, char_sequence, name, identity);
+            let [fact] = facts.as_ref() else {
+                panic!("the checked fact keeps the one represented String override");
+            };
+            assert_eq!(fact.receiver, Ty::String);
+            let declaration = fact
+                .declaration
+                .as_ref()
+                .expect("String provides its own CharSequence implementation");
+            assert_eq!(declaration.operation, Some(intrinsic));
+            assert_eq!(declaration.params.as_ref(), params);
+            assert_eq!(declaration.ret, ret);
         }
     }
 }

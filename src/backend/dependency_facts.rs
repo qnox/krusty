@@ -20,6 +20,7 @@ pub use references::referenced_dependencies;
 use crate::fx_hash::HashMap;
 use std::collections::hash_map::Entry;
 
+pub use crate::fir::BuiltinImplementation;
 use crate::fir::{ExternalCallableId, ExternalPropertyId};
 pub use crate::libraries::CompilerIntrinsic as BackendCompilerIntrinsic;
 pub use crate::libraries::DependencyGetterSignature;
@@ -432,6 +433,49 @@ mod tests {
         assert!(!fact.matches_dependency_body_call(&params, Some(1), false));
     }
 
+    #[test]
+    fn checked_builtin_implementations_are_copied_by_external_identity() {
+        let identity = ExternalCallableId::from_raw(1);
+        let expected = vec![BuiltinImplementation {
+            receiver: Ty::obj("kotlin/String"),
+            declaration: None,
+        }]
+        .into_boxed_slice();
+        let mut callables = accessor_facts();
+        let fact = callables.callables.get_mut(&identity).unwrap();
+        fact.kind = ExternalCallableKind::Member;
+        fact.declaration_owner = Some(SemanticCallableOwner::Classifier(crate::types::type_name(
+            "kotlin/CharSequence",
+        )));
+        let mut implementations = HashMap::default();
+        implementations.insert(identity, expected.clone());
+
+        callables
+            .record_checked_builtin_implementations(&implementations)
+            .unwrap();
+
+        assert_eq!(
+            callables.callables[&identity].builtin_implementations,
+            expected
+        );
+    }
+
+    #[test]
+    fn checked_builtin_implementation_handoff_rejects_missing_identity() {
+        let identity = ExternalCallableId::from_raw(1);
+        let mut callables = accessor_facts();
+        let fact = callables.callables.get_mut(&identity).unwrap();
+        fact.kind = ExternalCallableKind::Member;
+        fact.declaration_owner = Some(SemanticCallableOwner::Classifier(crate::types::type_name(
+            "kotlin/CharSequence",
+        )));
+
+        assert_eq!(
+            callables.record_checked_builtin_implementations(&HashMap::default()),
+            Err(identity)
+        );
+    }
+
     fn accessor_facts() -> CheckedBackendCallables {
         let mut facts = CheckedBackendCallables::default();
         let mut getter = extension_fact();
@@ -650,27 +694,6 @@ mod tests {
     }
 }
 
-/// What one builtin class runs for a call of a supertype's member on a value of it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct BuiltinImplementation {
-    /// The builtin type (`String`, a primitive), whose classifier is a proper subtype of the
-    /// member's.
-    pub receiver: Ty,
-    /// The builtin classifier's override; `None` when it inherits the member's own body.
-    pub declaration: Option<BuiltinOverrideDeclaration>,
-}
-
-/// One builtin classifier's override of a supertype's member, as its provider published it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct BuiltinOverrideDeclaration {
-    /// The operation the provider realizes the override as, if it is one.
-    pub operation: Option<BackendCompilerIntrinsic>,
-    /// The override's declared parameter and result types (`Int.compareTo(other: Int): Int`); a
-    /// property's are its getter's.
-    pub params: Box<[Ty]>,
-    pub ret: Ty,
-}
-
 /// What the provider normalized for one selected dependency property.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BackendPropertyFact {
@@ -800,6 +823,7 @@ impl CheckedBackendCallables {
         classes: &super::class_tables::module_classes::ModuleClasses,
     ) -> Result<Self, DependencyFactError> {
         use super::class_tables::module_classes::ModuleMember;
+        use super::class_tables::module_slots::PlanKey;
         use crate::fir::ResolvedPropertyOverrideTarget;
         let mut facts = Self::freeze(ir, provider)?;
         let identities = classes
@@ -807,10 +831,7 @@ impl CheckedBackendCallables {
             .flat_map(|(_, class)| class.members.iter())
             .filter_map(|member| match member {
                 ModuleMember::Function {
-                    callable:
-                        crate::backend::class_tables::module_slots::PlanKey::DependencyCallable(
-                            identity,
-                        ),
+                    callable: PlanKey::DependencyCallable(identity),
                     ..
                 }
                 | ModuleMember::Property {
@@ -944,36 +965,27 @@ impl CheckedBackendCallables {
         Ok(facts)
     }
 
-    /// Record what each builtin class runs for every member of a library classifier this file
-    /// calls, as `implementations` answers it for the member's owner, name and identity. The
-    /// frontend answers it from the member hierarchy at the handoff; every other callable keeps
-    /// none.
-    pub fn record_builtin_implementations(
+    /// Copy checker-produced builtin implementation facts for every selected external member.
+    /// A missing identity is an incomplete frontend handoff and must fail closed.
+    pub fn record_checked_builtin_implementations(
         &mut self,
-        mut implementations: impl FnMut(
-            TypeName,
-            &str,
-            ExternalCallableId,
-        ) -> Box<[BuiltinImplementation]>,
-    ) {
-        // A getter is published under its accessor's name; its property's declared name is what
-        // the declarations overriding it are named.
-        let getter_properties = self
-            .properties
-            .values()
-            .map(|property| (property.getter, property.name.clone()))
-            .collect::<HashMap<_, _>>();
+        implementations: &HashMap<ExternalCallableId, Box<[BuiltinImplementation]>>,
+    ) -> Result<(), ExternalCallableId> {
         for (&identity, fact) in &mut self.callables {
-            let (ExternalCallableKind::Member, Some(SemanticCallableOwner::Classifier(owner))) =
-                (fact.kind, fact.declaration_owner)
-            else {
+            if fact.kind != ExternalCallableKind::Member
+                || !matches!(
+                    fact.declaration_owner,
+                    Some(SemanticCallableOwner::Classifier(_))
+                )
+            {
                 continue;
+            }
+            let Some(selected) = implementations.get(&identity) else {
+                return Err(identity);
             };
-            let name = getter_properties
-                .get(&identity)
-                .map_or(fact.name.as_str(), |name| name);
-            fact.builtin_implementations = implementations(owner, name, identity);
+            fact.builtin_implementations = selected.clone();
         }
+        Ok(())
     }
 
     /// Freeze dependency identities on `super` calls introduced after the initial handoff.
@@ -1112,6 +1124,24 @@ impl CheckedBackendCallables {
     /// is not one of this file's.
     pub fn callable(&self, identity: ExternalCallableId) -> Option<&BackendCallableFact> {
         self.callables.get(&identity)
+    }
+
+    /// The exact external members referenced by this checked IR unit, in stable identity order.
+    pub(crate) fn external_member_identities(&self) -> Vec<ExternalCallableId> {
+        let mut identities = self
+            .callables
+            .iter()
+            .filter_map(|(&identity, callable)| {
+                (callable.kind == ExternalCallableKind::Member
+                    && matches!(
+                        callable.declaration_owner,
+                        Some(SemanticCallableOwner::Classifier(_))
+                    ))
+                .then_some(identity)
+            })
+            .collect::<Vec<_>>();
+        identities.sort_unstable_by_key(|identity| identity.raw());
+        identities
     }
 
     /// The fact for a dependency property identity this file's IR holds. `None` means the identity
