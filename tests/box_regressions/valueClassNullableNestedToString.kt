@@ -8,14 +8,17 @@ OPTIONAL_JVM_INLINE_ANNOTATION value class I(val x: Int)
 OPTIONAL_JVM_INLINE_ANNOTATION value class NI(val raw: I?)
 OPTIONAL_JVM_INLINE_ANNOTATION value class NUI(val raw: UInt?)
 fun box(): String {
-    val text = listOf(
-        V(S("a")).toString(), V(null).toString(),
-        NU(uintArrayOf(1u, 4000000000u)).toString(), NU(null).toString(),
-        NL(ulongArrayOf(2uL)).toString(), NL(null).toString(),
-        NI(I(3)).toString(), NI(null).toString(),
-        NUI(4u).toString(), NUI(null).toString(),
-        "in ${V(S("b"))}",
-    ).joinToString(";")
+    val text = V(S("a")).toString() +
+        ";" + V(null).toString() +
+        ";" + NU(uintArrayOf(1u, 4000000000u)).toString() +
+        ";" + NU(null).toString() +
+        ";" + NL(ulongArrayOf(2uL)).toString() +
+        ";" + NL(null).toString() +
+        ";" + NI(I(3)).toString() +
+        ";" + NI(null).toString() +
+        ";" + NUI(4u).toString() +
+        ";" + NUI(null).toString() +
+        ";" + "in ${V(S("b"))}"
     val expected = "V(s=S(v=a));V(s=null);" +
         "NU(raw=UIntArray(storage=[1, -294967296]));NU(raw=null);" +
         "NL(raw=ULongArray(storage=[2]));NL(raw=null);" +
