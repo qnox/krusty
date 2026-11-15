@@ -214,6 +214,18 @@ impl<'a> Checker<'a> {
                 &candidates.overloads,
             );
         }
+        // A property the site cannot see yields to an extension property the same way.
+        if candidates.extension_property.is_some()
+            && candidates.property.as_ref().is_some_and(|property| {
+                !self.callable_accessible(
+                    property.getter_visibility,
+                    property.getter.owner,
+                    property.getter.external_identity,
+                )
+            })
+        {
+            candidates.property = None;
+        }
         candidates
     }
 
