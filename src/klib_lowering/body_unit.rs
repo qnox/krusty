@@ -960,7 +960,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
         &self,
         signature: &KlibDeclarationSignature,
     ) -> Result<Option<super::primitive_calls::CommonPrimitiveCall>, KlibBodyDeclineReason> {
-        self.primitive_at(signature, |facts, identity, bodies| {
+        self.primitive_at(signature, true, |facts, identity, bodies| {
             facts.common_primitive(identity, bodies)
         })
     }
@@ -969,7 +969,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
         &self,
         signature: &KlibDeclarationSignature,
     ) -> Result<Option<super::primitive_calls::CommonPrimitiveCall>, KlibBodyDeclineReason> {
-        self.primitive_at(signature, |facts, identity, bodies| {
+        self.primitive_at(signature, false, |facts, identity, bodies| {
             facts.range_literal_bounds(identity, bodies)
         })
     }
@@ -1048,18 +1048,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
             .declarations
             .external_callable_by_dependency(&identity)
             .and_then(|(_, realization)| {
-                let callable = realization.klib_body_callable()?;
-                callable
-                    .range_construction()
-                    .or(match callable.compiler_intrinsic() {
-                        Some(crate::libraries::CompilerIntrinsic::RangeUntil) => {
-                            Some(crate::fir::FirRangeOperation::Until)
-                        }
-                        Some(crate::libraries::CompilerIntrinsic::RangeDownTo) => {
-                            Some(crate::fir::FirRangeOperation::DownTo)
-                        }
-                        _ => None,
-                    })
+                super::for_loops::range_literal_operation(realization.klib_body_callable()?)
             });
         match operation {
             Some(operation) => Ok(Some(operation)),
@@ -1097,10 +1086,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
             .declarations
             .external_callable_by_dependency(&identity)
             .and_then(|(_, realization)| {
-                match realization.klib_body_callable()?.compiler_intrinsic()? {
-                    crate::libraries::CompilerIntrinsic::Indices(kind) => Some(kind),
-                    _ => None,
-                }
+                super::for_loops::indices_receiver(realization.klib_body_callable()?)
             }))
     }
 
@@ -1133,8 +1119,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
             .is_some_and(|(_, realization)| {
                 realization
                     .klib_body_callable()
-                    .and_then(|callable| callable.compiler_intrinsic())
-                    == Some(crate::libraries::CompilerIntrinsic::ProgressionReversed)
+                    .is_some_and(super::for_loops::reverses_progression)
             }))
     }
 
@@ -2509,6 +2494,7 @@ impl Linker<'_, '_> {
     fn primitive_at(
         &self,
         signature: &KlibDeclarationSignature,
+        allow_target_property_read: bool,
         select: PrimitiveSelection,
     ) -> Result<Option<super::primitive_calls::CommonPrimitiveCall>, KlibBodyDeclineReason> {
         // Keep the existing public-call obligation and canonical ambiguity diagnostics. A
@@ -2531,11 +2517,31 @@ impl Linker<'_, '_> {
                 ))
             }
         };
-        let primitive = select(self.sources.callees, &identity, self.sources.bodies)?;
+        let selected = select(self.sources.callees, &identity, self.sources.bodies)?;
+        let primitive = if let Some(external) = self.sources.externals.get(&identity) {
+            let property_read = external.target_intrinsic().filter(|operation| {
+                allow_target_property_read
+                    && matches!(
+                        operation,
+                        crate::libraries::CompilerIntrinsic::ArraySize
+                            | crate::libraries::CompilerIntrinsic::StringLength
+                    )
+            });
+            property_read
+                .map(|operation| {
+                    self.sources.callees.target_property_read(
+                        &identity,
+                        self.sources.bodies,
+                        operation,
+                    )
+                })
+                .transpose()?
+                .flatten()
+        } else {
+            selected
+        };
         Ok(
-            if self.sources.externals.contains_key(&identity)
-                || self.root.is_some_and(|root| &identity == root.identity())
-            {
+            if self.root.is_some_and(|root| &identity == root.identity()) {
                 None
             } else {
                 primitive

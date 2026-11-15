@@ -3,23 +3,28 @@ package krusty.tooling;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.InputStreamReader;
+import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import org.apache.maven.repository.internal.MavenRepositorySystemUtils;
-import org.apache.maven.settings.Mirror;
-import org.apache.maven.settings.Profile;
-import org.apache.maven.settings.Proxy;
-import org.apache.maven.settings.Repository;
-import org.apache.maven.settings.Server;
+import org.apache.maven.RepositoryUtils;
+import org.apache.maven.artifact.repository.ArtifactRepository;
+import org.apache.maven.bridge.MavenRepositorySystem;
+import org.apache.maven.cli.MavenCli;
+import org.apache.maven.cli.configuration.SettingsXmlConfigurationProcessor;
+import org.apache.maven.execution.DefaultMavenExecutionRequest;
+import org.apache.maven.execution.MavenExecutionRequest;
+import org.apache.maven.execution.MavenExecutionRequestPopulator;
+import org.apache.maven.internal.aether.DefaultRepositorySystemSessionFactory;
+import org.apache.maven.model.Repository;
+import org.apache.maven.model.RepositoryPolicy;
 import org.apache.maven.settings.Settings;
-import org.apache.maven.settings.building.DefaultSettingsBuilderFactory;
+import org.apache.maven.settings.building.SettingsBuilder;
+import org.apache.maven.settings.building.SettingsBuildingRequest;
 import org.apache.maven.settings.building.DefaultSettingsBuildingRequest;
-import org.apache.maven.wagon.Wagon;
-import org.apache.maven.wagon.providers.file.FileWagon;
-import org.apache.maven.wagon.providers.http.HttpWagon;
-import org.eclipse.aether.DefaultRepositorySystemSession;
+import org.codehaus.plexus.DefaultContainerConfiguration;
+import org.codehaus.plexus.DefaultPlexusContainer;
 import org.eclipse.aether.RepositorySystem;
 import org.eclipse.aether.RepositorySystemSession;
 import org.eclipse.aether.artifact.Artifact;
@@ -27,31 +32,32 @@ import org.eclipse.aether.artifact.DefaultArtifact;
 import org.eclipse.aether.collection.CollectRequest;
 import org.eclipse.aether.graph.Dependency;
 import org.eclipse.aether.graph.Exclusion;
-import org.eclipse.aether.impl.DefaultServiceLocator;
-import org.eclipse.aether.repository.LocalRepository;
 import org.eclipse.aether.repository.RemoteRepository;
-import org.eclipse.aether.repository.RepositoryPolicy;
 import org.eclipse.aether.resolution.ArtifactRequest;
 import org.eclipse.aether.resolution.DependencyRequest;
-import org.eclipse.aether.connector.basic.BasicRepositoryConnectorFactory;
-import org.eclipse.aether.spi.connector.RepositoryConnectorFactory;
-import org.eclipse.aether.spi.connector.transport.TransporterFactory;
-import org.eclipse.aether.transport.wagon.WagonProvider;
-import org.eclipse.aether.transport.wagon.WagonTransporterFactory;
-import org.eclipse.aether.util.repository.AuthenticationBuilder;
-import org.eclipse.aether.util.repository.DefaultAuthenticationSelector;
-import org.eclipse.aether.util.repository.DefaultMirrorSelector;
-import org.eclipse.aether.util.repository.DefaultProxySelector;
 
 /**
- * Long-lived Maven resolver. Artifact requests go through
- * {@link RepositorySystem#resolveArtifact} and {@link RepositorySystem#resolveDependencies}, the
- * calls IntelliJ's embedder makes from {@code Maven3XServerEmbedder.resolveArtifacts}.
+ * Long-lived Maven resolver. The session is the one
+ * {@link DefaultRepositorySystemSessionFactory} builds from {@code settings.xml}: mirrors,
+ * proxies, servers, and the local repository. A repository from {@code jarRepositories.xml}
+ * is added to that request and normalized by the session. Artifact requests go through
+ * {@link RepositorySystem#resolveArtifact} and {@link RepositorySystem#resolveDependencies},
+ * the calls IntelliJ's embedder makes from {@code Maven3XServerEmbedder.resolveArtifacts}.
  */
 public final class MavenResolverClient {
-    private static RepositorySystem repositorySystem;
-    private static RepositorySystemSession session;
-    private static List<RemoteRepository> repositories;
+    private static MavenRuntime runtime;
+
+    static {
+        if (System.getProperty("maven.conf") == null) {
+            File home = mavenHome();
+            if (home != null) {
+                File conf = new File(home, "conf");
+                if (conf.isDirectory()) {
+                    System.setProperty("maven.conf", conf.getAbsolutePath());
+                }
+            }
+        }
+    }
 
     private MavenResolverClient() {}
 
@@ -68,14 +74,16 @@ public final class MavenResolverClient {
                 Protocol.respond(1, "", failure.toString());
             }
         }
+        close();
     }
 
     private static void resolve(Map<String, Object> request) throws Exception {
-        ensureSession();
+        ensureRuntime();
+        List<RemoteRepository> remotes = withProjectRepositories(runtime, Protocol.objects(request, "repositories"));
         StringBuilder errors = new StringBuilder();
         for (Map<String, Object> artifact : Protocol.objects(request, "artifacts")) {
             try {
-                resolveOne(artifact);
+                resolveOne(artifact, remotes);
             } catch (Exception failure) {
                 if (!errors.isEmpty()) {
                     errors.append('\n');
@@ -90,7 +98,8 @@ public final class MavenResolverClient {
         }
     }
 
-    private static void resolveOne(Map<String, Object> requested) throws Exception {
+    private static void resolveOne(Map<String, Object> requested, List<RemoteRepository> remotes)
+        throws Exception {
         String classifier = Protocol.text(requested, "classifier");
         if (classifier.isEmpty()) {
             classifier = null;
@@ -118,147 +127,200 @@ public final class MavenResolverClient {
             }
             CollectRequest collect = new CollectRequest();
             collect.setRoot(new Dependency(artifact, "compile", false, exclusions));
-            collect.setRepositories(repositories);
-            repositorySystem.resolveDependencies(session, new DependencyRequest(collect, null));
+            collect.setRepositories(remotes);
+            runtime.system.resolveDependencies(runtime.session, new DependencyRequest(collect, null));
             return;
         }
-        repositorySystem.resolveArtifact(session, new ArtifactRequest(artifact, repositories, null));
+        runtime.system.resolveArtifact(runtime.session, new ArtifactRequest(artifact, remotes, null));
     }
 
-    private static void ensureSession() throws Exception {
-        if (session != null) {
-            return;
-        }
-        DefaultServiceLocator locator = MavenRepositorySystemUtils.newServiceLocator();
-        locator.addService(RepositoryConnectorFactory.class, BasicRepositoryConnectorFactory.class);
-        locator.addService(TransporterFactory.class, WagonTransporterFactory.class);
-        locator.setServices(WagonProvider.class, new ManualWagonProvider());
-        repositorySystem = locator.getService(RepositorySystem.class);
-        if (repositorySystem == null) {
-            throw new IllegalStateException("RepositorySystem is unavailable");
-        }
-        Settings settings = settings();
-        DefaultRepositorySystemSession created = MavenRepositorySystemUtils.newSession();
-        created.setOffline(settings.isOffline());
-        String local = settings.getLocalRepository();
-        if (local == null || local.isEmpty()) {
-            local = new File(System.getProperty("user.home"), ".m2/repository").getAbsolutePath();
-        }
-        created.setLocalRepositoryManager(
-            repositorySystem.newLocalRepositoryManager(created, new LocalRepository(local))
-        );
-        DefaultMirrorSelector mirrors = new DefaultMirrorSelector();
-        for (Mirror mirror : settings.getMirrors()) {
-            mirrors.add(
-                mirror.getId(),
-                mirror.getUrl(),
-                mirror.getMirrorOf(),
-                false,
-                mirror.getMirrorOfLayouts(),
-                null
+    private static void ensureRuntime() throws Exception {
+        if (runtime == null) {
+            runtime = open(
+                SettingsXmlConfigurationProcessor.DEFAULT_USER_SETTINGS_FILE, globalSettings()
             );
         }
-        created.setMirrorSelector(mirrors);
-        DefaultAuthenticationSelector authentication = new DefaultAuthenticationSelector();
-        for (Server server : settings.getServers()) {
-            if (server.getUsername() == null) {
-                continue;
-            }
-            authentication.add(
-                server.getId(),
-                new AuthenticationBuilder()
-                    .addUsername(server.getUsername())
-                    .addPassword(server.getPassword())
-                    .build()
-            );
-        }
-        created.setAuthenticationSelector(authentication);
-        DefaultProxySelector proxies = new DefaultProxySelector();
-        for (Proxy proxy : settings.getProxies()) {
-            if (!proxy.isActive() || proxy.getHost() == null) {
-                continue;
-            }
-            org.eclipse.aether.repository.Authentication proxyAuthentication = null;
-            if (proxy.getUsername() != null) {
-                proxyAuthentication = new AuthenticationBuilder()
-                    .addUsername(proxy.getUsername())
-                    .addPassword(proxy.getPassword())
-                    .build();
-            }
-            proxies.add(
-                new org.eclipse.aether.repository.Proxy(
-                    proxy.getProtocol(), proxy.getHost(), proxy.getPort(), proxyAuthentication
-                ),
-                proxy.getNonProxyHosts()
-            );
-        }
-        created.setProxySelector(proxies);
-        session = created;
-        repositories = repositorySystem.newResolutionRepositories(created, remoteRepositories(settings));
     }
 
-    private static Settings settings() {
+    private static void close() {
+        if (runtime != null) {
+            runtime.close();
+            runtime = null;
+        }
+    }
+
+    /**
+     * The embedder session for one settings pair. {@code globalSettings} may be absent.
+     * Project repositories are not part of this session until
+     * {@link #withProjectRepositories} adds them.
+     */
+    static MavenRuntime open(File userSettings, File globalSettings) throws Exception {
+        DefaultContainerConfiguration configuration = new DefaultContainerConfiguration();
+        configuration.setClassPathScanning("index");
+        configuration.setAutoWiring(true);
+        configuration.setJSR250Lifecycle(true);
+        configuration.setName("maven");
+        DefaultPlexusContainer container = new DefaultPlexusContainer(configuration);
         try {
-            DefaultSettingsBuildingRequest request = new DefaultSettingsBuildingRequest();
-            request.setSystemProperties(System.getProperties());
-            File user = new File(System.getProperty("user.home"), ".m2/settings.xml");
-            if (user.isFile()) {
-                request.setUserSettingsFile(user);
-            }
-            File global = new File("/usr/share/maven/conf/settings.xml");
-            if (global.isFile()) {
-                request.setGlobalSettingsFile(global);
-            }
-            return new DefaultSettingsBuilderFactory().newInstance().build(request).getEffectiveSettings();
-        } catch (Exception ignored) {
-            return new Settings();
+            Thread.currentThread().setContextClassLoader(container.getContainerRealm());
+            DefaultRepositorySystemSessionFactory factory =
+                container.lookup(DefaultRepositorySystemSessionFactory.class);
+            MavenExecutionRequestPopulator populator = container.lookup(MavenExecutionRequestPopulator.class);
+            RepositorySystem system = container.lookup(RepositorySystem.class);
+            SettingsBuilder builder = container.lookup(SettingsBuilder.class);
+            Settings settings = settings(builder, userSettings, globalSettings);
+            MavenExecutionRequest request = new DefaultMavenExecutionRequest();
+            populator.populateFromSettings(request, settings);
+            populator.populateDefaults(request);
+            RepositorySystemSession session = factory.newRepositorySession(request);
+            List<RemoteRepository> repositories = system.newResolutionRepositories(
+                session, RepositoryUtils.toRepos(request.getRemoteRepositories())
+            );
+            return new MavenRuntime(container, system, session, repositories);
+        } catch (Exception failure) {
+            container.dispose();
+            throw failure;
         }
     }
 
-    private static List<RemoteRepository> remoteRepositories(Settings settings) {
-        RepositoryPolicy policy = new RepositoryPolicy(
-            true, RepositoryPolicy.UPDATE_POLICY_DAILY, RepositoryPolicy.CHECKSUM_POLICY_WARN
-        );
-        List<RemoteRepository> remotes = new ArrayList<>();
-        remotes.add(repository("central", "https://repo.maven.apache.org/maven2", policy));
-        for (Profile profile : settings.getProfiles()) {
-            boolean active = settings.getActiveProfiles().contains(profile.getId());
-            if (!active && profile.getActivation() != null && profile.getActivation().isActiveByDefault()) {
-                active = true;
-            }
-            if (!active) {
+    /**
+     * Repositories named by {@code jarRepositories.xml}, turned into Maven repositories and
+     * normalized by {@code runtime}'s session. A URL the session already has is left as that
+     * resolved entry. Their update policy is always: a {@code .lastUpdated} marker left by a
+     * failed Central lookup must not hide a JetBrains-only coordinate.
+     */
+    static List<RemoteRepository> withProjectRepositories(
+        MavenRuntime runtime, List<? extends Map<String, ?>> requested
+    ) throws Exception {
+        List<ArtifactRepository> added = new ArrayList<>();
+        for (Map<String, ?> repository : requested) {
+            String url = text(repository, "url");
+            if (url.isEmpty() || listed(runtime.repositories, url) || listedArtifact(added, url)) {
                 continue;
             }
-            for (Repository repository : profile.getRepositories()) {
-                if (repository.getUrl() == null || repository.getUrl().isEmpty()) {
-                    continue;
-                }
-                remotes.add(repository(repository.getId(), repository.getUrl(), policy));
+            String id = text(repository, "id");
+            if (id.isEmpty()) {
+                id = url;
             }
+            added.add(MavenRepositorySystem.buildArtifactRepository(projectRepository(id, url)));
         }
+        if (added.isEmpty()) {
+            return runtime.repositories;
+        }
+        List<RemoteRepository> normalized =
+            runtime.system.newResolutionRepositories(runtime.session, RepositoryUtils.toRepos(added));
+        List<RemoteRepository> remotes = new ArrayList<>(runtime.repositories);
+        remotes.addAll(normalized);
         return remotes;
     }
 
-    private static RemoteRepository repository(String id, String url, RepositoryPolicy policy) {
-        return new RemoteRepository.Builder(id == null || id.isEmpty() ? "central" : id, "default", url)
-            .setReleasePolicy(policy)
-            .setSnapshotPolicy(policy)
-            .build();
+    private static Repository projectRepository(String id, String url) {
+        Repository repository = new Repository();
+        repository.setId(id);
+        repository.setUrl(url);
+        repository.setLayout("default");
+        repository.setReleases(always());
+        repository.setSnapshots(always());
+        return repository;
     }
 
-    private static final class ManualWagonProvider implements WagonProvider {
-        @Override
-        public Wagon lookup(String roleHint) {
-            if ("http".equals(roleHint) || "https".equals(roleHint)) {
-                return new HttpWagon();
+    private static RepositoryPolicy always() {
+        RepositoryPolicy policy = new RepositoryPolicy();
+        policy.setEnabled(true);
+        policy.setUpdatePolicy(org.eclipse.aether.repository.RepositoryPolicy.UPDATE_POLICY_ALWAYS);
+        policy.setChecksumPolicy(org.eclipse.aether.repository.RepositoryPolicy.CHECKSUM_POLICY_WARN);
+        return policy;
+    }
+
+    private static Settings settings(SettingsBuilder builder, File userSettings, File globalSettings)
+        throws Exception {
+        SettingsBuildingRequest building = new DefaultSettingsBuildingRequest();
+        building.setSystemProperties(System.getProperties());
+        if (userSettings != null && userSettings.isFile()) {
+            building.setUserSettingsFile(userSettings);
+        }
+        if (globalSettings != null && globalSettings.isFile()) {
+            building.setGlobalSettingsFile(globalSettings);
+        }
+        return builder.build(building).getEffectiveSettings();
+    }
+
+    private static File globalSettings() {
+        File configured = SettingsXmlConfigurationProcessor.DEFAULT_GLOBAL_SETTINGS_FILE;
+        if (configured.isFile()) {
+            return configured;
+        }
+        File home = mavenHome();
+        if (home == null) {
+            return configured;
+        }
+        return new File(new File(home, "conf"), "settings.xml");
+    }
+
+    private static File mavenHome() {
+        String property = System.getProperty("maven.home");
+        if (property != null && !property.isEmpty()) {
+            return new File(property);
+        }
+        try {
+            File jar = new File(MavenCli.class.getProtectionDomain().getCodeSource().getLocation().toURI());
+            File lib = jar.getParentFile();
+            if (lib != null && "lib".equals(lib.getName())) {
+                return lib.getParentFile();
             }
-            if ("file".equals(roleHint)) {
-                return new FileWagon();
-            }
+        } catch (URISyntaxException ignored) {
             return null;
         }
+        return null;
+    }
 
-        @Override
-        public void release(Wagon wagon) {}
+    private static String text(Map<String, ?> object, String key) {
+        Object value = object.get(key);
+        return value == null ? "" : value.toString();
+    }
+
+    private static boolean listed(List<RemoteRepository> repositories, String url) {
+        for (RemoteRepository repository : repositories) {
+            if (url.equals(repository.getUrl())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean listedArtifact(List<ArtifactRepository> repositories, String url) {
+        for (ArtifactRepository repository : repositories) {
+            if (url.equals(repository.getUrl())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static final class MavenRuntime {
+        final RepositorySystem system;
+        final RepositorySystemSession session;
+        final List<RemoteRepository> repositories;
+        private final DefaultPlexusContainer container;
+
+        private MavenRuntime(
+            DefaultPlexusContainer container,
+            RepositorySystem system,
+            RepositorySystemSession session,
+            List<RemoteRepository> repositories
+        ) {
+            this.container = container;
+            this.system = system;
+            this.session = session;
+            this.repositories = repositories;
+        }
+
+        void close() {
+            try {
+                container.dispose();
+            } catch (Exception ignored) {
+                // The process is leaving. A container that fails to stop has nothing left to do.
+            }
+        }
     }
 }

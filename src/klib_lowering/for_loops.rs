@@ -115,6 +115,42 @@ pub(super) fn range_for_loop<'a>(
     })
 }
 
+/// The range literal kotlinc's `ForLoopsLowering` counts through when a loop iterates the
+/// progression a call of `callable` builds: a builtin scalar's `rangeTo`/`rangeUntil`, or the
+/// `until`/`downTo` builder. Read from the provider declaration only, so every linker counts the
+/// same calls.
+pub(super) fn range_literal_operation(
+    callable: crate::libraries::KlibBodyCallable<'_>,
+) -> Option<crate::fir::FirRangeOperation> {
+    callable
+        .range_construction()
+        .or(match callable.compiler_intrinsic() {
+            Some(crate::libraries::CompilerIntrinsic::RangeUntil) => {
+                Some(crate::fir::FirRangeOperation::Until)
+            }
+            Some(crate::libraries::CompilerIntrinsic::RangeDownTo) => {
+                Some(crate::fir::FirRangeOperation::DownTo)
+            }
+            _ => None,
+        })
+}
+
+/// The receiver kind of the `indices` getter `callable` is, when its provider declaration is
+/// kotlinc's counted-loop bound (`IndicesHandler`).
+pub(super) fn indices_receiver(
+    callable: crate::libraries::KlibBodyCallable<'_>,
+) -> Option<crate::libraries::IndicesReceiver> {
+    match callable.compiler_intrinsic()? {
+        crate::libraries::CompilerIntrinsic::Indices(kind) => Some(kind),
+        _ => None,
+    }
+}
+
+/// Whether `callable` is kotlinc's progression `reversed`, by its provider declaration.
+pub(super) fn reverses_progression(callable: crate::libraries::KlibBodyCallable<'_>) -> bool {
+    callable.compiler_intrinsic() == Some(crate::libraries::CompilerIntrinsic::ProgressionReversed)
+}
+
 /// The calls of the counted `for` loop `expression` is, which its counted loop does not make: an
 /// array loop's protocol calls, and a range loop's protocol calls and the call building its range.
 /// Every other expression has none.

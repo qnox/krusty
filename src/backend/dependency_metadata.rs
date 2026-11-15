@@ -232,6 +232,9 @@ pub struct DependencyExportSignatures {
     member_declarations: HashMap<FunId, MemberDeclaration>,
     /// The interface subset whose implementations participate in interface dispatch.
     interface_members: HashSet<FunId>,
+    /// Generated implementations behind exact property-accessor exports. They are private
+    /// trampoline targets; the accessor identity belongs to the exported wrapper, not this body.
+    property_accessor_entries: HashMap<FunId, ExportedPropertyAccessor>,
     interface_properties: HashMap<crate::fir::PropertyId, KlibDependencyCallable>,
     /// Every property of this file another module may name, by its getter's published identity,
     /// whether or not the getter has code of its own: what a reference to the property is equal
@@ -321,6 +324,11 @@ impl DependencyExportSignatures {
     /// another module and has a callable realization.
     pub fn callable(&self, callable: FunId) -> Option<&KlibDependencyCallable> {
         self.callables.get(&callable)
+    }
+
+    /// Whether `callable` is the private implementation behind an exact property-accessor export.
+    pub fn is_property_accessor_entry(&self, callable: FunId) -> bool {
+        self.property_accessor_entries.contains_key(&callable)
     }
 
     /// Iterate every callable identity this file publishes so a target can install its complete
@@ -505,6 +513,18 @@ impl DependencyExportSignatures {
         assert!(
             previous.is_none(),
             "one member publishes one KLIB declaration identity"
+        );
+    }
+
+    pub(crate) fn record_property_accessor_entry(
+        &mut self,
+        callable: FunId,
+        accessor: ExportedPropertyAccessor,
+    ) {
+        let previous = self.property_accessor_entries.insert(callable, accessor);
+        assert!(
+            previous.is_none(),
+            "one callable realizes one property accessor entry"
         );
     }
 
