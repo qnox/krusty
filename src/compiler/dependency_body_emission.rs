@@ -190,7 +190,10 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         };
-        let emitted_roots::FrozenClosure { declarations } = closure;
+        let emitted_roots::FrozenClosure {
+            declarations,
+            authorized_member_edges,
+        } = closure;
         let callees = KlibCalleeFacts::with_reference_declarations(
             selected.iter().copied(),
             declarations.iter().filter_map(|(target, declaration)| {
@@ -200,6 +203,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             }),
         )
         .with_checked_dependency_facts(source.callables.klib_dependency_facts())
+        .with_authorized_member_edges(authorized_member_edges)
         .with_target_classifiers(&target_represents_classifier);
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,

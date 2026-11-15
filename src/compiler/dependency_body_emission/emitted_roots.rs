@@ -13,6 +13,11 @@ use std::collections::VecDeque;
 /// The declarations a unit's closure freezes.
 pub(super) struct FrozenClosure {
     pub(super) declarations: Vec<(crate::fir::ExternalCallableId, ExternalCallableRealization)>,
+    /// Edges that authorize a provider call of a member realized outside the unit. Function edges
+    /// are the ones the checker froze. An accessor has no function-hierarchy edge; the closure's
+    /// empty edge is the authorization the provider call consumes.
+    pub(super) authorized_member_edges:
+        HashMap<KlibDependencyCallable, crate::klib_lowering::CallEdge>,
 }
 
 /// Freeze declaration contracts along the exact producer graph before ordinary body lowering.
@@ -34,6 +39,7 @@ pub(super) fn declarations(
         .collect::<VecDeque<_>>();
     let mut visited = HashSet::default();
     let mut declarations = Vec::new();
+    let mut authorized_member_edges = HashMap::default();
     // Declaration-only evidence already pushed, which the closure never walks.
     let mut declared = HashSet::default();
     // Members of a materialized class that dispatch reaches: their bodies are emitted even where
@@ -196,6 +202,9 @@ pub(super) fn declarations(
             .is_some_and(|edge| capabilities.target_realizes_bodyless || realizes_any_member(edge));
         // A call of a member realized outside the unit carries the facts the member hierarchy
         // decorates a source call of it with; the edge is what authorizes the call.
+        if let Some(edge) = outside_edge.filter(|_| external_member) {
+            authorized_member_edges.insert(identity.clone(), edge);
+        }
         let emits_body = !externals.contains_key(&identity)
             && !member
             && !external_member
@@ -243,7 +252,10 @@ pub(super) fn declarations(
         }
         declarations.push((declaration_target, realization));
     }
-    Ok(FrozenClosure { declarations })
+    Ok(FrozenClosure {
+        declarations,
+        authorized_member_edges,
+    })
 }
 
 pub(super) fn ordinary_roots<'a>(

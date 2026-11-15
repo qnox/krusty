@@ -59,6 +59,16 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         semantic_types.extend(selected.params().iter().copied());
         semantic_types.push(selected.ret());
         semantic_types.extend(selected.type_parameters().iter().copied());
+        // Emission closes a constructor through the same initialization plan: superclass
+        // arguments, field and block initializers, dispatched members, and a materialized
+        // superclass constructor. Initializer-root symbols omit the members dispatch reaches,
+        // so an override emitted with the class can call `kotlin.Any.toString` without the
+        // checker ever freezing that edge.
+        if realization.kind == crate::libraries::ExternalCallableKind::Constructor {
+            pending.extend(emitted_initialization_callees(
+                source, bodies, &identity, selected,
+            ));
+        }
         #[cfg(test)]
         if realization.kind == crate::libraries::ExternalCallableKind::Constructor {
             facts.reached_constructors.insert(identity.clone());
@@ -77,15 +87,15 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         {
             return Err(external);
         }
-        let implementation_name = selected
-            .accessor()
-            .map_or_else(|| selected.name(), |accessor| accessor.name.as_ref());
-        let implementations = crate::symbol_resolver::builtin_implementation_facts(
+        // The same property-or-function name the source handoff uses. An accessor spelling is a
+        // different declaration and would record a different fact.
+        let implementations = super::builtin_implementation::for_checked_external_members(
             source,
-            owner,
-            implementation_name,
-            external,
-        );
+            [external],
+            &super::builtin_implementation::Facts::default(),
+        )?
+        .remove(&external)
+        .unwrap_or_default();
         match facts.builtin_implementations.entry(external) {
             std::collections::hash_map::Entry::Occupied(existing)
                 if existing.get() != &implementations =>
@@ -112,6 +122,44 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         semantic_types,
     ));
     Ok(facts)
+}
+
+/// Declarations the emission closure reaches from `identity`'s class initialization.
+///
+/// A plan that does not admit the class contributes nothing. Emission declines that constructor
+/// on its own; this walk must not turn that decline into a missing member-edge failure.
+fn emitted_initialization_callees(
+    source: &dyn SymbolSource,
+    bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    identity: &crate::libraries::KlibDependencyCallable,
+    selected: crate::libraries::KlibBodyCallable<'_>,
+) -> Vec<crate::libraries::KlibDependencyCallable> {
+    let mut chain = Vec::new();
+    let mut constructor = identity.clone();
+    let mut seen = crate::fx_hash::HashSet::default();
+    while let Some(superclass) =
+        crate::klib_lowering::delegated_superclass_constructor(bodies, &constructor)
+    {
+        if !seen.insert(superclass.clone()) {
+            break;
+        }
+        let Some((_, realization)) = source.external_callable_by_dependency(&superclass) else {
+            break;
+        };
+        chain.push(realization);
+        constructor = superclass;
+    }
+    let mut facts = crate::klib_lowering::KlibCalleeFacts::new([selected]);
+    for realization in &chain {
+        if let Some(callable) = realization.klib_body_callable() {
+            facts = facts.with_declaration(callable);
+        }
+    }
+    facts
+        .constructor_initialization_callees(identity, bodies)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
 /// Resolve the exact declaration in its common member hierarchy and freeze the edge facts that

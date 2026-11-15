@@ -8,6 +8,7 @@ mod body_forms;
 mod callable_references;
 mod callee_headers;
 mod captured_projections;
+mod checked_member_edges;
 mod closure_frames;
 mod closure_producers;
 mod constructor_calls;

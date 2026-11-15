@@ -74,6 +74,18 @@ impl<'a> KlibCalleeFacts<'a> {
         self
     }
 
+    /// Record edges the closure authorized for members the checker has no function edge for.
+    /// A checker edge is the hierarchy proof and is left as stored.
+    pub(crate) fn with_authorized_member_edges(
+        mut self,
+        edges: impl IntoIterator<Item = (KlibDependencyCallable, CallEdge)>,
+    ) -> Self {
+        for (identity, edge) in edges {
+            self.member_edges.entry(identity).or_insert(edge);
+        }
+        self
+    }
+
     pub(crate) fn builtin_implementation_facts(
         &self,
     ) -> &HashMap<crate::fir::ExternalCallableId, Box<[crate::fir::BuiltinImplementation]>> {
