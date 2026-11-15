@@ -278,18 +278,8 @@ impl crate::fir::SelectedResultPublicationSemantics for ProductionSignatureSeman
         sibling: crate::fir::ResolvedTy,
     ) -> Option<crate::fir::ResolvedTy> {
         let publication = self.selected_calls.publication(origin)?;
-        let signature = publication.open_result_signature()?;
-        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
-        let expectation = crate::symbol_resolver::generic_return_expectation_from_sibling(
-            &source,
-            signature,
-            sibling.get(),
-            |actual, bound| crate::symbol_resolver::resolution_subtype(&source, actual, bound),
-        )?;
+        let expectation =
+            publication.expectation_from_sibling(self.table, scope.source.raw(), sibling.get())?;
         crate::fir::ResolvedTy::new(expectation).ok()
     }
 

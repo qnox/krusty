@@ -8,6 +8,18 @@ use crate::fx_hash::HashMap;
 use crate::libraries::{GenericSig, LibraryCallable, LibraryMember, TypeEnhancement};
 use crate::types::{Ty, TyKind, TypeName};
 
+/// Bind `$module` and `$source` to one file's declarations ahead of the compilation libraries.
+/// Signature publication and the compact bridge share this construction.
+macro_rules! file_library_source {
+    ($table:expr, $file:expr, $module:ident, $source:ident) => {
+        let $module = $crate::module_symbols::ModuleSymbols::for_file($table, $file);
+        let $source = $crate::symbol_source::CompositeSource::new(vec![
+            &$module as &dyn $crate::symbol_source::SymbolSource,
+            &*$table.libraries as &dyn $crate::symbol_source::SymbolSource,
+        ]);
+    };
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum DispatchBinding {
     /// The call's checked explicit receiver supplies the declaring classifier's arguments.
@@ -81,6 +93,23 @@ impl CompactSelectedResultPublication {
             !self.explicit_type_arguments
                 && crate::symbol_resolver::has_result_only_formal(signature)
         })
+    }
+
+    /// The sibling face that rechecks this call when [`Self::open_result_signature`] is open.
+    pub(super) fn expectation_from_sibling(
+        &self,
+        table: &super::SymbolTable,
+        file: u32,
+        sibling: Ty,
+    ) -> Option<Ty> {
+        let signature = self.open_result_signature()?;
+        file_library_source!(table, file, module, source);
+        crate::symbol_resolver::generic_return_expectation_from_sibling(
+            &source,
+            signature,
+            sibling,
+            |actual, bound| crate::symbol_resolver::resolution_subtype(&source, actual, bound),
+        )
     }
 
     pub(super) fn with_selected(mut self, selected: Ty) -> Self {
