@@ -294,20 +294,6 @@ pub(super) enum StaticAccessor {
     Setter,
 }
 
-/// Access flags of a compiler-default static accessor: `public static final` on a class.
-/// An interface method cannot be `final`; the JVM rejects that class file.
-fn default_static_accessor_flags(ir: &IrFile, owner: &str) -> u16 {
-    let interface = ir
-        .classes
-        .iter()
-        .any(|class| class.is_interface && class.fq_name_matches(owner));
-    if interface {
-        0x0009
-    } else {
-        0x0019
-    }
-}
-
 /// The exact compiler-default accessor one static property claims. Collision planning calls the
 /// same operation as emission so a diagnostic cannot drift from the method the class writer will
 /// publish after value-class storage erasure or setter-name mangling.
@@ -384,11 +370,12 @@ pub(super) fn emit_default_static_accessor(
     // `()Ljava/util/List<Ljava/lang/String;>;` and `setXs(List)` as `(Ljava/util/List<…>;)V`.
     let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
     let declared = ir.static_accessor_annotations(static_index);
-    let access = default_static_accessor_flags(ir, owner);
+    let storage_class = companion_blocks::storage_class(ir, static_index, owner);
+    let access = companion_blocks::default_accessor_access(ir, static_index);
     if accessor == StaticAccessor::Setter {
         emit_default_static_setter(
             cw,
-            owner,
+            &storage_class,
             s,
             ir.static_field_jvm_name(static_index),
             access,
@@ -427,7 +414,7 @@ pub(super) fn emit_default_static_accessor(
     if getter_line != 0 {
         g.mark_line(getter_line);
     }
-    let fref = cw.fieldref(owner, field_name, &desc);
+    let fref = cw.fieldref(&storage_class, field_name, &desc);
     g.getstatic(fref, slot_words(jt) as i32);
     // kotlinc emits no guard in the getter of a property another class probes with
     // `isInitialized`: that getter returns the raw field.
@@ -517,7 +504,7 @@ struct DefaultSetterHeader<'a> {
 /// A static property's compiler-default `setX`; see [`emit_default_static_accessor`].
 fn emit_default_static_setter(
     cw: &mut ClassWriter,
-    owner: &str,
+    storage_class: &str,
     s: &krusty::ir::IrStatic,
     field_name: &str,
     access: u16,
@@ -570,7 +557,7 @@ fn emit_default_static_setter(
         st.mark_line(setter_line);
     }
     load(jt, 0, &mut st);
-    let fref = cw.fieldref(owner, field_name, &field_descriptor);
+    let fref = cw.fieldref(storage_class, field_name, &field_descriptor);
     st.putstatic(fref, slot_words(jt) as i32);
     let setter_end = if s.is_lateinit && s.line != 0 && s.accessor_lines.declaration_end > s.line {
         s.accessor_lines.declaration_end
@@ -1277,13 +1264,11 @@ impl Emitter<'_> {
             // A `companion { … }` block property is read like a top-level one, with its
             // class in the facade's place: another class calls its public getter.
             if !emitted_by_owner && companion_blocks::getter_owned(self.ir, i) {
-                // An interface's static getter is an interface method. `invokestatic` of it
-                // must name an `InterfaceMethodref`; a `Methodref` fails to link.
-                let m = static_accessors::static_methodref(
-                    self.cw,
+                let m = companion_blocks::accessor_methodref(
                     self.ir,
-                    &facade,
-                    StaticOwner::Class(owner),
+                    self.cw,
+                    i,
+                    &owner_name,
                     &self.ir.jvm_static_getter_name(i),
                     &format!("(){}", type_descriptor(jt)),
                 );
@@ -1302,7 +1287,7 @@ impl Emitter<'_> {
                 })
             {
                 let fref = self.cw.fieldref(
-                    &owner_name,
+                    &companion_blocks::storage_class(self.ir, i, &owner_name),
                     self.ir.static_field_jvm_name(i),
                     &type_descriptor(jt),
                 );
@@ -1503,11 +1488,11 @@ impl Emitter<'_> {
             let emitted_by_owner = self.static_owner == Some(StaticOwner::Class(owner));
             if !emitted_by_owner && companion_blocks::setter_owned(self.ir, index) {
                 let setter = self.ir.jvm_static_setter_name(index);
-                let m = static_accessors::static_methodref(
-                    self.cw,
+                let m = companion_blocks::accessor_methodref(
                     self.ir,
-                    &facade,
-                    StaticOwner::Class(owner),
+                    self.cw,
+                    index,
+                    &owner_name,
                     &setter,
                     &format!("({})V", type_descriptor(jt)),
                 );
@@ -1520,7 +1505,7 @@ impl Emitter<'_> {
                     == Some(krusty::types::Visibility::Protected)
             {
                 let fref = self.cw.fieldref(
-                    &owner_name,
+                    &companion_blocks::storage_class(self.ir, index, &owner_name),
                     self.ir.static_field_jvm_name(index),
                     &type_descriptor(jt),
                 );
@@ -1636,7 +1621,9 @@ pub(super) fn declare_interface_statics(ir: &IrFile, c: &IrClass, cw: &mut Class
     // after that alias store, before `@Metadata`. A hoisted `@JvmField` property is visited later
     // because kotlinc places it after both.
     for (static_index, property) in ir.statics.iter().enumerate().filter(|(index, property)| {
-        property.owner_matches(&fq_name) && !ir.is_jvm_field_static(*index as u32)
+        property.owner_matches(&fq_name)
+            && !ir.is_jvm_field_static(*index as u32)
+            && !companion_blocks::in_interface_storage_class(ir, *index as u32)
     }) {
         let descriptor = ir_type_desc(&property.ty);
         let value = property.init.and_then(|init| constant_value(ir, init));

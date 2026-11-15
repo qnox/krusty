@@ -854,12 +854,14 @@ fn emit_jvm_interface_companion_surface(
         .iter()
         .enumerate()
         .filter(|(_, s)| s.owner_matches(&fq_name))
+        .filter(|(index, _)| !companion_blocks::in_interface_storage_class(ir, *index as u32))
         .filter_map(|(index, s)| Some((index as u32, s, static_fields::clinit_initializer(ir, s)?)))
         .collect();
     // Generated statics initialize after the declared ones, as a class `<clinit>` does.
     clinit_statics.sort_by_key(|&(_, s, _)| s.source_order == u32::MAX);
     let array = delegated_property_array::exists(env, c.fq_name);
-    if c.companion_class.is_some() || !clinit_statics.is_empty() || array {
+    let stores_blocks = companion_blocks::has_interface_storage(ir, c);
+    if c.companion_class.is_some() || !clinit_statics.is_empty() || array || stores_blocks {
         cw.reserve_method_name("<clinit>");
         cw.seed_utf8("()V");
         let companion_initializer = ir.companion_clinit_body(c.fq_name);
@@ -888,7 +890,21 @@ fn emit_jvm_interface_companion_surface(
         for step in static_fields::class_initializer_steps(ir, c, &clinit_statics) {
             match step {
                 static_fields::ClassInitializerStep::ConstructCompanion => {
+                    companion_blocks::emit_interface_storage_initialization(
+                        ir,
+                        c,
+                        companion_blocks::StorageGroup::BeforeCompanion,
+                        emitter.cw,
+                        &mut clinit,
+                    );
                     emit_companion_init(emitter.cw, &mut clinit, &fq_name, c);
+                    companion_blocks::emit_interface_storage_initialization(
+                        ir,
+                        c,
+                        companion_blocks::StorageGroup::AfterCompanion,
+                        emitter.cw,
+                        &mut clinit,
+                    );
                 }
                 static_fields::ClassInitializerStep::CompanionBody => {
                     if let Some(body) = companion_initializer {
@@ -2855,6 +2871,13 @@ fn finish_code_sig<const ACCESS: u16>(
 /// with no body is a `public abstract` declaration; a method WITH a body is a Kotlin default method —
 /// emitted as a concrete instance method (Code, no `ACC_ABSTRACT`), which the JVM treats as a default
 /// method.
+/// A member of an interface's source-ordered method table.
+enum InterfaceMember {
+    Function(u32),
+    /// A block property's compiler-default accessor over its static storage.
+    DefaultAccessor(u32, static_fields::StaticAccessor),
+}
+
 fn emit_interface_class(
     ir: &IrFile,
     c: &krusty::ir::IrClass,
@@ -2889,39 +2912,41 @@ fn emit_interface_class(
     // holder forward per non-private body.
     let enable_compat = jvm_default == JvmDefaultMode::Enable;
     let mut jd_bridge_fids: Vec<u32> = Vec::new();
-    let member_fids = member_schedule::interface_functions(ir, c);
-    // A companion-block property's compiler-default accessor is not a declared function. The
-    // class member schedule emits it; an interface publishes the same accessor, in that order,
-    // or the call sites that name `getX` link to a method the interface never declared.
-    let block_accessors: Vec<(u32, u32, static_fields::StaticAccessor)> =
-        source_ordered_members(ir, c, None)
+    // kotlinc emits interface members in SOURCE order: the shared member schedule orders the
+    // functions, and the stable sort keeps that order between members at one source offset.
+    // A stored `companion { … }` block property's compiler-default accessors take the property's
+    // place among them, as in a class.
+    let mut members: Vec<((u32, u8), InterfaceMember)> =
+        member_schedule::interface_functions(ir, c)
             .into_iter()
-            .filter_map(|member| match member {
-                SourceOrderedMember::StaticDefaultAccessor(index, accessor) => {
-                    Some((ir.statics[index as usize].source_order, index, accessor))
-                }
-                _ => None,
+            .map(|fid| {
+                (
+                    (ir.fn_source_order.get(&fid).copied().unwrap_or(u32::MAX), 0),
+                    InterfaceMember::Function(fid),
+                )
             })
             .collect();
-    let mut next_block_accessor = 0usize;
-    for &fid in &member_fids {
-        let function_order = ir.fn_source_order.get(&fid).copied().unwrap_or(u32::MAX);
-        while let Some(&(source_order, index, accessor)) = block_accessors.get(next_block_accessor)
-        {
-            if source_order >= function_order {
-                break;
+    members.extend(
+        member_schedule::static_default_accessors(ir, c)
+            .map(|(key, index, accessor)| (key, InterfaceMember::DefaultAccessor(index, accessor))),
+    );
+    members.sort_by_key(|(key, _)| *key);
+    for (_, member) in members {
+        let fid = match member {
+            InterfaceMember::Function(fid) => fid,
+            InterfaceMember::DefaultAccessor(index, accessor) => {
+                static_fields::emit_default_static_accessor(
+                    ir,
+                    &fq_name,
+                    &mut cw,
+                    env,
+                    opts.param_assertions,
+                    index,
+                    accessor,
+                );
+                continue;
             }
-            static_fields::emit_default_static_accessor(
-                ir,
-                &fq_name,
-                &mut cw,
-                env,
-                opts.param_assertions,
-                index,
-                accessor,
-            );
-            next_block_accessor += 1;
-        }
+        };
         if standalone_method_is_elided(ir, fid, env) {
             continue;
         }
@@ -3057,18 +3082,6 @@ fn emit_interface_class(
             }
         }
     }
-    while let Some(&(_, index, accessor)) = block_accessors.get(next_block_accessor) {
-        static_fields::emit_default_static_accessor(
-            ir,
-            &fq_name,
-            &mut cw,
-            env,
-            opts.param_assertions,
-            index,
-            accessor,
-        );
-        next_block_accessor += 1;
-    }
     // A collection special bridge follows the declared member it adapts and precedes the
     // compatibility access bridge for that member (`size()` before `access$getSize$jd`).
     bridge_emission::emit_bridges(ir, c, &mut cw, env);
@@ -3138,6 +3151,9 @@ fn emit_interface_class(
         extra.push((holder, env.run.finish_class(di)));
     }
     emit_jvm_interface_companion_surface(ir, c, facade, env, &mut cw);
+    extra.extend(companion_blocks::emit_interface_storage_classes(
+        ir, c, facade, env, opts,
+    ));
     // An interface is a VIEW of the same `IrClass` every other kind is — compute its `@Metadata` (and
     // therefore its debug tables/annotations) through the shared path, exactly like `emit_class`.
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
