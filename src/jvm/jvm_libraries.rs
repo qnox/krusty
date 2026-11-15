@@ -1718,6 +1718,16 @@ impl JvmLibraries {
                             .and_then(|arity| arity.checked_sub(1));
                         CallSig::metadata_member(value_arity, Vec::new(), Vec::new(), vararg_index)
                     };
+                    // `metadata_member` replaces the call signature. Java parameter names were
+                    // read from MethodParameters and have to land on this signature: the
+                    // replacement above would otherwise publish `fun test(: AtomicInteger!)`.
+                    if uses_java_type_semantics && !m.parameter_names.is_empty() {
+                        let mut names = m.parameter_names.clone();
+                        names.drain(..constructor_enclosing_prefix.min(names.len()));
+                        if names.len() == member.params.len() {
+                            member.call_sig.param_names = names;
+                        }
+                    }
                     // Java has no `operator` modifier. Kotlin therefore recognizes a Java method
                     // as an operator declaration from the language-defined name/arity convention.
                     // Normalize that capability here; the resolver can then require the same
@@ -3204,6 +3214,7 @@ impl JvmLibraries {
                         field_ty,
                         field.access,
                         field.nullability,
+                        field.const_value.is_some(),
                     ))
                 };
                 let visibility = if field.access & 0x0001 != 0 {

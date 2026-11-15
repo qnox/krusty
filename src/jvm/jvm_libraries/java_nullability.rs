@@ -9,12 +9,22 @@ use crate::libraries::ResultEnhancement;
 use crate::types::{Ty, TyKind, TypeName};
 
 /// Normalize a Java field type. An enum constant (`ACC_ENUM`) is not-null: kotlinc reports
-/// `Enum.ENTRY == null` as always false and emits no platform guard. Every other unqualified Java
-/// reference field stays flexible, including a static field whose type is an enum but which is not
-/// an enum constant.
-pub(super) fn java_field_type(ty: Ty, access: u16, annotated: Option<JavaNullability>) -> Ty {
+/// `Enum.ENTRY == null` as always false and emits no platform guard. A field that carries a
+/// `ConstantValue` is a compile-time constant, so its reference type is not flexible either:
+/// an interface `String SOME = "Some"` is `String`, and `const val` can copy it. A `static final`
+/// without that attribute stays flexible (`String NULL = null` is `String!`). Every other
+/// unqualified Java reference field stays flexible, including a static field whose type is an
+/// enum but which is not an enum constant.
+pub(super) fn java_field_type(
+    ty: Ty,
+    access: u16,
+    annotated: Option<JavaNullability>,
+    compile_time_constant: bool,
+) -> Ty {
     let nullability = if access & super::super::classreader::ACC_ENUM != 0 {
         Some(JavaNullability::NotNull)
+    } else if compile_time_constant {
+        Some(annotated.unwrap_or(JavaNullability::NotNull))
     } else {
         annotated
     };
@@ -146,6 +156,25 @@ mod tests {
             java_type_nullability(Ty::ty_param("E", any), Some(JavaNullability::NotNull)),
             Ty::ty_param("E", any),
             "`@NotNull E` stays `E & Any`"
+        );
+    }
+
+    #[test]
+    fn a_compile_time_constant_string_is_not_a_platform_type() {
+        let string = Ty::String;
+        assert_eq!(
+            java_field_type(string, 0, None, true),
+            string,
+            "a ConstantValue String is the non-null type const val copies"
+        );
+        assert_eq!(
+            java_field_type(string, 0, None, false),
+            Ty::platform_nullable(string)
+        );
+        assert_eq!(
+            java_field_type(string, 0, Some(JavaNullability::Nullable), true),
+            Ty::nullable(string),
+            "an explicit nullability annotation still owns the constant"
         );
     }
 

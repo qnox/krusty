@@ -410,24 +410,42 @@ pub(super) fn report_unactualized_members(
             continue;
         };
         diags.set_file(actual.file);
-        let Target::Classifier { name, shape, .. } = &actual.target else {
-            // Only a classifier owns members, and only a classifier is recorded as owing any.
-            continue;
-        };
-        let subject = match declarations.get(owed.classifier) {
-            Some(Resolved::Classifier(signature)) => {
-                render_classifier_subject(signature, name, shape)
+        let subject = match &actual.target {
+            Target::Classifier { name, shape, .. } => match declarations.get(owed.classifier) {
+                Some(Resolved::Classifier(signature)) => {
+                    render_classifier_subject(signature, name, shape)
+                }
+                _ => Err("has no resolved classifier signature"),
+            },
+            Target::TypeAlias { name, .. } => {
+                render_typealias_member_subject(declarations.alias_expansion(owed.classifier), name)
             }
-            _ => Err("has no resolved classifier signature"),
+            Target::Function { .. } | Target::Property { .. } => continue,
         };
         // The reference compiler lists what the classifier owes under the line that names it,
-        // each member as the common source declared it.
-        let listing = owed
-            .expected
-            .iter()
-            .filter_map(|member| expected.get(member))
-            .map(|member| format!("\n\n    {member}"))
-            .collect::<String>();
+        // each member as the common source declared it. A same-arity provider member whose
+        // parameter types differ is named under the member it failed to actualize.
+        let mut listing = String::new();
+        for member in &owed.expected {
+            let Some(written) = expected.get(member) else {
+                continue;
+            };
+            listing.push_str(&format!("\n\n    {written}"));
+            for (_, incompatible) in owed
+                .parameter_mismatches
+                .iter()
+                .filter(|(expect, _)| expect == member)
+            {
+                listing.push_str(
+                    "\n\n    The following declaration is incompatible because parameter types are different:\n        ",
+                );
+                listing.push_str(incompatible);
+            }
+        }
+        // kotlinc ends the member listing with a blank line before the source excerpt.
+        if !listing.is_empty() {
+            listing.push('\n');
+        }
         match subject {
             Ok(rendered) => diags.error(
                 actual.name,
@@ -968,6 +986,25 @@ fn render_classifier_subject(
     Ok(format!(
         "actual {} {name}{formals} : {supertypes}",
         shape.keyword()
+    ))
+}
+
+fn render_typealias_member_subject(
+    template: Option<&crate::libraries::TypeAliasTemplate>,
+    name: &str,
+) -> Result<String, &'static str> {
+    let template = template.ok_or("has no resolved expansion")?;
+    if template.expansion.mentions_pending() {
+        return Err("expands to a type that did not resolve");
+    }
+    let formals = if template.formals.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", template.formals.join(", "))
+    };
+    Ok(format!(
+        "actual typealias {name}{formals} = {}",
+        template.expansion.source_name()
     ))
 }
 

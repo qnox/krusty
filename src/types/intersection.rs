@@ -120,7 +120,13 @@ fn decompose(ty: Ty, inherited_nullable: bool, out: &mut Vec<Piece>) {
 fn component_order(left: Ty, right: Ty) -> Ordering {
     match (left.kind(), right.kind()) {
         (TyKind::Obj(left_name, left_args), TyKind::Obj(right_name, right_args)) => {
-            type_path_cmp(left_name, right_name)
+            // Diagnostic order follows the simple source name (`Comparable` before
+            // `Serializable`), which is also how a common-supertype list is ordered. The full
+            // path still distinguishes two classifiers that share a segment.
+            left_name
+                .segment_ref()
+                .cmp(right_name.segment_ref())
+                .then_with(|| type_path_cmp(left_name, right_name))
                 .then_with(|| slice_cmp(&left_args, &right_args, component_order))
         }
         _ => structural_cmp(left, right),

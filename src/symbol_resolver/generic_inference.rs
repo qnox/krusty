@@ -1259,6 +1259,12 @@ pub(super) fn unify_inferred_ty_impl(
             if actual.mentions_error() {
                 return;
             }
+            // A star is not a type argument. `MutableSet<T>` used as `Set<*>` does not choose `T`,
+            // and `T` used as `*` does not either. A star buried inside a real type (`Set<*>` as
+            // the whole expected type of a bare `T`) still binds, because that type is denotable.
+            if matches!(actual.kind(), TyKind::StarProjection(_)) {
+                return;
+            }
             // A postponed expression may already carry the very variable we are collecting
             // constraints for (`FT` against `FT`). That is an identity, not evidence. Recording it
             // makes the later useful constraint (`FT` against `UserKlass`) join with a symbolic
@@ -1450,10 +1456,14 @@ pub(crate) fn merge_inferred_ty_from_symbols(
     }
     let merged = merge_inferred_ty(Some(current), actual);
     let Some(source) = source else { return merged };
-    if !merged.is_erased_top() || !current.is_reference() || !actual.is_reference() {
+    // A primitive is a classifier too (`Int` is `kotlin.Int`): `arrayOf(1, "b")` joins at
+    // `Comparable<*> & Serializable`, not at `Any`. Only a type with no classifier hierarchy
+    // stays on the nominal merge.
+    let classifier_bound = |ty: Ty| ty.kotlin_class_internal().is_some() || ty.is_reference();
+    if !merged.is_erased_top() || !classifier_bound(current) || !classifier_bound(actual) {
         return merged;
     }
-    // Two reference lower bounds join at their common supertype, as kotlinc's does: every
+    // Two classifier lower bounds join at their common supertype, as kotlinc's does: every
     // most-specific classifier both hierarchies share, however far up each one sits, with type
     // arguments joined by declaration variance (`Inv<A>` and `Inv<B>` join at `Inv<out C>`, `C` the
     // common supertype of `A` and `B`), and an intersection when several incomparable classifiers

@@ -6,6 +6,24 @@ use super::*;
 type AnnotationElements = Vec<(String, Ty)>;
 type AnnotationShape = (AnnotationElements, ParamList, AnnotationParameterPolicy);
 
+/// The type a spread vararg argument is checked against: `Array<out E>` for a parameter
+/// declared `vararg E`.
+fn vararg_spread_expected(declared: Ty) -> Ty {
+    let Some(element) = declared.non_null().array_elem() else {
+        return declared;
+    };
+    let element = match element.kind() {
+        TyKind::OutProjection(_) => element,
+        _ => Ty::out_projection(element),
+    };
+    let array = Ty::array(element);
+    if declared.is_nullable() {
+        Ty::nullable(array)
+    } else {
+        array
+    }
+}
+
 impl Checker<'_> {
     pub(super) fn applied_annotation_shape(&self, owner: Ty) -> Option<AnnotationShape> {
         let classifier = self.resolver().classifier(owner.kotlin_class_internal()?)?;
@@ -189,6 +207,10 @@ impl Checker<'_> {
                 if parameters.vararg == Some(index) && !named && !self.file.is_spread_arg(argument)
                 {
                     declared.array_read_elem().unwrap_or(*declared)
+                } else if parameters.vararg == Some(index) && self.file.is_spread_arg(argument) {
+                    // A spread vararg is the array, and the use-site type of a vararg is
+                    // `Array<out E>`, not the invariant array the element is stored as.
+                    vararg_spread_expected(*declared)
                 } else {
                     *declared
                 };
@@ -211,6 +233,16 @@ impl Checker<'_> {
         argument: ExprId,
         expected: Ty,
     ) {
+        // A spread contributes the array it already has. The expected element type must not
+        // flow back into that array and rewrite it: `@B(*arrayOf(1, "b"))` is
+        // `Array<Comparable<*> & Serializable>`, which is not `Array<out String>`.
+        if self.file.is_spread_arg(argument) {
+            let saved = self.expected.take();
+            let actual = self.expr(scope, argument);
+            self.expected = saved;
+            self.expect_assignable(expected, actual, self.span(argument), "annotation argument");
+            return;
+        }
         if let Expr::AnnotationArrayLiteral(elements) = self.file.expr(argument).clone() {
             let Some(element_ty) = expected.non_null().array_elem() else {
                 self.expect_assignable(

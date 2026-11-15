@@ -9,6 +9,35 @@ use crate::types::{Ty, TyKind, TypeName};
 
 use super::*;
 
+/// The return a lambda is checked against when the SAM type argument is inferred from an
+/// expected type. A Java method declared `T get()` and applied as `Supplier<String>` is flexible
+/// `String!` at a call, but the expected type argument constrains the lambda at non-null `String`.
+/// A written type argument keeps the flexible method return. A nullable type argument
+/// (`Supplier<String?>`) is already that nullable type and stays nullable.
+fn declared_classifier_type_parameter(ty: Ty) -> bool {
+    match ty.kind() {
+        TyKind::TyParam(_, _) | TyKind::Var(_, _) => true,
+        TyKind::PlatformNullable(inner) => inner.is_ty_param(),
+        _ => false,
+    }
+}
+
+fn inferred_java_sam_return(
+    signature: &crate::symbol_resolver::SamSignature,
+    inferred_from_expected: bool,
+) -> Ty {
+    if !inferred_from_expected {
+        return signature.ret;
+    }
+    // The declaration return is the classifier's own type parameter (`T` or `T!`) before the
+    // call substitutes it. A concrete Java `String!` is neither.
+    let type_parameter = declared_classifier_type_parameter(signature.unsubstituted_ret);
+    match signature.ret.kind() {
+        TyKind::PlatformNullable(inner) if type_parameter && !inner.is_nullable() => inner,
+        _ => signature.ret,
+    }
+}
+
 impl Checker<'_> {
     /// Check the language-defined single-argument construction of a selected classifier. `Ok(None)`
     /// means the classifier is not a SAM or the operand is inapplicable. `Err(())` means a provider
@@ -49,9 +78,16 @@ impl Checker<'_> {
             }
             return Ok(None);
         };
+        // An expected `Supplier<String>` fixes the lambda at the type argument `String`. The Java
+        // method's flexible `String!` is the conversion target only when the type argument is
+        // written (`Supplier<String> { ... }`), which still accepts a nullable body.
+        let lambda_return = inferred_java_sam_return(
+            &signature,
+            explicit_target.is_none() && contextual_target.is_some(),
+        );
         let expected_callable = Ty::fun_with_shape(
             signature.params.clone(),
-            signature.ret,
+            lambda_return,
             signature.context_count,
             signature.has_receiver,
             signature.suspend,
@@ -72,6 +108,8 @@ impl Checker<'_> {
             "SAM constructor call={call:?} expected={expected:?} postponed_depth={} postpone_body={postpone_lambda_body}",
             self.postponed_argument_depth,
         );
+        let saved_nullable_argument = self.inferred_sam_nullable_argument;
+        self.inferred_sam_nullable_argument = lambda_return != signature.ret;
         let actual = if postpone_lambda_body {
             self.set(*argument, expected_callable)
         } else {
@@ -88,6 +126,7 @@ impl Checker<'_> {
                     )
                 })
         };
+        self.inferred_sam_nullable_argument = saved_nullable_argument;
         let actual = crate::types::ty_declared_at_call(actual, site);
         let selected = if fixed_target.is_some() {
             select_fixed_sam_constructor(&self.fed_source(), signature, target, actual)
@@ -497,6 +536,7 @@ mod tests {
             ret: Ty::Unit,
             declared_params: Vec::new(),
             declared_ret: Ty::Unit,
+            unsubstituted_ret: Ty::Unit,
             context_count: 0,
             has_receiver: false,
             suspend: false,

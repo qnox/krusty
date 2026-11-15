@@ -896,6 +896,7 @@ impl Resolver<'_> {
             name: "<init>".into(),
             tparams: Vec::new(),
             params: Vec::new(),
+            param_names: Vec::new(),
             ret: None,
             throws: Vec::new(),
             access: ACC_PUBLIC,
@@ -905,6 +906,7 @@ impl Resolver<'_> {
             name: "<init>".into(),
             tparams: Vec::new(),
             params: Vec::new(),
+            param_names: Vec::new(),
             ret: None,
             throws: Vec::new(),
             access: ACC_PRIVATE,
@@ -914,6 +916,11 @@ impl Resolver<'_> {
             name: "<init>".into(),
             tparams: Vec::new(),
             params: d.record_components.iter().map(|(_, t)| t.clone()).collect(),
+            param_names: d
+                .record_components
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect(),
             ret: None,
             throws: Vec::new(),
             access: ACC_PUBLIC
@@ -959,6 +966,7 @@ impl Resolver<'_> {
                         name: name.clone(),
                         tparams: Vec::new(),
                         params: Vec::new(),
+                        param_names: Vec::new(),
                         ret: Some(ty.clone()),
                         throws: Vec::new(),
                         access: ACC_PUBLIC,
@@ -1052,6 +1060,18 @@ impl Resolver<'_> {
             code.aconst_null();
             code.athrow();
             w.add_method_sig(acc, &m.name, &desc, &code, sig.as_deref());
+        }
+        // Source parameter names are a declaration fact. The stub's descriptor erases them, so
+        // the class file carries them in MethodParameters, which is where a later read recovers
+        // `fun test(i: AtomicInteger!)`. An enum constructor's descriptor also has the synthetic
+        // name and ordinal, which are not source parameters.
+        if !enum_constructor && m.param_names.len() == m.params.len() && !m.param_names.is_empty() {
+            let named = m
+                .param_names
+                .iter()
+                .map(|name| (Some(name.clone()), 0u16))
+                .collect::<Vec<_>>();
+            w.set_method_parameters(&m.name, &desc, &named);
         }
         if m.has_annotation_default {
             w.mark_unevaluated_annotation_default(&m.name, &desc);

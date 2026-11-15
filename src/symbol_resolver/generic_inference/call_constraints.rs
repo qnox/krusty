@@ -948,6 +948,10 @@ fn collect_call_inference_constraints(
 ) {
     match shape.kind() {
         TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
+            // `Set<*>` does not instantiate the element variable of `Set<T>` / `MutableSet<T>`.
+            if matches!(actual.kind(), TyKind::StarProjection(_)) {
+                return;
+            }
             constraints.insert(source, name.as_str(), actual, position, origin);
         }
         TyKind::Nullable(inner) => {

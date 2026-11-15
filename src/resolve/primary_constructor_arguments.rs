@@ -26,6 +26,7 @@ impl Checker<'_> {
             anonymous: is_anonymous_object,
         } = site;
         let capture_scope = scope;
+        self.report_omitted_supertype_constructor_type_arguments(scope, cl);
         // An anonymous constructor header sees lexical values without its instance-property
         // overlay. Retain its authentic dispatch rung solely as the unavailable constructor
         // prefix: removing that rung would renumber enclosing receivers in the capture ledger.
@@ -250,4 +251,81 @@ impl Checker<'_> {
                 .expect("anonymous constructor receiver frame");
         }
     }
+
+    /// A supertype constructor does not infer the constructed classifier's type arguments.
+    /// `class Test : Box(0)` and `class Test : R(0)` (a generic typealias) both require the
+    /// arguments to be written; the value argument is not evidence for them.
+    fn report_omitted_supertype_constructor_type_arguments(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        class: &ClassDecl,
+    ) {
+        if !class.base_type_args.is_empty() {
+            return;
+        }
+        let Some(base) = class.base_class.as_deref() else {
+            return;
+        };
+        let simple = base.rsplit(['/', '.']).next().unwrap_or(base);
+        let span = class.base_class_span.unwrap_or(class.span);
+        let (_, _, alias, _) = self.select_classifier_binding(scope, simple);
+        let (formals, display) = if let Some(alias) = alias {
+            if alias.formals.is_empty() {
+                return;
+            }
+            (
+                alias.formals.len(),
+                typealias_constructor_display(simple, &alias),
+            )
+        } else {
+            let InheritedNestedClassifier::Found(owner) = self.select_classifier(scope, simple)
+            else {
+                return;
+            };
+            let Some(shape) = self.resolver().classifier(owner) else {
+                return;
+            };
+            if shape.own_type_parameter_count == 0 {
+                return;
+            }
+            (
+                shape.own_type_parameter_count,
+                super::candidate_display::classifier_access_display_from_shape(owner, &shape),
+            )
+        };
+        self.diags.error(
+            span,
+            format!(
+                "{} for '{display}'.",
+                super::candidate_display::type_argument_count_wording(formals)
+            ),
+        );
+    }
+}
+
+fn typealias_constructor_display(
+    name: &str,
+    alias: &super::classifier_binding::SelectedTypeAlias,
+) -> String {
+    let formals = if alias.formals.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<{}>",
+            alias
+                .formals
+                .iter()
+                .map(|formal| crate::types::type_parameter_source_name(formal))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let segment = alias
+        .identity
+        .map(|identity| identity.nested_segment_ref().to_string())
+        .unwrap_or_else(|| name.to_string());
+    format!(
+        "typealias {segment}{formals} = {}",
+        alias.expansion.source_name()
+    )
 }

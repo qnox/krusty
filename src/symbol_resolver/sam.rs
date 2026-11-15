@@ -41,6 +41,9 @@ pub struct SamSignature {
     /// Declaration shape used by backend realization. Class parameters remain open here.
     pub(crate) declared_params: Vec<Ty>,
     pub(crate) declared_ret: Ty,
+    /// The return the method is declared with, before substitution. A Java `T get()` keeps `T`
+    /// here even when `declared_ret` is the erased classfile return.
+    pub(crate) unsubstituted_ret: Ty,
     pub(crate) context_count: usize,
     pub(crate) has_receiver: bool,
     pub(crate) suspend: bool,
@@ -290,6 +293,9 @@ pub(crate) fn semantic_sam_signature(
         ret,
         declared_params: sam.params.clone(),
         declared_ret: sam.ret,
+        // `sam.ret` is the erased classfile return (`Object!`). The generic signature keeps the
+        // classifier type parameter open (`T`), which is what an inferred SAM conversion checks.
+        unsubstituted_ret: declared_result(&sam),
         context_count: sam.context_count,
         has_receiver,
         suspend: sam.suspend(),

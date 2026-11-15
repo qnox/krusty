@@ -20,6 +20,8 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
         features.has("ForbidArrayOfNothingInLhsOfClassLiteral");
     file.enum_entries_enabled = features.has("EnumEntries");
     file.collection_literals_enabled = features.has("CollectionLiterals");
+    file.precise_simplification_to_flexible_lower_constraint =
+        features.has("PreciseSimplificationToFlexibleLowerConstraint");
     file.prioritized_enum_entries = features.has("PrioritizedEnumEntries");
     file.implicit_signed_to_unsigned_integer_conversion =
         features.has("ImplicitSignedToUnsignedIntegerConversion");

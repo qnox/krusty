@@ -118,6 +118,7 @@ mod tests {
             deprecation: None,
             has_annotation_default: false,
             annotations: Box::new([type_name(LOW_PRIORITY)]),
+            parameter_names: Vec::new(),
         }
     }
 
