@@ -1430,3 +1430,12 @@ fn wasm_generic_elvis_preserves_its_non_null_type_parameter() {
         );
     }
 }
+
+// PLATFORM-SPECIFIC: a library class's dispatch table type is one type of the whole Wasm program,
+// shared by the support unit laying the class out and the module class extending it.
+#[test]
+fn wasm_library_superclass_members_dispatch_to_the_subclass() {
+    let src = include_str!("box_regressions/librarySuperclassMembersOfSubclass.kt");
+    expect_reference_box(src, "librarySuperclassMembersOfSubclass");
+    expect_wasm_box(src, "librarySuperclassMembersOfSubclass");
+}
