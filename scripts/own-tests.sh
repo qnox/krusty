@@ -32,34 +32,30 @@ if command -v just >/dev/null 2>&1; then
 fi
 phase_end provision
 
-# Build one selection and print its own-suite test executables. Rendered rustc diagnostics are only
-# in Cargo's JSON stream, so they are mirrored to stderr.
-build_selection() {
-  local stream
-  stream="$(mktemp)"
-  if ! cargo "$@" --profile gate --message-format=json >"$stream"; then
-    jq -r 'select(.reason == "compiler-message") | .message.rendered // empty' "$stream" >&2 || true
-    rm -f "$stream"
-    return 1
-  fi
-  jq -r -f scripts/own-test-binaries.jq "$stream"
-  rm -f "$stream"
-}
-
-# The backend, CLI, language server and toolchain crates with the CLI and language-server binaries
-# their tests start, then the compiler's cfg(test) unit harness. Cargo applies `--tests` to every
-# selected package, so the root package is built apart: with it, `--tests` would also build the
-# conformance and e2e targets this job does not run.
+# The own-suite packages in one Cargo invocation, so every crate, krusty's library among them, is
+# compiled once with one feature set. Cargo applies `--tests` to every selected package, so this
+# also compiles the root package's e2e and conformance targets; e2e runs in its own job from
+# build-tool-bins' binary, and conformance is not an own suite. Rendered rustc diagnostics are only
+# in Cargo's JSON stream, so a failed build replays them to stderr.
 phase_begin build
-# Each selection is assigned before it is split: a failed build then stops the script under `set -e`.
-crate_tests="$(build_selection build \
-  -p krusty-jvm -p krusty-native -p krusty-wasm -p krusty-cli -p krusty-lsp -p krusty-toolchain \
-  --lib --bins --tests)"
-compiler_unit_tests="$(build_selection test --no-run -p krusty --lib)"
+stream="$(mktemp)"
+if ! cargo build --profile gate --message-format=json \
+    -p krusty -p krusty-jvm -p krusty-native -p krusty-wasm -p krusty-cli -p krusty-lsp -p krusty-toolchain \
+    --lib --bins --tests >"$stream"; then
+  jq -r 'select(.reason == "compiler-message") | .message.rendered // empty' "$stream" >&2 || true
+  exit 1
+fi
 phase_end build
+own_bins="$(jq -r -f scripts/own-test-binaries.jq "$stream")"
+# The cfg(test) harness of krusty's library: the only lib target named `krusty`.
+compiler_unit_tests="$(jq -r 'select(.reason == "compiler-artifact" and .profile.test == true
+    and .target.name == "krusty" and .target.kind == ["lib"]) | .executable' "$stream")"
+bins=()
+while IFS= read -r binary; do
+  [ "$(basename "$binary" | sed 's/-[0-9a-f]*$//')" = e2e ] || bins+=("$binary")
+done <<<"$own_bins"
+rm -f "$stream"
 [ -n "$compiler_unit_tests" ] || { echo "own-tests: compiler unit binary missing" >&2; exit 1; }
-mapfile -t bins <<<"$crate_tests"
-bins+=("$compiler_unit_tests")
 
 export KRUSTY_BIN="$target_root/gate/krusty"
 export KRUSTY_LSP_BIN="$target_root/gate/krusty-lsp"
