@@ -506,7 +506,12 @@ fn an_actual_member_publishes_its_entry_under_its_expect() {
         .unwrap()
         .inherited_default_provider = Some(ResolvedFunctionOverrideTarget::Module(expected));
 
-    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
+    realize(
+        &mut ir,
+        &mut CheckedBackendCallables::default(),
+        |_| false,
+        |_| false,
+    );
 
     assert!(ir.default_entries.contains_key(&function));
     assert_eq!(
