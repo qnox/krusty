@@ -87,6 +87,9 @@ fn an_interface_reached_through_the_superclass_publishes_no_inherited_default() 
             name: InheritedMemberName::Function("direct".into()),
             function,
             accessor: None,
+            annotation_origin: Some(InheritedDefaultAnnotationOrigin::Function(
+                function.expect("function target")
+            )),
             declaring_interface: direct,
             dispatch_interface: direct,
             parameters: Box::new([]),
@@ -123,6 +126,9 @@ fn the_nearest_declaration_of_a_slot_wins_and_names_its_direct_superinterface() 
             name: InheritedMemberName::Function("g".into()),
             function,
             accessor: None,
+            annotation_origin: Some(InheritedDefaultAnnotationOrigin::Function(
+                function.expect("function target")
+            )),
             declaring_interface: left,
             dispatch_interface: left,
             parameters: Box::new([]),
@@ -214,6 +220,81 @@ fn inherited_property_accessors_publish_their_exact_checked_targets() {
             &InheritedMemberName::PropertySetter("answer".into()),
         ]
     );
+}
+
+#[test]
+fn inherited_default_body_and_annotations_keep_separate_exact_declarations() {
+    let [base, nearer, derived, private_only] = published_inherited_defaults(
+        r#"package sample
+interface A {
+    fun f(): String = "A"
+    var p: String
+        get() = "A"
+        set(value) {}
+}
+open class PrivateDecoy {
+    private fun f(): String = "private"
+    private var p: String = "private"
+}
+open class B : PrivateDecoy(), A
+interface C : A {
+    override fun f(): String = "C"
+    override var p: String
+        get() = "C"
+        set(value) {}
+}
+class AOnly : A
+class COnly : C
+class D : B(), C
+class PrivateOnly : PrivateDecoy(), C
+"#,
+        "InheritedAnnotationOrigin",
+        &["AOnly", "COnly", "D", "PrivateOnly"],
+    )
+    .try_into()
+    .expect("four classifiers");
+    assert_eq!(derived.len(), 3, "function, getter and setter");
+    for default in &derived {
+        let ancestor = base
+            .iter()
+            .find(|candidate| candidate.name == default.name)
+            .expect("exact ancestor slot");
+        let body = nearer
+            .iter()
+            .find(|candidate| candidate.name == default.name)
+            .expect("exact nearer body slot");
+        assert_eq!(
+            (default.function, default.accessor),
+            (body.function, body.accessor)
+        );
+        assert_eq!(
+            default.declaring_interface,
+            crate::types::type_name("sample/C")
+        );
+        assert_eq!(default.annotation_origin, ancestor.annotation_origin);
+        assert_ne!(default.annotation_origin, body.annotation_origin);
+        assert!(matches!(
+            default.annotation_origin,
+            Some(InheritedDefaultAnnotationOrigin::Function(
+                ResolvedFunctionOverrideTarget::Module(_)
+            )) | Some(InheritedDefaultAnnotationOrigin::Getter(
+                ResolvedPropertyOverrideTarget::Module(_)
+            )) | Some(InheritedDefaultAnnotationOrigin::Setter(
+                ResolvedPropertyOverrideTarget::Module(_)
+            ))
+        ));
+    }
+    assert_eq!(private_only.len(), 3);
+    for default in &private_only {
+        let body = nearer
+            .iter()
+            .find(|candidate| candidate.name == default.name)
+            .expect("exact body slot");
+        assert_eq!(
+            default.annotation_origin, body.annotation_origin,
+            "private superclass decoys do not supply inherited metadata"
+        );
+    }
 }
 
 #[test]

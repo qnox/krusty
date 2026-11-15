@@ -486,6 +486,7 @@ pub(super) struct EmitEnv<'a> {
     /// `Signature` attributes. Declaration-site variance is a Kotlin fact; spelling it as JVM
     /// use-site wildcards is owned entirely by this emitter.
     signature_symbols: &'a dyn BackendClassifierSource,
+    source_member_annotations: &'a krusty::backend::SourceMemberAnnotations,
     /// Provider-normalized JVM facts for dependency identities already selected into common IR.
     dependency_callables: &'a krusty::backend::CheckedBackendCallables,
     /// Exact invocation-owner facts for both the stable module/dependency model and classifiers
@@ -1006,44 +1007,10 @@ pub(crate) fn emit_all_with_checked_classifiers(
     opts: &EmitOptions,
     run: &EmitRun,
 ) -> Option<Vec<(String, Vec<u8>)>> {
-    let env = EmitEnv {
-        facade_class,
-        multifile_facade: opts.multifile_facade.as_deref(),
-        bodies: &bytecode_inline_call::ModuleClassBodies::new(bodies, run),
-        run,
-        continuation_metadata: facts.metadata.continuations,
-        emit_time_machines: facts.metadata.emit_time_machines,
-        suspended_result_returns: facts.metadata.suspended_result_returns,
-        intrinsic_probe_continuations: facts.metadata.intrinsic_probe_continuations,
-        bridge_adaptations: facts.metadata.bridge_adaptations,
-        function_argument_arrays: facts.metadata.function_argument_arrays,
-        override_results: facts.metadata.override_results,
-        collection_method_entry_barriers: facts.metadata.collection_method_entry_barriers,
-        collection_members: facts.metadata.collection_members,
-        signature_symbols: facts.signature_symbols,
-        dependency_callables: facts.dependency_callables,
-        dispatch_classifiers: std::rc::Rc::new(
-            crate::member_dispatch::CheckedDispatchClassifiers::new(ir, facts.signature_symbols),
-        ),
-        jvm_default: opts.jvm_default,
-        lambda_modes: opts.lambda_modes,
-        java_parameters: opts.java_parameters,
-        inline_string_concat: opts.inline_string_concat,
-        inline_scopes_numbers: opts.inline_scopes_numbers,
-        metadata_stamp: opts.metadata_stamp(),
-        property_realizations: facts.property_realizations,
-        property_reference_realizations: facts.property_reference_realizations,
-        sam_wrapper_realizations: facts.sam_wrapper_realizations,
-        local_delegate_access: facts.local_delegate_access,
-        default_call_operands: facts.default_call_operands,
-        inner_classes: crate::inner_classes::InnerClasses::new(
-            ir,
-            facts.metadata.override_results,
-            facade,
-            opts.lambda_modes,
-        ),
-    };
-    emit_all_with_class_meta(ir, facade, &env, facts.metadata.facade, opts, &|_| None)
+    let metadata = facts.metadata.facade;
+    let bodies = bytecode_inline_call::ModuleClassBodies::new(bodies, run);
+    let env = facts.environment(ir, (facade_class, facade), &bodies, opts, run);
+    emit_all_with_class_meta(ir, facade, &env, metadata, opts, &|_| None)
 }
 
 /// `class_meta` may supply per-class `@kotlin.Metadata` keyed by the class's internal name. This
@@ -2891,18 +2858,29 @@ fn emit_interface_class(
     // holder forward per non-private body.
     let enable_compat = jvm_default == JvmDefaultMode::Enable;
     let mut jd_bridge_fids: Vec<u32> = Vec::new();
-    // kotlinc emits interface members in SOURCE order — a property's accessors sit at the
-    // property's declared position among the functions — while lowering registers declared
-    // functions before property accessors. Sort by the recorded source offset (stable, so a
-    // property's getter stays before its setter); synthesized members without one trail in
-    // registration order, kotlinc's placement for them too.
-    let mut member_fids: Vec<u32> = c.methods.clone();
-    member_fids.sort_by_key(|fid| ir.fn_source_order.get(fid).copied().unwrap_or(u32::MAX));
+    let member_fids = member_schedule::interface_functions(ir, c);
     for &fid in &member_fids {
         if standalone_method_is_elided(ir, fid, env) {
             continue;
         }
         let f = &ir.functions[fid as usize];
+        // A property annotation carrier is a static declaration. `disable` and `enable` both
+        // publish the compatibility holder, and the carrier lives there with its own frame (no
+        // inserted interface receiver). `no-compatibility` has no holder, so the carrier stays
+        // on the interface.
+        if emits_default_impls
+            && default_impls::emit_annotation_carrier(
+                ir,
+                fid,
+                c.fq_name,
+                facade,
+                &mut default_impls,
+                env,
+                opts,
+            )
+        {
+            continue;
+        }
         // A STATIC member of an interface is not a default method: a lambda synthetic
         // (`f$lambda$0`) is a private static helper that stays where it is. Moving it to the holder
         // prepended a receiver its body never reads, and published it abstract on the interface —
@@ -2942,12 +2920,7 @@ fn emit_interface_class(
                 && !ir.inline_only_fns.contains(&fid)
             {
                 jd_bridge_fids.push(fid);
-                let di = default_impls.get_or_insert_with(|| {
-                    let mut w =
-                        new_writer(&format!("{fq_name}$DefaultImpls"), "java/lang/Object", opts);
-                    w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
-                    w
-                });
+                let di = default_impls::holder(&mut default_impls, &fq_name, opts);
                 interface_compatibility::emit_own_member_forward(
                     ir,
                     c,
@@ -2962,12 +2935,7 @@ fn emit_interface_class(
             if f.body.is_some() && !f.is_static {
                 // `disable`: the body moves to the holder as a receiver-first static, and the
                 // interface keeps only the abstract declaration emitted below.
-                let di = default_impls.get_or_insert_with(|| {
-                    let mut w =
-                        new_writer(&format!("{fq_name}$DefaultImpls"), "java/lang/Object", opts);
-                    w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
-                    w
-                });
+                let di = default_impls::holder(&mut default_impls, &fq_name, opts);
                 emit_holder_method(ir, fid, c.fq_name, &fq_name, facade, di, env);
             }
             // A private member has NO interface-side declaration under `disable`: kotlinc writes
@@ -3004,12 +2972,7 @@ fn emit_interface_class(
             // would publish a holder class the build says does not exist — a downstream compilation
             // resolving against it links to a class kotlinc would never have produced.
             if emits_default_impls {
-                let di = default_impls.get_or_insert_with(|| {
-                    let mut w =
-                        new_writer(&format!("{fq_name}$DefaultImpls"), "java/lang/Object", opts);
-                    w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
-                    w
-                });
+                let di = default_impls::holder(&mut default_impls, &fq_name, opts);
                 if enable_compat {
                     // The interface owns the real default application; the holder's copy is a
                     // thin synthetic forward to it (kotlinc's `enable` shape).
@@ -4073,8 +4036,7 @@ fn emit_placed_method(
     // still have a source-visible generic contract.
     // kotlinc maps a lambda literal's body without generics, and a compiler-synthesized lambda's;
     // an anonymous function's keeps them.
-    let synthesized = ir.lambda_class_provenance(fid)
-        == Some(krusty::ir::type_reflection::LambdaClassProvenance::SynthesizedAdapter);
+    let synthesized = crate::lambda_classes::erases_adapter_signature(ir, fid);
     let method_sig = (!ir.serialization_cache_methods.contains(&fid)
         && !ir.is_lambda_literal(fid)
         && !synthesized)
@@ -6531,6 +6493,7 @@ mod invariant_tests {
                     intrinsic_probe_continuations,
                 },
                 signature_symbols: &super::metadata_name_tests::DeclarationNames(ir),
+                source_member_annotations: &Default::default(),
                 dependency_callables: &dependency_callables,
                 property_realizations: &property_realizations,
                 property_reference_realizations: &property_reference_realizations,

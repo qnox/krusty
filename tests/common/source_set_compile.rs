@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use krusty::diag::DiagSink;
 use krusty::source::SourceInput;
 
+pub(crate) mod compiler_diagnostics;
+
 pub fn compile_in_process_files(
     sources: &[(&str, &str)],
     cp_jars: &[PathBuf],
@@ -159,6 +161,14 @@ pub(crate) fn compile_inputs(
             )
         })
         .collect::<Vec<_>>();
+    compiler_diagnostics::report_rejection(
+        "main",
+        inputs
+            .iter()
+            .zip(stems)
+            .map(|(input, stem)| (input.kind, stem.as_str(), input.text)),
+        &diags,
+    );
     (!diags.has_errors() && !classes.is_empty()).then_some(classes)
 }
 

@@ -20,6 +20,14 @@ pub(super) struct CheckedAnnotationApplications {
 }
 
 impl CheckedAnnotationApplications {
+    pub(super) fn retention_facts(
+        &self,
+    ) -> impl Iterator<Item = (TypeName, crate::types::AnnotationRetention)> + '_ {
+        self.checked
+            .values()
+            .map(|application| (application.internal, application.retention))
+    }
+
     pub(super) fn get(&self, key: &(u32, u32)) -> Option<&crate::types::AppliedAnnotation> {
         self.checked.get(key)
     }

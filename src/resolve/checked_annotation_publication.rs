@@ -16,6 +16,7 @@ pub(crate) fn publish_checked_declaration_annotations(
     diags: &mut DiagSink,
 ) {
     let mut constructor_properties = Vec::new();
+    let mut application_retentions = Vec::new();
     for (file_index, file) in files.iter().enumerate() {
         let declarations = table
             .classes
@@ -63,6 +64,13 @@ pub(crate) fn publish_checked_declaration_annotations(
             fragment: SourceFragmentMode::DeclarationAnnotations,
             streamed_cache: None,
         });
+        for (classifier, retention) in info.applied_annotations.retention_facts() {
+            application_retentions.push(if index.classifier_declaration(classifier).is_some() {
+                CheckedRetentionEvidence::Source(classifier)
+            } else {
+                CheckedRetentionEvidence::Dependency(classifier, retention)
+            });
+        }
         let mut checked = Vec::new();
         for &(internal, declaration) in &declarations {
             let Decl::Class(class) = file.decl(declaration) else {
@@ -195,8 +203,47 @@ pub(crate) fn publish_checked_declaration_annotations(
             }
         }
     }
+    // An application's source annotation class may be declared in this file or a later one.
+    // Its checked policy replaces the header's provisional default only after that file is read.
+    for evidence in application_retentions {
+        let classifier = evidence.classifier();
+        let Some(retention) = evidence.finalized(&table.annotation_retentions) else {
+            diags.module_error(format!(
+                "internal error: checked source annotation {} has no finalized retention policy",
+                classifier.render(),
+            ));
+            continue;
+        };
+        index.publish_checked_annotation_retention(classifier, retention);
+    }
     for property in constructor_properties {
         property.publish(index);
+    }
+}
+
+/// Source policies are finalized by this pass; dependency policies were authenticated when their
+/// applications were checked. An absent source policy cannot become a dependency default.
+#[derive(Clone, Copy)]
+enum CheckedRetentionEvidence {
+    Source(TypeName),
+    Dependency(TypeName, crate::types::AnnotationRetention),
+}
+
+impl CheckedRetentionEvidence {
+    fn classifier(self) -> TypeName {
+        match self {
+            Self::Source(classifier) | Self::Dependency(classifier, _) => classifier,
+        }
+    }
+
+    fn finalized(
+        self,
+        source_policies: &HashMap<TypeName, crate::types::AnnotationRetention>,
+    ) -> Option<crate::types::AnnotationRetention> {
+        match self {
+            Self::Source(classifier) => source_policies.get(&classifier).copied(),
+            Self::Dependency(_, retention) => Some(retention),
+        }
     }
 }
 
@@ -1420,3 +1467,6 @@ fn unsigned_constant_magnitude(constant: &crate::libraries::LibraryConst) -> Opt
 
 #[cfg(test)]
 mod constant_values_tests;
+
+#[cfg(test)]
+mod retention_policy_tests;

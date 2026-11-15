@@ -80,6 +80,9 @@ pub struct IrLambdaClass {
     /// lambda: `invoke` is then that interface's method, under the method's name, and the bridge
     /// adapts the method's declared shape rather than `FunctionN.invoke`.
     pub sam: Option<Box<IrSamTarget>>,
+    /// A synthesized callable-reference implementation, rather than a source SAM lambda.
+    /// Its class is synthetic and captures enclosing formals without redeclaring SAM formals.
+    pub sam_reference: bool,
 }
 
 /// One captured value a lambda class stores in a field.
