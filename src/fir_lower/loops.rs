@@ -641,6 +641,7 @@ impl BodyLowering<'_> {
                         argument.receiver.value,
                         argument.receiver.conversion,
                     )?,
+                    context: Default::default(),
                 })
             })
             .collect::<Result<Vec<_>, FirLoweringFailure>>()?;
