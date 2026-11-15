@@ -1158,6 +1158,40 @@ fn a_type_parameter_smart_cast_lowers_as_the_source_smart_cast_does() {
     }
 }
 
+/// `kotlin.coroutines.intrinsics.createCoroutineUnintercepted` narrows its `suspend () -> T`
+/// receiver by `this is BaseContinuationImpl`: a value of a function type narrows to any type it is
+/// checked against, since any class can implement a function type besides its own supertypes.
+#[test]
+fn a_function_value_smart_cast_lowers_as_the_source_smart_cast_does() {
+    let demo = demo(
+        &[("f", &[T::Function0Int], T::NullableCharSequence)],
+        |_, body| {
+            let a = body.param(0);
+            let operand = body.ty(T::CharSequence);
+            let checked = body.expr(
+                T::Boolean,
+                KlibIrExprKind::TypeOperator {
+                    operator: KlibIrTypeOperator::InstanceOf,
+                    operand,
+                    argument: a,
+                },
+            );
+            let a = body.param(0);
+            let narrowed = body.type_operator(KlibIrTypeOperator::ImplicitCast, a, T::CharSequence);
+            let returned = body.return_(narrowed);
+            let guard = body.branches("IF", vec![(checked, returned)], T::Unit);
+            let fallback = body.constant(T::NullableNothing, KlibIrConstant::Null);
+            Some(vec![KlibIrStatement::Expression(guard), body.ret(fallback)])
+        },
+    );
+    let source = "fun f(a: () -> Int): CharSequence? {\n if (a is CharSequence) return a\n \
+                  return null\n}\n";
+    assert_eq!(
+        lowered_f(&demo),
+        super::demo_package::source_body_with_stdlib(source, "f", 1)
+    );
+}
+
 /// `rendered` with each type parameter identity spelled `<P>`: a KLIB body names its function's
 /// type parameter by metadata identity, the source by its declaration, and both are `P`.
 fn with_parameter_identities_erased(rendered: &str) -> String {

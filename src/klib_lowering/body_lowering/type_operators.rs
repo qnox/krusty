@@ -142,7 +142,7 @@ impl BodyLowering<'_> {
             return Ok(arg);
         }
         if let Some(widened) = self.nullable_widening(arg, actual, target) {
-            return Ok(self.typed(widened, ty));
+            return Ok(widened);
         }
         if let Some(upcast) = self.upcast(arg, actual, target) {
             return Ok(upcast);
@@ -177,9 +177,14 @@ impl BodyLowering<'_> {
     /// of `actual`, of `actual`'s classifier at any type arguments (`Collection<*>` after
     /// `this is Collection<*>` on an `Iterable<T>`), or names the same classifier at other type
     /// arguments. A value of a type parameter narrows to any type: its argument can be any
-    /// subtype of its bounds.
+    /// subtype of its bounds. So does a value of a function type, an interface any class can
+    /// implement besides its own supertypes (`this is BaseContinuationImpl` on a
+    /// `suspend () -> T`).
     fn narrows(&self, actual: Ty, target: Ty) -> bool {
-        if matches!(actual.non_null().kind(), TyKind::TyParam(..)) {
+        if matches!(
+            actual.non_null().kind(),
+            TyKind::TyParam(..) | TyKind::Fun(..)
+        ) {
             return true;
         }
         let classifier = |ty: Ty| match ty.non_null().kind() {
@@ -210,7 +215,7 @@ impl BodyLowering<'_> {
     }
 
     /// `value`, of the non-null type `actual`, widened to its nullable type `target`: a coercion
-    /// checked FIR lowering places for the target to represent. `None` for any other pair.
+    /// checked FIR lowering places for the target to represent, typed `target`. `None` for any other pair.
     pub(super) fn nullable_widening(
         &mut self,
         value: ExprId,
@@ -220,7 +225,8 @@ impl BodyLowering<'_> {
         if actual.is_nullable() || target != Ty::nullable(actual) {
             return None;
         }
-        Some(self.coercion(value, target))
+        let widened = self.coercion(value, target);
+        Some(self.typed(widened, target))
     }
 }
 
