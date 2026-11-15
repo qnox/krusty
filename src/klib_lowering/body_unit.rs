@@ -1413,7 +1413,13 @@ impl<'s> CallLinker for Linker<'_, 's> {
     }
 
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
-        self.sources.callees.applied_supertype(sub, owner)
+        let callees = self.sources.callees;
+        super::same_library_class::applied_supertype(
+            self.local_classes,
+            sub,
+            owner,
+            &|sub, owner| callees.applied_supertype(sub, owner),
+        )
     }
 
     fn dependency_override(

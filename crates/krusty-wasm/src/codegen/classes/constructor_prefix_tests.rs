@@ -890,7 +890,7 @@ fn non_enclosing_receiver_profiles_remain_unsupported() {
         IrCapturedReceiver::Lambda(None),
         IrCapturedReceiver::Callable {
             label: "callable".into(),
-            owner: krusty::fir::CapturedCallableOwner::Declaration,
+            owner: krusty::fir::CapturedCallableOwner::LocalFunction,
         },
         IrCapturedReceiver::Context {
             kind: krusty::types::CapturedContextKind::LegacyReceiver,
@@ -978,6 +978,8 @@ fn proven_context_and_lambda_receivers_are_ordinary_references() {
     scalar.classes[class as usize].fields[field as usize].ty = Ty::Unit;
     assert_eq!(check_supported(&scalar, class), expected);
 
+    // The extension receiver of the capturing declaration itself is that declaration's own
+    // object parameter, with or without a receiver identity; a local function's is not.
     let mut callable = copy_transport(&original);
     install(
         &mut callable,
@@ -986,7 +988,37 @@ fn proven_context_and_lambda_receivers_are_ordinary_references() {
             owner: krusty::fir::CapturedCallableOwner::Declaration,
         },
     );
-    assert_eq!(check_supported(&callable, class), expected);
+    assert_eq!(check_supported(&callable, class), Ok(()));
+
+    let mut unidentified = copy_transport(&original);
+    unidentified.classes[class as usize].ctor_args[parameter as usize]
+        .capture
+        .as_mut()
+        .unwrap()
+        .receiver = Some(IrCapturedReceiver::Callable {
+        label: "callable".into(),
+        owner: krusty::fir::CapturedCallableOwner::Declaration,
+    });
+    assert_eq!(check_supported(&unidentified, class), Ok(()));
+
+    let mut local_function = copy_transport(&callable);
+    local_function.classes[class as usize].ctor_args[parameter as usize]
+        .capture
+        .as_mut()
+        .unwrap()
+        .receiver = Some(IrCapturedReceiver::Callable {
+        label: "callable".into(),
+        owner: krusty::fir::CapturedCallableOwner::LocalFunction,
+    });
+    assert_eq!(check_supported(&local_function, class), expected);
+
+    let mut scalar_receiver = copy_transport(&callable);
+    let field = scalar_receiver.classes[class as usize].ctor_args[parameter as usize]
+        .field_index
+        .unwrap();
+    scalar_receiver.classes[class as usize].ctor_args[parameter as usize].ty = Ty::Int;
+    scalar_receiver.classes[class as usize].fields[field as usize].ty = Ty::Int;
+    assert_eq!(check_supported(&scalar_receiver, class), expected);
 }
 
 #[test]

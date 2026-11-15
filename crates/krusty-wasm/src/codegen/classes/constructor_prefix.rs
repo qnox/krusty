@@ -1,6 +1,6 @@
 //! Constructor-prefix transport proved by common IR, separately from physical field ordinals.
 
-use krusty::fir::{ClassCaptureIdentity, EnclosingInstanceKind};
+use krusty::fir::{CapturedCallableOwner, ClassCaptureIdentity, EnclosingInstanceKind};
 use krusty::ir::{ClassId, IrCapturedReceiver, IrCtorArg, IrCtorParameterProvenance, IrFile};
 use krusty::types::{Ty, TyKind, TypeName};
 
@@ -95,8 +95,21 @@ fn captured_receiver(ir: &IrFile, argument: &IrCtorArg, receiver: &IrCapturedRec
             context_parameter(argument, types, *index)
         }
         IrCapturedReceiver::Lambda(_) => receiver_lambda(argument),
-        IrCapturedReceiver::Callable { .. } => false,
+        IrCapturedReceiver::Callable { owner, .. } => declaration_receiver(argument, *owner),
     }
+}
+
+// The extension receiver of the declaration the capture is written in is that declaration's own
+// parameter: an object reference stored like any captured value, as `asList`'s object literal
+// stores its array. No value identity or enclosing class stands for it. A local function's
+// receiver is another frame's and stays declined.
+fn declaration_receiver(argument: &IrCtorArg, owner: CapturedCallableOwner) -> bool {
+    owner == CapturedCallableOwner::Declaration
+        && matches!(
+            argument.capture_identity,
+            None | Some(ClassCaptureIdentity::Receiver(_))
+        )
+        && matches!(argument.ty.kind(), TyKind::Obj(_, _))
 }
 
 // The parameter's declared type is the entry its rung recorded at `index`. Its closure identity is

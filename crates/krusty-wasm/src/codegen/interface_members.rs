@@ -42,7 +42,7 @@ use super::laid_out_classes::{DependencyImplementation, SignatureAdapters};
 use super::lower::library_members::{
     library_member_identity, library_member_owner, library_member_signature, MemberRole,
 };
-use super::lower::{carrier, Unsupported};
+use super::lower::{carrier, parameter_value_carrier, Unsupported};
 
 /// A function's wasm parameters (the receiver first) and results.
 pub(super) type Signature = (Vec<ValType>, Vec<ValType>);
@@ -51,7 +51,9 @@ pub(super) type Signature = (Vec<ValType>, Vec<ValType>);
 pub(super) fn member_signature(params: &[Ty], result: Ty) -> Result<Signature, Unsupported> {
     let mut carriers = vec![REFERENCE];
     for param in params {
-        carriers.push(carrier(*param)?.ok_or_else(|| "a `Unit` parameter".to_string())?);
+        carriers.push(
+            parameter_value_carrier(*param)?.ok_or_else(|| "a `Unit` parameter".to_string())?,
+        );
     }
     Ok((carriers, carrier(result)?.into_iter().collect()))
 }

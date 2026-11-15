@@ -32,11 +32,12 @@ use crate::libraries::{
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrClass, KlibIrExprKind, KlibIrFunction,
-    KlibIrMember, KlibIrStatement, KlibIrType, KlibIrTypeParameter, KlibIrVariance,
+    KlibIrMember, KlibIrMemberAccess, KlibIrStatement, KlibIrType, KlibIrTypeParameter,
+    KlibIrVariance,
 };
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 use crate::metadata::semantic::{
-    class_is_value, class_kind, declaration_modality, declaration_visibility,
+    class_is_value, class_kind, declaration_modality, declaration_visibility, KotlinModality,
 };
 use crate::types::{Ty, TyKind, TypeName, TypeVariance, Visibility};
 
@@ -364,6 +365,15 @@ struct AdmittedInterface {
     arguments: Vec<Ty>,
 }
 
+/// A class's declared supertypes: every one in order, the interfaces among them, its
+/// superclass other than `Any`, and, when that is a library class, its application.
+struct AuthenticatedSupertypes {
+    supertypes: Vec<Ty>,
+    interfaces: Vec<AdmittedInterface>,
+    superclass: Option<TypeName>,
+    library_superclass: Option<AdmittedInterface>,
+}
+
 struct InterfaceSignature {
     parameters: Vec<Ty>,
     result: Ty,
@@ -394,6 +404,28 @@ pub(super) struct PreparedLocalClass<'a> {
     pub(super) members: Vec<PreparedMember<'a>>,
     /// An inner class's outer instance.
     pub(super) outer: Option<OuterInstance<'a>>,
+    /// The same-library superclass the constructor delegates to; `Any` otherwise.
+    pub(super) superclass: Option<LocalSuperclass<'a>>,
+    pub(super) open: bool,
+}
+
+/// A same-library superclass constructor a class's constructor delegates to, and the slot of the
+/// class constructor's parameter each of its arguments passes.
+pub(super) struct LocalSuperclass<'a> {
+    pub(super) constructor: SuperclassConstructor<'a>,
+    pub(super) operands: Vec<u32>,
+}
+
+/// The constructor a same-library class's constructor delegates to.
+#[derive(Clone, Copy)]
+pub(super) enum SuperclassConstructor<'a> {
+    /// A constructor of another class only this library's bodies link.
+    Local(&'a KlibIrSignature),
+    /// A published constructor of the library class `classifier`.
+    Library {
+        signature: &'a KlibPublicIdSignature,
+        classifier: TypeName,
+    },
 }
 
 /// The outer instance an inner class holds: the outer class's `this`, which the inner class's
@@ -480,24 +512,10 @@ fn proves_local(
             _ => false,
         };
     }
-    let TyKind::Obj(name, arguments) = sub.kind() else {
+    let Some(supertypes) = applied_local_supertypes(classes, sub) else {
         return false;
     };
-    let Some(local) = classes.values().find(|class| class.classifier == name) else {
-        return false;
-    };
-    if arguments.len() != local.formals.len() {
-        return false;
-    }
-    let mut bindings = HashMap::default();
-    for (formal, argument) in local.formals.iter().zip(arguments.iter()) {
-        let TyKind::TyParam(identity, _) = formal.kind() else {
-            return false;
-        };
-        bindings.insert(identity.as_str().to_owned(), *argument);
-    }
-    for declared in &local.supertypes {
-        let applied = crate::types::ty_subst_applied_arguments(*declared, &bindings);
+    for applied in supertypes {
         if applied == sub {
             continue;
         }
@@ -509,6 +527,67 @@ fn proves_local(
         }
     }
     false
+}
+
+/// The supertypes the materialized class `sub` names declares, at the type arguments `sub`
+/// applies to the class. `None` when `sub` is not a materialized local class.
+fn applied_local_supertypes(
+    classes: &HashMap<LocalIdentity, MaterializedLocalClass>,
+    sub: Ty,
+) -> Option<Vec<Ty>> {
+    let TyKind::Obj(name, arguments) = sub.kind() else {
+        return None;
+    };
+    let local = classes.values().find(|class| class.classifier == name)?;
+    if arguments.len() != local.formals.len() {
+        return None;
+    }
+    let mut bindings = HashMap::default();
+    for (formal, argument) in local.formals.iter().zip(arguments.iter()) {
+        let TyKind::TyParam(identity, _) = formal.kind() else {
+            return None;
+        };
+        bindings.insert(identity.as_str().to_owned(), *argument);
+    }
+    Some(
+        local
+            .supertypes
+            .iter()
+            .map(|declared| crate::types::ty_subst_applied_arguments(*declared, &bindings))
+            .collect(),
+    )
+}
+
+/// `owner` as the non-null `sub` applies it: `sub` itself, or the supertype a materialized local
+/// class's hierarchy applies, ending at one the calling compilation's class model applies.
+pub(super) fn applied_supertype(
+    classes: &HashMap<LocalIdentity, MaterializedLocalClass>,
+    sub: Ty,
+    owner: TypeName,
+    public: &dyn Fn(Ty, TypeName) -> Option<Ty>,
+) -> Option<Ty> {
+    applied_local_supertype(classes, sub, owner, public, 0)
+}
+
+fn applied_local_supertype(
+    classes: &HashMap<LocalIdentity, MaterializedLocalClass>,
+    sub: Ty,
+    owner: TypeName,
+    public: &dyn Fn(Ty, TypeName) -> Option<Ty>,
+    depth: u8,
+) -> Option<Ty> {
+    if depth == 8 {
+        return None;
+    }
+    if sub.kotlin_class_internal() == Some(owner) {
+        return Some(sub);
+    }
+    let Some(supertypes) = applied_local_supertypes(classes, sub) else {
+        return public(sub, owner);
+    };
+    supertypes
+        .into_iter()
+        .find_map(|applied| applied_local_supertype(classes, applied, owner, public, depth + 1))
 }
 
 /// The call shape of a member already declared for `class`.
@@ -711,7 +790,8 @@ fn prepare_class<'a>(
     if constructors.len() != 1 || constructors[0].base.symbol.signature != *signature {
         return Err(unsupported("a non-public class with another constructor"));
     }
-    delegates_to_any(arena, &class.base.symbol, function, source.validate_root)?;
+    let delegation =
+        superclass_delegation(arena, &class.base.symbol, function, source.validate_root)?;
     let resolve = |signature: &KlibIrSignature| classifier(source.bodies, source.module, signature);
     let ClassFormals {
         types,
@@ -719,8 +799,12 @@ fn prepare_class<'a>(
         variances,
         bounds,
     } = formals;
-    let (supertypes, interfaces) =
-        authenticate_supertypes(source.bodies, source.module, arena, class, &types, &resolve)?;
+    let AuthenticatedSupertypes {
+        supertypes,
+        interfaces,
+        superclass,
+        library_superclass,
+    } = authenticate_supertypes(source.bodies, source.module, arena, class, &types, &resolve)?;
     let self_type = Ty::obj_args_name(class_name, &formals);
     let result = semantic_type_in(arena, &types, function.return_type, &resolve)?;
     if result != self_type {
@@ -744,6 +828,7 @@ fn prepare_class<'a>(
         declarations: source.declarations,
         module: source.module,
         interfaces: &interfaces,
+        library_superclass: library_superclass.as_ref(),
     };
     let StoredMembers {
         mut fields,
@@ -802,6 +887,16 @@ fn prepare_class<'a>(
         (None, None) => None,
         _ => return Err(mismatch("an inner class constructor has no outer instance")),
     };
+    let superclass = local_superclass(
+        source,
+        LocalDelegation {
+            arena,
+            function,
+            delegation,
+            superclass,
+            outer: outer_instance,
+        },
+    )?;
     let class_type_parameters = formals
         .iter()
         .map(|formal| match formal.kind() {
@@ -854,7 +949,121 @@ fn prepare_class<'a>(
         steps,
         members,
         outer: outer_instance,
+        superclass,
+        open: declaration_modality(class.base.flags) != KotlinModality::Final,
     })
+}
+
+/// A class's constructor delegation to the constructor of its same-library superclass, and what
+/// it checks that delegation against.
+struct LocalDelegation<'a, 'o> {
+    arena: &'a KlibIrArena,
+    function: &'a KlibIrFunction,
+    delegation: Option<&'a KlibIrMemberAccess>,
+    superclass: Option<TypeName>,
+    outer: Option<OuterInstance<'o>>,
+}
+
+/// The same-library superclass a class's constructor delegates to, with the constructor slot of
+/// each argument it passes. The delegation passes the constructor's own parameters, an inner
+/// class its outer instance among them; any other argument keeps the class unsupported.
+fn local_superclass<'a>(
+    source: LocalClassSource<'a, '_>,
+    delegation: LocalDelegation<'a, '_>,
+) -> Result<Option<LocalSuperclass<'a>>, KlibBodyDeclineReason> {
+    let LocalDelegation {
+        arena,
+        function,
+        delegation,
+        superclass,
+        outer,
+    } = delegation;
+    let (access, superclass) = match (delegation, superclass) {
+        (None, None) => return Ok(None),
+        (Some(access), Some(superclass)) => (access, superclass),
+        _ => {
+            return Err(mismatch(
+                "a constructor delegates apart from its class's superclass",
+            ))
+        }
+    };
+    let constructor = match source
+        .bodies
+        .module_local_function(source.module, &access.symbol.signature)
+    {
+        Some((super_arena, super_function)) => {
+            let super_class = constructor_class(super_arena, super_function)?;
+            if classifier(source.bodies, source.module, &super_class)? != Some(superclass) {
+                return Err(mismatch(
+                    "a constructor delegates to another class than its superclass",
+                ));
+            }
+            SuperclassConstructor::Local(&access.symbol.signature)
+        }
+        None => match &access.symbol.signature {
+            // A library superclass's constructor is published; the linker proves its class.
+            KlibIrSignature::Public(signature) => SuperclassConstructor::Library {
+                signature,
+                classifier: superclass,
+            },
+            _ => {
+                return Err(mismatch(
+                    "a superclass constructor has no linkable signature",
+                ))
+            }
+        },
+    };
+    let prefix = u32::from(outer.is_some());
+    let slot = |symbol: &KlibIrSymbol| -> Option<u32> {
+        if let Some(outer) = outer {
+            let receiver = function.dispatch_receiver.as_ref();
+            if symbol == outer.symbol || receiver.is_some_and(|r| &r.base.symbol == symbol) {
+                return Some(1);
+            }
+        }
+        function
+            .regular_parameters
+            .iter()
+            .position(|parameter| &parameter.base.symbol == symbol)
+            .map(|index| 1 + prefix + u32::try_from(index).expect("a parameter index fits u32"))
+    };
+    let arguments = match &access.arguments {
+        KlibIrArguments::Flat(values) => values.clone(),
+        KlibIrArguments::Split {
+            dispatch_receiver,
+            extension_receiver: None,
+            values,
+        } => dispatch_receiver
+            .iter()
+            .map(|receiver| Some(*receiver))
+            .chain(values.iter().copied())
+            .collect(),
+        KlibIrArguments::Split { .. } => {
+            return Err(mismatch(
+                "a superclass delegation passes an extension receiver",
+            ))
+        }
+    };
+    let operands = arguments
+        .into_iter()
+        .map(|argument| {
+            let argument = argument.ok_or(unsupported(
+                "a superclass delegation leaving a parameter to its default",
+            ))?;
+            match &arena.expr(argument).kind {
+                KlibIrExprKind::GetValue { symbol, .. } => slot(symbol).ok_or(unsupported(
+                    "a superclass constructor argument other than a constructor parameter",
+                )),
+                _ => Err(unsupported(
+                    "a superclass constructor argument other than a constructor parameter",
+                )),
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(LocalSuperclass {
+        constructor,
+        operands,
+    }))
 }
 
 fn authenticate_supertypes(
@@ -864,9 +1073,11 @@ fn authenticate_supertypes(
     class: &KlibIrClass,
     types: &KlibTypeParameters,
     resolve: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
-) -> Result<(Vec<Ty>, Vec<AdmittedInterface>), KlibBodyDeclineReason> {
+) -> Result<AuthenticatedSupertypes, KlibBodyDeclineReason> {
     let mut supertypes = Vec::new();
     let mut interfaces = Vec::new();
+    let mut superclass = None;
+    let mut library_superclass = None;
     for supertype in &class.supertypes {
         let ty = semantic_type_in(arena, types, *supertype, resolve)?;
         if ty == Ty::obj_name(crate::types::wk::any()) {
@@ -876,6 +1087,14 @@ fn authenticate_supertypes(
         let KlibIrType::Simple { classifier, .. } = arena.ty(*supertype) else {
             return Err(unsupported("a superclass other than Any"));
         };
+        // A same-library class is the superclass, which the class's constructor delegates to.
+        if let Some(local) = resolve(&classifier.signature)? {
+            if superclass.replace(local).is_some() {
+                return Err(mismatch("a class lists two superclasses"));
+            }
+            supertypes.push(ty);
+            continue;
+        }
         let KlibIrSignature::Public(signature) = &classifier.signature else {
             return Err(unsupported("a non-public supertype"));
         };
@@ -887,6 +1106,23 @@ fn authenticate_supertypes(
             }
             LocatedClass::Several => return Err(mismatch("two libraries serialize one supertype")),
             LocatedClass::One(found) => {
+                // A library class is the superclass, which the unit materializes from its own
+                // initialization when the class's constructor delegates to it.
+                if class_kind(found.base.flags) == TypeKind::Class {
+                    let TyKind::Obj(name, _) = ty.kind() else {
+                        return Err(mismatch("a superclass is not a class"));
+                    };
+                    if superclass.replace(name).is_some() {
+                        return Err(mismatch("a class lists two superclasses"));
+                    }
+                    library_superclass = Some(AdmittedInterface {
+                        name,
+                        signature: classifier.signature.clone(),
+                        arguments: ty.type_args().to_vec(),
+                    });
+                    supertypes.push(ty);
+                    continue;
+                }
                 if class_kind(found.base.flags) != TypeKind::Interface {
                     return Err(unsupported("a superclass other than Any"));
                 }
@@ -902,7 +1138,12 @@ fn authenticate_supertypes(
             }
         }
     }
-    Ok((supertypes, interfaces))
+    Ok(AuthenticatedSupertypes {
+        supertypes,
+        interfaces,
+        superclass,
+        library_superclass,
+    })
 }
 
 struct StoredMembers<'a> {
@@ -920,6 +1161,7 @@ struct MemberScope<'a> {
     declarations: &'a dyn crate::symbol_source::SymbolSource,
     module: &'a str,
     interfaces: &'a [AdmittedInterface],
+    library_superclass: Option<&'a AdmittedInterface>,
 }
 
 fn members_and_storage<'a>(
@@ -1021,10 +1263,15 @@ fn member_overrides(
                 "an override of a declaration other than a function",
             ));
         }
-        let KlibIrSignature::Public(signature) = &symbol.signature else {
-            return Err(unsupported("an override of a non-public declaration"));
+        let declaration = match &symbol.signature {
+            KlibIrSignature::Public(signature) => {
+                KlibDeclarationSignature::Public(signature.clone())
+            }
+            KlibIrSignature::Accessor(accessor) => {
+                KlibDeclarationSignature::Accessor(accessor.clone())
+            }
+            _ => return Err(unsupported("an override of a non-public declaration")),
         };
-        let declaration = KlibDeclarationSignature::Public(signature.clone());
         let identity = match scope.bodies.linked_origin(scope.module, &declaration) {
             KlibCalleeOrigin::Exact(identity) => identity,
             KlibCalleeOrigin::Missing => {
@@ -1044,13 +1291,21 @@ fn member_overrides(
                 "an override this library does not authenticate",
             ));
         };
-        let KlibDeclarationSignature::Public(owner_signature) = &identity.declaration else {
-            return Err(unsupported("an override of a non-public declaration"));
+        let owner_signature = match &identity.declaration {
+            KlibDeclarationSignature::Public(signature) => {
+                KlibIrSignature::Public(signature.clone())
+            }
+            KlibDeclarationSignature::Accessor(accessor) => {
+                KlibIrSignature::Accessor(accessor.clone())
+            }
+            KlibDeclarationSignature::FileLocal { .. } => {
+                return Err(unsupported("an override of a non-public declaration"))
+            }
         };
-        let (owner_arena, owner, declared) = match scope.bodies.function_owner(
-            &identity.module,
-            &KlibIrSignature::Public(owner_signature.clone()),
-        ) {
+        let (owner_arena, owner, declared) = match scope
+            .bodies
+            .function_owner(&identity.module, &owner_signature)
+        {
             LocatedMember::One {
                 module: owner_module,
                 arena,
@@ -1104,6 +1359,13 @@ fn member_overrides(
             (interface.name, interface.arguments.as_slice())
         } else if metadata_owner == crate::types::wk::any() {
             (metadata_owner, &[][..])
+        } else if let Some(superclass) = scope
+            .library_superclass
+            .filter(|superclass| superclass.signature == owner.base.symbol.signature)
+        {
+            // A member the library superclass declares, a fake override included, applied as
+            // the class applies its superclass.
+            (superclass.name, superclass.arguments.as_slice())
         } else {
             return Err(unsupported("an override of a class member"));
         };
@@ -1296,12 +1558,14 @@ fn constructor_parameters(
     })
 }
 
-fn delegates_to_any(
-    arena: &KlibIrArena,
+/// The superclass constructor a primary constructor delegates to before initializing its own
+/// instance: `None` for `Any`'s, or the delegation to a same-library superclass.
+fn superclass_delegation<'a>(
+    arena: &'a KlibIrArena,
     class_symbol: &KlibIrSymbol,
-    function: &KlibIrFunction,
+    function: &'a KlibIrFunction,
     validate_root: &dyn Fn(&KlibPublicIdSignature) -> Result<(), KlibBodyDeclineReason>,
-) -> Result<(), KlibBodyDeclineReason> {
+) -> Result<Option<&'a KlibIrMemberAccess>, KlibBodyDeclineReason> {
     let Some(KlibIrBody::Block(statements)) = &function.body else {
         return Err(unsupported("a nontrivial primary constructor body"));
     };
@@ -1315,6 +1579,25 @@ fn delegates_to_any(
             "a primary constructor does not delegate before initialization",
         ));
     };
+    if access.symbol.kind != KlibIrSymbolKind::Constructor
+        || !matches!(
+            &arena.expr(*initialize).kind,
+            KlibIrExprKind::InstanceInitializerCall(class) if class == class_symbol
+        )
+    {
+        return Err(mismatch(
+            "an ordinary class does not delegate to a superclass and initialize its own instance",
+        ));
+    }
+    let root = match &access.symbol.signature {
+        KlibIrSignature::Public(signature) => {
+            super::ir_builtins::root_constructor(signature, || validate_root(signature))?
+        }
+        _ => false,
+    };
+    if !root {
+        return Ok(Some(access));
+    }
     let no_operands = match &access.arguments {
         KlibIrArguments::Flat(values) => values.is_empty(),
         KlibIrArguments::Split {
@@ -1323,26 +1606,12 @@ fn delegates_to_any(
             values,
         } => dispatch_receiver.is_none() && extension_receiver.is_none() && values.is_empty(),
     };
-    let root = match &access.symbol.signature {
-        KlibIrSignature::Public(signature) => {
-            super::ir_builtins::root_constructor(signature, || validate_root(signature))?
-        }
-        _ => false,
-    };
-    if access.symbol.kind != KlibIrSymbolKind::Constructor
-        || !no_operands
-        || !access.type_arguments.is_empty()
-        || !root
-        || !matches!(
-            &arena.expr(*initialize).kind,
-            KlibIrExprKind::InstanceInitializerCall(class) if class == class_symbol
-        )
-    {
+    if !no_operands || !access.type_arguments.is_empty() {
         return Err(mismatch(
             "an ordinary class does not delegate to Any and initialize its own instance",
         ));
     }
-    Ok(())
+    Ok(None)
 }
 
 fn mismatch(detail: &str) -> KlibBodyDeclineReason {
@@ -1385,6 +1654,7 @@ pub(super) fn installed_class(prepared: &PreparedLocalClass<'_>) -> IrClass {
     class.ctor_args = prepared.ctor_args.clone();
     class.ctor_param_count = 0;
     class.explicit_param_stores = true;
+    class.is_open = prepared.open;
     if let Some(outer) = &prepared.outer {
         class.is_inner_class = true;
         class.constructor_prefix_count = 1;
