@@ -12,10 +12,8 @@ fn a_mapped_atomic_keeps_its_kotlin_modality_and_constructors() {
                   class Counter : AtomicInt(0)\n\
                   fun empty() = AtomicInt()\n";
     let stdlib = common::stdlib_jar();
-    let result = common::compiler_diagnostics(
-        &[("Atomics.kt", source)],
-        std::slice::from_ref(&stdlib),
-    );
+    let result =
+        common::compiler_diagnostics(&[("Atomics.kt", source)], std::slice::from_ref(&stdlib));
 
     assert_ne!(result.krusty_code, 0, "krusty silently accepted source");
     assert_ne!(
