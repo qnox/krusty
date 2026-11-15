@@ -224,7 +224,7 @@ mod tests {
     fn class_directories_stand_in_for_a_jar_the_build_did_not_produce() {
         let tree = TempTree::new("ij-classes-stand-in");
         let (module, classes, jar) = module_with(&tree, false, true);
-        let realized = realize_direct(&[jar.clone()], std::slice::from_ref(&module));
+        let realized = realize_direct(std::slice::from_ref(&jar), std::slice::from_ref(&module));
         assert_eq!(realized, vec![classes]);
         assert_eq!(dependency_classpath_entries(&module), realized);
     }
@@ -237,7 +237,10 @@ mod tests {
         std::fs::write(&jar, "jar").unwrap();
         let marker = PathBuf::from(format!("{}.lastUpdated", jar.display()));
         std::fs::write(&marker, "marker").unwrap();
-        assert_eq!(realize_direct(&[marker.clone()], &[]), vec![jar]);
+        assert_eq!(
+            realize_direct(std::slice::from_ref(&marker), &[]),
+            vec![jar]
+        );
 
         let absent = tree.path("m2/missing.jar.lastUpdated");
         std::fs::write(&absent, "marker").unwrap();
