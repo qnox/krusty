@@ -4,8 +4,9 @@
 //! kotlinc as its oracle: that compiler still miscompiles the program. The directive bounds the
 //! reference releases the case applies to, in interval notation with either bound optional:
 //! `[2.5.0,)` (from 2.5.0), `[2.4.0,2.5.0)` (2.4.x only), `(,2.5.0]`. A bare version, `2.5.0`, is
-//! the same as `[2.5.0,)`. Bounds compare `major.minor.patch` only, so a release candidate of
-//! 2.5.0 is inside `[2.5.0,)`, as it is for a [`crate::kotlin_version::Quirk`] fixed in 2.5.0.
+//! the same as `[2.5.0,)`. A bound is a plain `major.minor.patch` and compares only that, so a
+//! release candidate of 2.5.0 is inside `[2.5.0,)`, as it is for a
+//! [`crate::kotlin_version::Quirk`] fixed in 2.5.0.
 
 use crate::kotlin_version::KotlinVersion;
 
@@ -33,7 +34,18 @@ impl ReleaseRange {
                 "`// {DIRECTIVE}: {payload}` is not a version or an interval such as `[2.5.0,)`"
             )
         };
-        let version = |text: &str| KotlinVersion::parse(text).ok_or_else(invalid);
+        // A bound is a plain `major.minor.patch`: it compares only those, so a pre-release
+        // qualifier (`2.5.0-RC`) would promise a distinction the range cannot make.
+        let version = |text: &str| {
+            let plain = text.split('.').count() == 3
+                && text
+                    .split('.')
+                    .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()));
+            plain
+                .then(|| KotlinVersion::parse(text))
+                .flatten()
+                .ok_or_else(invalid)
+        };
         let Some(open) = payload.chars().next().filter(|c| matches!(c, '[' | '(')) else {
             let version = version(payload)?;
             return Ok(Self {
@@ -160,6 +172,7 @@ mod tests {
             "",
             "2.5",
             "2.5.0-RC",
+            "[2.5.0-RC,)",
             "[2.5.0",
             "[,)",
             "[2.5.0;2.6.0)",
