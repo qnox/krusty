@@ -29,6 +29,10 @@ pub struct IrNodePosition {
     /// from a node that carries the statement's start offset itself. Once lowering gives every
     /// node its FIR expression's position this goes, and the JVM line rule reads node kinds only.
     pub statement_line: Option<u32>,
+    /// The line of the call this node replaced, when the node is an array factory's vararg.
+    /// The factory's array instructions are marked at [`Self::source_line`], the first element's
+    /// line. `None` for every other node, including a vararg argument of a call.
+    pub factory_line: Option<u32>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -88,6 +92,7 @@ impl InheritedFacts for IrNodePositions {
             source_line,
             end_line,
             statement_line,
+            factory_line,
         } = self.get(source);
         let copy = self.settle(target);
         for (copied, line) in [
@@ -101,6 +106,9 @@ impl InheritedFacts for IrNodePositions {
         }
         if statement_line.is_some() {
             copy.statement_line = statement_line;
+        }
+        if factory_line.is_some() {
+            copy.factory_line = factory_line;
         }
     }
 }
@@ -118,6 +126,7 @@ impl IrFile {
         position.start_line = None;
         position.source_line = None;
         position.end_line = None;
+        position.factory_line = None;
     }
 
     /// Settle every node in `nodes` that is not settled yet with the start, source and end lines of
@@ -206,6 +215,11 @@ impl IrFile {
         self.positions.get(expression).end_line
     }
 
+    /// The call line an array factory kept after it was replaced by its vararg.
+    pub fn factory_line(&self, expression: ExprId) -> Option<u32> {
+        self.positions.get(expression).factory_line
+    }
+
     pub fn set_source_line(&mut self, expression: ExprId, line: u32) {
         self.positions.settle(expression).source_line = Some(line);
     }
@@ -220,6 +234,10 @@ impl IrFile {
             .settle(expression)
             .start_line
             .get_or_insert(line);
+    }
+
+    pub fn set_factory_line(&mut self, expression: ExprId, line: u32) {
+        self.positions.settle(expression).factory_line = Some(line);
     }
 
     /// Give `expression` the source line `line` unless it already has one.
@@ -299,6 +317,7 @@ mod tests {
             source_line: Some(line),
             end_line: Some(line + 1),
             statement_line: None,
+            factory_line: None,
         }
     }
 
@@ -324,6 +343,7 @@ mod tests {
                 source_line: Some(2),
                 end_line: None,
                 statement_line: None,
+                factory_line: None,
             }
         );
         assert_eq!(ir.position(positionless as u32), IrNodePosition::default());
