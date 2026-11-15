@@ -58,6 +58,25 @@ pub(crate) enum LocatedMember<'a> {
     },
 }
 
+/// The top-level property that declares one backing field, and the arena that owns both.
+pub(crate) enum LocatedStaticField<'a> {
+    Missing,
+    Several,
+    One {
+        arena: &'a KlibIrArena,
+        property: &'a crate::metadata::klib_ir::tree::KlibIrProperty,
+        field: &'a crate::metadata::klib_ir::tree::KlibIrField,
+    },
+}
+
+/// A top-level property whose backing field a file's initialization stores by running code.
+pub(crate) struct StaticFieldInitializer<'a> {
+    pub(crate) arena: &'a KlibIrArena,
+    pub(crate) property: &'a crate::metadata::klib_ir::tree::KlibIrProperty,
+    pub(crate) field: &'a crate::metadata::klib_ir::tree::KlibIrField,
+    pub(crate) initializer: crate::metadata::klib_ir::tree::KlibIrExprId,
+}
+
 pub(crate) struct KlibClassMember<'a> {
     pub(crate) arena: &'a KlibIrArena,
     pub(crate) class: &'a crate::metadata::klib_ir::tree::KlibIrClass,
@@ -601,6 +620,174 @@ impl KlibDeclarationBodies {
         self.libraries[library].local_function(signature)
     }
 
+    /// The top-level property whose accessor is exactly `identity`, with the arena that owns it,
+    /// and whether that accessor is its setter. The property is the one the accessor's signature
+    /// names, and the accessor sits in the slot of its shape: a getter without value parameters,
+    /// a setter with one. A function signature matching an accessor slot of another property
+    /// proves nothing.
+    pub(crate) fn top_level_accessor_property(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Result<
+        Option<(
+            &KlibIrArena,
+            &crate::metadata::klib_ir::tree::KlibIrProperty,
+            bool,
+        )>,
+        &'static str,
+    > {
+        let KlibDeclarationSignature::Accessor(accessor) = &identity.declaration else {
+            return Ok(None);
+        };
+        let signature = ir_signature(&identity.declaration);
+        let Some(&library) = self
+            .owners
+            .get(&(identity.module.clone(), signature.clone()))
+        else {
+            return Ok(None);
+        };
+        let property_signature = KlibIrSignature::Public(accessor.property().clone());
+        let mut found = None;
+        for tree in self.libraries[library].trees() {
+            let KlibIrMember::Property(property) = &tree.declaration else {
+                continue;
+            };
+            if property.base.symbol.kind != KlibIrSymbolKind::Property
+                || property.base.symbol.signature != property_signature
+            {
+                continue;
+            }
+            let slot = |accessor: Option<crate::metadata::klib_ir::tree::KlibIrFunctionId>,
+                        parameters: usize| {
+                accessor.is_some_and(|id| {
+                    let function = tree.arena.function(id);
+                    function.base.symbol.signature == signature
+                        && function.regular_parameters.len() == parameters
+                })
+            };
+            for setter in [false, true].into_iter().filter(|&setter| {
+                if setter {
+                    slot(property.setter, 1)
+                } else {
+                    slot(property.getter, 0)
+                }
+            }) {
+                if found.replace((&tree.arena, property, setter)).is_some() {
+                    return Err(
+                        "the serialized accessor is not a unique top-level property member",
+                    );
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// Whether initializing the serialized file `file` of `module` runs no code: every top-level
+    /// backing field of that file is initialized with a constant or not at all. A top-level
+    /// backing field whose identity names no file leaves every file's initialization unproven.
+    pub(crate) fn module_file_initialization_is_inert(&self, module: &str, file: u32) -> bool {
+        let Some(&library) = self.modules.get(module) else {
+            return false;
+        };
+        self.libraries[library].trees().iter().all(|tree| {
+            let KlibIrMember::Property(property) = &tree.declaration else {
+                return true;
+            };
+            let Some(backing) = &property.backing_field else {
+                return true;
+            };
+            match backing.base.symbol.signature {
+                KlibIrSignature::FileLocal { file: declared, .. } if declared != file => true,
+                KlibIrSignature::FileLocal { .. } => {
+                    backing.initializer.is_none_or(|initializer| {
+                        matches!(tree.arena.expr(initializer).kind, KlibIrExprKind::Const(_))
+                    })
+                }
+                KlibIrSignature::Public(_) | KlibIrSignature::Accessor(_) => false,
+            }
+        })
+    }
+
+    /// The serialized file of `identity` when it is a top-level function or a top-level property
+    /// accessor of its library: the file whose initialization a call of it runs first.
+    pub(crate) fn top_level_file(&self, identity: &KlibDependencyCallable) -> Option<u32> {
+        let signature = ir_signature(&identity.declaration);
+        let library = match identity.declaration {
+            KlibDeclarationSignature::FileLocal { .. } => *self.modules.get(&identity.module)?,
+            KlibDeclarationSignature::Public(_) | KlibDeclarationSignature::Accessor(_) => *self
+                .owners
+                .get(&(identity.module.clone(), signature.clone()))?,
+        };
+        self.libraries[library].top_level_file(&signature)
+    }
+
+    /// The top-level properties of the serialized file `file` of `module` whose backing field is
+    /// initialized by running code, in declaration order: what initializing that file runs.
+    pub(crate) fn module_file_initializers<'a>(
+        &'a self,
+        module: &str,
+        file: u32,
+    ) -> Vec<StaticFieldInitializer<'a>> {
+        let Some(&library) = self.modules.get(module) else {
+            return Vec::new();
+        };
+        self.libraries[library]
+            .trees_with_files()
+            .filter(|&(declared, _)| declared == file)
+            .filter_map(|(_, tree)| {
+                let KlibIrMember::Property(property) = &tree.declaration else {
+                    return None;
+                };
+                let field = property.backing_field.as_ref()?;
+                let initializer = field.initializer?;
+                (!matches!(tree.arena.expr(initializer).kind, KlibIrExprKind::Const(_))).then_some(
+                    StaticFieldInitializer {
+                        arena: &tree.arena,
+                        property,
+                        field,
+                        initializer,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// The top-level property `module` itself serializes whose backing field is `field`.
+    ///
+    /// A backing field is read only by bodies of its own library, so producer dependencies are
+    /// not searched.
+    pub(crate) fn module_static_field<'a>(
+        &'a self,
+        module: &str,
+        field: &KlibIrSymbol,
+    ) -> LocatedStaticField<'a> {
+        let Some(&library) = self.modules.get(module) else {
+            return LocatedStaticField::Missing;
+        };
+        let mut found = LocatedStaticField::Missing;
+        for tree in self.libraries[library].trees() {
+            let KlibIrMember::Property(property) = &tree.declaration else {
+                continue;
+            };
+            let Some(backing) = property
+                .backing_field
+                .as_ref()
+                .filter(|backing| backing.base.symbol == *field)
+            else {
+                continue;
+            };
+            if !matches!(found, LocatedStaticField::Missing) {
+                return LocatedStaticField::Several;
+            }
+            found = LocatedStaticField::One {
+                arena: &tree.arena,
+                property,
+                field: backing,
+            };
+        }
+        found
+    }
+
     /// The class in `module` that declares the file-local function `signature` directly.
     pub(crate) fn module_class_declaring<'a>(
         &'a self,
@@ -742,6 +929,17 @@ impl KlibDeclarationBodies {
             return Vec::new();
         };
         let mut symbols = arena.emitted_callable_symbols(function, forms);
+        // A top-level function first runs its file's initialization, which evaluates the
+        // initializers of that file's properties that run code.
+        if let Some(file) = self.top_level_file(identity) {
+            for initializer in self.module_file_initializers(&identity.module, file) {
+                symbols.extend(
+                    initializer
+                        .arena
+                        .emitted_callable_symbols_from(vec![initializer.initializer], forms),
+                );
+            }
+        }
         // A file-local class the body constructs, an object literal's among them, is
         // materialized with the body, every member included, since dispatch can run any of them.
         // A private class of the same file is its own declaration tree, so its members are read
@@ -752,10 +950,9 @@ impl KlibDeclarationBodies {
             next += 1;
             if let Some((class_arena, class)) = constructed_local_class(trees, symbol) {
                 if classes.insert(&class.base.symbol) {
-                    symbols.extend(class_arena.emitted_callable_symbols_from(
-                        class_arena.class_member_roots(class),
-                        forms,
-                    ));
+                    let mut roots = class_arena.class_member_roots(class);
+                    roots.extend(class_arena.class_superclass_delegations(class));
+                    symbols.extend(class_arena.emitted_callable_symbols_from(roots, forms));
                 }
             }
         }

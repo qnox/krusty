@@ -867,6 +867,7 @@ fn select_adapted_bound_instance_candidate(
             } else {
                 0
             };
+            let declared = candidate.semantic_params().into_owned();
             let type_arguments = specialize_candidate_with_type_arguments(
                 source,
                 &mut candidate,
@@ -898,7 +899,7 @@ fn select_adapted_bound_instance_candidate(
             ) {
                 return None;
             }
-            Some((candidate, plan, type_arguments))
+            Some((candidate, plan, type_arguments, declared))
         })
         .collect::<Vec<_>>();
     let nearest = candidates
@@ -907,11 +908,12 @@ fn select_adapted_bound_instance_candidate(
         .min()?;
     candidates.retain(|candidate| candidate.0.receiver_rank == nearest);
     // Providers may expose one inherited declaration through multiple hierarchy paths. Those are
-    // duplicate facts; distinct semantic signatures remain overload candidates.
-    let mut unique = Vec::<(FunctionInfo, Vec<AdaptedRefArgument>, Vec<Ty>)>::new();
+    // duplicate facts; distinct declared signatures remain overload candidates, even when this
+    // expected shape instantiates them alike (`pick(x: T)` and `pick(x: Holder<T>)`).
+    let mut unique = Vec::<(FunctionInfo, Vec<AdaptedRefArgument>, Vec<Ty>, Vec<Ty>)>::new();
     for candidate in candidates {
         if unique.iter().any(|existing| {
-            existing.0.semantic_params() == candidate.0.semantic_params()
+            existing.3 == candidate.3
                 && existing.0.callable.ret == candidate.0.callable.ret
                 && existing.0.callable.suspend == candidate.0.callable.suspend
         }) {
@@ -919,19 +921,26 @@ fn select_adapted_bound_instance_candidate(
         }
         unique.push(candidate);
     }
+    let declared_shapes = unique
+        .iter()
+        .map(|candidate| erased_declared_parameters(&candidate.3))
+        .collect::<Vec<_>>();
     let specificity = unique
         .iter()
-        .map(|(candidate, plan, _)| AdaptedReferenceSpecificity {
-            parameters: &candidate.callable.params,
-            plan,
-            is_vararg: candidate.call_sig.vararg_index.is_some(),
-        })
+        .zip(&declared_shapes)
+        .map(
+            |((candidate, plan, ..), parameters)| AdaptedReferenceSpecificity {
+                parameters,
+                plan,
+                is_vararg: candidate.call_sig.vararg_index.is_some(),
+            },
+        )
         .collect::<Vec<_>>();
     let maximal = maximal_adapted_references(&specificity, shape_at_least_as_specific);
     let [selected] = maximal.as_slice() else {
         return None;
     };
-    let (selected, plan, type_arguments) = unique.swap_remove(*selected);
+    let (selected, plan, type_arguments, _) = unique.swap_remove(*selected);
     Some((selected, plan, type_arguments))
 }
 

@@ -97,8 +97,15 @@ pub(crate) struct LaidOutClasses {
 impl LaidOutClasses {
     /// Begin (or continue) one source module's file, or with `support` a dependency support unit
     /// it selected, forgetting another module's classes.
+    ///
+    /// A support unit is named apart from the source module that selected it, and it is lowered
+    /// between that module's files. It is not a new source module: rotating the registry to its
+    /// name would discard the classes those files already laid out, which a later file extends.
     pub(crate) fn enter_source_module(&mut self, module_name: &str, support: bool) {
         self.support = support;
+        if support {
+            return;
+        }
         if self.source_module.as_deref() != Some(module_name) {
             self.source_module = Some(module_name.to_owned());
             self.classes.clear();
@@ -119,5 +126,48 @@ impl LaidOutClasses {
         } else {
             self.classes.insert(class, laid_out);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LaidOutClass, LaidOutClasses, ObjectFunction};
+    use krusty::backend::class_tables::LaidOutSuperclass;
+    use krusty::types::type_name;
+
+    fn record() -> LaidOutClass {
+        LaidOutClass {
+            table: LaidOutSuperclass::default(),
+            descriptor: String::new(),
+            fields_end: 0,
+            reference_offsets: Vec::new(),
+            vtable: Vec::new(),
+            interface_bodies: krusty::fx_hash::HashMap::default(),
+            constructors: Vec::new(),
+            methods: krusty::fx_hash::HashMap::default(),
+            activation: ObjectFunction::Local(String::new()),
+            dependency_implementations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_support_unit_keeps_classes_the_source_module_already_laid_out() {
+        let mut laid_out = LaidOutClasses::default();
+        let strings = type_name("demo/Strings");
+        laid_out.enter_source_module("main", false);
+        laid_out.insert(strings, record());
+
+        laid_out.enter_source_module("main$klib_body$main$0", true);
+        assert!(laid_out.get(strings).is_some());
+        let array_list = type_name("kotlin/collections/ArrayList");
+        laid_out.insert(array_list, record());
+
+        laid_out.enter_source_module("main", false);
+        assert!(laid_out.get(strings).is_some());
+        assert!(laid_out.get(array_list).is_some());
+
+        laid_out.enter_source_module("other", false);
+        assert!(laid_out.get(strings).is_none());
+        assert!(laid_out.get(array_list).is_some());
     }
 }

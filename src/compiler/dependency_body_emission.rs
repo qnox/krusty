@@ -33,6 +33,8 @@ pub(super) struct DependencySupportState {
     emitted: HashMap<KlibDependencyCallable, PublishedDependency>,
     /// One physical realization per exact logical class; equal names cannot alias producers.
     materialized_classes: HashMap<TypeName, KlibDependencyCallable>,
+    /// One static per top-level property backing field, by its library and field symbol.
+    materialized_statics: HashSet<(String, crate::metadata::klib_ir::KlibIrSymbol)>,
 }
 
 #[derive(Clone, Copy)]
@@ -302,6 +304,20 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         }
+        let statics = unit
+            .materialized_statics()
+            .map(|(module, field)| (module.to_owned(), field.clone()))
+            .collect::<Vec<_>>();
+        if statics
+            .iter()
+            .any(|field| support_state.materialized_statics.contains(field))
+        {
+            diags.error(
+                Span::new(0, 0),
+                "cannot store a dependency property twice in separate dependency support units",
+            );
+            return Vec::new();
+        }
         let mut exports = DependencyExportSignatures::default();
         let closed = unit
             .callable_functions()
@@ -481,6 +497,7 @@ pub(super) fn emit_dependencies<B: Backend>(
         }
         support_state.emitted.extend(published);
         support_state.materialized_classes.extend(materialized);
+        support_state.materialized_statics.extend(statics);
         artifacts.extend(outputs);
     }
     artifacts

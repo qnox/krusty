@@ -81,9 +81,21 @@ impl Body<'_> {
                 let (Some(receiver), [index]) = (receiver, args) else {
                     return Err("a malformed string read".to_string());
                 };
+                // Kotlin's `String.get` throws for an index outside the string, whatever the
+                // array bounds policy.
+                let (chars, offset) = (
+                    self.local(ValType::reference(self.runtime.chars)),
+                    self.local(ValType::I32),
+                );
                 self.string_storage(receiver)?;
+                self.code.local_set(chars);
                 self.value(*index, Ty::Int)?;
-                self.code.array_get_u(self.runtime.chars);
+                self.code.local_tee(offset).local_get(chars).array_len();
+                self.throw_unless_index_below()?;
+                self.code
+                    .local_get(chars)
+                    .local_get(offset)
+                    .array_get_u(self.runtime.chars);
                 Ok(())
             }
             IrIntrinsic::UnsignedToString { source } => {
@@ -113,7 +125,7 @@ impl Body<'_> {
                 };
                 self.generated_property_equals(*left, *right, ty)
             }
-            IrIntrinsic::DataClassArrayToString { ty } => {
+            IrIntrinsic::GeneratedPropertyArrayToString { ty } => {
                 let (None, [value]) = (receiver, args) else {
                     return Err("a malformed generated array rendering".to_string());
                 };

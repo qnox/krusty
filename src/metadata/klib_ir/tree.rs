@@ -236,6 +236,41 @@ fn push_access_arguments(access: &KlibIrMemberAccess, pending: &mut Vec<KlibIrEx
 }
 
 impl KlibIrArena {
+    /// The delegating calls of `class`'s constructors to a superclass constructor other than
+    /// `Any`'s. A constructed object literal passes the calls' arguments where it is constructed,
+    /// so they are emitted with the body that constructs it.
+    pub(crate) fn class_superclass_delegations(&self, class: &KlibIrClass) -> Vec<KlibIrExprId> {
+        let mut roots = Vec::new();
+        for member in &class.members {
+            let KlibIrMember::Function(function) = member else {
+                continue;
+            };
+            let function = self.function(*function);
+            let Some(KlibIrBody::Block(statements)) = &function.body else {
+                continue;
+            };
+            let Some(KlibIrStatement::Expression(first)) = statements.first() else {
+                continue;
+            };
+            let KlibIrExprKind::DelegatingConstructorCall(access) = &self.expr(*first).kind else {
+                continue;
+            };
+            let crate::metadata::klib_ir::KlibIrSignature::Public(callee) =
+                &access.symbol.signature
+            else {
+                continue;
+            };
+            let any = callee.package().segments() == ["kotlin"]
+                && callee.declaration().segments().first().map(String::as_str) == Some("Any");
+            if !any {
+                roots.push(*first);
+            }
+        }
+        roots
+    }
+}
+
+impl KlibIrArena {
     /// The expressions the members of `class` evaluate: member and accessor bodies with their
     /// parameter defaults, field initializers and anonymous initializers. A constructor and a class
     /// nested in `class` are not included.
@@ -844,6 +879,24 @@ pub enum KlibIrMember {
         statements: Vec<KlibIrStatement>,
     },
     TypeAlias(KlibIrTypeAlias),
+}
+
+impl KlibIrMember {
+    /// Whether `function` is this top-level declaration itself or an accessor of the property it
+    /// declares, rather than a member of a class or a function local to a body.
+    pub fn declares_top_level(&self, function: KlibIrFunctionId) -> bool {
+        match self {
+            Self::Function(declared) => *declared == function,
+            Self::Property(property) => {
+                property.getter == Some(function) || property.setter == Some(function)
+            }
+            Self::Field(_)
+            | Self::Class(_)
+            | Self::EnumEntry(_)
+            | Self::AnonymousInitializer { .. }
+            | Self::TypeAlias(_) => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

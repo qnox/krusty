@@ -1,4 +1,5 @@
-//! Declaration-owned instance field coordinates shared by constructor and member bodies.
+//! Declaration-owned field coordinates shared by constructor, member and accessor bodies: the
+//! instance fields of a class, and the static storage of a top-level property.
 
 use super::*;
 use crate::ir::ClassId;
@@ -130,6 +131,21 @@ impl<'a> InstanceStorageFrame<'a> {
         }
     }
 
+    /// A member of an object literal, whose fields hold its captured values first and then the
+    /// `fields` its properties with storage declare, from `first_index`.
+    pub(super) fn object_member(
+        class: ClassId,
+        first_index: u32,
+        fields: impl IntoIterator<Item = (&'a KlibIrSymbol, Ty, bool)>,
+        receiver: Ty,
+    ) -> Self {
+        let mut frame = Self::member(class, fields, Some(receiver), false);
+        for field in &mut frame.fields {
+            field.index += first_index;
+        }
+        frame
+    }
+
     fn field(&self, symbol: &KlibIrSymbol) -> Lowered<Field<'a>> {
         let mut matches = self.fields.iter().filter(|field| field.symbol == symbol);
         let Some(field) = matches.next().copied() else {
@@ -190,6 +206,11 @@ impl<'a> BodyLowering<'a> {
         value: Option<KlibIrExprId>,
         ty: Ty,
     ) -> Lowered<ExprId> {
+        if receiver.is_none() {
+            if let Some(field) = self.linker.static_field(self.ir, symbol)? {
+                return self.static_field(field, value, ty);
+            }
+        }
         let Some(frame) = self.instance_storage.as_ref() else {
             return unsupported(if value.is_some() {
                 "a field write"
@@ -247,5 +268,59 @@ impl<'a> BodyLowering<'a> {
             }
         };
         Ok(self.typed(lowered, ty))
+    }
+
+    /// A read or write of the static storage of a top-level property.
+    fn static_field(
+        &mut self,
+        field: super::StaticField,
+        value: Option<KlibIrExprId>,
+        ty: Ty,
+    ) -> Lowered<ExprId> {
+        let lowered = match value {
+            Some(value) => {
+                if ty != Ty::Unit {
+                    return Err(mismatch("a field store is not typed Unit"));
+                }
+                if !field.writable {
+                    return Err(mismatch("a body writes a final static field"));
+                }
+                let value = self.operand(value, field.ty)?;
+                self.ir.add_expr(IrExpr::SetStatic {
+                    index: field.index,
+                    value,
+                })
+            }
+            None => {
+                if ty != field.ty {
+                    return Err(mismatch(
+                        "a field read disagrees with its declared storage type",
+                    ));
+                }
+                self.ir.add_expr(IrExpr::GetStatic(field.index))
+            }
+        };
+        Ok(self.typed(lowered, ty))
+    }
+
+    /// The body of the function that stores a top-level property's initial value: its serialized
+    /// initializer, evaluated once by its file's initialization and stored in its static.
+    pub(in super::super) fn initialize_static(
+        mut self,
+        field: super::StaticField,
+        initializer: KlibIrExprId,
+    ) -> Lowered<ExprId> {
+        let value = self.operand(initializer, field.ty)?;
+        let store = self.ir.add_expr(IrExpr::SetStatic {
+            index: field.index,
+            value,
+        });
+        self.ir.set_logical_type(store, Ty::Unit);
+        let body = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![store],
+            value: None,
+        });
+        self.ir.callable_scopes.insert(body);
+        Ok(body)
     }
 }
