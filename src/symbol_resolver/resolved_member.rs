@@ -66,6 +66,7 @@ impl ResolvedMember {
         );
         member.physical_name = callable.physical_name;
         member.external_identity = callable.external_identity;
+        member.declaration_owner = callable.declaration_owner;
         member.external_property_identity = callable.external_property_identity;
         member.physical_params = callable.physical_params;
         member.physical_parameter_plan = callable.physical_parameter_plan;

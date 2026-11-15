@@ -67,7 +67,6 @@ arrays/hashMap.kt
 arrays/inProjectionOfList.kt
 arrays/indices.kt
 arrays/indicesChar.kt
-arrays/iterator.kt
 arrays/iteratorBooleanArray.kt
 arrays/iteratorByteArray.kt
 arrays/iteratorByteArrayNextByte.kt
@@ -78,7 +77,6 @@ arrays/iteratorIntArray.kt
 arrays/iteratorLongArray.kt
 arrays/iteratorLongArrayNextLong.kt
 arrays/iteratorShortArray.kt
-arrays/kt1291.kt
 arrays/kt2997.kt
 arrays/kt33.kt
 arrays/kt4118.kt
