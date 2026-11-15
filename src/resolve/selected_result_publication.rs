@@ -240,11 +240,9 @@ impl CompactSelectedResultPublication {
         for argument in declared.arguments().iter() {
             collect_type_parameters(*argument, &mut mentioned);
         }
-        let unbound = mentioned
-            .iter()
-            .any(|parameter| {
-                formals.contains(parameter) && !bindings.contains_key(parameter.as_str())
-            });
+        let unbound = mentioned.iter().any(|parameter| {
+            formals.contains(parameter) && !bindings.contains_key(parameter.as_str())
+        });
         (!unbound).then(|| {
             declared.substituted(|application| crate::types::ty_subst(application, &bindings))
         })
@@ -252,7 +250,12 @@ impl CompactSelectedResultPublication {
 
     /// The type parameters selection binds: the callable's own, then those of its declared
     /// receiver that the callable does not declare.
-    fn formals(&self) -> (Vec<crate::types::TyParamName>, Vec<crate::types::TyParamName>) {
+    fn formals(
+        &self,
+    ) -> (
+        Vec<crate::types::TyParamName>,
+        Vec<crate::types::TyParamName>,
+    ) {
         let callable_formals = self
             .signature
             .as_ref()
