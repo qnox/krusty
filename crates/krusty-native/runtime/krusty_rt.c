@@ -861,6 +861,30 @@ kt_boolean kt_string_contains(KRef self, KRef other) {
     return 0;
 }
 
+/* Whether `length` UTF-16 units of `self` from `self_offset` equal those of `other` from
+   `other_offset`: Kotlin/Native's `Kotlin_String_unsafeRangeEquals`, which `regionMatches` calls
+   once it has checked both ranges against their strings' lengths. It walks units rather than
+   bytes, because an offset may fall between the halves of a surrogate pair. */
+kt_boolean kt_string_range_equals(KRef self, kt_int self_offset, KRef other, kt_int other_offset,
+                                  kt_int length) {
+    KUnits left = kt_units_of(self);
+    KUnits right = kt_units_of(other);
+    kt_char x = 0;
+    kt_char y = 0;
+    for (kt_int unit = 0; unit < self_offset; unit++) {
+        (void)kt_units_next(&left, &x);
+    }
+    for (kt_int unit = 0; unit < other_offset; unit++) {
+        (void)kt_units_next(&right, &y);
+    }
+    for (kt_int unit = 0; unit < length; unit++) {
+        if (!kt_units_next(&left, &x) || !kt_units_next(&right, &y) || x != y) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 /* `s.removeSuffix(suffix)`, for a `String` or a `StringBuilder` receiver and suffix. It is
    `endsWith` and then `substring` by unit, which is how Kotlin defines it, and that is what cuts a
    pair in two when the suffix is its low half: `"😀".removeSuffix("\uDE00")` is `"\uD83D"`.
