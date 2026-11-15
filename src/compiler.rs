@@ -1021,6 +1021,18 @@ fn consume_body_group(
     ) else {
         return false;
     };
+    if let Err(identity) = sink
+        .ir_mut()
+        .record_external_builtin_implementations(&info.builtin_implementations)
+    {
+        diags.error(
+            Span::new(0, 0),
+            format!(
+                "internal error: inconsistent builtin implementation facts for external member {identity:?}"
+            ),
+        );
+        return false;
+    }
     if let Err(error) = sink.refresh_body_local_declarations(index) {
         diags.error(
             Span::new(0, 0),

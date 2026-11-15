@@ -65,6 +65,7 @@ pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;
 pub(crate) use classifier_callables::{
     constructor_declaration_signature, constructor_generic_signature, ConstructorAlias,
+    ConstructorCallConstraints,
 };
 pub use classifier_callables::{BoundInnerConstructor, ConstructorCandidate, ConstructorOrigin};
 pub(crate) use classifier_declaration::type_alias_target_classifier;
@@ -243,6 +244,9 @@ pub struct CollectionBarrier {
 pub struct LibraryMember {
     /// Stable provider identity copied from the normalized callable candidate after selection.
     pub external_identity: Option<crate::fir::ExternalCallableId>,
+    /// Qualified source namespace that declares this callable, preserved independently of its
+    /// physical owner. Backends consume the latter; semantic hierarchy queries consume this.
+    pub declaration_owner: Option<crate::types::SemanticCallableOwner>,
     /// Stable dependency declaration that supplies inherited default expressions for this selected
     /// override. The selected callable remains [`Self::external_identity`]; a target consumes this
     /// second opaque identity only when the checked call omits an argument.
@@ -759,6 +763,7 @@ impl LibraryMember {
         LibraryMember {
             deprecation: None,
             external_identity: None,
+            declaration_owner: None,
             external_default_provider: None,
             external_property_identity: None,
             semantic_role: None,
@@ -1736,6 +1741,7 @@ impl FunctionInfo {
         member.physical_name = self.callable.physical_name.clone();
         member.physical_parameter_plan = self.callable.physical_parameter_plan.clone();
         member.owner = Some(self.callable.owner);
+        member.declaration_owner = self.callable.declaration_owner;
         member.physical_ret = self.callable.physical_ret;
         // Preserve the selected declaration's pre-substitution results when a generic `FunctionInfo`
         // is materialized as an instance-member emit handle. The logical `ret` above is deliberately

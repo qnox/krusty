@@ -501,7 +501,7 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
             tys(params, names);
             *ret = ty(*ret, names);
         }
-        Callee::Module { params, ret, .. } | Callee::ModuleDefaultEntry { params, ret, .. } => {
+        Callee::Module { params, ret, .. } => {
             tys(params, names);
             *ret = ty(*ret, names);
         }
@@ -520,6 +520,12 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
             }
         }
         Callee::ModuleWithDefaults {
+            params,
+            ret,
+            dispatch_receiver_ty,
+            ..
+        }
+        | Callee::ModuleDefaultEntry {
             params,
             ret,
             dispatch_receiver_ty,

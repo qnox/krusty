@@ -27,14 +27,14 @@ pub mod range_constructions;
 mod source_class_members;
 pub mod value_classes;
 
+pub use crate::fir::{BuiltinImplementation, BuiltinOverrideDeclaration};
 pub use constructor_selection::selected_constructor;
 pub use dependency_call_shape::{DeclaredOperandRoles, DependencyCallShape, DependencyExportCall};
 #[cfg(any(test, feature = "test-support"))]
 pub use dependency_facts::referenced_dependencies;
 pub use dependency_facts::{
     BackendCallableFact, BackendCompilerIntrinsic, BackendPropertyFact, BackendSemanticCallRole,
-    BuiltinImplementation, BuiltinOverrideDeclaration, CheckedBackendCallables,
-    DependencyClassifier, DependencyFactError, DependencyGetterSignature,
+    CheckedBackendCallables, DependencyClassifier, DependencyFactError, DependencyGetterSignature,
 };
 pub(crate) use dependency_metadata::has_standalone_dependency_code;
 pub use dependency_metadata::KlibDependencyCallable;
