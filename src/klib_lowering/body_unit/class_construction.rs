@@ -343,11 +343,20 @@ impl<'u, 's> Linker<'u, 's> {
         class.ctor_param_count = 1;
         let class = ir.add_class(class);
         self.classes.insert(identity, class);
-        Ok(super::MemberClass {
+        let member = super::MemberClass {
             class,
             fields: vec![field],
             contract,
-        })
+        };
+        // A boxed instance dispatches to the class's overrides, as an ordinary class's does: each
+        // one the program's closure selected, with every declaration it overrides. An override
+        // left out keeps its slot unrealized, which a call reaching it declines on.
+        for function in value_class_overrides(&header) {
+            if self.selects_override(&contract.module, function) {
+                self.declare_dispatched(ir, member.clone(), header.arena, function)?;
+            }
+        }
+        Ok(member)
     }
 
     /// The class a member of the final ordinary class `header` declares belongs to: the class
@@ -404,6 +413,38 @@ impl<'u, 's> Linker<'u, 's> {
             fields,
             contract,
         })
+    }
+
+    /// Whether the program's closure selected the override `function` of a class of `module` and
+    /// every declaration it overrides, each by one exact provider declaration.
+    fn selects_override(&self, module: &str, function: &KlibIrFunction) -> bool {
+        let selected = |identity: &KlibDependencyCallable| {
+            matches!(
+                self.sources.callees.get(identity),
+                Some(KlibCalleeFact::Selected(_))
+            ) && self.sources.callees.reference_target(identity).is_some()
+        };
+        let Some(signature) =
+            crate::klib_libraries::member_signature(&function.base.symbol.signature)
+        else {
+            return false;
+        };
+        let KlibCalleeOrigin::Exact(identity) =
+            self.sources.bodies.linked_origin(module, &signature)
+        else {
+            return false;
+        };
+        selected(&identity)
+            && function.overridden.iter().all(|symbol| {
+                crate::klib_libraries::member_signature(&symbol.signature)
+                    .and_then(|signature| {
+                        self.sources
+                            .bodies
+                            .overridden_declarations(module, &signature)
+                            .ok()
+                    })
+                    .is_some_and(|declarations| declarations.iter().all(selected))
+            })
     }
 
     /// Declare `function`, a member dispatch on an instance of the materialized class `member`
@@ -547,6 +588,33 @@ impl<'u, 's> Linker<'u, 's> {
         }
         Ok(())
     }
+}
+
+/// The members of the value class `header` with bodies that override another declaration: the
+/// ones dispatch reaches on a boxed instance of the class.
+fn value_class_overrides<'s>(
+    header: &super::super::class_headers::ClassMemberHeader<'s, 's>,
+) -> Vec<&'s KlibIrFunction> {
+    let arena = header.arena;
+    header
+        .class
+        .members
+        .iter()
+        .flat_map(|member| match member {
+            crate::metadata::klib_ir::tree::KlibIrMember::Function(function) => vec![*function],
+            crate::metadata::klib_ir::tree::KlibIrMember::Property(property) => {
+                [property.getter, property.setter]
+                    .into_iter()
+                    .flatten()
+                    .collect()
+            }
+            _ => Vec::new(),
+        })
+        .map(|function| arena.function(function))
+        .filter(|function| {
+            !function.constructor && function.body.is_some() && !function.overridden.is_empty()
+        })
+        .collect()
 }
 
 /// The constructor a secondary constructor of a class without a primary one delegates to: its

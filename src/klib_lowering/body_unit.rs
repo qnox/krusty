@@ -2213,6 +2213,10 @@ impl<'s> Linker<'_, 's> {
             }
             (None, _) => None,
         };
+        // Materializing a value class declares its overrides, this member among them.
+        if let Some(&declared) = self.functions.get(identity) {
+            return Ok(declared);
+        }
         self.queue(
             ir,
             identity,
