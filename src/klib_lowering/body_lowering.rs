@@ -241,6 +241,12 @@ pub(super) trait CallLinker {
     /// Proves that `classifier` is a dependency object, whose value a body may read.
     fn singleton(&self, classifier: TypeName) -> Lowered<()>;
 
+    /// Whether the target owns the representation of `classifier`, which a class of this unit
+    /// extends without the unit materializing it. A linker that knows no such class says no.
+    fn target_represents(&self, _classifier: TypeName) -> bool {
+        false
+    }
+
     /// The dependency enum class whose constant `entry` a body reads, with that constant's name.
     /// A linker that materializes no class declines the read.
     fn enum_entry(
@@ -367,6 +373,9 @@ pub(super) struct BodyLowering<'a> {
     instance_storage: Option<instance_storage::InstanceStorageFrame<'a>>,
     /// Enclosing values a member of an object literal reads through its constructor fields.
     captures: HashMap<KlibIrSymbol, object_literals::CaptureField>,
+    /// The members of the object literals being lowered, by serialized signature.
+    object_members:
+        HashMap<crate::metadata::klib_ir::KlibIrSignature, object_literals::ObjectMember>,
     /// The member function whose `return`s are being lowered, when that is not the template.
     member_return: Option<KlibIrSymbol>,
     /// The result type of [`Self::member_return`].
@@ -401,6 +410,7 @@ impl<'a> BodyLowering<'a> {
             captures: HashMap::default(),
             member_return: None,
             member_result: None,
+            object_members: HashMap::default(),
         }
     }
 

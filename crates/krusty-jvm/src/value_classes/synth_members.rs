@@ -572,16 +572,10 @@ pub(super) fn synth_value_members(
             .name()
             .to_owned();
         if custom_to_string.is_none() {
-            let carrier = ir.add_expr(IrExpr::GetValue(0));
-            // A non-null nested value class is this slot's carrier. Name it through its own
-            // `toString-impl` (`Outer(i=Inner(x=20))`); the concat then appends that String.
-            let rendered = nested_value_text(
-                ir,
-                u_ir,
-                under,
-                carrier,
-                &mut realized.rendered_value_class_text,
-            );
+            // A nested value class held as its carrier is named through its own `toString-impl`
+            // (`Outer(i=Inner(x=20))`); the concat then appends that String.
+            let rendered =
+                nested_value_text(ir, u_ir, under, 0, &mut realized.rendered_value_class_text);
             // ONE `StringConcat` (not nested `+`): kotlinc builds a single `StringBuilder` and appends the
             // 1-char closing paren via `append(C)` — a nested concat would emit a second builder.
             let prefix = str_const(ir, format!("{simple}({fname}="));
@@ -1159,26 +1153,27 @@ fn guard_false(ir: &mut IrFile, cond: ExprId) -> ExprId {
 /// that class's carrier, and the call's descriptor names the fully erased carrier. Its logical
 /// type stays the nested class, so the `StringBuilder` path appends with `append(Object)`; its
 /// physical result is the `String` the call returns, which an `invokedynamic` concat passes as
-/// `String`. A nullable property is left as the value erasure stored.
+/// `String`. An array property, nullable or not, renders its contents through `Arrays.toString`.
+/// A nullable nested value class the JVM stores UNBOXED (its carrier, which holds the outer `null`)
+/// is named the same way behind a null test, `null` rendering as `null`; one stored as its box is
+/// left as it is, the box's own `toString` naming the class. The value is read from `slot`.
 fn nested_value_text(
     ir: &mut IrFile,
     underlying: Ty,
     under: &Under,
-    value: ExprId,
+    slot: u32,
     rendered_value_class_text: &mut HashSet<ExprId>,
 ) -> ExprId {
-    // An array renders by its contents, as a data class's array property does; an unsigned array
-    // is a value class of its own and renders as that class through its carrier below.
-    if underlying.non_null().is_array()
-        && (underlying.non_null().is_reference_array()
-            || !underlying
-                .non_null()
-                .array_elem()
-                .is_some_and(|element| element.is_unsigned()))
-    {
+    let value = ir.add_expr(IrExpr::GetValue(slot));
+    if underlying.renders_array_contents() {
+        // An array renders its contents (`Bits(raw=[1, 2])`), as a data-class array property does;
+        // `Arrays.toString` renders a null array as `null`, so a nullable one takes it as well. An
+        // unsigned array is a value class, rendered below through its own `toString-impl`.
         return ir.add_expr(IrExpr::Call {
             callee: Box::new(Callee::Intrinsic {
-                operation: krusty::ir::IrIntrinsic::DataClassArrayToString { ty: underlying },
+                operation: krusty::ir::IrIntrinsic::GeneratedPropertyArrayToString {
+                    ty: underlying,
+                },
                 ret: Ty::String,
             }),
             dispatch_receiver: None,
@@ -1186,7 +1181,29 @@ fn nested_value_text(
         });
     }
     if underlying.is_nullable() {
-        return value;
+        let Some(nested) = underlying.non_null().obj_internal().filter(|nested| {
+            under.contains_key(nested) && !super::nullable_is_boxed(*nested, under)
+        }) else {
+            return value;
+        };
+        // kotlinc's `v == null ? "null" : Nested.toString-impl(v)`, whose second read of `v` the
+        // null-check fold keeps on the stack (`dup; ifnonnull; pop`).
+        let null = ir.add_expr(IrExpr::Const(krusty::ir::IrConst::Null));
+        let is_null = ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: krusty::ir::IrBinOp::RefEq,
+            lhs: value,
+            rhs: null,
+        });
+        let text = ir.add_expr(IrExpr::Const(krusty::ir::IrConst::String("null".into())));
+        let present = ir.add_expr(IrExpr::GetValue(slot));
+        let named = nested_to_string_impl(ir, nested, underlying.non_null(), under, present);
+        let guarded = ir.add_expr(IrExpr::When {
+            branches: vec![(Some(is_null), text), (None, named)],
+        });
+        ir.set_physical_type(guarded, Ty::String);
+        ir.set_logical_type(guarded, Ty::obj_name(nested));
+        rendered_value_class_text.insert(guarded);
+        return guarded;
     }
     if underlying.is_unsigned() {
         // kotlinc renders an unsigned carrier through its own `toString-impl`, appended as an
@@ -1208,6 +1225,20 @@ fn nested_value_text(
     if !under.contains_key(&nested) {
         return value;
     }
+    let call = nested_to_string_impl(ir, nested, underlying, under, value);
+    rendered_value_class_text.insert(call);
+    call
+}
+
+/// `nested`'s static `toString-impl` over the carrier `value` holds: its `String` physically, the
+/// nested class logically, so a `StringBuilder` concat appends it as kotlinc does, as an object.
+fn nested_to_string_impl(
+    ir: &mut IrFile,
+    nested: TypeName,
+    underlying: Ty,
+    under: &Under,
+    value: ExprId,
+) -> ExprId {
     let carrier = erase(&underlying, under);
     let call = ir.add_expr(IrExpr::Call {
         callee: Box::new(Callee::Static {
@@ -1221,7 +1252,6 @@ fn nested_value_text(
     });
     ir.set_physical_type(call, Ty::String);
     ir.set_logical_type(call, Ty::obj_name(nested));
-    rendered_value_class_text.insert(call);
     call
 }
 
