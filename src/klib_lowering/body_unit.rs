@@ -753,7 +753,13 @@ impl DependencyBodyUnit {
                     .bodies
                     .function(callable.identity())
                     .ok_or(KlibBodyDeclineReason::Unjoined)?;
-                if callable.kind() == crate::libraries::ExternalCallableKind::Constructor {
+                if callable.kind() == crate::libraries::ExternalCallableKind::Constructor
+                    && callable
+                        .class_contract()
+                        .is_some_and(|class| class.is_value)
+                {
+                    linker.materialize_value_constructor(ir, callable)
+                } else if callable.kind() == crate::libraries::ExternalCallableKind::Constructor {
                     linker.materialize_class(ir, callable.identity(), callable)?;
                     let constructor = linker.constructors.get(callable.identity()).ok_or(
                         KlibBodyDeclineReason::UnsupportedDeclaration(

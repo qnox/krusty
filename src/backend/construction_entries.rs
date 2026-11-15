@@ -153,6 +153,21 @@ pub(super) fn entry(
     entry
 }
 
+/// The entry constructing `class` through its primary constructor, when the file lays out its
+/// object. A dependency unit builds it for a value class's box, whose construction is its whole
+/// constructor, and exports it under that constructor's identity as it does any other function.
+pub(crate) fn primary_entry(ir: &mut IrFile, class: crate::ir::ClassId) -> Option<FunId> {
+    let entry = build(
+        ir,
+        super::ExportedConstructor {
+            class,
+            secondary: None,
+        },
+    )?;
+    ir.construction_entries.insert(entry, class);
+    Some(entry)
+}
+
 /// The entry constructing `constructor`'s class, when the file lays out its object.
 fn build(ir: &mut IrFile, constructor: super::ExportedConstructor) -> Option<FunId> {
     let class = &ir.classes[constructor.class as usize];

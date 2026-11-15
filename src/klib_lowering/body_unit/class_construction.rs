@@ -341,7 +341,40 @@ impl<'u, 's> Linker<'u, 's> {
             0,
         )];
         class.ctor_param_count = 1;
+        // A box's construction stores its value, which the value was validated as when it was
+        // made: the class runs no initialization of its own.
+        class.ctor_args = vec![IrCtorArg {
+            name: Some(class.fields[0].name.clone()),
+            context_kind: crate::types::ContextParameterKind::None,
+            ty: stored.ty,
+            declared_ty: Some(stored.ty),
+            is_field: true,
+            field_index: Some(0),
+            has_default: false,
+            is_vararg: false,
+            type_param: None,
+            check: None,
+            anonymous_super_forward: None,
+            capture: None,
+            provenance: IrCtorParameterProvenance::Value,
+            capture_identity: None,
+        }];
+        let self_type = super::super::klib_types::semantic_type(
+            header.arena,
+            &header.types,
+            header
+                .class
+                .this_receiver
+                .as_ref()
+                .ok_or_else(|| {
+                    KlibBodyDeclineReason::SignatureMismatch(
+                        "a value class header has no receiver".to_owned(),
+                    )
+                })?
+                .ty,
+        )?;
         let class = ir.add_class(class);
+        ir.record_declared_class_self_type(classifier, self_type);
         self.classes.insert(identity, class);
         let member = super::MemberClass {
             class,
@@ -357,6 +390,37 @@ impl<'u, 's> Linker<'u, 's> {
             }
         }
         Ok(member)
+    }
+
+    /// The entry constructing a box of the value class whose primary constructor `selected` is.
+    /// A box runs no initialization: the class this materializes stores the constructor's value,
+    /// and the entry is exported under the constructor's identity as a function of the unit.
+    pub(super) fn materialize_value_constructor(
+        &mut self,
+        ir: &mut IrFile,
+        selected: KlibBodyCallable<'s>,
+    ) -> Result<FunId, KlibBodyDeclineReason> {
+        let member = self.materialize_member_class(ir, selected)?;
+        let primary = member
+            .contract
+            .primary_constructor
+            .as_ref()
+            .map(|primary| KlibDeclarationSignature::Public(primary.clone()));
+        if primary.as_ref() != Some(&selected.identity().declaration) {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a value class construction other than through its primary constructor".to_owned(),
+            ));
+        }
+        if let Some(&entry) = self.functions.get(selected.identity()) {
+            return Ok(entry);
+        }
+        let entry = crate::backend::construction_entries::primary_entry(ir, member.class).ok_or(
+            KlibBodyDeclineReason::SignatureMismatch(
+                "a value class box without its checked self type".to_owned(),
+            ),
+        )?;
+        self.functions.insert(selected.identity().clone(), entry);
+        Ok(entry)
     }
 
     /// The class a member of the final ordinary class `header` declares belongs to: the class
