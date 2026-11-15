@@ -1738,13 +1738,15 @@ impl<'a> Body<'a> {
                 captures,
                 sam,
                 ..
-            } => self.function_value(
-                impl_fn,
-                &captures,
-                function_values::FunctionEquality::Identity,
-                self.type_of(id)?,
-                sam.as_deref(),
-            )?,
+            } => {
+                self.function_value(
+                    impl_fn,
+                    &captures,
+                    function_values::FunctionEquality::Identity,
+                    self.type_of(id)?,
+                    sam.as_deref(),
+                )?;
+            }
             IrExpr::CallableReference(reference) if !reference.declaration_suspend => {
                 self.callable_reference(id, &reference)?
             }
