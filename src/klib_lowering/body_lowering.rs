@@ -241,6 +241,12 @@ pub(super) trait CallLinker {
     /// Proves that `classifier` is a dependency object, whose value a body may read.
     fn singleton(&self, classifier: TypeName) -> Lowered<()>;
 
+    /// Whether the target owns the representation of `classifier`, which a class of this unit
+    /// extends without the unit materializing it. A linker that knows no such class says no.
+    fn target_represents(&self, _classifier: TypeName) -> bool {
+        false
+    }
+
     /// The dependency enum class whose constant `entry` a body reads, with that constant's name.
     /// A linker that materializes no class declines the read.
     fn enum_entry(

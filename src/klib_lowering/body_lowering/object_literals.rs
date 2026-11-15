@@ -380,12 +380,23 @@ impl<'a> BodyLowering<'a> {
                 )?,
                 None,
             ),
-            None => (
-                0,
-                operands
-                    .external_target
-                    .map(crate::ir::IrExternalConstructorTarget::unresolved),
-            ),
+            None => {
+                // The target lays out only a class it represents; any other superclass must be
+                // one a support unit materializes for the object to extend.
+                if !operands.declaration.class_emits_members
+                    && !self.linker.target_represents(superclass)
+                {
+                    return unsupported(
+                        "an object literal extending a dependency class no unit materializes",
+                    );
+                }
+                (
+                    0,
+                    operands
+                        .external_target
+                        .map(crate::ir::IrExternalConstructorTarget::unresolved),
+                )
+            }
         };
         let pairs = operands
             .args

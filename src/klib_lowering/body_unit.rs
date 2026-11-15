@@ -1222,6 +1222,10 @@ impl CallLinker for Linker<'_, '_> {
         ))
     }
 
+    fn target_represents(&self, classifier: TypeName) -> bool {
+        self.sources.callees.target_represents(classifier)
+    }
+
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
         self.sources.callees.applied_supertype(sub, owner)
     }
