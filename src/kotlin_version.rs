@@ -3,8 +3,9 @@
 //! krusty supports every version listed in the `kotlin-versions` manifest at once, and the reference
 //! compilers do not agree on everything a user can observe. kotlinc 2.4.20, for instance, rewords
 //! a batch of diagnostics and reports NO_VALUE_FOR_PARAMETER at a different position than 2.4.10.
-//! Code whose output differs between reference versions asks [`target`] instead of assuming
-//! one version. The wording itself lives in [`crate::diagnostic_wording`], keyed by version.
+//! A behavior that differs between reference versions is a [`Quirk`]: its releases are recorded
+//! once, in the quirk table, and code tests the reproduced profile ([`Quirks::target`]) instead of
+//! comparing versions. Diagnostic wording lives in [`crate::diagnostic_wording`], keyed by version.
 //!
 //! The target is process-wide, like the reference toolchain [`crate::toolchain`] already selects:
 //! the `-Xkotlin-reference-version=` flag ([`set_target`]) wins, then `KRUSTY_LANGUAGE_VERSION`
@@ -14,6 +15,10 @@
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::OnceLock;
+
+mod quirks;
+
+pub use quirks::{Quirk, Quirks};
 
 /// A full Kotlin release version, `major.minor.patch`, ordered numerically.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -223,7 +228,8 @@ pub fn configured_target() -> Result<KotlinVersion, String> {
     }
 }
 
-/// Whether the reference version is `version` or newer.
+/// Whether the reference version is `version` or newer. A behavior difference is a [`Quirk`]
+/// instead; this answers the wording table and tests.
 pub fn at_least(version: KotlinVersion) -> bool {
     target() >= version
 }

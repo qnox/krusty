@@ -74,6 +74,59 @@ fn a_call_of_a_dependency_function_lowers_its_callee_into_the_unit() {
 }
 
 #[test]
+fn a_generic_local_call_publishes_its_declared_result() {
+    let demo = demo(
+        &[("id", &[T::P], T::P), ("caller", &[T::String], T::String)],
+        |name, body| {
+            let argument = body.param(0);
+            let value = match name {
+                "caller" => body.generic_call("id", vec![argument], T::String, T::String),
+                _ => argument,
+            };
+            Some(vec![body.ret(value)])
+        },
+    );
+    let mut unit = DependencyBodyUnit::default();
+    demo.lower(&mut unit, "caller", &["caller", "id"])
+        .expect("lowers");
+    validated(unit.ir());
+    let id = unit
+        .ir()
+        .functions
+        .iter()
+        .position(|function| function.name == "id")
+        .expect("the generic callee") as u32;
+    let declared = unit.ir().functions[id as usize].ret;
+    let call = unit
+        .ir()
+        .exprs
+        .iter()
+        .position(|expression| {
+            matches!(
+                expression,
+                crate::ir::IrExpr::Call { callee, .. }
+                    if matches!(**callee, crate::ir::Callee::Local(function) if function == id)
+            )
+        })
+        .expect("the call") as u32;
+    assert_eq!(
+        unit.ir().call_declared_ret.get(&call).copied(),
+        Some(declared)
+    );
+    assert!(unit.ir().checked_type(call).is_none());
+    assert!(unit.ir().exprs.iter().any(|expression| {
+        matches!(
+            expression,
+            crate::ir::IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::ImplicitCoercion,
+                arg,
+                type_operand,
+            } if *arg == call && *type_operand == Ty::String
+        )
+    }));
+}
+
+#[test]
 fn overlapping_roots_share_their_transitive_callee_when_selected_in_reverse_order() {
     let demo = demo(&IDENTITY_AND_CALLER, identity_and_caller);
     let mut unit = DependencyBodyUnit::default();

@@ -2,7 +2,8 @@
 // through a projected receiver: through `Holder<*>` the value is `Any` and `Box<T & Any>` is
 // `Box<out Any>`, through `Holder<out Named?>` they are `Named` and `Box<out Named>`, and
 // through `Holder<in String?>` the box is `Box<in String>`. A concrete override that narrows the
-// members to `String` reads the same way.
+// members to `String` reads the same way, and so does a `CharSequence` read and concatenation
+// through `Holder<out CharSequence?>`.
 
 class Box<T>(val item: T)
 
@@ -39,6 +40,14 @@ fun covariant(holder: Holder<out Named?>): String {
     return value.name + box.item.name
 }
 
+fun charSequence(holder: Holder<out CharSequence?>): String {
+    val value: CharSequence = holder.value
+    val box: Box<out CharSequence> = holder.box
+    return value.toString() + box.item.length
+}
+
+fun starConcat(holder: Holder<*>): String = holder.value.toString() + holder.box.item
+
 fun starString(holder: Holder<*>): String = (holder.value as String) + (holder.box.item as String)
 
 fun contravariant(holder: Holder<in String?>): Box<in String> = holder.box
@@ -55,6 +64,8 @@ fun box(): String {
     val word = Word("O")
     if (!star(word)) return "word star"
     if (starString(word) != "OO") return "word: ${starString(word)}"
+    if (charSequence(word) != "O1") return "word char sequence: ${charSequence(word)}"
+    if (starConcat(word) != "OO") return "word concat: ${starConcat(word)}"
     if (contravariant(word).item != "O") return "word contravariant"
     if (cast(word)?.item != "O") return "word cast"
     if (cast(text)?.item != "O") return "cast"
