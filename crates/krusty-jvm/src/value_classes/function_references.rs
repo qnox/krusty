@@ -147,6 +147,10 @@ pub(super) fn realize(ir: &mut IrFile, callable_under: &Under, renamed_functions
             .enumerate()
             .map(|(i, logical)| {
                 let target = fr.target_param_tys.get(i + target_offset)?;
+                // A primitive-array value class keeps its semantic name through erasure
+                // (`UIntArray`), yet the selected callable takes its carrier (`int[]`).
+                let target = &super::representation::carrier_slot(*target, callable_under)
+                    .unwrap_or(*target);
                 let fq = logical.non_null().obj_internal()?;
                 // `FunctionN.invoke` always receives the logical value as an Object. Adapt it to
                 // the selected callable's *physical* parameter, not merely to a type with different
