@@ -79,17 +79,27 @@ pub(crate) fn add_continuation_parameters_with_runtime(
                 })
         })
     {
+        crate::trace_compiler!("suspend", "a non-suspend function reaches a suspension");
         return Err(ContinuationDecline::Suspends);
     }
     if !machine_functions.is_empty() && runtime.is_none() {
+        crate::trace_compiler!(
+            "suspend",
+            "a body suspends without a selected coroutine runtime"
+        );
         return Err(ContinuationDecline::Suspends);
     }
     for function in suspend_functions {
         add_continuation_parameter(ir, function);
     }
     for function in machine_functions {
-        super::state_machine::realize(ir, function, &suspend_set)
-            .map_err(|_| ContinuationDecline::Suspends)?;
+        super::state_machine::realize(ir, function, &suspend_set).map_err(|reason| {
+            crate::trace_compiler!(
+                "suspend",
+                "function {function} has no state machine: {reason:?}"
+            );
+            ContinuationDecline::Suspends
+        })?;
     }
     pass_continuations(ir, &suspend_set);
     Ok(())

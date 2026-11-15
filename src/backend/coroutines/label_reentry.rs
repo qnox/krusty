@@ -112,6 +112,13 @@ impl Split<'_> {
                 init: Some(init), ..
             } => init,
             IrExpr::SetValue { value, .. } => value,
+            // A captured `var`'s write: its holder is an already-evaluated lexical capture, which
+            // reads the same cell before and after the suspension.
+            IrExpr::RefSet { holder, value, .. }
+                if matches!(ir.exprs[holder as usize], IrExpr::GetValue(_)) =>
+            {
+                value
+            }
             IrExpr::Return(Some(value)) => value,
             _ => stmt,
         };
@@ -163,7 +170,10 @@ impl Split<'_> {
                 }
                 self.count(ir, *body)
             }
-            _ => Err(ReentryDecline::UnsupportedSuspension),
+            other => {
+                crate::trace_compiler!("suspend", "a suspension in statement {stmt}: {other:?}");
+                Err(ReentryDecline::UnsupportedSuspension)
+            }
         }
     }
 

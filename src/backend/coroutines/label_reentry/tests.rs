@@ -449,3 +449,62 @@ fn two_suspensions_in_one_statement_decline() {
 
     assert_eq!(labels, Err(ReentryDecline::UnsupportedSuspension));
 }
+
+/// `captured = leaf()` for a captured `var`: the write to its cell completes with the value the
+/// suspension resumed with, reading the same holder.
+#[test]
+fn a_captured_variable_write_completes_with_the_resumed_value() {
+    let (mut ir, leaf) = file();
+    let holder = ir.add_expr(IrExpr::GetValue(3));
+    let suspending = call(&mut ir, leaf);
+    let write = ir.add_expr(IrExpr::RefSet {
+        holder,
+        elem: Ty::Int,
+        value: suspending,
+    });
+
+    let (body, labels) = split(&mut ir, vec![write]);
+
+    assert_eq!(labels, Ok(1));
+    let [statement] = stmts(&ir, body)[..] else {
+        panic!("one suspension statement");
+    };
+    let [_, _, complete] = stmts(&ir, statement)[..] else {
+        panic!("declare, step, complete");
+    };
+    let (guard, completed) = guarded(&ir, complete);
+    assert!(is_label(&ir, guard, 0));
+    assert_eq!(completed, write);
+    assert!(matches!(ir.exprs[write as usize],
+        IrExpr::RefSet { holder: read, value, .. }
+            if read == holder && matches!(ir.exprs[value as usize],
+                IrExpr::TypeOp { op: IrTypeOp::Cast, arg, .. }
+                    if matches!(ir.exprs[arg as usize], IrExpr::GetValue(10)))));
+}
+
+/// A cell write whose holder is not an evaluated capture would read it again after resuming, so
+/// it keeps declining.
+#[test]
+fn a_cell_write_through_a_computed_holder_declines() {
+    let (mut ir, leaf) = file();
+    let other = ir.add_fun(IrFunction {
+        name: "cell".to_string(),
+        params: Vec::new(),
+        ret: Ty::Int,
+        body: None,
+        is_static: true,
+        dispatch_receiver: None,
+        param_checks: Vec::new(),
+    });
+    let holder = call(&mut ir, other);
+    let suspending = call(&mut ir, leaf);
+    let write = ir.add_expr(IrExpr::RefSet {
+        holder,
+        elem: Ty::Int,
+        value: suspending,
+    });
+
+    let (_, labels) = split(&mut ir, vec![write]);
+
+    assert_eq!(labels, Err(ReentryDecline::UnsupportedSuspension));
+}
