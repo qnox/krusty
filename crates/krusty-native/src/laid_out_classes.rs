@@ -269,6 +269,8 @@ impl LaidOutClasses {
                 interfaces,
                 interface_entries,
             };
+            // A member of another module's interface the class implements with a member of its
+            // own stands at that member's slot, which a subclass's table answers for itself.
             let dependency_implementations = layout
                 .dependency_implementations
                 .iter()
@@ -278,6 +280,16 @@ impl LaidOutClasses {
                         DependencyImplementation::Function(function.clone()),
                     )
                 })
+                .chain(
+                    layout
+                        .interface_entries
+                        .iter()
+                        .filter_map(|(identity, entry)| {
+                            entry.map(|slot| {
+                                (identity.clone(), DependencyImplementation::Slot(slot))
+                            })
+                        }),
+                )
                 .collect();
             self.published_by_name.insert(
                 name,
