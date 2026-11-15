@@ -12,6 +12,7 @@
 //! once, when the backend is finalized.
 
 mod array_access;
+mod array_lists;
 mod array_objects;
 mod boxes;
 mod builtin_instances;
