@@ -3448,6 +3448,7 @@ reflection/typeOf/typeOfCapturedStar.kt
 regressions/Kt1149.kt
 regressions/Kt1619Test.kt
 regressions/Kt2495Test.kt
+regressions/abstractCollectionBridgesAcrossFiles.kt
 regressions/collectionSizeInInlineBody.kt
 regressions/collectionSizeOrDefault.kt
 regressions/dataClassInRegularFunctionWithTypeParameters.kt
@@ -3844,6 +3845,7 @@ when/kt45081.kt
 when/kt47365.kt
 when/kt5448.kt
 when/oneUnitBranch.kt
+when/range.kt
 when/stringOptimization/duplicatingItems.kt
 when/stringOptimization/duplicatingItemsSameHashCode.kt
 when/stringOptimization/duplicatingItemsSameHashCode2.kt
@@ -3861,6 +3863,7 @@ when/switchOptimizationTypes.kt
 when/switchOptimizationUnordered.kt
 when/switchOptimizationWithGap.kt
 when/typeDisjunction.kt
+when/whenArgumentIsEvaluatedOnlyOnce.kt
 when/whenSubjectVariable/denseIntSwitchWithSubjectVariable.kt
 when/whenSubjectVariable/ieee754Equality.kt
 when/whenSubjectVariable/ieee754EqualityWithSmartCast.kt
