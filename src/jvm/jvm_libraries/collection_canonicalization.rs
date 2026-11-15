@@ -35,9 +35,9 @@ pub(super) fn publish_mapped_supertypes(
     }
     for name in mapped {
         let duplicate_class_face = libraries.cp.builtin_is_interface_name(name) == Some(false)
-            && supertypes.iter_ids().any(|existing| {
-                jvm_class_map::type_names_map_to_same_jvm_internal(existing, name)
-            });
+            && supertypes
+                .iter_ids()
+                .any(|existing| jvm_class_map::type_names_map_to_same_jvm_internal(existing, name));
         if !supertypes.contains_name(name) && !duplicate_class_face {
             supertypes.push_name(name);
         }
@@ -46,9 +46,10 @@ pub(super) fn publish_mapped_supertypes(
         return supertypes;
     }
     let mut kotlin_faces = TypeNameList::new();
-    for supertype in supertypes.iter_ids().filter(|&supertype| {
-        jvm_class_map::jvm_collection_to_kotlin_type_name(supertype).is_none()
-    }) {
+    for supertype in supertypes
+        .iter_ids()
+        .filter(|&supertype| jvm_class_map::jvm_collection_to_kotlin_type_name(supertype).is_none())
+    {
         kotlin_faces.push_name(supertype);
     }
     kotlin_faces
