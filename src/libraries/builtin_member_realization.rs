@@ -502,6 +502,25 @@ pub(crate) fn primitive_iterator_next(
     ))
 }
 
+/// `ArrayList`'s own `operator fun get` / `set`. The element is the classifier's type parameter.
+/// A user list, and the `List` / `MutableList` interface members, stay ordinary calls: only the
+/// `ArrayList` returned by array-backed `arrayListOf` is the vararg array those operations index.
+fn list_access(facts: &BuiltinMemberDeclaration<'_>) -> Option<CompilerIntrinsic> {
+    if !facts.is_operator
+        || facts.is_property
+        || !facts.owner.matches("kotlin/collections/ArrayList")
+    {
+        return None;
+    }
+    match (facts.name, facts.params) {
+        ("get", [Ty::Int]) if facts.ret.is_ty_param() => Some(CompilerIntrinsic::ListGet),
+        ("set", [Ty::Int, value]) if value.is_ty_param() && facts.ret.is_ty_param() => {
+            Some(CompilerIntrinsic::ListSet)
+        }
+        _ => None,
+    }
+}
+
 /// The members an array classifier declares for its elements and length (`IntArray.get(Int): Int`,
 /// `Array<T>.set(Int, T)`, `val size: Int`). No platform class implements them; the declaration
 /// itself is the array operation. A reference array's element is its classifier's type parameter.
@@ -536,6 +555,9 @@ fn array_access(facts: &BuiltinMemberDeclaration<'_>) -> Option<CompilerIntrinsi
 /// Attach a compiler realization only to an exact normalized builtin declaration.
 pub(crate) fn realization(facts: BuiltinMemberDeclaration<'_>) -> MemberRealization {
     if let Some(intrinsic) = array_access(&facts) {
+        return MemberRealization::Intrinsic(intrinsic);
+    }
+    if let Some(intrinsic) = list_access(&facts) {
         return MemberRealization::Intrinsic(intrinsic);
     }
     if facts.is_property {
@@ -692,6 +714,28 @@ mod tests {
         assert_eq!(
             realization(facts("kotlin/Array", "get", &[Ty::Int], element)),
             MemberRealization::Intrinsic(CompilerIntrinsic::ArrayGet)
+        );
+        assert_eq!(
+            realization(facts(
+                "kotlin/collections/ArrayList",
+                "get",
+                &[Ty::Int],
+                element
+            )),
+            MemberRealization::Intrinsic(CompilerIntrinsic::ListGet)
+        );
+        assert_eq!(
+            realization(facts(
+                "kotlin/collections/ArrayList",
+                "set",
+                &[Ty::Int, element],
+                element
+            )),
+            MemberRealization::Intrinsic(CompilerIntrinsic::ListSet)
+        );
+        assert_eq!(
+            realization(facts("sample/MyList", "get", &[Ty::Int], element)),
+            MemberRealization::Dispatch
         );
         assert_eq!(
             realization(facts(

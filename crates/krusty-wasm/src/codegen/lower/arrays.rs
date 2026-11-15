@@ -363,8 +363,70 @@ impl Body<'_> {
         Ok(())
     }
 
+    /// `list[index]`, where the list value is the array `arrayListOf` returned.
+    pub(super) fn list_get(
+        &mut self,
+        receiver: u32,
+        index: u32,
+        element: Ty,
+    ) -> Result<(), Unsupported> {
+        self.array_get_typed(
+            receiver,
+            index,
+            krusty::types::Ty::obj_args_name(krusty::types::wk::array(), &[element]),
+        )
+    }
+
+    /// `list[index] = value`, answering the element that was stored there.
+    pub(super) fn list_set(
+        &mut self,
+        receiver: u32,
+        index: u32,
+        value: u32,
+        element: Ty,
+    ) -> Result<(), Unsupported> {
+        let array = krusty::types::Ty::obj_args_name(krusty::types::wk::array(), &[element]);
+        let (form, stored) = self.array_form(array)?;
+        let (object, offset) = self.slot_operands(receiver, array, form, index)?;
+        let written = self
+            .local(carrier(stored)?.ok_or_else(|| "a list element without a carrier".to_string())?);
+        self.value(value, stored)?;
+        self.code.local_set(written);
+        let storage = self.array_backing(form, object);
+        self.check_slot(storage, offset)?;
+        self.code
+            .local_get(storage)
+            .ref_as_non_null()
+            .local_get(offset);
+        match form.read {
+            ElementRead::Plain => self.code.array_get(form.storage),
+            ElementRead::Signed => self.code.array_get_s(form.storage),
+            ElementRead::Unsigned => self.code.array_get_u(form.storage),
+        };
+        self.coerce_emitted_value(stored, element)?;
+        let previous = self.local(
+            carrier(element)?.ok_or_else(|| "a list element without a carrier".to_string())?,
+        );
+        self.code.local_set(previous);
+        self.code
+            .local_get(storage)
+            .ref_as_non_null()
+            .local_get(offset)
+            .local_get(written)
+            .array_set(form.storage)
+            .local_get(previous);
+        Ok(())
+    }
+
     pub(super) fn array_get(&mut self, receiver: u32, index: u32) -> Result<(), Unsupported> {
-        let (array, form, stored) = self.array_operand(receiver)?;
+        let array = self
+            .type_of(receiver)?
+            .ok_or_else(|| "an array operand without a checked type".to_string())?;
+        self.array_get_typed(receiver, index, array)
+    }
+
+    fn array_get_typed(&mut self, receiver: u32, index: u32, array: Ty) -> Result<(), Unsupported> {
+        let (form, stored) = self.array_form(array)?;
         let element = array
             .non_null()
             .array_read_elem()

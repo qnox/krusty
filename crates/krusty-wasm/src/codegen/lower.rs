@@ -57,6 +57,13 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         || operation == krusty::backend::BackendCompilerIntrinsic::ArrayGet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySize
+        || matches!(
+            operation,
+            krusty::backend::BackendCompilerIntrinsic::ListStorageConstruction(
+                krusty::libraries::ListStorageConstruction::MutablePacked
+            ) | krusty::backend::BackendCompilerIntrinsic::ListGet
+                | krusty::backend::BackendCompilerIntrinsic::ListSet
+        )
         || operation == krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
         || operation == krusty::backend::BackendCompilerIntrinsic::StringCompare
         || matches!(
@@ -1231,6 +1238,61 @@ impl<'a> Body<'a> {
                     krusty::backend::default_arguments::mask_words(params.len()),
                 ));
                 self.direct_call(function, &frame, &args)?;
+            }
+            // `arrayListOf(vararg)` is the array the call already built. Element reads and
+            // writes go through that array; the list value is the array.
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver: None,
+                args,
+            } if let Callee::External { target, .. } = &**call_callee
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    matches!(
+                        fact.compiler_operation(),
+                        Some(
+                            krusty::backend::BackendCompilerIntrinsic::ListStorageConstruction(
+                                krusty::libraries::ListStorageConstruction::MutablePacked
+                            )
+                        )
+                    )
+                }) =>
+            {
+                let [elements] = args.as_slice() else {
+                    return Err(
+                        "an array-backed list built from something other than its array".into(),
+                    );
+                };
+                self.expression(*elements)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver,
+                args,
+            } if let Callee::External { target, ret, .. } = &**call_callee
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    fact.compiler_operation()
+                        == Some(krusty::backend::BackendCompilerIntrinsic::ListGet)
+                }) =>
+            {
+                let (Some(receiver), [index]) = (dispatch_receiver, args.as_slice()) else {
+                    return Err("a list read with malformed operands".into());
+                };
+                self.list_get(receiver, *index, *ret)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver,
+                args,
+            } if let Callee::External { target, ret, .. } = &**call_callee
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    fact.compiler_operation()
+                        == Some(krusty::backend::BackendCompilerIntrinsic::ListSet)
+                }) =>
+            {
+                let (Some(receiver), [index, value]) = (dispatch_receiver, args.as_slice()) else {
+                    return Err("a list write with malformed operands".into());
+                };
+                self.list_set(receiver, *index, *value, *ret)?;
             }
             // The target stdlib's own `typeOf` body only says it is a compiler intrinsic.
             IrExpr::Call {

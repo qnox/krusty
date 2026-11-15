@@ -72,6 +72,12 @@ pub enum CompilerIntrinsic {
     /// A target may supply its collection storage instead of calling the declaration's body.
     /// This is not common lowering of a library algorithm; other targets keep the ordinary call.
     ListStorageConstruction(ListStorageConstruction),
+    /// `ArrayList`'s `operator fun get(index: Int): E`. A target that stores that `ArrayList` as
+    /// the array `arrayListOf` already built reads that array; other targets keep the library method.
+    ListGet,
+    /// `ArrayList`'s `operator fun set(index: Int, element: E): E`, the write paired with
+    /// [`Self::ListGet`]. The result is the element previously stored at that index.
+    ListSet,
     /// An array classifier's own `operator fun get(index: Int)` (`IntArray.get`, `Array<T>.get`).
     /// The array classifiers have no platform class, so a target reads the element directly.
     ArrayGet,

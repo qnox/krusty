@@ -515,6 +515,8 @@ fn realize_expressions(
                     | krusty::libraries::CompilerIntrinsic::ArrayGet
                     | krusty::libraries::CompilerIntrinsic::ArraySet
                     | krusty::libraries::CompilerIntrinsic::ArraySize
+                    | krusty::libraries::CompilerIntrinsic::ListGet
+                    | krusty::libraries::CompilerIntrinsic::ListSet
                     | krusty::libraries::CompilerIntrinsic::PrimitiveIteratorNext
                     | krusty::libraries::CompilerIntrinsic::NullableAnyToString
                     | krusty::libraries::CompilerIntrinsic::PrimitiveHashCode
@@ -1065,6 +1067,8 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::RadixToString { .. }
                 | krusty::libraries::CompilerIntrinsic::ArrayGet
                 | krusty::libraries::CompilerIntrinsic::ArraySet
+                | krusty::libraries::CompilerIntrinsic::ListGet
+                | krusty::libraries::CompilerIntrinsic::ListSet
                 | krusty::libraries::CompilerIntrinsic::ArrayFactory(_)
                 | krusty::libraries::CompilerIntrinsic::ListStorageConstruction(_)
                 | krusty::libraries::CompilerIntrinsic::CharCode

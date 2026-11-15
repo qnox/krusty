@@ -369,7 +369,6 @@ callableReference/property/simpleMutableExtension.kt
 callableReference/property/simpleMutableMember.kt
 callableReference/property/simpleMutableTopLevel.kt
 callableReference/property/simpleTopLevel.kt
-callableReference/starProjectionCallableReference.kt
 casts/asForConstants.kt
 casts/asSafeForConstants.kt
 casts/asToNothing.kt
@@ -2125,8 +2124,6 @@ inlineClasses/unboxNullableValueOfInlineClassWithNullablePrimitiveUnderlyingType
 inlineClasses/unboxNullableValueOfInlineClassWithPrimitiveUnderlyingType.kt
 inlineClasses/unboxNullableValueOfInlineClassWithPrimitiveUnderlyingTypeGeneric.kt
 inlineClasses/unboxResultParameterWhenCapturingToCrossinlineLambda.kt
-inlineClasses/unboxValueFromPlatformType.kt
-inlineClasses/unboxValueFromPlatformTypeGeneric.kt
 inlineClasses/unboxValueOfAnyBeforeMethodInvocation.kt
 inlineClasses/unboxValueOfAnyBeforeMethodInvocationGeneric.kt
 inlineClasses/unboxValueOfAnyBeforeMethodInvocationGeneric2.kt
@@ -3715,7 +3712,6 @@ unsignedTypes/whenByUnsigned.kt
 vararg/boxingArgumentsForVararg.kt
 vararg/doNotCopyImmediatelyCreatedArrays.kt
 vararg/evaluationOrder.kt
-vararg/kt10926.kt
 vararg/kt37715.kt
 vararg/kt581.kt
 vararg/referenceToContainsFromVarargParameter.kt
