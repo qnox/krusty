@@ -651,6 +651,7 @@ interface View<T> {
 }
 private class Hidden(private val value: String) : View<CharSequence> {
     override fun get(): String = value
+    override fun toString(): String = \"value=$value\"
 }
 fun make(value: String): View<CharSequence> = Hidden(value)
 ";
@@ -935,6 +936,34 @@ fn applied_interface_signature_substitutes_the_supertype() {
     assert_ne!(edge.declared_result, edge.applied_result);
     assert!(edge.applied_parameters.is_empty());
     assert!(edge.declared_parameters.is_empty());
+    let any_to_string = unit
+        .ir()
+        .function_overrides
+        .values()
+        .flatten()
+        .find(|edge| edge.overridden_owner == crate::types::wk::any() && edge.name == "toString")
+        .expect("Hidden publishes its Any.toString override");
+    let any_symbols = libraries.symbols(
+        crate::symbol_source::SymbolNamespace::Classifier(crate::types::wk::any()),
+        "toString",
+    );
+    let [any_declaration] = any_symbols.callables.functions() else {
+        panic!("one kotlin.Any.toString declaration")
+    };
+    let any_to_string_id = any_declaration
+        .callable
+        .external_identity
+        .expect("kotlin.Any.toString has a provider identity");
+    assert_eq!(
+        any_to_string.overridden,
+        crate::fir::ResolvedFunctionOverrideTarget::External(any_to_string_id)
+    );
+    assert!(!any_to_string.overridden_is_interface);
+    assert!(any_to_string.implementation_function.is_some());
+    assert_eq!(
+        any_to_string.overridden_semantic_role,
+        Some(crate::types::SemanticCallRole::KotlinAnyToString)
+    );
     let _ = std::fs::remove_dir_all(&directory);
 }
 
