@@ -277,12 +277,10 @@ compileKotlinAgainstKotlin/jvm8/jvm8against6/simpleCallWithBigHierarchy.kt
 compileKotlinAgainstKotlin/jvm8/jvm8against6/simpleCallWithHierarchy.kt
 compileKotlinAgainstKotlin/jvm8/jvm8against6/simpleProp.kt
 compileKotlinAgainstKotlin/jvm8/jvm8against6/simplePropWithHierarchy.kt
-compileKotlinAgainstKotlin/kt14012.kt
 compileKotlinAgainstKotlin/privateSuperType.kt
 compileKotlinAgainstKotlin/privateSuperType2.kt
 compileKotlinAgainstKotlin/privateSuperTypeDefaults.kt
 compileKotlinAgainstKotlin/privateSuperTypeDefaults2.kt
-compileKotlinAgainstKotlin/propertyReference.kt
 compileKotlinAgainstKotlin/sealedClass.kt
 compileKotlinAgainstKotlin/secondaryConstructors.kt
 compileKotlinAgainstKotlin/useDeserializedFunInterface.kt
@@ -965,14 +963,12 @@ fakeOverride/intersectionInLocal.kt
 fakeOverride/privateFakeOverrides0.kt
 fakeOverride/privateFakeOverrides1.kt
 fakeOverride/substitutionInLocal.kt
-fakeOverride/varianceOverload.kt
 fir/inferenceWithTypeAliasFromOtherModule.kt
 fir/kt68806.kt
 fir/multipleDefaultsFalsePositiveDelegation.kt
 fir/nestedClassTypeParameterDeserialization.kt
 fir/smartCastToInvisibleClassMember.kt
 fir/sourceBinarySource.kt
-fir/toLong.kt
 fp/atan2ZeroGuadrantsDouble.kt
 fp/powDouble.kt
 fp/powFloat.kt
@@ -1141,7 +1137,6 @@ inline/inlineNoReturn.kt
 inline/inlineOrder.kt
 inline/inlineSimpleAssignment.kt
 inline/iteratorOnInlineFunctionResult.kt
-inline/kt66017.kt
 inline/lambdaInLambda.kt
 inline/lambdaReassignment.kt
 inline/lambdaReassignmentWithCapture.kt
@@ -1396,10 +1391,8 @@ lower/forLoopsLowering/vars.kt
 lower/forLoopsLowering/withIndex.kt
 lower/forLoopsLowering/withIndexUInt.kt
 lower/localDelegatedProperty.kt
-mangling/internal.kt
 mangling/multipleConstructors.kt
 multiplatform/k2/aliasSuperTypeInLazy.kt
-multiplatform/k2/annotations/expectAnnotationCallInLibrary.kt
 multiplatform/k2/anonymousObjectAndSpecificImplementationInDeserializedIr.kt
 multiplatform/k2/basic/contextInFakeOverride.kt
 multiplatform/k2/basic/delegatedByExpectExtensionProperty.kt
@@ -1451,7 +1444,6 @@ multiplatform/k2/hmpp/expectActualOverloadTwoLibs.kt
 multiplatform/k2/hmpp/expectRefinement3-3.kt
 multiplatform/k2/hmpp/fakeOverrideExpectSuperType.kt
 multiplatform/k2/hmpp/fakeOverrideExpectSuperTypeFromLib.kt
-multiplatform/k2/hmpp/friendDependency.kt
 multiplatform/k2/hmpp/genericTypealiasSameNameTwoLibs.kt
 multiplatform/k2/hmpp/iheritanceFromExpected2-2.kt
 multiplatform/k2/hmpp/inheritanceFromExpected2-3.kt
@@ -1517,9 +1509,6 @@ properties/eagerInitializationGlobal2.kt
 properties/eagerInitializationGlobal3.kt
 properties/eagerInitializationGlobal4.kt
 properties/genericPropertyMultiModule.kt
-properties/initOrderMultiModule.kt
-properties/initializerOfValWithConstExpr.kt
-properties/initializerOfValWithNonConstExpr.kt
 properties/kt1398.kt
 properties/kt2786.kt
 properties/lazyInitialization.kt
@@ -2266,7 +2255,6 @@ regressions/kt68727.kt
 regressions/multimodule/inlineAssertFailsWithBlock.kt
 regressions/multimodule/inlineAssertFailsWithCompletedBlock.kt
 regressions/multimodule/inlineNarrowElementInRange.kt
-regressions/multimodule/inlineStdlibRepeat.kt
 regressions/objectCaptureOuterConstructorProperty.kt
 regressions/objectInsideDelegation.kt
 reified/callChain.kt
@@ -2313,10 +2301,8 @@ secondaryConstructors/localClasses.kt
 serialization/deserializedMembers.kt
 serialization/serializedCharConstant.kt
 serialization/serializedDefaultArgs.kt
-serialization/serializedDoWhile.kt
 serialization/serializedEnumOrdinal.kt
 serialization/serializedVararg.kt
-smartCasts/kt44932.kt
 smartCasts/negativesmartCastAugmentedAssignment.kt
 smartCasts/smartcastFromGenericToString.kt
 specialBuiltins/bridgeNotEmptyMap.kt

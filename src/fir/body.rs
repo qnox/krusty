@@ -726,7 +726,9 @@ pub enum FirCallableReferenceTarget {
     /// Reference to an exact compiler-supplied Kotlin array-factory declaration. The provider tag
     /// proves the declaration identity; these checked semantic types are the complete construction
     /// plan, so common lowering never reopens lookup or asks a backend for a nonexistent method.
+    /// `declaration` is the provider's identity of the factory, which the reference reflects.
     ArrayFactory {
+        declaration: ExternalCallableId,
         operation: crate::types::ArrayFactoryKind,
         array_type: ResolvedTy,
         element_type: ResolvedTy,

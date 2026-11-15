@@ -20,6 +20,15 @@ pub enum InheritedMemberName {
     PropertySetter(Box<str>),
 }
 
+/// The exact declaration whose annotations a compatibility override inherits. This can differ
+/// from the interface body it calls when the superclass already carries the same member.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum InheritedDefaultAnnotationOrigin {
+    Function(super::ResolvedFunctionOverrideTarget),
+    Getter(super::ResolvedPropertyOverrideTarget),
+    Setter(super::ResolvedPropertyOverrideTarget),
+}
+
 /// Where the selected declaration's body lives.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InheritedDefaultBody {
@@ -53,6 +62,9 @@ pub struct ResolvedInheritedDefault {
     /// setter share their property's stable identity, while a dependency accessor retains the
     /// provider identity of that exact getter or setter.
     pub accessor: Option<super::ResolvedPropertyOverrideTarget>,
+    /// Selected while the superclass's semantic member scope is live. Missing means that scope
+    /// had no unique, identified annotation declaration; a target must refuse that record.
+    pub annotation_origin: Option<InheritedDefaultAnnotationOrigin>,
     /// The interface that declares the selected member.
     pub declaring_interface: TypeName,
     /// The first declared direct superinterface of the classifier through which the member is
@@ -99,6 +111,25 @@ impl ResolvedModuleIndex {
             "inherited defaults require a published classifier"
         );
         for default in &defaults {
+            assert!(
+                matches!(
+                    (&default.name, default.annotation_origin),
+                    (_, None)
+                        | (
+                            InheritedMemberName::Function(_),
+                            Some(InheritedDefaultAnnotationOrigin::Function(_))
+                        )
+                        | (
+                            InheritedMemberName::PropertyGetter(_),
+                            Some(InheritedDefaultAnnotationOrigin::Getter(_))
+                        )
+                        | (
+                            InheritedMemberName::PropertySetter(_),
+                            Some(InheritedDefaultAnnotationOrigin::Setter(_))
+                        )
+                ),
+                "an inherited default keeps the annotation declaration's exact member role"
+            );
             assert!(
                 matches!(
                     (&default.name, default.function, default.accessor),
