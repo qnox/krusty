@@ -606,7 +606,9 @@ pub(super) fn emit_dependencies<B: Backend>(
         }
         for (classifier, identity) in materialized {
             support_state.materializing_classes.remove(&classifier);
-            support_state.materialized_classes.insert(classifier, identity);
+            support_state
+                .materialized_classes
+                .insert(classifier, identity);
         }
         artifacts.extend(nested_outputs);
         artifacts.extend(outputs);

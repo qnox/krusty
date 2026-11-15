@@ -119,15 +119,15 @@ pub type Artifact = (String, Vec<u8>);
 /// Target-owned policy for common IR lowerings which run before emission closure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommonIrPreparation {
-    pub counted_loops: crate::backend::counted_loops::CountedLoopPolicy,
-    pub enums: crate::backend::enums::Contract,
+    pub counted_loops: counted_loops::CountedLoopPolicy,
+    pub enums: enums::Contract,
 }
 
 /// An unsupported checked shape or a failed invariant during common-IR preparation.
 /// Capability declines and compiler inconsistencies retain distinct diagnostic channels.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CommonIrPreparationError {
-    Suspend(crate::backend::coroutines::ContinuationDecline),
+    Suspend(coroutines::ContinuationDecline),
     /// A compiler-owned preparation invariant failed after source-shape validation.
     Invariant(String),
 }

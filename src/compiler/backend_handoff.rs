@@ -171,7 +171,13 @@ pub(super) fn prepare_common_ir(
             "cannot freeze prepared dependency declarations: {error:?}"
         ))
     })?;
-    super::builtin_implementations::record(&mut callables, provider);
+    super::builtin_implementations::record_checked(&mut callables, &file.ir, provider).map_err(
+        |identity| {
+            crate::backend::CommonIrPreparationError::Invariant(format!(
+                "prepared IR has no builtin implementation facts for external member {identity:?}"
+            ))
+        },
+    )?;
     callables
         .freeze_plugin_runtime_callables(plugin_runtime, |identity| {
             provider.external_callable(identity)
