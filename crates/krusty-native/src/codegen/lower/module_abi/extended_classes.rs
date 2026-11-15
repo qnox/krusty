@@ -489,10 +489,17 @@ impl FileLowering<'_> {
 
         let mut interfaces = Vec::with_capacity(record.table.interfaces.len());
         for interface in &record.table.interfaces {
+            // An interface of this very file is exported under its own declaration identity; one
+            // of another module carries the identity its provider published.
             let Some(identity) = self
-                .classifiers
-                .classifier(*interface)
-                .and_then(|fact| fact.klib_identity.clone())
+                .ir
+                .class_id_by_name(*interface)
+                .and_then(|declared| self.dependency_signatures.classifier(declared).cloned())
+                .or_else(|| {
+                    self.classifiers
+                        .classifier(*interface)
+                        .and_then(|fact| fact.klib_identity.clone())
+                })
             else {
                 return Ok(None);
             };
