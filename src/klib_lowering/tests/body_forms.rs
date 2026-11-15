@@ -74,6 +74,59 @@ fn a_call_of_a_dependency_function_lowers_its_callee_into_the_unit() {
 }
 
 #[test]
+fn a_generic_local_call_publishes_its_declared_result() {
+    let demo = demo(
+        &[("id", &[T::P], T::P), ("caller", &[T::String], T::String)],
+        |name, body| {
+            let argument = body.param(0);
+            let value = match name {
+                "caller" => body.generic_call("id", vec![argument], T::String, T::String),
+                _ => argument,
+            };
+            Some(vec![body.ret(value)])
+        },
+    );
+    let mut unit = DependencyBodyUnit::default();
+    demo.lower(&mut unit, "caller", &["caller", "id"])
+        .expect("lowers");
+    validated(unit.ir());
+    let id = unit
+        .ir()
+        .functions
+        .iter()
+        .position(|function| function.name == "id")
+        .expect("the generic callee") as u32;
+    let declared = unit.ir().functions[id as usize].ret;
+    let call = unit
+        .ir()
+        .exprs
+        .iter()
+        .position(|expression| {
+            matches!(
+                expression,
+                crate::ir::IrExpr::Call { callee, .. }
+                    if matches!(**callee, crate::ir::Callee::Local(function) if function == id)
+            )
+        })
+        .expect("the call") as u32;
+    assert_eq!(
+        unit.ir().call_declared_ret.get(&call).copied(),
+        Some(declared)
+    );
+    assert!(unit.ir().checked_type(call).is_none());
+    assert!(unit.ir().exprs.iter().any(|expression| {
+        matches!(
+            expression,
+            crate::ir::IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::ImplicitCoercion,
+                arg,
+                type_operand,
+            } if *arg == call && *type_operand == Ty::String
+        )
+    }));
+}
+
+#[test]
 fn overlapping_roots_share_their_transitive_callee_when_selected_in_reverse_order() {
     let demo = demo(&IDENTITY_AND_CALLER, identity_and_caller);
     let mut unit = DependencyBodyUnit::default();
@@ -180,7 +233,7 @@ fn a_declining_callee_leaves_the_unit_as_it_was() {
         let a = body.param(0);
         let value = match name {
             "a" => body.call("b", vec![a], T::Int),
-            "b" => body.type_operator(KlibIrTypeOperator::SafeCast, a, T::Int),
+            "b" => body.type_operator(KlibIrTypeOperator::ImplicitNotNull, a, T::Int),
             _ => a,
         };
         Some(vec![body.ret(value)])
@@ -194,7 +247,7 @@ fn a_declining_callee_leaves_the_unit_as_it_was() {
         .expect_err("the callee declines");
     assert_eq!(
         decline.to_string(),
-        "the KLIB body of `demo.a` (it reaches the KLIB body of `demo.b` (it uses a safe cast))"
+        "the KLIB body of `demo.a` (it reaches the KLIB body of `demo.b` (it uses an implicit non-null assertion))"
     );
     assert_eq!(unit.ir().functions.len(), 1);
     assert_eq!(unit.ir().exprs.len(), expressions);
@@ -204,9 +257,9 @@ fn a_declining_callee_leaves_the_unit_as_it_was() {
     // own form.
     assert_eq!(
         demo.lower(&mut unit, "b", &[])
-            .expect_err("it casts safely")
+            .expect_err("it asserts non-null implicitly")
             .to_string(),
-        "the KLIB body of `demo.b` (it uses a safe cast)"
+        "the KLIB body of `demo.b` (it uses an implicit non-null assertion)"
     );
 }
 

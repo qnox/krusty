@@ -90,11 +90,17 @@ pub(super) fn emit_dependencies<B: Backend>(
     let bodies = facts.bodies();
     let intrinsics = facts.intrinsics();
     let selected = source.callables.klib_body_callables();
-    let type_oracle = crate::symbol_resolver::SourceOracle(platform);
+    if source.callables.klib_type_hierarchy().is_none() {
+        diags.error(
+            Span::new(0, 0),
+            "internal error: checked KLIB bodies have no frozen class-hierarchy facts",
+        );
+        return Vec::new();
+    }
     let target_represents_classifier =
         |classifier| backend.represents_dependency_classifier(classifier);
     let callees = KlibCalleeFacts::new(selected.iter().copied())
-        .with_type_oracle(&type_oracle)
+        .with_checked_dependency_facts(source.callables.klib_dependency_facts())
         .with_target_classifiers(&target_represents_classifier);
     let mut roots: Vec<crate::libraries::KlibBodyCallable<'_>> = Vec::new();
     for callable in selected.iter().copied().filter(|callable| {
@@ -186,7 +192,7 @@ pub(super) fn emit_dependencies<B: Backend>(
         };
         let emitted_roots::FrozenClosure {
             declarations,
-            member_edges,
+            authorized_member_edges,
         } = closure;
         let callees = KlibCalleeFacts::with_reference_declarations(
             selected.iter().copied(),
@@ -196,8 +202,8 @@ pub(super) fn emit_dependencies<B: Backend>(
                     .map(|callable| (*target, callable))
             }),
         )
-        .with_member_edges(member_edges)
-        .with_type_oracle(&type_oracle)
+        .with_checked_dependency_facts(source.callables.klib_dependency_facts())
+        .with_authorized_member_edges(authorized_member_edges)
         .with_target_classifiers(&target_represents_classifier);
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
@@ -412,6 +418,15 @@ pub(super) fn emit_dependencies<B: Backend>(
             }
             published.push((identity.clone(), PublishedDependency::AllocatingConstructor));
         }
+        if let Err(identity) = unit.record_builtin_implementation_facts(&callees) {
+            diags.error(
+                Span::new(0, 0),
+                format!(
+                    "internal error: checked KLIB body has conflicting builtin implementation facts for {identity:?}"
+                ),
+            );
+            return Vec::new();
+        }
         let mut callables = match CheckedBackendCallables::freeze(unit.ir(), platform) {
             Ok(callables) => callables,
             Err(error) => {
@@ -424,7 +439,17 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         };
-        super::builtin_implementations::record(&mut callables, platform);
+        if let Err(identity) =
+            super::builtin_implementations::record_checked(&mut callables, unit.ir(), platform)
+        {
+            diags.error(
+                Span::new(0, 0),
+                format!(
+                    "internal error: checked KLIB IR has no builtin implementation facts for external member {identity:?}"
+                ),
+            );
+            return Vec::new();
+        }
         let ordinal = support_state.emitted.len();
         let support_module = format!(
             "{}$klib_body${}${ordinal}",

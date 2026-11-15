@@ -225,16 +225,29 @@ mod tests {
     fn the_editor_refresh_keeps_the_short_gradle_ceiling() {
         let tree = TempTree::new("detect-editor-ceiling");
         tree.write("settings.gradle.kts", "");
-        let mut sync = crate::project::sync::ProjectSync::new(detect(tree.root(), &[]));
-        let runner = crate::project::runner::testing::FakeRunner::new(vec![
+        crate::project::tooling::reset_test_hooks();
+        crate::project::tooling::set_gradle_response(Ok(
             crate::project::runner::testing::FakeRunner::stdout(""),
-        ]);
+        ));
+        let mut sync = crate::project::sync::ProjectSync::new(detect(tree.root(), &[]));
+        let runner = crate::project::runner::testing::FakeRunner::new(vec![]);
 
         let _ = sync.refresh(&runner);
 
-        assert_eq!(runner.command_count(), 1);
         assert_eq!(
-            runner.command(0).timeout,
+            runner.command_count(),
+            0,
+            "editor refresh must not spawn gradlew"
+        );
+        let actions = crate::project::tooling::gradle_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            actions[0].distribution,
+            crate::project::tooling::Distribution::BuildDistribution
+        );
+        assert_eq!(actions[0].tasks, vec!["krustyModel".to_string()]);
+        assert_eq!(
+            actions[0].timeout,
             crate::project::runner::BUILD_TOOL_TIMEOUT
         );
     }
@@ -243,17 +256,22 @@ mod tests {
     fn the_scan_gradle_probe_uses_the_long_ceiling() {
         let tree = TempTree::new("detect-scan-ceiling");
         tree.write("settings.gradle.kts", "");
-        let provider = detect_for_scan(tree.root(), &[]);
-        let runner = crate::project::runner::testing::FakeRunner::new(vec![
+        crate::project::tooling::reset_test_hooks();
+        crate::project::tooling::set_gradle_response(Ok(
             crate::project::runner::testing::FakeRunner::stdout(""),
-        ]);
+        ));
+        let provider = detect_for_scan(tree.root(), &[]);
+        let runner = crate::project::runner::testing::FakeRunner::new(vec![]);
 
         let _ = provider.probe(&runner);
 
-        assert_eq!(runner.command_count(), 1);
+        assert_eq!(runner.command_count(), 0, "the scan must not spawn gradlew");
+        let actions = crate::project::tooling::gradle_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].timeout, crate::project::gradle::PROBE_TIMEOUT);
         assert_eq!(
-            runner.command(0).timeout,
-            crate::project::gradle::PROBE_TIMEOUT
+            actions[0].tasks,
+            vec!["krustyDownload".to_string(), "krustyModel".to_string()]
         );
     }
 

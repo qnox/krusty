@@ -462,6 +462,11 @@ mod tests {
                 .filter(|path| !path.starts_with(&jvm_provider)),
         );
         paths.extend(rust_files_under("src/js"));
+        // These code generators live in workspace crates rather than the compiler crate, so the
+        // module dependency budgets below do not catch a direct path back into resolver APIs.
+        // Keep the same checked-facts boundary across every representation backend.
+        paths.extend(rust_files_under("crates/krusty-native/src/codegen"));
+        paths.extend(rust_files_under("crates/krusty-wasm/src/codegen"));
         for path in paths {
             if path
                 .components()
@@ -484,6 +489,89 @@ mod tests {
                 "{} calls frontend selection from production backend code: {forbidden}",
                 path.display(),
                 forbidden = offenders.join(", "),
+            );
+        }
+    }
+
+    #[test]
+    fn source_backend_handoff_uses_checker_builtin_implementation_facts() {
+        let path = source_path("src/compiler/backend_handoff.rs");
+        let text = fs::read_to_string(&path).expect("read source backend handoff");
+        assert!(text.contains("record_checked"));
+        for forbidden in ["SymbolResolver", "symbol_resolver::", "resolve_symbol("] {
+            assert!(
+                !text.contains(forbidden),
+                "source backend handoff must consume checked builtin facts: {forbidden}"
+            );
+        }
+
+        let checker = source_path("src/compiler/builtin_implementations.rs");
+        let text = fs::read_to_string(&checker).expect("read checked builtin fact finalizer");
+        assert!(text.contains("for_checked_external_members"));
+        assert!(text.contains("external_member_identities"));
+    }
+
+    #[test]
+    fn klib_support_bodies_carry_checked_builtin_implementation_facts() {
+        let path = source_path("src/compiler/dependency_body_emission.rs");
+        let text = fs::read_to_string(&path).expect("read KLIB body handoff");
+        assert!(text.contains("record_checked"));
+        assert!(!text.contains("record_dependency_support"));
+        assert!(text.contains("checked_dependency_facts"));
+        for forbidden in [
+            "with_builtin_implementation_facts(platform)",
+            "symbol_resolver::",
+            "klib_dependency_member_call_edge(",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "KLIB body emission must consume facts stored before backend entry: {forbidden}"
+            );
+        }
+
+        let handoff = source_path("src/compiler/backend_handoff.rs");
+        let text = fs::read_to_string(&handoff).expect("read checked backend handoff");
+        let checked_facts = text
+            .find("record_klib_dependency_facts")
+            .expect("freeze KLIB body checker facts before backend emission");
+        let backend_facts = text
+            .find("super::builtin_implementations::record_checked")
+            .expect("finish checked callable facts at the handoff");
+        assert!(
+            checked_facts < backend_facts,
+            "KLIB body facts must be stored before checked callable completeness is enforced"
+        );
+
+        let roots = source_path("src/compiler/dependency_body_emission/emitted_roots.rs");
+        let text = fs::read_to_string(&roots).expect("read KLIB emitted roots");
+        for forbidden in [
+            "SymbolResolver",
+            "symbol_resolver::",
+            "member_declarations_in_hierarchy(",
+            "klib_dependency_member_call_edge(",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "KLIB body planning must consume facts stored at checker handoff: {forbidden}"
+            );
+        }
+
+        let checked = source_path("src/backend/dependency_facts.rs");
+        let text = fs::read_to_string(&checked).expect("read checked KLIB dependency facts");
+        assert!(text.contains("klib_type_hierarchy"));
+        let checker = source_path("src/resolve/dependency_body_call_edges.rs");
+        let text = fs::read_to_string(&checker).expect("read KLIB body hierarchy checker");
+        assert!(text.contains("klib_type_facts::freeze"));
+    }
+
+    #[test]
+    fn plugin_runtime_binding_uses_provider_declarations() {
+        let path = source_path("src/compiler/backend_handoff/plugin_handoff.rs");
+        let text = fs::read_to_string(&path).expect("read plugin runtime handoff");
+        for forbidden in ["SymbolResolver", "symbol_resolver::", "resolve_symbol("] {
+            assert!(
+                !text.contains(forbidden),
+                "plugin runtime declarations are provider-owned facts, not resolver candidates: {forbidden}"
             );
         }
     }
@@ -607,16 +695,38 @@ mod tests {
             Path::new("/workspace/src/jvm_libraries/contract_dsl_tests.rs")
         ));
         assert!(is_test_only_module_source(&source_path(
-            "src/jvm/jvm_libraries/contract_dsl_tests.rs"
+            "src/jvm/jvm_libraries/tests/contract_dsl_tests.rs"
         )));
         assert!(!is_test_only_module_source(&source_path(
             "src/jvm/jvm_libraries/synthetic_properties.rs"
         )));
         // Dependency budgets share the same proven parent-module production boundary.
         assert_allowed_crate_modules_in_file(
-            &source_path("src/jvm/jvm_libraries/contract_dsl_tests.rs"),
+            &source_path("src/jvm/jvm_libraries/tests/contract_dsl_tests.rs"),
             &[],
         );
+    }
+
+    #[test]
+    fn explicit_test_module_paths_cross_directory_boundaries() {
+        let root = std::env::temp_dir().join(format!(
+            "krusty-architecture-nested-path-{}",
+            std::process::id()
+        ));
+        let source = root.join("src");
+        fs::create_dir_all(source.join("parent/tests")).expect("create nested module tree");
+        let child = source.join("parent/tests/child.rs");
+        fs::write(&child, "pub fn fixture() {} ").expect("write child module");
+        for (declaration, expected) in [
+            ("#[cfg(test)] #[path = \"parent/tests/child.rs\"] mod child;", true),
+            ("#[cfg(not(test))] #[path = \"parent/tests/child.rs\"] mod child;", false),
+            ("#[cfg(any(test, feature = \"extra\"))] #[path = \"parent/tests/child.rs\"] mod child;", false),
+            ("#[cfg(test)] #[path = \"parent/tests/child.rs\"] mod child; #[cfg(not(test))] #[path = \"parent/tests/child.rs\"] mod child;", false),
+        ] {
+            fs::write(source.join("parent.rs"), declaration).expect("write parent module");
+            assert_eq!(is_test_only_module_source(&child), expected, "{declaration}");
+        }
+        fs::remove_dir_all(root).expect("remove nested module tree");
     }
 
     #[test]
@@ -769,9 +879,7 @@ mod tests {
         // Dependency bodies lower into common IR that Native and Wasm consume alike. The tests
         // beside the lowering may also reach the frontend to lower equivalent source.
         // A template body links its callees through the calling compilation's normalized
-        // provider (`symbol_source`) and decides the subtyping the body leaves implicit over the
-        // common class hierarchy (`assignable`, read through `symbol_resolver`'s provider
-        // oracle). All three are target-neutral semantic contracts, never a backend's.
+        // provider (`symbol_source`) and consumes the class hierarchy facts frozen by resolution.
         let allowed = [
             "assignable",
             "fir",
@@ -779,15 +887,18 @@ mod tests {
             "klib_libraries",
             "libraries",
             "metadata",
-            "symbol_resolver",
             "symbol_source",
             "types",
         ];
-        assert_allowed_crate_modules("src/klib_lowering.rs", &allowed);
+        let mut test_allowed = allowed.to_vec();
+        test_allowed.push("symbol_resolver");
+        assert_allowed_crate_modules("src/klib_lowering.rs", &test_allowed);
         for path in rust_files_under("src/klib_lowering") {
             let test_module = path.file_name() == Some(std::ffi::OsStr::new("tests.rs"))
                 || path.starts_with(source_path("src/klib_lowering/tests"));
-            if !test_module {
+            if test_module {
+                assert_allowed_crate_modules_in_file(&path, &test_allowed);
+            } else {
                 assert_allowed_crate_modules_in_file(&path, &allowed);
             }
         }
@@ -1519,10 +1630,23 @@ mod tests {
         }
     }
 
-    /// An out-of-line module source has no attributes of its own. Check its immediately enclosing
-    /// module declaration so a file included only by a proven test-only parent is not mistaken for
-    /// production code when backend files are enumerated recursively.
+    /// An out-of-line module source has no attributes of its own. Prove its test-only parent
+    /// declaration, including explicit paths that cross extra directories, before excluding it.
     fn is_test_only_module_source(path: &Path) -> bool {
+        test_only_module_source(path, &mut BTreeSet::new())
+    }
+
+    fn test_only_module_source(path: &Path, visiting: &mut BTreeSet<PathBuf>) -> bool {
+        let key = normalize_source_path(path);
+        if !visiting.insert(key.clone()) {
+            return false;
+        }
+        let result = module_source_has_only_test_parents(path, visiting);
+        visiting.remove(&key);
+        result
+    }
+
+    fn module_source_has_only_test_parents(path: &Path, visiting: &mut BTreeSet<PathBuf>) -> bool {
         let (module_name, containing_dir) =
             if path.file_name().and_then(|name| name.to_str()) == Some("mod.rs") {
                 let Some(module_dir) = path.parent() else {
@@ -1541,25 +1665,21 @@ mod tests {
         let (Some(module_name), Some(containing_dir)) = (module_name, containing_dir) else {
             return false;
         };
-        let Some(parent_module_name) = containing_dir.file_name().and_then(|name| name.to_str())
-        else {
-            return false;
-        };
-        let parent_candidates = [
-            if parent_module_name == "src" {
-                containing_dir.join("lib.rs")
-            } else {
-                containing_dir
-                    .parent()
-                    .unwrap_or(containing_dir)
-                    .join(format!("{parent_module_name}.rs"))
-            },
-            if parent_module_name == "src" {
-                containing_dir.join("main.rs")
-            } else {
-                containing_dir.join("mod.rs")
-            },
-        ];
+        let mut parent_candidates = Vec::new();
+        for directory in containing_dir.ancestors() {
+            let Some(name) = directory.file_name().and_then(|name| name.to_str()) else {
+                break;
+            };
+            if name == "src" {
+                parent_candidates.push(directory.join("lib.rs"));
+                parent_candidates.push(directory.join("main.rs"));
+                break;
+            }
+            if let Some(parent) = directory.parent() {
+                parent_candidates.push(parent.join(format!("{name}.rs")));
+            }
+            parent_candidates.push(directory.join("mod.rs"));
+        }
         let mut matched_declaration = false;
         for parent in parent_candidates {
             if parent == path {
@@ -1573,7 +1693,7 @@ mod tests {
                 continue;
             };
             matched_declaration = true;
-            if !test_only && !is_test_only_module_source(&parent) {
+            if !test_only && !test_only_module_source(&parent, visiting) {
                 return false;
             }
         }

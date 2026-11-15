@@ -2,7 +2,7 @@
 //! FIR would build for the same inline function: an anonymous object, one constructor field per
 //! captured parameter, and members that read those fields.
 
-use super::super::*;
+use super::*;
 use crate::compilation_target::CompilationTarget;
 use crate::ir::IrExpr;
 use crate::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
@@ -37,6 +37,7 @@ fn continuation_factory_lowers_as_an_anonymous_object() {
         .external_identity
         .expect("the factory has a provider identity");
     let realization = libraries.external_callable(id).expect("realization");
+    let hierarchy = checked_template_hierarchy(&libraries, &realization);
     let mut ir = crate::ir::IrFile::default();
     let template = lower_inline_template(
         &mut ir,
@@ -46,6 +47,7 @@ fn continuation_factory_lowers_as_an_anonymous_object() {
             declarations: libraries.declaration_bodies(),
             references: libraries.reference_bindings(),
             source: &libraries,
+            type_hierarchy: &hierarchy,
         },
     )
     .expect("a klib declaration")

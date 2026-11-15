@@ -65,7 +65,46 @@ pub(super) fn checked_ir_file<'a>(
             return None;
         }
     };
-    super::builtin_implementations::record(&mut callables, symbols.semantic_platform());
+    if let Some(dependency_bodies) = symbols.semantic_platform().klib_dependency_body_facts() {
+        let checked = match crate::resolve::for_checked_klib_bodies(
+            symbols.semantic_platform(),
+            dependency_bodies.bodies(),
+            callables.klib_body_callables(),
+        ) {
+            Ok(checked) => checked,
+            Err(identity) => {
+                diags.error(
+                    Span::new(0, 0),
+                    format!(
+                        "internal error: checked KLIB body graph has no exact member facts for {identity:?}"
+                    ),
+                );
+                return None;
+            }
+        };
+        if let Err(identity) = callables.record_klib_dependency_facts(checked) {
+            diags.error(
+                Span::new(0, 0),
+                format!(
+                    "internal error: checked KLIB body graph has conflicting facts for {identity:?}"
+                ),
+            );
+            return None;
+        }
+    }
+    if let Err(identity) = super::builtin_implementations::record_checked(
+        &mut callables,
+        &ir,
+        symbols.semantic_platform(),
+    ) {
+        diags.error(
+            Span::new(0, 0),
+            format!(
+                "internal error: checked IR has no builtin implementation facts for external member {identity:?}"
+            ),
+        );
+        return None;
+    }
     let file_name = module
         .stems
         .get(source.raw() as usize)

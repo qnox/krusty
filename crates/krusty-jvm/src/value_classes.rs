@@ -3091,6 +3091,7 @@ pub(crate) fn lower_value_classes(
                 id,
                 &repr_ctx,
                 &realized_members.rendered_value_class_text,
+                &under,
                 &mut ops,
             );
             if let IrExpr::Call { callee, args, .. } = &ir.exprs[id as usize] {
