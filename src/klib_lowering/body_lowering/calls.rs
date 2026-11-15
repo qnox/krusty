@@ -690,8 +690,9 @@ impl BodyLowering<'_> {
         let type_argument = self.semantic(*type_argument)?;
         let mut bindings = crate::fx_hash::HashMap::default();
         bindings.insert(selected.formal, type_argument);
-        let parameter = crate::types::ty_subst_keep_unbound(selected.parameter, &bindings);
-        let result = crate::types::ty_subst_keep_unbound(selected.result, &bindings);
+        let parameter =
+            crate::types::ty_subst_formals(selected.parameter, &[selected.formal], &bindings);
+        let result = crate::types::ty_subst_formals(selected.result, &[selected.formal], &bindings);
         let operands = self.call_operands(
             access,
             ty,
@@ -794,13 +795,15 @@ impl BodyLowering<'_> {
                     additional_bounds: Vec::new(),
                 });
             }
+            // The accessor's own formals are bound here; a declaring-class formal stays as written
+            // until the dispatch receiver applies it.
+            let formals = &linked.type_parameters;
+            let own = |ty| crate::types::ty_subst_formals(ty, formals, &bindings);
             for parameter in &mut linked.params {
-                *parameter = crate::types::ty_subst_keep_unbound(*parameter, &bindings);
+                *parameter = own(*parameter);
             }
-            linked.ret = crate::types::ty_subst_keep_unbound(linked.ret, &bindings);
-            linked.receiver = linked
-                .receiver
-                .map(|receiver| crate::types::ty_subst_keep_unbound(receiver, &bindings));
+            linked.ret = own(linked.ret);
+            linked.receiver = linked.receiver.map(own);
         }
         let CallOperands {
             receiver,
@@ -850,7 +853,11 @@ impl BodyLowering<'_> {
         {
             let value = bound_bindings[formal];
             for bound in bounds {
-                let bound = crate::types::ty_subst_keep_unbound(*bound, &bound_bindings);
+                let bound = crate::types::ty_subst_formals(
+                    *bound,
+                    &linked.type_parameters,
+                    &bound_bindings,
+                );
                 if !self
                     .linker
                     .is_subtype(self.header.type_parameters(), value, bound)
