@@ -1372,6 +1372,7 @@ impl krusty::backend::BackendClassifierSource for FunctionOwnerRole {
             std::sync::Arc::new(krusty::backend::BackendClassifierFact {
                 runtime_exception: None,
                 declaration_name: None,
+                klib_identity: None,
                 access: krusty::libraries::ClassifierAccess::Public,
                 is_kotlin: true,
                 mapped_builtin: false,

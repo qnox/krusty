@@ -961,7 +961,12 @@ mod tests {
                 TypeCheckRole::FunctionOfArity(1),
                 TypeCheckRole::SuspendFunctionOfArity(1),
             ]),
-            vec!["kt_type_function1", "kt_type_function", "kt_type_function2"]
+            vec![
+                "kt_type_function1",
+                "kt_type_function",
+                "kt_type_suspend_function1",
+                "kt_type_function2"
+            ]
         );
     }
 }

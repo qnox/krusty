@@ -519,6 +519,8 @@ mod tests {
             slot_types: Vec::new(),
             entries: Vec::new(),
             function_bridge: None,
+            function_arities: Vec::new(),
+            suspend_function_arities: Vec::new(),
             ancestors: Vec::new(),
             constructors: vec![None; 3],
             constructor_entries: vec![
