@@ -497,6 +497,24 @@ fn load_expectation(path: &Path) -> BTreeSet<String> {
 }
 
 impl Suite {
+    /// Check a whole owned case through the corpus compiler and the same reference listing,
+    /// without consulting failure inventories or applying a corpus substring filter.
+    pub fn assert_owned_case(&self, path: &Path) {
+        let corpus = Corpus::new(self);
+        assert_eq!(
+            reference_outcome(&corpus, path),
+            Outcome::Pass,
+            "reference {}",
+            path.display()
+        );
+        assert_eq!(
+            krusty_outcome(&corpus, path),
+            Outcome::Pass,
+            "krusty {}",
+            path.display()
+        );
+    }
+
     fn failures(&self) -> String {
         format!("{}_expected_failures", self.inventory)
     }
