@@ -44,6 +44,7 @@ fn int_range_initialization_freezes_any_tostring() {
         &libraries,
         libraries.declaration_bodies(),
         [selected],
+        &[],
     )
     .expect("IntRange initialization has checked member edges");
     let edge = facts

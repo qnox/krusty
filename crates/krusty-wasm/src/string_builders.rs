@@ -11,9 +11,12 @@
 //! Kotlin's `StringBuilder` inherits both from `Any`. Its `toString` slot copies the units in use
 //! into a new string.
 
+use krusty::types::TypeName;
+
 use super::encode::{BlockType, Code, CompositeType, FieldType, Function, HeapType, Module};
 use super::encode::{StorageType, SubType, ValType};
 use super::identity::IdentityObjects;
+use super::interface_dispatch::ClassRef;
 use super::objects::{immutable, ObjectRoot, REFERENCE};
 use super::runtime::{ADD32, GE_S32, GT_S32, LT_S32, MUL32, OR32, SUB32};
 
@@ -24,9 +27,23 @@ const LENGTH_FIELD: u32 = CHARS_FIELD + 1;
 /// The capacity of a builder that asked for less, and the least a full one grows by.
 const MINIMUM_CAPACITY: i32 = 16;
 
+/// The class the runtime lays out.
+/// `kotlin.text.StringBuilder`.
+pub(super) fn class() -> TypeName {
+    krusty::types::wk::string_builder()
+}
+
+/// Whether `classifier` is `kotlin.text.StringBuilder`, which the runtime lays out.
+pub(super) fn lays_out(classifier: TypeName) -> bool {
+    classifier == class()
+}
+
 /// The runtime's `StringBuilder` type and the functions realizing its members.
 pub(super) struct StringBuilders {
     table: u32,
+    /// The builder's class, which implements the library members `StringBuilder` overrides
+    /// (`super::builtin_members`).
+    pub(super) class: ClassRef,
     /// `(capacity: Int) -> StringBuilder`.
     pub(super) new: u32,
     /// `(builder, value: String?) -> builder`: appends `value`, or `"null"`.
@@ -65,7 +82,7 @@ impl StringBuilders {
             open: false,
         });
         let to_string = module.declare();
-        let (_, itable) = objects
+        let (class, itable) = objects
             .interfaces
             .class(module, objects.itable, vec![object]);
         let mut init = Code::default();
@@ -81,6 +98,7 @@ impl StringBuilders {
         let table = module.constant_global(ValType::reference(objects.any_table), init);
         let builders = Self {
             table,
+            class,
             new: module.declare(),
             append_string: module.declare(),
             append_range: module.declare(),
