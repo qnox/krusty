@@ -42411,12 +42411,10 @@ impl<'a> Checker<'a> {
                         {
                             self.report_inferred_java_override_return(
                                 scope,
-                                operator_declarations::InferredOverrideMember {
-                                    class: d,
-                                    class_decl: cl,
-                                    method: m,
-                                    method_index,
-                                },
+                                d,
+                                cl,
+                                m,
+                                method_index,
                                 current_owner,
                                 inferred,
                             );
@@ -42447,12 +42445,10 @@ impl<'a> Checker<'a> {
                         .insert(m.name_span.lo, inferred_return);
                     self.report_inferred_java_override_return(
                         scope,
-                        operator_declarations::InferredOverrideMember {
-                            class: d,
-                            class_decl: cl,
-                            method: m,
-                            method_index,
-                        },
+                        d,
+                        cl,
+                        m,
+                        method_index,
                         current_owner,
                         inferred_return,
                     );

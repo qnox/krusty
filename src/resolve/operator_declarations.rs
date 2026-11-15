@@ -20,16 +20,6 @@ pub(super) enum OperatorDeclarationSite {
     Member(Option<crate::fir::DeclarationId>, Option<Ty>),
 }
 
-/// The member whose inferred override return is checked: its class, the class declaration, the
-/// method and the method's index in that class.
-#[derive(Clone, Copy)]
-pub(super) struct InferredOverrideMember<'a> {
-    pub(super) class: DeclId,
-    pub(super) class_decl: &'a ClassDecl,
-    pub(super) method: &'a FunDecl,
-    pub(super) method_index: usize,
-}
-
 /// The return an override must meet when a Java method's declared return is a type parameter
 /// and the applied return is that parameter's non-null type argument wrapped as a platform type.
 /// `None` leaves the ordinary flexible return in place.
@@ -349,16 +339,13 @@ impl Checker<'_> {
     pub(super) fn report_inferred_java_override_return(
         &mut self,
         scope: &CheckerScope<'_>,
-        member: InferredOverrideMember<'_>,
+        class: DeclId,
+        class_decl: &ClassDecl,
+        method: &FunDecl,
+        method_index: usize,
         current_owner: Option<TypeName>,
         inferred_return: Ty,
     ) {
-        let InferredOverrideMember {
-            class,
-            class_decl,
-            method,
-            method_index,
-        } = member;
         if self.signature_defaults_only {
             return;
         }
