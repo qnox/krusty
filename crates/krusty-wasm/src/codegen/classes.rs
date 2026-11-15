@@ -1237,11 +1237,11 @@ fn inherited_any_member(
         (AnyMember::ToString, OwnedBase::Enum) => runtime.object_strings.enum_name,
         (AnyMember::ToString, OwnedBase::None) => {
             let names = source_class_names(ir, class)?;
-            runtime.identity_to_string(module, ir.classes[class as usize].fq_name_id(), &names)
+            runtime.identity_to_string(module, &names)
         }
         (AnyMember::ToString, OwnedBase::Exception(_)) => {
             let names = source_class_names(ir, class)?;
-            runtime.throwable_to_string(module, ir.classes[class as usize].fq_name_id(), &names)
+            runtime.throwable_to_string(module, &names)
         }
     })
 }

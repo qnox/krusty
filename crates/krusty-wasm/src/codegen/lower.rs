@@ -1883,10 +1883,10 @@ impl<'a> Body<'a> {
                 ..
             } => {
                 self.function_value(
+                    id,
                     impl_fn,
                     &captures,
                     function_values::FunctionEquality::Identity,
-                    self.type_of(id)?,
                     sam.as_deref(),
                 )?;
             }

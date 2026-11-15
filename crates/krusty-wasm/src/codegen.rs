@@ -524,7 +524,8 @@ mod tests {
             "{}a `toString` of `kotlin.Any?` reaching an object another file creates yet",
             super::DECLINE_PREFIX
         )];
-        let other = "fun function(): String = show { 1 }";
+        let other = "fun interface Supplier { fun get(): Int }\n\
+                     fun converted(): String = show(Supplier { 1 })";
         for target in WasmTarget::ALL {
             for sources in [[show, other], [other, show]] {
                 let (outputs, diagnostics) = compile_program(target, Entry::Box, &sources);
@@ -605,12 +606,14 @@ mod tests {
     }
 
     /// A `var` can be assigned anything after its initializer, so rendering it still declines
-    /// while the file creates a function value.
+    /// while the file creates a function value with no `toString` body, one converted to a
+    /// `fun interface`.
     #[test]
     fn an_erased_to_string_of_a_reassigned_var_declines() {
-        let source = "fun box(): String { val supplier = { 1 }\n\
+        let source = "fun interface Supplier { fun get(): Int }\n\
+                      fun box(): String { val supplier = Supplier { 1 }\n\
                       var message: Any = \"O\"\n\
-                      if (supplier() == 2) message = supplier\n\
+                      if (supplier.get() == 2) message = supplier\n\
                       return \"$message\" + \"K\" }";
         for target in WasmTarget::ALL {
             let (outputs, diagnostics) = compile(target, source);
@@ -623,6 +626,20 @@ mod tests {
                 )]
             );
             assert!(outputs.is_empty());
+        }
+    }
+
+    /// A lambda and a reference to a function print their class names, as kotlinc-wasm's do, so an
+    /// erased `toString` reaching them is lowered.
+    #[test]
+    fn an_erased_to_string_reaches_named_function_values() {
+        let source = "fun show(value: Any?): String = value.toString()\n\
+                      fun box(): String = if (show { 1 } == \"\" || show(::show) == \"\") \
+                      \"fail\" else \"OK\"";
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(target, source);
+            assert_eq!(diagnostics, Vec::<String>::new(), "{target:?}");
+            assert!(!outputs.is_empty(), "{target:?}");
         }
     }
 
