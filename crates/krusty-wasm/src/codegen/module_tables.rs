@@ -6,8 +6,9 @@
 //! class's IR, and it may come later, so the type is not the declaring file's to build: every file
 //! reads it from here, built from the plan's slot signatures (Pass 1's headers,
 //! `krusty::backend::class_tables::module_slots`), and the declaring file lays its table out as
-//! this type. A class the plan does not cover, a body-local one among them, is typed by its file
-//! alone, and no other file dispatches through it.
+//! this type. A class implementing a function type extends the function value table of its
+//! arity, as its declaring file lays it out. A class the plan does not cover, a body-local one
+//! among them, is typed by its file alone, and no other file dispatches through it.
 
 use krusty::fx_hash::HashMap;
 
@@ -15,6 +16,7 @@ use krusty::backend::class_tables::module_slots::{ModuleSlotPlan, PlannedSignatu
 use krusty::types::TypeName;
 
 use super::super::encode::{Module, SubType};
+use super::super::function_values::FunctionShapes;
 use super::super::objects::{ObjectRoot, REFERENCE};
 use super::lower::{carrier, Unsupported};
 
@@ -41,13 +43,14 @@ impl ModuleTables {
         class: TypeName,
         module: &mut Module,
         objects: &ObjectRoot,
+        functions: &mut FunctionShapes,
     ) -> Option<Result<ModuleTable, Unsupported>> {
         if let Some(table) = self.tables.get(&class) {
             return Some(table.clone());
         }
         let planned = plan.table(class)?;
         let table = match planned {
-            Ok(planned) => self.build(plan, planned, module, objects),
+            Ok(planned) => self.build(plan, planned, module, objects, functions),
             Err(reason) => Err(reason.to_owned()),
         };
         self.tables.insert(class, table.clone());
@@ -60,15 +63,17 @@ impl ModuleTables {
         planned: &krusty::backend::class_tables::module_slots::PlannedTable,
         module: &mut Module,
         objects: &ObjectRoot,
+        functions: &mut FunctionShapes,
     ) -> Result<ModuleTable, Unsupported> {
         let parent = match planned.superclass {
             Some(superclass) => Some(
-                self.table(plan, superclass, module, objects)
+                self.table(plan, superclass, module, objects, functions)
                     .ok_or("a planned superclass the plan does not cover")??,
             ),
             None => None,
         };
         let mut slot_types = Vec::with_capacity(planned.len() as usize);
+        let mut shape = None;
         for slot in 0..planned.len() {
             let own = match plan
                 .slot_signature(planned, slot)
@@ -78,6 +83,11 @@ impl ModuleTables {
                     Some(objects.any_slot_types[member.slot() as usize])
                 }
                 PlannedSignature::Untyped => None,
+                PlannedSignature::FunctionInvoke { arity } => {
+                    let function = functions.shape(module, objects, arity);
+                    shape = Some(function);
+                    Some(function.invoke)
+                }
                 PlannedSignature::Member { parameters, result } => {
                     let mut params = vec![REFERENCE];
                     for &parameter in parameters {
@@ -106,11 +116,11 @@ impl ModuleTables {
                 objects.itable,
                 objects.type_infos.ty,
             ),
-            supertype: Some(
-                parent
-                    .as_ref()
-                    .map_or(objects.any_table, |parent| parent.table_type),
-            ),
+            supertype: Some(match (&parent, shape) {
+                (Some(parent), _) => parent.table_type,
+                (None, Some(shape)) => shape.table,
+                (None, None) => objects.any_table,
+            }),
             open: true,
         });
         Ok(ModuleTable {

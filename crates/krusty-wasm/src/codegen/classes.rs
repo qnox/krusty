@@ -744,8 +744,10 @@ pub(super) fn declare(
         });
         // A class the module plan covers takes the table type every file reads from the plan,
         // so a file dispatching through it from elsewhere casts to this one type. A function
-        // class the plan does not cover extends the function value table of its arity.
-        let table_type = match module_tables.table(plan, class.fq_name, module, objects) {
+        // class extends the function value table of its arity, whether the plan covers it or not.
+        let planned =
+            module_tables.table(plan, class.fq_name, module, objects, &mut runtime.functions);
+        let table_type = match planned {
             Some(Ok(planned)) if planned.slot_types == slot_types[id as usize] => {
                 planned.table_type
             }
