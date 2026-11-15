@@ -1987,6 +1987,9 @@ pub struct File {
     /// `+NormalizeNaNValuesInConstContext`: every NaN a compile-time constant evaluates to is the
     /// canonical NaN of its type, whatever sign and payload the arithmetic produced.
     pub normalize_nan_in_const_context: bool,
+    /// `+IntrinsicConstEvaluation`: a constant context (an annotation argument, a `const val`)
+    /// also evaluates the intrinsic-const reads it otherwise rejects, such as an entry's `name`.
+    pub intrinsic_const_evaluation: bool,
     /// `+CustomEqualsInValueClasses`: permit the typed `equals(Self)` convention in a value class
     /// whose selected representation is inline rather than full/boxed.
     pub custom_equals_in_value_classes: bool,

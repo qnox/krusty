@@ -8,11 +8,11 @@
 use crate::fx_hash::HashMap;
 
 use crate::ast::{BinOp, Expr, ExprId, File, TemplatePart, UnOp};
-use crate::kt_string::KtStringBuf;
+use crate::kt_string::{KtString, KtStringBuf};
 use crate::libraries::{CompilerIntrinsic, LibConst, LibraryConst, PrimitiveBinaryIntrinsic};
-use crate::types::Ty;
+use crate::types::{SemanticCallRole, Ty};
 
-use super::{ResolvedCall, SyntheticOperatorCall};
+use super::{ExprLowering, ResolvedCall, ResolvedEnumEntry, SyntheticOperatorCall};
 
 /// Extract a literal's value after checking has fixed its semantic type.
 ///
@@ -99,6 +99,23 @@ pub(crate) struct CheckedConstantExpression<'a> {
     pub resolved_constants: &'a HashMap<ExprId, LibraryConst>,
     pub resolved_calls: &'a HashMap<ExprId, ResolvedCall>,
     pub resolved_operator_calls: &'a HashMap<(ExprId, SyntheticOperatorCall), ResolvedCall>,
+    pub resolved_enum_entries: &'a HashMap<ExprId, ResolvedEnumEntry>,
+    pub expr_lowers: &'a HashMap<ExprId, ExprLowering>,
+}
+
+impl super::Checker<'_> {
+    /// The checked facts this checker has recorded so far, for evaluating a constant expression.
+    pub(super) fn checked_constant_context(&self) -> CheckedConstantExpression<'_> {
+        CheckedConstantExpression {
+            file: self.file,
+            expression_types: &self.expr_types,
+            resolved_constants: &self.resolved_constants,
+            resolved_calls: &self.resolved_calls,
+            resolved_operator_calls: &self.resolved_operator_calls,
+            resolved_enum_entries: &self.resolved_enum_entries,
+            expr_lowers: &self.expr_lowers,
+        }
+    }
 }
 
 /// Evaluate the Kotlin compile-time expression rooted at `expression`.
@@ -122,6 +139,10 @@ impl Evaluator<'_> {
     fn expression_ty(&self, expression: ExprId, requested: Option<Ty>) -> Option<Ty> {
         let ty = requested.unwrap_or(*self.context.expression_types.get(expression.0 as usize)?);
         (!ty.mentions_error() && !ty.mentions_pending()).then(|| ty.canonical_semantic())
+    }
+
+    fn selected_role(&self, expression: ExprId) -> Option<SemanticCallRole> {
+        selected_member_role(self.context, expression)
     }
 
     fn selected_intrinsic(
@@ -189,6 +210,42 @@ impl Evaluator<'_> {
                         }
                     }
                 }
+                Some(LibraryConst {
+                    ty,
+                    value: LibConst::Str(output.finish()),
+                })
+            }
+            Expr::Member { receiver, .. } => match self.selected_role(expression)? {
+                SemanticCallRole::KotlinStringLength => {
+                    let LibConst::Str(text) = self.evaluate(*receiver, None, depth + 1)?.value
+                    else {
+                        return None;
+                    };
+                    Some(LibraryConst {
+                        ty,
+                        value: LibConst::Int(i32::try_from(text.len_utf16()).ok()?),
+                    })
+                }
+                SemanticCallRole::KotlinEnumName => {
+                    let entry = intrinsic_const_enum_entry(self.context, *receiver)?;
+                    Some(LibraryConst {
+                        ty,
+                        value: LibConst::Str(KtString::from(entry.name.as_str())),
+                    })
+                }
+                _ => None,
+            },
+            Expr::Call { callee, args }
+                if args.is_empty()
+                    && self.selected_role(expression)
+                        == Some(SemanticCallRole::KotlinAnyToString) =>
+            {
+                let Expr::Member { receiver, .. } = self.context.file.expr(*callee) else {
+                    return None;
+                };
+                let operand = self.evaluate(*receiver, None, depth + 1)?;
+                let mut output = KtStringBuf::new();
+                push_constant_string(&operand, &mut output)?;
                 Some(LibraryConst {
                     ty,
                     value: LibConst::Str(output.finish()),
@@ -288,6 +345,38 @@ impl Evaluator<'_> {
         .then_some(())?;
         arithmetic_numeric(expected, left, right, result_ty)
     }
+}
+
+/// The language role of the member declaration selected at `expression`: a property read's
+/// selected accessor, as checked FIR takes it, else the selected member call's declaration.
+pub(super) fn selected_member_role(
+    context: CheckedConstantExpression<'_>,
+    expression: ExprId,
+) -> Option<SemanticCallRole> {
+    if let Some(ExprLowering::MemberPropertyRead {
+        accessor: Some(accessor),
+        ..
+    }) = context.expr_lowers.get(&expression)
+    {
+        return accessor.semantic_role;
+    }
+    match context.resolved_calls.get(&expression)? {
+        ResolvedCall::Member(member) => member.member.semantic_role,
+        _ => None,
+    }
+}
+
+/// The entry `receiver` names directly, when `+IntrinsicConstEvaluation` makes its `name` a
+/// constant. An entry read through any other value is not a constant expression.
+pub(super) fn intrinsic_const_enum_entry<'a>(
+    context: CheckedConstantExpression<'a>,
+    receiver: ExprId,
+) -> Option<&'a ResolvedEnumEntry> {
+    context
+        .file
+        .intrinsic_const_evaluation
+        .then(|| context.resolved_enum_entries.get(&receiver))
+        .flatten()
 }
 
 /// `constant` with a NaN replaced by its type's canonical NaN (`Float.NaN`, `Double.NaN`).

@@ -1333,13 +1333,7 @@ impl Checker<'_> {
         expression: ExprId,
         declared: Ty,
     ) -> Option<crate::libraries::LibraryConst> {
-        let context = CheckedConstantExpression {
-            file: self.file,
-            expression_types: &self.expr_types,
-            resolved_constants: &self.resolved_constants,
-            resolved_calls: &self.resolved_calls,
-            resolved_operator_calls: &self.resolved_operator_calls,
-        };
+        let context = self.checked_constant_context();
         checked_constant_expression(context, expression, declared)
     }
 
