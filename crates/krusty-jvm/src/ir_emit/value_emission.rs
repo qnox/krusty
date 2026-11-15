@@ -1003,6 +1003,7 @@ impl super::Emitter<'_> {
                 }
                 Callee::Module { .. }
                 | Callee::ModuleDefaultEntry { .. }
+                | Callee::ModuleConstructorDefaultEntry { .. }
                 | Callee::ModuleWithDefaults { .. }
                 | Callee::LocalWithDefaults { .. }
                 | Callee::ClassStaticWithDefaults { .. }

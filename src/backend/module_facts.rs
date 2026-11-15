@@ -655,7 +655,8 @@ impl BackendModuleFacts {
                 .source_enum_constants
                 .get(&constant.classifier)
                 .is_some_and(|constants| constants.contains(&constant.name)),
-            super::instance_links::InstanceEntry::Constructor { declaration, .. } => {
+            super::instance_links::InstanceEntry::Constructor { declaration, .. }
+            | super::instance_links::InstanceEntry::ConstructorDefaults { declaration, .. } => {
                 self.source_constructors.contains(declaration)
             }
         }

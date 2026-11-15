@@ -45,6 +45,51 @@ pub fn publish_constructors(
             exports.record_instance_entry(instance, entry);
         }
     }
+    publish_constructor_defaults(ir, (module_name, module), exports);
+}
+
+/// Build the entry of every constructor's default-argument entry (see `super::default_arguments`)
+/// whose constructor `module` certifies another file may build an instance through, and record it
+/// as that constructor's default-argument instance. A construction in another file that leaves
+/// arguments out calls it with the whole frame and the omission masks.
+fn publish_constructor_defaults(
+    ir: &mut IrFile,
+    (module_name, module): (&str, &super::BackendModuleFacts),
+    exports: &mut DependencyExportSignatures,
+) {
+    let mut published = ir
+        .constructor_default_entries
+        .iter()
+        .filter_map(|(&declaration, &target)| {
+            let class = ir.checked_constructor_bodies.get(&declaration)?.class;
+            Some((declaration, class, target))
+        })
+        .collect::<Vec<_>>();
+    published.sort_unstable_by_key(|&(declaration, _, _)| declaration.raw());
+    for (declaration, class, target) in published {
+        let instance = super::instance_links::InstanceEntry::ConstructorDefaults {
+            module: module_name.into(),
+            declaration,
+        };
+        if !module.declares_instance(&instance) {
+            continue;
+        }
+        // The default-argument entry is always a secondary constructor of its class.
+        let Some(secondary) = target.ordinal.checked_sub(1) else {
+            continue;
+        };
+        let constructor = super::ExportedConstructor {
+            class,
+            secondary: Some(secondary as usize),
+        };
+        if let Some((entry, construction)) = construct(ir, constructor) {
+            // A mask word can make the entry's parameter list equal to a declared constructor's,
+            // so the construction names the entry by its place.
+            ir.construction_targets.insert(construction, target);
+            ir.construction_entries.insert(entry, class);
+            exports.record_instance_entry(instance, entry);
+        }
+    }
 }
 
 /// Build the entry of every constructor `exports` publishes from `ir` and export it as an ordinary
@@ -155,6 +200,11 @@ pub(super) fn entry(
 
 /// The entry constructing `constructor`'s class, when the file lays out its object.
 fn build(ir: &mut IrFile, constructor: super::ExportedConstructor) -> Option<FunId> {
+    construct(ir, constructor).map(|(entry, _)| entry)
+}
+
+/// [`build`], with the construction the entry answers.
+fn construct(ir: &mut IrFile, constructor: super::ExportedConstructor) -> Option<(FunId, ExprId)> {
     let class = &ir.classes[constructor.class as usize];
     let internal = class.fq_name;
     let result = ir.declared_class_self_type(internal)?;
@@ -193,7 +243,10 @@ fn build(ir: &mut IrFile, constructor: super::ExportedConstructor) -> Option<Fun
         default_prefix_count: 0,
     });
     ir.set_logical_type(construction, result);
-    Some(entry(ir, "<init>$new", parameters, result, construction))
+    Some((
+        entry(ir, "<init>$new", parameters, result, construction),
+        construction,
+    ))
 }
 
 fn read(ir: &mut IrFile, slot: u32, ty: Ty) -> ExprId {

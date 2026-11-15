@@ -293,7 +293,7 @@ pub(super) fn arguments(ir: &mut IrFile, parameters: &[Ty], frame: Frame) -> Vec
 /// keeps the type it yields. A call whose recorded declaration result is the entry's, or that
 /// recorded no type, stays a call; one that yields another type, as an override narrows the
 /// result of the provider whose entry it calls, becomes a coercion of the entry's value.
-fn replace(ir: &mut IrFile, site: ExprId, call: IrExpr, result: Ty) {
+pub(super) fn replace(ir: &mut IrFile, site: ExprId, call: IrExpr, result: Ty) {
     let declared = ir.call_declared_ret.get(&site).copied();
     let site_type = ir.checked_type(site).or(declared);
     match site_type {

@@ -234,6 +234,7 @@ impl ReferencedDependencies {
             | Callee::CrossFile { .. }
             | Callee::Module { .. }
             | Callee::ModuleDefaultEntry { .. }
+            | Callee::ModuleConstructorDefaultEntry { .. }
             | Callee::Static { .. }
             | Callee::Virtual { .. }
             | Callee::Super { .. }
