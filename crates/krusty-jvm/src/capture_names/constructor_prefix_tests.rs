@@ -31,6 +31,7 @@ pub(crate) fn original_prefix() -> (IrFile, DeclarationId, u32) {
                 owner: None,
             }),
             crossinline_parameter: None,
+            inlined: false,
         }),
         provenance: IrCtorParameterProvenance::Capture,
         capture_identity: Some(krusty::fir::ClassCaptureIdentity::EnclosingClass(outer)),

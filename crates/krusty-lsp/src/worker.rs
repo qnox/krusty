@@ -45,9 +45,9 @@ const WORKER_READY: &[u8] = b"ready";
 
 /// Classpath override and whether the worker should skip navigation indexes.
 ///
-/// Indexing sets `diagnostics_only` so closed files do not pay for hover, tokens, and navigation
-/// the index store discards. Interactive analysis leaves the flag false and still passes the
-/// module classpath.
+/// Indexing sets `diagnostics_only` so closed files do not pay for hover, tokens, and the rich
+/// navigation indexes. The response still carries definition occurrences; the supervisor binds
+/// those to declaration identities. Interactive analysis leaves the flag false.
 #[derive(Copy, Clone)]
 pub struct WorkerAnalysisOptions<'a> {
     pub classpath: Option<&'a [PathBuf]>,
@@ -346,6 +346,8 @@ struct AnalysisResponse {
     signature_help: SignatureHelpIndex,
     semantic_tokens: SemanticTokenIndex,
     definitions: DefinitionIndex,
+    #[serde(default)]
+    workspace_references: DefinitionIndex,
     type_definitions: DefinitionIndex,
     implementations: DefinitionIndex,
     #[serde(default)]
@@ -387,6 +389,7 @@ impl From<DocumentAnalysis> for AnalysisResponse {
             signature_help: analysis.signature_help,
             semantic_tokens: analysis.semantic_tokens,
             definitions: analysis.definitions,
+            workspace_references: analysis.workspace_references,
             type_definitions: analysis.type_definitions,
             implementations: analysis.implementations,
             library_definitions: analysis.library_definitions,
@@ -433,6 +436,7 @@ impl AnalysisResponse {
             signature_help: self.signature_help,
             semantic_tokens: self.semantic_tokens,
             definitions: self.definitions,
+            workspace_references: self.workspace_references,
             type_definitions: self.type_definitions,
             implementations: self.implementations,
             library_definitions: self.library_definitions,
@@ -1313,13 +1317,25 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
             &language.features,
         );
         let (analyses, implementation_relations) = if request.diagnostics_only {
-            // The compiler still checks the file. Hover, tokens, and navigation are what the index
-            // store throws away, and they dominate the worker response for a chunk of closed files.
+            // The compiler still checks the file. Hover, tokens, and the rich navigation indexes
+            // dominate a closed-file response, so they are not built. What is kept is the
+            // definition-occurrence list: the supervisor binds each target to a URI, and that
+            // identity is what references and go-to-definition match after this chunk is gone.
+            let references = crate::analysis::checked_definition_indexes(
+                &sources,
+                &source_set.files,
+                &source_set.symbols,
+                request.result_count,
+            );
             let mut analyses = source_set
                 .files
                 .into_iter()
-                .take(request.result_count)
-                .map(|file| DocumentAnalysis::with_diagnostics(file.diagnostics))
+                .zip(references)
+                .map(|(file, workspace_references)| {
+                    let mut analysis = DocumentAnalysis::with_diagnostics(file.diagnostics);
+                    analysis.workspace_references = workspace_references;
+                    analysis
+                })
                 .collect::<Vec<_>>();
             crate::retain_analysis_wire_budget(&mut analyses, MAX_WORKER_MESSAGE_BYTES);
             (analyses, Vec::new())
@@ -1807,6 +1823,7 @@ mod tests {
             definitions: DefinitionIndex::wire_saturation_fixture(definitions),
             type_definitions: DefinitionIndex::wire_saturation_fixture(type_definitions),
             implementations: DefinitionIndex::wire_saturation_fixture(implementations),
+            workspace_references: DefinitionIndex::default(),
             library_definitions: LibraryDefinitionIndex::default(),
             document_symbols: DocumentSymbolIndex::default(),
             workspace_symbols: WorkspaceSymbolIndex::default(),
@@ -2604,6 +2621,10 @@ mod tests {
         assert_eq!(analysis.signature_help.entry_count(), 0);
         assert_eq!(analysis.semantic_tokens.entry_count(), 0);
         assert_eq!(analysis.definitions.entry_count(), 0);
+        assert!(
+            analysis.workspace_references.entry_count() > 0,
+            "a closed-file chunk keeps definition occurrences under a declaration identity"
+        );
         assert_eq!(analysis.type_definitions.entry_count(), 0);
         assert_eq!(analysis.implementations.entry_count(), 0);
         assert_eq!(analysis.document_symbols.entry_count(), 0);

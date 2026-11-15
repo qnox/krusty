@@ -16,6 +16,7 @@ pub use references::referenced_dependencies;
 use crate::fx_hash::HashMap;
 use std::collections::hash_map::Entry;
 
+pub use crate::fir::BuiltinImplementation;
 use crate::fir::{ExternalCallableId, ExternalPropertyId};
 pub use crate::libraries::CompilerIntrinsic as BackendCompilerIntrinsic;
 pub use crate::libraries::DependencyGetterSignature;
@@ -60,11 +61,12 @@ pub struct BackendCallableFact {
     /// Exact declarations this declaration overrides, as checked FIR froze them from the member
     /// hierarchy. A target keys a specially implemented language declaration on them.
     pub overridden_declarations: Box<[crate::types::OverriddenDeclaration]>,
-    /// For a member of a supertype of builtin primitive classifiers (`Number.toLong`,
-    /// `Comparable.compareTo`), what each such primitive runs when a value of it is the receiver,
-    /// as the member hierarchy proves. A target carrying the primitive as an object dispatches the
-    /// call to these; every other callable has none.
-    pub primitive_implementations: Box<[PrimitiveImplementation]>,
+    /// For a member of a supertype of builtin classes (`CharSequence.length`, `Number.toLong`,
+    /// `Comparable.compareTo`), or a property's getter of one, what each such class runs when a
+    /// value of it is the receiver, as the member hierarchy proves. A target carrying the builtin
+    /// value in a representation of its own (a string, a box) dispatches the call to these; every
+    /// other callable has none.
+    pub builtin_implementations: Box<[BuiltinImplementation]>,
     pub member_realization: MemberRealization,
     pub params: Vec<Ty>,
     pub physical_params: Vec<Ty>,
@@ -315,7 +317,7 @@ mod tests {
             compiler_intrinsic: None,
             semantic_role: None,
             overridden_declarations: Box::new([]),
-            primitive_implementations: Box::new([]),
+            builtin_implementations: Box::new([]),
             member_realization: MemberRealization::Dispatch,
             params: params.clone(),
             physical_params: params,
@@ -363,6 +365,49 @@ mod tests {
         assert!(fact.matches_dependency_body_call(&params, Some(1), true));
         assert!(!fact.matches_dependency_body_call(&params, Some(0), true));
         assert!(!fact.matches_dependency_body_call(&params, Some(1), false));
+    }
+
+    #[test]
+    fn checked_builtin_implementations_are_copied_by_external_identity() {
+        let identity = ExternalCallableId::from_raw(1);
+        let expected = vec![BuiltinImplementation {
+            receiver: Ty::obj("kotlin/String"),
+            declaration: None,
+        }]
+        .into_boxed_slice();
+        let mut callables = accessor_facts();
+        let fact = callables.callables.get_mut(&identity).unwrap();
+        fact.kind = ExternalCallableKind::Member;
+        fact.declaration_owner = Some(SemanticCallableOwner::Classifier(crate::types::type_name(
+            "kotlin/CharSequence",
+        )));
+        let mut implementations = HashMap::default();
+        implementations.insert(identity, expected.clone());
+
+        callables
+            .record_checked_builtin_implementations(&implementations)
+            .unwrap();
+
+        assert_eq!(
+            callables.callables[&identity].builtin_implementations,
+            expected
+        );
+    }
+
+    #[test]
+    fn checked_builtin_implementation_handoff_rejects_missing_identity() {
+        let identity = ExternalCallableId::from_raw(1);
+        let mut callables = accessor_facts();
+        let fact = callables.callables.get_mut(&identity).unwrap();
+        fact.kind = ExternalCallableKind::Member;
+        fact.declaration_owner = Some(SemanticCallableOwner::Classifier(crate::types::type_name(
+            "kotlin/CharSequence",
+        )));
+
+        assert_eq!(
+            callables.record_checked_builtin_implementations(&HashMap::default()),
+            Err(identity)
+        );
     }
 
     fn accessor_facts() -> CheckedBackendCallables {
@@ -540,7 +585,7 @@ mod tests {
             compiler_intrinsic: None,
             semantic_role: None,
             overridden_declarations: Box::new([]),
-            primitive_implementations: Box::new([]),
+            builtin_implementations: Box::new([]),
             member_realization: MemberRealization::Dispatch,
             params: vec![Ty::Int],
             physical_params: vec![Ty::Int],
@@ -581,25 +626,6 @@ mod tests {
         });
         assert!(!fact.is_singleton_member_of(owner));
     }
-}
-
-/// What one builtin primitive runs for a call of a supertype's member on a value of it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct PrimitiveImplementation {
-    /// The primitive, whose classifier is a proper subtype of the member's.
-    pub receiver: Ty,
-    /// The primitive classifier's override; `None` when it inherits the member's own body.
-    pub declaration: Option<PrimitiveOverrideDeclaration>,
-}
-
-/// One primitive classifier's override of a supertype's member, as its provider published it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct PrimitiveOverrideDeclaration {
-    /// The operation the provider realizes the override as, if it is one.
-    pub operation: Option<BackendCompilerIntrinsic>,
-    /// The override's declared parameter and result types (`Int.compareTo(other: Int): Int`).
-    pub params: Box<[Ty]>,
-    pub ret: Ty,
 }
 
 /// What the provider normalized for one selected dependency property.
@@ -806,26 +832,27 @@ impl CheckedBackendCallables {
         Ok(facts)
     }
 
-    /// Record what each builtin primitive runs for every member of a library classifier this
-    /// file calls, as `implementations` answers it for the member's owner, name and identity.
-    /// The frontend answers it from the member hierarchy at the handoff; every other callable
-    /// keeps none.
-    pub fn record_primitive_implementations(
+    /// Copy checker-produced builtin implementation facts for every selected external member.
+    /// A missing identity is an incomplete frontend handoff and must fail closed.
+    pub fn record_checked_builtin_implementations(
         &mut self,
-        mut implementations: impl FnMut(
-            TypeName,
-            &str,
-            ExternalCallableId,
-        ) -> Box<[PrimitiveImplementation]>,
-    ) {
+        implementations: &HashMap<ExternalCallableId, Box<[BuiltinImplementation]>>,
+    ) -> Result<(), ExternalCallableId> {
         for (&identity, fact) in &mut self.callables {
-            let (ExternalCallableKind::Member, Some(SemanticCallableOwner::Classifier(owner))) =
-                (fact.kind, fact.declaration_owner)
-            else {
+            if fact.kind != ExternalCallableKind::Member
+                || !matches!(
+                    fact.declaration_owner,
+                    Some(SemanticCallableOwner::Classifier(_))
+                )
+            {
                 continue;
+            }
+            let Some(selected) = implementations.get(&identity) else {
+                return Err(identity);
             };
-            fact.primitive_implementations = implementations(owner, &fact.name, identity);
+            fact.builtin_implementations = selected.clone();
         }
+        Ok(())
     }
 
     /// Freeze dependency identities on `super` calls introduced after the initial handoff.
@@ -923,7 +950,7 @@ impl CheckedBackendCallables {
                     compiler_intrinsic: callable.compiler_intrinsic,
                     semantic_role: callable.semantic_role,
                     overridden_declarations: Box::new([]),
-                    primitive_implementations: Box::new([]),
+                    builtin_implementations: Box::new([]),
                     member_realization: callable.member_realization,
                     params: callable.params,
                     physical_params: callable.physical_params,
@@ -964,6 +991,24 @@ impl CheckedBackendCallables {
     /// is not one of this file's.
     pub fn callable(&self, identity: ExternalCallableId) -> Option<&BackendCallableFact> {
         self.callables.get(&identity)
+    }
+
+    /// The exact external members referenced by this checked IR unit, in stable identity order.
+    pub(crate) fn external_member_identities(&self) -> Vec<ExternalCallableId> {
+        let mut identities = self
+            .callables
+            .iter()
+            .filter_map(|(&identity, callable)| {
+                (callable.kind == ExternalCallableKind::Member
+                    && matches!(
+                        callable.declaration_owner,
+                        Some(SemanticCallableOwner::Classifier(_))
+                    ))
+                .then_some(identity)
+            })
+            .collect::<Vec<_>>();
+        identities.sort_unstable_by_key(|identity| identity.raw());
+        identities
     }
 
     /// The fact for a dependency property identity this file's IR holds. `None` means the identity

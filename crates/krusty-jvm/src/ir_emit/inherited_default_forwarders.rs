@@ -244,7 +244,7 @@ fn forwarders(ir: &IrFile, c: &krusty::ir::IrClass, env: &EmitEnv) -> Vec<Inheri
                 &class_type_params,
                 default,
                 env.dependency_callables,
-                env.jvm_default,
+                crate::declared_jvm_default::of_class(c, env.jvm_default),
             )
         })
         .collect()

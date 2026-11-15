@@ -15,6 +15,27 @@ pub enum IrDeclarationlessVisibility {
 }
 
 impl IrFile {
+    /// The class and method index of `function` when it is a method of an open class, which a
+    /// subclass may override, so a call reaches it through the class's dispatch table.
+    pub(crate) fn overridable_method(
+        &self,
+        function: super::FunId,
+    ) -> Option<(super::ClassId, u32)> {
+        let owner = self.functions[function as usize].dispatch_receiver?;
+        let class = self.class_id_by_name(owner)?;
+        let declaration = &self.classes[class as usize];
+        if !(declaration.is_open || declaration.is_abstract)
+            || self.method_visibility(function) == crate::types::Visibility::Private
+        {
+            return None;
+        }
+        let index = declaration
+            .methods
+            .iter()
+            .position(|&method| method == function)?;
+        Some((class, u32::try_from(index).ok()?))
+    }
+
     pub(crate) fn record_declared_class_self_type(&mut self, classifier: TypeName, self_type: Ty) {
         assert_eq!(self_type.kotlin_class_internal(), Some(classifier));
         let previous = self.declared_class_self_types.insert(classifier, self_type);

@@ -322,6 +322,112 @@ fn class_lambdas_run() {
     );
 }
 
+/// Compile `source` under `-Xlambdas=class -Xsam-conversions=class` with either compiler.
+fn compile_source_with_class_modes(source: &str, reference: bool) -> Vec<(String, Vec<u8>)> {
+    let work = common::scratch_dir().expect("allocate class-mode fixture");
+    let file = work.join("L.kt");
+    let output = work.join("out");
+    std::fs::create_dir_all(&output).expect("create output");
+    std::fs::write(&file, source).expect("write fixture");
+    if reference {
+        let args = vec![
+            "-d".to_string(),
+            output.to_string_lossy().into_owned(),
+            "-nowarn".to_string(),
+            "-Xlambdas=class".to_string(),
+            "-Xsam-conversions=class".to_string(),
+            file.to_string_lossy().into_owned(),
+        ];
+        let (code, stderr) =
+            common::kotlinc_compile(&args).expect("reference compiler unavailable");
+        assert_eq!(code, 0, "kotlinc rejected the class-mode fixture: {stderr}");
+    } else {
+        let stdlib = common::stdlib_jar();
+        let result = std::process::Command::new(common::krusty_binary())
+            .args(["-d", output.to_str().expect("UTF-8 output"), "-no-reflect"])
+            .args(["-Xlambdas=class", "-Xsam-conversions=class"])
+            .args(["-classpath", stdlib.to_str().expect("UTF-8 stdlib")])
+            .arg(&file)
+            .output()
+            .expect("run krusty CLI");
+        assert!(
+            result.status.success(),
+            "krusty rejected the class-mode fixture: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    let mut names = Vec::new();
+    collect_classes(&output, &output, &mut names);
+    let classes = names
+        .iter()
+        .map(|name| {
+            let bytes = std::fs::read(output.join(format!("{name}.class"))).expect("read class");
+            (name.clone(), bytes)
+        })
+        .collect();
+    let _ = std::fs::remove_dir_all(work);
+    classes
+}
+
+fn generic_sam_class_name(classes: &[(String, Vec<u8>)]) -> &str {
+    let mut matches = classes
+        .iter()
+        .filter(|(name, _)| name.contains("$genericSam$"));
+    let name = matches
+        .next()
+        .map(|(name, _)| name.as_str())
+        .expect("genericSam emits its SAM class");
+    assert!(matches.next().is_none(), "genericSam emits one SAM class");
+    name
+}
+
+/// A lambda converted to a SAM under `-Xsam-conversions=class` is a class whose method IS the
+/// lambda body (kotlinc's `sam/lambdaGenericFunInterface` listing): the captured `f` is the
+/// synthetic final field `$f` with a generic `Signature`, the method keeps the generic result `T`,
+/// and the class names its enclosing method. A forwarding wrapper over a static `lambda$0` has a
+/// `$captured$0` field and an erased method instead.
+#[test]
+fn sam_lambda_class_holds_the_body_and_the_captured_value_like_kotlinc() {
+    let source = r#"
+fun interface Sam<T> { fun get(): T }
+fun <T> genericSam(f: () -> T): Sam<T> = Sam { f() }
+fun box(): String {
+    val sam = genericSam { "x" }
+    val type = sam.javaClass
+    val fields = type.declaredFields
+    if (fields.map { it.name } != listOf("\$f")) return "fields: " + fields.map { it.name }
+    if (!fields[0].isSynthetic) return "field is not synthetic"
+    val field = fields[0].genericType.toString()
+    if (field != "kotlin.jvm.functions.Function0<T>") return "field type: " + field
+    val method = type.getDeclaredMethod("get")
+    if (method.genericReturnType.toString() != "T") return "result: " + method.genericReturnType
+    if (type.enclosingMethod?.name != "genericSam") return "enclosing: " + type.enclosingMethod
+    if (type.declaredMethods.any { it.name.contains("lambda") }) return "forwarding method"
+    return if (sam.get() == "x") "OK" else "wrong value"
+}
+"#;
+    let ours = compile_source_with_class_modes(source, false);
+    let reference = compile_source_with_class_modes(source, true);
+    let sam_class = generic_sam_class_name(&ours);
+    assert_eq!(sam_class, generic_sam_class_name(&reference));
+    let class_sets = common::ClassSets {
+        reference: reference.iter().cloned().collect(),
+        krusty: ours.iter().cloned().collect(),
+    };
+    let (reference_listing, krusty_listing) = class_sets.class_listing(sam_class);
+    assert_eq!(
+        krusty_listing, reference_listing,
+        "generic SAM class ABI differs from kotlinc"
+    );
+
+    let stdlib = common::stdlib_jar();
+    let ours_result = common::run_box(&ours, "LKt", std::slice::from_ref(&stdlib));
+    let reference_result = common::run_box(&reference, "LKt", &[stdlib]);
+    assert_eq!(ours_result.as_deref(), Some("OK"));
+    assert_eq!(reference_result.as_deref(), Some("OK"));
+    assert_eq!(ours_result, reference_result);
+}
+
 /// A DELEGATED property's initializer lambda (`val z by lazy { 7 }`) carries the property name, so
 /// it cannot share the bare `C$<ordinal>` family with unbound init-block lambdas (where a shared
 /// counter once let names collide). kotlinc names it `Deleg$z$2`.

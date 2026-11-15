@@ -170,6 +170,7 @@ const MODELED_FEATURES: &[&str] = &[
     "AllowEagerSupertypeAccessibilityChecks",
     "AnnotationsInMetadata",
     "BareArrayClassLiteral",
+    "CallableReferencesToContextual",
     "ContextParameters",
     "ContextReceivers",
     "ContextSensitiveResolutionUsingExpectedType",
@@ -195,6 +196,7 @@ const MODELED_FEATURES: &[&str] = &[
     "MultiPlatformProjects",
     "NameBasedDestructuring",
     "NestedTypeAliases",
+    "NormalizeNaNValuesInConstContext",
     "NullableNothingInReifiedPosition",
     "PrioritizedEnumEntries",
     "ProhibitIntersectionReifiedTypeParameter",
@@ -518,15 +520,34 @@ mod tests {
         assert!(features.has("SourceFeature"));
     }
 
+    /// Modeled before any supported release defines them: kotlinc added the feature in a release
+    /// krusty does not support yet. An entry leaves this list when a supported release's table
+    /// gains the feature, and the test below fails until it does.
+    const AHEAD_OF_SUPPORTED_RELEASES: &[&str] = &["NormalizeNaNValuesInConstContext"];
+
     #[test]
     fn modeled_features_are_sorted_kotlinc_features() {
         assert!(MODELED_FEATURES.windows(2).all(|pair| pair[0] < pair[1]));
-        let table =
-            FeatureTable::for_version(crate::kotlin_version::KotlinVersion::newest()).unwrap();
+        let tables: Vec<_> = crate::kotlin_version::KotlinVersion::supported()
+            .into_iter()
+            .map(|version| FeatureTable::for_version(version).unwrap())
+            .collect();
         for name in MODELED_FEATURES {
+            let known = tables.iter().any(|table| table.get(name).is_some());
+            if AHEAD_OF_SUPPORTED_RELEASES.contains(name) {
+                assert!(
+                    !known,
+                    "{name} is now a feature of a supported release: drop it from \
+                     AHEAD_OF_SUPPORTED_RELEASES"
+                );
+            } else {
+                assert!(known, "{name} is not a kotlinc language feature");
+            }
+        }
+        for name in AHEAD_OF_SUPPORTED_RELEASES {
             assert!(
-                table.get(name).is_some(),
-                "{name} is not a kotlinc language feature"
+                MODELED_FEATURES.contains(name),
+                "{name} is not modeled, so it does not belong in AHEAD_OF_SUPPORTED_RELEASES"
             );
         }
     }

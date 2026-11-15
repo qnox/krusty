@@ -1044,6 +1044,7 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::UnsignedRemainder { .. }
                 | krusty::libraries::CompilerIntrinsic::ResultFailure(_)
                 | krusty::libraries::CompilerIntrinsic::TextTrim
+                | krusty::libraries::CompilerIntrinsic::StringCompare
                 | krusty::libraries::CompilerIntrinsic::CollectionSizeOrDefault,
             ) => {
                 unreachable!("a target KLIB library helper cannot reach JVM call realization")

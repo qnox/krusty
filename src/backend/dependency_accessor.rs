@@ -13,6 +13,7 @@ pub struct DependencyAccessor<'a> {
     parameters: &'a [Ty],
     result: Ty,
     dispatch: IrPropertyDispatch,
+    write: bool,
 }
 
 impl CheckedBackendCallables {
@@ -59,11 +60,23 @@ impl CheckedBackendCallables {
             parameters,
             result,
             dispatch,
+            write,
         })
     }
 }
 
 impl DependencyAccessor<'_> {
+    /// Whether the operation writes the property, through its setter.
+    pub fn writes(&self) -> bool {
+        self.write
+    }
+
+    /// Whether the operation dispatches on its receiver rather than naming a superclass's
+    /// implementation.
+    pub fn dispatches(&self) -> bool {
+        self.dispatch == IrPropertyDispatch::Ordinary
+    }
+
     pub fn callee(&self) -> Result<Callee, &'static str> {
         if self.dispatch != IrPropertyDispatch::Ordinary {
             return Err("a dependency accessor export called through super");

@@ -74,13 +74,17 @@ impl CallSiteVariableMap {
         })
     }
 
-    /// `ty` with every call-owned formal replaced by this call's variable for it.
+    /// `ty` with every call-owned formal replaced by this call's variable for it. A formal of a
+    /// signature that already names inference variables (a candidate instantiated for a
+    /// lexically fixed formal) is such a variable, and is renamed like a declared one.
     pub(crate) fn instantiate_type(&self, ty: Ty) -> Ty {
         crate::types::ty_map_symbols(ty, &|symbol, bound| match symbol.kind() {
-            TyKind::TyParam(name, _) => match self.call_owned.get(name.as_str()) {
-                Some(&variable) => Ty::type_variable(TyParamName::new(variable), bound),
-                None => symbol.with_symbol_bound(bound),
-            },
+            TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
+                match self.call_owned.get(name.as_str()) {
+                    Some(&variable) => Ty::type_variable(TyParamName::new(variable), bound),
+                    None => symbol.with_symbol_bound(bound),
+                }
+            }
             _ => symbol.with_symbol_bound(bound),
         })
     }

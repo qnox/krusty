@@ -151,13 +151,8 @@ impl Checker<'_> {
         source: &ResolvedContextArgument,
     ) -> Option<NarrowPath> {
         match source {
-            ResolvedContextArgument::Binding {
-                name, shadow_depth, ..
-            } => {
-                let local = scope
-                    .shadowed_binding(Ns::Value, name, *shadow_depth)?
-                    .value()?;
-                Some(NarrowPath::root_only(PathRoot::Value(local.flow_identity)))
+            ResolvedContextArgument::Binding { flow_identity, .. } => {
+                Some(NarrowPath::root_only(PathRoot::Value((*flow_identity)?)))
             }
             ResolvedContextArgument::ImplicitReceiver(selection) if selection.current => {
                 self.current_receiver_path(scope)

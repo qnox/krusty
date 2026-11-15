@@ -96,7 +96,7 @@ fn frozen(signature: GenericSig) -> BackendCallableFact {
         compiler_intrinsic: None,
         semantic_role: None,
         overridden_declarations: Box::new([]),
-        primitive_implementations: Box::new([]),
+        builtin_implementations: Box::new([]),
         member_realization: crate::libraries::MemberRealization::Dispatch,
         params: signature.parameters_with_receiver(1).into_vec(),
         physical_params: Vec::new(),

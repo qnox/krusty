@@ -397,7 +397,7 @@ pub(crate) fn constant_value_pb(st: &mut StringTable<'_>, constant: &crate::ir::
     annotation_value_pb(st, &crate::ir::AnnoValue::Const(constant.clone()))
 }
 
-fn annotation_value_pb(st: &mut StringTable<'_>, value: &crate::ir::AnnoValue) -> Pb {
+pub(super) fn annotation_value_pb(st: &mut StringTable<'_>, value: &crate::ir::AnnoValue) -> Pb {
     use crate::ir::{AnnoValue, IrConst};
     let mut out = Pb::new();
     match value {
@@ -1400,7 +1400,7 @@ pub fn build_package_with_intersection_approximation(
         &lookups.enum_entry_bodies,
         &lookups.anonymous_classifiers,
         lookups.intersection_approximation,
-        lookups.inner_classifiers,
+        lookups.classifier_applications,
     );
     let mut requirements = VersionRequirementTable::default();
     let mut contract_types = ContractTypeTable::default();

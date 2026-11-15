@@ -6,7 +6,8 @@ use super::common;
 fn a_bare_call_reaches_the_default_import_past_a_same_package_extension() {
     let (sources, java) = krusty::conformance::split_files(include_str!(
         "../box_regressions/bareCallPastReceiverOnlyLevelContracts.kt"
-    ));
+    ))
+    .expect("partition");
     assert!(java.is_empty());
     let [(stem, program)] = sources.as_slice() else {
         panic!("the complete bare-call contract regression")

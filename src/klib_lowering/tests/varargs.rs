@@ -2,7 +2,7 @@
 
 use super::super::function_lowering::{raw_function_header, HeaderPurpose};
 use super::demo_package::{declaration, T};
-use super::demo_package::{demo, source_body};
+use super::demo_package::{demo, source_body_with_stdlib};
 use super::*;
 use crate::metadata::klib_ir::tree::KlibIrVarargElement;
 
@@ -238,7 +238,7 @@ fn serialized_varargs_preserve_one_array_and_each_spread_in_source_order() {
     validated(unit.ir());
     assert_eq!(
         lowered_body(&unit, function),
-        source_body(
+        source_body_with_stdlib(
             "fun a(a: IntArray): IntArray { return intArrayOf(1, *a, 2) }",
             "a",
             1

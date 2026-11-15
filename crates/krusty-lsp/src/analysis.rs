@@ -428,9 +428,30 @@ pub struct Completion<'a> {
 /// `(source lo, source hi, target file, target lo, target hi)`.
 type DefinitionEntry = [u32; 5];
 
-#[derive(Clone, Default, Deserialize, Serialize)]
+/// A declaration named by its file and the span of its name.
+///
+/// A definition target's file number is an index into one analyzed source set. That number is
+/// meaningless in the next chunk. This identity is the file's URI plus the name span, which a
+/// closed-file symbol index records for the same declaration, so a reference and a go-to-definition
+/// can meet across source sets.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct DeclarationIdentity {
+    pub uri: String,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct DefinitionIndex {
     entries: Vec<DefinitionEntry>,
+    /// Source-set file index to URI. Empty until the supervisor binds the file list it knows.
+    /// Not on the worker wire: the worker is handed sources, never URIs.
+    #[serde(default, skip)]
+    bound_uris: HashMap<u32, String>,
+    /// Declaration name text at `(file, span.lo, span.hi)` when the source set was still in hand.
+    /// A later edit can put a different declaration on the same bytes; the name is what proves the
+    /// span still means this declaration.
+    #[serde(default, skip)]
+    declaration_names: HashMap<(u32, u32, u32), String>,
 }
 
 /// Classpath definitions keyed by their source occurrence.
@@ -1047,6 +1068,23 @@ impl ProjectSymbolIndex {
     pub fn segment_count(&self) -> usize {
         self.segments.len()
     }
+
+    /// Newest layer first, so an edited buffer's declaration wins over the closed-file copy.
+    pub fn declaration_range(&self, uri: &str, span: Span) -> Option<[u32; 4]> {
+        self.segments
+            .iter()
+            .rev()
+            .find_map(|segment| segment.declaration_range(uri, span))
+    }
+
+    /// Newest layer first. The name currently recorded at `span`, so a retained use can tell that
+    /// the span still belongs to the declaration it was bound to.
+    pub fn declaration_name(&self, uri: &str, span: Span) -> Option<&str> {
+        self.segments
+            .iter()
+            .rev()
+            .find_map(|segment| segment.declaration_name(uri, span))
+    }
 }
 
 /// The match qualities the ladder walks, strongest first.
@@ -1506,6 +1544,29 @@ impl WorkspaceSymbolIndex {
         });
         self.by_name = by_name;
         self.by_initials = by_initials;
+    }
+
+    /// The protocol range of the declaration whose name occupies `span` in `uri`.
+    ///
+    /// Parse-only indexing records that name span, so a reference bound to the same URI and span
+    /// resolves here after the source set that numbered the file has been dropped.
+    pub fn declaration_range(&self, uri: &str, span: Span) -> Option<[u32; 4]> {
+        let file = self.files.iter().position(|candidate| candidate == uri)? as u32;
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| entry[0] == file && entry[1] == span.lo && entry[2] == span.hi)?;
+        Some([entry[3], entry[4], entry[5], entry[6]])
+    }
+
+    /// The declaration name whose selection span is `span` in `uri`.
+    pub fn declaration_name(&self, uri: &str, span: Span) -> Option<&str> {
+        let file = self.files.iter().position(|candidate| candidate == uri)? as u32;
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| entry[0] == file && entry[1] == span.lo && entry[2] == span.hi)?;
+        self.names.get(entry[10] as usize).map(String::as_str)
     }
 
     fn lowercase_name(&self, entry_index: u32) -> Option<&str> {
@@ -2691,6 +2752,8 @@ impl DefinitionIndex {
     pub(crate) fn wire_saturation_fixture(entry_count: usize) -> Self {
         Self {
             entries: vec![[u32::MAX; 5]; entry_count],
+            bound_uris: HashMap::new(),
+            declaration_names: HashMap::new(),
         }
     }
 
@@ -2710,7 +2773,11 @@ impl DefinitionIndex {
         entries.sort_unstable();
         entries.dedup();
         entries.truncate(available);
-        Self { entries }
+        Self {
+            entries,
+            bound_uris: HashMap::new(),
+            declaration_names: HashMap::new(),
+        }
     }
 
     fn from_occurrences(
@@ -2775,10 +2842,93 @@ impl DefinitionIndex {
         self.entries.len()
     }
 
+    /// Every use this index recorded, in source order.
+    pub fn occurrences(&self) -> impl Iterator<Item = (Span, DefinitionTarget)> + '_ {
+        self.entries.iter().map(|entry| {
+            (
+                Span::new(entry[0], entry[1]),
+                DefinitionTarget {
+                    file: entry[2],
+                    span: Span::new(entry[3], entry[4]),
+                },
+            )
+        })
+    }
+
+    /// Remember which URI each source-set file index names.
+    ///
+    /// Call once, after navigation file indexes have been remapped into `uris`. A later chunk
+    /// cannot see those indexes; the URI and the declaration's name span still name it.
+    pub fn bind_uris(&mut self, uris: &[&str]) {
+        if !self.bound_uris.is_empty() || uris.is_empty() {
+            return;
+        }
+        let mut referenced = HashSet::new();
+        for entry in &self.entries {
+            referenced.insert(entry[2]);
+        }
+        for file in referenced {
+            let Some(uri) = uris.get(file as usize).copied() else {
+                continue;
+            };
+            if uri.is_empty() {
+                continue;
+            }
+            self.bound_uris.insert(file, uri.to_string());
+        }
+    }
+
+    pub fn file_uri(&self, file: u32) -> Option<&str> {
+        self.bound_uris.get(&file).map(String::as_str)
+    }
+
+    pub fn declaration_identity(&self, target: DefinitionTarget) -> Option<DeclarationIdentity> {
+        Some(DeclarationIdentity {
+            uri: self.file_uri(target.file)?.to_string(),
+            span: target.span,
+        })
+    }
+
+    /// Snapshot each target's name from `sources`, which are aligned with the file indexes.
+    ///
+    /// Call after remapping, while those sources are still in hand. The snapshot is not on the
+    /// worker wire: the host has the texts the worker was given.
+    pub fn record_declaration_names(&mut self, sources: &[&str]) {
+        if !self.declaration_names.is_empty() {
+            return;
+        }
+        for entry in &self.entries {
+            let key = (entry[2], entry[3], entry[4]);
+            if self.declaration_names.contains_key(&key) {
+                continue;
+            }
+            let Some(name) = sources
+                .get(entry[2] as usize)
+                .and_then(|source| source.get(entry[3] as usize..entry[4] as usize))
+            else {
+                continue;
+            };
+            if name.is_empty() {
+                continue;
+            }
+            self.declaration_names.insert(key, name.to_string());
+        }
+    }
+
+    /// Name recorded for `target` when its source set was indexed.
+    pub fn declaration_name(&self, target: DefinitionTarget) -> Option<&str> {
+        self.declaration_names
+            .get(&(target.file, target.span.lo, target.span.hi))
+            .map(String::as_str)
+    }
+
     fn remap_files(&mut self, remaps: &[(u32, u32)]) {
         if remaps.is_empty() {
             return;
         }
+        // File indexes are about to change. A snapshot keyed by the old indexes would authenticate
+        // the wrong source. The host records names again after the remap.
+        self.declaration_names.clear();
         for entry in &mut self.entries {
             if let Ok(index) = remaps.binary_search_by_key(&entry[2], |(file, _)| *file) {
                 entry[2] = remaps[index].1;
@@ -3351,14 +3501,19 @@ pub struct IndexOutcome {
     pub conclusive: bool,
 }
 
-/// One workspace file's indexing result. Only diagnostics and the text hash are retained; the
-/// rich per-document indices are derived while indexing and dropped, because a swept file is
-/// re-analysed interactively the moment it is opened.
+/// One workspace file's indexing result.
+///
+/// Diagnostics and declaration-identity references are retained. Hover, tokens, and the other
+/// navigation indexes are not: a swept file is re-analysed interactively when it is opened.
+/// Parse-only declarations stay in the project symbol index.
 #[derive(Clone, Debug)]
 pub struct IndexedFile {
     pub uri: String,
     pub diagnostics: Vec<Diagnostic>,
     pub text_hash: u64,
+    /// Uses in this file, with each target bound to a declaration identity when the chunk's URI
+    /// list was known. Empty for a caller that only supplied diagnostics.
+    pub references: DefinitionIndex,
     /// Retained only until the store resolves byte spans to line and UTF-16 column, then dropped.
     /// Resolving later would need the text again, and re-reading would race the sweep.
     pub text: String,
@@ -3372,6 +3527,10 @@ pub struct DocumentAnalysis {
     pub signature_help: SignatureHelpIndex,
     pub semantic_tokens: SemanticTokenIndex,
     pub definitions: DefinitionIndex,
+    /// Uses retained from a closed-file chunk. Interactive analysis leaves this empty and serves
+    /// references from `definitions`; indexing fills it so a chunk can be dropped without losing
+    /// the declaration identity of each use.
+    pub workspace_references: DefinitionIndex,
     pub type_definitions: DefinitionIndex,
     pub implementations: DefinitionIndex,
     pub library_definitions: LibraryDefinitionIndex,
@@ -3531,6 +3690,7 @@ impl DocumentAnalysis {
                 signature_help,
                 semantic_tokens,
                 definitions,
+                workspace_references: DefinitionIndex::default(),
                 library_definitions,
                 type_definitions: DefinitionIndex::default(),
                 implementations: DefinitionIndex::default(),
@@ -3552,6 +3712,7 @@ impl DocumentAnalysis {
             signature_help: SignatureHelpIndex::default(),
             semantic_tokens: SemanticTokenIndex::default(),
             definitions: DefinitionIndex::default(),
+            workspace_references: DefinitionIndex::default(),
             type_definitions: DefinitionIndex::default(),
             implementations: DefinitionIndex::default(),
             library_definitions: LibraryDefinitionIndex::default(),
@@ -3568,6 +3729,7 @@ impl DocumentAnalysis {
 
     pub fn remap_navigation_files(&mut self, remaps: &[(u32, u32)], retained_file_count: usize) {
         self.definitions.remap_files(remaps);
+        self.workspace_references.remap_files(remaps);
         self.type_definitions.remap_files(remaps);
         self.implementations.remap_files(remaps);
         self.workspace_symbols
@@ -3607,6 +3769,7 @@ impl DocumentAnalysis {
             &self.signature_help,
             &self.semantic_tokens,
             &self.definitions,
+            &self.workspace_references,
             &self.type_definitions,
             &self.implementations,
             &self.library_definitions,
@@ -3627,6 +3790,7 @@ impl DocumentAnalysis {
         self.signature_help = SignatureHelpIndex::default();
         self.semantic_tokens = SemanticTokenIndex::default();
         self.definitions = DefinitionIndex::default();
+        self.workspace_references = DefinitionIndex::default();
         self.type_definitions = DefinitionIndex::default();
         self.implementations = DefinitionIndex::default();
         self.library_definitions = LibraryDefinitionIndex::default();
@@ -3794,148 +3958,92 @@ pub(crate) fn finalize_navigation(
         .collect()
 }
 
-/// Analyze one source in an open source set and retain only data needed by editor queries.
-pub fn analyze_for_lsp(sources: &[&str]) -> Vec<DocumentAnalysis> {
-    analyze_for_lsp_with_navigation_limit(sources, MAX_SOURCE_SET_NAVIGATION_ENTRIES)
+/// Definition indexes for the checked files of an analysis the server already ran.
+///
+/// The same symbol tables and occurrence walk as an interactive analysis. Hover, completion, and
+/// signature help are not built: a definition or references query does not read them.
+pub(crate) fn checked_definition_indexes(
+    sources: &[&str],
+    files: &[FileAnalysis],
+    symbols: &FrontendSymbols,
+    checked: usize,
+) -> Vec<DefinitionIndex> {
+    let highlight_symbols = HighlightSymbols::from_source_set(files, symbols);
+    let definition_symbols = DefinitionSymbols::from_source_set(
+        sources,
+        files,
+        symbols,
+        MAX_SOURCE_SET_NAVIGATION_ENTRIES,
+    );
+    let mut budget = NavigationBudget::default();
+    let mut indexes = Vec::with_capacity(checked.min(files.len()));
+    for (index, file) in files.iter().enumerate().take(checked) {
+        let source = sources.get(index).copied().unwrap_or("");
+        let remaining = budget.remaining();
+        let semantic = file.semantic_occurrences(
+            source,
+            index as u32,
+            symbols,
+            &highlight_symbols,
+            &definition_symbols,
+            SemanticLimits {
+                definition_entries: remaining,
+                type_definition_entries: 0,
+                implementation_entries: 0,
+                hover_entries: 0,
+                hover_wire_bytes: 0,
+                library_definition_wire_bytes: 0,
+            },
+        );
+        indexes.push(DefinitionIndex::from_occurrences(
+            semantic.definitions,
+            &mut budget,
+        ));
+    }
+    indexes
 }
 
-/// Register the classes each Java document declares, so Kotlin references to them navigate to the
-/// Java source rather than to the classpath stub that made them resolvable.
-pub(crate) fn register_java_declarations(
-    definition_symbols: &mut DefinitionSymbols,
-    sources: &[&str],
-    java_documents: &[u32],
-) {
-    let mut declarations = Vec::new();
-    let mut counts = HashMap::new();
-    for &index in java_documents {
-        let Some(source) = sources.get(index as usize) else {
-            continue;
-        };
-        for declaration in java::global_declared_class_occurrences(source, index) {
-            *counts.entry(declaration.0.clone()).or_insert(0usize) += 1;
-            declarations.push(declaration);
+/// How long the server's definition and references lookups take once the indexes exist.
+///
+/// One definition lookup, on the first occurrence when there is one, then a references scan of
+/// every index for that target. Index construction is not included. An empty index is still a
+/// query: it is the handler's answer for a cursor that hits nothing.
+pub(crate) struct NavigationQueries {
+    pub definition_us: u64,
+    pub references_us: u64,
+}
+
+pub(crate) fn measure_navigation_queries(indexes: &[DefinitionIndex]) -> NavigationQueries {
+    let query = indexes
+        .iter()
+        .find_map(|index| index.entries.first().map(|entry| (index, entry[0])))
+        .or_else(|| indexes.first().map(|index| (index, 0)));
+    let started = std::time::Instant::now();
+    let targets = query
+        .map(|(index, offset)| index.get(offset).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let definition_us = started.elapsed().as_micros() as u64;
+    let started = std::time::Instant::now();
+    let target_ids = targets.into_iter().collect::<HashSet<_>>();
+    if !target_ids.is_empty() {
+        for index in indexes {
+            for _occurrence in index.occurrences_targeting(&target_ids) {}
         }
     }
-    for (owner, target) in declarations {
-        if counts.get(&owner) == Some(&1)
-            && !definition_symbols.class_targets().contains_key(&owner)
-        {
-            definition_symbols.insert_class_target(owner, target);
-        }
+    NavigationQueries {
+        definition_us,
+        references_us: started.elapsed().as_micros() as u64,
     }
 }
 
-pub(crate) fn apply_java_navigation(
-    analyses: &mut [DocumentAnalysis],
-    sources: &[&str],
-    java_documents: &[u32],
-    definition_symbols: &DefinitionSymbols,
-    budgets: &mut AnalysisBudgets,
-) {
-    let limit = analyses.len().min(sources.len());
-    let java_documents = java_documents
-        .iter()
-        .map(|index| *index as usize)
-        .filter(|index| *index < limit)
-        .collect::<Vec<_>>();
-    if java_documents.is_empty() {
-        return;
-    }
-    for &index in &java_documents {
-        let mut targets = definition_symbols.class_targets().clone();
-        targets.extend(java::declared_classes(sources[index], index as u32));
-        let occurrences = java::definition_occurrences(sources[index], &targets);
-        analyses[index].definitions =
-            DefinitionIndex::from_occurrences(occurrences, &mut budgets.navigation);
-    }
-}
+mod source_set_documents;
 
-pub fn analyze_documents_for_lsp(documents: &[(&str, &str)]) -> Vec<DocumentAnalysis> {
-    let inputs = documents
-        .iter()
-        .map(|(uri, source)| {
-            if uri.ends_with(".java") {
-                SourceInput::java(source)
-            } else {
-                SourceInput::kotlin(source)
-            }
-        })
-        .collect::<Vec<_>>();
-    analyze_source_inputs_for_lsp(&inputs, MAX_SOURCE_SET_NAVIGATION_ENTRIES)
-}
-
-fn analyze_for_lsp_with_navigation_limit(
-    sources: &[&str],
-    navigation_relation_limit: usize,
-) -> Vec<DocumentAnalysis> {
-    let inputs = sources
-        .iter()
-        .map(|source| SourceInput::kotlin(source))
-        .collect::<Vec<_>>();
-    analyze_source_inputs_for_lsp(&inputs, navigation_relation_limit)
-}
-
-fn analyze_source_inputs_for_lsp(
-    inputs: &[SourceInput<'_>],
-    navigation_relation_limit: usize,
-) -> Vec<DocumentAnalysis> {
-    let sources = inputs.iter().map(|input| input.text).collect::<Vec<_>>();
-    let java_documents = inputs
-        .iter()
-        .enumerate()
-        .filter(|(_, input)| input.kind == SourceKind::Java)
-        .map(|(index, _)| index as u32)
-        .collect::<Vec<_>>();
-    let analysis = crate::jvm_analysis::analyze_standalone_source_inputs(inputs);
-    let highlight_symbols = HighlightSymbols::from_source_set(&analysis.files, &analysis.symbols);
-    let mut definition_symbols = DefinitionSymbols::from_source_set(
-        &sources,
-        &analysis.files,
-        &analysis.symbols,
-        navigation_relation_limit,
-    );
-    register_java_declarations(&mut definition_symbols, &sources, &java_documents);
-    let completion_symbols = CompletionSymbols::from_source_set(&analysis.files);
-    let signature_help_symbols =
-        SignatureHelpSymbols::from_source_set(&sources, &analysis.files, &analysis.symbols);
-    let workspace_symbols = WorkspaceSymbolIndex::from_source_set(&sources, &analysis.files);
-    let indexes = SourceSetIndexes::new(
-        &analysis.symbols,
-        &highlight_symbols,
-        &definition_symbols,
-        &completion_symbols,
-        &signature_help_symbols,
-    );
-    let mut budgets = AnalysisBudgets::new();
-    let pending = analysis
-        .files
-        .into_iter()
-        .zip(&sources)
-        .enumerate()
-        .map(|(file_index, (file, source))| {
-            DocumentAnalysis::from_file_analysis(
-                source,
-                file,
-                file_index as u32,
-                &indexes,
-                &mut budgets,
-            )
-        })
-        .collect();
-    let mut analyses = finalize_navigation(pending, &mut budgets);
-    apply_java_navigation(
-        &mut analyses,
-        &sources,
-        &java_documents,
-        &definition_symbols,
-        &mut budgets,
-    );
-    if let Some(first) = analyses.first_mut() {
-        first.workspace_symbols = workspace_symbols;
-    }
-    analyses
-}
+pub use source_set_documents::{analyze_documents_for_lsp, analyze_for_lsp};
+#[cfg(test)]
+use source_set_documents::{
+    analyze_for_lsp_with_navigation_limit, document_analyses_for_source_set,
+};
+pub(crate) use source_set_documents::{apply_java_navigation, register_java_declarations};
 
 #[cfg(test)]
 mod tests {
@@ -4692,6 +4800,30 @@ mod tests {
             );
         }
         assert!(indexed.is_complete());
+    }
+
+    #[test]
+    fn a_definition_target_matches_the_closed_file_symbol_by_identity() {
+        let declaration = "package demo\nfun answer(): Int = 42\n";
+        let use_source = "package demo\nfun use(): Int = answer()\n";
+        let analyses = source_set_documents::analyze_for_lsp(&[declaration, use_source]);
+        let mut references = analyses[1].definitions.clone();
+        references.bind_uris(&["file:///Decl.kt", "file:///Use.kt"]);
+        let occurrence = references
+            .occurrences()
+            .find(|(span, _)| use_source.get(span.lo as usize..span.hi as usize) == Some("answer"))
+            .expect("the use names answer");
+        let identity = references
+            .declaration_identity(occurrence.1)
+            .expect("the target is bound to the declaration file");
+
+        assert_eq!(identity.uri, "file:///Decl.kt");
+        let symbols = WorkspaceSymbolIndex::from_disk_sources(&[("file:///Decl.kt", declaration)]);
+        assert_eq!(
+            symbols.declaration_range(&identity.uri, identity.span),
+            Some([1, 4, 1, 10]),
+            "the closed-file symbol selects the same name span go-to-definition returns"
+        );
     }
 
     /// Parse-only indexing keeps every file whatever its size: a declaration past several
@@ -5968,7 +6100,21 @@ mod tests {
                       fun smart(value: SmartBase) {\n\
                       \u{20}\u{20}if (value is SmartDerived) { val narrowed = value }\n\
                       }\n";
-        let analysis = analyze_for_lsp(&[source]).pop().unwrap();
+        let inputs = [SourceInput::kotlin(source)];
+        let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            krusty::toolchain::stdlib_classpath(),
+        ));
+        let analysis = document_analyses_for_source_set(
+            &inputs,
+            crate::compiler_analysis::analyze_source_inputs_with_features(
+                &inputs,
+                PlatformProvider::jvm(platform),
+                &krusty::features::LangFeatures::new(),
+            ),
+            MAX_SOURCE_SET_NAVIGATION_ENTRIES,
+        )
+        .pop()
+        .unwrap();
         assert!(
             analysis.diagnostics.is_empty(),
             "{:?}",

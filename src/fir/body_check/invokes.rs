@@ -577,11 +577,48 @@ impl BodyFirChecker<'_> {
         };
         let origin = self.origins.synthetic(cause, kind);
         let value = match argument {
-            ResolvedContextArgument::Binding {
-                name, shadow_depth, ..
-            } => {
+            ResolvedContextArgument::Binding { name, source, .. } => {
+                return self.materialize_context_binding(span, cause, origin, name, *source);
+            }
+            ResolvedContextArgument::ImplicitReceiver(selection) => {
+                self.materialize_implicit_receiver(origin, span, selection)?
+                    .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?
+                    .value
+            }
+        };
+        Ok(FirReceiver {
+            value,
+            conversion: None,
+        })
+    }
+
+    /// Consume the selected source directly. A required capture is never retried as a
+    /// same-named lexical value when its retained inventory is missing.
+    pub(super) fn materialize_context_binding(
+        &mut self,
+        span: Option<Span>,
+        cause: OriginId,
+        origin: OriginId,
+        name: &str,
+        source: crate::resolve::ContextBindingSource,
+    ) -> Result<FirReceiver, BodyCheckFailure> {
+        use crate::resolve::ContextBindingSource;
+        let (ty, kind) = match source {
+            ContextBindingSource::RequiredClassCapture { lexical_binding } => {
+                let captured = self
+                    .class_value_by_lexical_binding(lexical_binding)
+                    .ok_or_else(|| {
+                        self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
+                    })?;
+                let kind = match self.constructor_parameter_capture_read(captured) {
+                    Some(read) => read,
+                    None => self.class_storage_read_kind(captured, origin)?,
+                };
+                (captured.ty, kind)
+            }
+            ContextBindingSource::ProvenLocalDepth { shadow_depth, .. } => {
                 let (enclosing_depth, binding) = self
-                    .binding_source_at_shadow_depth(name, *shadow_depth)
+                    .binding_source_at_shadow_depth(name, shadow_depth)
                     .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnknownLocal))?;
                 let kind = if let Some(enclosing_depth) = enclosing_depth {
                     self.body.add_capture(FirCapture {
@@ -598,18 +635,10 @@ impl BodyFirChecker<'_> {
                 } else {
                     FirExprKind::ValueRead(binding.value)
                 };
-                self.body.add_expr(FirExpr {
-                    origin,
-                    ty: binding.ty,
-                    kind,
-                })
-            }
-            ResolvedContextArgument::ImplicitReceiver(selection) => {
-                self.materialize_implicit_receiver(origin, span, selection)?
-                    .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?
-                    .value
+                (binding.ty, kind)
             }
         };
+        let value = self.body.add_expr(FirExpr { origin, ty, kind });
         Ok(FirReceiver {
             value,
             conversion: None,
@@ -641,6 +670,11 @@ impl BodyFirChecker<'_> {
                     member.member.stable_declaration,
                     &member.member.params,
                 )?;
+                let vararg = self.declared_argument_vararg(
+                    self.file.expr_span(expression),
+                    member.member.call_sig.vararg_index,
+                    member.context_args.len(),
+                )?;
                 (
                     target.0,
                     target.1,
@@ -650,7 +684,7 @@ impl BodyFirChecker<'_> {
                     }),
                     None,
                     member.context_args,
-                    member.member.call_sig.vararg_index,
+                    vararg,
                     parameters,
                     None,
                 )
@@ -680,14 +714,13 @@ impl BodyFirChecker<'_> {
                         conversion: None,
                     }),
                     extension.context_args,
-                    extension.vararg_index,
+                    ArgumentVararg::of_source_parameters(extension.vararg_index),
                     parameters,
                     None,
                 )
             }
             ref selected @ ResolvedCall::MemberExtension {
                 ref dispatch_receiver,
-                vararg_index,
                 ref context_args,
                 ..
             } => {
@@ -707,7 +740,7 @@ impl BodyFirChecker<'_> {
                         conversion: None,
                     }),
                     context_args.clone(),
-                    vararg_index,
+                    target.argument_vararg,
                     target.parameters,
                     target.extension_parameter,
                 )

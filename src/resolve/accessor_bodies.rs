@@ -69,6 +69,11 @@ impl Checker<'_> {
             let setter_scope = scope.child(ScopeKind::Function { receiver: None });
             let parameter = crate::ast::setter_param_or_value(setter.param.as_ref());
             checker.declare(&setter_scope, &parameter, value, true);
+            checker.record_lexical_declaration(
+                &setter_scope,
+                &parameter,
+                super::lexical_bindings::LexicalValueRole::Setter(setter.span),
+            );
             match body {
                 FunBody::Expr(body) | FunBody::Block(body) => {
                     checker.check_executable_body(&setter_scope, *body);

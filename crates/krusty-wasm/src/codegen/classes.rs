@@ -55,7 +55,7 @@ use krusty::backend::class_tables::{
 use krusty::backend::local_properties::RealizedLocalPropertyAccess;
 use krusty::backend::BackendClassifierSource;
 use krusty::fir::{CallableId, PropertyId, ResolvedPropertyOverrideTarget};
-use krusty::ir::{ClassId, FunId, IrClass, IrExpr, IrFile, IrLocalPropertyLayout};
+use krusty::ir::{ClassId, FunId, IrClass, IrFile, IrLocalPropertyLayout};
 use krusty::types::{Ty, TypeName};
 
 use super::super::encode::{
@@ -68,7 +68,7 @@ use super::super::interface_dispatch::{ClassRef, MemberRef};
 use super::super::objects::{immutable, ObjectRoot, ITABLE_FIELD, REFERENCE};
 use super::super::runtime::{Runtime, AND32, EQ32, EQ64, OR32};
 use super::laid_out_classes::{DependencyImplementation, LaidOutClass, LaidOutClasses, Placed};
-use super::lower::{carrier, parameter_carrier, Unsupported, STRING};
+use super::lower::{carrier, cell_reference, parameter_carrier, Unsupported, STRING};
 
 mod constructor_prefix;
 pub(super) use constructor_prefix::enclosing_field;
@@ -340,6 +340,7 @@ impl FileClasses {
     /// `signatures` are the file's function indices and types, by `FunId`.
     pub(super) fn records(
         &self,
+        module: &mut Module,
         ir: &IrFile,
         functions: &[Option<u32>],
         signatures: &[Option<u32>],
@@ -379,7 +380,7 @@ impl FileClasses {
             }
             for &owner in chain.iter().rev() {
                 fields.extend(
-                    own_fields(&ir.classes[owner as usize])
+                    own_fields(module, ir, owner)
                         .expect("every field was carried when the struct was declared"),
                 );
             }
@@ -486,6 +487,12 @@ pub(super) const ENUM_BASE_FIELDS: u32 = 2;
 /// prefix.
 const EXCEPTION_BASE_FIELDS: u32 = 2;
 
+/// The type a method of `owner` receives its receiver at: a builtin value's own type, which it is
+/// carried as, and otherwise the class's.
+pub(super) fn receiver_type(owner: krusty::types::TypeName) -> Ty {
+    krusty::types::builtin_semantic(owner).unwrap_or_else(|| Ty::obj_name(owner))
+}
+
 /// The wasm signature of a method of the file: the receiver, then its parameters.
 pub(super) fn method_type(
     module: &mut Module,
@@ -493,7 +500,11 @@ pub(super) fn method_type(
     function: FunId,
 ) -> Result<u32, Unsupported> {
     let declaration = &ir.functions[function as usize];
-    let mut params = vec![REFERENCE];
+    let receiver = match declaration.dispatch_receiver {
+        Some(owner) => carrier(receiver_type(owner))?.ok_or("a `Unit` receiver")?,
+        None => REFERENCE,
+    };
+    let mut params = vec![receiver];
     for parameter in 0..declaration.params.len() {
         params.push(
             parameter_carrier(module, ir, function, parameter as u32)?
@@ -529,14 +540,10 @@ pub(super) fn module_plan(
 fn check_supported(ir: &IrFile, id: ClassId) -> Result<(), Unsupported> {
     let class = &ir.classes[id as usize];
     let name = class.fq_name();
-    // An annotation class that is only applied needs nothing at run time beyond an ordinary
-    // layout. An annotation INSTANCE compares, hashes, and prints by its members, which this
-    // object form does not provide, so a file constructing one is still declined.
-    let construct = if class.annotation_impl_of.is_some()
-        || (class.is_annotation && constructs(ir, class.fq_name))
-    {
-        "an annotation instance"
-    } else if class.prop_ref.is_some() || class.func_ref.is_some() {
+    // An annotation class, applied or constructed, is an ordinary layout. An annotation instance
+    // compares, hashes and prints by its members, which this object form does not provide: those
+    // three slots stay unrealized, so a use of one declines at the call.
+    let construct = if class.prop_ref.is_some() || class.func_ref.is_some() {
         "a callable reference"
     } else if class.lambda.is_some() || class.sam_wrapper.is_some() {
         "a function value's class"
@@ -586,24 +593,14 @@ fn check_exception_storage(
     Ok(())
 }
 
-/// Whether a body `ir` emits constructs the class named `name`. Orphan expressions and
-/// cloning-only inline templates are not emitted, so a construction there is no obligation.
-fn constructs(ir: &IrFile, name: TypeName) -> bool {
-    krusty::ir::emitted_body_roots(ir)
-        .into_iter()
-        .flat_map(|root| krusty::ir::value_namespace_expressions(ir, root))
-        .any(|expression| {
-            matches!(ir.expr(expression), IrExpr::New { internal, .. } if *internal == name)
-        })
-}
-
 /// Lay out every class of `ir` in `module`: types, constructors' and accessors' indices, and the
 /// dispatch tables, whose entries name `functions` (the file's function indices, by `FunId`). A
 /// superclass no class of `ir` declares is read from `laid_out`, the classes earlier files of the
 /// source module laid out.
 /// What the source module says about classes beyond the file being declared.
-#[derive(Clone, Copy)]
 pub(super) struct BeyondFile<'a> {
+    /// The table types of the classes the module plan covers, which this file's classes take.
+    pub(super) module_tables: &'a mut super::module_tables::ModuleTables,
     pub(super) classifiers: &'a dyn BackendClassifierSource,
     /// The module-wide numbering of every class's table and every interface member.
     pub(super) plan: &'a ModuleSlotPlan,
@@ -620,6 +617,7 @@ pub(super) fn declare(
     beyond: BeyondFile<'_>,
 ) -> Result<FileClasses, Unsupported> {
     let BeyondFile {
+        module_tables,
         classifiers,
         plan,
         laid_out,
@@ -699,9 +697,9 @@ pub(super) fn declare(
             }
         }
         if let Some(parent) = table.superclass {
-            fields.extend(inherited_fields(ir, &tables, parent)?);
+            fields.extend(inherited_fields(module, ir, &tables, parent)?);
         }
-        fields.extend(own_fields(class)?);
+        fields.extend(own_fields(module, ir, id)?);
         let root = match bases[id as usize] {
             OwnedBase::None => objects.identified,
             OwnedBase::Enum => objects.enum_base,
@@ -716,19 +714,32 @@ pub(super) fn declare(
             }),
             open: true,
         });
-        let table_type = module.subtype(SubType {
-            composite: table_struct(
-                &slot_types[id as usize],
-                objects.itable,
-                objects.type_infos.ty,
-            ),
-            supertype: Some(match (parent, laid_out_parent) {
-                (Some(parent), _) => parent.table_type.expect("a superclass has a table type"),
-                (None, Some(superclass)) => superclass.table_type,
-                (None, None) => objects.any_table,
+        // A class the module plan covers takes the table type every file reads from the plan,
+        // so a file dispatching through it from elsewhere casts to this one type.
+        let table_type = match module_tables.table(plan, class.fq_name, module, objects) {
+            Some(Ok(planned)) if planned.slot_types == slot_types[id as usize] => {
+                planned.table_type
+            }
+            Some(Ok(_)) => {
+                return Err(format!(
+                    "a class whose table differs from its module-wide plan (`{}`)",
+                    class.fq_name()
+                ))
+            }
+            Some(Err(_)) | None => module.subtype(SubType {
+                composite: table_struct(
+                    &slot_types[id as usize],
+                    objects.itable,
+                    objects.type_infos.ty,
+                ),
+                supertype: Some(match (parent, laid_out_parent) {
+                    (Some(parent), _) => parent.table_type.expect("a superclass has a table type"),
+                    (None, Some(superclass)) => superclass.table_type,
+                    (None, None) => objects.any_table,
+                }),
+                open: true,
             }),
-            open: true,
-        });
+        };
         let form = &mut forms[id as usize];
         form.structure = Some(structure);
         form.table_type = Some(table_type);
@@ -1023,6 +1034,9 @@ fn inherited_any_member(
     member: AnyMember,
     base: OwnedBase,
 ) -> Option<u32> {
+    if ir.classes[class as usize].annotation_impl_of.is_some() {
+        return None;
+    }
     Some(match (member, base) {
         (AnyMember::Equals, _) => runtime.objects.identity_equals,
         (AnyMember::HashCode, _) => runtime.identity.hash_code,
@@ -1058,7 +1072,7 @@ pub(super) fn accessor_function(
 
 /// A table struct: one immutable typed function reference per typed slot, `funcref` elsewhere,
 /// and the interface table and the type information after `kotlin.Any`'s slots.
-fn table_struct(slots: &[Option<u32>], itable: u32, type_info: u32) -> CompositeType {
+pub(super) fn table_struct(slots: &[Option<u32>], itable: u32, type_info: u32) -> CompositeType {
     let mut fields = Vec::with_capacity(slots.len() + 2);
     for (slot, ty) in slots.iter().enumerate() {
         if slot as u32 == ITABLE_FIELD {
@@ -1101,7 +1115,7 @@ fn single_value_field(
     }
     let value = carrier(class.fields[0].ty)?
         .ok_or_else(|| format!("a `Unit`-typed value class field (`{}`)", class.fq_name()))?;
-    let field = 1 + bases[id as usize].fields() + tables.table(id).first_field;
+    let field = PREFIX_FIELDS + bases[id as usize].fields() + tables.table(id).first_field;
     Ok(Some(ValueStorage {
         structure: forms[id as usize]
             .structure
@@ -1226,17 +1240,27 @@ fn value_class_hash(
 }
 
 /// The struct fields `class` declares, each mutable: a field is written by the constructor after
-/// the object exists.
-fn own_fields(class: &IrClass) -> Result<Vec<FieldType>, Unsupported> {
-    class
+/// the object exists. A shared capture is the cell reference, not the element's carrier.
+fn own_fields(
+    module: &mut Module,
+    ir: &IrFile,
+    class: ClassId,
+) -> Result<Vec<FieldType>, Unsupported> {
+    let declared = ir.classes[class as usize]
         .fields
         .iter()
-        .map(|field| {
-            let value = carrier(field.ty)?.ok_or_else(|| {
+        .enumerate()
+        .map(|(index, field)| (u32::try_from(index).expect("too many fields"), field.ty))
+        .collect::<Vec<_>>();
+    declared
+        .into_iter()
+        .map(|(index, ty)| {
+            let value = field_storage(module, ir, class, index, ty)?.ok_or_else(|| {
+                let declaration = &ir.classes[class as usize];
                 format!(
                     "a `Unit`-typed field (`{}.{}`)",
-                    class.fq_name(),
-                    field.name
+                    declaration.fq_name(),
+                    declaration.fields[index as usize].name
                 )
             })?;
             Ok(FieldType {
@@ -1249,15 +1273,16 @@ fn own_fields(class: &IrClass) -> Result<Vec<FieldType>, Unsupported> {
 
 /// Every field of `class` and its superclasses in this file, root first.
 fn inherited_fields(
+    module: &mut Module,
     ir: &IrFile,
     tables: &NumberedClassTables,
     class: ClassId,
 ) -> Result<Vec<FieldType>, Unsupported> {
     let mut fields = match tables.table(class).superclass {
-        Some(parent) => inherited_fields(ir, tables, parent)?,
+        Some(parent) => inherited_fields(module, ir, tables, parent)?,
         None => Vec::new(),
     };
-    fields.extend(own_fields(&ir.classes[class as usize])?);
+    fields.extend(own_fields(module, ir, class)?);
     Ok(fields)
 }
 
@@ -1294,11 +1319,11 @@ fn slot_types<'r>(
                 Slot::AnyMember(member) => Some(objects.any_slot_types[member.slot() as usize]),
                 Slot::Function(function) => Some(method_type(module, ir, *function)?),
                 Slot::FieldGetter { class, field } => {
-                    let value = field_carrier(ir, *class, *field)?;
+                    let value = field_carrier(module, ir, *class, *field)?;
                     Some(module.func_type(vec![REFERENCE], vec![value]))
                 }
                 Slot::FieldSetter { class, field } => {
-                    let value = field_carrier(ir, *class, *field)?;
+                    let value = field_carrier(module, ir, *class, *field)?;
                     Some(module.func_type(vec![REFERENCE, value], Vec::new()))
                 }
                 Slot::Abstract => match keys.get(&(slot as u32)) {
@@ -1412,18 +1437,59 @@ fn property_key_type(
     method_type(module, ir, function)
 }
 
-/// How field `field` of `class` is carried.
+/// How field `field` of `class` is carried. A shared capture is the cell, not its element.
 pub(super) fn field_carrier(
+    module: &mut Module,
     ir: &IrFile,
     class: ClassId,
     field: u32,
 ) -> Result<ValType, Unsupported> {
     let declaration = &ir.classes[class as usize];
-    carrier(declaration.fields[field as usize].ty)?.ok_or_else(|| {
+    let declared = &declaration.fields[field as usize];
+    field_storage(module, ir, class, field, declared.ty)?.ok_or_else(|| {
         format!(
             "a `Unit`-typed field (`{}.{}`)",
             declaration.fq_name(),
-            declaration.fields[field as usize].name
+            declared.name
         )
     })
+}
+
+/// The carrier of constructor argument `index`, a cell when that argument fills a shared capture.
+pub(super) fn constructor_argument_carrier(
+    module: &mut Module,
+    ir: &IrFile,
+    class: ClassId,
+    index: usize,
+    declared: Ty,
+) -> Result<ValType, Unsupported> {
+    let field = ir.classes[class as usize]
+        .ctor_args
+        .get(index)
+        .and_then(|argument| argument.field_index);
+    match field {
+        Some(field) if ir.shared_class_capture_fields.contains_key(&(class, field)) => {
+            field_storage(module, ir, class, field, declared)?.ok_or_else(|| {
+                format!(
+                    "a `Unit` shared capture (`{}`)",
+                    ir.classes[class as usize].fq_name()
+                )
+            })
+        }
+        _ => carrier(declared)?.ok_or_else(|| "a `Unit` constructor parameter".to_string()),
+    }
+}
+
+/// A shared capture field stores the cell. Every other field stores its declared carrier.
+fn field_storage(
+    module: &mut Module,
+    ir: &IrFile,
+    class: ClassId,
+    field: u32,
+    declared: Ty,
+) -> Result<Option<ValType>, Unsupported> {
+    match ir.shared_class_capture_fields.get(&(class, field)) {
+        Some(&element) => cell_reference(module, element).map(Some),
+        None => carrier(declared),
+    }
 }

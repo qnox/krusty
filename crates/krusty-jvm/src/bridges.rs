@@ -44,9 +44,12 @@ pub(super) fn derive_bridges(
         superclass_method_bridges(
             ir,
             cid,
-            classpath,
-            callables,
-            override_results,
+            &OverrideBridgeFacts {
+                classpath,
+                callables,
+                override_results,
+                jvm_default,
+            },
             argument_arrays,
             &mut order,
         )?;
@@ -57,7 +60,7 @@ pub(super) fn derive_bridges(
             ir,
             cid,
             callables,
-            jvm_default,
+            crate::declared_jvm_default::of_class(&ir.classes[cid], jvm_default),
         );
         order.extend(std::iter::repeat_n(u32::MAX, inherited.len()));
         ir.classes[cid].bridges.extend(inherited);
@@ -366,15 +369,27 @@ pub(super) fn implementation_function(
 /// A method overriding a superclass method with a different erased signature (a generic or covariant
 /// override) needs an `ACC_BRIDGE` method carrying the SUPERCLASS's descriptor that delegates to the
 /// concrete override — without it a call through a base reference resolves to a method that is not there.
+/// What bridge derivation reads of the module beyond the class being derived.
+struct OverrideBridgeFacts<'a> {
+    classpath: &'a krusty::jvm::classpath::Classpath,
+    callables: &'a krusty::backend::CheckedBackendCallables,
+    override_results: &'a crate::override_results::OverrideResults,
+    jvm_default: crate::ir_emit::JvmDefaultMode,
+}
+
 fn superclass_method_bridges(
     ir: &mut IrFile,
     cid: usize,
-    classpath: &krusty::jvm::classpath::Classpath,
-    callables: &krusty::backend::CheckedBackendCallables,
-    override_results: &crate::override_results::OverrideResults,
+    facts: &OverrideBridgeFacts<'_>,
     argument_arrays: &mut crate::function_argument_arrays::FunctionArgumentArrays,
     order: &mut Vec<u32>,
 ) -> Result<(), SkipReason> {
+    let OverrideBridgeFacts {
+        classpath,
+        callables,
+        override_results,
+        jvm_default,
+    } = *facts;
     let internal_name = ir.classes[cid].fq_name;
     let edges = ir
         .function_overrides
@@ -385,6 +400,21 @@ fn superclass_method_bridges(
         let own_fid = implementation_function(ir, &edge);
         if edge.implementation_owner == internal_name
             && own_fid.is_none_or(|function| !ir.classes[cid].methods.contains(&function))
+        {
+            continue;
+        }
+        // An implementation inherited from an interface compiled without compatibility is a
+        // default method that carries its own bridges (`bridge method test(Object)` beside
+        // `test(String)`), so a class compiled without compatibility has nothing to bridge.
+        if edge.implementation_owner != internal_name
+            && crate::declared_jvm_default::of_class(&ir.classes[cid], jvm_default)
+                == crate::ir_emit::JvmDefaultMode::NoCompatibility
+            && ir.classes.iter().any(|owner| {
+                owner.fq_name == edge.implementation_owner
+                    && owner.is_interface
+                    && crate::declared_jvm_default::of_class(owner, jvm_default)
+                        == crate::ir_emit::JvmDefaultMode::NoCompatibility
+            })
         {
             continue;
         }

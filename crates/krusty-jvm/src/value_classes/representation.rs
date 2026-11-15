@@ -6,6 +6,7 @@
 //! so the questions "box this through `box-impl`" and "unbox to the declared carrier" exclude it.
 //! Callable naming does not ask these questions: kotlinc mangles by the semantic identity.
 
+use super::Under;
 use krusty::ir::IrFile;
 use krusty::types::{Ty, TyKind, TypeName};
 
@@ -196,6 +197,34 @@ pub(super) fn is_ref(t: &Ty) -> bool {
         Some(fq_name) => Ty::obj_name(fq_name).unboxed_primitive().is_none(),
         None => false,
     }
+}
+
+/// Whether a NULLABLE value class `X?` is represented BOXED. Only true when its underlying erases to a
+/// primitive (a primitive can't carry null, so `X?` keeps the boxed `X`). Over a reference underlying,
+/// `X?` erases to that underlying reference — represented unboxed, exactly like a non-null `X`.
+pub(super) fn nullable_is_boxed(x: TypeName, under: &Under) -> bool {
+    // `X?` stays UNBOXED (its underlying reference carries null) only when the underlying is a NON-NULL
+    // reference. Over a primitive (can't hold null) OR a NULLABLE reference (where `X(null)` and a `null`
+    // `X?` would otherwise be indistinguishable), `X?` is the boxed `X`.
+    under
+        .get(&x)
+        .map(|u| {
+            !is_ref(&erase(u, under))
+                || krusty::value_classes::nullable_value_requires_distinct_null(x, under)
+        })
+        .unwrap_or(false)
+}
+
+/// A NULLABLE value-class type `X?` (which stays boxed) → its internal name.
+pub(super) fn boxed_vc(t: &Ty, under: &Under) -> Option<TypeName> {
+    if t.is_nullable() {
+        if let Some(fq_name) = t.non_null().obj_internal() {
+            if under.contains_key(&fq_name) && nullable_is_boxed(fq_name, under) {
+                return Some(fq_name);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

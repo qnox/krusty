@@ -28,6 +28,9 @@ pub(super) trait ExtensionReferenceRules {
     }
     /// Whether the `left` adapted parameter shape is at least as specific as `right`.
     fn at_least_as_specific(&self, left: &[Ty], right: &[Ty]) -> bool;
+    /// Whether a reference fills the declaration's leading context parameters from its own site,
+    /// so the expected function shape does not carry them.
+    fn binds_reference_contexts(&self) -> bool;
 }
 
 pub(super) enum ExtensionReferenceChoice {
@@ -118,12 +121,20 @@ fn applicable_extension(
         return None;
     }
     let context_count = function.context_count.min(function.semantic_params().len());
+    // Contexts the reference binds are not inputs of its expected shape, so the unbound receiver
+    // sits at the front of the expectation instead of behind them.
+    let bound_contexts = if rules.binds_reference_contexts() {
+        context_count
+    } else {
+        0
+    };
+    let expected_receiver = context_count - bound_contexts;
     let expected_values = match expected {
         Some(expected) => {
             let mut values = expected.params.to_vec();
             if unbound {
-                values.get(context_count)?;
-                values.remove(context_count);
+                values.get(expected_receiver)?;
+                values.remove(expected_receiver);
             }
             Some(values)
         }
@@ -132,6 +143,7 @@ fn applicable_extension(
     let type_arguments = specialize_candidate_with_type_arguments(
         source,
         &mut function,
+        bound_contexts,
         Some(receiver),
         expected_values.as_deref(),
         expected.map(|expected| expected.ret),
@@ -171,7 +183,7 @@ fn applicable_extension(
                 return None;
             }
             if unbound {
-                let expected_receiver = *expected.params.get(context_count)?;
+                let expected_receiver = *expected.params.get(expected_receiver)?;
                 if !super::callable_reference_selection::input_parameter_fits(
                     expected_receiver,
                     receiver,
@@ -183,12 +195,13 @@ fn applicable_extension(
             let mut plan = checked_parameter_plan(
                 value_params,
                 &function.call_sig,
+                bound_contexts,
                 expected_values.as_deref()?,
                 rules,
             )?;
             if unbound {
-                shift_plan_values_from(&mut plan, context_count, 1);
-                plan.insert(context_count, AdaptedRefArgument::Value(context_count));
+                shift_plan_values_from(&mut plan, expected_receiver, 1);
+                plan.insert(context_count, AdaptedRefArgument::Value(expected_receiver));
             }
             // The plan has mapped every input; the result must fit, and the variables it binds
             // must agree with their input occurrences.
@@ -208,8 +221,9 @@ fn applicable_extension(
             }
             plan
         }
-        None => (0..reference_params.len())
-            .map(AdaptedRefArgument::Value)
+        None => (0..bound_contexts)
+            .map(|_| AdaptedRefArgument::Context)
+            .chain((0..reference_params.len() - bound_contexts).map(AdaptedRefArgument::Value))
             .collect(),
     };
     Some(ApplicableExtension {
@@ -225,12 +239,17 @@ fn applicable_extension(
 pub(super) fn checked_parameter_plan(
     params: &[Ty],
     call_sig: &CallSig,
+    context_count: usize,
     expected_params: &[Ty],
     rules: &impl ExtensionReferenceRules,
 ) -> Option<Vec<AdaptedRefArgument>> {
-    let plan = parameter_plan(params, call_sig, expected_params, |actual, target| {
-        rules.assignable(actual, target)
-    })?;
+    let plan = parameter_plan(
+        params,
+        call_sig,
+        context_count,
+        expected_params,
+        |actual, target| rules.assignable(actual, target),
+    )?;
     for (target, argument) in plan.iter().enumerate() {
         let declared = *params.get(target)?;
         match argument {
@@ -256,7 +275,7 @@ pub(super) fn checked_parameter_plan(
                     return None;
                 }
             }
-            AdaptedRefArgument::Default => {}
+            AdaptedRefArgument::Context | AdaptedRefArgument::Default => {}
         }
     }
     Some(plan)
@@ -289,6 +308,10 @@ impl ExtensionReferenceRules for super::Checker<'_> {
 
     fn input_fits(&self, expected: Ty, target: Ty) -> bool {
         self.postponed_reference_input_fits(expected, target)
+    }
+
+    fn binds_reference_contexts(&self) -> bool {
+        self.file.callable_references_to_contextual
     }
 
     fn at_least_as_specific(&self, left: &[Ty], right: &[Ty]) -> bool {

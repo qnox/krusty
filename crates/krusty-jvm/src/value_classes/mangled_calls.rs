@@ -7,12 +7,13 @@ use krusty::ir::{Callee, ExprId, IrExpr, IrFile};
 use krusty::types::Ty;
 
 /// The recorded JVM facts of one renamed declaration: its source name, and its exact descriptor
-/// plus parameter types when the function is not itself value-lowered or suspend.
+/// plus checked parameter types when the function is not itself value-lowered or suspend.
 type RenamedDeclaration = (String, Option<(String, Vec<Ty>)>);
 
 pub(super) fn rename(
     ir: &mut IrFile,
     renamed_functions: &HashSet<u32>,
+    checked_parameters: &[Vec<Ty>],
     lowered_value_members: &HashSet<u32>,
     suspend_functions: &HashSet<u32>,
     under: &Under,
@@ -33,14 +34,15 @@ pub(super) fn rename(
             .then(|| {
                 (
                     ir_method_desc(&declaration.params, &declaration.ret),
-                    declaration.params.clone(),
+                    checked_parameters[function as usize].clone(),
                 )
             });
             (callable, (declaration.name.clone(), exact_descriptor))
         })
         .collect();
-    // A call to a renamed declaration of this file passes that exact declaration's parameters,
-    // whose value classes it takes unboxed.
+    // A call to a renamed declaration of this file passes that exact declaration's checked
+    // parameters: a value class there is taken unboxed, and a reference supertype of one boxes it,
+    // even where that supertype is also the value class's own underlying type.
     let mut declared_parameters = Vec::new();
     for (index, e) in ir.exprs.iter_mut().enumerate() {
         if let IrExpr::Call { callee, .. } = e {
@@ -148,9 +150,11 @@ mod tests {
             args: Vec::new(),
         });
 
+        let checked_parameters = vec![Vec::new(); ir.functions.len()];
         rename(
             &mut ir,
             &[function].into_iter().collect(),
+            &checked_parameters,
             &HashSet::default(),
             &HashSet::default(),
             &HashMap::default(),

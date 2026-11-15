@@ -16,7 +16,7 @@ pub(super) type ReceiverLabel = (
 );
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum ReceiverDeclarationRole {
+pub enum ReceiverDeclarationRole {
     Lambda {
         expression: Span,
         slot: LambdaReceiverSlot,
@@ -42,7 +42,7 @@ impl ReceiverDeclarationRole {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum LambdaReceiverSlot {
+pub enum LambdaReceiverSlot {
     Extension,
     Context(u32),
 }

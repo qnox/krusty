@@ -29,6 +29,14 @@ fn scalar_representation(
         {
             Some(scalar)
         }
+        // An unsigned array class is an object of its own over the signed array it wraps.
+        Some(array @ ValType::Ref { .. })
+            if underlying == carried
+                && Ty::obj_name(classifier).canonical_semantic().is_array()
+                && declaration.underlying.non_null().is_array() =>
+        {
+            Some(array)
+        }
         _ => None,
     })
 }
@@ -62,8 +70,33 @@ impl Body<'_> {
             Ok(declaration) => declaration?,
             Err(error) => return Some(Err(error)),
         };
+        if declaration.underlying.non_null().is_array() {
+            if let Err(error) = self.require_array_view(
+                Ty::obj_name(internal).canonical_semantic(),
+                declaration.underlying,
+            ) {
+                return Some(Err(error));
+            }
+        }
         let underlying = [declaration.underlying];
         Some(match args {
+            // The size constructor of an array class allocates the wrapped array: `this(IntArray(size))`.
+            [size]
+                if declaration.underlying.non_null().is_array()
+                    && selected.is_some_and(|selected| selected == [Ty::Int]) =>
+            {
+                self.new_array(Ty::obj_name(internal), *size)
+            }
+            // Wrapping a signed array shares its storage: the new object is the class's own.
+            [argument]
+                if declaration.underlying.non_null().is_array()
+                    && selected.is_none_or(|selected| selected == underlying) =>
+            {
+                self.value(*argument, declaration.underlying)
+                    .and_then(|()| {
+                        self.rewrap_array(declaration.underlying, Ty::obj_name(internal))
+                    })
+            }
             // The argument arrives in its own type's carrier form, which need not be the class's:
             // a `Byte` is sign-extended where a `UByte` holds its zero-extended bits. The
             // ordinary coercion between the two types converts it.
@@ -107,9 +140,52 @@ impl Body<'_> {
             .callables
             .property(target)
             .ok_or("a value-class storage read without its property")?;
-        let class = Ty::obj_name(property.owner).canonical_semantic();
-        let underlying = property.result;
+        self.declared_value_storage_read(receiver, property.owner, property.result)
+    }
+
+    /// A materialized value-class field uses the same target representation as its checked
+    /// storage property. An ordinary user value class retains its declared class layout.
+    pub(super) fn materialized_value_storage_read(
+        &mut self,
+        receiver: u32,
+        class: krusty::ir::ClassId,
+        index: u32,
+    ) -> Option<Result<(), Unsupported>> {
+        let owner = &self.ir.classes[class as usize];
+        if !owner.is_value {
+            return None;
+        }
+        let declaration = match self.scalar_value_class(owner.fq_name) {
+            Ok(declaration) => declaration?,
+            Err(error) => return Some(Err(error)),
+        };
+        if index != 0
+            || owner.fields.len() != 1
+            || owner.fields[0].ty != declaration.underlying
+            || owner.fields[0].name.as_str() != declaration.property.as_ref()
+        {
+            return Some(Err(
+                "a target-owned value-class field apart from its declared storage".into(),
+            ));
+        }
+        let owner = owner.fq_name;
+        Some(self.declared_value_storage_read(receiver, owner, declaration.underlying))
+    }
+
+    fn declared_value_storage_read(
+        &mut self,
+        receiver: u32,
+        owner: TypeName,
+        underlying: Ty,
+    ) -> Result<(), Unsupported> {
+        let class = Ty::obj_name(owner).canonical_semantic();
+        if underlying.non_null().is_array() {
+            self.require_array_view(class, underlying)?;
+        }
         self.value(receiver, class)?;
+        if underlying.non_null().is_array() {
+            return self.rewrap_array(class, underlying);
+        }
         self.coerce_emitted_value(class, underlying)
     }
 }

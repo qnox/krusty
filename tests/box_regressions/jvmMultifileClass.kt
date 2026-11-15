@@ -1,3 +1,5 @@
+// TARGET_BACKEND: JVM_IR
+// PLATFORM-SPECIFIC: JVM multifile facade annotations and package-part ABI.
 // Two files share one multifile class: each compiles to a part, callers go through the facade,
 // and private declarations of the same name in both parts do not collide.
 // FILE: first.kt

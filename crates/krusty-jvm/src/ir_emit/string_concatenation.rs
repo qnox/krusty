@@ -69,6 +69,9 @@ impl Emitter<'_> {
             }
             self.release_operand_spills(&temps);
         } else {
+            // The builder is the concatenation, so it opens on the concatenation's line. An
+            // `invokedynamic` concatenation has no constructor and leaves the line to its operands.
+            self.mark_expression_start(concat, code);
             code.new_obj(builder);
             code.dup();
             code.invokespecial(constructor, 0, 0);

@@ -20,7 +20,7 @@ use crate::ir::{
     for_each_child, shift_value_indices, Callee, ExprId, IrConst, IrExpr, IrFile,
     IrGeneratedParameterRole, IrParameterIdentity, IrTypeOp,
 };
-use crate::types::{wk, Ty};
+use crate::types::{continuation_passing, wk, Ty};
 
 use super::control_flow::stmt_diverges;
 
@@ -302,11 +302,10 @@ fn add_continuation_parameter(ir: &mut IrFile, function: u32) {
     let declaration = &mut ir.functions[function as usize];
     let receiver = u32::from(declaration.dispatch_receiver.is_some() && !declaration.is_static);
     let completion = receiver + declaration.params.len() as u32;
-    declaration
-        .params
-        .push(Ty::obj_args_name(wk::continuation(), &[result]));
+    let (continuation, completed) = continuation_passing(result);
+    declaration.params.push(continuation);
     declaration.param_checks.push(None);
-    declaration.ret = Ty::nullable(Ty::obj_name(wk::any()));
+    declaration.ret = completed;
     let body = declaration.body;
     if let Some(parameters) = ir.fn_params.get_mut(&function) {
         parameters.identities.push(IrParameterIdentity::generated(

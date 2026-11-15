@@ -7,6 +7,11 @@ use krusty::types::TypeName;
 
 use super::*;
 
+/// Whether `classifier` is one of the exception classes the runtime lays out itself.
+pub(in crate::codegen) fn runtime_lays_out(classifier: TypeName) -> bool {
+    krusty::libraries::RuntimeExceptionKind::of(classifier).is_some()
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -177,6 +182,16 @@ impl Body<'_> {
                 _ => None,
             })
         else {
+            if let Some(constructed) = external
+                .and_then(|target| self.root_any_construction(target, internal, args, params))
+            {
+                return constructed;
+            }
+            if let Some(target) =
+                external.filter(|_| super::string_builders::is_string_builder(internal))
+            {
+                return self.string_builder_construction(target, args);
+            }
             if let Some(constructed) =
                 external.and_then(|target| self.dependency_construction(target, internal, args))
             {

@@ -1,4 +1,4 @@
-//! Checked realization of compiler-provided array constructors.
+//! Checked realization of compiler-provided array operations.
 
 use super::*;
 
@@ -8,8 +8,6 @@ impl BodyFirChecker<'_> {
         expression: ExprId,
         arguments: &[ExprId],
     ) -> Result<FirExprKind, BodyCheckFailure> {
-        use crate::types::ArrayFactoryKind;
-
         let Some(ExprLowering::CompilerSynthetic(kind)) = self.info.expr_lowers.get(&expression)
         else {
             return Err(self.failure(
@@ -17,6 +15,19 @@ impl BodyFirChecker<'_> {
                 BodyCheckFailureKind::UnsupportedCallShape,
             ));
         };
+        self.array_operation(expression, arguments, *kind)
+    }
+
+    /// The array `expression` builds: a compiler-built literal or size constructor, or a call
+    /// whose selected `kotlin` declaration is an array factory function (`arrayOf`, …).
+    pub(super) fn array_operation(
+        &mut self,
+        expression: ExprId,
+        arguments: &[ExprId],
+        kind: crate::types::ArrayFactoryKind,
+    ) -> Result<FirExprKind, BodyCheckFailure> {
+        use crate::types::ArrayFactoryKind;
+
         let array_type = self.expression_type(expression)?;
         crate::trace_compiler!(
             "fir",
@@ -35,7 +46,7 @@ impl BodyFirChecker<'_> {
                 )
             })?;
         let cause = self.expression_origin(expression)?;
-        match (*kind, arguments) {
+        match (kind, arguments) {
             (
                 ArrayFactoryKind::PrimitiveVararg(_)
                 | ArrayFactoryKind::ReferenceVararg

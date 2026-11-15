@@ -18,6 +18,7 @@ pub(super) struct CheckedCallableReference<'a> {
     pub(super) binding: crate::fir::FirCallableReferenceBinding,
     pub(super) dispatch_receiver: Option<FirReceiver>,
     pub(super) extension_receiver: Option<FirReceiver>,
+    pub(super) context_arguments: &'a [FirReceiver],
     pub(super) substitutions: &'a [FirTypeSubstitution],
     pub(super) adaptation: Option<&'a crate::fir::FirReferenceAdaptation>,
     pub(super) reference_ty: crate::types::Ty,
@@ -34,6 +35,8 @@ struct MaterializedCallableReference {
 struct BoundCallableReceivers {
     dispatch: Option<ExprId>,
     extension: Option<ExprId>,
+    /// Values the reference site selected for the declaration's leading context parameters.
+    contexts: Vec<ExprId>,
 }
 
 /// The receivers a checked property read or write carries together.
@@ -165,6 +168,7 @@ impl BodyLowering<'_> {
             binding,
             dispatch_receiver,
             extension_receiver,
+            context_arguments,
             substitutions,
             adaptation,
             reference_ty,
@@ -263,12 +267,20 @@ impl BodyLowering<'_> {
             .ok_or(FirLoweringFailure::MissingCallable(target))?;
         let dispatch_receiver = self.receiver(dispatch_receiver)?;
         let extension_receiver = self.receiver(extension_receiver)?;
+        let contexts = context_arguments
+            .iter()
+            .map(|argument| self.receiver(Some(*argument)))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         if let Some(reference) = self.materialize_callable_reference(
             callable,
             binding,
             BoundCallableReceivers {
                 dispatch: dispatch_receiver,
                 extension: extension_receiver,
+                contexts,
             },
             substitutions,
             adaptation,
@@ -294,6 +306,7 @@ impl BodyLowering<'_> {
         let BoundCallableReceivers {
             dispatch: dispatch_capture,
             extension: extension_capture,
+            contexts: context_captures,
         } = receivers;
         let MaterializedCallableReference {
             ty: reference_ty,
@@ -326,6 +339,22 @@ impl BodyLowering<'_> {
 
         let mut captures = Vec::new();
         let mut capture_types = Vec::new();
+        // The declaration's leading context parameters are bound at the reference site: each is
+        // one more captured value, read by the adapter in declaration order.
+        if context_captures.len() > signature_parameters.len() {
+            return Ok(None);
+        }
+        let context_capture_slots = context_captures
+            .iter()
+            .zip(&signature_parameters)
+            .map(|(value, &declared)| {
+                let slot = captures.len() as u32;
+                captures.push(*value);
+                capture_types.push(declared);
+                slot
+            })
+            .collect::<Vec<_>>();
+        let receiver_capture_start = captures.len();
         let dispatch_capture_slot = dispatch_capture.map(|value| {
             let slot = captures.len() as u32;
             captures.push(value);
@@ -373,7 +402,10 @@ impl BodyLowering<'_> {
                 }
                 _ if extension_receiver.is_none() => {
                     if let Some(expected) = callable.shape.extension_receiver {
-                        let position = callable.shape.context_parameter_count as usize;
+                        // Context parameters the reference site binds are not inputs of the
+                        // reference, so the receiver follows only the ones it still exposes.
+                        let position = (callable.shape.context_parameter_count as usize)
+                            .saturating_sub(context_capture_slots.len());
                         let Some(source) = own_parameters.get(position).copied() else {
                             return Ok(None);
                         };
@@ -412,6 +444,15 @@ impl BodyLowering<'_> {
                                 source_ty,
                                 signature_parameters[parameter as usize],
                             ),
+                        }
+                    }
+                    crate::fir::FirAdaptedReferenceArgument::Context => {
+                        let Some(&slot) = context_capture_slots.get(parameter as usize) else {
+                            return Ok(None);
+                        };
+                        IrCheckedArgument::Expression {
+                            parameter,
+                            value: self.ir.add_expr(IrExpr::GetValue(slot)),
                         }
                     }
                     crate::fir::FirAdaptedReferenceArgument::Default => {
@@ -521,11 +562,13 @@ impl BodyLowering<'_> {
             .index
             .declaration_header(callable.declaration)
             .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::SUSPEND));
-        let bound_receiver = match captures.as_slice() {
+        let (context_captures, receiver_captures) = captures.split_at(receiver_capture_start);
+        let bound_receiver = match receiver_captures {
             [] => None,
             [receiver] => Some(*receiver),
             _ => return Ok(None),
         };
+        let context_captures = context_captures.to_vec();
         // The declaration's own parameter list: its extension receiver follows its context
         // parameters, as the declaration takes them. A companion-associated declaration's receiver
         // names the classifier whose static scope it joins; it is not a physical parameter.
@@ -543,20 +586,24 @@ impl BodyLowering<'_> {
                 (callable.shape.context_parameter_count as usize).min(declaration_parameters.len());
             declaration_parameters.insert(position, specialize(receiver.get()));
         }
-        Ok(Some(self.ir.add_expr(IrExpr::CallableReference(Box::new(
-            crate::ir::IrCallableReference {
-                target: crate::ir::IrCallableReferenceTarget::Module(callable.id),
-                adapter: function,
-                captures: Vec::new(),
-                bound_receiver,
-                function_type: reference_ty,
-                declaration_parameters: declaration_parameters.into_boxed_slice(),
-                declaration_result: signature_result,
-                declaration_suspend,
-                adaptation: adaptation.cloned().map(Box::new),
-                reflection_owner,
-            },
-        )))))
+        Ok(Some(
+            self.ir.add_expr(IrExpr::CallableReference(Box::new(
+                crate::ir::IrCallableReference {
+                    target: crate::ir::IrCallableReferenceTarget::Module(callable.id),
+                    adapter: function,
+                    bound_contexts: u32::try_from(context_captures.len())
+                        .expect("too many bound context arguments"),
+                    captures: context_captures,
+                    bound_receiver,
+                    function_type: reference_ty,
+                    declaration_parameters: declaration_parameters.into_boxed_slice(),
+                    declaration_result: signature_result,
+                    declaration_suspend,
+                    adaptation: adaptation.cloned().map(Box::new),
+                    reflection_owner,
+                },
+            ))),
+        ))
     }
 
     pub(super) fn checked_property_reference(

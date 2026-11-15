@@ -229,6 +229,7 @@ impl BodyLowering<'_> {
                     adapter: wrapper,
                     captures: Vec::new(),
                     bound_receiver: Some(captured),
+                    bound_contexts: 0,
                     function_type,
                     declaration_parameters: target_parameters
                         .iter()

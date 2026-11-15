@@ -273,6 +273,7 @@ mod tests {
 
     fn indexed(uri: &str, hash: u64) -> IndexedFile {
         IndexedFile {
+            references: crate::DefinitionIndex::default(),
             uri: uri.to_string(),
             diagnostics: vec![Diagnostic {
                 span: Span::new(0, 1),
@@ -394,6 +395,7 @@ mod tests {
                 .collect();
             attempted.push(uri.clone());
             indexed.push(IndexedFile {
+                references: crate::DefinitionIndex::default(),
                 uri,
                 diagnostics,
                 text_hash: 1,

@@ -685,6 +685,7 @@ impl BodyLowering<'_> {
                         value: self.coerce_to_declared(value, actual, declared),
                     }
                 }
+                crate::fir::FirAdaptedReferenceArgument::Context => return Ok(None),
                 crate::fir::FirAdaptedReferenceArgument::Default => {
                     crate::ir::IrCheckedArgument::Default { parameter }
                 }
@@ -835,6 +836,7 @@ impl BodyLowering<'_> {
                 adapter: wrapper,
                 captures: bound_captures.to_vec(),
                 bound_receiver: bound_extension_receiver,
+                bound_contexts: 0,
                 function_type: reference_ty,
                 declaration_parameters: reference.params.clone().into_boxed_slice(),
                 declaration_result: selected_result,

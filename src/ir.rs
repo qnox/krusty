@@ -66,7 +66,9 @@ pub mod fields;
 mod function_scope;
 mod generic_signature;
 pub use generic_signature::{IrGenericSig, IrTypeParameter};
+mod coroutine_runtime;
 mod inline_copies;
+pub use coroutine_runtime::IrCoroutineRuntime;
 mod suspension_points;
 pub use suspension_points::{IrIntrinsicSuspensionPoint, IrValueClassSuspendResult};
 mod intrinsic;
@@ -106,6 +108,8 @@ mod references;
 mod reified_markers;
 mod reified_templates;
 mod sam_target;
+mod type_tests;
+pub(crate) use type_tests::{admits_null_at_runtime, settled_instance_answer};
 mod source_debug;
 pub(crate) use source_debug::SourceDebug;
 mod static_properties;
@@ -2187,6 +2191,10 @@ pub struct IrFile {
     /// with suspension points, builds the state machine + continuation class. Common lowering keeps a
     /// `suspend fun` plain, mirroring how value classes stay plain until their target pass.
     pub suspend_funs: Vec<u32>,
+    /// The stdlib declarations the coroutine lowering of this file calls, selected by the handoff
+    /// for a file that declares a suspend function. `None` when the file has none or the
+    /// compilation's classpath does not declare them.
+    pub coroutine_runtime: Option<IrCoroutineRuntime>,
     /// Functions that exist only to forward an interface member to its delegate (`: I by d`).
     /// A suspend forwarder threads its own continuation into that one call. It is not a user tail
     /// call: a reference-carrier value class still forwards, and the backend checkcasts the carrier
@@ -2412,6 +2420,13 @@ pub struct IrFile {
     pub semantic_call_roles: crate::fx_hash::HashMap<ExprId, crate::types::SemanticCallRole>,
     /// See [`external_overrides::ExternalOverriddenDeclarations`].
     pub external_overridden_declarations: external_overrides::ExternalOverriddenDeclarations,
+    /// Builtin override implementations computed by the checker for selected external members.
+    /// Backends consume this fact table without traversing the source member hierarchy.
+    pub(crate) external_builtin_implementations:
+        crate::fx_hash::HashMap<ExternalCallableId, Box<[crate::fir::BuiltinImplementation]>>,
+    /// The dependency member declarations this file emits as methods of a class it materializes,
+    /// so an override edge naming one is an override of a method of this file.
+    pub dependency_methods: crate::fx_hash::HashMap<crate::fir::ExternalCallableId, FunId>,
     /// Current-module functions that play a language role through the declaration they override
     /// (an override of `Any.toString`), as the frontend's override resolution published them.
     pub callable_semantic_roles:
@@ -2836,6 +2851,7 @@ mod class_skeletons;
 mod data_class_members;
 mod debug_lines;
 mod debug_locals;
+mod external_builtin_implementations;
 mod external_overrides;
 mod generated_members;
 pub use data_class_members::IrDataClassMemberRole;

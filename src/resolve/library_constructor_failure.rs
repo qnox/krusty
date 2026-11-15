@@ -225,6 +225,9 @@ impl Checker<'_> {
                 } else {
                     actual
                 };
+                if self.report_uninferred_call_argument(scope, argument, expected, actual) {
+                    return;
+                }
                 self.expect_assignable(expected, actual, self.span(argument), "argument");
             }
             LibraryConstructorFailure::TypeArgumentMismatch {

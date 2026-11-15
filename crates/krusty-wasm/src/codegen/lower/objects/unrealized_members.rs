@@ -52,6 +52,10 @@ impl Body<'_> {
             return self.reaches_unrealized(class, member);
         }
         let value = ty.non_null();
+        if value == Ty::String {
+            // A string answers every member itself.
+            return Ok(false);
+        }
         if let Some(prints) = box_prints(value) {
             // A scalar read as a reference is its box.
             return Ok(member == AnyMember::ToString && !prints);

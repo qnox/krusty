@@ -8,10 +8,9 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use super::common_core as common;
+use super::common_core::{compiler_errors, error_blocks, render_errors};
 use super::reference_box_support::{kotlinc_box_files_result_with_classpath, kotlinc_box_result};
-use super::reference_compiler_support::{
-    compiler_errors, error_blocks, kotlinc_paths_result, render_errors, write_fixture_sources,
-};
+use super::reference_compiler_support::{kotlinc_paths_result, write_fixture_sources};
 use super::target_diagnostics_support::front_end_diagnostics_located_for;
 
 /// [`common::compile_in_process`] with selected classpath entries treated as Kotlin friend modules

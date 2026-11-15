@@ -15,8 +15,12 @@
 //! at one index; a class's table is an immutable `(array funcref)` its dispatch table points to,
 //! null when it holds none. An `is` function per interface tests every implementing struct.
 //!
-//! A library class's member that boxes implement is dispatched the same way, through a member no
-//! interface numbers ([`InterfaceDispatch::unnumbered`], `super::boxes`).
+//! A library classifier's member is dispatched the same way, through a member named by its KLIB
+//! identity ([`InterfaceDispatch::library`]): an interface's, which the program's classes implement
+//! like any other, and a class's that builtin classes override (`super::builtin_members`). A value
+//! the runtime carries in a representation of its own, a string, has no interface table: a member
+//! it implements records the representation's struct, and its stub tests for it first, as the
+//! `is` function of an interface it is an instance of does (`super::builtin_instances`).
 
 use krusty::fx_hash::HashMap;
 use krusty::types::TypeName;
@@ -41,9 +45,14 @@ pub(super) struct InterfaceDispatch {
     numbered: HashMap<(String, u32), MemberRef>,
     /// Each member a source module published an identity for, by that identity.
     identities: HashMap<Vec<u8>, MemberRef>,
+    /// Each member of a library classifier something names, by its KLIB identity.
+    library: HashMap<Vec<u8>, MemberRef>,
     classes: Vec<ClassRecord>,
     /// The `is` function of each interface something tests, in the order they were asked for.
     tests: Vec<(TypeName, u32)>,
+    /// Each runtime representation with no interface table, by its struct, and the interfaces
+    /// its values are instances of.
+    representations: Vec<(u32, Vec<TypeName>)>,
 }
 
 struct Member {
@@ -53,6 +62,14 @@ struct Member {
     /// Declared once a call goes through the member.
     stub: Option<u32>,
     implementations: Vec<(ClassRef, u32)>,
+    /// The implementations of runtime representations with no interface table, by their struct,
+    /// tested for in this order before the classes' implementations are reached.
+    representations: Vec<(u32, u32)>,
+    /// Why a class implementing this library member has no implementation this generator can
+    /// write: a call through the member declines with it.
+    unimplementable: Option<String>,
+    /// The library classifier declaring this member, whose every instance must implement it.
+    library_owner: Option<TypeName>,
 }
 
 struct ClassRecord {
@@ -101,9 +118,8 @@ impl InterfaceDispatch {
         Ok(member)
     }
 
-    /// A member no interface numbers, carried as `params` (the receiver first) and `results`: a
-    /// library class's member its boxes implement (`super::boxes`), which keeps it.
-    pub(super) fn unnumbered(
+    /// A member no interface numbers, carried as `params` (the receiver first) and `results`.
+    fn unnumbered(
         &mut self,
         module: &mut Module,
         (params, results): (Vec<ValType>, Vec<ValType>),
@@ -116,8 +132,40 @@ impl InterfaceDispatch {
             ty,
             stub: None,
             implementations: Vec::new(),
+            representations: Vec::new(),
+            unimplementable: None,
+            library_owner: None,
         });
         member
+    }
+
+    /// The member `owner` declares whose KLIB identity is `identity`
+    /// (`krusty::backend::interface_identity`), carried as `params` (the receiver first) and
+    /// `results`. A call through it and every class implementing it name it alike, whichever
+    /// comes first.
+    pub(super) fn library(
+        &mut self,
+        module: &mut Module,
+        owner: TypeName,
+        identity: &[u8],
+        (params, results): (Vec<ValType>, Vec<ValType>),
+    ) -> Result<MemberRef, String> {
+        // A member a source module published is that module's: its classes implement it by
+        // number, so a call through it must not name a second member for the same identity.
+        if let Some(&member) = self.identities.get(identity) {
+            return Ok(member);
+        }
+        if let Some(&member) = self.library.get(identity) {
+            let known = &self.members[member.0 as usize];
+            if known.params != params || known.results != results {
+                return Err("a library member carried two ways".to_string());
+            }
+            return Ok(member);
+        }
+        let member = self.unnumbered(module, (params, results));
+        self.members[member.0 as usize].library_owner = Some(owner);
+        self.library.insert(identity.to_vec(), member);
+        Ok(member)
     }
 
     /// Publish `identity` as `member`'s, for a dependent module to name it by.
@@ -196,9 +244,90 @@ impl InterfaceDispatch {
         }
     }
 
+    /// Record that `function`, carried as `member` is, implements `member` for every value of the
+    /// runtime representation `structure`, which has no interface table.
+    pub(super) fn implement_representation(
+        &mut self,
+        member: MemberRef,
+        structure: u32,
+        function: u32,
+    ) -> Result<(), String> {
+        let representations = &mut self.members[member.0 as usize].representations;
+        match representations
+            .iter()
+            .find(|(known, _)| *known == structure)
+        {
+            Some((_, known)) if *known != function => {
+                Err("a representation implementing one member twice".to_string())
+            }
+            Some(_) => Ok(()),
+            None => {
+                representations.push((structure, function));
+                Ok(())
+            }
+        }
+    }
+
+    /// Record that a class implements the library member `member` with something this generator
+    /// cannot write, which declines the program only if a call goes through the member.
+    pub(super) fn unimplementable(&mut self, member: MemberRef, reason: String) {
+        self.members[member.0 as usize]
+            .unimplementable
+            .get_or_insert(reason);
+    }
+
+    /// Why the program cannot be dispatched: a member a call goes through that a class implements
+    /// with something this generator cannot write, or a library member some instance of its
+    /// classifier implements with nothing, such as an object the runtime creates.
+    pub(super) fn declined(&self) -> Option<String> {
+        let called = self.members.iter().filter(|member| member.stub.is_some());
+        for member in called {
+            if let Some(reason) = &member.unimplementable {
+                return Some(reason.clone());
+            }
+            let Some(owner) = member.library_owner else {
+                continue;
+            };
+            let unimplemented = self.classes.iter().enumerate().any(|(class, record)| {
+                record.interfaces.contains(&owner)
+                    && !member
+                        .implementations
+                        .iter()
+                        .any(|(known, _)| known.0 as usize == class)
+            });
+            if unimplemented {
+                return Some(format!(
+                    "a call of a `{}` member on an instance that does not implement it",
+                    owner.render()
+                ));
+            }
+        }
+        None
+    }
+
     /// Record that `class`'s instances are instances of `interface`.
     pub(super) fn instance_of(&mut self, class: ClassRef, interface: TypeName) {
         let interfaces = &mut self.classes[class.0 as usize].interfaces;
+        if !interfaces.contains(&interface) {
+            interfaces.push(interface);
+        }
+    }
+
+    /// Record that every value of the runtime representation `structure`, which has no interface
+    /// table, is an instance of `interface`.
+    pub(super) fn representation_instance_of(&mut self, structure: u32, interface: TypeName) {
+        let index = match self
+            .representations
+            .iter()
+            .position(|(known, _)| *known == structure)
+        {
+            Some(index) => index,
+            None => {
+                self.representations.push((structure, Vec::new()));
+                self.representations.len() - 1
+            }
+        };
+        let interfaces = &mut self.representations[index].1;
         if !interfaces.contains(&interface) {
             interfaces.push(interface);
         }
@@ -327,7 +456,8 @@ impl InterfaceDispatch {
         }
     }
 
-    /// `ref.test` of every struct implementing `interface`, but a subtype of one already tested.
+    /// `ref.test` of every representation and struct implementing `interface`, but a subtype of
+    /// a struct already tested.
     fn test_body(&self, interface: TypeName) -> Code {
         let implementors = self
             .classes
@@ -336,6 +466,13 @@ impl InterfaceDispatch {
             .collect::<Vec<_>>();
         let mut code = Code::default();
         code.i32_const(0);
+        for (structure, interfaces) in &self.representations {
+            if interfaces.contains(&interface) {
+                code.local_get(0)
+                    .ref_test(false, HeapType::Concrete(*structure))
+                    .op(OR32);
+            }
+        }
         let mut tested = Vec::new();
         for class in &implementors {
             let structure = class.ancestors[0];
@@ -363,6 +500,14 @@ fn forward(code: &mut Code, member: &Member) {
 
 fn stub_body(member: &Member, shape: &Shape, objects: &ObjectRoot) -> Code {
     let mut code = Code::default();
+    // A representation with no interface table answers before the table is read.
+    for &(structure, function) in &member.representations {
+        code.local_get(0)
+            .ref_test(false, HeapType::Concrete(structure))
+            .if_(BlockType::Empty);
+        forward(&mut code, member);
+        code.call(function).return_().end();
+    }
     match *shape {
         Shape::Unreachable => {
             code.unreachable();

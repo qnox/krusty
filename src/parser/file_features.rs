@@ -10,6 +10,7 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.assert_always_enabled = features.has("AssertionsAlwaysEnable");
     file.assert_always_disabled = features.has("AssertionsAlwaysDisable");
     file.explicit_context_arguments = features.has("ExplicitContextArguments");
+    file.callable_references_to_contextual = features.has("CallableReferencesToContextual");
     file.context_sensitive_resolution_using_expected_type =
         features.has("ContextSensitiveResolutionUsingExpectedType");
     file.allow_protected_super_companion_property_access =
@@ -18,6 +19,7 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.forbid_array_of_nothing_in_lhs_of_class_literal =
         features.has("ForbidArrayOfNothingInLhsOfClassLiteral");
     file.enum_entries_enabled = features.has("EnumEntries");
+    file.collection_literals_enabled = features.has("CollectionLiterals");
     file.prioritized_enum_entries = features.has("PrioritizedEnumEntries");
     file.implicit_signed_to_unsigned_integer_conversion =
         features.has("ImplicitSignedToUnsignedIntegerConversion");
@@ -37,6 +39,8 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.lambda_implementation_uses_inferred_result =
         features.language_version() < crate::language_version::LanguageVersion::V2_4;
     file.full_value_classes = features.has("FullValueClasses");
+    file.smart_cast_value_class_components =
+        features.has("AllowSmartCastsOnValueClassUnderlyingProperties");
     file.forbid_value_class_recursion_via_type_parameters =
         features.has("ForbidValueClassRecursionViaTypeParameters");
     file.value_class_recursion_via_type_parameters_warning = features.deprecation_warning_message(
@@ -51,6 +55,7 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
         "'operator' modifier is not applicable to function: must override 'equals()' in Any.",
     );
     file.custom_equals_in_value_classes = features.has("CustomEqualsInValueClasses");
+    file.normalize_nan_in_const_context = features.has("NormalizeNaNValuesInConstContext");
     file.forbid_upper_bounds_violation_on_type_operator_and_parameter_bounds =
         features.has("ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds");
     file.forbid_useless_type_arguments = features.has("ForbidUselessTypeArgumentsIn25");

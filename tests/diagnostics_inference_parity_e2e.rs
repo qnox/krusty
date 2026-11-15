@@ -265,6 +265,158 @@ fn empty_reference_array_does_not_match_a_primitive_array_parameter() {
 }
 
 #[test]
+fn array_factories_without_element_evidence_match_kotlinc_exactly() {
+    // `arrayOf`, `emptyArray` and `arrayOfNulls` are ordinary generic declarations: with no
+    // element and no expected type, nothing infers `T`. An empty vararg and an omitted default
+    // argument supply no evidence for a formal that only their parameters mention.
+    let source = "fun <T> pick(vararg xs: T, fallback: T? = null): T? = fallback\n\
+                  \n\
+                  fun use() {\n\
+                  \x20   val a = emptyArray()\n\
+                  \x20   val b = arrayOf()\n\
+                  \x20   val c = arrayOfNulls(1)\n\
+                  \x20   val d = pick()\n\
+                  }\n";
+    let result = common::compiler_diagnostics(
+        &[("ArrayFactoryInference.kt", source)],
+        &[common::stdlib_jar()],
+    );
+    assert_eq!(result.krusty_stdout, "");
+    let krusty = errors(&result.krusty_stderr);
+    let reference = errors(&result.reference_stderr);
+    let message = "cannot infer type for type parameter 'T'. Specify it explicitly.";
+    let expected = [(4, 13), (5, 13), (6, 13), (7, 13)]
+        .into_iter()
+        .map(|(line, column)| ObservedError {
+            file: "ArrayFactoryInference.kt".to_string(),
+            line,
+            column,
+            message: message.to_string(),
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+    assert_eq!(krusty.len(), 4);
+    assert_eq!(reference.len(), 4);
+    assert_eq!(krusty, expected);
+    assert_eq!(reference, expected);
+}
+
+#[test]
+fn nested_spread_of_an_empty_array_infers_the_enclosing_formal_like_kotlinc() {
+    // The spread `emptyArray()` takes `id`'s vararg array as its expectation, so its `T` is the
+    // enclosing function's `E`: kotlinc then rejects `E` as `emptyArray`'s reified argument, and
+    // reports no return type mismatch.
+    let source = "fun <T> id(vararg xs: T): Array<out T> = xs\n\
+                  fun <E> g(): Array<out E> = id(*emptyArray())\n";
+    let result = common::compiler_diagnostics(&[("Main.kt", source)], &[common::stdlib_jar()]);
+    assert_eq!(result.krusty_stdout, "");
+    let krusty = errors(&result.krusty_stderr);
+    let reference = errors(&result.reference_stderr);
+    let expected = vec![ObservedError {
+        file: "Main.kt".to_string(),
+        line: 2,
+        column: 33,
+        message: "cannot use 'E' as reified type parameter. Use a class instead.".to_string(),
+    }];
+
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+    assert_eq!(krusty.len(), 1);
+    assert_eq!(reference.len(), 1);
+    assert_eq!(krusty, expected);
+    assert_eq!(reference, expected);
+}
+
+#[test]
+fn a_nested_call_left_uninferred_by_its_parameter_matches_kotlinc_exactly() {
+    // Neither `String` nor `Any` constrains `mk`'s `T`: kotlinc reports it uninferred at the nested
+    // callee, then rejects the argument a `String` parameter cannot take, rendering the formal as
+    // `uninferred T (of fun <T> mk)`. An `Array<out Any>` parameter does constrain it.
+    let source = "fun <T> mk(): Array<T> = TODO()\n\
+                  fun take(text: String) {}\n\
+                  fun takeAny(value: Any) {}\n\
+                  fun takeOut(value: Array<out Any>) {}\n\
+                  fun calls() {\n\
+                  \x20   take(mk())\n\
+                  \x20   takeAny(mk())\n\
+                  \x20   takeOut(mk())\n\
+                  }\n";
+    let result = common::compiler_diagnostics(&[("Main.kt", source)], &[common::stdlib_jar()]);
+    assert_eq!(result.krusty_stdout, "");
+    let krusty = errors(&result.krusty_stderr);
+    let reference = errors(&result.reference_stderr);
+    let uninferred = "cannot infer type for type parameter 'T'. Specify it explicitly.";
+    let expected = [
+        (6, 10, uninferred),
+        (
+            6,
+            10,
+            "argument type mismatch: actual type is 'Array<uninferred T (of fun <T> mk)>', but 'String' was expected.",
+        ),
+        (7, 13, uninferred),
+    ]
+    .into_iter()
+    .map(|(line, column, message)| ObservedError {
+        file: "Main.kt".to_string(),
+        line,
+        column,
+        message: message.to_string(),
+    })
+    .collect::<Vec<_>>();
+
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+    assert_eq!(krusty.len(), 3);
+    assert_eq!(reference.len(), 3);
+    assert_eq!(krusty, expected);
+    assert_eq!(reference, expected);
+}
+
+#[test]
+fn every_formal_a_call_leaves_open_is_reported_like_kotlinc() {
+    // kotlinc reports each open formal of `emptyMap`, in declaration order, as a local initializer
+    // and as an argument whose parameter does not constrain them.
+    let source = "fun take(text: String) {}\n\
+                  fun calls() {\n\
+                  \x20   val local = emptyMap()\n\
+                  \x20   take(emptyMap())\n\
+                  }\n";
+    let result = common::compiler_diagnostics(&[("Main.kt", source)], &[common::stdlib_jar()]);
+    assert_eq!(result.krusty_stdout, "");
+    let krusty = errors(&result.krusty_stderr);
+    let reference = errors(&result.reference_stderr);
+    let uninferred = |name: &str| {
+        format!("cannot infer type for type parameter '{name}'. Specify it explicitly.")
+    };
+    let expected = [
+        (3, 17, uninferred("K")),
+        (3, 17, uninferred("V")),
+        (4, 10, uninferred("K")),
+        (4, 10, uninferred("V")),
+        (
+            4,
+            10,
+            "argument type mismatch: actual type is 'Map<uninferred K (of fun <K, V> emptyMap), \
+uninferred V (of fun <K, V> emptyMap)>', but 'String' was expected."
+                .to_string(),
+        ),
+    ]
+    .into_iter()
+    .map(|(line, column, message)| ObservedError {
+        file: "Main.kt".to_string(),
+        line,
+        column,
+        message,
+    })
+    .collect::<Vec<_>>();
+
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+    assert_eq!(krusty.len(), 5);
+    assert_eq!(reference.len(), 5);
+    assert_eq!(krusty, expected);
+    assert_eq!(reference, expected);
+}
+
+#[test]
 fn subjectless_when_fallthrough_diagnostics_match_kotlinc() {
     let result = common::compiler_diagnostics(
         &[(

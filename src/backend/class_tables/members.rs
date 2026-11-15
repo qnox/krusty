@@ -22,6 +22,7 @@ pub(crate) fn any_slot(role: Option<crate::types::SemanticCallRole>) -> Option<u
             | crate::types::SemanticCallRole::KotlinFunctionInvoke
             | crate::types::SemanticCallRole::KotlinCallableReferenceName
             | crate::types::SemanticCallRole::KotlinStringLength
+            | crate::types::SemanticCallRole::KotlinStringCompareTo
             | crate::types::SemanticCallRole::KotlinEnumName
             | crate::types::SemanticCallRole::KotlinPropertyReferenceGet(_)
             | crate::types::SemanticCallRole::KotlinPropertyReferenceSet(_)
@@ -311,6 +312,16 @@ pub(crate) fn overridden_functions(
                             function.name
                         ))
                     }
+                }
+            }
+            // An override of a dependency member this file emits as a method of a class it
+            // materializes replaces that method's slot, as an override of any method here does.
+            ResolvedFunctionOverrideTarget::External(target)
+                if let Some(&overridden) = ir.dependency_methods.get(target) =>
+            {
+                let targets = map.entry(implementation).or_default();
+                if !targets.contains(&overridden) {
+                    targets.push(overridden);
                 }
             }
             ResolvedFunctionOverrideTarget::External(_) => {

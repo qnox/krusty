@@ -302,6 +302,13 @@ impl FileLowering<'_> {
                 self.ir.classes[class as usize].fq_name,
                 LaidOutClass {
                     table,
+                    descriptor: self
+                        .module
+                        .declarations()
+                        .get_data_decl(self.classes[class as usize].descriptor)
+                        .name
+                        .clone()
+                        .ok_or("an extended class with an anonymous descriptor")?,
                     fields_end: layout.fields_end,
                     reference_offsets: layout.reference_offsets,
                     vtable,

@@ -19,6 +19,7 @@ mod classifier_associated;
 mod classifier_identities;
 mod classifier_parents;
 mod constructor_results;
+mod context_receivers;
 mod convention_results;
 mod declaration_aliases;
 mod declaration_conflicts;
@@ -98,6 +99,8 @@ struct ProductionSignatureSemantics<'a> {
     source_orders: HashMap<crate::fir::DeclarationId, u32>,
     signature_origins: HashMap<crate::fir::DeclarationId, crate::fir::OriginId>,
     scoped_receivers: RefCell<HashMap<crate::fir::DeclarationId, Vec<SignatureImplicitReceiver>>>,
+    /// The declarations whose context parameter types are being resolved, innermost last.
+    context_headers_in_resolution: RefCell<Vec<crate::fir::DeclarationId>>,
     scoped_frames: semantics::scoped_constraint_frames::ScopedConstraintFrames,
     stable_functions: stable_function_index::StableFunctionIndex,
     diagnostics: RefCell<Vec<ProductionSignatureDiagnostic>>,
@@ -820,19 +823,16 @@ impl ProductionSignatureSemantics<'_> {
         crate::fir::DiagnosticId::from_raw(diagnostics.len() as u32)
     }
 
-    fn record_classifier_access_diagnostic_at(
+    /// A finding reported on every exit, once per `identity`.
+    fn record_unconditional_diagnostic_at(
         &self,
         declaration: crate::fir::DeclarationId,
         source: crate::fir::SourceFileId,
         span: Span,
-        classifier: crate::types::TypeName,
+        identity: crate::diag::DiagnosticIdentity,
         message: String,
     ) -> crate::fir::DiagnosticId {
         let file = source.raw();
-        let identity = crate::diag::DiagnosticIdentity::ClassifierAccess {
-            reference: span,
-            classifier,
-        };
         let mut diagnostics = self.diagnostics.borrow_mut();
         if let Some(index) = diagnostics
             .iter()
@@ -2267,70 +2267,6 @@ impl ProductionSignatureSemantics<'_> {
         }
     }
 
-    fn classifier_context_receivers(
-        &self,
-        declaration: crate::fir::DeclarationId,
-        source: crate::fir::SourceFileId,
-    ) -> Vec<Ty> {
-        let Some(crate::fir::HeaderDeclarationKind::Classifier {
-            context_parameters, ..
-        }) = self
-            .headers
-            .syntax
-            .declaration(declaration)
-            .map(|header| header.kind)
-        else {
-            return Vec::new();
-        };
-        let scope = crate::fir::SignatureScope {
-            owner: declaration,
-            source,
-        };
-        self.headers
-            .syntax
-            .parameters(context_parameters)
-            .iter()
-            .rev()
-            .filter_map(|parameter| self.resolve_compact_header_type(scope, parameter.ty))
-            .collect()
-    }
-
-    fn declaration_context_receivers(&self, scope: crate::fir::SignatureScope) -> Vec<Ty> {
-        let compact_parameters =
-            self.headers
-                .syntax
-                .declaration(scope.owner)
-                .and_then(|declaration| match declaration.kind {
-                    crate::fir::HeaderDeclarationKind::Callable {
-                        parameters,
-                        context_count,
-                        ..
-                    } => self
-                        .headers
-                        .syntax
-                        .parameters(parameters)
-                        .get(..context_count as usize)
-                        .map(<[_]>::to_vec),
-                    crate::fir::HeaderDeclarationKind::Property {
-                        context_parameters, ..
-                    } => Some(self.headers.syntax.parameters(context_parameters).to_vec()),
-                    crate::fir::HeaderDeclarationKind::Classifier { .. }
-                    | crate::fir::HeaderDeclarationKind::Constructor { .. }
-                    | crate::fir::HeaderDeclarationKind::TypeAlias { .. } => None,
-                });
-        if let Some(parameters) = compact_parameters {
-            return parameters
-                .iter()
-                .filter_map(|parameter| self.resolve_compact_header_type(scope, parameter.ty))
-                .collect();
-        }
-        self.callable_signature(scope.owner)
-            .map(|signature| {
-                signature.params[..signature.context_count.min(signature.params.len())].to_vec()
-            })
-            .unwrap_or_default()
-    }
-
     fn declaration_implicit_receiver_entries(
         &self,
         scope: crate::fir::SignatureScope,
@@ -3331,10 +3267,10 @@ pub(crate) fn finalized_streamed_signature_index(
         let Some(classifier) = classifier else {
             continue;
         };
-        let entries = table.enums.entry(classifier).or_default();
-        if !entries.iter().any(|entry| entry == spelling) {
-            entries.push(spelling.to_owned());
-        }
+        let class = table.classes.get_mut(&classifier);
+        class
+            .expect("a collected enum")
+            .declare_enum_entry(spelling);
     }
     let empty_extension_receivers = HashMap::default();
     let empty_classifier_parents = classifier_parents::ParentInventory::default();
@@ -3350,6 +3286,7 @@ pub(crate) fn finalized_streamed_signature_index(
         source_orders: HashMap::default(),
         signature_origins: HashMap::default(),
         scoped_receivers: RefCell::new(HashMap::default()),
+        context_headers_in_resolution: Default::default(),
         scoped_frames: Default::default(),
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
@@ -4123,6 +4060,7 @@ pub(crate) fn finalized_streamed_signature_index(
         source_orders,
         signature_origins,
         scoped_receivers: RefCell::new(HashMap::default()),
+        context_headers_in_resolution: Default::default(),
         scoped_frames: Default::default(),
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
@@ -4509,6 +4447,7 @@ pub(crate) fn finalized_streamed_signature_index(
             .syntax
             .interface_delegations(delegations)
             .iter()
+            .filter(|d| source_supertypes.get(d.supertype as usize) != Some(&Ty::Error))
             .map(|delegation| {
                 let interface = *source_supertypes.get(delegation.supertype as usize)?;
                 let source = match delegation.source {
