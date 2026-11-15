@@ -45,3 +45,35 @@ fn a_rejected_family_filtered_to_one_publishes_no_constructor_commitment() {
     assert!(!info.resolved_constructors.contains_key(&call));
     assert!(!info.resolved_call_arg_slots.contains_key(&call));
 }
+
+#[test]
+fn an_inapplicable_fixed_alias_constructor_cannot_hide_a_viable_function() {
+    let source = "class Tag<T>(val value: T)\n\
+                  typealias Named = Tag<String>\n\
+                  fun Named(value: Any): String = \"function\"\n\
+                  fun inspect(value: Any): String = if (value is String) value else \"constructor\"\n\
+                  fun box(): String = inspect(Named(1))\n";
+    let mut diagnostics = DiagSink::new();
+    let (file, _, info) = crate::frontend::analyze_source_standalone(source, &mut diagnostics);
+    assert_eq!(
+        diagnostics
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .collect::<Vec<_>>(),
+        Vec::<&str>::new()
+    );
+    let info = info.expect("checked alias call");
+    let calls = calls_named(&file, "Named");
+    assert_eq!(calls.len(), 1);
+    let call = calls[0];
+    assert!(!info.resolved_constructors.contains_key(&call));
+    let selected = info
+        .resolved_top_level_call(call)
+        .expect("same-named function");
+    assert_eq!(
+        selected.callable.params,
+        [crate::types::Ty::obj("kotlin/Any")]
+    );
+    assert_eq!(selected.callable.ret, crate::types::Ty::String);
+}
