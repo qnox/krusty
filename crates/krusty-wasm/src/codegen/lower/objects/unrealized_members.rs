@@ -18,7 +18,7 @@
 
 use krusty::backend::class_tables::AnyMember;
 use krusty::ir::{ClassId, IrExpr, IrFile};
-use krusty::types::{Ty, TyKind};
+use krusty::types::Ty;
 
 use super::super::super::super::boxes::box_prints;
 use super::super::super::super::encode::ValType;
