@@ -1218,14 +1218,21 @@ impl<'a> Body<'a> {
                 dispatch_receiver: None,
                 args,
             } if let Callee::ModuleDefaultEntry {
-                provider, params, ..
+                provider,
+                params,
+                dispatch_receiver_ty,
+                ..
             } = &**call_callee =>
             {
                 let function = self
                     .calls
                     .module_default(*provider)
                     .ok_or_else(|| "an unregistered source default entry".to_string())?;
-                let mut frame = params.clone();
+                let mut frame = dispatch_receiver_ty
+                    .iter()
+                    .copied()
+                    .chain(params.iter().copied())
+                    .collect::<Vec<_>>();
                 frame.extend(std::iter::repeat_n(
                     Ty::Int,
                     krusty::backend::default_arguments::mask_words(params.len()),
