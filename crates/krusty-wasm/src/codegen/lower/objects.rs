@@ -959,6 +959,7 @@ impl Body<'_> {
                 if !storage.direct_read {
                     return Err("a top-level property read that requires an accessor".to_string());
                 }
+                self.initialize_storage_owner(target)?;
                 self.code.global_get(storage.global);
                 return Ok(());
             }
@@ -1029,6 +1030,7 @@ impl Body<'_> {
                     return Err("a top-level property write that requires an accessor".to_string());
                 }
                 self.value(value, storage.ty)?;
+                self.initialize_storage_owner(target)?;
                 self.code.global_set(storage.global);
                 return Ok(());
             }

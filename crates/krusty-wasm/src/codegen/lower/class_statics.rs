@@ -133,6 +133,20 @@ impl Body<'_> {
         }
     }
 
+    /// Initialize the class that owns this file's storage of `target`, before it is read or
+    /// written through the property rather than through `GetStatic`/`SetStatic`.
+    pub(super) fn initialize_storage_owner(
+        &mut self,
+        target: krusty::fir::PropertyId,
+    ) -> Result<(), Unsupported> {
+        match self.ir.local_property_layouts.get(&target) {
+            Some(krusty::ir::IrLocalPropertyLayout::TopLevelStorage { storage, .. }) => {
+                self.initialize_static_owner(*storage)
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Initialize the class that owns static `index`, before that static is read or written.
     pub(super) fn initialize_static_owner(&mut self, index: u32) -> Result<(), Unsupported> {
         let property = &self.ir.statics[index as usize];
