@@ -51,8 +51,13 @@ impl Checker<'_> {
         match self.function_value_conversion_source(scope, argument, nominal, expected) {
             Some(source) => {
                 if !matches!(self.file.expr(argument), Expr::CallableRef { .. }) {
+                    // A `null` value stays `null`, unless the release converts it to an adapter
+                    // that yields `null`.
+                    let keeps_null = source.admits_null()
+                        && !crate::kotlin_version::Quirks::target()
+                            .has(crate::kotlin_version::Quirk::NullFunctionValueConvertsToAdapter);
                     self.selected_function_value_conversions
-                        .insert(argument, (source, expected));
+                        .insert(argument, (source, expected, keeps_null));
                 }
                 source
             }
@@ -229,6 +234,20 @@ impl Checker<'_> {
                     source.suspend,
                 ));
                 self.receiver_is_assignable(*candidate, converted_target)
+            })
+            .map(|candidate| {
+                // A type parameter whose bound admits `null` can hold `null`, which the converted
+                // value then stays. Releases with `NullFunctionValueConvertsToAdapter` convert the
+                // value as if it were present.
+                if nominal.upper_bound_admits_null()
+                    && !candidate.admits_null()
+                    && !crate::kotlin_version::Quirks::target()
+                        .has(crate::kotlin_version::Quirk::NullFunctionValueConvertsToAdapter)
+                {
+                    Ty::nullable(candidate)
+                } else {
+                    candidate
+                }
             })
     }
 
