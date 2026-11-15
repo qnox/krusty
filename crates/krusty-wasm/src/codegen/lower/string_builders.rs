@@ -15,7 +15,7 @@ use super::*;
 
 /// Whether `classifier` is `kotlin.text.StringBuilder`.
 pub(in crate::codegen) fn is_string_builder(classifier: TypeName) -> bool {
-    classifier.matches("kotlin/text/StringBuilder")
+    classifier == krusty::types::wk::string_builder()
 }
 
 /// Whether `ty` is a `StringBuilder`, nullable or not.
@@ -80,7 +80,7 @@ fn member(fact: &BackendCallableFact) -> Option<Member> {
 }
 
 fn builder_type() -> Ty {
-    Ty::obj("kotlin/text/StringBuilder")
+    Ty::obj_name(krusty::types::wk::string_builder())
 }
 
 impl Body<'_> {
@@ -172,8 +172,13 @@ impl Body<'_> {
                 self.code.call(length);
             }
             (Member::Get, [index]) => {
+                // `StringBuilder.get` throws for an index outside the units in use.
+                let (builder, offset) = (self.local(REFERENCE), self.local(ValType::I32));
+                self.code.local_set(builder);
                 self.value(*index, Ty::Int)?;
-                self.code.call(get);
+                self.code.local_tee(offset).local_get(builder).call(length);
+                self.throw_unless_index_below()?;
+                self.code.local_get(builder).local_get(offset).call(get);
             }
             _ => return Err("a StringBuilder call with malformed operands".into()),
         }

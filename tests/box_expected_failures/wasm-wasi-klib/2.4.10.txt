@@ -203,7 +203,6 @@ bridges/multipleModules1.kt
 bridges/noBridgeOnMutableCollectionInheritance.kt
 bridges/overridesTwoDeclarations/abstractDeclarationOverridesAbstractAndConcreteDeclarations.kt
 bridges/propertyDiamondFakeOverride.kt
-bridges/returnTypeSignature.kt
 bridges/special.kt
 bridges/specialGeneric.kt
 bridges/strListContains.kt
@@ -405,10 +404,8 @@ classLiteral/bound/primitives.kt
 classLiteral/classEquality.kt
 classes/comanionObjectFieldVsClassField.kt
 classes/implementComparableInSubclass.kt
-classes/initializerBlockDImpl.kt
 classes/kt1535.kt
 classes/kt1538.kt
-classes/kt1980.kt
 classes/kt2417.kt
 classes/kt2566_2.kt
 classes/kt343.kt
@@ -417,10 +414,6 @@ classes/kt508.kt
 classes/kt8011.kt
 classes/kt8011a.kt
 classes/nestedInitBlocksWithLambda.kt
-classes/overloadBinaryOperator.kt
-classes/overloadPlusAssign.kt
-classes/overloadPlusAssignReturn.kt
-classes/overloadPlusToPlusAssign.kt
 classes/overloadUnaryOperator.kt
 closures/anonymousObjectAsLastExpressionInLambda.kt
 closures/captureExtensionReceiver.kt
@@ -495,10 +488,8 @@ controlStructures/breakContinueInExpressions/inlinedBreakContinue/lambdaPassedTo
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/loopWithinInlineFunction.kt
 controlStructures/breakInWhen.kt
 controlStructures/continueInExpr.kt
-controlStructures/continueInFor.kt
 controlStructures/continueInForCondition.kt
 controlStructures/continueInWhen.kt
-controlStructures/continueToLabelInFor.kt
 controlStructures/factorialTest.kt
 controlStructures/forArrayList.kt
 controlStructures/forArrayListMultiDecl.kt
@@ -1311,7 +1302,6 @@ extensionFunctions/extensionFunctionFakeOverride.kt
 extensionFunctions/extensionFunctionInValueClass.kt
 extensionFunctions/extensionFunctionWithExtensionAsAReceiver.kt
 extensionFunctions/extensionFunctionWithInlineModifier.kt
-extensionFunctions/kt23675.kt
 extensionFunctions/kt3285.kt
 extensionFunctions/kt475.kt
 extensionFunctions/kt865.kt
@@ -2178,7 +2168,6 @@ intrinsics/kt10131.kt
 intrinsics/kt10131a.kt
 intrinsics/kt8666.kt
 intrinsics/nullPlusString.kt
-intrinsics/rangeFromCollection.kt
 intrinsics/stringFromCollection.kt
 intrinsics/throwableParamOrder.kt
 intrinsics/tostring.kt
@@ -2283,15 +2272,6 @@ mangling/parentheses.kt
 mangling/publicOverrideSuperCall.kt
 mixedNamedPosition/varargsEvaluationOrder.kt
 multiDecl/component.kt
-multiDecl/forIterator/MultiDeclFor.kt
-multiDecl/forIterator/MultiDeclForComponentExtensions.kt
-multiDecl/forIterator/MultiDeclForComponentMemberExtensions.kt
-multiDecl/forIterator/MultiDeclForComponentMemberExtensionsInExtensionFunction.kt
-multiDecl/forIterator/MultiDeclForValCaptured.kt
-multiDecl/forIterator/longIterator/MultiDeclForComponentExtensions.kt
-multiDecl/forIterator/longIterator/MultiDeclForComponentExtensionsValCaptured.kt
-multiDecl/forIterator/longIterator/MultiDeclForComponentMemberExtensions.kt
-multiDecl/forIterator/longIterator/MultiDeclForComponentMemberExtensionsInExtensionFunction.kt
 multiDecl/kt9828_hashMap.kt
 multiplatform/k2/aliasSuperTypeInLazy.kt
 multiplatform/k2/annotations/expectAnnotationCallInLibrary.kt
@@ -3450,7 +3430,6 @@ reified/vararg.kt
 reified/varargs.kt
 reified/withInlineTurnedOff.kt
 rtti/isReifiedObject.kt
-safeCall/kt245.kt
 safeCall/kt247.kt
 safeCall/kt3430.kt
 safeCall/primitive.kt
@@ -3568,7 +3547,6 @@ syntheticAccessors/protectedMemberReferenceAccessor/kt46597_property.kt
 toArray/kt3177-toTypedArray.kt
 toArray/returnToTypedArray.kt
 traits/diamondPropertyAccessors.kt
-traits/kt2399.kt
 traits/kt5393_property.kt
 traits/multiple.kt
 try/catch3.kt
@@ -3754,7 +3732,6 @@ when/is.kt
 when/kt45081.kt
 when/kt47365.kt
 when/kt5448.kt
-when/range.kt
 when/stringOptimization/duplicatingItems.kt
 when/stringOptimization/duplicatingItemsSameHashCode.kt
 when/stringOptimization/duplicatingItemsSameHashCode2.kt
@@ -3771,7 +3748,6 @@ when/switchOptimizationStatement.kt
 when/switchOptimizationTypes.kt
 when/switchOptimizationUnordered.kt
 when/switchOptimizationWithGap.kt
-when/whenArgumentIsEvaluatedOnlyOnce.kt
 when/whenSubjectVariable/denseIntSwitchWithSubjectVariable.kt
 when/whenSubjectVariable/ieee754Equality.kt
 when/whenSubjectVariable/ieee754EqualityWithSmartCast.kt
