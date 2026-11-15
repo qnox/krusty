@@ -1034,16 +1034,16 @@ fn ir_signature(declaration: &KlibDeclarationSignature) -> KlibIrSignature {
     }
 }
 
-/// The file-local class whose constructor `symbol` names, resolved in `trees`, the decoded trees
+/// The library-private class whose constructor `symbol` names, resolved in `trees`, the decoded trees
 /// whose signature tables numbered the symbol, with the arena that serializes the class and its
 /// constructor.
 fn constructed_local_class<'a>(
     trees: &'a KlibIrModuleTrees,
     symbol: &KlibIrSymbol,
 ) -> Option<(&'a KlibIrArena, &'a KlibIrClass)> {
-    if symbol.kind != KlibIrSymbolKind::Constructor
-        || !matches!(symbol.signature, KlibIrSignature::FileLocal { .. })
-    {
+    // `local_function` answers a file-local constructor and one of a class private to its
+    // enclosing class; a published constructor is not there.
+    if symbol.kind != KlibIrSymbolKind::Constructor {
         return None;
     }
     let (function_arena, function) = trees.local_function(&symbol.signature)?;

@@ -232,8 +232,11 @@ impl KlibIrModuleTrees {
                         _ => Vec::new(),
                     };
                     for id in ids {
-                        let signature = tree.arena.function(id).base.symbol.signature.clone();
-                        functions.push((signature, (tree_index, id)));
+                        let signature = &tree.arena.function(id).base.symbol.signature;
+                        // A file-local member is already indexed by its own signature.
+                        if !matches!(signature, KlibIrSignature::FileLocal { .. }) {
+                            functions.push((signature.clone(), (tree_index, id)));
+                        }
                     }
                 }
             }
