@@ -5,6 +5,16 @@
 
 use super::*;
 
+/// One interface-member call: the receiver, the arguments, the answer the site asked for, and the
+/// member's realized parameter types. Those four travel together from the call site into the
+/// dispatch.
+pub(super) struct InterfaceMemberCall<'a> {
+    pub(super) receiver: u32,
+    pub(super) args: &'a [u32],
+    pub(super) ret: Ty,
+    pub(super) physical: &'a [Ty],
+}
+
 /// A class of this file that implements a dependency declaration, and the slot it does it in.
 pub(super) struct ImplementorArm {
     class: ClassId,
@@ -253,11 +263,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// Whether `internal`'s member stays with the runtime, rather than a direct implementor call.
     ///
     /// A closed range is worn by objects the runtime builds, and nothing in this file is one of
-    /// them. A collection is worn by both, so its member is dispatched below: the file's classes
-    /// first, then the runtime's own objects. A special bridge whose answer is `Boolean` or `Int`
-    /// (`contains`, `remove`, `indexOf`) is dispatched too, and an argument that is not the
-    /// override's element answers the bridge's rejection instead of being cast. A bridge with any
-    /// other answer, such as `Map.get`, stays with the runtime.
+    /// them. A collection is worn by both, so its member is dispatched below: each class of this
+    /// file, then the runtime function that realizes the member on a runtime collection. A special
+    /// bridge whose answer is `Boolean` or `Int` (`contains`, `remove`, `indexOf`) is dispatched
+    /// the same way, and an argument that is not the override's element answers the bridge's
+    /// rejection instead of being cast. A bridge with any other answer, such as `Map.get`, stays
+    /// with the runtime.
     fn runtime_owns_member(
         &self,
         internal: krusty::types::TypeName,
@@ -284,9 +295,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         internal: krusty::types::TypeName,
         target: krusty::fir::ExternalCallableId,
         signature: super::super::super::intrinsics::FunctionSignature<'_>,
-        receiver: u32,
-        args: &[u32],
-        ret: Ty,
+        call: InterfaceMemberCall<'_>,
     ) -> Option<Result<Option<Value>, Unsupported>> {
         if self.runtime_owns_member(internal, signature) {
             return None;
@@ -309,14 +318,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             .is_some_and(|collection| {
                 super::super::super::intrinsics::has_special_bridge(collection, signature.name)
             });
-        Some(self.dependency_interface_dispatch(
-            &implementors,
-            &runtime,
-            receiver,
-            args,
-            ret,
-            bridge,
-        ))
+        // A runtime collection is not one of the classes above. The member's own runtime function
+        // is the remaining arm; an abstract-method trap would be a call the program did make.
+        let collection = self.checked_type(call.receiver).and_then(|ty| {
+            super::lists::collection_runtime_member(self.file, ty, signature, call.physical)
+                .filter(|(_, carried, _)| carried.len() == call.args.len() + 1)
+        });
+        Some(self.dependency_interface_dispatch(&implementors, &runtime, call, bridge, collection))
     }
 
     /// Dispatch among the classes of this file implementing a dependency interface member, then
@@ -329,17 +337,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         &mut self,
         implementors: &[ImplementorArm],
         runtime: &[(&'static str, &'static str)],
-        receiver: u32,
-        args: &[u32],
-        ret: Ty,
+        call: InterfaceMemberCall<'_>,
         bridge: bool,
+        collection: Option<(&'static str, Vec<Ty>, Ty)>,
     ) -> Result<Option<Value>, Unsupported> {
-        let object = self.reference(receiver)?;
+        let object = self.reference(call.receiver)?;
         if self.terminated {
             return Ok(None);
         }
-        let mut operands = Vec::with_capacity(args.len());
-        for argument in args {
+        let mut operands = Vec::with_capacity(call.args.len());
+        for argument in call.args {
             let Some(value) = self.expression(*argument)? else {
                 return Ok(None);
             };
@@ -353,22 +360,57 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             implementors,
             object,
             &operands,
-            ret,
+            call.ret,
             bridge,
             |body, object| {
+                if let Some((symbol, carried, runtime_answer)) = collection {
+                    return body.collection_runtime_call(
+                        symbol,
+                        &carried,
+                        runtime_answer,
+                        object,
+                        &runtime_operands,
+                        call.ret,
+                    );
+                }
                 body.dispatch_runtime_implementations(
                     runtime,
                     object,
                     &runtime_operands,
-                    ret,
+                    call.ret,
                     |body| {
-                        // Unreachable when every implementor was tested. The merge fills the carrier.
+                        // No source class and no runtime function realizes this member.
                         body.runtime_call("kt_abstract_method_called", &[], Ty::Unit, &[])?;
                         Ok(None)
                     },
                 )
             },
         )
+    }
+
+    /// Call the runtime function that realizes a collection member, converting each operand to the
+    /// carrier that function takes and the result to the type the call site asked for.
+    fn collection_runtime_call(
+        &mut self,
+        symbol: &'static str,
+        carried: &[Ty],
+        runtime_answer: Ty,
+        object: Value,
+        operands: &[(Value, Option<Ty>)],
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let mut values = Vec::with_capacity(carried.len());
+        values.push(object);
+        for ((value, source), target) in operands.iter().zip(carried.iter().skip(1)) {
+            let Some(converted) = self.convert(*value, *source, *target)? else {
+                return Ok(None);
+            };
+            values.push(converted);
+        }
+        let Some(produced) = self.runtime_call(symbol, carried, runtime_answer, &values)? else {
+            return Ok(None);
+        };
+        self.convert(produced, Some(runtime_answer), ret)
     }
 
     pub(super) fn dispatch_by_implementor_with(

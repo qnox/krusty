@@ -548,7 +548,15 @@ impl BodyLowering<'_, '_, '_> {
                                     }
                                 }
                                 if let Some(realized) = self.dependency_interface_member(
-                                    internal, *target, signature, receiver, args, *ret,
+                                    internal,
+                                    *target,
+                                    signature,
+                                    super::implementor_dispatch::InterfaceMemberCall {
+                                        receiver,
+                                        args,
+                                        ret: *ret,
+                                        physical: &realization.physical_params,
+                                    },
                                 ) {
                                     return realized;
                                 }

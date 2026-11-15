@@ -612,18 +612,51 @@ impl<'a> FileLowering<'a> {
 
     /// Every concrete class of this file that can stand behind `internal`.
     ///
-    /// A class can implement `internal` through a superclass declared in another file, so the
-    /// direct header is not enough: `ListQueue : Sized` implements `MutableCollection` when
-    /// `Sized` does, and `Sized` is not a supertype written on `ListQueue`'s own header.
+    /// The class's own header is the source of truth. A body-local class and a class lowered from
+    /// a dependency support unit are in this IR and name the interface they implement, and neither
+    /// is in the classifier index (`classifier` declines a body-local name). Reading only that
+    /// index drops them, and a member of the interface then has no arm.
+    ///
+    /// A class can also implement `internal` through a superclass this file does not declare:
+    /// `ListQueue : Sized` implements `MutableCollection` when `Sized` does, and `Sized` is not an
+    /// interface written on `ListQueue`. That superclass is someone else's declaration, so its
+    /// frozen supertypes name the interface. A superclass this file does declare stays its own
+    /// arm; the subclass is not a second one, because an instance test of the superclass already
+    /// matches it.
     pub(super) fn implementors_of(&self, internal: TypeName) -> Vec<ClassId> {
         (0..self.ir.classes.len() as ClassId)
             .filter(|&id| {
                 let class = &self.ir.classes[id as usize];
                 !class.is_interface
                     && !class.is_abstract
-                    && self.is_subclassifier(class.fq_name, internal)
+                    && self.class_stands_behind(class, internal)
             })
             .collect()
+    }
+
+    /// Whether a concrete class of this file can be an instance of `internal`.
+    fn class_stands_behind(&self, class: &krusty::ir::IrClass, internal: TypeName) -> bool {
+        let mut external_supertypes = Vec::new();
+        for named in std::iter::once(class.superclass)
+            .chain(class.interfaces.iter())
+            .chain(
+                class
+                    .supertypes
+                    .iter()
+                    .copied()
+                    .filter_map(Ty::obj_internal),
+            )
+        {
+            if named == internal {
+                return true;
+            }
+            if self.ir.class_id_by_name(named).is_none() {
+                external_supertypes.push(named);
+            }
+        }
+        external_supertypes
+            .into_iter()
+            .any(|named| self.is_subclassifier(named, internal))
     }
 
     /// Whether the classifier `class` is `of` or has it among its supertypes, by the hierarchy

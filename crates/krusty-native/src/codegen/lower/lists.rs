@@ -256,6 +256,35 @@ fn list_symbol(
     })
 }
 
+/// The runtime function for one list or collection member, selected by the receiver's collection
+/// kind and the declaration's physical parameters.
+///
+/// `ArrayList.contains` is declared on `AbstractMutableList`. The receiver is still the runtime's
+/// list, so the operation is that list's, not a member the owner alone names.
+pub(super) fn collection_runtime_member(
+    file: &FileLowering<'_>,
+    ty: Ty,
+    signature: super::super::super::intrinsics::FunctionSignature<'_>,
+    physical: &[Ty],
+) -> Option<(&'static str, Vec<Ty>, Ty)> {
+    let list = is_list(file, ty);
+    if !(list || is_collection(file, ty)) {
+        return None;
+    }
+    let owner = signature.owner.semantic_classifier()?;
+    let declaration =
+        classifier_shapes::collection_declaration(file.classifiers, owner).or_else(|| {
+            let internal = ty.non_null().obj_internal()?;
+            file.standard_collection_implementation(internal)
+                .map(classifier_shapes::CollectionDeclaration::Implementation)
+        })?;
+    if list {
+        list_symbol(declaration, signature, physical)
+    } else {
+        collection_symbol(declaration, signature)
+    }
+}
+
 /// The runtime function answering one member declared on `Collection` itself, for a receiver
 /// typed by no narrower collection. Which collection stands behind it is the descriptor's to say,
 /// so each entry point asks it rather than reading one shape's header.
@@ -886,28 +915,14 @@ impl BodyLowering<'_, '_, '_> {
             return Some(self.list_call(symbol, &carried, answer, receiver, args, ret));
         }
         // A LIST's OWN members — indexed access, size, removal — are about the runtime's list
-        // REPRESENTATION rather than about walking, and no thunk of a class's would reach one. A
-        // file putting a class of its own behind a list declines them; see
-        // [`FileLowering::implements_collection_of`].
-        let list = is_list(self.file, ty);
-        if !(list || is_collection(self.file, ty)) || self.file.implements_collection_of(ty) {
+        // REPRESENTATION rather than about walking. A file that also puts a class of its own
+        // behind the receiver's type dispatches that class first; this direct call is only for a
+        // receiver no class of the file can be. See [`FileLowering::implements_collection_of`].
+        if self.file.implements_collection_of(ty) {
             return None;
         }
-        // `ArrayList.contains` is declared on `AbstractMutableList`. The receiver is still the
-        // runtime's list, so the operation is that list's, not a member the owner alone names.
-        let owner = signature.owner.semantic_classifier()?;
-        let declaration = classifier_shapes::collection_declaration(self.file.classifiers, owner)
-            .or_else(|| {
-            let internal = ty.non_null().obj_internal()?;
-            self.file
-                .standard_collection_implementation(internal)
-                .map(classifier_shapes::CollectionDeclaration::Implementation)
-        })?;
-        let (symbol, carried, answer) = if list {
-            list_symbol(declaration, signature, physical)?
-        } else {
-            collection_symbol(declaration, signature)?
-        };
+        let (symbol, carried, answer) =
+            collection_runtime_member(self.file, ty, signature, physical)?;
         Some(self.list_call(symbol, &carried, answer, receiver, args, ret))
     }
 
