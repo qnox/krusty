@@ -11,6 +11,7 @@ use crate::klib_libraries::{KlibCalleeOrigin, KlibDeclarationBodies};
 use crate::libraries::{
     KlibBodyCallable, KlibClassStorage, KlibDeclarationSignature, KlibDependencyCallable, TypeKind,
 };
+use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{
     KlibIrArguments, KlibIrBody, KlibIrExprId, KlibIrExprKind, KlibIrField, KlibIrFunction,
     KlibIrMember, KlibIrStatement,
@@ -90,9 +91,42 @@ pub(super) fn plan<'a, 'b>(
     callees: &super::KlibCalleeFacts<'_>,
 ) -> Result<Option<ClassInitialization<'a, 'b>>, KlibBodyDeclineReason> {
     let header = class_headers::authenticate(selected, bodies)?;
+    if header
+        .contract
+        .primary_constructor
+        .as_ref()
+        .is_some_and(|primary| {
+            selected.identity().declaration != KlibDeclarationSignature::Public(primary.clone())
+        })
+    {
+        return Ok(None);
+    }
+    admit(header, TypeKind::Class, bodies, callees)
+}
+
+/// The initialization of the object `class`, through its private primary constructor, which no
+/// provider records: the object's own declaration is the only creator of its instance.
+pub(super) fn object_plan<'a, 'b>(
+    class: &'a crate::libraries::KlibBodyClassContract,
+    bodies: &'b KlibDeclarationBodies,
+    callees: &super::KlibCalleeFacts<'_>,
+) -> Result<Option<ClassInitialization<'a, 'b>>, KlibBodyDeclineReason> {
+    match class_headers::authenticate_object_constructor(class, bodies)? {
+        Some(header) => admit(header, TypeKind::Object, bodies, callees),
+        None => Ok(None),
+    }
+}
+
+/// The initialization of a class of `kind` by the constructor `header` authenticates.
+fn admit<'a, 'b>(
+    header: ClassMemberHeader<'a, 'b>,
+    kind: TypeKind,
+    bodies: &'b KlibDeclarationBodies,
+    callees: &super::KlibCalleeFacts<'_>,
+) -> Result<Option<ClassInitialization<'a, 'b>>, KlibBodyDeclineReason> {
     let contract = header.contract;
     // A class the target lays out itself is the target's to construct, as `Any` is.
-    if contract.kind != TypeKind::Class
+    if contract.kind != kind
         || callees.target_represents(contract.classifier)
         || !matches!(
             contract.modality,
@@ -101,12 +135,6 @@ pub(super) fn plan<'a, 'b>(
         || contract.is_value
         || contract.is_inner
         || contract.is_expect
-        || contract
-            .primary_constructor
-            .as_ref()
-            .is_some_and(|primary| {
-                selected.identity().declaration != KlibDeclarationSignature::Public(primary.clone())
-            })
         || header.class.value_class_representation.is_some()
     {
         return Ok(None);
@@ -336,9 +364,43 @@ pub(super) fn constructor_initialization_callees(
     bodies: &KlibDeclarationBodies,
     callees: &super::KlibCalleeFacts<'_>,
 ) -> Result<Option<Vec<KlibDependencyCallable>>, KlibBodyDeclineReason> {
-    let Some(plan) = plan(selected, bodies, callees)? else {
-        return Ok(None);
-    };
+    Ok(plan(selected, bodies, callees)?.map(|plan| initialization_callees(&plan, bodies)))
+}
+
+/// The library objects the same admitted initialization reads as values.
+pub(super) fn constructor_initialization_objects(
+    selected: KlibBodyCallable<'_>,
+    bodies: &KlibDeclarationBodies,
+    callees: &super::KlibCalleeFacts<'_>,
+) -> Result<Vec<KlibPublicIdSignature>, KlibBodyDeclineReason> {
+    Ok(plan(selected, bodies, callees)?
+        .map(|plan| initialization_objects(&plan))
+        .unwrap_or_default())
+}
+
+/// The library objects the admitted initialization of the object `class` reads as values.
+pub(super) fn object_initialization_objects(
+    class: &crate::libraries::KlibBodyClassContract,
+    bodies: &KlibDeclarationBodies,
+    callees: &super::KlibCalleeFacts<'_>,
+) -> Result<Vec<KlibPublicIdSignature>, KlibBodyDeclineReason> {
+    Ok(object_plan(class, bodies, callees)?
+        .map(|plan| initialization_objects(&plan))
+        .unwrap_or_default())
+}
+
+/// Exact edges of the admitted initialization of the object `class`.
+pub(super) fn object_initialization_callees(
+    class: &crate::libraries::KlibBodyClassContract,
+    bodies: &KlibDeclarationBodies,
+    callees: &super::KlibCalleeFacts<'_>,
+) -> Result<Option<Vec<KlibDependencyCallable>>, KlibBodyDeclineReason> {
+    Ok(object_plan(class, bodies, callees)?.map(|plan| initialization_callees(&plan, bodies)))
+}
+
+/// The expressions an initialization evaluates: the superclass constructor's arguments, then each
+/// field initializer and initializer block.
+fn initialization_roots(plan: &ClassInitialization<'_, '_>) -> Vec<KlibIrExprId> {
     let mut roots = Vec::new();
     if let Some(superclass) = &plan.superclass {
         roots.extend(superclass.arguments.iter().copied());
@@ -351,37 +413,61 @@ pub(super) fn constructor_initialization_callees(
             }
         }
     }
+    roots
+}
+
+/// The library objects an initialization reads as values. A dispatched member's body is walked
+/// as the member is.
+fn initialization_objects(plan: &ClassInitialization<'_, '_>) -> Vec<KlibPublicIdSignature> {
+    let mut objects: Vec<KlibPublicIdSignature> = Vec::new();
+    for symbol in plan
+        .header
+        .arena
+        .emitted_object_symbols_from(initialization_roots(plan), super::EMITTED_CALL_FORMS)
+    {
+        if let KlibIrSignature::Public(signature) = &symbol.signature {
+            if !objects.contains(signature) {
+                objects.push(signature.clone());
+            }
+        }
+    }
+    objects
+}
+
+fn initialization_callees(
+    plan: &ClassInitialization<'_, '_>,
+    bodies: &KlibDeclarationBodies,
+) -> Vec<KlibDependencyCallable> {
+    let roots = initialization_roots(plan);
     let superclass = plan
         .superclass
         .as_ref()
         .filter(|superclass| superclass.materialized)
         .map(|superclass| superclass.constructor.clone());
-    Ok(Some(
-        plan.header
-            .arena
-            .emitted_callable_symbols_from(roots, super::EMITTED_CALL_FORMS)
-            .into_iter()
-            // The class's dispatched members are always emitted with it, as dispatch reaches them.
-            .chain(plan.dispatched.iter().map(|function| &function.base.symbol))
-            .filter_map(|symbol| match &symbol.signature {
-                KlibIrSignature::Public(signature) => {
-                    Some(KlibDeclarationSignature::Public(signature.clone()))
-                }
-                KlibIrSignature::Accessor(signature) => {
-                    Some(KlibDeclarationSignature::Accessor(signature.clone()))
-                }
-                _ => None,
-            })
-            .filter_map(|signature| {
-                match bodies.linked_origin(&plan.header.contract.module, &signature) {
-                    KlibCalleeOrigin::Exact(identity) => Some(identity),
-                    KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
-                }
-            })
-            // A materialized superclass is initialized first, through its own constructor.
-            .chain(superclass)
-            .collect(),
-    ))
+    plan.header
+        .arena
+        .emitted_callable_symbols_from(roots, super::EMITTED_CALL_FORMS)
+        .into_iter()
+        // The class's dispatched members are always emitted with it, as dispatch reaches them.
+        .chain(plan.dispatched.iter().map(|function| &function.base.symbol))
+        .filter_map(|symbol| match &symbol.signature {
+            KlibIrSignature::Public(signature) => {
+                Some(KlibDeclarationSignature::Public(signature.clone()))
+            }
+            KlibIrSignature::Accessor(signature) => {
+                Some(KlibDeclarationSignature::Accessor(signature.clone()))
+            }
+            _ => None,
+        })
+        .filter_map(|signature| {
+            match bodies.linked_origin(&plan.header.contract.module, &signature) {
+                KlibCalleeOrigin::Exact(identity) => Some(identity),
+                KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
+            }
+        })
+        // A materialized superclass is initialized first, through its own constructor.
+        .chain(superclass)
+        .collect()
 }
 
 /// The superclass constructor the primary constructor `identity` serializes a delegation to,
@@ -423,9 +509,28 @@ pub(super) fn constructor_dispatched_members(
     bodies: &KlibDeclarationBodies,
     callees: &super::KlibCalleeFacts<'_>,
 ) -> Result<Vec<KlibDependencyCallable>, KlibBodyDeclineReason> {
-    let Some(plan) = plan(selected, bodies, callees)? else {
-        return Ok(Vec::new());
-    };
+    match plan(selected, bodies, callees)? {
+        Some(plan) => dispatched_members(&plan, bodies),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// The members dispatch reaches of the admitted object `class`.
+pub(super) fn object_dispatched_members(
+    class: &crate::libraries::KlibBodyClassContract,
+    bodies: &KlibDeclarationBodies,
+    callees: &super::KlibCalleeFacts<'_>,
+) -> Result<Vec<KlibDependencyCallable>, KlibBodyDeclineReason> {
+    match object_plan(class, bodies, callees)? {
+        Some(plan) => dispatched_members(&plan, bodies),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn dispatched_members(
+    plan: &ClassInitialization<'_, '_>,
+    bodies: &KlibDeclarationBodies,
+) -> Result<Vec<KlibDependencyCallable>, KlibBodyDeclineReason> {
     plan.dispatched
         .iter()
         .filter(|function| function.body.is_some())
@@ -451,9 +556,28 @@ pub(super) fn constructor_declaration_evidence(
     bodies: &KlibDeclarationBodies,
     callees: &super::KlibCalleeFacts<'_>,
 ) -> Result<Vec<KlibDependencyCallable>, KlibBodyDeclineReason> {
-    let Some(plan) = plan(selected, bodies, callees)? else {
-        return Ok(Vec::new());
-    };
+    match plan(selected, bodies, callees)? {
+        Some(plan) => overridden_declarations(&plan, bodies),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// The declarations the overrides of the admitted object `class` override.
+pub(super) fn object_overridden_declarations(
+    class: &crate::libraries::KlibBodyClassContract,
+    bodies: &KlibDeclarationBodies,
+    callees: &super::KlibCalleeFacts<'_>,
+) -> Result<Vec<KlibDependencyCallable>, KlibBodyDeclineReason> {
+    match object_plan(class, bodies, callees)? {
+        Some(plan) => overridden_declarations(&plan, bodies),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn overridden_declarations(
+    plan: &ClassInitialization<'_, '_>,
+    bodies: &KlibDeclarationBodies,
+) -> Result<Vec<KlibDependencyCallable>, KlibBodyDeclineReason> {
     let mut declarations = plan
         .superclass
         .iter()

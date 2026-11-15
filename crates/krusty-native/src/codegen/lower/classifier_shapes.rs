@@ -164,8 +164,8 @@ pub(super) fn runtime_member_classes() -> [(TypeName, &'static str); 1] {
 /// companions of the built-in types, the bases a source class's layout extends (`Number` and the
 /// throwables), the shared empty set, text, the arrays, the unsigned integers (carried as the value
 /// they wrap), the builder it constructs, the integral ranges and progressions, and the standard
-/// collection implementations. A dependency body's call of such
-/// a member, or read of such an object, is lowered here as a source one is.
+/// collection implementations. A dependency body's call of such a member, or read of such an
+/// object, is lowered here as a source one is.
 pub(in super::super) fn represents_dependency_classifier(internal: TypeName) -> bool {
     super::super::super::intrinsics::is_any(internal)
         || internal == krusty::types::wk::unit()

@@ -29,7 +29,7 @@ impl CallLinker for NoCalls {
     ) -> Lowered<LinkedAccessor> {
         panic!("no accessor")
     }
-    fn singleton(&self, _: TypeName) -> Lowered<()> {
+    fn singleton(&mut self, _: &mut IrFile, _: TypeName) -> Lowered<()> {
         panic!("no singleton")
     }
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {

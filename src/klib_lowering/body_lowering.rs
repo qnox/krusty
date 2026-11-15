@@ -238,8 +238,9 @@ pub(super) trait CallLinker {
         callee: &KlibAccessorIdSignature,
     ) -> Lowered<LinkedAccessor>;
 
-    /// Proves that `classifier` is a dependency object, whose value a body may read.
-    fn singleton(&self, classifier: TypeName) -> Lowered<()>;
+    /// Proves that `classifier` is a dependency object, whose value a body may read, and
+    /// materializes it in `ir` when its instance is the linker's to create.
+    fn singleton(&mut self, ir: &mut IrFile, classifier: TypeName) -> Lowered<()>;
 
     /// Whether the target owns the representation of `classifier`, which a class of this unit
     /// extends without the unit materializing it. A linker that knows no such class says no.
