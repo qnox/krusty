@@ -9,6 +9,7 @@
 use super::callable_reference_selection::{
     erased_declared_parameters, maximal_adapted_references, parameter_plan, shift_plan_values_from,
     specialize_candidate_with_type_arguments, AdaptedRefArgument, AdaptedReferenceSpecificity,
+    ReferenceExpectation, TypeVariableInputs,
 };
 use crate::libraries::{CallSig, FunctionInfo};
 use crate::symbol_source::SymbolSource;
@@ -31,6 +32,11 @@ pub(super) trait ExtensionReferenceRules {
     /// Whether a reference fills the declaration's leading context parameters from its own site,
     /// so the expected function shape does not carry them.
     fn binds_reference_contexts(&self) -> bool;
+    /// Which inputs of the expected shape the call passing the reference declares as its own
+    /// type variables.
+    fn type_variable_inputs(&self) -> TypeVariableInputs {
+        TypeVariableInputs::NONE
+    }
 }
 
 pub(super) enum ExtensionReferenceChoice {
@@ -145,10 +151,17 @@ fn applicable_extension(
     let type_arguments = specialize_candidate_with_type_arguments(
         source,
         &mut function,
-        bound_contexts,
         Some(receiver),
-        expected_values.as_deref(),
-        expected.map(|expected| expected.ret),
+        ReferenceExpectation {
+            params: expected_values.as_deref(),
+            ret: expected.map(|expected| expected.ret),
+            bound_contexts,
+            type_variable_inputs: if unbound {
+                rules.type_variable_inputs().without(expected_receiver)
+            } else {
+                rules.type_variable_inputs()
+            },
+        },
         |actual, bound| rules.bound_admits(actual, bound),
     )
     .ok()?;
@@ -315,6 +328,10 @@ impl ExtensionReferenceRules for super::Checker<'_> {
 
     fn binds_reference_contexts(&self) -> bool {
         self.file.callable_references_to_contextual
+    }
+
+    fn type_variable_inputs(&self) -> TypeVariableInputs {
+        self.active_reference_type_variable_inputs()
     }
 
     fn at_least_as_specific(&self, left: &[Ty], right: &[Ty]) -> bool {
