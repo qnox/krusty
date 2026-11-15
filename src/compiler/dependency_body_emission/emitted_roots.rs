@@ -194,9 +194,9 @@ pub(super) fn declarations(
         } else {
             None
         };
-        let external_member = outside_edge
-            .as_ref()
-            .is_some_and(|edge| capabilities.target_realizes_bodyless || realizes_any_member(edge));
+        let external_member = outside_edge.as_ref().is_some_and(|edge| {
+            capabilities.target_realizes_bodyless || edge.realizes_any_member()
+        });
         // A call of a member realized outside the unit carries the facts the member hierarchy
         // decorates a source call of it with; the edge is what authorizes the call.
         if let Some(edge) = outside_edge.filter(|_| external_member) {
@@ -431,9 +431,7 @@ fn is_materialized_class_member(
         let (target, _) = platform
             .external_callable_by_dependency(callable.identity())
             .ok_or("a builtin-type member has no provider declaration")?;
-        return Ok(!realizes_any_member(&member_edge(
-            platform, target, callable,
-        )?));
+        return Ok(!member_edge(platform, target, callable)?.realizes_any_member());
     }
     let Some(class) = callable
         .class_contract()
@@ -579,19 +577,6 @@ fn member_edge(
         ));
     };
     Ok(edge)
-}
-
-/// Whether a call with `edge` invokes one of `kotlin.Any`'s members, which every target realizes
-/// from the receiver's own representation.
-fn realizes_any_member(edge: &crate::klib_lowering::CallEdge) -> bool {
-    matches!(
-        edge.semantic_role,
-        Some(
-            crate::types::SemanticCallRole::KotlinAnyEquals
-                | crate::types::SemanticCallRole::KotlinAnyHashCode
-                | crate::types::SemanticCallRole::KotlinAnyToString
-        )
-    )
 }
 
 /// Whether `identity` is a member of a class no support unit materializes. Support bodies call it
