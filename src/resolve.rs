@@ -106,6 +106,7 @@ mod class_names_aliases;
 mod expression_finalization;
 mod reference_array_spread;
 mod reference_context_arguments;
+mod reference_type_variable_inputs;
 mod star_projected_classifier;
 use candidate_display::{
     ambiguous_classifier_message, classifier_access_display_from_shape,
@@ -16577,6 +16578,10 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                if let Some(signature) = known_sig.as_ref().filter(|_| has_callable_ref_argument) {
+                    let parameters = known_argument_parameters.as_deref();
+                    self.record_call_reference_type_variable_inputs(args, signature, parameters);
+                }
                 // EXPLICIT type arguments (`build<C> { … }`): they bind the callee's formals ahead
                 // of any argument unification, so the lambda shape's receiver/params substitute to
                 // the written types instead of the formals' bounds.
@@ -30267,6 +30272,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         expected: None,
         callable_reference_literal_constraints: HashMap::default(),
         active_callable_reference: None,
+        reference_type_variable_inputs: HashMap::default(),
         active_postponed_callable_reference_recheck: None,
         completed_failed_postponed_callable_rechecks: crate::fx_hash::HashSet::default(),
         imports,
@@ -32706,6 +32712,10 @@ struct Checker<'a> {
     /// during that one reference's selection and is discarded with the bounded checker.
     callable_reference_literal_constraints: HashMap<ExprId, HashMap<String, Vec<CallArgKind>>>,
     active_callable_reference: Option<ExprId>,
+    /// Per callable-reference argument, the inputs its selected parameter declares as call type
+    /// variables, as `reference_type_variable_inputs` records them.
+    reference_type_variable_inputs:
+        HashMap<ExprId, callable_reference_selection::TypeVariableInputs>,
     /// The callable-reference expression whose concrete postponed shape is being rechecked.
     /// Candidate selection uses this semantic ownership marker to leave a shape mismatch to the
     /// enclosing call without suppressing diagnostics produced inside the reference itself.
@@ -34830,7 +34840,7 @@ impl<'a> Checker<'a> {
                 &candidates,
                 self.file.callable_references_to_contextual,
                 None,
-                expected,
+                self.instance_reference_expectation(expected),
                 |actual, target| self.receiver_is_assignable(actual, target),
                 |left_params, right_params| {
                     self.callable_ref_parameter_shape_at_least_as_specific(
@@ -37197,7 +37207,7 @@ impl<'a> Checker<'a> {
                 overloads,
                 self.file.callable_references_to_contextual,
                 None,
-                expected,
+                self.instance_reference_expectation(expected),
                 |actual, target| self.receiver_is_assignable(actual, target),
                 |left_params, right_params| {
                     self.callable_ref_parameter_shape_at_least_as_specific(
@@ -38261,68 +38271,6 @@ impl<'a> Checker<'a> {
         );
     }
 
-    /// Semantic callable shape of a local function reference. The lifted method signature keeps
-    /// erased JVM parameter/return types in `params`/`ret`; source generic types live in
-    /// `generic_sig` and must be applied to the reference receiver before the value is exposed.
-    fn local_function_reference_shape(
-        signature: &Signature,
-        receiver: Option<Ty>,
-    ) -> (Vec<Ty>, Ty) {
-        let Some(generic) = signature.generic_sig.as_ref() else {
-            return (signature.params.clone(), signature.ret);
-        };
-        let mut bindings = crate::symbol_resolver::GSigBinds::default();
-        if let Some((declared, actual)) = generic.receiver.zip(receiver) {
-            crate::symbol_resolver::unify_ty(declared, actual, &mut bindings);
-        }
-        (
-            generic
-                .params
-                .iter()
-                .map(|parameter| {
-                    crate::symbol_resolver::ty_subst_keep_unbound(*parameter, &bindings)
-                })
-                .collect(),
-            crate::symbol_resolver::ty_subst_keep_unbound(generic.ret, &bindings),
-        )
-    }
-
-    /// Apply a contextual callable shape to a generic local declaration through the same
-    /// provider-neutral specialization used for module and dependency candidates. Local lifting is
-    /// a lowering detail; it must not create a second inference algorithm for callable references.
-    fn contextual_local_function_reference_shape(
-        &self,
-        signature: &Signature,
-        receiver: Option<Ty>,
-        expected_params: &[Ty],
-        expected_ret: Ty,
-    ) -> Option<(Vec<Ty>, Ty)> {
-        let Some(generic) = signature.generic_sig.as_ref() else {
-            return Some(Self::local_function_reference_shape(signature, receiver));
-        };
-        let call_sig = CallSig {
-            param_defaults: signature.param_defaults,
-            required: signature.required,
-            vararg: signature.vararg(),
-            vararg_index: signature.vararg_index,
-            ..CallSig::default()
-        };
-        let source = self.fed_source();
-        let specialized = callable_reference_selection::specialize_generic_signature(
-            &source,
-            generic,
-            &call_sig,
-            receiver,
-            callable_reference_selection::ReferenceExpectation {
-                params: Some(expected_params),
-                ret: Some(expected_ret),
-                bound_contexts: 0,
-            },
-            |actual, bound| self.generic_bound_admits(actual, bound),
-        )
-        .ok()?;
-        Some((specialized.params, specialized.ret))
-    }
     fn mark_local_function_call(
         &mut self,
         call: ExprId,
@@ -46979,6 +46927,7 @@ impl<'a> Checker<'a> {
         implicit_lambda_label: Option<&str>,
     ) {
         let ParameterTypeExpectation { expected, declared } = parameter;
+        self.record_reference_type_variable_inputs(argument, declared);
         // Some selected call paths validate their arguments directly rather than through
         // `selected_argument_type` (notably source constructors). Once selection supplies a
         // function expectation, postponed lambdas and callable references must be committed here as
@@ -54540,7 +54489,7 @@ impl<'a> Checker<'a> {
                             &candidates,
                             self.file.callable_references_to_contextual,
                             None,
-                            expected,
+                            self.instance_reference_expectation(expected),
                             |actual, target| self.receiver_is_assignable(actual, target),
                             |left_params, right_params| {
                                 self.callable_ref_parameter_shape_at_least_as_specific(
@@ -54839,7 +54788,7 @@ impl<'a> Checker<'a> {
                         &receiver_candidates.overloads,
                         self.file.callable_references_to_contextual,
                         Some(receiver_ty),
-                        expected,
+                        self.instance_reference_expectation(expected),
                         |actual, target| self.receiver_is_assignable(actual, target),
                         |left_params, right_params| {
                             self.callable_ref_parameter_shape_at_least_as_specific(
