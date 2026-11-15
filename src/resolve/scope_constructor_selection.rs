@@ -207,20 +207,7 @@ impl Checker<'_> {
             &[crate::libraries::FunctionInfo],
         ),
     ) -> Option<ScopeCallCompetition> {
-        let classifier = constructors
-            .first()?
-            .constructor
-            .map(|constructor| constructor.classifier)?;
-        // The functions have no classifier arguments, so a type alias application constrains only
-        // the result here: a constructor whose result contradicts it is inapplicable, as in
-        // kotlinc, and the winning constructor is committed with the alias's full application.
-        let shape = self.resolved_type_name(classifier)?;
-        let (_, expected) = self.scope_constructor_constraints(
-            call_args.call,
-            call,
-            classifier,
-            shape.type_params().len(),
-        );
+        constructors.first()?.constructor?;
         let family = functions
             .iter()
             .filter(|candidate| candidate.kind == crate::libraries::FnKind::TopLevel)
@@ -232,7 +219,7 @@ impl Checker<'_> {
             call_args,
             call.explicit_type_args,
             None,
-            CallResultConstraint::direct(expected),
+            CallResultConstraint::direct(call.expected),
             family,
         )? {
             CallableCandidateSelection::Selected(selected)
