@@ -990,7 +990,12 @@ fn shapes_this_lowering_cannot_realize_keep_their_checked_form() {
         args: Vec::new(),
     });
     let block = ir.add_expr(IrExpr::Block {
-        stmts: vec![member_extension, super_call, dependency_provider],
+        stmts: vec![
+            member_extension,
+            foreign_provider,
+            super_call,
+            dependency_provider,
+        ],
         value: None,
     });
     declare(
