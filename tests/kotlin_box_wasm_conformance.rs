@@ -1430,3 +1430,49 @@ fn wasm_generic_elvis_preserves_its_non_null_type_parameter() {
         );
     }
 }
+
+// PLATFORM-SPECIFIC: kotlinc-wasm stores a library file's constant initializer in that file's
+// initialization order, as the JVM does, so an earlier initializer reading it sees the default.
+// Kotlin/Native stores every constant before any code of the file runs and reads 7 instead.
+#[test]
+fn wasm_a_library_file_stores_its_constants_in_initialization_order() {
+    let source = r#"// MODULE: lib
+// FILE: Library.kt
+package ordered
+
+private val early = peekLater()
+private var later = 7
+
+private fun peekLater(): Int = later
+
+fun earlyRead(): Int = early
+
+fun laterRead(): Int = later
+
+// MODULE: main(lib)
+// FILE: Box.kt
+import ordered.earlyRead
+import ordered.laterRead
+
+fun box(): String {
+    if (earlyRead() != 0) return "an earlier initializer sees the default: ${earlyRead()}"
+    if (laterRead() != 7) return "the constant is stored: ${laterRead()}"
+    return "OK"
+}
+"#;
+    let stem = "wasmLibraryConstantsInInitializationOrder";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must run the complete two-module program");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        assert_eq!(
+            lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            Outcome::Pass,
+            "{stem} on {}",
+            target.name(),
+        );
+    }
+}

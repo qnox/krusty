@@ -722,11 +722,13 @@ impl KlibDeclarationBodies {
     }
 
     /// The top-level properties of the serialized file `file` of `module` whose backing field is
-    /// initialized by running code, in declaration order: what initializing that file runs.
+    /// initialized by running code, in declaration order: what initializing that file runs. With
+    /// `constants`, those initialized with a constant are among them, in that same order.
     pub(crate) fn module_file_initializers<'a>(
         &'a self,
         module: &str,
         file: u32,
+        constants: bool,
     ) -> Vec<StaticFieldInitializer<'a>> {
         let Some(&library) = self.modules.get(module) else {
             return Vec::new();
@@ -740,14 +742,14 @@ impl KlibDeclarationBodies {
                 };
                 let field = property.backing_field.as_ref()?;
                 let initializer = field.initializer?;
-                (!matches!(tree.arena.expr(initializer).kind, KlibIrExprKind::Const(_))).then_some(
-                    StaticFieldInitializer {
-                        arena: &tree.arena,
-                        property,
-                        field,
-                        initializer,
-                    },
-                )
+                (constants
+                    || !matches!(tree.arena.expr(initializer).kind, KlibIrExprKind::Const(_)))
+                .then_some(StaticFieldInitializer {
+                    arena: &tree.arena,
+                    property,
+                    field,
+                    initializer,
+                })
             })
             .collect()
     }
@@ -930,9 +932,9 @@ impl KlibDeclarationBodies {
         };
         let mut symbols = arena.emitted_callable_symbols(function, forms);
         // A top-level function first runs its file's initialization, which evaluates the
-        // initializers of that file's properties that run code.
+        // initializers of that file's properties that run code. A constant calls nothing.
         if let Some(file) = self.top_level_file(identity) {
-            for initializer in self.module_file_initializers(&identity.module, file) {
+            for initializer in self.module_file_initializers(&identity.module, file, false) {
                 symbols.extend(
                     initializer
                         .arena

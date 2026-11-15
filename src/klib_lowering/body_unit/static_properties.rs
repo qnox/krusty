@@ -5,12 +5,16 @@
 //! the unit, which the property's own library reads and writes: the accessor bodies, and nothing
 //! outside that library, name the field.
 //!
-//! A constant initializer is the static's initial value, which a target may store before the
-//! unit's first function runs without any program observing the difference. Any other
-//! initializer runs as part of its file's initialization, as kotlinc initializes a file: once,
-//! when a top-level function or accessor of that file is first called, every such initializer of
-//! the file in declaration order. The flag is set before the initializers run, so one that calls
-//! back into its own file sees the defaults of the properties not yet initialized.
+//! Any other initializer runs as part of its file's initialization, as kotlinc initializes a
+//! file: once, when a top-level function or accessor of that file is first called, every such
+//! initializer of the file in declaration order. The flag is set before the initializers run, so
+//! one that calls back into its own file sees the defaults of the properties not yet initialized.
+//!
+//! A constant initializer is the static's initial value where its file's initialization runs no
+//! code, since no program can then observe when it is stored, and on a target that stores every
+//! constant before any code of its file runs, as Kotlin/Native does. On any other target, as
+//! kotlinc-wasm does, a constant is stored in its place in its file's initialization order, so an
+//! earlier initializer reading it sees the default.
 
 use super::*;
 use crate::ir::{IrConst, IrExpr, IrStatic, IrStaticAccessor, IrStaticAccessors};
@@ -124,14 +128,11 @@ impl Linker<'_, '_> {
                 .ok_or(KlibBodyDeclineReason::UnsupportedDeclaration(
                     "an external or unknown static field storage flag",
                 ))?;
-        if !matches!(
-            backing.base.symbol.signature,
-            KlibIrSignature::FileLocal { .. }
-        ) {
+        let KlibIrSignature::FileLocal { file, .. } = backing.base.symbol.signature else {
             return Err(KlibBodyDeclineReason::SignatureMismatch(
                 "a top-level backing field without a file-local identity".to_owned(),
             ));
-        }
+        };
         if property.is_lateinit() {
             return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
                 "a `lateinit` top-level property",
@@ -142,8 +143,16 @@ impl Linker<'_, '_> {
             &super::super::klib_types::KlibTypeParameters::default(),
             backing.ty,
         )?;
-        // Any other initializer is its file initialization's to store.
+        // Any other initializer is its file initialization's to store, as is a constant whose
+        // file initialization runs code on a target that does not store it first.
         let init = constant_initializer(ir, arena, backing, ty)?;
+        let init = init.filter(|_| {
+            self.presets_constant_statics
+                || self
+                    .sources
+                    .bodies
+                    .module_file_initialization_is_inert(&self.active_module, file)
+        });
         let index = u32::try_from(ir.statics.len()).expect("a static list fits u32");
         ir.statics.push(IrStatic {
             name: backing.name.clone(),
@@ -250,11 +259,11 @@ impl Linker<'_, '_> {
         self.file_initializations
             .insert(file.clone(), initialization);
         let mut steps = Vec::new();
-        for initializer in self
-            .sources
-            .bodies
-            .module_file_initializers(&file.0, file.1)
-        {
+        for initializer in self.sources.bodies.module_file_initializers(
+            &file.0,
+            file.1,
+            !self.presets_constant_statics,
+        ) {
             let saved = std::mem::replace(&mut self.active_module, file.0.clone());
             let storage = self.static_storage(ir, &initializer.field.base.symbol);
             self.active_module = saved;
