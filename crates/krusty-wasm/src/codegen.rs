@@ -464,16 +464,28 @@ mod tests {
             "{}a `toString` of `kotlin.Any?` reaching an object another file creates yet",
             super::DECLINE_PREFIX
         )];
-        for other in [
-            "fun double(): String = show(1.5)",
-            "fun function(): String = show { 1 }",
-        ] {
-            for target in WasmTarget::ALL {
-                for sources in [[show, other], [other, show]] {
-                    let (outputs, diagnostics) = compile_program(target, Entry::Box, &sources);
-                    assert_eq!(diagnostics, expected, "{sources:?}");
-                    assert!(outputs.is_empty());
-                }
+        let other = "fun double(): String = show(1.5)";
+        for target in WasmTarget::ALL {
+            for sources in [[show, other], [other, show]] {
+                let (outputs, diagnostics) = compile_program(target, Entry::Box, &sources);
+                assert_eq!(diagnostics, expected, "{sources:?}");
+                assert!(outputs.is_empty());
+            }
+        }
+    }
+
+    /// A function value another file creates prints through its table, so the erased `toString`
+    /// lowers, whichever file comes first.
+    #[test]
+    fn an_erased_to_string_reaches_another_files_function_value() {
+        let show = "fun show(value: Any?): String = value.toString()\n\
+                    fun box(): String = \"OK\"";
+        let other = "fun function(): String = show { 1 }";
+        for target in WasmTarget::ALL {
+            for sources in [[show, other], [other, show]] {
+                let (outputs, diagnostics) = compile_program(target, Entry::Box, &sources);
+                assert_eq!(diagnostics, Vec::<String>::new(), "{sources:?}");
+                assert_eq!(outputs.len(), 2);
             }
         }
     }
@@ -493,24 +505,25 @@ mod tests {
         }
     }
 
-    /// A function value converted to a `fun interface` is an instance of it with no `toString`
-    /// body, so rendering a value of that interface declines.
+    /// A function value, converted to a `fun interface` or not, answers `toString` through its
+    /// table, so rendering one lowers.
     #[test]
-    fn a_fun_interface_to_string_declines_on_a_converted_function_value() {
-        let source = "fun interface Supplier { fun get(): Int }\n\
-                      fun box(): String { val supplier = Supplier { 1 }\n\
-                      return if (\"$supplier\" == \"\") \"empty\" else \"OK\" }";
-        for target in WasmTarget::ALL {
-            let (outputs, diagnostics) = compile(target, source);
-            assert_eq!(
-                diagnostics,
-                vec![format!(
-                    "{}a `toString` of `Supplier` reaching a runtime object this target cannot \
-                     print yet",
-                    super::DECLINE_PREFIX
-                )]
-            );
-            assert!(outputs.is_empty());
+    fn to_string_of_a_function_value_lowers() {
+        for source in [
+            "fun interface Supplier { fun get(): Int }\n\
+             fun box(): String { val supplier = Supplier { 1 }\n\
+             return if (\"$supplier\" == \"\") \"empty\" else \"OK\" }",
+            "fun box(): String { val lambda: Any = { 1 }\n\
+             return if (lambda.toString().length > 16) \"OK\" else \"fail\" }",
+            "fun one(): Int = 1\n\
+             fun box(): String { val reference: Any = ::one\n\
+             return if (reference.toString().length > 16) \"OK\" else \"fail\" }",
+        ] {
+            for target in WasmTarget::ALL {
+                let (outputs, diagnostics) = compile(target, source);
+                assert_eq!(diagnostics, Vec::<String>::new(), "{target:?}");
+                assert!(!outputs.is_empty(), "{target:?}");
+            }
         }
     }
 
@@ -529,12 +542,12 @@ mod tests {
     }
 
     /// A `var` can be assigned anything after its initializer, so rendering it still declines
-    /// while the file creates a function value.
+    /// while the file creates a floating box.
     #[test]
     fn an_erased_to_string_of_a_reassigned_var_declines() {
-        let source = "fun box(): String { val supplier = { 1 }\n\
+        let source = "fun box(): String { val floating = 1.5\n\
                       var message: Any = \"O\"\n\
-                      if (supplier() == 2) message = supplier\n\
+                      if (floating == 2.5) message = floating\n\
                       return \"$message\" + \"K\" }";
         for target in WasmTarget::ALL {
             let (outputs, diagnostics) = compile(target, source);

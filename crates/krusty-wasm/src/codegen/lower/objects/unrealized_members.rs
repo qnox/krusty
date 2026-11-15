@@ -3,7 +3,7 @@
 //! Every object answers `equals`, `hashCode` and `toString` through its table, and most tables
 //! hold a body for each (see `super::super::super::classes` and `crate::runtime`). A few
 //! still hold the trap of a member with no body: `toString` of a floating box, for which no printer
-//! writes Kotlin's form; `toString` of a function value; and `toString` of a class the compiler
+//! writes Kotlin's form; and `toString` of a class the compiler
 //! generated, which Kotlin gives no source name the default prints. Lowering declines a call that
 //! could reach one rather than emit a trap the program would run into.
 //!
@@ -39,9 +39,6 @@ impl Body<'_> {
                 if declaration.is_fun_interface {
                     // A function value converted to a `fun interface` is an instance of it too.
                     self.record_call(member, ty, Receiver::Erased);
-                    if member == AnyMember::ToString && holds_unprinted_values(self.ir) {
-                        return Ok(true);
-                    }
                 } else {
                     // A plain interface is only implemented by classes, including another file's.
                     self.record_call(member, ty, Receiver::Classes);
@@ -59,9 +56,6 @@ impl Body<'_> {
         if let Some(prints) = box_prints(value) {
             // A scalar read as a reference is its box.
             return Ok(member == AnyMember::ToString && !prints);
-        }
-        if matches!(value.kind(), TyKind::Fun(_)) {
-            return Ok(member == AnyMember::ToString);
         }
         if !matches!(carrier(value)?, Some(ValType::Ref { .. })) {
             return Ok(false);
@@ -142,18 +136,13 @@ fn runtime_exception_lacks_body(member: AnyMember) -> bool {
 }
 
 /// Whether a reference of `ir` can hold a runtime object whose `toString` has no body: a floating
-/// box, which only a floating value the file emits becomes, or a function value, which only a
-/// lambda or a callable reference the file emits creates.
+/// box, which only a floating value the file emits becomes.
 pub(in super::super) fn holds_unprinted_values(ir: &IrFile) -> bool {
     krusty::ir::emitted_body_roots(ir)
         .into_iter()
         .flat_map(|root| krusty::ir::value_namespace_expressions(ir, root))
         .any(|expression| {
-            matches!(
-                ir.expr(expression),
-                IrExpr::Lambda { .. } | IrExpr::CallableReference(_)
-            ) || ir
-                .checked_type(expression)
+            ir.checked_type(expression)
                 .and_then(|ty| box_prints(ty.non_null()))
                 == Some(false)
         })

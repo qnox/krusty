@@ -114,7 +114,6 @@ impl Body<'_> {
             },
         );
 
-        let [_, _, to_string_ty] = self.runtime.objects.any_slot_types;
         let equals = match equality {
             FunctionEquality::Identity => self.runtime.objects.identity_equals,
             FunctionEquality::Declaration { .. } => self.runtime.callable_references.equals,
@@ -123,7 +122,9 @@ impl Body<'_> {
             FunctionEquality::Identity => self.runtime.identity.hash_code,
             FunctionEquality::Declaration { .. } => self.runtime.callable_references.hash_code,
         };
-        let to_string = self.runtime.objects.trap(self.module, to_string_ty);
+        let to_string = self
+            .runtime
+            .function_value_to_string(self.module, own.len(), hash_code);
         let objects = &mut self.runtime.objects;
         let (class, itable) =
             objects

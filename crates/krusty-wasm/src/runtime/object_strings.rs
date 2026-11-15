@@ -36,6 +36,9 @@ pub(crate) struct ObjectStrings {
     throwable_string: u32,
     /// The `toString` slot body of each class name, by the default it renders.
     slots: HashMap<(TypeName, Rendering), u32>,
+    /// The `toString` slot body of function values of one arity, by the hash function their
+    /// table holds: a lambda's identity hash and a callable reference's declaration differ.
+    function_values: HashMap<(u32, usize), u32>,
     /// The target, whose library chooses the name `Throwable.toString` prints.
     target: WasmTarget,
 }
@@ -55,6 +58,7 @@ impl ObjectStrings {
             identity_string: module.declare(),
             throwable_string: module.declare(),
             slots: HashMap::default(),
+            function_values: HashMap::default(),
             target,
         }
     }
@@ -92,6 +96,34 @@ impl Runtime {
             WasmTarget::Wasi => &names.simple,
         };
         self.named_slot(module, class, name, Rendering::Throwable)
+    }
+
+    /// The `toString` slot body of a function value taking `arity` arguments: `kotlin.FunctionN`,
+    /// `@`, and the value's hash, which `hash_code` (the function its table holds) answers. The
+    /// function value classes extend no common identified object, so the hash is asked of the table.
+    pub(crate) fn function_value_to_string(
+        &mut self,
+        module: &mut Module,
+        arity: usize,
+        hash_code: u32,
+    ) -> u32 {
+        if let Some(function) = self.object_strings.function_values.get(&(hash_code, arity)) {
+            return *function;
+        }
+        let mut code = Code::default();
+        self.ascii_constant(module, &mut code, &format!("kotlin.Function{arity}@"));
+        code.local_get(0)
+            .call(hash_code)
+            .call(self.string_of_i32)
+            .call(self.string_concat);
+        let function = module.declare();
+        let ty = self.objects.any_slot_types[2];
+        let locals = Vec::new();
+        module.define(function, Function { ty, locals, code });
+        self.object_strings
+            .function_values
+            .insert((hash_code, arity), function);
+        function
     }
 
     /// A `toString` slot body answering the constant `text`: the rendering of a class whose every
