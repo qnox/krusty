@@ -116,6 +116,7 @@ mod tests {
             let files = chunk
                 .into_iter()
                 .map(|(uri, text)| krusty_lsp::IndexedFile {
+                    references: krusty_lsp::DefinitionIndex::default(),
                     diagnostics: if crashed {
                         vec![krusty::diag::Diagnostic {
                             span: krusty::diag::Span::new(0, 0),
