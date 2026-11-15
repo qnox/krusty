@@ -36,6 +36,7 @@ use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol};
 use crate::types::{Ty, TypeName};
 
 mod class_construction;
+pub(crate) use class_construction::superclass_constructor_ordinal;
 mod enum_materialization;
 mod local_class;
 
@@ -291,6 +292,8 @@ struct BodyHeader<'a> {
 struct MemberClass<'a> {
     class: crate::ir::ClassId,
     fields: Vec<&'a KlibIrField>,
+    /// The class's properties with a backing field, each with that field.
+    properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
     contract: &'a crate::libraries::KlibBodyClassContract,
 }
 
@@ -795,7 +798,12 @@ impl DependencyBodyUnit {
                     (Some((class, plan)), _) => lowering.initialize_class(*class, plan),
                     (None, value_member) => match value_member {
                         Some(member) => lowering
-                            .reading_through(member.class, &member.fields, member.contract.is_value)
+                            .reading_through(
+                                member.class,
+                                &member.fields,
+                                member.properties.clone(),
+                                member.contract.is_value,
+                            )
                             .body(body.statements),
                         None => lowering.body(body.statements),
                     }
@@ -855,6 +863,25 @@ struct Linker<'u, 's> {
 }
 
 impl CallLinker for Linker<'_, '_> {
+    fn atomic_field(
+        &self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<Option<crate::libraries::AtomicOperation>, KlibBodyDeclineReason> {
+        let signature = KlibDeclarationSignature::Public(callee.clone());
+        Ok(
+            match self
+                .sources
+                .bodies
+                .linked_origin(&self.active_module, &signature)
+            {
+                KlibCalleeOrigin::Exact(identity) => {
+                    self.sources.intrinsics.atomic_field(&identity)
+                }
+                KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
+            },
+        )
+    }
+
     fn common_primitive(
         &self,
         signature: &KlibDeclarationSignature,
@@ -1219,6 +1246,10 @@ impl CallLinker for Linker<'_, '_> {
         Err(KlibBodyDeclineReason::UnsupportedOperation(
             "an object value",
         ))
+    }
+
+    fn target_represents(&self, classifier: TypeName) -> bool {
+        self.sources.callees.target_represents(classifier)
     }
 
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
@@ -1764,17 +1795,22 @@ impl<'s> Linker<'_, 's> {
         self.private_members.insert(identity.clone());
         let function = match self.functions.get(identity) {
             Some(&function) => function,
-            None => self.queue(
-                ir,
-                identity,
-                None,
-                arena,
-                declaration,
-                BodyHeader {
-                    header,
-                    value_member: Some(active),
-                },
-            )?,
+            None => {
+                let class = active.class;
+                let function = self.queue(
+                    ir,
+                    identity,
+                    None,
+                    arena,
+                    declaration,
+                    BodyHeader {
+                        header,
+                        value_member: Some(active),
+                    },
+                )?;
+                register_class_method(ir, class, function);
+                function
+            }
         };
         let declared = &ir.functions[function as usize];
         let (Some(receiver), params) = (
@@ -2062,7 +2098,8 @@ impl<'s> Linker<'_, 's> {
             }
             (None, _) => None,
         };
-        self.queue(
+        let class = value_member.as_ref().map(|member| member.class);
+        let declared = self.queue(
             ir,
             identity,
             selected,
@@ -2072,7 +2109,11 @@ impl<'s> Linker<'_, 's> {
                 header,
                 value_member,
             },
-        )
+        )?;
+        if let Some(class) = class {
+            register_class_method(ir, class, declared);
+        }
+        Ok(declared)
     }
 
     /// Declare `function` with `header` and queue its body.
@@ -2167,6 +2208,15 @@ fn private_class_member_header<'b>(
         member.types,
     )?;
     Ok((member.arena, member.function, header))
+}
+
+/// Record `function` as a method of the materialized `class`, once. A member no class table
+/// numbers (a final or private one) still belongs to its class, so a call of it runs it directly.
+fn register_class_method(ir: &mut IrFile, class: crate::ir::ClassId, function: FunId) {
+    if !ir.classes[class as usize].methods.contains(&function) {
+        ir.classes[class as usize].methods.push(function);
+        ir.note_class_method(class, function);
+    }
 }
 
 /// The statements of the body `function` serializes.

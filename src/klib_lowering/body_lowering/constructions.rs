@@ -12,6 +12,15 @@ use crate::metadata::klib_ir::tree::{KlibIrArguments, KlibIrMemberAccess};
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 use crate::types::Ty;
 
+pub(super) struct ConstructorOperands {
+    pub(super) declaration: super::super::constructor_calls::ConstructorDeclaration,
+    pub(super) external_target: Option<crate::fir::ExternalCallableId>,
+    pub(super) local_access: Option<crate::ir::IrConstructorAccess>,
+    pub(super) params: Vec<Ty>,
+    pub(super) args: Vec<ExprId>,
+    pub(super) defaults: Vec<u32>,
+}
+
 fn constructor_arguments(
     access: &KlibIrMemberAccess,
 ) -> Lowered<Vec<Option<crate::metadata::klib_ir::tree::KlibIrExprId>>> {
@@ -69,12 +78,15 @@ impl BodyLowering<'_> {
         Ok(value)
     }
 
-    pub(super) fn constructor_call(
+    /// The constructor a call selects, with its supplied operands lowered in declaration order
+    /// against the parameters the construction of `ty` instantiates, and the ordinals it leaves to
+    /// their defaults. A construction and a delegation to a superclass constructor share it.
+    pub(super) fn constructor_operands(
         &mut self,
         access: &KlibIrMemberAccess,
         constructor_type_arguments: u32,
         ty: Ty,
-    ) -> Lowered<ExprId> {
+    ) -> Lowered<ConstructorOperands> {
         if access.symbol.kind != KlibIrSymbolKind::Constructor {
             return Err(mismatch("a constructor call's symbol is not a constructor"));
         }
@@ -123,6 +135,30 @@ impl BodyLowering<'_> {
                 }
             }
         }
+        Ok(ConstructorOperands {
+            declaration,
+            external_target,
+            local_access,
+            params,
+            args,
+            defaults,
+        })
+    }
+
+    pub(super) fn constructor_call(
+        &mut self,
+        access: &KlibIrMemberAccess,
+        constructor_type_arguments: u32,
+        ty: Ty,
+    ) -> Lowered<ExprId> {
+        let ConstructorOperands {
+            declaration,
+            external_target,
+            local_access,
+            params,
+            args,
+            defaults,
+        } = self.constructor_operands(access, constructor_type_arguments, ty)?;
         match declaration.semantic_role {
             Some(crate::types::SemanticCallRole::KotlinArrayAllocation) => {
                 if declaration.classifier != crate::types::wk::array()

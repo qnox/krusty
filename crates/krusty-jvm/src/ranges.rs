@@ -125,6 +125,7 @@ pub(super) fn realize(
                 | IrCheckedOperation::ExternalPropertyRead { .. }
                 | IrCheckedOperation::ExternalPropertyWrite { .. }
                 | IrCheckedOperation::PropertyReference { .. }
+                | IrCheckedOperation::AtomicField { .. }
                 // The backend pass above realized every counted loop and range-membership test.
                 | IrCheckedOperation::RangeConstruction { .. }
                 | IrCheckedOperation::RangeLoop { .. }

@@ -11,6 +11,7 @@ impl BodyLowering<'_, '_, '_> {
         &mut self,
         provider: krusty::fir::CallableId,
         target: krusty::fir::CallableId,
+        dispatch_receiver_ty: Option<Ty>,
         params: &[Ty],
         ret: Ty,
         args: &[u32],
@@ -19,7 +20,10 @@ impl BodyLowering<'_, '_, '_> {
             self.file.module_name,
             provider,
         );
-        let mut frame = params.to_vec();
+        let mut frame = dispatch_receiver_ty
+            .into_iter()
+            .chain(params.iter().copied())
+            .collect::<Vec<_>>();
         frame.extend(std::iter::repeat_n(
             Ty::Int,
             krusty::backend::default_arguments::mask_words(params.len()),
@@ -38,7 +42,11 @@ impl BodyLowering<'_, '_, '_> {
         }
         // As for a call that supplies everything: operands first, then the defining file's
         // initializer, then the call, whose defaults may read that file's top-level state.
-        self.initialize_defining_file(target)?;
+        self.initialize_defining_file(if dispatch_receiver_ty.is_some() {
+            provider
+        } else {
+            target
+        })?;
         if self.terminated {
             return Ok(None);
         }
@@ -55,16 +63,16 @@ impl BodyLowering<'_, '_, '_> {
         receiver: u32,
     ) -> Result<Option<Value>, Unsupported> {
         let declaration = &self.file.ir.functions[function as usize];
-        let Some(owner) = declaration
+        let Some(carried) = declaration
             .dispatch_receiver
-            .filter(|&owner| self.file.values.is_value_class(owner))
+            .and_then(|owner| self.file.value_receiver(owner))
         else {
             return Err(declined!(
                 "a direct call of `{}` with a receiver",
                 declaration.name
             ));
         };
-        let value = self.coerce(receiver, Ty::obj_name(owner))?;
+        let value = self.coerce(receiver, carried)?;
         if self.terminated {
             return Ok(None);
         }

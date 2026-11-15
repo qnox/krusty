@@ -37,13 +37,19 @@ impl BodyLowering<'_> {
         let callee = match &access.symbol.signature {
             KlibIrSignature::Public(callee) => callee,
             KlibIrSignature::FileLocal { .. } => {
-                let linked = self
-                    .linker
-                    .link_local_function(self.ir, &access.symbol.signature)?;
+                let linked = match self.object_members.get(&access.symbol.signature) {
+                    Some(member) => member.linked(),
+                    None => self
+                        .linker
+                        .link_local_function(self.ir, &access.symbol.signature)?,
+                };
                 return self.linked_call(linked, access, ty);
             }
             KlibIrSignature::Accessor(accessor) => return self.accessor_call(accessor, access, ty),
         };
+        if let Some(operation) = self.linker.atomic_field(callee)? {
+            return self.atomic_field(operation, access, ty);
+        }
         if let Some(arity) = function_invocation_arity(callee) {
             if !access.type_arguments.is_empty() {
                 return Err(mismatch(
@@ -635,7 +641,15 @@ impl BodyLowering<'_> {
                 .insert(call, classifier);
         }
         // The result of a generic local function is its declared type parameter; the call's
-        // value is that result at the call's type arguments.
+        // value is that result at the call's type arguments. The call itself keeps the
+        // declaration's result, as a source call of a local function does, and the coercion
+        // carries the substituted one. A backend reads that published result rather than
+        // reconstructing it from the callee.
+        if let Some(declared) =
+            declared_ret.filter(|_| matches!(self.ir.expr(call), IrExpr::Call { .. }))
+        {
+            self.ir.call_declared_ret.insert(call, declared);
+        }
         Ok(match declared_ret {
             Some(declared) if declared != operands.ret => {
                 let coerced = self.coercion(call, operands.ret);

@@ -338,7 +338,7 @@ impl Fixture {
             &mut linker,
         );
         if matches!(access, Access::ValueReadOnly) {
-            lowering = lowering.reading_through(class, &[&self.fields[0]], true);
+            lowering = lowering.reading_through(class, &[&self.fields[0]], Vec::new(), true);
             if no_declared_receiver {
                 lowering.instance_storage.as_mut().unwrap().receiver = None;
             }
@@ -347,6 +347,7 @@ impl Fixture {
                 class,
                 receiver: Some(self.receiver_ty),
                 access,
+                properties: Vec::new(),
                 fields: self
                     .fields
                     .iter()
