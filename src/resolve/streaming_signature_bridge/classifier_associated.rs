@@ -33,6 +33,14 @@ pub(super) type Demand<'demand> = dyn FnMut(
     ) -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>
     + 'demand;
 
+/// The classifier call `Classifier.spelling(...)` a selection is about.
+#[derive(Clone, Copy)]
+pub(super) struct ClassifierCallee<'a>(
+    pub(super) crate::fir::SignatureScope,
+    pub(super) crate::types::TypeName,
+    pub(super) &'a str,
+);
+
 impl ProductionSignatureSemantics<'_> {
     /// Select the ordinary callable family denoted by `Classifier.name(...)`. The shared resolver
     /// owns whether the declaration is a Java static, Kotlin companion instance/static, or an
@@ -40,14 +48,13 @@ impl ProductionSignatureSemantics<'_> {
     /// and, for source declarations, demands its stable inferred result.
     pub(super) fn classifier_call_argument_expectations(
         &self,
-        scope: crate::fir::SignatureScope,
-        classifier: crate::types::TypeName,
-        spelling: &str,
+        callee: ClassifierCallee<'_>,
         arguments: &[crate::fir::SigCallArgumentProbe<'_>],
         type_arguments: &[crate::fir::ResolvedTy],
         trailing_lambda: bool,
         refresh_typed_postponed: bool,
     ) -> Result<Box<[Option<crate::fir::ResolvedTy>]>, crate::fir::DiagnosticId> {
+        let ClassifierCallee(scope, classifier, spelling) = callee;
         let resolved_type_arguments = type_arguments
             .iter()
             .map(|argument| argument.get())
@@ -118,9 +125,7 @@ impl ProductionSignatureSemantics<'_> {
 
     pub(super) fn select_classifier_call(
         &self,
-        scope: crate::fir::SignatureScope,
-        classifier: crate::types::TypeName,
-        spelling: &str,
+        callee: ClassifierCallee<'_>,
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
         type_arguments: &[crate::fir::ResolvedTy],
         trailing_lambda: bool,
@@ -129,6 +134,7 @@ impl ProductionSignatureSemantics<'_> {
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
+        let ClassifierCallee(scope, classifier, spelling) = callee;
         let resolved_type_arguments = type_arguments
             .iter()
             .map(|argument| argument.get())

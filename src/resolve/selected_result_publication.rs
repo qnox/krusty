@@ -269,7 +269,7 @@ impl CompactSelectedResultPublication {
         let mut formals = callable_formals;
         for formal in &receiver_formals {
             if !formals.contains(formal) {
-                formals.push(formal.clone());
+                formals.push(*formal);
             }
         }
         (formals, receiver_formals)

@@ -2,6 +2,7 @@
 
 use super::super::callable_reference_selection as reference_selection;
 use super::callable_references::AppliedSourceAlias;
+use super::classifier_associated::ClassifierCallee;
 use super::constructor_results::selected_sam_constructor_result;
 use super::top_level_call::SelectedTopLevelCall;
 use super::*;
@@ -1101,9 +1102,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     super::classifier_associated::AssociatedSignatureCall::Absent => {}
                 }
                 if let Some(result) = self.select_classifier_call(
-                    scope,
-                    classifier,
-                    name,
+                    ClassifierCallee(scope, classifier, name),
                     arguments,
                     type_arguments,
                     trailing_lambda,
@@ -1480,9 +1479,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         }
         for callable_owner in self.lexical_classifier_callable_owners(scope) {
             if let Some(result) = self.select_classifier_call(
-                scope,
-                callable_owner,
-                spelling,
+                ClassifierCallee(scope, callable_owner, spelling),
                 arguments,
                 type_arguments,
                 trailing_lambda,
@@ -1495,9 +1492,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             self.explicit_imported_classifier_callable(scope.source, spelling)
         {
             if let Some(result) = self.select_classifier_call(
-                scope,
-                owner,
-                &declared_name,
+                ClassifierCallee(scope, owner, &declared_name),
                 arguments,
                 type_arguments,
                 trailing_lambda,
@@ -2127,9 +2122,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     self.explicit_imported_classifier_callable(scope.source, spelling)
                 {
                     if let Ok(expectations) = self.classifier_call_argument_expectations(
-                        scope,
-                        owner,
-                        &declared_name,
+                        ClassifierCallee(scope, owner, &declared_name),
                         arguments,
                         type_arguments,
                         trailing_lambda,
@@ -2188,9 +2181,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     );
                     if let Some(classifier) = classifier {
                         let expectations = self.classifier_call_argument_expectations(
-                            scope,
-                            classifier,
-                            member,
+                            ClassifierCallee(scope, classifier, member),
                             arguments,
                             type_arguments,
                             trailing_lambda,
@@ -2239,9 +2230,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     // rejects the call before final selection can reach that rung.
                     for classifier in self.lexical_classifier_callable_owners(scope) {
                         if let Ok(expectations) = self.classifier_call_argument_expectations(
-                            scope,
-                            classifier,
-                            spelling,
+                            ClassifierCallee(scope, classifier, spelling),
                             arguments,
                             type_arguments,
                             trailing_lambda,
