@@ -64,10 +64,6 @@ pub(super) fn is_lazy(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/Lazy"])
 }
 
-pub(super) fn is_read_write_property(internal: TypeName) -> bool {
-    is_identity(internal, &["kotlin/properties/ReadWriteProperty"])
-}
-
 pub(super) fn is_read_only_property(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/properties/ReadOnlyProperty"])
 }
