@@ -61,20 +61,17 @@ impl<'a> FileLowering<'a> {
     /// Declare a slot per top-level property. Declared before any body is compiled, because a
     /// function may read a property declared after it.
     pub(super) fn declare_statics(&mut self) -> Result<(), Unsupported> {
-        for (index, declaration) in self.ir.statics.iter().enumerate() {
+        let ir = self.ir;
+        for (index, declaration) in ir.statics.iter().enumerate() {
             // An owner is a PLACEMENT fact the JVM needs — a companion's `const val` becomes a
             // field of the OUTER class there. There is no facade here for a slot to be placed
-            // differently from, so the owner says nothing about the slot; what it could say
-            // something about is WHEN the initializer runs, since a companion's runs with the
-            // companion rather than at program start. An initializer that cannot OBSERVE the
-            // difference settles it; anything else owned by a class still declines rather than
-            // guess at the order.
+            // differently from, so the owner says nothing about the slot; what it does say is
+            // WHEN the initializer runs: with its class rather than at program start. An
+            // initializer that cannot OBSERVE the difference runs at program start; anything else
+            // waits for its class (`class_statics`).
             if let Some(owner) = declaration.owner {
                 if !self.order_independent(declaration) {
-                    return Err(declined!(
-                        "a non-`const` property stored on `{}`",
-                        owner.render()
-                    ));
+                    self.defer_to_class(index as u32, owner)?;
                 }
             }
             if self.carrier(declaration.ty) == Carrier::Void {
@@ -113,7 +110,14 @@ impl<'a> FileLowering<'a> {
             .statics
             .iter()
             .enumerate()
-            .map(|(index, declaration)| (self.statics[index], declaration.ty, declaration.init))
+            .map(|(index, declaration)| {
+                // A deferred static is still rooted here, at program start, but its class runs
+                // its initializer.
+                let init = declaration
+                    .init
+                    .filter(|_| !self.is_deferred_static(index as u32));
+                (self.statics[index], declaration.ty, init)
+            })
             .collect();
 
         self.emit_function(id, signature, Ty::Unit, &symbol, &mut |body, _| {
@@ -367,6 +371,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     pub(super) fn static_read(&mut self, index: u32) -> Result<Option<Value>, Unsupported> {
+        self.initialize_static_owner(index)?;
         let ty = self.file.ir.statics[index as usize].ty;
         let slot = self.file.statics[index as usize];
         let clif = self.carrier(ty).clif().expect("declined at declaration");
@@ -384,6 +389,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let Some(value) = value else {
             return Err("a `Unit` value assigned to a top-level property".into());
         };
+        self.initialize_static_owner(index)?;
         let address = self.data_address(slot);
         self.builder.ins().store(trusted(), value, address, 0);
         Ok(())

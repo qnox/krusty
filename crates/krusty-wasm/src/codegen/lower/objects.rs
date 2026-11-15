@@ -1457,6 +1457,7 @@ pub(super) fn define_class_functions(
                 class: id,
                 ordinal: 0,
             };
+            body.initialize_class(id);
             body.primary_constructor(id)?;
             let lowered = body.finish();
             let carriers = constructor_carriers(module, ir, id, &parameters)?;
@@ -1481,6 +1482,7 @@ pub(super) fn define_class_functions(
                 class: id,
                 ordinal: ordinal as u32 + 1,
             };
+            body.initialize_class(id);
             body.secondary_constructor(id, ordinal)?;
             let lowered = body.finish();
             let carriers = constructor_carriers(module, ir, id, &parameters)?;

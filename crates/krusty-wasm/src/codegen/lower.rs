@@ -25,6 +25,7 @@ mod arrays;
 mod boxing;
 mod callable_reference_identity;
 mod class_literals;
+mod class_statics;
 mod dependency_exports;
 mod enums;
 mod exceptions;
@@ -155,9 +156,6 @@ pub(super) fn lower_file(
         tables: module_tables,
     } = state;
     for property in &ir.statics {
-        if property.owner.is_some() {
-            return Err("a static property of a class".to_string());
-        }
         if property.is_lateinit {
             return Err("a `lateinit` top-level property".to_string());
         }
@@ -168,6 +166,7 @@ pub(super) fn lower_file(
         };
         Ok(module.global(value))
     })?;
+    let class_initializers = class_statics::ClassInitializers::declare(ir, module)?;
     let member_property_definitions = property_registry.prepare_member_properties(ir, module)?;
     let mut signatures = Vec::with_capacity(ir.functions.len());
     for (id, function) in ir.functions.iter().enumerate() {
@@ -288,6 +287,7 @@ pub(super) fn lower_file(
         properties: property_registry,
         reach: &reach,
         delegates: &delegates,
+        class_initializers: &class_initializers,
     };
     local_delegates::define(&context, module, runtime)?;
     for (id, function) in ir.functions.iter().enumerate() {
@@ -327,6 +327,11 @@ pub(super) fn lower_file(
             function.ret,
         );
         body.scope = krusty::ir::IrEnclosure::Function(id as FunId);
+        // A block function or accessor is a static member of its class: calling one initializes
+        // the class first.
+        if let Some(class) = ir.companion_blocks.declaring_class(id as FunId) {
+            body.initialize_class(class);
+        }
         body.initializers = ir.single_assignment_initializers(root);
         body.shared_cell_parameters(id as FunId)?;
         match body.function_body(root, function.ret) {
@@ -386,7 +391,16 @@ pub(super) fn lower_file(
     } else if !member_property_definitions.is_empty() {
         return Err("a member property definition without its class layout".to_string());
     }
-    let initializer = if ir.statics.iter().any(|property| property.init.is_some()) {
+    class_initializers.define(&context, module, runtime)?;
+    let file_statics = || {
+        ir.statics
+            .iter()
+            .zip(&globals)
+            .enumerate()
+            .filter(|(index, _)| !class_initializers.is_deferred(*index as u32))
+            .map(|(_, static_global)| static_global)
+    };
+    let initializer = if file_statics().any(|(property, _)| property.init.is_some()) {
         let index = module.declare();
         let ty = module.func_type(Vec::new(), Vec::new());
         let mut body = Body::new(
@@ -394,14 +408,13 @@ pub(super) fn lower_file(
             module,
             runtime,
             &[],
-            ir.statics
-                .iter()
-                .filter_map(|property| property.init)
+            file_statics()
+                .filter_map(|(property, _)| property.init)
                 .flat_map(|init| ir.declared_value_slot_types(init))
                 .collect(),
             Ty::Unit,
         );
-        for (property, global) in ir.statics.iter().zip(&globals) {
+        for (property, global) in file_statics() {
             if let Some(init) = property.init {
                 body.value(init, property.ty)?;
                 body.code.global_set(*global);
@@ -510,6 +523,8 @@ struct FileContext<'a> {
     reach: &'a std::cell::RefCell<FileReach>,
     /// Local delegated-property accessors and the one object each property's convention receives.
     delegates: &'a local_delegates::Prepared,
+    /// The initializer of each class that owns statics.
+    class_initializers: &'a class_statics::ClassInitializers,
 }
 
 /// The wasm value a parameter of type `ty` is passed as. A `Nothing` parameter holds no value any
@@ -789,6 +804,7 @@ struct Body<'a> {
     /// What this file's bodies record for the module about calls through `kotlin.Any`'s slots.
     reach: &'a std::cell::RefCell<FileReach>,
     delegates: &'a local_delegates::Prepared,
+    class_initializers: &'a class_statics::ClassInitializers,
     code: Code,
     /// Locals beyond the parameters, in index order.
     locals: Vec<ValType>,
@@ -861,6 +877,7 @@ impl<'a> Body<'a> {
             properties: context.properties,
             reach: context.reach,
             delegates: context.delegates,
+            class_initializers: context.class_initializers,
             code: Code::default(),
             locals: Vec::new(),
             next_local: parameters.len() as u32,
@@ -1147,11 +1164,13 @@ impl<'a> Body<'a> {
                 None => return Err(format!("an assignment to undeclared value {var}")),
             },
             IrExpr::GetStatic(index) => {
+                self.initialize_static_owner(index);
                 self.code.global_get(self.globals[index as usize]);
             }
             IrExpr::SetStatic { index, value } => {
                 let ty = self.ir.statics[index as usize].ty;
                 self.value(value, ty)?;
+                self.initialize_static_owner(index);
                 self.code.global_set(self.globals[index as usize]);
             }
             IrExpr::Block { stmts, value } => {
