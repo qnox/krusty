@@ -23,10 +23,13 @@ impl Checker<'_> {
         callable_reference_selection::specialize_candidate_with_type_arguments(
             &source,
             function,
-            bound_contexts,
             extension_receiver,
-            expected_params,
-            expected_ret,
+            callable_reference_selection::ReferenceExpectation {
+                params: expected_params,
+                ret: expected_ret,
+                bound_contexts,
+                type_variable_inputs: self.active_reference_type_variable_inputs(),
+            },
             |actual, bound| self.generic_bound_admits(actual, bound),
         )
     }
