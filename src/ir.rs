@@ -218,6 +218,21 @@ pub use type_check_role::TypeCheckRole;
 pub use type_reflection::IrGenericTopLevelProperty;
 use type_reflection::TypeReflectionFacts;
 
+/// What checking decided about a context argument's evaluation, recorded with the argument so a copy
+/// of the call keeps it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IrContextArgumentRole {
+    /// A value argument, or a context argument written as an ordinary source argument.
+    #[default]
+    Ordinary,
+    /// A context parameter or implicit receiver the scope supplied. It is no source argument, so it
+    /// never reorders a call's written operands.
+    Implicit,
+    /// An explicit context argument evaluated after the extension receiver, as it is written,
+    /// although it is passed before it.
+    AfterReceiver,
+}
+
 /// One checker-selected argument after source-order evaluation has been preserved. Parameter
 /// ordinals and omitted/default/vararg decisions are semantic facts; no later phase remaps them.
 #[derive(Clone, Debug, PartialEq)]
@@ -225,6 +240,8 @@ pub enum IrCheckedArgument {
     Expression {
         parameter: u32,
         value: ExprId,
+        /// Whether checking selected this argument from the scope or ordered it after the receiver.
+        context: IrContextArgumentRole,
     },
     Default {
         parameter: u32,
