@@ -611,23 +611,52 @@ impl<'a> FileLowering<'a> {
     }
 
     /// Every concrete class of this file that can stand behind `internal`.
+    ///
+    /// The class's own header is the source of truth. A body-local class and a class lowered from
+    /// a dependency support unit are in this IR and name the interface they implement, and neither
+    /// is in the classifier index (`classifier` declines a body-local name). Reading only that
+    /// index drops them, and a member of the interface then has no arm.
+    ///
+    /// A class can also implement `internal` through a superclass this file does not declare:
+    /// `ListQueue : Sized` implements `MutableCollection` when `Sized` does, and `Sized` is not an
+    /// interface written on `ListQueue`. That superclass is someone else's declaration, so its
+    /// frozen supertypes name the interface. A superclass this file does declare stays its own
+    /// arm; the subclass is not a second one, because an instance test of the superclass already
+    /// matches it.
     pub(super) fn implementors_of(&self, internal: TypeName) -> Vec<ClassId> {
         (0..self.ir.classes.len() as ClassId)
             .filter(|&id| {
                 let class = &self.ir.classes[id as usize];
                 !class.is_interface
-                    && std::iter::once(class.superclass)
-                        .chain(class.interfaces.iter())
-                        .chain(
-                            class
-                                .supertypes
-                                .iter()
-                                .copied()
-                                .filter_map(Ty::obj_internal),
-                        )
-                        .any(|named| named == internal)
+                    && !class.is_abstract
+                    && self.class_stands_behind(class, internal)
             })
             .collect()
+    }
+
+    /// Whether a concrete class of this file can be an instance of `internal`.
+    fn class_stands_behind(&self, class: &krusty::ir::IrClass, internal: TypeName) -> bool {
+        let mut external_supertypes = Vec::new();
+        for named in std::iter::once(class.superclass)
+            .chain(class.interfaces.iter())
+            .chain(
+                class
+                    .supertypes
+                    .iter()
+                    .copied()
+                    .filter_map(Ty::obj_internal),
+            )
+        {
+            if named == internal {
+                return true;
+            }
+            if self.ir.class_id_by_name(named).is_none() {
+                external_supertypes.push(named);
+            }
+        }
+        external_supertypes
+            .into_iter()
+            .any(|named| self.is_subclassifier(named, internal))
     }
 
     /// Whether the classifier `class` is `of` or has it among its supertypes, by the hierarchy
@@ -711,6 +740,15 @@ impl<'a> FileLowering<'a> {
     }
 
     pub(super) fn implements_collection_of(&self, ty: Ty) -> bool {
+        // `ArrayList`, `HashMap` and `HashSet` are the runtime's own objects. A file that also
+        // implements `Collection` cannot put one of its classes behind those final types, so a
+        // receiver statically typed as one of them still has the runtime representation. The
+        // interface (`List`, `MutableCollection`) keeps the shape check: an object of the file
+        // can stand behind it.
+        let internal = ty.non_null().obj_internal();
+        if internal.is_some_and(|name| standard_collection_implementation(name).is_some()) {
+            return false;
+        }
         self.collection_shape_of(ty)
             .is_some_and(|shape| self.implemented_collections.contains(&shape))
     }
