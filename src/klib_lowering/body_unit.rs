@@ -1807,7 +1807,12 @@ impl<'s> Linker<'_, 's> {
         candidate: KlibBodyCallable<'s>,
     ) -> Result<bool, KlibBodyDeclineReason> {
         if is_receiver_member(candidate, self.sources.bodies, self.sources.callees) {
-            return Ok(true);
+            // A member realizing one of `kotlin.Any`'s stays the target's, as the closure froze it.
+            return Ok(!self
+                .sources
+                .callees
+                .member_edge(candidate.identity())
+                .is_some_and(super::CallEdge::realizes_any_member));
         }
         let Some(class) = candidate
             .class_contract()

@@ -6,3 +6,18 @@ pub(crate) struct CheckedMemberCallEdge {
     pub(crate) semantic_role: Option<crate::types::SemanticCallRole>,
     pub(crate) overridden: Box<[crate::types::OverriddenDeclaration]>,
 }
+
+impl CheckedMemberCallEdge {
+    /// Whether the call reaches one of `kotlin.Any`'s members (or a declaration overriding one),
+    /// which every target realizes from the receiver's own representation.
+    pub(crate) fn realizes_any_member(&self) -> bool {
+        matches!(
+            self.semantic_role,
+            Some(
+                crate::types::SemanticCallRole::KotlinAnyEquals
+                    | crate::types::SemanticCallRole::KotlinAnyHashCode
+                    | crate::types::SemanticCallRole::KotlinAnyToString
+            )
+        )
+    }
+}
