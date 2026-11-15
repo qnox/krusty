@@ -214,19 +214,31 @@ impl<'a> Checker<'a> {
                 &candidates.overloads,
             );
         }
-        // A property the site cannot see yields to an extension property the same way.
-        if candidates.extension_property.is_some()
-            && candidates.property.as_ref().is_some_and(|property| {
-                !self.callable_accessible(
-                    property.getter_visibility,
-                    property.getter.owner,
-                    property.getter.external_identity,
-                )
-            })
+        // A property the site cannot see yields to a visible extension property the same way.
+        if candidates
+            .extension_property
+            .as_ref()
+            .is_some_and(|extension| self.property_reference_visible(extension))
+            && candidates
+                .property
+                .as_ref()
+                .is_some_and(|property| !self.property_reference_visible(property))
         {
             candidates.property = None;
         }
         candidates
+    }
+
+    /// Whether the reference site can see the getter of a resolved property.
+    fn property_reference_visible(
+        &self,
+        property: &crate::symbol_resolver::ResolvedPropertyRef,
+    ) -> bool {
+        self.callable_accessible(
+            property.getter_visibility,
+            property.getter.owner,
+            property.getter.external_identity,
+        )
     }
 
     /// Drop the members of `receiver` the site cannot see when a visible extension of the same
