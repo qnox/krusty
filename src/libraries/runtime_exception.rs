@@ -18,7 +18,7 @@ pub enum RuntimeExceptionKind {
 }
 
 impl RuntimeExceptionKind {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 11] = [
         Self::Throwable,
         Self::Exception,
         Self::RuntimeException,
@@ -26,6 +26,9 @@ impl RuntimeExceptionKind {
         Self::NullPointer,
         Self::IllegalState,
         Self::IllegalArgument,
+        Self::UnsupportedOperation,
+        Self::Arithmetic,
+        Self::NumberFormat,
         Self::ClassCast,
     ];
 
@@ -79,13 +82,16 @@ mod tests {
             RuntimeExceptionKind::NullPointer => 4,
             RuntimeExceptionKind::IllegalState => 5,
             RuntimeExceptionKind::IllegalArgument => 6,
-            RuntimeExceptionKind::ClassCast => 7,
+            RuntimeExceptionKind::UnsupportedOperation => 7,
+            RuntimeExceptionKind::Arithmetic => 8,
+            RuntimeExceptionKind::NumberFormat => 9,
+            RuntimeExceptionKind::ClassCast => 10,
         };
         let positions: Vec<usize> = RuntimeExceptionKind::ALL
             .into_iter()
             .map(position)
             .collect();
-        assert_eq!(positions, (0..8).collect::<Vec<_>>());
+        assert_eq!(positions, (0..11).collect::<Vec<_>>());
         for kind in RuntimeExceptionKind::ALL {
             assert_eq!(RuntimeExceptionKind::of(kind.classifier()), Some(kind));
         }
