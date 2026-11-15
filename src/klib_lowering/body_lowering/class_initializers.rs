@@ -67,6 +67,52 @@ impl<'a> BodyLowering<'a> {
         Ok(body)
     }
 
+    /// A secondary constructor of the materialized `class` delegating to its primary
+    /// constructor: the delegation's arguments become the arguments of the class's secondary
+    /// constructor `secondary`, then its own statements run as a member of the class does,
+    /// reading and writing the receiver's `fields`.
+    pub(in super::super) fn delegate_to_primary(
+        mut self,
+        class: ClassId,
+        secondary: usize,
+        receiver: Ty,
+        fields: &[&'a crate::metadata::klib_ir::tree::KlibIrField],
+        arguments: &[crate::metadata::klib_ir::tree::KlibIrExprId],
+        statements: &'a [KlibIrStatement],
+    ) -> Lowered<ExprId> {
+        let declared = &self.ir.classes[class as usize];
+        let storage = fields
+            .iter()
+            .zip(&declared.fields)
+            .map(|(field, declared)| (&field.base.symbol, declared.ty, declared.is_final()))
+            .collect::<Vec<_>>();
+        let primary = declared
+            .ctor_args
+            .iter()
+            .map(|parameter| parameter.ty)
+            .collect::<Vec<_>>();
+        if primary.len() != arguments.len() {
+            return Err(mismatch(
+                "a primary constructor delegation passes another number of arguments",
+            ));
+        }
+        self.instance_storage = Some(super::instance_storage::InstanceStorageFrame::member(
+            class,
+            storage,
+            Some(receiver),
+            false,
+        ));
+        // The arguments read the constructor's own parameters, which this frame numbers as the
+        // constructor does.
+        let arguments = arguments
+            .iter()
+            .zip(primary)
+            .map(|(&argument, ty)| self.operand(argument, ty))
+            .collect::<Lowered<Vec<_>>>()?;
+        self.ir.classes[class as usize].secondary_ctors[secondary].delegate_args = arguments;
+        self.body(statements)
+    }
+
     /// Field stores and anonymous initializers of a same-library file-local class, in member order.
     pub(in super::super) fn initialize_local(
         mut self,

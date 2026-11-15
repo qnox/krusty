@@ -543,7 +543,10 @@ pub(super) fn ordinary_roots<'a>(
             if bodies.function_has_body(selected.identity()) != Some(true) {
                 continue;
             }
-            if callees
+            // The constructor's delegation chain is admitted with the declarations it reaches,
+            // as the closure admits it.
+            let superclasses = superclass_realizations(platform, bodies, selected.identity());
+            if with_realized_declarations(callees.clone(), &superclasses)
                 .constructor_initialization_callees(selected.identity(), bodies)
                 .map_err(|reason| format!("an invalid constructor root: {reason:?}"))?
                 .is_some()
