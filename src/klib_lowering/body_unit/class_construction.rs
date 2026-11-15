@@ -414,7 +414,7 @@ impl<'u, 's> Linker<'u, 's> {
         if let Some(&entry) = self.functions.get(selected.identity()) {
             return Ok(entry);
         }
-        let entry = crate::backend::construction_entries::primary_entry(ir, member.class).ok_or(
+        let entry = ir.add_construction_entry(member.class, None).ok_or(
             KlibBodyDeclineReason::SignatureMismatch(
                 "a value class box without its checked self type".to_owned(),
             ),
