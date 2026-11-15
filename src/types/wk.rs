@@ -39,6 +39,7 @@ names! {
     any => "kotlin/Any",
     unsafe_variance => "kotlin/UnsafeVariance",
     kclass => "kotlin/reflect/KClass",
+    ktype => "kotlin/reflect/KType",
     comparable => "kotlin/Comparable",
     array => "kotlin/Array",
     string => "kotlin/String",

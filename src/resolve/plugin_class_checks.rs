@@ -55,6 +55,7 @@ impl Checker<'_> {
             .filter(|parameter| parameter.is_property)
             .map(|parameter| FrontendPropertyFacts {
                 annotations: self.annotation_identities(scope, &parameter.annotations),
+                type_annotations: self.type_use_annotation_identities(scope, Some(&parameter.ty)),
                 has_backing_field: true,
                 has_initializer: parameter.default.is_some(),
                 is_lateinit: false,
@@ -65,6 +66,7 @@ impl Checker<'_> {
             .into_iter()
             .chain(cl.body_props.iter().map(|property| FrontendPropertyFacts {
                 annotations: self.annotation_identities(scope, &property.annotations),
+                type_annotations: self.type_use_annotation_identities(scope, property.ty.as_ref()),
                 has_backing_field: !property.is_abstract
                     && !property.is_external
                     && property.delegate.is_none()
@@ -110,6 +112,29 @@ impl Checker<'_> {
     ) -> Vec<TypeName> {
         annotations
             .iter()
+            .filter_map(|annotation| self.annotation_identity_in_scope(scope, annotation))
+            .collect()
+    }
+
+    /// The type-use annotations written anywhere in `ty`, its arguments' included, in source order.
+    fn type_use_annotation_identities(
+        &self,
+        scope: &CheckerScope<'_>,
+        ty: Option<&crate::ast::TypeRef>,
+    ) -> Vec<TypeName> {
+        let Some(ty) = ty else {
+            return Vec::new();
+        };
+        let mut annotations = self
+            .file
+            .type_annotations
+            .iter()
+            .filter(|(&start, _)| ty.span.lo <= start && start < ty.span.hi)
+            .flat_map(|(_, annotations)| annotations)
+            .collect::<Vec<_>>();
+        annotations.sort_by_key(|annotation| annotation.span.lo);
+        annotations
+            .into_iter()
             .filter_map(|annotation| self.annotation_identity_in_scope(scope, annotation))
             .collect()
     }

@@ -50,6 +50,42 @@ pub trait BackendClassifierSource {
             crate::libraries::ClassifierDeclarationKey::TypeAlias(_) => None,
         }
     }
+
+    /// Every builtin class (`String`, a primitive, an unsigned integer) whose classifier is a
+    /// proper subtype of `classifier`, through the supertypes the classifier facts publish: the
+    /// builtin values a target carrying them in representations of its own must count as
+    /// instances of `classifier`.
+    fn builtin_subtypes(&self, classifier: TypeName) -> Vec<crate::types::Ty> {
+        crate::types::REPRESENTED_BUILTINS
+            .into_iter()
+            .filter(|builtin| {
+                builtin
+                    .kotlin_class_internal()
+                    .is_some_and(|own| own != classifier && is_subclassifier(self, own, classifier))
+            })
+            .collect()
+    }
+}
+
+/// Whether `ancestor` is `classifier` or one of the supertypes its facts publish, transitively.
+fn is_subclassifier(
+    source: &(impl BackendClassifierSource + ?Sized),
+    classifier: TypeName,
+    ancestor: TypeName,
+) -> bool {
+    let mut pending = vec![classifier];
+    let mut seen = crate::fx_hash::HashSet::default();
+    while let Some(next) = pending.pop() {
+        if next == ancestor {
+            return true;
+        }
+        if seen.insert(next) {
+            if let Some(fact) = source.classifier(next) {
+                pending.extend(fact.supertypes.iter().copied());
+            }
+        }
+    }
+    false
 }
 
 /// The exact classifier information representation backends may inspect after semantic checking.
@@ -212,6 +248,13 @@ pub struct BackendModuleFacts {
     /// Each dependency classifier the module's own classes stand behind, with the file of every
     /// source class that can be an instance of it, body-local ones included.
     dependency_implementors: HashMap<TypeName, Box<[crate::fir::SourceFileId]>>,
+    /// The constants of every enum class this module declares, in declaration order. Another file
+    /// of the module reads one through the entry its declaring file publishes, and links that read
+    /// by this fact before the declaring file is lowered (see `super::module_links`).
+    source_enum_constants: HashMap<TypeName, Box<[Box<str>]>>,
+    /// The constructors of this module another file may build an instance through, by their
+    /// checked declaration: see [`constructible_from_another_file`].
+    source_constructors: HashSet<crate::fir::DeclarationId>,
     /// Each `expect` classifier an `actual typealias` actualizes, mapped to the alias's target.
     /// Common code types the `expect` as its own classifier; every target realizes the target.
     actualized_expects: HashMap<TypeName, TypeName>,
@@ -252,6 +295,8 @@ impl BackendModuleFacts {
         let mut generated_classifiers = Vec::new();
         let mut source_supertypes = HashMap::default();
         let mut source_class_members = HashMap::default();
+        let mut source_enum_constants = HashMap::default();
+        let mut source_constructors = HashSet::default();
         let mut actualized_expects = HashMap::default();
         let mut actualized_nested_expects = HashMap::default();
         for raw in 0..index.declaration_count() {
@@ -263,6 +308,9 @@ impl BackendModuleFacts {
                     crate::libraries::ClassifierDeclarationKey::TypeAlias(alias.identity),
                     alias.declaration_name.clone(),
                 );
+            }
+            if constructible_from_another_file(index, declaration) {
+                source_constructors.insert(declaration);
             }
             let Some(classifier) = index.classifier_header(declaration) else {
                 continue;
@@ -347,6 +395,23 @@ impl BackendModuleFacts {
             } else {
                 crate::libraries::TypeKind::Class
             };
+            if kind == crate::libraries::TypeKind::Enum {
+                let constants = index
+                    .owned_declarations(declaration)
+                    .iter()
+                    .filter(|&&child| {
+                        index.declaration_header(child).is_some_and(|header| {
+                            header.kind == crate::fir::DeclarationKind::EnumEntry
+                        })
+                    })
+                    .map(|&child| {
+                        index.declaration_name(child).map(Box::from).ok_or(
+                            BackendFactError::IncompleteClassifier(classifier.classifier),
+                        )
+                    })
+                    .collect::<Result<Box<[_]>, _>>()?;
+                source_enum_constants.insert(classifier.classifier, constants);
+            }
             let is_interface = matches!(
                 kind,
                 crate::libraries::TypeKind::Interface | crate::libraries::TypeKind::Annotation
@@ -516,13 +581,15 @@ impl BackendModuleFacts {
             classes: Default::default(),
             source_class_members,
             dependency_implementors: dependency_implementors(&source_supertypes),
+            source_enum_constants,
+            source_constructors,
             actualized_expects,
             actualized_nested_expects,
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_classifiers(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_classifiers(
         source: impl IntoIterator<Item = (TypeName, LibraryType)>,
         body_local_classifiers: impl IntoIterator<Item = TypeName>,
     ) -> Result<Self, BackendFactError> {
@@ -565,6 +632,8 @@ impl BackendModuleFacts {
             classes: Default::default(),
             source_class_members: HashMap::default(),
             dependency_implementors: HashMap::default(),
+            source_enum_constants: HashMap::default(),
+            source_constructors: HashSet::default(),
             actualized_expects: HashMap::default(),
             actualized_nested_expects: HashMap::default(),
         })
@@ -572,6 +641,24 @@ impl BackendModuleFacts {
 
     pub fn classifier(&self, classifier: TypeName) -> Option<Arc<BackendClassifierFact>> {
         self.classifiers.get(&classifier).cloned()
+    }
+
+    /// Whether a file of this module declares `instance`: an object, a constant of an enum, or a
+    /// constructor another file may build through.
+    pub fn declares_instance(&self, instance: &super::instance_links::InstanceEntry) -> bool {
+        match instance {
+            super::instance_links::InstanceEntry::Object(classifier) => self
+                .classifiers
+                .get(classifier)
+                .is_some_and(|fact| fact.source && fact.kind == crate::libraries::TypeKind::Object),
+            super::instance_links::InstanceEntry::EnumConstant(constant) => self
+                .source_enum_constants
+                .get(&constant.classifier)
+                .is_some_and(|constants| constants.contains(&constant.name)),
+            super::instance_links::InstanceEntry::Constructor { declaration, .. } => {
+                self.source_constructors.contains(declaration)
+            }
+        }
     }
 
     pub fn classifiers(&self) -> impl Iterator<Item = (TypeName, &BackendClassifierFact)> {
@@ -610,7 +697,7 @@ impl BackendModuleFacts {
     }
 
     /// The dispatch shape of every named class of the module, when the target asked for it.
-    pub(crate) fn classes(&self) -> &super::class_tables::module_classes::ModuleClasses {
+    pub fn classes(&self) -> &super::class_tables::module_classes::ModuleClasses {
         &self.classes
     }
 
@@ -633,7 +720,7 @@ impl BackendModuleFacts {
 
     /// The checked defaults `classifier` inherits without overriding, independent of which source
     /// file is currently entering Pass 2.
-    pub(crate) fn inherited_defaults(
+    pub fn inherited_defaults(
         &self,
         classifier: TypeName,
     ) -> Option<&[crate::fir::ResolvedInheritedDefault]> {
@@ -727,7 +814,7 @@ pub struct CheckedBackendClassifiers<'a> {
 }
 
 impl<'a> CheckedBackendClassifiers<'a> {
-    pub(crate) fn new(module: &'a BackendModuleFacts, dependencies: &'a dyn SymbolSource) -> Self {
+    pub fn new(module: &'a BackendModuleFacts, dependencies: &'a dyn SymbolSource) -> Self {
         Self {
             module,
             dependencies,
@@ -1139,6 +1226,55 @@ fn visit_inline_plan(plan: &InlineBodyPlan, visit: &mut impl FnMut(Ty)) {
             visit_callable(&recovery.failure.callable, &mut *visit);
         }
     }
+}
+
+/// Whether `constructor` is a constructor of an ordinary class that another file builds an
+/// instance through its declaring file's entry: a non-private constructor without context
+/// parameters of a class that is not abstract, `sealed`, an `enum`, an object, an annotation or an
+/// interface. An `inner` class's entry takes its enclosing instance first.
+fn constructible_from_another_file(
+    index: &crate::fir::ResolvedModuleIndex,
+    constructor: crate::fir::DeclarationId,
+) -> bool {
+    use crate::fir::DeclarationFlags as Flag;
+    let Some(header) = index.declaration_header(constructor) else {
+        return false;
+    };
+    if header.kind != crate::fir::DeclarationKind::Constructor
+        || header.visibility == crate::types::Visibility::Private
+        || header.flags.has(Flag::EXPECT)
+    {
+        return false;
+    }
+    let Some(owner) = index
+        .declaration_anchor(constructor)
+        .and_then(|anchor| anchor.owner)
+    else {
+        return false;
+    };
+    let (Some(owner_header), Some(_)) = (
+        index.declaration_header(owner),
+        index.classifier_header(owner),
+    ) else {
+        return false;
+    };
+    ![
+        Flag::INTERFACE,
+        Flag::ANNOTATION_CLASS,
+        Flag::ENUM,
+        Flag::SINGLETON,
+        Flag::ABSTRACT,
+        Flag::SEALED,
+        Flag::LOCAL_CLASS,
+        Flag::ANONYMOUS_OBJECT,
+        Flag::EXPECT,
+    ]
+    .iter()
+    .any(|flag| owner_header.flags.has(*flag))
+        && index
+            .callable_for_declaration(constructor)
+            .is_some_and(|callable| callable.shape.context_parameter_count == 0)
+        && !index.is_body_local_declaration(owner)
 }
 
 #[cfg(test)]

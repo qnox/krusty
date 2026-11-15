@@ -48,7 +48,7 @@ impl Backend for JsBackend {
 
 /// JavaScript keeps a counted loop's entry test at the top, and an unsigned value is its own
 /// representation there: no call in the header is realized as inlined.
-pub(crate) const COUNTED_LOOPS: crate::backend::counted_loops::CountedLoopPolicy =
+pub const COUNTED_LOOPS: crate::backend::counted_loops::CountedLoopPolicy =
     crate::backend::counted_loops::CountedLoopPolicy {
         style: crate::backend::counted_loops::CounterLoopStyle::PreTested,
         inlining: crate::backend::counted_loops::HeaderInlining::None,

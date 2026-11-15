@@ -3,7 +3,9 @@
 //! Selection collects and solves a call's constraints against the call's variables
 //! ([`crate::symbol_resolver::CallSiteVariables`]); everything it hands on (the specialized
 //! callable, its bindings and the parameter shapes overload ranking compares) is expressed over the
-//! declaration's formals again, exactly as a declaration-owned signature would have produced.
+//! declaration's formals again, exactly as a declaration-owned signature would have produced. The
+//! selected parameters also stay available over the call's own variables, so selected-argument
+//! checking can tell a variable the selection left open from a declared formal in scope.
 
 use super::*;
 
@@ -78,6 +80,7 @@ pub(super) fn declared_selection(
     candidate_index: usize,
 ) -> SelectedCallable {
     let declared = |ty: Ty| variables.declared_type(ty);
+    let call_site_params = candidate.callable.params.clone();
     candidate.receiver = candidate.receiver.map(declared);
     candidate.callable.params = candidate
         .callable
@@ -90,6 +93,7 @@ pub(super) fn declared_selection(
     candidate.callable.vararg_elem = candidate.callable.vararg_elem.map(declared);
     SelectedCallable {
         info: candidate,
+        call_site_params,
         bindings: variables.declared_bindings(bindings),
         intersection_bindings: intersection_bindings
             .into_iter()
@@ -114,5 +118,23 @@ impl CandidateParameterShapes {
             selection: declared(self.selection),
             declaration_specificity: declared(self.declaration_specificity),
         }
+    }
+}
+
+impl SelectedCallable {
+    /// [`SelectedCallable::call_site_params`] in the layout of its applied parameters.
+    pub(super) fn applied_call_site_params(&self) -> std::borrow::Cow<'_, [Ty]> {
+        self.info.applied_layout(&self.call_site_params)
+    }
+}
+
+impl ContextualCallShape {
+    /// `call_site`, laid out like the parameters this shape was built from, in this shape's layout;
+    /// `None` when it does not cover them.
+    pub(super) fn call_site_params(&self, call_site: &[Ty]) -> Option<Vec<Ty>> {
+        self.parameter_indices
+            .iter()
+            .map(|&parameter| call_site.get(parameter).copied())
+            .collect()
     }
 }

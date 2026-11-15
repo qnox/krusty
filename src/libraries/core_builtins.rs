@@ -24,14 +24,14 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
         owner: TypeName,
         receiver: Ty,
         name: &str,
-        parameter: Option<Ty>,
+        params: &[Ty],
         result: Ty,
         semantics: (CompilerIntrinsic, Notation),
     ) {
         let (intrinsic, notation) = semantics;
         let infix = notation == Notation::Infix;
         let operator = notation == Notation::Operator;
-        let params = parameter.into_iter().collect::<Vec<_>>();
+        let params = params.to_vec();
         let mut callable =
             LibraryCallable::library(owner, name, params.clone(), result, result, "");
         callable.compiler_intrinsic = Some(intrinsic);
@@ -41,13 +41,22 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
         declaration.flags.operator = operator;
 
         // A class cannot declare two members with one name and one parameter list, so a decoded
-        // declaration with this name and these parameters is the core declaration itself, whatever
-        // its provider calls the owner's type parameter in the result (`Array<T>.get`).
+        // declaration with this name and these parameters is the core declaration itself. A core
+        // member mentions no type parameter but its owner's, which each provider spells its own
+        // way (`Array<T>.set(Int, T)`), so a type parameter matches the provider's type parameter.
+        let same_parameter = |declared: &Ty, core: &Ty| {
+            declared == core || declared.is_ty_param() && core.is_ty_param()
+        };
         if let Some(callables) = classifier.declared_callables.get_mut(name) {
             let (mut functions, properties) = std::mem::take(callables).into_parts();
             if let Some(existing) = functions.overloads.iter_mut().find(|candidate| {
+                let declared = candidate.semantic_params();
                 candidate.kind == FnKind::Member
-                    && candidate.semantic_params().as_ref() == params.as_slice()
+                    && declared.len() == params.len()
+                    && declared
+                        .iter()
+                        .zip(&params)
+                        .all(|(declared, core)| same_parameter(declared, core))
             }) {
                 existing.callable.compiler_intrinsic = Some(intrinsic);
                 existing.flags.infix |= infix;
@@ -183,8 +192,8 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
             Ty::Int,
             CompilerIntrinsic::ArraySize,
         );
-        // `operator fun get(index: Int): E`, where `E` is `Array<T>`'s formal or the primitive
-        // array's element.
+        // `operator fun get(index: Int): E` and `operator fun set(index: Int, value: E)`, where `E`
+        // is `Array<T>`'s formal or the primitive array's element.
         let (receiver, element) = match crate::types::prim_array_element(owner) {
             Some(element) => (Ty::obj_name(owner), element),
             None => {
@@ -198,9 +207,19 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
             owner,
             receiver,
             "get",
-            Some(Ty::Int),
+            &[Ty::Int],
             element,
             (CompilerIntrinsic::ArrayGet, Notation::Operator),
+        );
+        // `operator fun set(index: Int, value: E)`.
+        member_function(
+            classifier,
+            owner,
+            receiver,
+            "set",
+            &[Ty::Int, element],
+            Ty::Unit,
+            (CompilerIntrinsic::ArraySet, Notation::Operator),
         );
     }
     if owner == crate::types::wk::string() {
@@ -209,7 +228,7 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
             owner,
             Ty::String,
             "get",
-            Some(Ty::Int),
+            &[Ty::Int],
             Ty::Char,
             (CompilerIntrinsic::StringGet, Notation::Operator),
         );
@@ -234,7 +253,7 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
                 owner,
                 receiver,
                 name,
-                Some(receiver),
+                &[receiver],
                 receiver,
                 (intrinsic, Notation::Infix),
             );
@@ -244,7 +263,7 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
             owner,
             receiver,
             "inv",
-            None,
+            &[],
             receiver,
             (CompilerIntrinsic::PrimitiveBitNot, Notation::Plain),
         );
@@ -259,7 +278,7 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
                     owner,
                     receiver,
                     name,
-                    Some(Ty::Int),
+                    &[Ty::Int],
                     receiver,
                     (intrinsic, Notation::Infix),
                 );

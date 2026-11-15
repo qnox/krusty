@@ -22,6 +22,7 @@ use collection_canonicalization::{
     canonicalize_jvm_collections, overlay_metadata_collection_names,
 };
 #[cfg(test)]
+#[path = "jvm_libraries/tests/contract_dsl_tests.rs"]
 mod contract_dsl_tests;
 mod dependency_access_policy;
 mod dependency_deprecation;
@@ -46,12 +47,13 @@ mod provider_normalization_tests;
 mod raw_types;
 use provider_normalization::normalize_tail;
 mod signature_parser;
+mod source_module_headers;
 use signature_parser::parse_formals;
 mod return_types;
 use return_types::{java_collection_return_lower_bound, metadata_declared_nonnull_return};
 mod static_properties;
 mod synthetic_properties;
-mod unsigned_intrinsics;
+pub mod unsigned_intrinsics;
 use static_properties::StaticAccessor;
 use synthetic_properties::{accessor_property_name, setter_name_for_getter, AccessorInventory};
 
@@ -62,7 +64,7 @@ use builtins_customizer::JvmBuiltInsCustomizer;
 use generic_signatures::{
     concrete_generic_ret, mark_receiver_fun_params, parse_field_gsig, suspend_return_from_gsig,
 };
-pub(in crate::jvm) use generic_signatures::{parse_class_gsig, parse_method_gsig};
+pub use generic_signatures::{parse_class_gsig, parse_method_gsig};
 use inline_capability::{metadata_inline, property_accessor_inline, property_getter_inline};
 use java_nullability::{
     java_field_type, java_result_enhancement, java_type_argument_nullability, java_type_nullability,
@@ -84,9 +86,11 @@ use crate::libraries::{
     PropertyInfo, PropertyProducer, PropertySet, ReturnInfo, Visibility,
 };
 use crate::runtime::{PlatformRangeCtor, RangeConstruction};
-use crate::symbol_resolver::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
-use crate::types::{type_name, SemanticCallableOwner, Ty, TyKind, TypeName, TypeNameList};
+use crate::types::{
+    ty_subst, ty_subst_all, ty_subst_keep_unbound, type_name, SemanticCallableOwner, Ty, TyKind,
+    TypeName, TypeNameList,
+};
 
 use java_operator_convention::java_method_has_operator_convention;
 
@@ -590,11 +594,14 @@ impl JvmLibraries {
                 builtin.param_defaults,
                 builtin.vararg,
             );
-            for ordinal in 0..builtin.context_count {
-                function.call_sig.parameter_identities[ordinal] =
-                    crate::fir::ResolvedParameterIdentity::LegacyContextReceiver {
-                        ordinal: ordinal as u32,
-                    };
+            for (ordinal, identity) in function.call_sig.parameter_identities
+                [..builtin.context_count]
+                .iter_mut()
+                .enumerate()
+            {
+                *identity = crate::fir::ResolvedParameterIdentity::LegacyContextReceiver {
+                    ordinal: ordinal as u32,
+                };
             }
             function.call_sig.only_input_type_formals = builtin.only_input_type_formals;
             function.call_sig.reified_type_parameter_ordinals =
@@ -1988,9 +1995,9 @@ impl JvmLibraries {
             }
             // Kotlin metadata is authoritative for Kotlin companion identity. The structural field
             // pattern is only a Java/classfile fallback when no Kotlin companion fact exists.
-            let metadata_companion = super::metadata::class_companion_name(&ci).and_then(|field| {
+            let metadata_companion = super::metadata::class_companion_name(&ci).map(|field| {
                 let companion = crate::types::type_name_nested_child(internal_name, &field);
-                Some((field, companion))
+                (field, companion)
             });
             let classfile_companion = (!ci.meta.is_present())
                 .then(|| {
@@ -2670,7 +2677,7 @@ fn interface_holder_method(
     }))
 }
 
-pub(crate) fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
+pub fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
     let (params, ret) = crate::jvm::names::parse_method_descriptor(desc)?;
     Some((
         params.into_iter().map(declared_desc_to_ty).collect(),
@@ -2741,6 +2748,7 @@ impl JvmLibraries {
             // realization consumed after checked FIR has supplied both receivers.
             self.register_external_callable(&mut callable, FnKind::Member, declaration_owner);
             member.external_identity = callable.external_identity;
+            member.declaration_owner = callable.declaration_owner;
             member.inline_body_plan = callable.inline_body_plan;
         }
         for member in &mut classifier.companion {
@@ -2762,6 +2770,7 @@ impl JvmLibraries {
             callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
             self.register_external_callable(&mut callable, FnKind::TopLevel, declaration_owner);
             member.external_identity = callable.external_identity;
+            member.declaration_owner = callable.declaration_owner;
             member.inline_body_plan = callable.inline_body_plan;
         }
         for declarations in classifier.declared_callables.values_mut() {
@@ -3098,7 +3107,7 @@ impl JvmLibraries {
                     );
                     Some(setter)
                 });
-                overloads.push(PropertyInfo {
+                let mut property = PropertyInfo {
                     return_value_status: Some(mp.return_value_status),
                     name: name.to_string(),
                     kind: PropKind::Member,
@@ -3144,7 +3153,13 @@ impl JvmLibraries {
                     source_member: None,
                     producer: PropertyProducer::KotlinAccessor,
                     read_stability: self.module_read_stability(mp, cn),
-                });
+                };
+                crate::libraries::realize_class_name_property(
+                    cn,
+                    self.cp.common_metadata_owns(cn),
+                    &mut property,
+                );
+                overloads.push(property);
                 self.publish_kotlin_property_deprecation(overloads.last_mut(), mp);
             }
 
@@ -3965,55 +3980,18 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         Some("JVM")
     }
 
+    /// kotlinc's JVM `FirArrayOfNullableNothingExpressionChecker`: a JVM array needs a runtime
+    /// element class, and `Nothing?` has none.
+    fn array_of_nullable_nothing_error(&self) -> Option<&'static str> {
+        Some("'Array<Nothing?>' is not supported on the JVM.")
+    }
+
     fn install_source_module_headers(
         &self,
         sources: &[crate::libraries::PlatformSourceHeaderInput<'_>],
         source_classifiers: &[(TypeName, crate::types::Visibility)],
     ) -> Result<(), crate::libraries::SourceHeaderError> {
-        let java = sources
-            .iter()
-            .map(|source| {
-                (
-                    source.source,
-                    source.file_stem.map_or_else(
-                        || format!("Source{}.java", source.source),
-                        |stem| format!("{stem}.java"),
-                    ),
-                    source.text.to_string(),
-                )
-            })
-            .collect::<Vec<_>>();
-        if java.is_empty() {
-            return Ok(());
-        }
-        if self.source_headers.borrow().is_some() {
-            return Err(crate::libraries::SourceHeaderError {
-                source: java[0].0,
-                message: "JVM source-module headers were installed more than once".into(),
-            });
-        }
-        let source_classifiers = source_classifiers
-            .iter()
-            .copied()
-            .collect::<crate::fx_hash::HashMap<_, _>>();
-        let world = super::java_stub::SourceModuleHeaderWorld {
-            source_classifiers: &source_classifiers,
-            classpath: &self.cp,
-        };
-        let java_blocks = java
-            .iter()
-            .map(|(_, name, source)| (name.clone(), source.clone()))
-            .collect::<Vec<_>>();
-        // Lenient, like kotlinc: one unresolvable Java type must not withdraw every Java header of
-        // the module (`an_unresolved_type_in_one_java_source_keeps_the_module_java_headers`).
-        let headers = super::java_stub::stub_classes(
-            &java_blocks,
-            super::java_stub::StubMode::Lenient,
-            &world,
-        )
-        .expect("lenient Java header stubbing keeps every source set");
-        *self.source_headers.borrow_mut() = Some(self.cp.push_stub_overlay(headers));
-        Ok(())
+        self.install_java_source_headers(sources, source_classifiers)
     }
 
     fn is_optional_expectation(&self, classifier: TypeName) -> bool {
@@ -4340,7 +4318,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
 }
 
 impl JvmLibraries {
-    pub(super) fn range_construction(&self, lo: Ty, hi: Ty) -> Option<RangeConstruction> {
+    pub fn range_construction(&self, lo: Ty, hi: Ty) -> Option<RangeConstruction> {
         let (internal, elem, trailing_nulls) = match (lo, hi) {
             (Ty::Char, Ty::Char) => ("kotlin/ranges/CharRange", Ty::Char, 0),
             (Ty::UInt, Ty::UInt) => ("kotlin/ranges/UIntRange", Ty::UInt, 1),

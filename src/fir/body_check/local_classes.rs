@@ -27,18 +27,26 @@ impl BodyFirChecker<'_> {
         name: &str,
         shadow_depth: usize,
     ) -> Option<(Option<u32>, LocalBinding)> {
+        self.lexical_binding_sources(name).nth(shadow_depth)
+    }
+
+    /// The distinct lexical bindings of `name`, nearest first: this body's scopes, then the values
+    /// it captures from enclosing bodies.
+    fn lexical_binding_sources<'s>(
+        &'s self,
+        name: &'s str,
+    ) -> impl Iterator<Item = (Option<u32>, LocalBinding)> + 's {
         let mut seen = crate::fx_hash::HashSet::default();
         self.scopes
             .iter()
             .rev()
-            .filter_map(|scope| scope.get(name).copied().map(|binding| (None, binding)))
+            .filter_map(move |scope| scope.get(name).copied().map(|binding| (None, binding)))
             .chain(
                 self.outer_values
                     .shadowed(name)
                     .map(|(depth, binding)| (Some(*depth), *binding)),
             )
-            .filter(|(depth, binding)| seen.insert((*depth, binding.value)))
-            .nth(shadow_depth)
+            .filter(move |(depth, binding)| seen.insert((*depth, binding.value)))
     }
 
     /// A construction-site super forward cannot use the anonymous constructor's capture field.
@@ -895,6 +903,22 @@ impl BodyFirChecker<'_> {
         {
             return Ok(None);
         }
+        self.constructor_parameter_capture_read(binding)
+            .map(Some)
+            .ok_or_else(|| {
+                self.failure(
+                    self.file.expr_span(expression),
+                    BodyCheckFailureKind::MissingStableCallTarget,
+                )
+            })
+    }
+
+    /// The read of `binding` from its constructor parameter, when this body is that class's own
+    /// constructor code: its constructor, an initializer, or a property initializer.
+    pub(super) fn constructor_parameter_capture_read(
+        &self,
+        binding: ClassCaptureBinding,
+    ) -> Option<FirExprKind> {
         let constructing = self.nested_body_depth == 0
             && binding.enclosing_depth == 0
             && self
@@ -910,18 +934,12 @@ impl BodyFirChecker<'_> {
                 })
                 .and_then(|anchor| anchor.owner)
                 == Some(binding.owner);
-        if !constructing {
-            return Err(self.failure(
-                self.file.expr_span(expression),
-                BodyCheckFailureKind::MissingStableCallTarget,
-            ));
-        }
-        Ok(Some(FirExprKind::ConstructorCaptureRead {
+        constructing.then_some(FirExprKind::ConstructorCaptureRead {
             owner: binding.owner,
             field: binding.field,
             shared_cell: binding.shared_cell,
             site: crate::fir::FirConstructorCaptureSite::Parameter,
-        }))
+        })
     }
 
     /// Carry a constructor-prefix capture into the callable that reads it, and answer WHERE that
@@ -1636,20 +1654,30 @@ impl BodyFirChecker<'_> {
             "anonymous body captures declaration={declaration:?} expression={expression:?} captures={captures:?}",
         );
         let mut captures = self.checked_class_captures(declaration, span, origin, &captures)?;
-        if !captures.is_empty() {
-            let stored = self
-                .info
-                .local_class_capture_layouts
-                .stored
-                .get(&transient)
-                .filter(|stored| stored.len() == captures.len())
-                .ok_or_else(|| {
-                    self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
-                })?;
+        let capture_order = if captures.is_empty() {
+            Box::default()
+        } else {
+            let layouts = &self.info.local_class_capture_layouts;
+            let (order, stored) = match (
+                layouts.orders.get(&transient),
+                layouts.stored.get(&transient),
+            ) {
+                (Some(order), Some(stored))
+                    if order.len() == captures.len() && stored.len() == captures.len() =>
+                {
+                    (order.clone(), stored.clone())
+                }
+                _ => {
+                    return Err(
+                        self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+                    )
+                }
+            };
             for (capture, stored) in captures.iter_mut().zip(stored.iter().copied()) {
                 capture.stored = stored;
             }
-        }
+            order
+        };
         crate::trace_compiler!(
             "fir",
             "anonymous checked captures declaration={declaration:?} captures={}",
@@ -1706,6 +1734,7 @@ impl BodyFirChecker<'_> {
         Ok(FirExprKind::AnonymousObject(FirAnonymousObject {
             declaration,
             captures,
+            capture_order,
             delegate_arguments: delegate_arguments.into_boxed_slice(),
             super_arguments,
         }))

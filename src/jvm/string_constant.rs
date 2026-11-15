@@ -11,7 +11,7 @@ use crate::kt_string::{KtString, KtStringBuf};
 /// The most modified-UTF-8 bytes one `CONSTANT_Utf8` entry holds.
 const UTF8_ENTRY_LIMIT: usize = 65535;
 
-pub(crate) fn push_string(value: &KtString, code: &mut CodeBuilder, cw: &mut ClassWriter) {
+pub fn push_string(value: &KtString, code: &mut CodeBuilder, cw: &mut ClassWriter) {
     let parts = utf8_entry_parts(value);
     let [single] = parts.as_slice() else {
         // Each constant is interned where the instruction using it is emitted, as kotlinc's

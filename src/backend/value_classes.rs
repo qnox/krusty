@@ -30,7 +30,7 @@ use crate::value_classes::{
 
 /// Every value class one file reaches, each with the underlying type its declaration states.
 #[derive(Debug, Default)]
-pub(crate) struct ValueClassInventory {
+pub struct ValueClassInventory {
     declarations: UnderlyingTypes,
     /// The value classes this module's sources declare, in this file or another.
     module_declared: HashSet<TypeName>,
@@ -63,7 +63,7 @@ impl ValueClassInventory {
     /// Two publications of one declaration that disagree, a class the IR marks as a value class
     /// with no checked declaration behind it, and a declaration graph that reaches itself are each
     /// refused rather than resolved by picking one answer.
-    pub(crate) fn inventory(ir: &IrFile, facts: &dyn ClassifierFactSource) -> Result<Self, String> {
+    pub fn inventory(ir: &IrFile, facts: &dyn ClassifierFactSource) -> Result<Self, String> {
         let mut pending = crate::ir::referenced_classifiers::referenced_classifier_names(ir);
         // A dependency member is named by its checked signature, and the IR walk above covers
         // the call shapes a JVM needs; a KLIB program also realizes the dependency members its
@@ -126,7 +126,7 @@ impl ValueClassInventory {
     /// The value classes among `classes` and every classifier the types in `carried` name, read
     /// from the checked declarations alone: given the module's named classes and what their members
     /// carry, one answer every file shares, which a dispatch numbering that spans files needs.
-    pub(crate) fn of_module_classes(
+    pub fn of_module_classes(
         classes: impl IntoIterator<Item = TypeName>,
         carried: impl IntoIterator<Item = Ty>,
         facts: &dyn ClassifierFactSource,
@@ -193,7 +193,7 @@ impl ValueClassInventory {
     /// `ty` as a KLIB backend carries it: a value class projected to its underlying value wherever
     /// the policy says so, anything else unchanged. Still a SEMANTIC type — the carrier is read
     /// from it as from any other.
-    pub(crate) fn project(&self, ty: Ty) -> Ty {
+    pub fn project(&self, ty: Ty) -> Ty {
         if self.declarations.is_empty() {
             return ty;
         }
@@ -202,23 +202,20 @@ impl ValueClassInventory {
 
     /// The value class `ty` is an UNBOXED occurrence of, or `None` when `ty` travels as itself —
     /// which a boxed `V?` does, being an object like any other.
-    pub(crate) fn unboxed(&self, ty: Ty) -> Option<TypeName> {
+    pub fn unboxed(&self, ty: Ty) -> Option<TypeName> {
         let classifier = ty.non_null().obj_internal()?;
         (self.declarations.contains_key(&classifier) && self.project(ty) != ty)
             .then_some(classifier)
     }
 
     /// Whether `classifier` is a value class.
-    pub(crate) fn is_value_class(&self, classifier: TypeName) -> bool {
+    pub fn is_value_class(&self, classifier: TypeName) -> bool {
         self.declarations.contains_key(&classifier)
     }
 
     /// This inventory, knowing which of its value classes the module's own sources declare: the
     /// ones another file of the module boxes through entry points the declaring file defines.
-    pub(crate) fn declared_in_module(
-        mut self,
-        classifiers: impl IntoIterator<Item = TypeName>,
-    ) -> Self {
+    pub fn declared_in_module(mut self, classifiers: impl IntoIterator<Item = TypeName>) -> Self {
         self.module_declared = classifiers
             .into_iter()
             .filter(|classifier| self.declarations.contains_key(classifier))
@@ -227,12 +224,12 @@ impl ValueClassInventory {
     }
 
     /// Whether `classifier` is a value class the module's own sources declare.
-    pub(crate) fn is_module_declared(&self, classifier: TypeName) -> bool {
+    pub fn is_module_declared(&self, classifier: TypeName) -> bool {
         self.module_declared.contains(&classifier)
     }
 
     /// The underlying type `classifier` declares, when it is a value class.
-    pub(crate) fn underlying(&self, classifier: TypeName) -> Option<Ty> {
+    pub fn underlying(&self, classifier: TypeName) -> Option<Ty> {
         self.declarations.get(&classifier).copied()
     }
 }

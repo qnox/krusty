@@ -1,0 +1,113 @@
+//! Source-line planning for JVM constructor property stores.
+//!
+//! Common IR owns the stable property identity and declaration line; bytecode emission supplies the
+//! physical program counter. This module keeps that boundary explicit and never reconstructs a line
+//! from a field name or a surrounding class header.
+
+use krusty::ir::{ExprId, IrClass, IrExpr, IrFile};
+
+/// The line of a primary constructor's own start, which its trailing `return` maps to
+/// (`setExtraLineNumberForVoidReturningFunction` marks a primary constructor's start offset). A
+/// written primary constructor starts at its first modifier, annotation, `constructor` keyword,
+/// or `(`, which may sit on a line after the class name; without one the constructor is the
+/// declaration itself and starts where its annotations do.
+pub(super) fn primary_constructor_line(ir: &IrFile, class: &IrClass) -> u32 {
+    if class.primary_ctor_lines.rebuilt_body_line != 0 {
+        return class.primary_ctor_lines.rebuilt_body_line;
+    }
+    if class.primary_ctor_lines.decl_line != 0 {
+        return class.primary_ctor_lines.decl_line;
+    }
+    if let Some(&line) = ir.ctor_open_lines.get(&class.fq_name_id()) {
+        return line;
+    }
+    class.primary_delegation_line().unwrap_or(0)
+}
+
+pub(super) struct PropertyStore {
+    pub(super) expression: ExprId,
+    pub(super) line: Option<u32>,
+}
+
+/// The line a constructor's store of the exact `field` coordinate maps to.
+///
+/// A PRIMARY-CONSTRUCTOR property's store goes to the line its declaration starts on, annotations
+/// included: kotlinc puts `@SerialName("x")` over `val x: Int` on the annotation's line, while the
+/// property's own getter stays on the `val` line. A BODY property is not the same shape — its
+/// initializer store stays on its own line, annotation or not. Constructor properties and the
+/// delegates of delegated properties (whose field is not named after the property) carry
+/// `constructor_store_line`. An explicit body-property store goes through [`property_store_line`]
+/// so its exact expression identity selects the initializer line recorded by common lowering.
+pub(super) fn property_line(ir: &IrFile, class: &IrClass, field: u32) -> Option<u32> {
+    let field = class.fields.get(field as usize)?;
+    if field.constructor_store_line != 0 {
+        return Some(field.constructor_store_line);
+    }
+    ir.prop_decl_lines
+        .get(&(class.fq_name_id(), field.name.clone()))
+        .copied()
+        .filter(|&line| line != 0)
+}
+
+/// The source line owned by one constructor field store.
+///
+/// An explicit body-property initializer is identified by its exact `SetField`; lowering records
+/// that store's initializer line in common IR. Constructor-property parameters and delegated
+/// storage instead carry the field-level line used by their implicit or synthesized store.
+pub(super) fn property_store_line(
+    ir: &IrFile,
+    class: &IrClass,
+    field: u32,
+    expression: ExprId,
+) -> Option<u32> {
+    let field = class.fields.get(field as usize)?;
+    if field.constructor_store_line != 0 {
+        return Some(field.constructor_store_line);
+    }
+    if ir.property_initializer_stores.contains(&expression) {
+        return ir.statement_line(expression).filter(|&line| line != 0);
+    }
+    // An `init` assignment already records the statement line. The property's declaration line is
+    // only the fallback for a store lowering did not attach to a source statement.
+    if let Some(line) = ir.statement_line(expression).filter(|&line| line != 0) {
+        return Some(line);
+    }
+    ir.prop_decl_lines
+        .get(&(class.fq_name_id(), field.name.clone()))
+        .copied()
+        .filter(|&line| line != 0)
+}
+
+/// Return the ordered property stores only when lowering retained a pure `SetField` initializer
+/// block. A mixed block must be emitted atomically; the backend does not guess which instructions
+/// correspond to source properties.
+pub(super) fn initializer_property_stores(
+    ir: &IrFile,
+    class: &IrClass,
+    init_body: ExprId,
+) -> Option<Vec<PropertyStore>> {
+    let IrExpr::Block { stmts, value } = ir.expr(init_body) else {
+        return None;
+    };
+    if value.is_some()
+        || !stmts
+            .iter()
+            .all(|&statement| matches!(ir.expr(statement), IrExpr::SetField { .. }))
+    {
+        return None;
+    }
+    Some(
+        stmts
+            .iter()
+            .map(|&expression| {
+                let IrExpr::SetField { index, .. } = ir.expr(expression) else {
+                    unreachable!("initializer was checked as a SetField block")
+                };
+                PropertyStore {
+                    expression,
+                    line: property_store_line(ir, class, *index, expression),
+                }
+            })
+            .collect(),
+    )
+}

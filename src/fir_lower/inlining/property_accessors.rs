@@ -272,7 +272,7 @@ fn expand_inline_accessor(
 
     let result_ty = ty_subst_keep_unbound(ir.functions[function as usize].ret, &bindings);
     let setter = access.value.is_some();
-    let close_line = ir.fn_close_lines.get(&function).copied();
+    let close_line = ir.function_position(function).close_line;
     let produced = finish_accessor_expansion(
         ir,
         cloned_root,

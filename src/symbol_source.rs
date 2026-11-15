@@ -179,6 +179,15 @@ pub trait SymbolSource {
         None
     }
 
+    /// The class contract of `classifier`, when this provider published that class. A singleton
+    /// edge's class is the singleton it dispatches to, and this is how the edge learns it.
+    fn klib_body_class_contract(
+        &self,
+        _classifier: TypeName,
+    ) -> Option<crate::libraries::KlibBodyClassContract> {
+        None
+    }
+
     /// Normalize the declaration named by one exact module-qualified KLIB identity.
     ///
     /// Dependency support lowering uses this only after its producer graph resolved a serialized
@@ -366,6 +375,15 @@ impl SymbolSource for CompositeSource<'_> {
         self.children
             .iter()
             .find_map(|child| child.external_callable(identity))
+    }
+
+    fn klib_body_class_contract(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::libraries::KlibBodyClassContract> {
+        self.children
+            .iter()
+            .find_map(|child| child.klib_body_class_contract(classifier))
     }
 
     fn external_callable_by_dependency(
@@ -565,6 +583,13 @@ impl SymbolSource for CachedCompositeSource<'_> {
         identity: crate::fir::ExternalCallableId,
     ) -> Option<crate::libraries::ExternalCallableRealization> {
         self.source.external_callable(identity)
+    }
+
+    fn klib_body_class_contract(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::libraries::KlibBodyClassContract> {
+        self.source.klib_body_class_contract(classifier)
     }
 
     fn external_property(

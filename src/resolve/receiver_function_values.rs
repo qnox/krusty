@@ -504,7 +504,7 @@ impl Checker<'_> {
                 param_names: &param_names,
                 param_defaults: &defaults,
                 required: params.len(),
-                vararg: false,
+                vararg_index: None,
                 context_count: 0,
                 ret: signature.ret,
                 source_display: None,

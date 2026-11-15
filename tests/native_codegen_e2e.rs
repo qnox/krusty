@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use krusty::backend::{Artifact, Backend as _};
 use krusty::diag::DiagSink;
-use krusty::native::{CraneliftBackend, NativeTarget};
 use krusty::source::SourceInput;
+use krusty_native::{CraneliftBackend, NativeTarget};
 
 use super::common;
 
@@ -72,7 +72,7 @@ fn concurrent_native_codegen_scratch_directories_are_unique() {
 
 fn host() -> Option<NativeTarget> {
     let target = NativeTarget::host()?;
-    (krusty::native::can_link(target)
+    (krusty_native::can_link(target)
         && krusty::toolchain::stdlib_jar().is_some()
         && krusty::toolchain::jdk_modules().is_some())
     .then_some(target)
@@ -133,7 +133,7 @@ fn run(source: &str) -> String {
     );
     let objects = objects_of(&artifacts);
     assert!(!objects.is_empty(), "no object was emitted");
-    let image = krusty::native::link_program(&objects, target)
+    let image = krusty_native::link_program(&objects, target)
         .unwrap_or_else(|error| panic!("krusty's linker must link the program: {error}"));
 
     let scratch = Scratch::new("run");
@@ -190,7 +190,7 @@ fn the_executable_is_a_static_elf_with_no_interpreter() {
         "the code generator emits relocatable objects and a C ABI header, never C source: {names:?}"
     );
     let objects = objects_of(&artifacts);
-    let image = krusty::native::link_program(&objects, target).expect("link");
+    let image = krusty_native::link_program(&objects, target).expect("link");
     assert_eq!(&image[..4], b"\x7fELF");
     assert_eq!(
         image[16], 2,
@@ -236,7 +236,7 @@ fn one_host_links_a_static_executable_for_every_supported_architecture() {
     // descriptors, vtables and constructor path are cross-compiled too, not only straight code.
     let mut linked = Vec::new();
     for &target in NativeTarget::ALL {
-        if !krusty::native::can_link(target) {
+        if !krusty_native::can_link(target) {
             eprintln!("skipping {target}: no prebuilt runtime in this build");
             continue;
         }
@@ -259,7 +259,7 @@ fn one_host_links_a_static_executable_for_every_supported_architecture() {
         );
         assert!(diagnostics.is_empty(), "{target}: {diagnostics:?}");
         let objects = objects_of(&artifacts);
-        let image = krusty::native::link_program(&objects, target)
+        let image = krusty_native::link_program(&objects, target)
             .unwrap_or_else(|error| panic!("linking for {target} must succeed: {error}"));
         assert_eq!(&image[..4], b"\x7fELF", "{target}");
         assert_eq!(image[16], 2, "{target}: ET_EXEC");
@@ -589,8 +589,8 @@ fn a_library_module_defines_no_entry_point() {
     // A module with no `main` is a library; inventing an entry point for it would produce a program
     // that silently does nothing. Linked alone, the runtime's `_start` has nothing to call.
     let objects = objects_of(&artifacts);
-    match krusty::native::link_program(&objects, target) {
-        Err(krusty::native::ProgramLinkError::UndefinedSymbol(symbol)) => {
+    match krusty_native::link_program(&objects, target) {
+        Err(krusty_native::ProgramLinkError::UndefinedSymbol(symbol)) => {
             assert_eq!(symbol, "kt_program_entry");
         }
         other => panic!("a library must not link into a program: {other:?}"),
@@ -929,7 +929,7 @@ fn a_not_null_assertion_passes_a_value_through_and_fails_on_null() {
     );
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     let objects = objects_of(&artifacts);
-    let image = krusty::native::link_program(&objects, target).expect("link");
+    let image = krusty_native::link_program(&objects, target).expect("link");
     let scratch = Scratch::new("notnull");
     let executable = scratch.path().join("program");
     std::fs::write(&executable, &image).expect("write");
@@ -974,7 +974,7 @@ fn a_slice_between_the_halves_of_one_character_keeps_the_selected_utf16_units() 
     );
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     let objects = objects_of(&artifacts);
-    let image = krusty::native::link_program(&objects, target).expect("link");
+    let image = krusty_native::link_program(&objects, target).expect("link");
     let scratch = Scratch::new("surrogate");
     let executable = scratch.path().join("program");
     std::fs::write(&executable, &image).expect("write");
@@ -1024,7 +1024,7 @@ fn a_throw_a_program_wrote_stops_it_and_says_what_happened() {
         let (artifacts, diagnostics) = compile(&[("Main", source)], target);
         assert!(diagnostics.is_empty(), "{source}: {diagnostics:?}");
         let objects = objects_of(&artifacts);
-        let image = krusty::native::link_program(&objects, target).expect("link");
+        let image = krusty_native::link_program(&objects, target).expect("link");
         let scratch = Scratch::new("throw");
         let executable = scratch.path().join("program");
         std::fs::write(&executable, &image).expect("write");
@@ -1249,7 +1249,7 @@ fn an_array_index_outside_its_bounds_fails_loudly() {
             .filter(|(name, _)| name.ends_with(".o"))
             .map(|(_, bytes)| bytes.as_slice())
             .collect::<Vec<_>>();
-        let image = krusty::native::link_program(&objects, target).expect("link");
+        let image = krusty_native::link_program(&objects, target).expect("link");
         let scratch = Scratch::new("bounds");
         let executable = scratch.path().join("program");
         std::fs::write(&executable, &image).expect("write");

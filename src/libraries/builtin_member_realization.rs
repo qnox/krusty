@@ -325,6 +325,24 @@ impl UnsignedElement {
     }
 }
 
+/// The scalar type of an exact unsigned `toString(): String` declaration.
+///
+/// Decimal conversion applies to all four unsigned widths independently of the binary-operation
+/// realization below. The provider has already authenticated this qualified declaration owner.
+pub(crate) fn unsigned_to_string_type(facts: &BuiltinMemberDeclaration<'_>) -> Option<Ty> {
+    if facts.name != "toString"
+        || !facts.params.is_empty()
+        || facts.ret != Ty::String
+        || facts.is_property
+        || facts.is_operator
+        || facts.is_infix
+    {
+        return None;
+    }
+    let ty = crate::types::builtin_semantic(facts.owner)?;
+    ty.is_unsigned().then_some(ty)
+}
+
 /// The unsigned value class and operation of an exact `UInt`/`ULong` declaration:
 /// `compareTo(same): Int`, `div(same): same` and `rem(same): same` as operators, and
 /// `toString(): String`. Any other overload, including the mixed-width ones, stays ordinary.
@@ -348,12 +366,27 @@ pub(crate) fn unsigned_member_operation(
         "compareTo" if binary && facts.ret == Ty::Int => UnsignedMemberOperation::CompareTo,
         "div" if binary && facts.ret == element => UnsignedMemberOperation::Divide,
         "rem" if binary && facts.ret == element => UnsignedMemberOperation::Remainder,
-        "toString" if facts.params.is_empty() && facts.ret == Ty::String => {
+        "toString" if unsigned_to_string_type(facts) == Some(element) => {
             UnsignedMemberOperation::ToString
         }
         _ => return None,
     };
     Some((class, operation))
+}
+
+/// `String.compareTo(other: String): Int`, by its exact declaration. Only a provider whose
+/// strings a target lays out itself realizes it as [`CompilerIntrinsic::StringCompare`]; a JVM
+/// string is a platform class whose own `compareTo` a call reaches.
+pub(crate) fn string_compare_intrinsic(
+    facts: &BuiltinMemberDeclaration<'_>,
+) -> Option<CompilerIntrinsic> {
+    (facts.owner == crate::types::wk::string()
+        && facts.name == "compareTo"
+        && !facts.is_property
+        && !facts.is_infix
+        && facts.params == [Ty::String]
+        && facts.ret == Ty::Int)
+        .then_some(CompilerIntrinsic::StringCompare)
 }
 
 /// The primitive operation implemented by one exact unsigned bitwise member signature.
@@ -419,7 +452,7 @@ fn range_construction(facts: &BuiltinMemberDeclaration<'_>) -> Option<MemberReal
 /// and bitwise declarations expose the carrier/result type after Kotlin numeric promotion
 /// (`Long.minus(Int)` returns `Long`, so both operands of the primitive subtraction are `Long`).
 /// Shift declarations deliberately keep their count parameter distinct (`Long.shl(Int)`).
-pub(crate) fn primitive_binary_operands(
+pub fn primitive_binary_operands(
     intrinsic: CompilerIntrinsic,
     parameter: Ty,
     result: Ty,
@@ -442,7 +475,7 @@ pub(crate) fn primitive_binary_operands(
 /// Common comparison carrier of an exact builtin scalar `compareTo`: `Char` compares as `Int`,
 /// `Boolean` as itself, numeric operands at their promoted type (`Int.compareTo(Long)` compares
 /// `Long`s).
-pub(crate) fn primitive_compare_operand(receiver: Ty, parameter: Ty) -> Option<Ty> {
+pub fn primitive_compare_operand(receiver: Ty, parameter: Ty) -> Option<Ty> {
     let receiver = receiver.canonical_semantic().non_null();
     let parameter = parameter.canonical_semantic().non_null();
     if receiver == Ty::Boolean && parameter == Ty::Boolean {

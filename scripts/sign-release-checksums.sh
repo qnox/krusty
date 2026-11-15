@@ -35,8 +35,7 @@ verifier=$(mktemp -d)
 trap 'for h in "$signer" "$verifier"; do gpgconf --homedir "$h" --kill gpg-agent 2>/dev/null || true; rm -rf "$h"; done' EXIT
 
 printf '%s\n' "$SIGNING_KEY" | gpg --homedir "$signer" --batch --quiet --import 2>/dev/null
-printf '%s' "${SIGNING_KEY_PASSWORD:-}" | gpg --homedir "$signer" --batch --quiet --pinentry-mode loopback \
-  --passphrase-fd 0 --armor --detach-sign --local-user "$key_id!" --output "$sums.asc" "$sums"
+# Authenticate the public certificate before asking the secret key to make a signature.
 gpg --homedir "$signer" --batch --quiet --armor --export "$key_id!" > "$certificate"
 
 primary() { gpg --homedir "$verifier" --batch --with-colons --show-keys "$1" 2>/dev/null | awk -F: '$1 == "fpr" { print $10; exit }'; }
@@ -45,6 +44,8 @@ if [[ "$(primary "$certificate")" != "$root" ]]; then
   echo "the signing subkey $key_id is not bound by the release root key $root" >&2
   exit 1
 fi
+printf '%s' "${SIGNING_KEY_PASSWORD:-}" | gpg --homedir "$signer" --batch --quiet --pinentry-mode loopback \
+  --passphrase-fd 0 --armor --detach-sign --local-user "$key_id!" --output "$sums.asc" "$sums"
 gpg --homedir "$verifier" --batch --quiet --import "$certificate" 2>/dev/null
 if ! gpg --homedir "$verifier" --batch --status-fd 1 --verify "$sums.asc" "$sums" 2>/dev/null |
   grep -q "^\[GNUPG:\] VALIDSIG .* $root\$"; then

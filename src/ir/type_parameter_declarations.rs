@@ -11,7 +11,7 @@ impl IrFile {
     /// Each declaration record this file holds, as its semantic identity and complete written
     /// bounds. One identity may be listed by more than one record; each copy carries the same
     /// checked bounds.
-    pub(crate) fn type_parameter_declarations(&self) -> Vec<(&str, &[(Ty, bool)])> {
+    pub fn type_parameter_declarations(&self) -> Vec<(&str, &[(Ty, bool)])> {
         let declared = self
             .signatures
             .values()

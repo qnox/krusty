@@ -262,3 +262,54 @@ fn truly_unbound_call_still_cannot_infer() {
         )],
     );
 }
+
+/// A `try` and a statement-position conditional with block branches still report a call that no
+/// branch binds, once per open call, in source order.
+#[test]
+fn branches_without_a_binding_sibling_still_cannot_infer() {
+    const SRC: &str = "fun box(c: Boolean) {\n\
+        try { emptyList() } catch (e: Exception) { emptyList() }\n\
+        if (c) { emptyList() } else { emptyList() }\n\
+        val x = try { emptyList() } catch (e: Exception) { null }\n\
+        when { c -> { emptyList() } else -> { 1 } }\n\
+    }\n";
+    const MESSAGE: &str = "cannot infer type for type parameter 'T'. Specify it explicitly.";
+    assert_diagnostics(
+        SRC,
+        &[
+            (2, 7, MESSAGE),
+            (2, 44, MESSAGE),
+            (3, 10, MESSAGE),
+            (3, 31, MESSAGE),
+            (4, 15, MESSAGE),
+            (5, 15, MESSAGE),
+        ],
+    );
+}
+
+/// Typed catches bind each other's open calls across a compiled dependency.
+#[test]
+fn typed_catches_bind_from_each_other() {
+    let modules = krusty::conformance::split_modules(include_str!(
+        "box_regressions/multimodule/typedCatchesBindFromEachOther.kt"
+    ))
+    .expect("the whole typed-catch dependency fixture has two modules");
+    let [library, main] = modules.as_slice() else {
+        panic!("expected the library and main modules");
+    };
+    assert_eq!(library.name, "lib");
+    assert!(library.deps.is_empty());
+    assert_eq!(main.name, "main");
+    assert_eq!(main.deps, ["lib"]);
+    assert_eq!(library.files.len(), 1);
+    assert_eq!(main.files.len(), 1);
+    assert_eq!(
+        common::expect_box_run_against(
+            "typed-catch-rebind",
+            &library.files[0].1,
+            &main.files[0].1,
+        )
+        .expect("both compilers run"),
+        "OK"
+    );
+}

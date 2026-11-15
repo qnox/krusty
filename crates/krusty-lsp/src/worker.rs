@@ -45,9 +45,9 @@ const WORKER_READY: &[u8] = b"ready";
 
 /// Classpath override and whether the worker should skip navigation indexes.
 ///
-/// Indexing sets `diagnostics_only` so closed files do not pay for hover, tokens, and navigation
-/// the index store discards. Interactive analysis leaves the flag false and still passes the
-/// module classpath.
+/// Indexing sets `diagnostics_only` so closed files do not pay for hover, tokens, and the rich
+/// navigation indexes. The response still carries definition occurrences; the supervisor binds
+/// those to declaration identities. Interactive analysis leaves the flag false.
 #[derive(Copy, Clone)]
 pub struct WorkerAnalysisOptions<'a> {
     pub classpath: Option<&'a [PathBuf]>,
@@ -346,6 +346,8 @@ struct AnalysisResponse {
     signature_help: SignatureHelpIndex,
     semantic_tokens: SemanticTokenIndex,
     definitions: DefinitionIndex,
+    #[serde(default)]
+    workspace_references: DefinitionIndex,
     type_definitions: DefinitionIndex,
     implementations: DefinitionIndex,
     #[serde(default)]
@@ -387,6 +389,7 @@ impl From<DocumentAnalysis> for AnalysisResponse {
             signature_help: analysis.signature_help,
             semantic_tokens: analysis.semantic_tokens,
             definitions: analysis.definitions,
+            workspace_references: analysis.workspace_references,
             type_definitions: analysis.type_definitions,
             implementations: analysis.implementations,
             library_definitions: analysis.library_definitions,
@@ -433,6 +436,7 @@ impl AnalysisResponse {
             signature_help: self.signature_help,
             semantic_tokens: self.semantic_tokens,
             definitions: self.definitions,
+            workspace_references: self.workspace_references,
             type_definitions: self.type_definitions,
             implementations: self.implementations,
             library_definitions: self.library_definitions,
@@ -1068,6 +1072,12 @@ impl AnalysisWorker {
         }
     }
 
+    /// Analyses this process has completed. A support probe that compiled disk sources advances it;
+    /// the empty-support short-circuit does not.
+    pub fn completed_analysis_count(&self) -> usize {
+        self.analyses
+    }
+
     pub fn set_language_settings(&mut self, language: LanguageSettings) {
         self.language = language;
     }
@@ -1307,13 +1317,25 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
             &language.features,
         );
         let (analyses, implementation_relations) = if request.diagnostics_only {
-            // The compiler still checks the file. Hover, tokens, and navigation are what the index
-            // store throws away, and they dominate the worker response for a chunk of closed files.
+            // The compiler still checks the file. Hover, tokens, and the rich navigation indexes
+            // dominate a closed-file response, so they are not built. What is kept is the
+            // definition-occurrence list: the supervisor binds each target to a URI, and that
+            // identity is what references and go-to-definition match after this chunk is gone.
+            let references = crate::analysis::checked_definition_indexes(
+                &sources,
+                &source_set.files,
+                &source_set.symbols,
+                request.result_count,
+            );
             let mut analyses = source_set
                 .files
                 .into_iter()
-                .take(request.result_count)
-                .map(|file| DocumentAnalysis::with_diagnostics(file.diagnostics))
+                .zip(references)
+                .map(|(file, workspace_references)| {
+                    let mut analysis = DocumentAnalysis::with_diagnostics(file.diagnostics);
+                    analysis.workspace_references = workspace_references;
+                    analysis
+                })
                 .collect::<Vec<_>>();
             crate::retain_analysis_wire_budget(&mut analyses, MAX_WORKER_MESSAGE_BYTES);
             (analyses, Vec::new())
@@ -1553,9 +1575,10 @@ mod tests {
     use std::io::{BufRead, Cursor, Read};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::java_stub_memo::{java_stub_generations, reset_java_stub_generations};
     use super::*;
     use crate::analysis::MAX_SOURCE_SET_NAVIGATION_ENTRIES;
+
+    mod java_headers;
 
     #[test]
     fn kotlinc_diagnostic_name_survives_the_worker_wire_boundary() {
@@ -1800,6 +1823,7 @@ mod tests {
             definitions: DefinitionIndex::wire_saturation_fixture(definitions),
             type_definitions: DefinitionIndex::wire_saturation_fixture(type_definitions),
             implementations: DefinitionIndex::wire_saturation_fixture(implementations),
+            workspace_references: DefinitionIndex::default(),
             library_definitions: LibraryDefinitionIndex::default(),
             document_symbols: DocumentSymbolIndex::default(),
             workspace_symbols: WorkspaceSymbolIndex::default(),
@@ -2597,6 +2621,10 @@ mod tests {
         assert_eq!(analysis.signature_help.entry_count(), 0);
         assert_eq!(analysis.semantic_tokens.entry_count(), 0);
         assert_eq!(analysis.definitions.entry_count(), 0);
+        assert!(
+            analysis.workspace_references.entry_count() > 0,
+            "a closed-file chunk keeps definition occurrences under a declaration identity"
+        );
         assert_eq!(analysis.type_definitions.entry_count(), 0);
         assert_eq!(analysis.implementations.entry_count(), 0);
         assert_eq!(analysis.document_symbols.entry_count(), 0);
@@ -2958,154 +2986,5 @@ fun combine(entries: Array<Entry>): String {
 
         let analyses = decode_worker_output(output);
         assert!(analyses[0].diagnostics.is_empty());
-    }
-
-    #[test]
-    fn worker_resolves_kotlin_reference_to_stubbed_java() {
-        let kotlin = "fun use(w: p.Widget) {}";
-        let request = format!(
-            "{{\"sources\":[{}],\"source_kinds\":[0],\"result_count\":1,\
-              \"java_sources\":[{}]}}",
-            serde_json::to_string(kotlin).unwrap(),
-            serde_json::to_string("package p; public class Widget {}").unwrap(),
-        );
-        let mut input = Vec::new();
-        write_framed(&mut input, request.as_bytes()).unwrap();
-        let mut output = Vec::new();
-        run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
-
-        let analyses = decode_worker_output(output);
-        let diagnostics = &analyses[0].diagnostics;
-        assert!(
-            !diagnostics.iter().any(|d| d.message.contains("Widget")),
-            "Widget resolved from stub: {diagnostics:?}"
-        );
-    }
-
-    #[test]
-    fn unchanged_java_stubs_are_generated_once() {
-        reset_java_stub_generations();
-        let java = "package p; public class Widget {}".to_string();
-        let source = "fun use(w: p.Widget) {}";
-        let mut input = Vec::new();
-        write_analysis_request(&mut input, source, std::slice::from_ref(&java), None);
-        write_analysis_request(&mut input, source, std::slice::from_ref(&java), None);
-        write_analysis_request(&mut input, source, &[], None);
-        write_analysis_request(&mut input, source, &[java], None);
-        let mut output = Vec::new();
-
-        run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
-
-        assert_eq!(java_stub_generations(), 1);
-        let analyses = decode_worker_analyses(output, 4);
-        assert_eq!(diagnostic_messages(&analyses[0]), Vec::<&str>::new());
-        assert_eq!(diagnostic_messages(&analyses[1]), Vec::<&str>::new());
-        assert_eq!(
-            diagnostic_messages(&analyses[2]),
-            vec!["unresolved reference 'p'."]
-        );
-        assert_eq!(diagnostic_messages(&analyses[3]), Vec::<&str>::new());
-    }
-
-    #[test]
-    fn a_java_source_change_rebuilds_stubs() {
-        reset_java_stub_generations();
-        let source = "fun use(w: p.Widget) {}";
-        let mut input = Vec::new();
-        write_analysis_request(
-            &mut input,
-            source,
-            &["package p; public class Widget {}".to_string()],
-            None,
-        );
-        write_analysis_request(
-            &mut input,
-            source,
-            &["package p; public class Gone {}".to_string()],
-            None,
-        );
-        let mut output = Vec::new();
-
-        run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
-
-        assert_eq!(java_stub_generations(), 2);
-        let analyses = decode_worker_analyses(output, 2);
-        assert_eq!(diagnostic_messages(&analyses[0]), Vec::<&str>::new());
-        assert_eq!(
-            diagnostic_messages(&analyses[1]),
-            vec!["unresolved reference 'Widget'."]
-        );
-    }
-
-    #[test]
-    fn unchanged_explicit_classpath_reuses_stubs_and_changed_contents_retry_fresh() {
-        reset_java_stub_generations();
-        let root = std::env::temp_dir().join(format!(
-            "krusty-worker-java-stub-contents-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        write_payload_class(&root);
-        let java = "package p; public class Widget { public q.Payload value() { return null; } }"
-            .to_string();
-        let source = "fun use(w: p.Widget) = w.value().token";
-        let classpath = [root.clone()];
-        let mut input = Vec::new();
-        write_analysis_request(
-            &mut input,
-            source,
-            std::slice::from_ref(&java),
-            Some(&classpath),
-        );
-        write_analysis_request(
-            &mut input,
-            source,
-            std::slice::from_ref(&java),
-            Some(&classpath),
-        );
-        let mutate_after = input.len() as u64;
-        write_analysis_request(
-            &mut input,
-            source,
-            std::slice::from_ref(&java),
-            Some(&classpath),
-        );
-        let class_file = root.join("q/Payload.class");
-        let mut reader = MutateAfter {
-            inner: Cursor::new(input),
-            after: mutate_after,
-            mutation: Some(Box::new(move || {
-                std::fs::remove_file(class_file).expect("remove payload class");
-            })),
-        };
-        let mut output = Vec::new();
-
-        run_analysis_worker(&mut reader, &mut output, Vec::new()).unwrap();
-
-        assert_eq!(java_stub_generations(), 1);
-        let analyses = decode_worker_analyses(output, 2);
-        assert_eq!(diagnostic_messages(&analyses[0]), Vec::<&str>::new());
-        assert_eq!(diagnostic_messages(&analyses[1]), Vec::<&str>::new());
-
-        let mut retry = Vec::new();
-        write_analysis_request(&mut retry, source, &[java], Some(&classpath));
-        let mut retry_output = Vec::new();
-        run_analysis_worker(&mut Cursor::new(retry), &mut retry_output, Vec::new()).unwrap();
-
-        assert_eq!(java_stub_generations(), 2);
-        let analyses = decode_worker_analyses(retry_output, 1);
-        assert_eq!(
-            diagnostic_messages(&analyses[0]),
-            vec!["unresolved reference 'token' on receiver of type 'Any'."]
-        );
-        std::fs::remove_dir_all(root).expect("remove classpath directory");
-    }
-
-    fn write_payload_class(root: &Path) {
-        let package = root.join("q");
-        std::fs::create_dir_all(&package).expect("create payload package");
-        let mut class = krusty::jvm::classfile::ClassWriter::new("q/Payload", "java/lang/Object");
-        class.add_field(krusty::jvm::classfile::ACC_PUBLIC, "token", "I");
-        std::fs::write(package.join("Payload.class"), class.finish()).expect("write payload class");
     }
 }

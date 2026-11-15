@@ -3,15 +3,19 @@
 
 mod annotation_values;
 pub use annotation_values::AnnotationValue;
+mod builtin_classes;
 pub(crate) use annotation_values::ExactFloat;
+pub use builtin_classes::REPRESENTED_BUILTINS;
 mod classifier_declarations;
 mod deprecation;
 mod diagnostic_rendering;
 mod intersection;
-pub(crate) use intersection::declaration_approximation;
+pub use intersection::declaration_approximation;
 mod overridden_declaration;
+mod qualified_name;
 mod semantic_call_role;
 mod semantic_callable_owner;
+mod suspension;
 pub use classifier_declarations::{
     ClassifierDeclarationFacts, ClassifierDeclarationKind, ClassifierDeclarationName,
     DeclaredValueClass, GeneratedClassifierFact, GeneratedClassifierKind,
@@ -25,6 +29,7 @@ pub use deprecation::{
 pub use overridden_declaration::OverriddenDeclaration;
 pub use semantic_call_role::{ConstNumericOperation, SemanticCallRole};
 pub use semantic_callable_owner::SemanticCallableOwner;
+pub use suspension::continuation_passing;
 mod annotation_targets;
 mod interning;
 mod spelling;
@@ -39,11 +44,12 @@ mod type_parameter_identity;
 pub use equality_mode::EqualityMode;
 
 pub(crate) use substitute::{
-    declares_formal, ty_canonicalize_params, ty_map_symbols, ty_rename_params, ty_subst,
-    ty_subst_alias_expansion, ty_subst_all, ty_subst_applied_arguments, ty_subst_formals,
-    ty_subst_keep_unbound, ty_subst_keep_unbound_closed, ty_subst_supertype_template,
-    ty_with_param_bounds, ty_with_transitive_param_bounds, TyParamBindings, TyParamKey,
+    declares_formal, ty_canonicalize_params, ty_map_symbols, ty_rename_params,
+    ty_subst_alias_expansion, ty_subst_formals, ty_subst_keep_unbound,
+    ty_subst_keep_unbound_closed, ty_subst_supertype_template, ty_with_param_bounds,
+    ty_with_transitive_param_bounds, TyParamBindings,
 };
+pub use substitute::{ty_subst, ty_subst_all, ty_subst_applied_arguments, TyParamKey};
 
 pub use crate::context_parameters::{CapturedContextKind, ContextParameterKind};
 pub use crate::inline_parameter_modifier::{InlineExpansionMode, InlineParameterModifier};
@@ -65,13 +71,19 @@ pub use thin_handles::{TyList, TyParamName};
 pub use ty_kind::TyKind;
 mod type_name_list;
 pub use type_name_list::TypeNameList;
+pub use type_parameter_identity::type_parameter_source_name;
 pub(crate) use type_parameter_identity::{
-    call_site_type_variable, constructor_type_parameter, declaration_type_parameter,
-    generated_function_type_parameter, hidden_captured_type_parameter,
-    is_nested_result_type_variable, metadata_type_parameter, nested_result_type_variable,
-    postponed_call_type_variable, postponed_variable_origin, ty_declared_at_call,
-    type_parameter_source_name, CallSiteIdentity,
+    call_site_type_variable, constructor_type_parameter, generated_function_type_parameter,
+    hidden_captured_type_parameter, is_nested_result_type_variable, metadata_type_parameter,
+    nested_result_type_variable, postponed_call_type_variable, postponed_variable_origin,
+    ty_declared_at_call, ty_mentions_call_variable, CallSiteIdentity,
 };
+// Backend unit tests build declaration type parameters directly; production code outside the
+// frontend never allocates one.
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use type_parameter_identity::declaration_type_parameter;
+#[cfg(any(test, feature = "test-support"))]
+pub use type_parameter_identity::declaration_type_parameter;
 
 /// Compile-time policy for Kotlin's `assert` operation. Every backend must guard, retain, or elide
 /// the checked operation while preserving lazy condition/message evaluation.
@@ -163,7 +175,7 @@ const BUILTIN_TYPE_NAMES: [(&str, TypeName); 16] = [
 ///
 /// `Unit` and `Nothing` are the enum variants. The scalar and `String` classifiers are the
 /// `Ty::Obj` constants. Every other name, including `kotlin/Array`, is `None`.
-pub(crate) fn builtin_semantic(name: TypeName) -> Option<Ty> {
+pub fn builtin_semantic(name: TypeName) -> Option<Ty> {
     Some(match name {
         KOTLIN_BOOLEAN => Ty::Boolean,
         KOTLIN_BYTE => Ty::Byte,
@@ -296,7 +308,7 @@ impl TypeName {
 
     /// Backend-oriented candidates for textual JVM nesting, deepest first. Semantic resolution
     /// continues to use the single exact [`Self::nested_owner`] relation.
-    pub(crate) fn existing_nested_owners(self) -> Vec<TypeName> {
+    pub fn existing_nested_owners(self) -> Vec<TypeName> {
         type_names()
             .existing_nested_owners(self.name_id())
             .into_iter()
@@ -305,19 +317,19 @@ impl TypeName {
     }
 
     /// The flattened JVM nested segment relative to an already-resolved enclosing classifier.
-    pub(crate) fn nested_segment_within(self, owner: TypeName) -> Option<&'static str> {
+    pub fn nested_segment_within(self, owner: TypeName) -> Option<&'static str> {
         type_names().nested_segment_within(self.name_id(), owner.name_id())
     }
 
     /// Backend boundary split for a nested classifier whose enclosing declaration is external to
     /// the current file. Semantic callers should keep using [`Self::nested_owner`].
-    pub(crate) fn jvm_nested_parts(self) -> Option<(String, String)> {
+    pub fn jvm_nested_parts(self) -> Option<(String, String)> {
         type_names().jvm_nested_parts(self.name_id())
     }
 
     /// JVM classfile spelling of this classifier identity. Source/metadata nesting separators are
     /// converted by the name tree; semantic callers should retain the identity instead.
-    pub(crate) fn jvm_binary_name(self) -> String {
+    pub fn jvm_binary_name(self) -> String {
         type_names().jvm_binary_name(self.name_id())
     }
 
@@ -550,7 +562,7 @@ impl fmt::Debug for Ty {
     }
 }
 
-pub(crate) fn stored_value_ty(ty: Ty) -> Ty {
+pub fn stored_value_ty(ty: Ty) -> Ty {
     if ty == Ty::Unit {
         Ty::obj("kotlin/Unit")
     } else {
@@ -672,10 +684,7 @@ impl Ty {
     /// Substitute known type parameters and erase an unbound parameter to its non-null upper bound.
     /// This is a type-shape operation used while publishing and specializing metadata; it is not an
     /// overload-selection decision.
-    pub(crate) fn substitute_erased<K: TyParamKey>(
-        self,
-        bindings: &crate::fx_hash::HashMap<K, Ty>,
-    ) -> Ty {
+    pub fn substitute_erased<K: TyParamKey>(self, bindings: &crate::fx_hash::HashMap<K, Ty>) -> Ty {
         match self.kind() {
             TyKind::TyParam(name, bound) | TyKind::Var(name, bound) => bindings
                 .get(name.as_str())
@@ -981,7 +990,7 @@ impl Ty {
     /// contributes `T & Any` ([`Ty::DefinitelyNotNull`]) rather than a copy whose bound was rewritten
     /// to `Any`: that copy is indistinguishable from a parameter declared `T : Any`. A parameter
     /// already bounded by non-null `Any` is contributed unchanged.
-    pub(crate) fn contributed_through_nullable_formal(self) -> Ty {
+    pub fn contributed_through_nullable_formal(self) -> Ty {
         let actual = self.non_null_keeping_mutability();
         match actual.kind() {
             TyKind::TyParam(_, bound) | TyKind::Var(_, bound)
@@ -1227,6 +1236,36 @@ impl Ty {
         }
     }
 
+    /// Whether this type mentions a call variable, or a type parameter for which `fixed` does not
+    /// hold. A type parameter lexically in scope names the enclosing declaration's own type and is
+    /// as determined as any classifier; any other one is still open.
+    pub fn mentions_open_ty_param(self, fixed: &dyn Fn(&str) -> bool) -> bool {
+        match self.kind() {
+            TyKind::TyParam(name, _) => !fixed(name.as_str()),
+            TyKind::Var(..) => true,
+            TyKind::DefinitelyNotNull(inner)
+            | TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner)
+            | TyKind::InProjection(inner)
+            | TyKind::OutProjection(inner)
+            | TyKind::StarProjection(inner)
+            | TyKind::RawProjection(inner) => inner.mentions_open_ty_param(fixed),
+            TyKind::Intersection(parts) => {
+                parts.iter().any(|part| part.mentions_open_ty_param(fixed))
+            }
+            TyKind::Obj(_, args) => args.iter().any(|a| a.mentions_open_ty_param(fixed)),
+            TyKind::Fun(signature) => {
+                signature.ret.mentions_open_ty_param(fixed)
+                    || signature
+                        .params
+                        .iter()
+                        .any(|p| p.mentions_open_ty_param(fixed))
+            }
+            _ => false,
+        }
+    }
+
     /// The name of a type-parameter type (`T`) or of a call's variable standing for one, else
     /// `None`.
     pub fn ty_param_name(self) -> Option<&'static str> {
@@ -1245,7 +1284,7 @@ impl Ty {
     }
 
     /// The upper bound carried by an occurrence of the type parameter identified by `name`.
-    pub(crate) fn type_parameter_occurrence_bound(self, name: &str) -> Option<Ty> {
+    pub fn type_parameter_occurrence_bound(self, name: &str) -> Option<Ty> {
         match self.kind() {
             TyKind::TyParam(candidate, bound) | TyKind::Var(candidate, bound) => {
                 (candidate == name).then_some(bound)
@@ -1512,7 +1551,7 @@ impl Ty {
     /// Render one type among the types named by the same diagnostic. Classifiers normally use their
     /// simple source name; colliding classifiers retain their package so the message distinguishes
     /// them.
-    pub(crate) fn source_name_with_type_parameter_in(
+    pub fn source_name_with_type_parameter_in(
         self,
         context: &[Ty],
         type_parameter: &dyn Fn(&str) -> String,
@@ -1892,6 +1931,11 @@ impl Ty {
         matches!(self, Ty::UByte | Ty::UShort | Ty::UInt | Ty::ULong)
     }
 
+    /// True for a builtin scalar classifier: a signed number, `Char`, `Boolean`, or unsigned.
+    pub fn is_builtin_scalar(self) -> bool {
+        self.is_numeric_or_char() || self == Ty::Boolean || self.is_unsigned()
+    }
+
     /// Whether a property of this type may carry metadata `HAS_CONSTANT`.
     ///
     /// kotlinc's `canBeUsedForConstVal`: the platform lower bound is a primitive, `String`, or an
@@ -2014,7 +2058,7 @@ pub(crate) fn semantic_value_parameter_ty(declared: Ty, is_vararg: bool) -> Ty {
 /// Whether `ty` mentions any of the named type parameters (`T` itself, `List<T>`, `(T) -> T`,
 /// `T?`). A pure `Ty` predicate shared by the checker (generic-shape classification) and lowering
 /// (generic-shape gates).
-pub(crate) fn ty_mentions_param<F: TyParamKey>(ty: Ty, names: &[F]) -> bool {
+pub fn ty_mentions_param<F: TyParamKey>(ty: Ty, names: &[F]) -> bool {
     match ty.kind() {
         TyKind::TyParam(name, _) | TyKind::Var(name, _) => declares_formal(names, &name),
         TyKind::DefinitelyNotNull(inner) => ty_mentions_param(inner, names),
@@ -2043,7 +2087,7 @@ pub(crate) fn ty_mentions_param<F: TyParamKey>(ty: Ty, names: &[F]) -> bool {
 /// Whether `ty` mentions ANY type parameter, whatever its identity. Semantic type-parameter names
 /// are checker-generated (`\0tp:…`), so a source-name list cannot match them — use this where the
 /// only question is "does a type variable appear at all".
-pub(crate) fn ty_mentions_any_param(ty: Ty) -> bool {
+pub fn ty_mentions_any_param(ty: Ty) -> bool {
     match ty.kind() {
         TyKind::TyParam(..) | TyKind::Var(..) => true,
         TyKind::Intersection(parts) => parts.iter().any(|part| ty_mentions_any_param(*part)),

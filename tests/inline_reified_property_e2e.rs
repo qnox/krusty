@@ -324,7 +324,7 @@ fn compile_files_diagnostics(
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diags,
     );
-    let backend = krusty::jvm::JvmBackend::new(cp);
+    let backend = krusty_jvm::JvmBackend::new(cp);
     let _ = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     if diags.diags.is_empty() {
         return "lowering/emit bailed without a diagnostic".to_string();

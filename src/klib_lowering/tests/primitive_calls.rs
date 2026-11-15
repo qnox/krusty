@@ -34,7 +34,11 @@ fn array_header_fixture(
     let contract = selected.class_contract().unwrap();
     let member = libraries
         .declaration_bodies()
-        .class_member_header(selected.identity(), &contract.signature)
+        .class_member_header(
+            selected.identity(),
+            &contract.signature,
+            Some(crate::libraries::KlibAccessorRole::Getter),
+        )
         .unwrap()
         .unwrap();
     let mut class: KlibIrClass = member.class.clone();
@@ -437,6 +441,42 @@ fn klib_primitive_planning_and_body_lowering_use_the_same_authenticated_shape() 
     assert!(DependencyBodyUnit::default()
         .lower_function(root, &bodies, &ordinary)
         .is_err());
+}
+
+#[test]
+fn checked_klib_property_facts_use_the_exact_property_name() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let owner = type_name("kotlin/CharSequence");
+    let classifier = libraries.classifier(owner).unwrap();
+    let property = &classifier.declared_callables["length"].properties()[0];
+    let identity = property.getter.external_identity.unwrap();
+    let realization = libraries.external_callable(identity).unwrap();
+    let selected = realization.klib_body_callable().unwrap();
+    let facts = KlibCalleeFacts::new([selected])
+        .with_builtin_implementation_facts(&libraries)
+        .unwrap();
+    let [implementation] = facts.builtin_implementation_facts()[&identity].as_ref() else {
+        panic!("CharSequence.length has one represented builtin implementation");
+    };
+    assert_eq!(implementation.receiver, Ty::String);
+    let declaration = implementation
+        .declaration
+        .as_ref()
+        .expect("String provides its own CharSequence.length implementation");
+    assert_eq!(declaration.operation, Some(CompilerIntrinsic::StringLength));
+    assert!(declaration.params.is_empty());
+    assert_eq!(declaration.ret, Ty::Int);
+
+    let expected = facts.builtin_implementation_facts()[&identity].clone();
+    let mut unit = DependencyBodyUnit::default();
+    unit.record_builtin_implementation_facts(&facts).unwrap();
+    assert_eq!(
+        unit.ir().external_builtin_implementations[&identity],
+        expected
+    );
 }
 
 #[test]

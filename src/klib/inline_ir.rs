@@ -128,7 +128,7 @@ fn prepared_function(
     if ir.suspend_funs.contains(&function) {
         return None;
     }
-    if ir.fn_varargs.contains_key(&function)
+    if ir.declared_parameters(function).vararg.is_some()
         || ir
             .declared_inline_modifiers(function)
             .iter()
@@ -203,7 +203,7 @@ fn prepared_function(
     if dispatch_receiver.is_some_and(|ty| !supported_type(ty, &generic.type_params)) {
         return None;
     }
-    let context_count = ir.fn_context_counts.get(&function).copied().unwrap_or(0);
+    let context_count = ir.declared_parameters(function).context_count;
     let extension_parameter = ir
         .extension_receiver_fns
         .contains(&function)
@@ -691,8 +691,8 @@ impl FileWriter {
     ) -> u32 {
         let boolean = self.ty(Ty::Boolean, parameters);
         let value_slot = usize::try_from(function.body.value_slot).expect("value slot fits usize");
-        let argument_ty = if function.dispatch_receiver.is_some() && value_slot == 0 {
-            function.dispatch_receiver.expect("slot zero is dispatch")
+        let argument_ty = if let (0, Some(dispatch)) = (value_slot, function.dispatch_receiver) {
+            dispatch
         } else {
             let index = value_slot - usize::from(function.dispatch_receiver.is_some());
             function.parameters[index].ty

@@ -11,7 +11,7 @@
 /// public KLIB signature, in an injective encoding (each string length-prefixed). Both the module
 /// that declares the member and every module implementing it compute it from the same published
 /// identity, never from a spelling.
-pub(crate) fn member_identity(member: &crate::libraries::KlibDependencyCallable) -> Vec<u8> {
+pub fn member_identity(member: &crate::libraries::KlibDependencyCallable) -> Vec<u8> {
     let mut bytes = Vec::new();
     identity_string(&mut bytes, &member.module);
     match &member.declaration {
@@ -26,6 +26,11 @@ pub(crate) fn member_identity(member: &crate::libraries::KlibDependencyCallable)
             bytes.extend_from_slice(&accessor.member_id().to_le_bytes());
             bytes.extend_from_slice(&accessor.mask().to_le_bytes());
         }
+        &crate::libraries::KlibDeclarationSignature::FileLocal { file, slot } => {
+            bytes.push(2);
+            bytes.extend_from_slice(&file.to_le_bytes());
+            bytes.extend_from_slice(&slot.to_le_bytes());
+        }
     }
     bytes
 }
@@ -35,7 +40,7 @@ pub(crate) fn member_identity(member: &crate::libraries::KlibDependencyCallable)
 /// the property's public KLIB signature. Either accessor names the same property, so a module
 /// that knows only the getter's identity and one that knows only the setter's agree. `None` for an
 /// identity that names no accessor.
-pub(crate) fn property_member_identity(
+pub fn property_member_identity(
     accessor: &crate::libraries::KlibDependencyCallable,
     setter: bool,
 ) -> Option<Vec<u8>> {

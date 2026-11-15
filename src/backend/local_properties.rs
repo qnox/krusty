@@ -24,7 +24,7 @@ fn accessor_callee(ir: &IrFile, accessor: crate::ir::FunId) -> Callee {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct RealizedLocalPropertyAccess {
+pub struct RealizedLocalPropertyAccess {
     pub operation: ExprId,
     pub target: PropertyId,
     pub read: bool,
@@ -39,7 +39,7 @@ struct CheckedPropertyAccess<'a> {
     operation: ExprId,
 }
 
-pub(crate) fn realize(ir: &mut IrFile) -> Result<Vec<RealizedLocalPropertyAccess>, PropertyId> {
+pub fn realize(ir: &mut IrFile) -> Result<Vec<RealizedLocalPropertyAccess>, PropertyId> {
     let mut realized = Vec::new();
     for raw in 0..ir.exprs.len() {
         let operation = raw as ExprId;
@@ -131,8 +131,10 @@ pub(crate) fn realize(ir: &mut IrFile) -> Result<Vec<RealizedLocalPropertyAccess
             }
             _ => None,
         };
-        if first_operand.is_some_and(|operand| ir.is_positionless(operand)) {
-            ir.mark_generated_operand_start(operation);
+        if let (Some(operand), Some(line)) = (first_operand, ir.source_line(operation)) {
+            if ir.is_positionless(operand) && line != 0 {
+                ir.build_operand_at_operation_start(operand, line);
+            }
         }
         ir.exprs[raw] = replacement;
         realized.push(RealizedLocalPropertyAccess {

@@ -16,12 +16,12 @@ use crate::ir::{
 
 /// The dependency callables and properties one checked file names, each once.
 #[derive(Debug, Default, Eq, PartialEq)]
-pub(crate) struct ReferencedDependencies {
+pub struct ReferencedDependencies {
     pub callables: BTreeSet<ExternalCallableId>,
     pub properties: BTreeSet<ExternalPropertyId>,
 }
 
-pub(crate) fn referenced_dependencies(ir: &IrFile) -> ReferencedDependencies {
+pub fn referenced_dependencies(ir: &IrFile) -> ReferencedDependencies {
     let mut referenced = ReferencedDependencies::default();
     for expression in &ir.exprs {
         referenced.expression(ir, expression);
@@ -105,6 +105,9 @@ impl ReferencedDependencies {
                 }
                 IrCallableReferenceTarget::External { declaration, .. } => {
                     self.callables.insert(*declaration);
+                }
+                IrCallableReferenceTarget::Property(property) => {
+                    self.property_reference(&property.target);
                 }
                 IrCallableReferenceTarget::Module(_)
                 | IrCallableReferenceTarget::Constructor { .. }
@@ -268,13 +271,15 @@ impl ReferencedDependencies {
             IrCheckedOperation::PropertyReference { target, .. } => {
                 self.property_reference(target);
             }
+            IrCheckedOperation::RangeConstruction { declaration, .. } => {
+                self.callables.extend(*declaration);
+            }
             IrCheckedOperation::Call { .. }
             | IrCheckedOperation::PropertyRead { .. }
             | IrCheckedOperation::PropertyWrite { .. }
             | IrCheckedOperation::LateinitFieldRead { .. }
             | IrCheckedOperation::BackingFieldRead { .. }
             | IrCheckedOperation::BackingFieldWrite { .. }
-            | IrCheckedOperation::RangeConstruction { .. }
             | IrCheckedOperation::ComparableRangeContains { .. }
             | IrCheckedOperation::IllegalProgressionStep { .. } => {}
         }

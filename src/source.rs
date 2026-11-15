@@ -75,6 +75,14 @@ impl SourceFragment {
     }
 }
 
+/// A top-level `expect` function or property that a common source binds by its own signature, and
+/// the source of the `actual` that replaces it everywhere that `actual` is seen.
+pub(crate) struct ReplacedExpect {
+    pub(crate) expect: crate::fir::DeclarationId,
+    pub(crate) actual: crate::fir::DeclarationId,
+    pub(crate) actual_source: u32,
+}
+
 /// A top-level `actual` that stands for an `expect` declared in another source.
 pub(crate) struct ExpectStandIn {
     pub(crate) actual: crate::fir::DeclarationId,
@@ -91,6 +99,11 @@ pub struct SourceFragments {
     alias_sources: crate::fx_hash::HashMap<crate::types::TypeName, u32>,
     /// The identities an `expect` classifier shares with the `actual typealias` actualizing it.
     aliased_expects: crate::fx_hash::HashSet<crate::types::TypeName>,
+    /// Each top-level `expect` function or property a common source binds by its own signature,
+    /// with the source of the `actual` replacing it. A source that sees that `actual` sees it in
+    /// the `expect`'s place.
+    replaced_expects:
+        crate::fx_hash::HashMap<crate::fir::DeclarationId, (crate::fir::DeclarationId, u32)>,
 }
 
 impl SourceFragments {
@@ -100,6 +113,7 @@ impl SourceFragments {
             expect_sources: Default::default(),
             alias_sources: Default::default(),
             aliased_expects: Default::default(),
+            replaced_expects: Default::default(),
         }
     }
 
@@ -110,8 +124,17 @@ impl SourceFragments {
         &mut self,
         expect_sources: impl IntoIterator<Item = ExpectStandIn>,
         aliased_expects: impl IntoIterator<Item = crate::types::TypeName>,
+        replaced_expects: impl IntoIterator<Item = ReplacedExpect>,
     ) {
         self.aliased_expects.extend(aliased_expects);
+        self.replaced_expects
+            .extend(replaced_expects.into_iter().map(
+                |ReplacedExpect {
+                     expect,
+                     actual,
+                     actual_source,
+                 }| (expect, (actual, actual_source)),
+            ));
         if self.fragments.iter().any(Option::is_some) {
             self.expect_sources.extend(expect_sources.into_iter().map(
                 |ExpectStandIn {
@@ -150,6 +173,22 @@ impl SourceFragments {
             && self.sees_alias(from, identity)
     }
 
+    /// Whether `declaration` is a top-level `expect` that an `actual` replaces wherever the
+    /// `actual` is seen: the two are one declaration, not two overloads.
+    pub(crate) fn is_replaced_expect(&self, declaration: crate::fir::DeclarationId) -> bool {
+        self.replaced_expects.contains_key(&declaration)
+    }
+
+    /// The `actual` replacing the `expect` `declaration` a common source bound, when it is one.
+    pub(crate) fn replacing_actual(
+        &self,
+        declaration: crate::fir::DeclarationId,
+    ) -> Option<crate::fir::DeclarationId> {
+        self.replaced_expects
+            .get(&declaration)
+            .map(|&(actual, _)| actual)
+    }
+
     /// Whether a reference in source `from` sees the `typealias` `identity`.
     pub(crate) fn sees_alias(&self, from: Option<u32>, identity: crate::types::TypeName) -> bool {
         self.sees(from, self.alias_sources.get(&identity).copied(), None)
@@ -164,6 +203,16 @@ impl SourceFragments {
         declared_in: Option<u32>,
         declaration: Option<crate::fir::DeclarationId>,
     ) -> bool {
+        if let Some(&(_, actual_source)) =
+            declaration.and_then(|declaration| self.replaced_expects.get(&declaration))
+        {
+            let fragment =
+                |source: Option<u32>| self.fragments.get(source? as usize).copied().flatten();
+            if from.is_none() || SourceFragment::sees(fragment(from), fragment(Some(actual_source)))
+            {
+                return false;
+            }
+        }
         let declared_in = declaration
             .and_then(|declaration| self.expect_sources.get(&declaration).copied())
             .or(declared_in);

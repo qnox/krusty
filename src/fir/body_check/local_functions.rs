@@ -399,12 +399,18 @@ impl BodyFirChecker<'_> {
                     })
                 })
                 .transpose()?,
+            // The call's arguments address the value parameters after the context parameters, so
+            // the selected vararg slot is counted among those.
             arguments: self.call_arguments_with_context(
                 expression,
                 arguments,
                 &selected.sig.params,
                 selected.context_args.iter().map(Some),
-                selected.sig.vararg_index,
+                self.declared_argument_vararg(
+                    self.file.expr_span(expression),
+                    selected.sig.vararg_index,
+                    selected.sig.context_count,
+                )?,
             )?,
             parameter_types: self
                 .published_parameter_types(self.file.expr_span(expression), &selected.sig.params)?,

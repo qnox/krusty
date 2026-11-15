@@ -47,6 +47,7 @@ tasks.test {
     // The tests drive a real krusty binary: -Pkrusty.binary=<path> or KRUSTY_BIN.
     val binary = providers.gradleProperty("krusty.binary").orElse(providers.environmentVariable("KRUSTY_BIN"))
     inputs.property("krustyBinary", binary.orElse(""))
+    systemProperty("krusty.kotlinVersion", kotlinVersion.get())
     doFirst {
         systemProperty("krusty.binary", binary.orNull ?: throw GradleException("set -Pkrusty.binary or KRUSTY_BIN"))
     }

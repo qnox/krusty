@@ -517,7 +517,7 @@ impl DeserializeBody<'_> {
                 value: None,
             });
             branches.push((None, raise_blk));
-            let dispatch = ir.add_expr(IrExpr::When { branches });
+            let dispatch = ir.add_when(branches, Ty::Unit);
             let loop_body = ir.add_expr(IrExpr::Block {
                 stmts: vec![set_i, dispatch],
                 value: None,
@@ -555,9 +555,7 @@ impl DeserializeBody<'_> {
                 stmts: vec![whilexpr],
                 value: None,
             });
-            stmts.push(ir.add_expr(IrExpr::When {
-                branches: vec![(Some(sequential), fast), (None, driven)],
-            }));
+            stmts.push(ir.add_when(vec![(Some(sequential), fast), (None, driven)], Ty::Unit));
             // endStructure
             let dend = this_desc(ir);
             let cend = composite(ir);

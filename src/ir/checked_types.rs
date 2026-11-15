@@ -26,10 +26,7 @@ impl IrFile {
     /// A nested lambda's captures still read this namespace, but its inline body has the lambda
     /// function's own slots. [`value_namespace_expressions`] observes that boundary, so two
     /// unrelated slot zeroes never enter the same inventory.
-    pub(crate) fn declared_value_slot_types(
-        &self,
-        root: ExprId,
-    ) -> crate::fx_hash::HashMap<u32, Ty> {
+    pub fn declared_value_slot_types(&self, root: ExprId) -> crate::fx_hash::HashMap<u32, Ty> {
         let mut declarations = crate::fx_hash::HashMap::default();
         let mut declare = |slot, ty| {
             let previous = declarations.insert(slot, ty);
@@ -57,6 +54,39 @@ impl IrFile {
             }
         }
         declarations
+    }
+
+    /// The initializer of each local value slot in `root`'s value namespace that one `Variable`
+    /// declares with an initializer and nothing assigns again: every read of the slot yields the
+    /// value that initializer computed.
+    pub fn single_assignment_initializers(
+        &self,
+        root: ExprId,
+    ) -> crate::fx_hash::HashMap<u32, ExprId> {
+        let mut initializers = crate::fx_hash::HashMap::default();
+        let mut reassigned = crate::fx_hash::HashSet::default();
+        for expression in super::value_namespace_expressions(self, root) {
+            match self.expr(expression) {
+                IrExpr::Variable {
+                    index,
+                    init: Some(init),
+                    ..
+                } => {
+                    if initializers.insert(*index, *init).is_some() {
+                        reassigned.insert(*index);
+                    }
+                }
+                IrExpr::Variable {
+                    index, init: None, ..
+                }
+                | IrExpr::SetValue { var: index, .. } => {
+                    reassigned.insert(*index);
+                }
+                _ => {}
+            }
+        }
+        initializers.retain(|slot, _| !reassigned.contains(slot));
+        initializers
     }
 
     /// The checked type of the value `id` yields, if lowering recorded one.

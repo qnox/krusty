@@ -34,29 +34,6 @@ impl InRangeLowering {
 }
 
 impl BodyLowering<'_> {
-    pub(super) fn range_expression(
-        &mut self,
-        operation: FirRangeOperation,
-        start: FirExprId,
-        start_type: Ty,
-        end: FirExprId,
-        end_type: Ty,
-        result: Ty,
-    ) -> Result<ExprId, FirLoweringFailure> {
-        let start = self.expression(start)?;
-        let end = self.expression(end)?;
-        Ok(self.ir.add_expr(IrExpr::Checked(Box::new(
-            IrCheckedOperation::RangeConstruction {
-                operation,
-                start,
-                start_type,
-                end,
-                end_type,
-                result,
-            },
-        ))))
-    }
-
     pub(super) fn in_range_expression(
         &mut self,
         range: InRangeLowering,

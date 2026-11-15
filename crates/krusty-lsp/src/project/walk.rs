@@ -5,7 +5,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-const IGNORED_DIRECTORIES: &[&str] = &[
+/// Directory names that never hold a module's own compilable sources.
+///
+/// `testData` is the important one: IntelliJ and the Kotlin compiler keep thousands of deliberately
+/// malformed Kotlin files there, often under a declared source root. Indexing them makes a project
+/// look like it failed to open and drowns navigation in fixture errors. `buildSrc` and
+/// `build-logic` are real Gradle source trees and are not in this list. The parity scan uses the
+/// same predicate, so the editor and the metric agree on what a source is.
+pub const IGNORED_DIRECTORIES: &[&str] = &[
     ".git",
     ".gradle",
     ".idea",
@@ -13,6 +20,9 @@ const IGNORED_DIRECTORIES: &[&str] = &[
     "node_modules",
     "out",
     "target",
+    "testData",
+    "test-data",
+    "testdata",
 ];
 
 /// Upper bound on walkers.
@@ -27,7 +37,7 @@ const MAX_WALK_THREADS: usize = 16;
 /// pays for a thread it did not need.
 const PARALLEL_WALK_THRESHOLD: usize = 16;
 
-pub(super) fn is_ignored_directory(path: &Path) -> bool {
+pub fn is_ignored_directory(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return true;
     };
@@ -525,6 +535,9 @@ mod tests {
         let kept = tree.write("src/Kept.kt", "class Kept\n");
         tree.write("build/Generated.kt", "class Generated\n");
         tree.write("target/Stale.kt", "class Stale\n");
+        tree.write("src/testData/Broken.kt", "class Broken\n");
+        tree.write("src/test-data/Broken.kt", "class Broken\n");
+        tree.write("src/testdata/Broken.kt", "class Broken\n");
         let build_src = tree.write("buildSrc/src/Plugin.kt", "class Plugin\n");
 
         let (found, failed) = walk(tree.root(), true, &[]);
@@ -533,6 +546,22 @@ mod tests {
         let mut expected = vec![kept, build_src];
         expected.sort();
         assert_eq!(found, expected);
+    }
+
+    #[test]
+    fn a_source_root_named_test_data_keeps_its_own_sources() {
+        let tree = TempTree::new("walk-testdata-root");
+        let root = tree.directory("tools/apiDump/testData");
+        let kept = tree.write("tools/apiDump/testData/src/Kept.kt", "class Kept\n");
+        tree.write(
+            "tools/apiDump/testData/src/testData/Broken.kt",
+            "class Broken\n",
+        );
+
+        let (found, failed) = walk(&root, true, &[]);
+
+        assert!(!failed);
+        assert_eq!(found, vec![kept]);
     }
 
     #[test]

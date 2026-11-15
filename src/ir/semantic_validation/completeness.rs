@@ -1,11 +1,11 @@
 //! Common-IR facts a backend consumes as complete.
 //!
 //! A backend realizes a property from its layout, a captured mutable local from its recorded
-//! holder parameter, and an arithmetic operator's answer at its recorded result type. It does not
-//! look for any of them anywhere else: not by an accessor's or field's spelling, not by scanning a
-//! body for the holder operations it happens to perform, and not by re-deriving Kotlin's numeric
-//! promotion from the operands. So common IR proves all three complete before it crosses into a
-//! backend.
+//! holder parameter, and an arithmetic operator's or a value `when`'s answer at its recorded result
+//! type. It does not look for any of them anywhere else: not by an accessor's or field's spelling,
+//! not by scanning a body for the holder operations it happens to perform, not by re-deriving
+//! Kotlin's numeric promotion from the operands, and not by joining a `when`'s branches. So common
+//! IR proves them complete before it crosses into a backend.
 
 use crate::fir::{FirPropertyReferenceTarget, PropertyId, SourceFileId};
 
@@ -22,18 +22,23 @@ pub enum IncompleteIrFact {
     SharedCaptureParameter { function: FunId, parameter: u32 },
     /// An arithmetic, bitwise or shift `PrimitiveBinOp` has no recorded result type.
     ArithmeticResult(ExprId),
+    /// A `when` with an `else` has no recorded result type.
+    WhenResult(ExprId),
 }
 
 impl IrFile {
     /// Prove that every property this file declares or references from its own declarations has a
     /// layout, that every parameter a function uses as a shared capture holder is recorded, and
-    /// that every arithmetic operator has its selected result type recorded.
+    /// that every arithmetic operator and value `when` has its result type recorded.
     /// `source` is the file this common IR was lowered from.
     pub fn validate_complete_facts(&self, source: SourceFileId) -> Result<(), IncompleteIrFact> {
         self.validate_property_layouts(source)?;
         self.validate_shared_capture_parameters()?;
-        match self.unrecorded_arithmetic_result() {
-            Some(expression) => Err(IncompleteIrFact::ArithmeticResult(expression)),
+        if let Some(expression) = self.unrecorded_arithmetic_result() {
+            return Err(IncompleteIrFact::ArithmeticResult(expression));
+        }
+        match self.unrecorded_when_result() {
+            Some(expression) => Err(IncompleteIrFact::WhenResult(expression)),
             None => Ok(()),
         }
     }

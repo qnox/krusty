@@ -1,21 +1,12 @@
 //! Lower checked type operations whose semantics require control flow.
 
 use crate::fir::FirExprId;
-use crate::ir::{ExprId, IrBinOp, IrConst, IrExpr, IrTypeOp};
-use crate::types::{stored_value_ty, Ty, TyKind};
+use crate::ir::{ExprId, IrBinOp, IrConst, IrExpr};
+use crate::types::{Ty, TyKind};
 
 use super::{BodyLowering, FirLoweringFailure};
 
-/// The language-defined answer for an instance check which does not depend on the operand.
-fn settled_instance_answer(target: Ty) -> Option<bool> {
-    (target.non_null().canonical_semantic() == Ty::Nothing).then_some(false)
-}
-
-/// kotlin IR's `IrType.isNullable()`: a nullable or flexible occurrence, or a type parameter whose
-/// bound admits `null`. A definitely-non-null `T & Any` does not.
-fn admits_null_at_runtime(ty: Ty) -> bool {
-    ty.admits_null() || (ty.is_ty_param() && ty.upper_bound_admits_null())
-}
+use crate::ir::admits_null_at_runtime;
 
 impl BodyLowering<'_> {
     /// `operand is target` (or `!is`), with the one case the LANGUAGE settles folded.
@@ -44,31 +35,7 @@ impl BodyLowering<'_> {
         operand: crate::ir::ExprId,
         target: crate::types::Ty,
     ) -> crate::ir::ExprId {
-        if let Some(answer) = settled_instance_answer(target) {
-            let answer = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(if negated {
-                !answer
-            } else {
-                answer
-            })));
-            let block = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![operand],
-                value: Some(answer),
-            });
-            // This synthesized value-bearing block has no source FIR node whose finalization can
-            // attach the result of the settled semantic check.
-            self.ir.set_logical_type(block, Ty::Boolean);
-            return block;
-        }
-        let op = if negated {
-            IrTypeOp::NotInstanceOf
-        } else {
-            IrTypeOp::InstanceOf
-        };
-        self.ir.add_expr(IrExpr::TypeOp {
-            op,
-            arg: operand,
-            type_operand: target,
-        })
+        self.ir.instance_check(negated, operand, target)
     }
 
     /// `operand is target` (or `!is`) as kotlinc's `TypeOperatorLowering.lowerInstanceOf` shapes
@@ -96,13 +63,21 @@ impl BodyLowering<'_> {
         if self.is_reified_type_parameter(target) {
             return self.instance_check(negated, operand, target);
         }
-        if admits_null_at_runtime(operand_type) && admits_null_at_runtime(target) {
-            let test = self.null_or_instance(operand, target.non_null());
-            return if negated {
-                self.ir.add_negation(test)
-            } else {
-                test
-            };
+        if admits_null_at_runtime(target) {
+            let next_temporary = &mut self.next_temporary;
+            return self.ir.nullable_target_type_test(
+                negated,
+                operand,
+                operand_type,
+                target,
+                || {
+                    let temporary = *next_temporary;
+                    *next_temporary = next_temporary
+                        .checked_add(1)
+                        .expect("too many FIR lowering temporaries");
+                    temporary
+                },
+            );
         }
         if admits_null_at_runtime(operand_type) && same_erased_upper_bound {
             let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
@@ -119,52 +94,6 @@ impl BodyLowering<'_> {
         self.instance_check(negated, operand, target.non_null())
     }
 
-    /// `irLetS(operand) { tmp -> tmp == null || tmp is target }`: a stable read is tested in place,
-    /// any other operand is evaluated once into an `Any?` temporary.
-    fn null_or_instance(&mut self, operand: ExprId, target: Ty) -> ExprId {
-        let (declaration, slot) = match self.stable_value_read(operand) {
-            Some(slot) => (None, slot),
-            None => {
-                let temporary = self.allocate_temporary();
-                let declaration = self.ir.add_expr(IrExpr::Variable {
-                    index: temporary,
-                    ty: Ty::nullable(Ty::obj("kotlin/Any")),
-                    init: Some(operand),
-                    named: false,
-                });
-                self.ir.safe_cast_temporaries.insert(declaration);
-                (Some(declaration), temporary)
-            }
-        };
-        let nullable_read = self.ir.add_expr(IrExpr::GetValue(slot));
-        let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-        let null_test = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::RefEq,
-            lhs: nullable_read,
-            rhs: null,
-        });
-        let instance_read = self.ir.add_expr(IrExpr::GetValue(slot));
-        let instance_test = self.instance_check(false, instance_read, target);
-        // `JvmBackendContext.oror` is a plain `when`, not a source `||`: its true branch is a
-        // constant and its else branch the instance test's value.
-        let true_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
-        let test = self.ir.add_expr(IrExpr::When {
-            branches: vec![(Some(null_test), true_value), (None, instance_test)],
-        });
-        self.ir.set_logical_type(test, Ty::Boolean);
-        match declaration {
-            Some(declaration) => {
-                let block = self.ir.add_expr(IrExpr::Block {
-                    stmts: vec![declaration],
-                    value: Some(test),
-                });
-                self.ir.set_logical_type(block, Ty::Boolean);
-                block
-            }
-            None => test,
-        }
-    }
-
     /// Whether `target` (or `target?`) is a reified type parameter, whose test an inline call site
     /// specializes and therefore keeps as written.
     fn is_reified_type_parameter(&self, target: Ty) -> bool {
@@ -177,9 +106,8 @@ impl BodyLowering<'_> {
             .is_some_and(|header| header.flags.is_reified())
     }
 
-    /// Lower `value as? T` to one evaluation followed by an `is T` guard, a checked cast on the
-    /// successful branch, and `null` otherwise. `IrTypeOp::SafeCast` cannot be a backend no-op: the
-    /// guarded shape is language semantics and therefore belongs in common lowering.
+    /// Lower `value as? T` through the shape every common-IR producer shares
+    /// ([`crate::ir::IrFile::safe_cast`]).
     pub(super) fn safe_cast_expression(
         &mut self,
         operand: FirExprId,
@@ -191,91 +119,15 @@ impl BodyLowering<'_> {
             .ok_or(FirLoweringFailure::MissingExpression(operand))?
             .ty
             .get();
-        let mut value = self.expression(operand)?;
-        // A safe cast to either `Nothing` or `Nothing?` can never produce a non-null value. Fold
-        // the whole cast here, while the semantic target is still available: retaining the generic
-        // guarded `when` would leave an unreachable cast branch whose JVM stack type (`Object`)
-        // still has to verify against the null-only result branch. The operand remains a statement,
-        // so its effects and divergence are preserved exactly once.
-        if settled_instance_answer(target) == Some(false) {
-            let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-            return Ok(self.ir.add_expr(IrExpr::Block {
-                stmts: vec![value],
-                value: Some(null),
-            }));
-        }
-        let storage_type = if operand_type == Ty::Unit {
-            let unit = self.ir.add_expr(IrExpr::UnitInstance);
-            value = self.ir.add_expr(IrExpr::Block {
-                stmts: vec![value],
-                value: Some(unit),
-            });
-            Ty::obj("kotlin/Unit")
-        } else if operand_type.scalar_value_repr().is_some() {
-            let any = Ty::obj("kotlin/Any");
-            value = self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: value,
-                type_operand: any,
-            });
-            any
-        } else {
-            stored_value_ty(operand_type)
-        };
-
-        // A safe cast to a primitive tests and retains its nullable wrapper. Reference targets and
-        // erased type parameters already have a reference representation of their own.
-        let target = target.non_null();
-        let runtime_target = if target == Ty::Unit {
-            Ty::obj("kotlin/Unit")
-        } else {
-            target.nullable_boxed().unwrap_or(target)
-        };
-        // kotlinc's `irLetS`: a read of an immutable binding is tested and cast in place; any other
-        // operand is evaluated once into a temporary.
-        let (declaration, operand_slot) = match self.stable_value_read(value) {
-            Some(slot) => (None, slot),
-            None => {
-                let temporary = self.allocate_temporary();
-                let declaration = self.ir.add_expr(IrExpr::Variable {
-                    index: temporary,
-                    ty: storage_type,
-                    init: Some(value),
-                    named: false,
-                });
-                self.ir.safe_cast_temporaries.insert(declaration);
-                (Some(declaration), temporary)
-            }
-        };
-        let read = self.ir.add_expr(IrExpr::GetValue(operand_slot));
-        let matches = self.instance_check(false, read, runtime_target);
-        let read = self.ir.add_expr(IrExpr::GetValue(operand_slot));
-        // `as? T` yields `T?`. A concrete primitive already names its boxed wrapper (`Int?`).
-        // A type parameter does not: an inline call later substitutes `T` with `Int`, and a
-        // success cast recorded as bare `T` unboxes that match and then unboxes the `null`
-        // mismatch. Recording `T?` specializes to `Int?`, which stays a boxed reference.
-        let cast_target = if runtime_target.is_ty_param() {
-            Ty::nullable(runtime_target)
-        } else {
-            runtime_target
-        };
-        let cast = self.ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
-            arg: read,
-            type_operand: cast_target,
-        });
-        let null = self.ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
-        let result = self.ir.add_expr(IrExpr::When {
-            branches: vec![(Some(matches), cast), (None, null)],
-        });
-        self.ir.set_logical_type(result, Ty::nullable(cast_target));
-        Ok(match declaration {
-            Some(declaration) => self.ir.add_expr(IrExpr::Block {
-                stmts: vec![declaration],
-                value: Some(result),
-            }),
-            None => result,
-        })
+        let value = self.expression(operand)?;
+        let next_temporary = &mut self.next_temporary;
+        Ok(self.ir.safe_cast(value, operand_type, target, || {
+            let temporary = *next_temporary;
+            *next_temporary = temporary
+                .checked_add(1)
+                .expect("too many FIR lowering temporaries");
+            temporary
+        }))
     }
 }
 
@@ -289,7 +141,7 @@ mod tests {
     use crate::types::Ty;
 
     use super::super::lower_body;
-    use super::settled_instance_answer;
+    use crate::ir::settled_instance_answer;
 
     fn resolved(ty: Ty) -> ResolvedTy {
         ResolvedTy::new(ty).unwrap()

@@ -47,11 +47,12 @@ pub struct KlibStamp {
 impl KlibStamp {
     /// What `compiler` stamps on a library compiled at source-language level `language`.
     ///
-    /// Read off `kotlinc-native -p library -Xmetadata-klib -language-version <language>`: 2.4.0 and
-    /// 2.4.10 stamp `1.4.1` below language 2.3, and 2.4.20 stamps the language level itself. Keyed
-    /// by exact releases, as the supported language levels are.
+    /// Read off `kotlinc-native -p library -Xmetadata-klib -language-version <language>`: the
+    /// language level itself, or `1.4.1` below language 2.3 on a release with
+    /// [`crate::kotlin_version::Quirk::KlibLegacyMetadataVersionBelowLanguage23`].
     pub fn new(compiler: KotlinVersion, language: LanguageVersion) -> Self {
-        let legacy_stamp = matches!(compiler, KotlinVersion::V2_4_0 | KotlinVersion::V2_4_10)
+        let legacy_stamp = crate::kotlin_version::Quirks::of_release(compiler)
+            .has(crate::kotlin_version::Quirk::KlibLegacyMetadataVersionBelowLanguage23)
             && language < LanguageVersion::V2_3;
         Self {
             compiler,
@@ -94,8 +95,8 @@ pub struct KlibWriter {
 impl KlibWriter {
     /// A current Native metadata-library container for cross-module tests that only care about
     /// archive structure or manifest authority, not version stamping itself.
-    #[cfg(test)]
-    pub(crate) fn native_test_fixture(unique_name: &str) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn native_test_fixture(unique_name: &str) -> Self {
         Self::new(
             unique_name,
             KlibStamp::new(KotlinVersion::V2_4_20, LanguageVersion::V2_4),

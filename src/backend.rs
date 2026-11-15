@@ -2,55 +2,53 @@
 //!
 //! A backend consumes checked frontend output and emits target artifacts.
 
-pub(crate) mod class_tables;
-pub(crate) mod construction_entries;
+pub mod class_names;
+pub mod class_tables;
+pub mod construction_entries;
 mod constructor_selection;
-pub(crate) mod coroutines;
-pub(crate) mod counted_loops;
-pub(crate) mod default_arguments;
+pub mod coroutines;
+pub mod counted_loops;
+pub mod default_arguments;
 mod dependency_accessor;
 mod dependency_call_shape;
 mod dependency_facts;
 mod dependency_metadata;
 mod dependency_signature;
-pub(crate) mod dispatch_entries;
+pub mod dispatch_entries;
 mod entry;
-pub(crate) mod enums;
-pub(crate) mod interface_identity;
-pub(crate) mod local_properties;
+pub mod enums;
+pub mod instance_links;
+pub mod interface_identity;
+pub mod local_properties;
 mod module_facts;
-pub(crate) mod property_entries;
+pub mod module_links;
+pub mod property_entries;
+pub mod range_constructions;
 mod source_class_members;
-pub(crate) mod value_classes;
+pub mod value_classes;
 
-pub(crate) use constructor_selection::selected_constructor;
-pub(crate) use dependency_call_shape::{
-    DeclaredOperandRoles, DependencyCallShape, DependencyExportCall,
-};
-#[cfg(test)]
-pub(crate) use dependency_facts::referenced_dependencies;
+pub use crate::fir::{BuiltinImplementation, BuiltinOverrideDeclaration};
+pub use constructor_selection::selected_constructor;
+pub use dependency_call_shape::{DeclaredOperandRoles, DependencyCallShape, DependencyExportCall};
+#[cfg(any(test, feature = "test-support"))]
+pub use dependency_facts::referenced_dependencies;
 pub use dependency_facts::{
     BackendCallableFact, BackendCompilerIntrinsic, BackendPropertyFact, BackendSemanticCallRole,
     CheckedBackendCallables, DependencyClassifier, DependencyFactError, DependencyGetterSignature,
 };
-pub(crate) use dependency_metadata::{
-    authenticated_singleton_receiver, has_standalone_dependency_code,
-    inert_staged_singleton_bindings,
-};
+pub(crate) use dependency_metadata::has_standalone_dependency_code;
+pub use dependency_metadata::KlibDependencyCallable;
+pub use dependency_metadata::{authenticated_singleton_receiver, inert_staged_singleton_bindings};
 pub use dependency_metadata::{
-    DependencyExportSignatures, DependencyMemberReceiver, DependencyMetadata,
+    DependencyExportSignatures, DependencyMemberReceiver, DependencyMetadata, EnumConstant,
     SingletonExtensionUnreadReceiver, SingletonMemberReceiver,
 };
-pub(crate) use dependency_metadata::{
-    ExportedConstructor, ExportedPropertyAccessor, KlibDependencyCallable,
-};
-pub(crate) use dependency_signature::{
-    instantiate_dependency_signature, DependencyFunctionSignature,
-};
+pub(crate) use dependency_metadata::{ExportedConstructor, ExportedPropertyAccessor};
+pub use dependency_signature::{instantiate_dependency_signature, DependencyFunctionSignature};
 
 /// The parameter form [`Entry::selected`] reports beside the selected function.
-pub(crate) use crate::ir::MainEntryParameters;
-pub(crate) use entry::ProgramEntry;
+pub use crate::ir::MainEntryParameters;
+pub use entry::ProgramEntry;
 pub use entry::{Entry, BOX_RESULT_FRAME};
 
 pub use module_facts::{
@@ -129,6 +127,13 @@ pub trait Backend {
     /// Whether this backend emits compiler-owned executable bodies selected from dependencies.
     /// Metadata writers leave this disabled: their output describes the source module only.
     fn emits_dependency_support(&self) -> bool {
+        false
+    }
+
+    /// Whether this backend lowers suspend functions on common IR with the shared coroutine
+    /// passes, and so calls the stdlib declarations the handoff selects for them
+    /// ([`crate::ir::IrCoroutineRuntime`]). A backend with its own coroutine pass leaves this off.
+    fn lowers_coroutines_on_common_ir(&self) -> bool {
         false
     }
 

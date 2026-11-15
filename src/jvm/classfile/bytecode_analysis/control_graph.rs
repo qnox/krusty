@@ -9,7 +9,7 @@ use crate::jvm::inline::{BranchTarget, Insn};
 /// One exception-table entry in INSTRUCTION indices: `[start, end)` is protected, `handler` is the
 /// entry point. The catch type is irrelevant to control flow — any of them may be taken.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Handler {
+pub struct Handler {
     pub start: usize,
     pub end: usize,
     pub handler: usize,
@@ -20,7 +20,7 @@ pub(crate) struct Handler {
 /// They are separate because a kill does not apply along an exceptional edge: the throw may happen
 /// before the store that would have killed the local completes, so a backward analysis must let the
 /// handler's demand through unfiltered.
-pub(crate) struct ControlGraph {
+pub struct ControlGraph {
     normal: Vec<Vec<usize>>,
     exceptional: Vec<Vec<usize>>,
     /// One past the last instruction — the virtual exit. A `goto` to it is how the unified inline
@@ -37,7 +37,7 @@ impl ControlGraph {
     /// `None` when the body uses the deprecated subroutine instructions (`jsr`/`jsr_w`/`ret`),
     /// whose successor relation is not expressible here. No Kotlin compiler emits them; refusing is
     /// what keeps that assumption honest rather than silently analyzing a wrong graph.
-    pub(crate) fn build(insns: &[Insn], handlers: &[Handler]) -> Option<ControlGraph> {
+    pub fn build(insns: &[Insn], handlers: &[Handler]) -> Option<ControlGraph> {
         let exit = insns.len();
         let mut normal = vec![Vec::new(); exit + 1];
         let mut exceptional = vec![Vec::new(); exit + 1];
@@ -104,15 +104,15 @@ impl ControlGraph {
         })
     }
 
-    pub(crate) fn exit(&self) -> usize {
+    pub fn exit(&self) -> usize {
         self.exit
     }
 
-    pub(crate) fn normal_successors(&self, index: usize) -> &[usize] {
+    pub fn normal_successors(&self, index: usize) -> &[usize] {
         self.normal.get(index).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    pub(crate) fn exceptional_successors(&self, index: usize) -> &[usize] {
+    pub fn exceptional_successors(&self, index: usize) -> &[usize] {
         self.exceptional
             .get(index)
             .map(Vec::as_slice)
@@ -121,7 +121,7 @@ impl ControlGraph {
 
     /// Instruction indices reachable from entry, in reverse post-order — the visit order that makes
     /// a backward fixpoint converge in few sweeps.
-    pub(crate) fn reverse_post_order(&self) -> Vec<usize> {
+    pub fn reverse_post_order(&self) -> Vec<usize> {
         let mut order = Vec::new();
         let mut state = vec![0u8; self.exit + 1]; // 0 unseen, 1 on stack, 2 done
         let mut stack = vec![(0usize, 0usize)];

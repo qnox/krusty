@@ -183,7 +183,7 @@ pub(in crate::resolve) fn report_inapplicable_callable_candidates(
                         param_names: &candidate.call_sig.param_names,
                         param_defaults: &candidate.call_sig.param_defaults,
                         required: candidate.call_sig.required,
-                        vararg: candidate.call_sig.vararg,
+                        vararg_index: candidate.call_sig.vararg_index,
                         context_count: candidate.context_count,
                         ret: candidate.callable.ret,
                         source_display: checker
@@ -328,7 +328,7 @@ pub(in crate::resolve) fn report_inapplicable_callable_candidates(
                     param_names: &candidate.call_sig.param_names,
                     param_defaults: &candidate.call_sig.param_defaults,
                     required: candidate.call_sig.required,
-                    vararg: candidate.call_sig.vararg,
+                    vararg_index: candidate.call_sig.vararg_index,
                     context_count: candidate.context_count,
                     ret: candidate.callable.ret,
                     source_display: checker
@@ -417,6 +417,20 @@ pub(in crate::resolve) fn report_inapplicable_callable_candidates(
     if displays.is_empty() {
         return reported_mapping_error;
     }
+    if let Some(message) = explicit_bound_lambda_rejection(
+        checker,
+        name,
+        &candidates,
+        args,
+        argument_names,
+        trailing_lambda,
+        &explicit_type_args,
+    ) {
+        checker
+            .diags
+            .error(checker.call_callee_name_span(call), message);
+        return true;
+    }
     displays.sort_unstable();
     let mut message = String::with_capacity(prefix.len() + display_bytes);
     message.push_str(prefix);
@@ -428,4 +442,153 @@ pub(in crate::resolve) fn report_inapplicable_callable_candidates(
         .diags
         .error(checker.call_callee_name_span(call), message);
     true
+}
+
+/// Both overloads' explicit type arguments are outside their bounds, so neither shapes the lambda.
+/// kotlinc lists every candidate in declaration order with the mismatch that leaves the lambda
+/// uninferred, not a sorted signature list.
+fn explicit_bound_lambda_rejection(
+    checker: &Checker<'_>,
+    name: &str,
+    candidates: &[crate::libraries::FunctionInfo],
+    args: &[ExprId],
+    argument_names: Option<&[Option<String>]>,
+    trailing_lambda: bool,
+    explicit_type_args: &[Ty],
+) -> Option<String> {
+    if explicit_type_args.is_empty()
+        || explicit_type_args
+            .iter()
+            .any(|argument| argument.mentions_error() || argument.mentions_pending())
+        || !args
+            .iter()
+            .any(|argument| matches!(checker.file.expr(*argument), Expr::Lambda { .. }))
+    {
+        return None;
+    }
+    if !candidates.iter().all(|candidate| {
+        let Some(signature) = candidate.generic_sig.as_ref() else {
+            return false;
+        };
+        signature.formals.len() == explicit_type_args.len()
+            && !crate::symbol_resolver::generic_bindings_satisfy_bounds(
+                signature,
+                &crate::symbol_resolver::seeded_gsig_binds(signature, explicit_type_args),
+                |actual, bound| checker.generic_bound_admits(actual, bound),
+            )
+    }) {
+        return None;
+    }
+    let mut message = String::from(INAPPLICABLE_OVERLOAD_PREFIX);
+    for candidate in candidates {
+        let display = checker
+            .module_source_display(candidate, candidate.callable.ret)
+            .unwrap_or_else(|| Checker::callable_candidate_display(name, candidate));
+        let reason = lambda_bound_rejection_reason(
+            checker,
+            candidate,
+            args,
+            argument_names,
+            trailing_lambda,
+        )
+        .unwrap_or_else(|| "Inapplicable candidate.".to_string());
+        message.push_str(&format!("\n\n{display}:\n  {reason}"));
+    }
+    Some(message)
+}
+
+fn lambda_bound_rejection_reason(
+    checker: &Checker<'_>,
+    candidate: &crate::libraries::FunctionInfo,
+    args: &[ExprId],
+    argument_names: Option<&[Option<String>]>,
+    trailing_lambda: bool,
+) -> Option<String> {
+    let signature = candidate.semantic_signature();
+    let context_count = candidate.context_count.min(signature.params.len());
+    let argument_parameters = call_argument_parameter_indices(
+        args.len(),
+        signature.params.len().saturating_sub(context_count),
+        argument_names,
+        trailing_lambda,
+        &candidate.call_sig.suffix(context_count),
+    )?;
+    let (source, parameter) =
+        argument_parameters
+            .into_iter()
+            .enumerate()
+            .find_map(|(source, parameter)| {
+                matches!(checker.file.expr(args[source]), Expr::Lambda { .. })
+                    .then_some((source, parameter + context_count))
+            })?;
+    let expected = signature.params.get(parameter).copied()?;
+    let TyKind::Fun(function) = expected.non_null().kind() else {
+        return None;
+    };
+    let Expr::Lambda { params, .. } = checker.file.expr(args[source]) else {
+        return None;
+    };
+    let owner = Checker::generic_callable_header(&candidate.callable.name, candidate);
+    let formals = signature.formals.as_slice();
+    let value_start =
+        function.context_count.min(function.params.len()) + usize::from(function.has_receiver);
+    let value_params = &function.params[value_start.min(function.params.len())..];
+    let lambda_arity = if params.is_empty() { 1 } else { params.len() };
+    if params.is_empty() || params.len() == value_params.len() {
+        let parameter_name = params.first().map(|name| name.as_str()).unwrap_or("it");
+        let expected_parameter = value_params
+            .first()
+            .copied()
+            .unwrap_or(Ty::obj("kotlin/Any"));
+        return Some(format!(
+            "Parameter type mismatch: actual type is '??? (Unknown type for value parameter {parameter_name})', but '{}' was expected.",
+            render_bound_rejected_type(expected_parameter, &owner, formals)
+        ));
+    }
+    let taken = lambda_arity.min(value_params.len());
+    let actual = render_function_type(&value_params[..taken], function.ret, &owner, formals);
+    let expected = render_function_type(value_params, function.ret, &owner, formals);
+    Some(format!(
+        "Argument type mismatch: actual type is '{actual}', but '{expected}' was expected."
+    ))
+}
+
+fn render_function_type(
+    params: &[Ty],
+    ret: Ty,
+    owner: &str,
+    formals: &[crate::types::TyParamName],
+) -> String {
+    let params = params
+        .iter()
+        .map(|parameter| render_bound_rejected_type(*parameter, owner, formals))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "({params}) -> {}",
+        render_bound_rejected_type(ret, owner, formals)
+    )
+}
+
+fn render_bound_rejected_type(
+    ty: Ty,
+    owner: &str,
+    formals: &[crate::types::TyParamName],
+) -> String {
+    match ty.non_null().kind() {
+        TyKind::TyParam(name, _) | TyKind::Var(name, _)
+            if formals.iter().any(|formal| formal.as_str() == name) =>
+        {
+            format!(
+                "uninferred {} (of {owner})",
+                crate::types::type_parameter_source_name(name.as_str())
+            )
+        }
+        TyKind::Fun(signature) => {
+            let start = signature.context_count.min(signature.params.len())
+                + usize::from(signature.has_receiver);
+            render_function_type(&signature.params[start..], signature.ret, owner, formals)
+        }
+        _ => ty.source_name(),
+    }
 }

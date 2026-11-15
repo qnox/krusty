@@ -45,7 +45,7 @@ pub(crate) fn metadata_type_parameter(source: &str) -> &'static str {
 /// Intern one declaration-owned type-parameter identity and retain its source spelling separately.
 /// The semantic key is opaque: callers compare it only by identity and never parse declaration
 /// coordinates or spelling out of it.
-pub(crate) fn declaration_type_parameter(
+pub fn declaration_type_parameter(
     compilation: u64,
     file: u32,
     declaration_start: u32,
@@ -154,6 +154,13 @@ pub(crate) fn ty_declared_at_call(ty: super::Ty, site: CallSiteIdentity) -> supe
         },
         _ => symbol.with_symbol_bound(bound),
     })
+}
+
+/// Whether `ty` names one of call `site`'s own inference variables: a variable that call's
+/// selection has not solved. A declaration formal never does, even when it is the called
+/// declaration's own formal in scope at a recursive call.
+pub(crate) fn ty_mentions_call_variable(ty: super::Ty, site: CallSiteIdentity) -> bool {
+    ty_declared_at_call(ty, site) != ty
 }
 
 /// The call and formal behind a call's inference variable; `None` for every other identity.
@@ -277,7 +284,7 @@ pub(crate) fn generated_function_type_parameter(
 
 /// The source spelling carried by a declaration-scoped semantic type-parameter key. Diagnostics and
 /// metadata show the written name even though inference uses the full identity.
-pub(crate) fn type_parameter_source_name(name: &str) -> &str {
+pub fn type_parameter_source_name(name: &str) -> &str {
     TYPE_PARAMETER_SOURCES
         .get_or_init(|| Mutex::new(HashMap::default()))
         .lock()

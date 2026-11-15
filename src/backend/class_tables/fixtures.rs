@@ -5,13 +5,7 @@ use crate::fir::ResolvedFunctionOverrideTarget;
 use crate::ir::{ClassId, FunId, IrClass, IrField, IrFile, IrFunction, IrProperty, IrfFlags};
 use crate::types::Ty;
 
-pub(crate) fn function(
-    name: &str,
-    owner: &str,
-    params: Vec<Ty>,
-    ret: Ty,
-    abstract_: bool,
-) -> IrFunction {
+pub fn function(name: &str, owner: &str, params: Vec<Ty>, ret: Ty, abstract_: bool) -> IrFunction {
     IrFunction {
         name: name.to_string(),
         params,
@@ -23,7 +17,7 @@ pub(crate) fn function(
     }
 }
 
-pub(crate) fn field(name: &str, ty: Ty) -> IrField {
+pub fn field(name: &str, ty: Ty) -> IrField {
     IrField {
         name: name.to_string(),
         ty,
@@ -36,11 +30,11 @@ pub(crate) fn field(name: &str, ty: Ty) -> IrField {
     }
 }
 
-pub(crate) fn stored_property(name: &str, ty: Ty, field: u32) -> IrProperty {
+pub fn stored_property(name: &str, ty: Ty, field: u32) -> IrProperty {
     IrProperty::stored_value(name.to_string(), ty, field)
 }
 
-pub(crate) fn class(ir: &mut IrFile, name: &str, superclass: &str, depth: u32) -> ClassId {
+pub fn class(ir: &mut IrFile, name: &str, superclass: &str, depth: u32) -> ClassId {
     let mut class = IrClass::synthetic(crate::types::type_name(name));
     class.superclass = crate::types::type_name(superclass);
     class.is_open = true;
@@ -63,19 +57,14 @@ pub(crate) fn class(ir: &mut IrFile, name: &str, superclass: &str, depth: u32) -
     id
 }
 
-pub(crate) fn add_method(ir: &mut IrFile, class: ClassId, function: IrFunction) -> FunId {
+pub fn add_method(ir: &mut IrFile, class: ClassId, function: IrFunction) -> FunId {
     let fid = ir.functions.len() as FunId;
     ir.functions.push(function);
     ir.classes[class as usize].methods.push(fid);
     fid
 }
 
-pub(crate) fn record_override(
-    ir: &mut IrFile,
-    class: ClassId,
-    implementation: FunId,
-    overridden: FunId,
-) {
+pub fn record_override(ir: &mut IrFile, class: ClassId, implementation: FunId, overridden: FunId) {
     // The frontend records overrides by callable identity; the test uses the function index
     // as that identity, which is what `checked_callable_functions` maps back.
     use crate::fir::CallableId;
@@ -116,7 +105,7 @@ pub(crate) fn record_override(
         });
 }
 
-pub(crate) fn record_semantic_override(
+pub fn record_semantic_override(
     ir: &mut IrFile,
     class: ClassId,
     implementation: FunId,

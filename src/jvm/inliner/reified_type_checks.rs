@@ -46,7 +46,7 @@ pub(super) fn writes_code(mode: i32, stub: &Node, nullable: bool, intrinsic: boo
 
 /// The nodes that replace the marker's type-bearing instruction `stub`, or `None` when repointing
 /// that instruction at `target.class` is the whole operation.
-pub(super) fn expand(
+pub fn expand(
     node: &mut MethodNode,
     mode: i32,
     stub: &Node,

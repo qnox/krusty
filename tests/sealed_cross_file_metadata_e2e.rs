@@ -28,7 +28,7 @@ fn compile_sources(sources: &[(&str, &str)], class_major: Option<u16>) -> Vec<(S
     let outputs = krusty::compiler::emit_analyzed(
         analysis,
         &stems,
-        &krusty::jvm::JvmBackend::new(cp).with_class_major(class_major),
+        &krusty_jvm::JvmBackend::new(cp).with_class_major(class_major),
         "main",
         &mut diags,
     );

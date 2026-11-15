@@ -21,8 +21,9 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use krusty::conformance::{
-    directive, inject_support_module, module_units, reference_only_kotlinc_arguments, split_files,
-    split_modules, unit_compiler_configuration, BoxJdk, FragmentUnit,
+    contains_directive, coroutine_sources, directive, inject_coroutine_support, module_units,
+    reference_only_kotlinc_arguments, source_modules, split_files, unit_compiler_configuration,
+    BoxJdk, FragmentUnit,
 };
 
 use super::common::{self, byte_dump};
@@ -89,8 +90,9 @@ pub fn checked_prepared_box(src: &str, stem: &str) -> Result<ReferenceClasses, S
     Ok(reference)
 }
 
-/// Bump when the on-disk cache layout or the comparison population changes — invalidates every
-/// cached entry. `v2` added per-module nesting and Java `.class` artifacts to `v1`'s flat tree.
+/// Bump when the on-disk cache layout, the comparison population, or how a case's reference
+/// compile is planned or invoked changes — invalidates every cached entry. CI keys the saved cache
+/// by Kotlin version only, so this salt is the one place such a change reaches existing entries. `v2` added per-module nesting and Java `.class` artifacts to `v1`'s flat tree.
 /// `v3` strips kotlinc diagnostic-test markers from the reference source, so marker-bearing cases
 /// that `v2` cached as FAILED must recompile. `v4` compiles folded multiplatform units as HMPP
 /// fragments instead of a flat `-Xcommon-sources` split (changing even a successful MPP case's
@@ -98,8 +100,10 @@ pub fn checked_prepared_box(src: &str, stem: &str) -> Result<ReferenceClasses, S
 /// its own `// LAMBDAS:`/`// SAM_CONVERSIONS:`/`// JVM_DEFAULT_MODE:` modes and keys on the producing
 /// JDK, so an older entry compiled under kotlinc's default modes or another JDK is never replayed.
 /// Every directive-selected argument rides its unit's `unit_arguments` and the test-only feature
-/// property rides `jvm_properties`, so a change of either re-keys itself.
-const REF_CACHE_SALT: &str = "ref-classes-v6-typed-language-settings";
+/// property rides `jvm_properties`, so a change of either re-keys itself. `v7` keys on the planned
+/// units' files and topology as well as the case text, so a partition change (such as leading code
+/// moving onto the first declared FILE) never replays an entry compiled from another partition.
+const REF_CACHE_SALT: &str = "ref-classes-v7-planned-units";
 
 /// A reference `.class` inventory grouped by module identity.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -271,10 +275,28 @@ fn cache_key(
         byte_dump::immutable_classpath_content_fingerprint(&content_paths, &producing_jdk_modules)?;
     let compiler_id = byte_dump::published_compiler_id();
     let producing_jdk = producing_jdk_identity()?;
+    let planned_units = units
+        .iter()
+        .map(|unit| {
+            format!(
+                "{:?}",
+                (
+                    &unit.module,
+                    &unit.kotlin,
+                    &unit.java,
+                    &unit.fragments,
+                    &unit.deps,
+                    &unit.friends,
+                )
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\0");
     Ok(ReferenceCacheInputs {
         src,
         stem,
         coroutine_helpers,
+        planned_units: &planned_units,
         base_args: &base_args,
         jvm_properties,
         unit_arguments: &unit_arguments,
@@ -419,6 +441,62 @@ pub fn reference_stats() -> ReferenceStats {
     }
 }
 
+/// A run's reference-compile profile: inventory cache hits and misses, then the live compiler
+/// server's lifecycle. Durations are summed over worker threads, like each lane's `timing` line.
+pub fn reference_profile(
+    reference: ReferenceStats,
+    server: common::kotlinc_server::KotlincServerStats,
+) -> String {
+    let secs = |duration: Duration| duration.as_secs_f64();
+    format!(
+        "reference profile (thread-sum): cache hit {} | cached rejection {} | miss {} | \
+         read {:.1}s | compile {:.1}s | cleanup {:.1}s | store {:.1}s\n\
+         kotlinc server (thread-sum): requests {} | starts {} | restarts {} | pool wait {:.1}s | \
+         start {:.1}s | compile {:.1}s",
+        reference.hits,
+        reference.cached_rejections,
+        reference.misses,
+        secs(reference.cache_read),
+        secs(reference.compile),
+        secs(reference.cleanup),
+        secs(reference.store),
+        server.requests,
+        server.starts,
+        server.restarts,
+        secs(server.pool_wait),
+        secs(server.start_time),
+        secs(server.compile_time),
+    )
+}
+
+#[test]
+fn reference_profile_reports_cache_and_server_counts() {
+    let reference = ReferenceStats {
+        hits: 3,
+        cached_rejections: 1,
+        misses: 596,
+        cache_read: Duration::from_millis(240),
+        compile: Duration::from_millis(140_049),
+        cleanup: Duration::from_millis(1_960),
+        store: Duration::from_millis(1_040),
+    };
+    let server = common::kotlinc_server::KotlincServerStats {
+        requests: 636,
+        starts: 2,
+        restarts: 0,
+        pool_wait: Duration::from_millis(40),
+        start_time: Duration::from_millis(9),
+        compile_time: Duration::from_millis(125_056),
+    };
+    assert_eq!(
+        reference_profile(reference, server),
+        "reference profile (thread-sum): cache hit 3 | cached rejection 1 | miss 596 | read 0.2s | \
+         compile 140.0s | cleanup 2.0s | store 1.0s\n\
+         kotlinc server (thread-sum): requests 636 | starts 2 | restarts 0 | pool wait 0.0s | \
+         start 0.0s | compile 125.1s"
+    );
+}
+
 /// Read every `.class` under `dir` into an internal-name → bytes map (package `/` separators, no
 /// extension). `Err` on any read failure — a concurrently rewritten cache must re-grade as a
 /// reference failure, not compare against truncated bytes.
@@ -466,6 +544,9 @@ pub struct ReferenceCacheInputs<'a> {
     pub src: &'a str,
     pub stem: &'a str,
     pub coroutine_helpers: &'a str,
+    /// Each planned unit's module, Kotlin and Java files, fragments, dependencies and friends: the
+    /// partition kotlinc actually compiles, which the case text alone does not determine.
+    pub planned_units: &'a str,
     /// The case's classpath and JDK arguments.
     pub base_args: &'a [String],
     /// The JVM properties the reference compiler server runs under ([`reference_jvm_properties`]).
@@ -496,6 +577,7 @@ impl ReferenceCacheInputs<'_> {
             self.src.as_bytes(),
             self.stem.as_bytes(),
             self.coroutine_helpers.as_bytes(),
+            self.planned_units.as_bytes(),
         ];
         let base_count = (self.base_args.len() as u64).to_le_bytes();
         parts.push(&base_count);
@@ -594,12 +676,12 @@ fn plan_units(src: &str, stem: &str, coroutine_helpers: &str) -> Result<Vec<Plan
             })
             .map_err(|error| format!("reference oracle: {error}"))
     };
-    if src.contains("// MODULE:") {
-        let Some(mut modules) = split_modules(src) else {
+    if contains_directive(src, "MODULE") {
+        let Some(mut modules) = source_modules(src) else {
             return Err("reference oracle does not support this // MODULE: shape".to_string());
         };
         if directive(src, "WITH_COROUTINES") {
-            inject_support_module(&mut modules, coroutine_helpers);
+            inject_coroutine_support(&mut modules, src, coroutine_helpers)?;
         }
         return module_units(&modules)
             .into_iter()
@@ -619,13 +701,13 @@ fn plan_units(src: &str, stem: &str, coroutine_helpers: &str) -> Result<Vec<Plan
             })
             .collect();
     }
-    let (mut kotlin, java) = if src.contains("// FILE:") {
-        split_files(src)
+    let (mut kotlin, java) = if contains_directive(src, "FILE") {
+        split_files(src)?
     } else {
         (vec![(stem.to_string(), src.to_string())], Vec::new())
     };
     if directive(src, "WITH_COROUTINES") {
-        kotlin.push(("CoroutineUtil".to_string(), coroutine_helpers.to_string()));
+        kotlin.extend(coroutine_sources(src, coroutine_helpers)?);
     }
     let configuration = configuration(&kotlin)?;
     Ok(vec![PlannedUnit {
@@ -867,7 +949,7 @@ fn write_group(dir: &Path, blocks: &[(String, String)]) -> Result<Vec<PathBuf>, 
 /// An open marker is recognized only when an upper-snake-case name follows `<!` AND a closing `!>`
 /// appears on the same line, so a real `a < !b` is left intact. Markers never span a line, so
 /// removing them preserves line numbers — and thus `LineNumberTable` bytes — on both sides.
-fn strip_diagnostic_markers(src: &str) -> String {
+pub(super) fn strip_diagnostic_markers(src: &str) -> String {
     let b = src.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -927,15 +1009,30 @@ impl Drop for ScratchDir {
 
 /// Read a cached result. `None` = no cached entry (compile it); `Some(Ok|Err)` = a published
 /// success or a cached deterministic rejection.
+///
+/// A read refreshes the entry's marker modification time. `scripts/prune-reference-cache.sh`
+/// drops entries whose marker has gone unread for a while, so the saved cache holds the current
+/// suite's inventories rather than every case and input any earlier run ever compiled.
 fn load_cache(cache: &Path) -> Option<Result<ReferenceClasses, String>> {
-    if cache.join("FAILED").is_file() {
-        let reason = std::fs::read_to_string(cache.join("FAILED")).unwrap_or_default();
+    let failed = cache.join("FAILED");
+    if failed.is_file() {
+        mark_used(&failed);
+        let reason = std::fs::read_to_string(&failed).unwrap_or_default();
         return Some(Err(reason.lines().next().unwrap_or("?").to_string()));
     }
-    if cache.join("OK").is_file() {
+    let ok = cache.join("OK");
+    if ok.is_file() {
+        mark_used(&ok);
         return Some(read_cached_classes(cache));
     }
     None
+}
+
+/// Stamp an entry's marker as read now. A failed stamp only lets the entry age out sooner.
+fn mark_used(marker: &Path) {
+    if let Ok(file) = std::fs::OpenOptions::new().write(true).open(marker) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
 }
 
 fn read_cached_classes(cache: &Path) -> Result<ReferenceClasses, String> {
@@ -1012,6 +1109,35 @@ mod tests {
 
     const NO_HELPERS: &str = "";
 
+    #[test]
+    fn reading_a_cached_entry_refreshes_its_marker() {
+        let scratch = ScratchDir::new().expect("scratch dir");
+        let stale = std::time::SystemTime::now() - Duration::from_secs(30 * 24 * 3600);
+        for (marker, contents) in [("OK", ""), ("FAILED", "a.kt:1:1: error: unresolved")] {
+            let cache = scratch.path().join(marker);
+            std::fs::create_dir_all(&cache).expect("entry dir");
+            let path = cache.join(marker);
+            std::fs::write(&path, contents).expect("marker");
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .and_then(|file| file.set_modified(stale))
+                .expect("age the marker");
+
+            assert!(load_cache(&cache).is_some(), "{marker} entry must load");
+
+            let modified = std::fs::metadata(&path).and_then(|meta| meta.modified());
+            let age = modified
+                .expect("marker mtime")
+                .elapsed()
+                .unwrap_or_default();
+            assert!(
+                age < Duration::from_secs(3600),
+                "{marker} marker stayed {age:?} old"
+            );
+        }
+    }
+
     fn kotlinc_available() -> bool {
         krusty::toolchain::kotlinc_path().is_some()
     }
@@ -1067,6 +1193,7 @@ mod tests {
             src: "fun box() = \"OK\"",
             stem: "Box",
             coroutine_helpers: NO_HELPERS,
+            planned_units: "main: Box.kt",
             base_args,
             jvm_properties: &[],
             unit_arguments,
@@ -1106,6 +1233,15 @@ mod tests {
             base.fingerprint(),
             ReferenceCacheInputs {
                 src: "fun box() = \"FAIL\"",
+                ..base
+            }
+            .fingerprint()
+        );
+        // The same case text planned into another partition is another compilation.
+        assert_ne!(
+            base.fingerprint(),
+            ReferenceCacheInputs {
+                planned_units: "main: Box.kt, Leading.kt",
                 ..base
             }
             .fingerprint()

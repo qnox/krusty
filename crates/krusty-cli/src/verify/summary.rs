@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use krusty::jvm::class_comparison::DifferenceKind;
+use krusty_jvm::class_comparison::DifferenceKind;
 
 use super::record::{CompilationRecord, Outcome};
 

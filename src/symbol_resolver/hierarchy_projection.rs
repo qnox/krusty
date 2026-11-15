@@ -101,11 +101,13 @@ pub(crate) fn member_scope_receiver(receiver: Ty) -> Ty {
 
 /// Whether a non-null semantic type owns a classifier/function/intersection member scope. This is
 /// the shared structural gate for member inventory; it does not perform lookup or reinterpret a
-/// failed receiver through another origin.
+/// failed receiver through another origin. `Unit` is the semantic spelling of the `kotlin.Unit`
+/// object type, so it owns that classifier's member scope like any other object type.
 pub(crate) fn supports_member_lookup(receiver: Ty) -> bool {
     matches!(
         receiver.non_null().kind(),
-        TyKind::STRING
+        TyKind::Unit
+            | TyKind::STRING
             | TyKind::Obj(..)
             | TyKind::TyParam(..)
             | TyKind::Var(..)

@@ -1,0 +1,904 @@
+//! The coroutine state machine for a suspend function whose only suspension is inside a body the
+//! emitter splices.
+//!
+//! The IR machine cannot build one for these: at the point it runs, the suspension is inside a
+//! lambda it treats as a closure boundary, and the locals that must be spilled do not exist until
+//! the inline body has been spliced.
+//!
+//! So the machine is built during emission, in two passes over the same body. The first emits it
+//! with no machine at all, which is the post-splice bytecode the spill set has to be read from; the
+//! second emits the real method around the answers.
+
+use krusty::fx_hash::HashMap;
+
+use crate::ir_emit::{ir_ty_to_jvm, load, slot_words, store, Emitter};
+use krusty::jvm::classfile::{CodeBuilder, VerifType};
+use krusty::types::{Ty, TypeName};
+
+/// Where the machine keeps its own state. Reserved above the parameters and below the body's own
+/// locals, so a frame built from the emitter's slot view describes them without being told to.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct MachineSlots {
+    pub(super) result: u16,
+    pub(super) continuation: u16,
+    pub(super) suspended: u16,
+}
+
+impl MachineSlots {
+    fn owns(&self, slot: u16) -> bool {
+        slot == self.result || slot == self.continuation || slot == self.suspended
+    }
+}
+
+/// One suspension's spill plan: the locals that must survive it.
+#[derive(Clone, Debug, Default)]
+pub(super) struct SuspensionPlan {
+    /// `(slot, type)` of every local live across the suspension, ascending by slot. The slots a
+    /// stack prefix is saved into are part of this: once saved they are locals like any other.
+    ///
+    /// A slot the verifier holds as `null` — `Ty::Null` — owns no field: its value is a constant,
+    /// the resume rematerializes it with `aconst_null`, and the join claims `null` for it. Storing
+    /// it in an `Object` field would restore it as `Object`, which is wider than what the code
+    /// after the join was verified against.
+    pub(super) spills: Vec<(u16, Ty)>,
+    /// The operand-stack values the dependency holds UNDER this suspension, bottom-first, each with
+    /// the slot it is saved into. `areturn` discards the stack, so they are stored before the call
+    /// and pushed back on both paths out of it.
+    pub(super) prefix: Vec<(u16, Ty)>,
+}
+
+/// What the discovery pass learned about one suspend function.
+#[derive(Clone, Debug, Default)]
+pub(super) struct MachinePlan {
+    /// One entry per suspension, in the order the markers were found.
+    pub(super) suspensions: Vec<SuspensionPlan>,
+    /// One past the highest slot the body itself uses; the machine's own locals go above it.
+    pub(super) body_locals: u16,
+}
+
+impl MachinePlan {
+    /// The continuation field holding spill `index`, by representation kind.
+    pub(super) fn spill_field(kind: char, index: usize) -> String {
+        format!("{kind}${index}")
+    }
+}
+
+/// Plans discovered per function, keyed by `FunId`.
+pub(super) type MachinePlans = HashMap<u32, MachinePlan>;
+
+/// The JVM representation kind a spilled local is stored under, matching the continuation field
+/// families the reference compiler uses (`I$0`, `L$0`, …).
+pub(super) fn spill_kind(ty: Ty) -> char {
+    match krusty::jvm::physical_type::ir_ty_to_jvm(&ty) {
+        Ty::Int | Ty::Short | Ty::Byte | Ty::Char | Ty::Boolean => 'I',
+        Ty::Long => 'J',
+        Ty::Float => 'F',
+        Ty::Double => 'D',
+        _ => 'L',
+    }
+}
+
+/// The Kotlin type a verification type stands for, as far as a spill needs to know.
+pub(super) fn verif_spill_type(v: &VerifType) -> Option<Ty> {
+    Some(match v {
+        VerifType::Integer => Ty::Int,
+        VerifType::Long => Ty::Long,
+        VerifType::Float => Ty::Float,
+        VerifType::Double => Ty::Double,
+        VerifType::ObjectName(name) => Ty::obj(name.as_str()),
+        VerifType::Null => Ty::Null,
+        // `Top` is an unassigned slot and `UninitializedThis` cannot be spilled.
+        _ => return None,
+    })
+}
+
+/// Read one function's spill plan off the bytecode the discovery pass emitted.
+///
+/// The markers say where each suspension landed — a position no offset recorded before the splice
+/// could have predicted. Around each one, the locals live across it are the spill set, and their
+/// types are what the verifier holds there: computed forward over the spliced body from `entry`,
+/// the method's own entry locals, and the frames it carries (see [`FrameTypes`]).
+///
+/// `None` when the body cannot be analyzed or a value that must survive cannot be typed: the
+/// machine then declines and the caller bails exactly as it did before.
+pub(super) fn discover(
+    code: &krusty::jvm::classfile::CodeBuilder,
+    machine: Option<MachineSlots>,
+    entry: &[VerifType],
+    cw: &krusty::jvm::classfile::ClassWriter,
+    expected: usize,
+) -> Option<MachinePlan> {
+    use crate::suspend::cps::LocalLiveness;
+    use krusty::jvm::classfile::bytecode_analysis::{ControlGraph, FrameTypes, Handler};
+    use krusty::jvm::classfile::CoroutineMarker;
+
+    let markers: Vec<(usize, u16)> = code
+        .marker_positions()?
+        .into_iter()
+        .filter(|(_, kind, _)| *kind == CoroutineMarker::Suspension)
+        .map(|(at, _, ordinal)| (at, ordinal))
+        .collect();
+    krusty::trace_compiler!(
+        "suspend",
+        "discover: {} marker(s) ordinals={:?}",
+        markers.len(),
+        markers
+            .iter()
+            .map(|(_, ordinal)| *ordinal)
+            .collect::<Vec<_>>()
+    );
+    if markers.is_empty() {
+        return None;
+    }
+    // One marker per suspension, each with its own ordinal. An inline function that invokes its
+    // lambda at two sites receives one body per site, each marked with its own ordinals; were the
+    // same body spliced twice, one ordinal would be marked twice and the plan would describe one
+    // site with the other's locals. That no longer happens by construction, and this check is the
+    // safety net that keeps a machine resuming at the wrong position from ever reaching a class
+    // file. A missing ordinal is the mirror case — the state would have no position, and its
+    // spills would never be emitted.
+    let mut marked: Vec<bool> = vec![false; expected];
+    for &(_, ordinal) in &markers {
+        let Some(seen) = marked.get_mut(ordinal as usize) else {
+            krusty::trace_compiler!("suspend", "discover: ordinal {ordinal} is not a state");
+            return None;
+        };
+        if std::mem::replace(seen, true) {
+            krusty::trace_compiler!(
+                "suspend",
+                "discover: ordinal {ordinal} marked more than once"
+            );
+            return None;
+        }
+    }
+    if let Some(missing) = marked.iter().position(|seen| !seen) {
+        krusty::trace_compiler!("suspend", "discover: state {missing} was never emitted");
+        return None;
+    }
+    // The builder's own bytes hold a placeholder for every branch not yet linked; the control
+    // flow read here has to be the method's.
+    let Some(bytes) = code.resolved_bytes() else {
+        krusty::trace_compiler!("suspend", "discover: a branch destination is unbound");
+        return None;
+    };
+    let Some(insns) = krusty::jvm::inline::disassemble(&bytes) else {
+        krusty::trace_compiler!("suspend", "discover: disassemble failed");
+        return None;
+    };
+    let offsets = krusty::jvm::inline::insn_offsets_at(&insns, 0);
+    let index_of = |offset: usize| offsets.iter().position(|&at| at == offset);
+    let Some(regions) = code
+        .resolved_exceptions()
+        .iter()
+        .map(|&(start, end, handler, _)| {
+            Some(Handler {
+                start: index_of(start as usize)?,
+                end: index_of(end as usize)?,
+                handler: index_of(handler as usize)?,
+            })
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        krusty::trace_compiler!(
+            "suspend",
+            "discover: an exception-table boundary is not an instruction offset"
+        );
+        return None;
+    };
+    let Some(graph) = ControlGraph::build(&insns, &regions) else {
+        krusty::trace_compiler!("suspend", "discover: control graph declined");
+        return None;
+    };
+    let Some(liveness) = LocalLiveness::analyze(&insns, &graph) else {
+        krusty::trace_compiler!("suspend", "discover: liveness declined");
+        return None;
+    };
+    // The frames this body will carry, by instruction index and slot, computed over it as the
+    // class writer will compute them.
+    let Some(frames) = cw.builder_frames(&bytes, code, entry) else {
+        krusty::trace_compiler!("suspend", "discover: the frames cannot be computed");
+        return None;
+    };
+    let Some(types) = FrameTypes::analyze(&insns, &graph, entry, &frames, cw) else {
+        krusty::trace_compiler!("suspend", "discover: frame analysis declined");
+        return None;
+    };
+
+    let mut suspensions = vec![SuspensionPlan::default(); expected];
+    for (at, ordinal) in markers {
+        let index = index_of(at)?;
+        let Some(state) = types.before(index) else {
+            krusty::trace_compiler!(
+                "suspend",
+                "discover: marker {ordinal} at {at} is unreachable"
+            );
+            return None;
+        };
+        krusty::trace_compiler!(
+            "suspend",
+            "discover: marker {ordinal} at {at} locals={:?} stack={:?}",
+            state.locals,
+            state.stack
+        );
+        // What the resume has to put back is not only what liveness calls live across the call:
+        // every frame the body can reach from the join claims the locals it holds there, whether
+        // or not the body reads them again, and one such frame types but the resume leaves unset
+        // fails verification at the edge into it. A slot the verifier holds as `top` here cannot
+        // be claimed by any of them without a store in between, so it needs no restoring.
+        let mut slots: Vec<u16> = liveness.live_before(index).iter().collect();
+        for slot in claimed_from(&graph, index, &frames) {
+            if !slots.contains(&slot) {
+                slots.push(slot);
+            }
+        }
+        slots.sort_unstable();
+        let mut spills = Vec::new();
+        // A `long`/`double` occupies two slots and the liveness set holds both. It is spilled once,
+        // under its first word; the second is the same value and has no type of its own (the
+        // verifier holds it as `top`).
+        for slot in slots {
+            // The machine's own locals are not spilled: they hold the state that survives the
+            // suspension rather than anything the body needs restored.
+            if machine.is_some_and(|machine| machine.owns(slot)) {
+                continue;
+            }
+            let held = state.local(slot);
+            if matches!(
+                held,
+                krusty::jvm::classfile::bytecode_analysis::VerificationType::Uninitialized(_)
+            ) {
+                krusty::trace_compiler!(
+                    "suspend",
+                    "discover: slot {slot} holds an unconstructed object at {at}"
+                );
+                return None;
+            }
+            let Some(ty) = verif_spill_type(&held.to_verif()) else {
+                continue;
+            };
+            spills.push((slot, ty));
+        }
+        // What the body holds on the operand stack under this call — the dependency's own values,
+        // `acc` in `acc = acc + f(x)` — is saved into slots ABOVE everything the body uses, so it
+        // cannot collide with a local. It is saved per suspension, since only one state is ever
+        // live at a time. `areturn` discards the stack, so a value that cannot be typed cannot be
+        // carried, and the machine declines.
+        let mut prefix = Vec::new();
+        let mut slot = code.max_locals;
+        for value in &state.stack {
+            let Some(ty) = verif_spill_type(&value.to_verif()) else {
+                krusty::trace_compiler!(
+                    "suspend",
+                    "discover: operand {value:?} under the suspension at {at} cannot be carried"
+                );
+                return None;
+            };
+            prefix.push((slot, ty));
+            slot += slot_words(ir_ty_to_jvm(&ty));
+        }
+        spills.extend(prefix.iter().copied());
+        spills.sort_by_key(|&(slot, _)| slot);
+        *suspensions.get_mut(ordinal as usize)? = SuspensionPlan { spills, prefix };
+    }
+    Some(MachinePlan {
+        suspensions,
+        body_locals: code.max_locals,
+    })
+}
+
+/// The slots some frame reachable from instruction `from` claims a type for.
+fn claimed_from(
+    graph: &krusty::jvm::classfile::bytecode_analysis::ControlGraph,
+    from: usize,
+    frames: &[(usize, Vec<VerifType>, Vec<VerifType>)],
+) -> Vec<u16> {
+    let mut seen = vec![false; graph.exit() + 1];
+    let mut pending = vec![from];
+    while let Some(index) = pending.pop() {
+        if index > graph.exit() || std::mem::replace(&mut seen[index], true) {
+            continue;
+        }
+        pending.extend_from_slice(graph.normal_successors(index));
+        pending.extend_from_slice(graph.exceptional_successors(index));
+    }
+    let mut claimed = Vec::new();
+    for (index, locals, _) in frames {
+        if !seen.get(*index).copied().unwrap_or(false) {
+            continue;
+        }
+        for (slot, typed_as) in locals.iter().enumerate() {
+            let described = !matches!(typed_as, VerifType::Top | VerifType::UninitializedThis);
+            let slot = slot as u16;
+            if described && !claimed.contains(&slot) {
+                claimed.push(slot);
+            }
+        }
+    }
+    claimed
+}
+
+/// The continuation class a machine keeps its state in: `<facade>$<function>$1`, or the next
+/// ordinal its sequence leaves free.
+pub(super) fn continuation_internal(
+    ir: &krusty::ir::IrFile,
+    fid: u32,
+    owner: &str,
+    function: &str,
+) -> String {
+    let ordinal = crate::local_class_names::continuation_ordinal(ir, fid);
+    crate::local_class_names::continuation_class_name(owner, function, ordinal)
+}
+
+const CONTINUATION_IMPL: &str = "kotlin/coroutines/jvm/internal/ContinuationImpl";
+const CONTINUATION: &str = "kotlin/coroutines/Continuation";
+
+/// The descriptor a spilled local is stored under.
+fn spill_descriptor(kind: char) -> &'static str {
+    match kind {
+        'I' => "I",
+        'J' => "J",
+        'F' => "F",
+        'D' => "D",
+        _ => "Ljava/lang/Object;",
+    }
+}
+
+/// Every spill field the plan needs, as `(name, descriptor)`, grouped by representation kind in the
+/// order the kinds are first spilled — the field families `I$0`, `L$0`, … name.
+pub(super) fn spill_fields(plan: &MachinePlan) -> Vec<(String, &'static str)> {
+    let mut counts: Vec<(char, usize)> = Vec::new();
+    for suspension in &plan.suspensions {
+        let mut here: Vec<(char, usize)> = Vec::new();
+        for (_, ty) in &suspension.spills {
+            if *ty == Ty::Null {
+                continue;
+            }
+            let kind = spill_kind(*ty);
+            match here.iter_mut().find(|(k, _)| *k == kind) {
+                Some((_, n)) => *n += 1,
+                None => here.push((kind, 1)),
+            }
+        }
+        for (kind, n) in here {
+            match counts.iter_mut().find(|(k, _)| *k == kind) {
+                Some((_, most)) => *most = (*most).max(n),
+                None => counts.push((kind, n)),
+            }
+        }
+    }
+    let mut fields = Vec::new();
+    for (kind, n) in counts {
+        for index in 0..n {
+            fields.push((
+                MachinePlan::spill_field(kind, index),
+                spill_descriptor(kind),
+            ));
+        }
+    }
+    fields
+}
+
+/// The slots a suspension restores as a constant `null` rather than from a field.
+pub(super) fn constant_null_slots(suspension: &SuspensionPlan) -> Vec<u16> {
+    suspension
+        .spills
+        .iter()
+        .filter(|(_, ty)| *ty == Ty::Null)
+        .map(|&(slot, _)| slot)
+        .collect()
+}
+
+/// Which field each spill of one suspension is stored in. A constant-`null` slot has none.
+pub(super) fn suspension_fields(
+    suspension: &SuspensionPlan,
+) -> Vec<(u16, Ty, String, &'static str)> {
+    let mut next: Vec<(char, usize)> = Vec::new();
+    let mut placed = Vec::new();
+    for &(slot, ty) in &suspension.spills {
+        if ty == Ty::Null {
+            continue;
+        }
+        let kind = spill_kind(ty);
+        let index = match next.iter_mut().find(|(k, _)| *k == kind) {
+            Some((_, n)) => {
+                let at = *n;
+                *n += 1;
+                at
+            }
+            None => {
+                next.push((kind, 1));
+                0
+            }
+        };
+        placed.push((
+            slot,
+            ty,
+            MachinePlan::spill_field(kind, index),
+            spill_descriptor(kind),
+        ));
+    }
+    placed
+}
+
+/// Everything the emitting pass needs to build one function's machine.
+#[derive(Clone, Debug)]
+pub(super) struct Machine {
+    pub(super) plan: MachinePlan,
+    pub(super) slots: MachineSlots,
+    /// Internal name of the continuation class this machine keeps its state in.
+    pub(super) internal: String,
+    /// `Some(owner)` for an instance method: the continuation holds the receiver, because
+    /// re-entering the method needs one.
+    pub(super) receiver: Option<String>,
+    /// `Some(name)` when re-entry goes through a synthetic static on the owner: a PRIVATE method is
+    /// not callable from the continuation class, exactly as for kotlinc's `access$<name>`.
+    pub(super) bridge: Option<String>,
+}
+
+/// The synthetic static a continuation re-enters a private method through.
+pub(super) fn access_bridge_name(function: &str) -> String {
+    format!("access${function}")
+}
+
+/// Build kotlinc's `access$<name>`: take the receiver and every parameter, call the private method
+/// with `invokespecial` — the only legal form for a private member — and hand back its result.
+pub(super) fn build_access_bridge(
+    cw: &mut krusty::jvm::classfile::ClassWriter,
+    owner: &str,
+    function: &str,
+    descriptor: &str,
+    instance: bool,
+) -> Option<(String, String, krusty::jvm::classfile::CodeBuilder)> {
+    use krusty::jvm::classfile::CodeBuilder;
+    let (params, ret) = split_descriptor(descriptor)?;
+    // Every parameter, and the receiver first when there is one: a bridge declares exactly the
+    // slots it is handed.
+    let locals = usize::from(instance)
+        + params
+            .iter()
+            .map(|p| usize::from(matches!(p.as_bytes().first(), Some(b'J') | Some(b'D'))) + 1)
+            .sum::<usize>();
+    let mut code = CodeBuilder::new(locals as u16);
+    let mut slot = 0u16;
+    if instance {
+        code.aload(0);
+        slot = 1;
+    }
+    for parameter in &params {
+        match parameter.as_bytes().first() {
+            Some(b'J') => {
+                code.lload(slot);
+                slot += 2;
+            }
+            Some(b'D') => {
+                code.dload(slot);
+                slot += 2;
+            }
+            Some(b'F') => {
+                code.fload(slot);
+                slot += 1;
+            }
+            Some(b'L') | Some(b'[') => {
+                code.aload(slot);
+                slot += 1;
+            }
+            _ => {
+                code.iload(slot);
+                slot += 1;
+            }
+        }
+    }
+    let target = cw.methodref(owner, function, descriptor);
+    let returns = i32::from(ret != "V");
+    // `invokespecial` is the only legal form for a private instance method; a private static is
+    // called the way any static is.
+    match instance {
+        true => code.invokespecial(target, i32::from(slot), returns),
+        false => code.invokestatic(target, i32::from(slot), returns),
+    }
+    match ret.as_str() {
+        "V" => code.ret_void(),
+        "J" => code.lreturn(),
+        "D" => code.dreturn(),
+        "F" => code.freturn(),
+        "I" | "Z" | "B" | "C" | "S" => code.ireturn(),
+        _ => code.areturn(),
+    }
+    let bridge_descriptor = match instance {
+        true => format!("(L{owner};{}", &descriptor[1..]),
+        false => descriptor.to_string(),
+    };
+    Some((access_bridge_name(function), bridge_descriptor, code))
+}
+
+/// A descriptor's parameter list and return descriptor, as written.
+fn split_descriptor(descriptor: &str) -> Option<(Vec<String>, String)> {
+    let (mut params, ret) = parse_outer_descriptor(descriptor)?;
+    // `parse_outer_descriptor` drops the trailing continuation, which a bridge must pass on.
+    params.push(format!("L{CONTINUATION};"));
+    Some((params, ret))
+}
+
+/// Build the continuation class a machine keeps its state in.
+///
+/// `<facade>$<function>$1 extends ContinuationImpl`, holding the resumed value, the state label and
+/// one field per spilled local. Its `invokeSuspend` stores the value, sets the resume bit and
+/// re-enters the function, which then dispatches to the state it stopped in.
+pub(super) struct ContinuationClass<'a> {
+    /// Internal name of the class to build.
+    pub(super) internal: &'a str,
+    /// The class holding the method this continuation re-enters, and that method's name and
+    /// descriptor.
+    pub(super) outer: &'a str,
+    pub(super) outer_method: &'a str,
+    pub(super) outer_descriptor: &'a str,
+    pub(super) plan: &'a MachinePlan,
+    /// Class-file major version, matched to the method's own.
+    pub(super) major: Option<u16>,
+    pub(super) source_file: Option<&'a str>,
+    /// `Some(owner)` for an instance method, whose receiver the continuation keeps.
+    pub(super) receiver: Option<&'a str>,
+    /// `Some(name)` when re-entry goes through a synthetic static on the owner.
+    pub(super) bridge: Option<&'a str>,
+    /// The value class whose carrier the re-entered method returns where it does not suspend; the
+    /// completion takes the value as its box. With it, whether the value class may be null, whose
+    /// null carrier stays null.
+    pub(super) completion_box: Option<(TypeName, Ty, bool)>,
+}
+
+pub(super) fn build_continuation_class(spec: ContinuationClass<'_>) -> Vec<u8> {
+    let ContinuationClass {
+        internal,
+        outer,
+        outer_method,
+        outer_descriptor,
+        plan,
+        major,
+        source_file,
+        receiver,
+        bridge,
+        completion_box,
+    } = spec;
+    use krusty::jvm::classfile::{ClassWriter, CodeBuilder, ACC_FINAL, ACC_PUBLIC};
+    let mut cw = ClassWriter::new(internal, CONTINUATION_IMPL);
+    if let Some(major) = major {
+        cw.set_major(major);
+    }
+    cw.set_source_file(source_file.map(str::to_string));
+    for (name, descriptor) in spill_fields(plan) {
+        cw.add_field(0, &name, descriptor);
+    }
+    cw.add_field(0, "result", "Ljava/lang/Object;");
+    // kotlinc's own order for an instance method: the resumed value, the receiver, then the label.
+    if let Some(owner) = receiver {
+        cw.add_field(ACC_FINAL, "this$0", &format!("L{owner};"));
+    }
+    cw.add_field(0, "label", "I");
+
+    // `<init>` hands the completion straight to ContinuationImpl, keeping the receiver first when
+    // there is one.
+    let ctor_descriptor = match receiver {
+        Some(owner) => format!("(L{owner};L{CONTINUATION};)V"),
+        None => format!("(L{CONTINUATION};)V"),
+    };
+    let mut ctor = CodeBuilder::new(if receiver.is_some() { 3 } else { 2 });
+    if let Some(owner) = receiver {
+        let this = cw.fieldref(internal, "this$0", &format!("L{owner};"));
+        ctor.aload(0);
+        ctor.aload(1);
+        ctor.putfield(this, 1);
+    }
+    ctor.aload(0);
+    ctor.aload(if receiver.is_some() { 2 } else { 1 });
+    let super_ctor = cw.methodref(CONTINUATION_IMPL, "<init>", &format!("(L{CONTINUATION};)V"));
+    ctor.invokespecial(super_ctor, 2, 0);
+    ctor.ret_void();
+    cw.add_method(0, "<init>", &ctor_descriptor, &ctor);
+
+    // `invokeSuspend(Object)`: keep the value, mark the machine as resuming, and re-enter it.
+    let mut invoke = CodeBuilder::new(2);
+    invoke.aload(0);
+    invoke.aload(1);
+    let result = cw.fieldref(internal, "result", "Ljava/lang/Object;");
+    invoke.putfield(result, 1);
+    invoke.aload(0);
+    invoke.aload(0);
+    let label = cw.fieldref(internal, "label", "I");
+    invoke.getfield(label, 1);
+    invoke.push_int(i32::MIN, &mut cw);
+    invoke.ior();
+    invoke.putfield(label, 1);
+    // Every value parameter is passed as a zero: the machine restores the real ones from the fields
+    // above before it reads any of them. An instance method is re-entered on the receiver the
+    // continuation kept.
+    let mut words = 0;
+    if let Some(owner) = receiver {
+        let this = cw.fieldref(internal, "this$0", &format!("L{owner};"));
+        invoke.aload(0);
+        invoke.getfield(this, 1);
+        words += 1;
+    }
+    if let Some((parameters, _)) = parse_outer_descriptor(outer_descriptor) {
+        for parameter in &parameters {
+            push_zero_descriptor(&mut invoke, parameter, &mut cw);
+            words += if matches!(parameter.as_str(), "J" | "D") {
+                2
+            } else {
+                1
+            };
+        }
+    }
+    invoke.aload(0);
+    let class = cw.class_ref(CONTINUATION);
+    invoke.checkcast(class);
+    words += 1;
+    match (bridge, receiver) {
+        // The bridge is static and takes the receiver as its first argument, which is already on
+        // the stack.
+        (Some(bridge), Some(owner)) => {
+            let descriptor = format!("(L{owner};{}", &outer_descriptor[1..]);
+            let reference = cw.methodref(outer, bridge, &descriptor);
+            invoke.invokestatic(reference, words, 1);
+        }
+        // A private static: same arguments as the method itself, through a static the continuation
+        // class is allowed to name.
+        (Some(bridge), None) => {
+            let reference = cw.methodref(outer, bridge, outer_descriptor);
+            invoke.invokestatic(reference, words, 1);
+        }
+        (None, Some(_)) => {
+            let reference = cw.methodref(outer, outer_method, outer_descriptor);
+            invoke.invokevirtual(reference, words, 1);
+        }
+        (None, None) => {
+            let reference = cw.methodref(outer, outer_method, outer_descriptor);
+            invoke.invokestatic(reference, words, 1);
+        }
+    }
+    if let Some((value_class, carrier, nullable)) = completion_box {
+        // `COROUTINE_SUSPENDED` goes back as it is; any other result is the carrier, boxed.
+        let resumed = invoke.new_label();
+        invoke.dup();
+        let suspended = cw.methodref(
+            "kotlin/coroutines/intrinsics/IntrinsicsKt",
+            "getCOROUTINE_SUSPENDED",
+            "()Ljava/lang/Object;",
+        );
+        invoke.invokestatic(suspended, 0, 1);
+        invoke.if_acmpne(resumed);
+        invoke.areturn();
+        invoke.bind(resumed);
+        let physical = ir_ty_to_jvm(&carrier).non_null();
+        if let Some(internal) = physical.obj_internal() {
+            let class = cw.class_ref(&internal.render());
+            invoke.checkcast(class);
+        }
+        super::value_class_adapters::emit_value_class_box_adapter(
+            &mut cw,
+            &mut invoke,
+            value_class,
+            physical,
+            nullable,
+        );
+    }
+    invoke.areturn();
+    invoke.link_local_branches();
+    cw.add_method(
+        ACC_PUBLIC | ACC_FINAL,
+        "invokeSuspend",
+        "(Ljava/lang/Object;)Ljava/lang/Object;",
+        &invoke,
+    );
+    cw.finish()
+}
+
+/// The outer method's parameter descriptors, excluding its trailing continuation.
+fn parse_outer_descriptor(descriptor: &str) -> Option<(Vec<String>, String)> {
+    let inner = descriptor.strip_prefix('(')?;
+    let end = inner.find(')')?;
+    let (params, ret) = (&inner[..end], &inner[end + 1..]);
+    let mut out = Vec::new();
+    let bytes = params.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        let start = at;
+        while bytes.get(at) == Some(&b'[') {
+            at += 1;
+        }
+        if bytes.get(at) == Some(&b'L') {
+            while bytes.get(at) != Some(&b';') {
+                at += 1;
+            }
+        }
+        at += 1;
+        out.push(params[start..at].to_string());
+    }
+    // The trailing continuation is supplied by the machine itself.
+    out.pop();
+    Some((out, ret.to_string()))
+}
+
+/// Push a zero of the shape `descriptor` names.
+fn push_zero_descriptor(
+    code: &mut krusty::jvm::classfile::CodeBuilder,
+    descriptor: &str,
+    cw: &mut krusty::jvm::classfile::ClassWriter,
+) {
+    match descriptor.as_bytes().first() {
+        Some(b'J') => code.push_long(0, cw),
+        Some(b'F') => code.push_float(0.0, cw),
+        Some(b'D') => code.push_double(0.0, cw),
+        Some(b'L') | Some(b'[') => code.aconst_null(),
+        _ => code.push_int(0, cw),
+    }
+}
+
+/// The value class whose box a suspension's resumption delivers, with the carrier the call returns
+/// where it does not suspend.
+pub(super) type ResumedBox = Option<(TypeName, Ty)>;
+
+/// A suspension [`Emitter::machine_before`] opened: its position in the machine, and the value
+/// class box its resumption delivers.
+pub(super) struct OpenSuspension {
+    ordinal: usize,
+    resumed_box: ResumedBox,
+}
+
+impl Emitter<'_> {
+    /// Open a suspension this emission's machine owns, if `e` is one.
+    ///
+    /// Both the value and the discarding path go through this: a suspension whose result is thrown
+    /// away — `api.stop(id)` as a statement — is a state of the machine like any other, and one
+    /// that never spilled would resume into a frame the dispatch cannot produce.
+    pub(super) fn machine_before(
+        &mut self,
+        e: u32,
+        code: &mut CodeBuilder,
+    ) -> Option<OpenSuspension> {
+        let &resumed_box = self.machine_suspensions.get(&e)?;
+        let ordinal = self.machine_next_ordinal;
+        self.machine_next_ordinal += 1;
+        match self.machine.is_some() {
+            // Building the machine: spill first, then the call, then the check.
+            true => self.emit_machine_spills(ordinal, code),
+            // Discovering the frame: mark where the splice put this suspension. The discovery pass
+            // reads everything else — the locals held here and what is on the stack under the
+            // call — off the finished bytecode.
+            false => {
+                if let Ok(marker) = u16::try_from(ordinal) {
+                    code.coroutine_marker(
+                        krusty::jvm::classfile::CoroutineMarker::Suspension,
+                        marker,
+                    );
+                }
+            }
+        }
+        Some(OpenSuspension {
+            ordinal,
+            resumed_box,
+        })
+    }
+
+    /// Close a suspension opened by [`Self::machine_before`].
+    pub(super) fn machine_after(
+        &mut self,
+        suspension: Option<OpenSuspension>,
+        code: &mut CodeBuilder,
+    ) {
+        if let (Some(suspension), true) = (suspension, self.machine.is_some()) {
+            self.emit_machine_check(suspension.ordinal, suspension.resumed_box, code);
+        }
+    }
+
+    /// Unbox the value class box a resumption delivers to the carrier a call that did not suspend
+    /// returns, so that the resumed path joins the direct one holding the same value.
+    pub(super) fn unbox_resumed_value(&mut self, resumed_box: ResumedBox, code: &mut CodeBuilder) {
+        if let Some((value_class, carrier)) = resumed_box {
+            super::value_class_adapters::emit_value_class_unbox_adapter(
+                self.cw,
+                code,
+                value_class,
+                ir_ty_to_jvm(&carrier).non_null(),
+                crate::suspend::box_may_be_null(self.ir, value_class, carrier),
+            );
+        }
+    }
+
+    /// Spill the locals that must survive suspension `ordinal`, and record which state to resume in.
+    ///
+    /// Emitted BEFORE the call's operands, which is also where the dependency's own stack prefix
+    /// still sits: this block empties that prefix into locals, so the operands are pushed onto a
+    /// clean stack and the call's own emission needs to know nothing about any of it.
+    pub(super) fn emit_machine_spills(&mut self, ordinal: usize, code: &mut CodeBuilder) {
+        let Some(machine) = self.machine.clone() else {
+            return;
+        };
+        let Some(suspension) = machine.plan.suspensions.get(ordinal) else {
+            return;
+        };
+        // What the dependency left on the stack under this call goes into locals first — top value
+        // into the last slot — so the call's own operands are pushed onto an empty stack and nothing
+        // is lost to the `areturn` a suspension leaves through.
+        for &(slot, ty) in suspension.prefix.iter().rev() {
+            store(ir_ty_to_jvm(&ty), slot, code);
+        }
+        for (slot, ty, field, descriptor) in suspension_fields(suspension) {
+            code.aload(machine.slots.continuation);
+            load(ir_ty_to_jvm(&ty), slot, code);
+            let reference = self.cw.fieldref(&machine.internal, &field, descriptor);
+            code.putfield(reference, slot_words(ir_ty_to_jvm(&ty)) as i32);
+        }
+        code.aload(machine.slots.continuation);
+        code.push_int(ordinal as i32 + 1, self.cw);
+        let label = self.cw.fieldref(&machine.internal, "label", "I");
+        code.putfield(label, 1);
+    }
+
+    /// The `COROUTINE_SUSPENDED` check that follows a suspension's call, and the state the dispatch
+    /// re-enters at.
+    ///
+    /// The call's result is on the stack. If the callee suspended, this frame returns that sentinel
+    /// and the machine is re-entered later at the marked position, which restores the spilled locals
+    /// and pushes the resumed value instead. Both paths join with one value on the stack, so
+    /// whatever consumes the call cannot tell which one ran.
+    pub(super) fn emit_machine_check(
+        &mut self,
+        ordinal: usize,
+        resumed: ResumedBox,
+        code: &mut CodeBuilder,
+    ) {
+        let Some(machine) = self.machine.clone() else {
+            return;
+        };
+        let Some(suspension) = machine.plan.suspensions.get(ordinal) else {
+            return;
+        };
+        let join = code.new_label();
+        code.dup();
+        code.aload(machine.slots.suspended);
+        code.if_acmpne(join);
+        code.aload(machine.slots.suspended);
+        code.areturn();
+        // The resume point: where the dispatch's restore block re-enters, with the spills restored
+        // and nothing on the stack. A resumption that failed is rethrown HERE, inside the body —
+        // inside any `try` the body wraps around the suspension, which is the only place a `catch`
+        // there can see the callee's exception — and a successful one pushes its value and falls
+        // into the join. kotlinc lays its state out at this same position, for the same reason.
+        //
+        // The `areturn` above ended the stream and nothing in this builder branches here, so the
+        // position is declared an external arrival. The marker names it for the enclosing method,
+        // which owns both the label the restore block jumps to and the frame — one recorded in this
+        // builder would be merged with the host's locals when the body is relocated, claiming locals
+        // the dispatch cannot produce.
+        let resume = code.new_label();
+        code.bind_external_target(resume);
+        code.set_stack_height(0);
+        if let Ok(marker) = u16::try_from(ordinal) {
+            code.coroutine_marker(krusty::jvm::classfile::CoroutineMarker::Resume, marker);
+        }
+        let throw_on_failure =
+            self.cw
+                .methodref("kotlin/ResultKt", "throwOnFailure", "(Ljava/lang/Object;)V");
+        code.aload(machine.slots.result);
+        code.invokestatic(throw_on_failure, 1, 0);
+        code.aload(machine.slots.result);
+        self.unbox_resumed_value(resumed, code);
+        // Where the two paths meet: the call that did not suspend, and the resume point above, both
+        // with the call's result on the stack.
+        code.bind(join);
+        if let Ok(marker) = u16::try_from(ordinal) {
+            code.coroutine_marker(krusty::jvm::classfile::CoroutineMarker::Join, marker);
+        }
+        // Both paths meet here holding only the call's result, so the dependency's own values go
+        // back on the stack AFTER the join — once, for the two of them. The code the splice wrapped
+        // around this one then finds exactly what it pushed, with the result on top.
+        if !suspension.prefix.is_empty() {
+            let result = machine.slots.result;
+            code.astore(result);
+            for &(slot, ty) in &suspension.prefix {
+                load(ir_ty_to_jvm(&ty), slot, code);
+            }
+            code.aload(result);
+        }
+    }
+}

@@ -6,19 +6,19 @@ use crate::fx_hash::HashSet;
 use crate::ir::{ExprId, IrBottomValueCompletion, IrExpr, IrFile, IrTypeOp};
 
 #[derive(Clone, Copy)]
-pub(crate) struct UnwrappedSuspension {
-    pub(crate) point: ExprId,
+pub struct UnwrappedSuspension {
+    pub point: ExprId,
     pub(crate) completion: Option<IrBottomValueCompletion>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct SuspensionCompletion {
+pub struct SuspensionCompletion {
     /// The raw call's checked result is semantic bottom, so its pre-CPS logical marker must not be
     /// interpreted as the erased result of the rewritten call.
-    pub(crate) semantic_bottom: bool,
+    pub semantic_bottom: bool,
     /// The resumed path terminates in this exact use context. A substituted generic bottom value
     /// used as a statement is semantic bottom but deliberately falls through after being discarded.
-    pub(crate) resume_diverges: bool,
+    pub resume_diverges: bool,
 }
 
 /// Peel checked result wrappers off `e` when their producer is a suspend call, returning the
@@ -31,7 +31,7 @@ pub(crate) struct SuspensionCompletion {
 /// the callee's erased result verbatim with no re-coercion, so an `ImplicitCoercion` that boxes a
 /// primitive result must be kept, or the function would return an unboxed value where its erased
 /// result is a reference. The state-machine path re-applies the coercion, so it peels both.
-pub(crate) fn unwrap_suspend_cast(
+pub fn unwrap_suspend_cast(
     ir: &IrFile,
     e: ExprId,
     suspend_set: &HashSet<u32>,
@@ -77,7 +77,7 @@ pub(crate) fn unwrap_suspend_cast(
     }
 }
 
-pub(crate) fn suspension_completion(
+pub fn suspension_completion(
     suspension: UnwrappedSuspension,
     discarded: bool,
 ) -> SuspensionCompletion {

@@ -42,6 +42,15 @@ pub use resolved_types::*;
 pub use selected_result_publication::SelectedResultPublicationSemantics;
 pub use selections::*;
 pub use signature_state::SignatureState;
+
+/// The `invoke` convention selected on a callee value.
+#[derive(Clone, Copy, Debug)]
+pub enum InvokeSelection {
+    Selected(ResolvedTy),
+    /// The callee has no applicable `invoke`. A bare call's tower moves on to its later levels;
+    /// without one, this is the call's diagnostic.
+    Inapplicable(DiagnosticId),
+}
 mod classifier_headers;
 mod declaration_metadata;
 mod serialization_records;
@@ -882,7 +891,7 @@ pub trait SignatureSemantics:
         callee: ResolvedTy,
         arguments: &[ResolvedSigCallArgument<'_>],
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
-    ) -> Result<ResolvedTy, DiagnosticId>;
+    ) -> Result<InvokeSelection, DiagnosticId>;
 
     fn invoke_argument_expectations(
         &self,
@@ -1465,6 +1474,8 @@ pub struct ResolvedModuleIndex {
     /// Exact property override edges selected while module/dependency declarations are live. These
     /// are semantic declaration headers; target erasure and bridge materialization are absent.
     pub(super) override_relations: super::OverrideRelations,
+    /// The dispatch shape of the dependency classes the module's classes extend.
+    pub(super) dependency_superclasses: Box<[super::ResolvedDependencySuperclass]>,
     /// The interface defaults each source classifier inherits without overriding, selected while
     /// the semantic hierarchy provider is live; target backends realize them without a walk.
     pub(super) inherited_defaults: HashMap<DeclarationId, Box<[super::ResolvedInheritedDefault]>>,
@@ -1885,14 +1896,9 @@ impl ResolvedModuleIndex {
         self.source_fragments = fragments;
     }
 
-    /// Whether source `from` types the `expect` classifier `identity` as the target of the
-    /// `actual typealias` actualizing it.
-    pub(crate) fn actualizes_expect(
-        &self,
-        from: Option<u32>,
-        identity: crate::types::TypeName,
-    ) -> bool {
-        self.source_fragments.actualizes_expect(from, identity)
+    /// Each source's fragment and the multiplatform actualization facts keyed by source.
+    pub(crate) fn source_fragments(&self) -> &crate::source::SourceFragments {
+        &self.source_fragments
     }
 
     /// Whether a reference in source `from` sees a declaration of source `declared_in`: a refined
@@ -2102,21 +2108,6 @@ impl ResolvedModuleIndex {
         self.classifier_hierarchies
             .get(&declaration)
             .map(Box::as_ref)
-    }
-
-    /// Direct supertypes already recorded for `classifier`. `None` means this index has no
-    /// hierarchy for that classifier; an empty list means the recorded hierarchy has no parent
-    /// other than the implicit `Any`.
-    pub fn recorded_direct_supertypes(&self, classifier: TypeName) -> Option<Vec<TypeName>> {
-        let declaration = self.classifier_declaration(classifier)?;
-        let hierarchy = self.classifier_hierarchy(declaration)?;
-        Some(
-            hierarchy
-                .iter()
-                .filter(|entry| entry.depth == 1)
-                .map(|entry| entry.classifier)
-                .collect(),
-        )
     }
 
     pub(crate) fn publish_classifier_hierarchy(
@@ -2514,6 +2505,7 @@ impl ResolvedModuleIndex {
             && self.callable_equality_bounds.is_empty()
             && self.callable_inherited_statuses.is_empty()
             && self.override_relations.is_empty()
+            && self.dependency_superclasses.is_empty()
             && self.property_return_value_statuses.is_empty()
             && self.function_typed_parameter_callables.is_empty()
             && self.properties.is_empty()

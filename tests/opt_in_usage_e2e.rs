@@ -481,3 +481,64 @@ fn an_unresolved_compiler_opt_in_marker_warns_once_per_compilation() {
         Vec::<String>::new()
     );
 }
+
+const COLLECTION_LITERALS_MARKER: &str = "package kotlin
+
+@RequiresOptIn
+annotation class ExperimentalCollectionLiteralsApi
+
+@ExperimentalCollectionLiteralsApi
+fun factory() = 1
+
+@RequiresOptIn
+annotation class OtherMarker
+
+@OtherMarker
+fun other() = 2
+";
+
+/// `+CollectionLiterals` accepts `kotlin.ExperimentalCollectionLiteralsApi` and no other marker.
+///
+/// kotlinc 2.5 accepts the marker under the feature (`FirOptInUsageBaseChecker`); the 2.4.x
+/// checker has no such exemption, so this expectation is krusty's own ledger and the kotlinc
+/// comparison for it runs on the 2.5 lane (the feature-off case below compares on every release).
+#[test]
+fn collection_literals_feature_accepts_only_its_own_marker() {
+    let allow_kotlin_package = vec![
+        "-Xallow-kotlin-package".to_string(),
+        "-Xcollection-literals".to_string(),
+    ];
+    let enabled = "// LANGUAGE: +CollectionLiterals
+fun use() {
+    kotlin.factory()
+    kotlin.other()
+}
+";
+    assert_eq!(
+        common::krusty_error_ledger_with_args(
+            &[
+                ("marker.kt", COLLECTION_LITERALS_MARKER),
+                ("main.kt", enabled),
+            ],
+            &allow_kotlin_package,
+        ),
+        ["main.kt:4:12: this declaration needs opt-in. Its usage must be marked with '@kotlin.OtherMarker' or '@OptIn(kotlin.OtherMarker::class)'"]
+    );
+}
+
+/// Without the feature the marker is an ordinary `@RequiresOptIn` one.
+#[test]
+fn the_marker_needs_opt_in_without_collection_literals() {
+    let allow_kotlin_package = vec!["-Xallow-kotlin-package".to_string()];
+    let disabled = "fun use() {
+    kotlin.factory()
+}
+";
+    common::assert_errors_match_kotlinc(
+        &[
+            ("marker.kt", COLLECTION_LITERALS_MARKER),
+            ("main.kt", disabled),
+        ],
+        &allow_kotlin_package,
+    );
+}

@@ -1,0 +1,139 @@
+use super::{realize_super_calls, ModuleRealizationTarget};
+use crate::property_realizations::PropertyRealizations;
+use krusty::backend::CheckedBackendCallables;
+use krusty::fir::{ExternalCallableId, ResolvedFunctionOverrideTarget};
+use krusty::ir::{Callee, IrExpr, IrFile, IrSuperCallKind};
+use krusty::libraries::{
+    ExternalCallableKind, ExternalCallableRealization, LibraryCallable, MemberRealization,
+    NonvirtualCallRealization,
+};
+use krusty::types::{type_name, Ty};
+
+struct NoClassifiers;
+
+impl krusty::backend::BackendClassifierSource for NoClassifiers {
+    fn classifier(
+        &self,
+        _: krusty::types::TypeName,
+    ) -> Option<std::sync::Arc<krusty::backend::BackendClassifierFact>> {
+        None
+    }
+}
+
+fn dependency_super_call(ir: &mut IrFile, target: ExternalCallableId) -> krusty::ir::ExprId {
+    let receiver = ir.add_expr(IrExpr::GetValue(0));
+    ir.add_expr(IrExpr::Call {
+        callee: Box::new(Callee::Super {
+            qualifier: type_name("fixture/Legacy"),
+            owner: type_name("fixture/Legacy"),
+            dispatch_owner: type_name("fixture/Child"),
+            enclosing_dispatch: false,
+            kind: IrSuperCallKind::Function,
+            name: "value".to_string(),
+            params: Vec::new(),
+            ret: Ty::Int,
+            interface: true,
+            realization: MemberRealization::Dispatch,
+            descriptor: "()I".to_string(),
+            declaration: Some(ResolvedFunctionOverrideTarget::External(target)),
+            defaults: Vec::new(),
+            source_member: None,
+        }),
+        dispatch_receiver: Some(receiver),
+        args: Vec::new(),
+    })
+}
+
+#[test]
+fn a_dependency_super_call_requires_its_frozen_identity() {
+    let mut ir = IrFile::default();
+    let target = ExternalCallableId::from_raw(4);
+    dependency_super_call(&mut ir, target);
+
+    assert_eq!(
+        realize_super_calls(
+            &mut ir,
+            &NoClassifiers,
+            &CheckedBackendCallables::default(),
+            &mut PropertyRealizations::default(),
+            &mut super::SuperAccessors::default(),
+            crate::ir_emit::JvmDefaultMode::default(),
+        ),
+        Err(ModuleRealizationTarget::DependencyCallable(target))
+    );
+}
+
+#[test]
+fn a_dependency_super_call_uses_its_frozen_nonvirtual_target() {
+    let mut ir = IrFile::default();
+    let target = ExternalCallableId::from_raw(4);
+    let call = dependency_super_call(&mut ir, target);
+    let holder = NonvirtualCallRealization {
+        owner: type_name("fixture/Legacy$DefaultImpls"),
+        descriptor: "(Lfixture/Legacy;)I".to_string(),
+    };
+    let mut declaration = LibraryCallable::library(
+        type_name("fixture/Legacy"),
+        "value",
+        Vec::new(),
+        Ty::Int,
+        Ty::Int,
+        "()I",
+    );
+    declaration.owner_is_interface = true;
+    declaration.nonvirtual_realization = Some(Box::new(holder.clone()));
+    let realization = ExternalCallableRealization {
+        callable: declaration,
+        kind: ExternalCallableKind::Member,
+        declaration_owner: None,
+        parameter_identities: Box::new([]),
+        declaration_signature: None,
+        dependency_callable: None,
+        direct_c_function: None,
+        klib_body_companion_receiver: None,
+        klib_body_type_parameters: Box::new([]),
+        klib_body_declaration_modifiers: None,
+        klib_body_class_contract: None,
+        klib_body_accessor: None,
+        klib_body_vararg_index: None,
+        klib_body_parameter_defaults: None,
+        declares_parameter_defaults: false,
+    };
+    let mut facts = CheckedBackendCallables::default();
+    facts
+        .freeze_plugin_super_callables(&ir, |identity| {
+            (identity == target).then(|| realization.clone())
+        })
+        .expect("the selected super declaration has a frozen fact");
+
+    realize_super_calls(
+        &mut ir,
+        &NoClassifiers,
+        &facts,
+        &mut PropertyRealizations::default(),
+        &mut super::SuperAccessors::default(),
+        crate::ir_emit::JvmDefaultMode::default(),
+    )
+    .expect("the frozen holder realizes the super call");
+    let IrExpr::Call {
+        callee: call_callee,
+        dispatch_receiver: Some(_),
+        args,
+    } = ir.expr(call)
+    else {
+        panic!("the legacy super call was not realized as its holder static");
+    };
+    let Callee::Static {
+        owner,
+        name,
+        descriptor,
+        ..
+    } = &**call_callee
+    else {
+        panic!("the legacy super call was not realized as its holder static");
+    };
+    assert_eq!(*owner, holder.owner);
+    assert_eq!(name, "value");
+    assert_eq!(descriptor, &holder.descriptor);
+    assert!(args.is_empty());
+}

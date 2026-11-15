@@ -4,7 +4,7 @@ use super::{
     level_functions, level_properties, member_scope_receiver, members_in_hierarchy,
     ranked_extension_candidates, receiver_allows_member_dispatch, supports_member_lookup,
     Callables, CandidateSelection, FnKind, FunctionInfo, FunctionSet, InheritedNestedClassifier,
-    PropKind, PropertySet, SymRecv, SymbolResolver, Ty,
+    PropKind, PropertySet, SymbolResolver, Ty,
 };
 
 pub(crate) struct ReceiverCallableInventory {
@@ -195,40 +195,19 @@ impl SymbolResolver<'_> {
             .unwrap_or_default()
     }
 
-    /// The member function overloads `recv.name` denotes: the accessible member part of
+    /// The member function overloads `receiver.name` denotes: the accessible member part of
     /// [`SymbolResolver::select_symbol`]'s overload family, without selecting a call among them.
-    pub(crate) fn member_overloads(&self, recv: SymRecv, name: &str) -> Vec<FunctionInfo> {
-        let members = |functions: &[FunctionInfo]| {
-            functions
-                .iter()
-                .filter(|overload| overload.kind == FnKind::Member)
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-        match recv {
-            SymRecv::Value(ty) | SymRecv::ImplicitValue(ty) => {
-                if !receiver_allows_member_dispatch(ty) {
-                    return Vec::new();
-                }
-                members(
-                    self.receiver_callable_inventory(ty, name)
-                        .accessible
-                        .functions(),
-                )
-            }
-            SymRecv::TopLevel => self
-                .symbol_levels_in_scope(name)
-                .iter()
-                .find(|symbols| level_functions(symbols).next().is_some())
-                .map(|symbols| {
-                    level_functions(symbols)
-                        .filter(|overload| overload.kind == FnKind::Member)
-                        .cloned()
-                        .collect()
-                })
-                .unwrap_or_default(),
-            SymRecv::Type(_) | SymRecv::TypeName(_) => Vec::new(),
+    pub(crate) fn member_overloads(&self, receiver: Ty, name: &str) -> Vec<FunctionInfo> {
+        if !receiver_allows_member_dispatch(receiver) {
+            return Vec::new();
         }
+        self.receiver_callable_inventory(receiver, name)
+            .accessible
+            .functions()
+            .iter()
+            .filter(|overload| overload.kind == FnKind::Member)
+            .cloned()
+            .collect()
     }
 
     pub(super) fn retain_accessible_extensions(

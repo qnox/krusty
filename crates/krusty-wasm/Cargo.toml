@@ -1,0 +1,13 @@
+[package]
+name = "krusty-wasm"
+version = "0.0.1"
+edition = "2021"
+description = "Kotlin/Wasm backend for krusty"
+license = "Apache-2.0"
+repository = "https://github.com/qnox/krusty"
+
+[dependencies]
+krusty = { path = "../.." }
+
+[dev-dependencies]
+krusty = { path = "../..", features = ["test-support"] }

@@ -26,9 +26,8 @@ impl JvmLibraries {
                     .external_callable(*identity)
                     .is_some_and(|realization| realization.declaration_owner == declaration_owner)
             })
-            .map(|identity| {
-                self.cp.enrich_external_callable(identity, &callable);
-                identity
+            .inspect(|identity| {
+                self.cp.enrich_external_callable(*identity, &callable);
             })
             .unwrap_or_else(|| {
                 self.cp.intern_external_callable(
@@ -38,6 +37,7 @@ impl JvmLibraries {
                 )
             });
         member.external_identity = Some(identity);
+        member.declaration_owner = declaration_owner;
     }
 
     pub(super) fn register_external_callable(
@@ -123,6 +123,7 @@ impl JvmLibraries {
             Some(SemanticCallableOwner::Classifier(owner)),
         );
         member.external_identity = callable.external_identity;
+        member.declaration_owner = callable.declaration_owner;
     }
 
     pub(super) fn register_external_property(

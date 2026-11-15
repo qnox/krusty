@@ -33,7 +33,7 @@ const THROWABLE: &str = "java/lang/Throwable";
 /// One exception-table entry in instruction indices, with the internal name of the class it
 /// catches (`None` for a catch-all).
 #[derive(Clone, Debug)]
-pub(crate) struct TypedHandler {
+pub struct TypedHandler {
     pub range: Handler,
     pub catch_type: Option<String>,
 }
@@ -41,7 +41,7 @@ pub(crate) struct TypedHandler {
 /// A frame as the class file carries it: at an instruction index, locals in frame form (a
 /// `long`/`double` is ONE entry, trailing `top`s dropped) and the stack bottom-first.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ComputedFrame {
+pub struct ComputedFrame {
     pub index: usize,
     pub locals: Vec<VerificationType>,
     pub stack: Vec<VerificationType>,
@@ -50,7 +50,7 @@ pub(crate) struct ComputedFrame {
 /// What the computation found: the frames to write, in instruction order, and the blocks nothing
 /// reaches, which ASM rewrites to `nop`s ending in `athrow` and cuts out of every protected range.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct ComputedFrames {
+pub struct ComputedFrames {
     pub frames: Vec<ComputedFrame>,
     /// Instruction-index ranges of the unreachable blocks, in order; each is non-empty.
     pub unreachable: Vec<std::ops::Range<usize>>,
@@ -61,7 +61,7 @@ pub(crate) struct ComputedFrames {
 
 /// Why no frames could be computed.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum Decline {
+pub enum Decline {
     /// A subroutine instruction (`jsr`/`ret`) or a branch outside the body.
     UnsupportedControlFlow,
     /// An instruction the interpreter cannot step, or one that underflows the stack.
@@ -73,7 +73,7 @@ pub(crate) enum Decline {
 }
 
 /// The inputs of one computation.
-pub(crate) struct FrameComputation<'a> {
+pub struct FrameComputation<'a> {
     pub insns: &'a [Insn],
     pub handlers: &'a [TypedHandler],
     /// `labels[i]`: a label stood at instruction `i` (a branch target, a line number, a local's
@@ -88,7 +88,7 @@ pub(crate) struct FrameComputation<'a> {
 
 impl FrameComputation<'_> {
     /// The frames ASM would write for this body, in instruction order.
-    pub(crate) fn compute(
+    pub fn compute(
         &self,
         access: u16,
         name: &str,
@@ -393,7 +393,7 @@ fn entry_locals(
 
 /// The method's entry frame in frame form: the baseline its first `StackMapTable` entry is relative
 /// to.
-pub(crate) fn entry_frame(
+pub fn entry_frame(
     access: u16,
     name: &str,
     descriptor: &str,

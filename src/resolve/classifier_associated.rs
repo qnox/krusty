@@ -217,10 +217,12 @@ impl Checker<'_> {
                 }
                 AssociatedCall::Selected(self.finish_top_level_call(
                     scope,
-                    call,
-                    args,
-                    arg_tys,
-                    argument_names,
+                    NamedCallArguments {
+                        call,
+                        args,
+                        arg_tys,
+                        argument_names,
+                    },
                     *selected,
                     explicit_type_args,
                     None,

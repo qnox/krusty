@@ -92,18 +92,20 @@ impl<'a, B: Backend> EmissionSession<'a, B> {
         emit_analyzed_into(
             analysis,
             stems,
-            self.backend,
-            state,
+            super::TargetEmission {
+                backend: self.backend,
+                state,
+                dependency_support: &mut self.dependency_support,
+            },
             module_name,
             diags,
-            &mut self.dependency_support,
             super::PassTwoHooks {
                 before_target: &mut |file, diags| {
                     file.dependency_exports =
                         metadata.record_ir_file(file, &mut metadata_state, diags);
                 },
                 checked_bodies: &mut super::NoObserver,
-                artifacts: &mut |artifact| outputs.push(artifact),
+                artifacts: &mut |_, artifact| outputs.push(artifact),
             },
         );
         if diags.has_errors() {

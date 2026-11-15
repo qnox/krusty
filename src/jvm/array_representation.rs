@@ -25,7 +25,7 @@ fn scalar_element(elem: Ty, what: &str) -> Ty {
 }
 
 /// `(opcode, value-words)` for an array element load (`Xaload`).
-pub(super) fn array_load_op(elem: Ty, reference_array: bool) -> (u8, i32) {
+pub fn array_load_op(elem: Ty, reference_array: bool) -> (u8, i32) {
     if reference_array {
         return (0x32, 1);
     }
@@ -44,7 +44,7 @@ pub(super) fn array_load_op(elem: Ty, reference_array: bool) -> (u8, i32) {
 }
 
 /// `(opcode, value-words)` for an array element store (`Xastore`).
-pub(super) fn array_store_op(elem: Ty, reference_array: bool) -> (u8, i32) {
+pub fn array_store_op(elem: Ty, reference_array: bool) -> (u8, i32) {
     if reference_array {
         return (0x53, 1);
     }
@@ -61,7 +61,7 @@ pub(super) fn array_store_op(elem: Ty, reference_array: bool) -> (u8, i32) {
 }
 
 /// `newarray` atype for a primitive element (JVMS Table 6.5.newarray-A).
-pub(super) fn prim_newarray_atype(elem: Ty) -> u8 {
+pub fn prim_newarray_atype(elem: Ty) -> u8 {
     match scalar_element(elem, "newarray") {
         Ty::Boolean => 4,
         Ty::Char => 5,
@@ -98,13 +98,13 @@ pub(super) fn prim_array_carrier(internal: impl crate::types::InternalName) -> O
 ///
 /// Here rather than at the one call site for the reason this module exists: it is a fact about how
 /// an array is represented on the JVM, and the emitter should not be the place that knows it.
-pub(super) fn arrays_to_string_descriptor(array: Ty) -> String {
+pub fn arrays_to_string_descriptor(array: Ty) -> String {
     format!("({})Ljava/lang/String;", arrays_parameter(array))
 }
 
 /// The `java.util.Arrays.hashCode` overload an array of this type takes: overloaded exactly like
 /// `toString` above, so every reference array (`Array<UInt>` included) takes `Object[]`.
-pub(super) fn arrays_hash_code(cw: &mut crate::jvm::classfile::ClassWriter, array: Ty) -> u16 {
+pub fn arrays_hash_code(cw: &mut crate::jvm::classfile::ClassWriter, array: Ty) -> u16 {
     let descriptor = format!("({})I", arrays_parameter(array));
     cw.methodref("java/util/Arrays", "hashCode", &descriptor)
 }

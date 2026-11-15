@@ -7,6 +7,10 @@
 use super::*;
 use crate::types::TyKind;
 
+/// Names, default flags, vararg index, and implicit integer-coercion flags of one constructor.
+pub(super) type StableConstructorParameterFacts =
+    (Vec<String>, Vec<bool>, Option<usize>, Vec<bool>);
+
 impl Checker<'_> {
     /// Normalize constructor headers already checked on an active body-local classifier's lexical
     /// rung into the ordinary constructor-candidate surface. No lookup or inference happens here:
@@ -486,7 +490,7 @@ impl Checker<'_> {
         &self,
         declaration: Option<crate::fir::DeclarationId>,
         parameter_count: usize,
-    ) -> Option<(Vec<String>, Vec<bool>, Option<usize>, Vec<bool>)> {
+    ) -> Option<StableConstructorParameterFacts> {
         let index = self.resolved_index?;
         let callable = index.callable_for_declaration(declaration?)?;
         let parameters = (0..parameter_count)

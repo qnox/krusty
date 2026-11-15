@@ -5,7 +5,7 @@ use super::{ClassId, ExprId, FunId, IrFile};
 
 /// The declaration an emitted body root belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum EmittedDeclaration {
+pub enum EmittedDeclaration {
     /// A function's body.
     Function(FunId),
     /// The initializer of the static at this index of [`IrFile::statics`].
@@ -19,15 +19,15 @@ pub(crate) enum EmittedDeclaration {
 
 /// One emitted body root and its declaration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct EmittedRoot {
-    pub(crate) declaration: EmittedDeclaration,
-    pub(crate) root: ExprId,
+pub struct EmittedRoot {
+    pub declaration: EmittedDeclaration,
+    pub root: ExprId,
 }
 
 /// Every emitted body root with its declaration. Defaults are not structural bodies: targets
 /// append only defaults their actual entry/wrapper policy emits. This inventory deliberately does
 /// not scan the expression or default arenas.
-pub(crate) fn emitted_declaration_roots(ir: &IrFile) -> Vec<EmittedRoot> {
+pub fn emitted_declaration_roots(ir: &IrFile) -> Vec<EmittedRoot> {
     let mut roots = Vec::new();
     for (function, declaration) in ir.functions.iter().enumerate() {
         let function = FunId::try_from(function).expect("too many functions for a function id");
@@ -81,7 +81,7 @@ pub(crate) fn emitted_declaration_roots(ir: &IrFile) -> Vec<EmittedRoot> {
 }
 
 /// The roots of [`emitted_declaration_roots`] alone.
-pub(crate) fn emitted_body_roots(ir: &IrFile) -> Vec<ExprId> {
+pub fn emitted_body_roots(ir: &IrFile) -> Vec<ExprId> {
     emitted_declaration_roots(ir)
         .into_iter()
         .map(|root| root.root)

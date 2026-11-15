@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::libraries::{function_classifiers as common, LibraryType};
 use crate::types::{type_name, type_name_child, TypeName};
 
-pub(super) fn classifier(internal: TypeName) -> Option<common::FunctionClassifier> {
+pub fn classifier(internal: TypeName) -> Option<common::FunctionClassifier> {
     common::classifier(internal)
 }
 

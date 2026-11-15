@@ -22,6 +22,18 @@ pub(super) fn declared_field<'a>(
     field: &'a KlibIrField,
     identities: &mut HashSet<&'a KlibIrSymbol>,
 ) -> Result<crate::libraries::KlibStoredField, KlibBodyDeclineReason> {
+    stored_field(field, identities, || {
+        semantic_type(header.arena, &header.types, field.ty)
+    })
+}
+
+/// Storage identity and flags, then `ty`. Callers resolve `ty` from the declaration that owns the
+/// field; a public class and a same-library file-local class share this check.
+pub(super) fn stored_field<'a>(
+    field: &'a KlibIrField,
+    identities: &mut HashSet<&'a KlibIrSymbol>,
+    ty: impl FnOnce() -> Result<crate::types::Ty, KlibBodyDeclineReason>,
+) -> Result<crate::libraries::KlibStoredField, KlibBodyDeclineReason> {
     let flags =
         field
             .instance_storage_flags()
@@ -39,7 +51,7 @@ pub(super) fn declared_field<'a>(
     }
     Ok(crate::libraries::KlibStoredField {
         name: field.name.clone(),
-        ty: semantic_type(header.arena, &header.types, field.ty)?,
+        ty: ty()?,
         final_: flags.is_final,
         private: flags.visibility == Visibility::Private,
     })

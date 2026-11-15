@@ -53,3 +53,12 @@ fun <T : Int> read(value: Any?): Int = ((value as Wrapper<T>?) as Wrapper<T>).va
 fun box(): String = if (read<Int>(Wrapper(1)) == 1) \"OK\" else \"fail\"\n";
     assert_eq!(run(GENERIC_CAST).expect("generic value-class cast"), "OK");
 }
+
+#[test]
+fn a_discarded_if_boxes_each_value_class_branch_into_its_sealed_result() {
+    let source = krusty::conformance::prepare_test_source(
+        include_str!("box_regressions/discardedIfOverSealedValueClasses.kt"),
+        krusty::conformance::TestTarget::Jvm,
+    );
+    common::expect_box_same_as_kotlinc(&source, "discardedIfOverSealedValueClasses");
+}

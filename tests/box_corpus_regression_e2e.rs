@@ -82,6 +82,7 @@ fn primitive_member_corpus_cases_box_ok() {
 
 const NULLABLE_TPARAM_SUPPORTED_CASES: &[&str] = &[
     "bridges/strListContains.kt",
+    "coroutines/kt46813.kt",
     "evaluate/booleanOperations.kt",
     "evaluate/byteOperations.kt",
     "evaluate/doubleOperations.kt",
@@ -91,11 +92,6 @@ const NULLABLE_TPARAM_SUPPORTED_CASES: &[&str] = &[
     "evaluate/shortOperations.kt",
     "functions/defaultargs1.kt",
 ];
-
-const NULLABLE_TPARAM_GATED_CASES: &[(&str, &str)] = &[(
-    "coroutines/kt46813.kt",
-    "gate:suspend-generic-value-class-specialization",
-)];
 
 const NOTHING_VALUE_CASES: &[&str] = &["nothingValue/nothingValueException.kt"];
 
@@ -114,13 +110,6 @@ fn nullable_type_parameter_admitted_cases_do_not_miscompile() {
             common::run_box_corpus_case(case).as_deref(),
             Some("OK"),
             "{case} must execute successfully, not silently skip"
-        );
-    }
-    for &(case, reason) in NULLABLE_TPARAM_GATED_CASES {
-        assert_eq!(
-            common::box_corpus_case_backend_outcome(case),
-            Some(common::BackendOutcome::Rejected(vec![reason.to_string()])),
-            "{case} must stop at its precise unsupported backend boundary"
         );
     }
 }

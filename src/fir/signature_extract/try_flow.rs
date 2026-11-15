@@ -7,17 +7,27 @@ use super::{
     ExpressionForm, OriginId, SigExpr, SigExprId, SignatureConstraintExtractor, SignatureScopeId,
 };
 
+/// The body, handlers, and finalizer of one `try` expression.
+pub(super) struct TrySyntax<'a> {
+    pub(super) body: ExprId,
+    pub(super) catches: &'a [CatchClause],
+    pub(super) finally: Option<ExprId>,
+}
+
 impl SignatureConstraintExtractor {
     pub(super) fn try_expression(
         &mut self,
         file: &File,
-        body: ExprId,
-        catches: &[CatchClause],
-        finally: Option<ExprId>,
+        syntax: TrySyntax<'_>,
         scope: SignatureScopeId,
         origin: &mut impl FnMut(crate::diag::Span) -> OriginId,
         node_origin: OriginId,
     ) -> Result<SigExprId, ExpressionForm> {
+        let TrySyntax {
+            body,
+            catches,
+            finally,
+        } = syntax;
         let mut results = Vec::with_capacity(catches.len() + 1);
         let branch_entry = self.boolean_vals.clone();
         self.try_body_writes.push(Default::default());

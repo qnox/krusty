@@ -25,15 +25,6 @@ use crate::types::{Ty, TypeName};
 
 use super::SymbolTable;
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct FunctionSlot {
-    name: String,
-    context_count: usize,
-    extension: bool,
-    suspend: bool,
-    parameters: Vec<Ty>,
-}
-
 fn applied_function_parameters(function: &FunctionInfo) -> Vec<Ty> {
     let mut parameters = function.semantic_params().to_vec();
     if function.kind == FnKind::Extension {
@@ -43,24 +34,6 @@ fn applied_function_parameters(function: &FunctionInfo) -> Vec<Ty> {
         parameters.insert(function.context_count.min(parameters.len()), receiver);
     }
     parameters
-}
-
-fn function_slot(function: &FunctionInfo) -> FunctionSlot {
-    let formals = function
-        .generic_sig
-        .as_ref()
-        .map(|signature| signature.formals.as_slice())
-        .unwrap_or_default();
-    FunctionSlot {
-        name: function.callable.name.clone(),
-        context_count: function.context_count,
-        extension: function.kind == FnKind::Extension,
-        suspend: function.flags.suspend,
-        parameters: applied_function_parameters(function)
-            .into_iter()
-            .map(|parameter| crate::types::ty_canonicalize_params(parameter, formals))
-            .collect(),
-    }
 }
 
 fn hierarchy_names(source: &dyn SymbolSource, root: Ty) -> Option<Vec<String>> {
@@ -104,38 +77,14 @@ fn hierarchy_names(source: &dyn SymbolSource, root: Ty) -> Option<Vec<String>> {
     Some(names)
 }
 
-fn interface_hierarchy(source: &dyn SymbolSource, root: Ty) -> Option<Vec<Ty>> {
-    let mut interfaces = Vec::new();
-    let mut queue = VecDeque::from([root]);
-    let mut seen = HashSet::default();
-    while let Some(current) = queue.pop_front() {
-        let owner = current.kotlin_class_internal()?;
-        if !seen.insert(owner) {
-            continue;
-        }
-        let declaration = source.classifier(owner)?;
-        if declaration.is_interface() {
-            interfaces.push(current);
-        }
-        queue.extend(
-            crate::symbol_resolver::direct_supertypes(source, current)
-                .into_iter()
-                .filter(|supertype| {
-                    supertype
-                        .kotlin_class_internal()
-                        .and_then(|classifier| source.classifier(classifier))
-                        .is_some_and(|classifier| classifier.is_interface())
-                }),
-        );
-    }
-    Some(interfaces)
-}
-
 fn interface_owners(source: &dyn SymbolSource, root: Ty) -> Option<HashSet<TypeName>> {
-    interface_hierarchy(source, root)?
-        .into_iter()
-        .map(|interface| interface.kotlin_class_internal())
-        .collect()
+    let mut owners = HashSet::default();
+    for (owner, _, _) in crate::symbol_resolver::applied_hierarchy(source, root) {
+        if source.classifier(owner)?.is_interface() {
+            owners.insert(owner);
+        }
+    }
+    Some(owners)
 }
 
 fn is_delegated_function(function: &FunctionInfo, interface_owners: &HashSet<TypeName>) -> bool {
@@ -166,20 +115,23 @@ fn effective_function<'a>(
         .into_iter()
         .filter(|(candidate, _)| candidate.receiver_rank == nearest)
         .collect::<Vec<_>>();
+    // One slot may join a Kotlin declaration with a Java one whose result is flexible (`V` and
+    // `V!`); those results are equivalent, so neither is more specific than the other.
+    let equivalent = |left, right| super::override_plans::equivalent(source, left, right);
     let mut maximal = nearest
         .iter()
         .copied()
         .filter(|(_, result)| {
             !nearest.iter().copied().any(|(_, other_result)| {
-                other_result != *result
-                    && crate::symbol_resolver::resolution_subtype(source, other_result, *result)
+                crate::symbol_resolver::resolution_subtype(source, other_result, *result)
+                    && !equivalent(other_result, *result)
             })
         })
         .collect::<Vec<_>>();
     let (selected, selected_result) = maximal.pop()?;
     maximal
         .iter()
-        .all(|(_, result)| *result == selected_result)
+        .all(|(_, result)| equivalent(*result, selected_result))
         .then_some(selected)
 }
 
@@ -362,11 +314,7 @@ fn function_call(
                 extension_receiver,
             );
         }
-        let mut declared_parameters = signature
-            .parameters
-            .iter()
-            .map(|parameter| *parameter)
-            .collect::<Vec<_>>();
+        let mut declared_parameters = signature.parameters.to_vec();
         if let Some(extension_receiver) = callable.shape.extension_receiver {
             declared_parameters.insert(
                 callable
@@ -501,6 +449,7 @@ fn delegated_function_declaration(
         applied_parameters: resolved_types(applied_parameters)?,
         applied_result: ResolvedTy::new(applied_result).ok()?,
         interface: function.callable.owner_is_interface,
+        has_kotlin_superclass_override: false,
     })
 }
 
@@ -547,7 +496,7 @@ fn property_call(
     if setter {
         parameters.push(property_type);
     }
-    let result = setter.then_some(Ty::Unit).unwrap_or(property_type);
+    let result = if setter { Ty::Unit } else { property_type };
     let callable = if setter {
         property.setter.as_ref()?
     } else {
@@ -811,7 +760,7 @@ fn delegation_members(
     for name in hierarchy_names(source, interface)? {
         let delegated = crate::symbol_resolver::members_in_hierarchy(source, interface, &name);
         let own_callables = crate::symbol_resolver::members_in_hierarchy(source, own, &name);
-        let own_function_slots = own_callables
+        let own_functions = own_callables
             .functions()
             .iter()
             .filter(|function| {
@@ -820,8 +769,7 @@ fn delegation_members(
                         || function.kind == FnKind::Extension
                             && function.callable.owner == delegating_classifier)
             })
-            .map(function_slot)
-            .collect::<HashSet<_>>();
+            .collect::<Vec<_>>();
         let own_property_slots = own_callables
             .properties()
             .iter()
@@ -829,67 +777,110 @@ fn delegation_members(
             .filter_map(property_slot)
             .collect::<Vec<_>>();
 
-        let mut slots: Vec<(FunctionSlot, Vec<&FunctionInfo>)> = Vec::new();
+        // One override slot per group, under the same shared rule that decides overrides
+        // everywhere else; the first declaration seen represents its slot.
+        let mut slots: Vec<Vec<&FunctionInfo>> = Vec::new();
         for function in delegated
             .functions()
             .iter()
             .filter(|function| is_delegated_function(function, &interface_owners))
         {
-            let slot = function_slot(function);
-            if let Some((_, candidates)) =
-                slots.iter_mut().find(|(candidate, _)| *candidate == slot)
-            {
+            if let Some(candidates) = slots.iter_mut().find(|candidates| {
+                crate::symbol_resolver::function_override_input_slots_match(
+                    source,
+                    candidates[0],
+                    function,
+                )
+            }) {
                 candidates.push(function);
             } else {
-                slots.push((slot, vec![function]));
+                slots.push(vec![function]);
             }
         }
-        for (slot, candidates) in slots {
-            if own_function_slots.contains(&slot) {
+        for candidates in slots {
+            let representative = candidates[0];
+            // The class's own declaration overrides the delegated one under the shared override
+            // rule, which reads a Java `accept(p0: T!)` as overridden by `accept(t: T)`.
+            if candidates.iter().any(|candidate| {
+                own_functions.iter().any(|own| {
+                    crate::symbol_resolver::function_override_input_slots_match(
+                        source, candidate, own,
+                    )
+                })
+            }) {
                 continue;
             }
             let function = effective_function(source, index, interface, candidates)?;
             if function.flags.inherited_by_delegation {
                 continue;
             }
-            let call = function_call(source, index, interface, function)?;
+            let mut call = function_call(source, index, interface, function)?;
             let primary = delegated_function_declaration(source, index, interface, function)?;
             let parameter_identities =
                 delegated_forwarder_parameter_identities(&primary.parameter_identities);
             let type_parameters = delegated_type_parameters(function.generic_sig.as_ref())?;
             let mut overridden = vec![primary];
-            // `members_in_hierarchy(own, name)` is an override view and deliberately coalesces
-            // identical slots. A generated forwarder still implements every exact interface
-            // declaration in that slot, so enumerate direct declarations from each applied
-            // interface occurrence and retain their stable identities independently.
-            for interface in interface_hierarchy(source, own)? {
-                let owner = interface.kotlin_class_internal()?;
-                let declarations =
-                    crate::symbol_resolver::members_in_hierarchy(source, interface, &name);
-                for obligation in declarations.functions().iter().filter(|obligation| {
-                    obligation.callable.owner == owner
-                        && obligation.receiver_rank == 0
-                        && obligation.visibility != crate::libraries::Visibility::Private
-                        && function_slot(obligation) == slot
-                        && applied_function_result(source, index, own, obligation).is_some_and(
-                            |result| {
-                                crate::symbol_resolver::resolution_subtype(
-                                    source,
-                                    call.result.get(),
-                                    result,
-                                )
-                            },
-                        )
-                }) {
+            // An override view coalesces slots. Retain every exact direct declaration,
+            // including superclass declarations whose existing slots this body replaces.
+            for (owner, applied, _) in crate::symbol_resolver::applied_hierarchy(source, own) {
+                source.classifier(owner)?;
+                if owner == own.kotlin_class_internal()? {
+                    continue;
+                }
+                for obligation in
+                    super::override_plans::overridable_declared_functions(source, applied, &name)
+                        .iter()
+                        .filter(|obligation| {
+                            crate::symbol_resolver::function_override_input_slots_match(
+                                source,
+                                obligation,
+                                representative,
+                            ) && applied_function_result(source, index, own, obligation)
+                                .is_some_and(|result| {
+                                    crate::symbol_resolver::resolution_subtype(
+                                        source,
+                                        call.result.get(),
+                                        result,
+                                    )
+                                })
+                        })
+                {
                     let obligation =
                         delegated_function_declaration(source, index, own, obligation)?;
-                    if overridden
+                    if !overridden
                         .iter()
                         .any(|known| known.target == obligation.target)
                     {
+                        overridden.push(obligation);
+                    }
+                }
+            }
+            let covering = super::override_plans::has_kotlin_superclass_override(
+                source,
+                overridden.iter().map(|edge| (edge.owner, edge.interface)),
+            );
+            for (edge, covered) in overridden.iter_mut().zip(covering) {
+                edge.has_kotlin_superclass_override = covered;
+            }
+            // The declarations a forwarder overrides agree on each parameter up to flexibility. A
+            // Java `T!` that a Kotlin declaration fixes not-null is enhanced to that rigid `T`, as
+            // kotlinc's signature enhancement does, so the forwarder checks it for null.
+            let mut parameter_enhancements =
+                vec![crate::libraries::TypeEnhancement::NONE; call.parameters.len()];
+            for declaration in &overridden {
+                for ((parameter, enhancement), declared) in call
+                    .parameters
+                    .iter_mut()
+                    .zip(&mut parameter_enhancements)
+                    .zip(declaration.applied_parameters.iter())
+                {
+                    let (enhanced, marks) =
+                        crate::libraries::enhance_from_overridden(parameter.get(), declared.get());
+                    if marks.is_none() {
                         continue;
                     }
-                    overridden.push(obligation);
+                    *parameter = ResolvedTy::new(enhanced).ok()?;
+                    *enhancement = enhancement.union(&marks);
                 }
             }
             members.push(ResolvedDelegatedMember::Function(
@@ -898,6 +889,7 @@ fn delegation_members(
                     parameter_identities,
                     type_parameters,
                     overridden: overridden.into_boxed_slice(),
+                    parameter_enhancements: parameter_enhancements.into_boxed_slice(),
                     call,
                 },
             ));

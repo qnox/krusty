@@ -102,3 +102,37 @@ fn published_inline_empty_selection_does_not_capture_an_unused_enclosing_value()
         .collect::<Vec<_>>();
     assert!(reads.is_empty(), "{reads:?}");
 }
+
+#[test]
+fn published_replay_refreshes_parameter_and_local_bindings_after_unrelated_declarations() {
+    let source = include_str!("../../../tests/box_regressions/PublishedInlineCaptureBindings.kt");
+    let body = retained_inline_body(source);
+    let object = anonymous_object(&body);
+    assert_eq!(object.captures.len(), 2);
+    assert_eq!(
+        object
+            .captures
+            .iter()
+            .filter(|capture| capture.source
+                == FirLocalClassCaptureSource::Value(body.parameters()[0].value))
+            .count(),
+        1
+    );
+    assert!(object
+        .captures
+        .iter()
+        .all(|capture| capture.stored && !capture.shared_cell));
+    let fields = body
+        .inline_nested_declaration_bodies()
+        .iter()
+        .flat_map(|member| {
+            (0..member.expression_count()).filter_map(move |raw| {
+                match &member.expr(FirExprId::from_raw(raw as u32))?.kind {
+                    FirExprKind::ClassStorageRead { owner, field } => Some((*owner, *field)),
+                    _ => None,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(fields, [(object.declaration, 0), (object.declaration, 1)]);
+}

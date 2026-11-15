@@ -18,6 +18,33 @@ impl CheckedLocalProperty {
     }
 }
 
+/// The source identity and interface role of one body-local property publication.
+pub(super) struct DeferredBodyProperty {
+    pub(super) source_member: crate::libraries::SourceMember,
+    pub(super) stable_declaration: Option<crate::fir::DeclarationId>,
+    pub(super) interface: bool,
+}
+
+/// Checked constructor-property facts installed into the body-local overlay.
+pub(super) struct ConstructorPropertyFacts {
+    pub(super) owner: TypeName,
+    pub(super) source_member: crate::libraries::SourceMember,
+    pub(super) stable_declaration: Option<crate::fir::DeclarationId>,
+    pub(super) stable_fact: Option<(crate::fir::DeclarationId, bool)>,
+    pub(super) checked: Ty,
+}
+
+/// The shape recorded for one checked body-local property.
+struct RecordedLocalProperty {
+    has_receiver: bool,
+    mutable: bool,
+    visibility: Visibility,
+    source_member: crate::libraries::SourceMember,
+    stable_declaration: Option<crate::fir::DeclarationId>,
+    ty: Ty,
+    interface: bool,
+}
+
 impl Checker<'_> {
     /// Install one deferred explicit body-property header before nested classifiers and sibling
     /// methods are checked. The active overlay is the same normalized candidate boundary used by
@@ -28,11 +55,14 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         owner: Option<TypeName>,
         property: &PropDecl,
-        source_member: crate::libraries::SourceMember,
-        stable_declaration: Option<crate::fir::DeclarationId>,
-        interface: bool,
+        publication: DeferredBodyProperty,
         properties: &mut Vec<ScopedProperty>,
     ) -> bool {
+        let DeferredBodyProperty {
+            source_member,
+            stable_declaration,
+            interface,
+        } = publication;
         if !self.has_deferred_local_header(stable_declaration) {
             return false;
         }
@@ -231,13 +261,16 @@ impl Checker<'_> {
         &self,
         scope: &CheckerScope<'_>,
         properties: &mut Vec<ScopedProperty>,
-        owner: TypeName,
         property: &PropParam,
-        source_member: crate::libraries::SourceMember,
-        stable_declaration: Option<crate::fir::DeclarationId>,
-        stable_fact: Option<(crate::fir::DeclarationId, bool)>,
-        checked: Ty,
+        facts: ConstructorPropertyFacts,
     ) -> bool {
+        let ConstructorPropertyFacts {
+            owner,
+            source_member,
+            stable_declaration,
+            stable_fact,
+            checked,
+        } = facts;
         let authorized = self.active_declarations.is_none()
             || stable_fact.is_some_and(|(declaration, finalized)| {
                 !finalized && Some(declaration) == stable_declaration
@@ -269,14 +302,17 @@ impl Checker<'_> {
         &mut self,
         owner: TypeName,
         name: &str,
-        has_receiver: bool,
-        mutable: bool,
-        visibility: Visibility,
-        source_member: crate::libraries::SourceMember,
-        stable_declaration: Option<crate::fir::DeclarationId>,
-        ty: Ty,
-        interface: bool,
+        recorded: RecordedLocalProperty,
     ) {
+        let RecordedLocalProperty {
+            has_receiver,
+            mutable,
+            visibility,
+            source_member,
+            stable_declaration,
+            ty,
+            interface,
+        } = recorded;
         if has_receiver || ty.mentions_error() || ty.mentions_pending() {
             return;
         }
@@ -367,13 +403,15 @@ impl Checker<'_> {
         self.record_checked_local_property_shape(
             owner,
             &property.name,
-            property.receiver.is_some(),
-            property.is_var,
-            property.visibility,
-            source_member,
-            stable_declaration,
-            ty,
-            interface,
+            RecordedLocalProperty {
+                has_receiver: property.receiver.is_some(),
+                mutable: property.is_var,
+                visibility: property.visibility,
+                source_member,
+                stable_declaration,
+                ty,
+                interface,
+            },
         );
     }
 
@@ -392,13 +430,15 @@ impl Checker<'_> {
         self.record_checked_local_property_shape(
             owner,
             &property.name,
-            false,
-            property.is_var,
-            property.visibility,
-            source_member,
-            stable_declaration,
-            ty,
-            interface,
+            RecordedLocalProperty {
+                has_receiver: false,
+                mutable: property.is_var,
+                visibility: property.visibility,
+                source_member,
+                stable_declaration,
+                ty,
+                interface,
+            },
         );
     }
 

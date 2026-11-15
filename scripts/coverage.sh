@@ -141,7 +141,10 @@ read_test_executables() {
     | ($artifact.target.kind | join(",")) as $kind
     | if ($package | package_is("krusty-lsp")) or ($package | package_is("krusty-toolchain")) then
         $artifact.executable
-      elif ($package | package_is("krusty-cli")) and $kind == "lib" then
+      elif (($package | package_is("krusty-cli")) or ($package | package_is("krusty-jvm"))
+          or ($package | package_is("krusty-native"))
+          or ($package | package_is("krusty-wasm")))
+          and $kind == "lib" then
         $artifact.executable
       elif ($package | package_is("krusty"))
           and ($kind == "lib" or ($kind == "test" and $artifact.target.name == "e2e")) then
@@ -154,7 +157,7 @@ read_test_executables() {
 phase_begin build-compiler
 compiler_json="$(mktemp)"
 if "${coverage_cargo[@]}" build --profile coverage --message-format=json \
-    -p krusty -p krusty-cli -p krusty-lsp -p krusty-toolchain --lib --bins --tests >"$compiler_json"; then
+    -p krusty -p krusty-jvm -p krusty-native -p krusty-wasm -p krusty-cli -p krusty-lsp -p krusty-toolchain --lib --bins --tests >"$compiler_json"; then
   phase_end build-compiler
 else
   status="$?"

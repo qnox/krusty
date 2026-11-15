@@ -3,7 +3,7 @@
 /// One sequence of lifted local callables: the source file that declares it, the lexical owner,
 /// and the outermost declaration name, as a [`crate::fir::FirLiftingSite`] spells them.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct IrLiftingSequence {
+pub struct IrLiftingSequence {
     pub source: crate::fir::SourceFileId,
     pub owner: Box<str>,
     pub container: Box<str>,
@@ -14,14 +14,14 @@ pub(crate) struct IrLiftingSequence {
 /// lambda realized as a class of its own) keeps it, so a target can still find that declaration's
 /// realization once its own passes have placed it.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct IrLiftingRoot {
+pub struct IrLiftingRoot {
     pub sequence: IrLiftingSequence,
     pub position: u32,
 }
 
 /// One position of an [`IrLiftingSequence`].
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct IrLiftingEntry {
+pub struct IrLiftingEntry {
     pub kind: crate::lifting_provenance::LiftingCallableKind,
     pub name: Option<Box<str>>,
     pub lifted: bool,

@@ -2,7 +2,7 @@
 
 /// Bit-packed boolean flags for an [`IrField`], collapsing `has_default`/`is_final`/`is_private`/
 /// `is_lateinit` into one byte. Read through the `IrField` accessors of the same names; built with the
-/// `with_*` chain. Headroom for four more flags before the byte fills.
+/// `with_*` chain. One flag bit remains.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IrfFlags(u8);
 
@@ -16,6 +16,8 @@ impl IrfFlags {
     pub(super) const COMPILER_GENERATED: u8 = 1 << 4;
     /// A delegated property's `x$delegate` storage: it holds the delegate, not a property value.
     pub(super) const PROPERTY_DELEGATE: u8 = 1 << 5;
+    /// An integer field every access reads and writes atomically. Set for a Native atomicfu value.
+    pub(super) const IS_ATOMIC: u8 = 1 << 6;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -55,6 +57,10 @@ impl IrfFlags {
     pub const fn with_property_delegate(self, on: bool) -> Self {
         self.with(Self::PROPERTY_DELEGATE, on)
     }
+    #[inline]
+    pub const fn with_is_atomic(self, on: bool) -> Self {
+        self.with(Self::IS_ATOMIC, on)
+    }
 }
 
 impl super::IrField {
@@ -76,6 +82,16 @@ impl super::IrField {
     #[inline]
     pub fn with_property_delegate(mut self, on: bool) -> Self {
         self.flags = self.flags.with_property_delegate(on);
+        self
+    }
+    /// See [`IrfFlags::IS_ATOMIC`].
+    #[inline]
+    pub fn is_atomic(&self) -> bool {
+        self.flags.has(IrfFlags::IS_ATOMIC)
+    }
+    #[inline]
+    pub fn with_is_atomic(mut self, on: bool) -> Self {
+        self.flags = self.flags.with_is_atomic(on);
         self
     }
 }

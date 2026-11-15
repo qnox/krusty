@@ -2,6 +2,8 @@
 
 use super::{Checker, CheckerScope, ExprId, Ty};
 
+mod missing_dependency_classes;
+
 pub(super) fn finalize(
     checker: &mut Checker<'_>,
     scope: &CheckerScope<'_>,
@@ -14,5 +16,6 @@ pub(super) fn finalize(
     checker.check_reified_type_arguments(scope, expression);
     checker.check_array_of_nothing_expression(expression, ty);
     checker.check_expression_missing_supertypes(expression);
+    checker.check_expression_missing_classes(expression);
     checker.record_flexible_value(expression);
 }

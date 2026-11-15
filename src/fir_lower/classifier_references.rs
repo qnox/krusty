@@ -19,6 +19,15 @@ pub(super) struct ClassifierCallable<'a> {
     pub(super) result: ResolvedTy,
 }
 
+/// The constructor a reference names, with the types the checker selected for it.
+pub(super) struct ConstructorReferenceTarget<'a> {
+    pub(super) target: &'a crate::fir::FirConstructorTarget,
+    pub(super) classifier: TypeName,
+    pub(super) outer: Option<ResolvedTy>,
+    pub(super) parameters: &'a [ResolvedTy],
+    pub(super) result: ResolvedTy,
+}
+
 fn unsupported_constructor_reference(
     target: &crate::fir::FirConstructorTarget,
 ) -> FirLoweringFailure {
@@ -39,17 +48,20 @@ impl BodyLowering<'_> {
     /// `(<parameters>)V`, independent of that adapter's value-returning ABI.
     pub(super) fn materialize_constructor_reference(
         &mut self,
-        target: &crate::fir::FirConstructorTarget,
-        classifier: TypeName,
-        outer: Option<ResolvedTy>,
-        parameters: &[ResolvedTy],
-        result: ResolvedTy,
+        constructor: ConstructorReferenceTarget<'_>,
         binding: FirCallableReferenceBinding,
         dispatch_receiver: Option<crate::fir::FirReceiver>,
         adaptation: Option<&FirReferenceAdaptation>,
         reference_ty: Ty,
         reflective: bool,
     ) -> Result<ExprId, FirLoweringFailure> {
+        let ConstructorReferenceTarget {
+            target,
+            classifier,
+            outer,
+            parameters,
+            result,
+        } = constructor;
         let failed = || unsupported_constructor_reference(target);
         let TyKind::Fun(reference) = reference_ty.non_null().kind() else {
             return Err(failed());
@@ -162,6 +174,7 @@ impl BodyLowering<'_> {
                                 value: self.ir.add_expr(IrExpr::GetValue(own_start + *source)),
                             }
                         }
+                        FirAdaptedReferenceArgument::Context => return Err(failed()),
                         FirAdaptedReferenceArgument::Default => {
                             crate::ir::IrCheckedArgument::Default { parameter }
                         }
@@ -286,6 +299,7 @@ impl BodyLowering<'_> {
                 adapter,
                 captures: Vec::new(),
                 bound_receiver: None,
+                bound_contexts: 0,
                 function_type,
                 declaration_parameters: declaration_parameters.into_boxed_slice(),
                 declaration_result,
@@ -314,6 +328,7 @@ impl BodyLowering<'_> {
                 adapter,
                 captures: Vec::new(),
                 bound_receiver: capture,
+                bound_contexts: 0,
                 function_type,
                 declaration_parameters: declaration_parameters.into_boxed_slice(),
                 declaration_result: Ty::Unit,
@@ -486,6 +501,7 @@ impl BodyLowering<'_> {
                         Ok(self.ir.add_expr(IrExpr::GetValue(*source)))
                     }
                     FirAdaptedReferenceArgument::Value(_)
+                    | FirAdaptedReferenceArgument::Context
                     | FirAdaptedReferenceArgument::Default
                     | FirAdaptedReferenceArgument::Vararg { .. } => Err(failed()),
                 })

@@ -57,16 +57,16 @@ impl Checker<'_> {
             "resolve",
             "in-place operator name={name} receiver={receiver_ty:?} argument={argument_ty:?}"
         );
-        let Some((result, call)) = self.operator_call_ret(
+        let Some((result, call)) = self.operator_call_ret(super::operator_calls::OperatorCall {
             scope,
-            receiver,
-            receiver_ty,
+            site: receiver,
+            receiver: receiver_ty,
             name,
-            &[argument_ty],
-            &[argument],
+            arg_tys: &[argument_ty],
+            arg_exprs: &[argument],
             span,
-            None,
-        ) else {
+            expected_result: None,
+        }) else {
             crate::trace_compiler!(
                 "resolve",
                 "in-place operator name={name} receiver={receiver_ty:?} no target"

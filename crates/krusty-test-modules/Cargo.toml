@@ -1,0 +1,10 @@
+[package]
+name = "krusty-test-modules"
+version = "0.0.1"
+edition = "2021"
+publish = false
+description = "Declares a test target's modules from the files present in its tests directory"
+license = "Apache-2.0"
+
+[lib]
+proc-macro = true

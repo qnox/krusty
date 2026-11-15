@@ -36,18 +36,6 @@ impl Checker<'_> {
         ty.filter(|ty| ty.is_array() && !self.ty_is_value_class(*ty))
     }
 
-    /// The element a single-index store `receiver[i] = v` writes as the built-in array operation,
-    /// or `None` when it is a `set` convention call.
-    ///
-    /// A value class over an array (`UIntArray` over `IntArray`) is not an array: its `set` is the
-    /// class's own member, which kotlinc calls. The declaration decides, through
-    /// [`Self::ty_is_value_class`], never the classifier's spelling.
-    pub(super) fn builtin_array_store_element(&self, receiver: Ty) -> Option<Ty> {
-        receiver
-            .array_elem()
-            .filter(|_| !self.ty_is_value_class(receiver))
-    }
-
     /// Narrow the explicit receiver of every member call and member property read whose receiver
     /// type is a value class. A safe call has already tested its receiver.
     pub(super) fn narrow_value_class_receivers(&mut self) {

@@ -6,7 +6,7 @@
 use super::{focused_wasm_lane_available, WasmLane};
 use crate::box_lane::{Lane, Outcome};
 use krusty::kotlin_version::KotlinVersion;
-use krusty::wasm::WasmTarget;
+use krusty_wasm::WasmTarget;
 
 const SOURCE: &str = include_str!("box_regressions/immediateLambdaEscapingOperands.kt");
 const STEM: &str = "immediateLambdaEscapingOperands";

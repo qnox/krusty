@@ -3,8 +3,8 @@
 //! companion the plugin generates initializes it on the class's own first line, the `@Serializable`
 //! one.
 
-use super::super::compiler_plugin_fixture::{assert_same_classes_and_box, PluginFixture};
-use super::super::serialization_companion_byte_parity_e2e::plugin_and_runtime;
+use super::compiler_plugin_fixture::{assert_same_classes_and_box, PluginFixture};
+use super::serialization_companion_byte_parity_e2e::plugin_and_runtime;
 
 const SOURCE: &str = "import kotlinx.serialization.Serializable\n\
                       import kotlinx.serialization.json.Json\n\

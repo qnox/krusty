@@ -125,8 +125,11 @@ impl Checker<'_> {
                         args,
                         arg_tys,
                     },
-                    &validation_params,
-                    &validation_params,
+                    SelectedParameters {
+                        applied: &validation_params,
+                        declared: &validation_params,
+                        call_site: None,
+                    },
                     &candidate.call_sig,
                     None,
                 ) {
@@ -172,10 +175,12 @@ impl Checker<'_> {
             MemberExtensionFunctionSelection::None(rejections) => self
                 .report_single_mapped_candidate_type_errors(
                     scope,
-                    call,
+                    CallArgs {
+                        call,
+                        args,
+                        arg_tys,
+                    },
                     name,
-                    args,
-                    arg_tys,
                     CallConstraints {
                         type_args: &explicit_type_args,
                         receiver: extension_receiver,

@@ -162,6 +162,13 @@ implementation makes for the toolchain: krusty fingerprints the inputs
 files' paths and contents with the state recorded in
 `<root>/build/krusty-toolchain/<module>jvm/compilation.state`. A body-only edit of a module
 therefore recompiles only that module. When krusty takes no fingerprint, the module compiles.
+`krusty classpath-fingerprint [--view-cache <dir>] <kotlinc arguments>` is the dependent side of
+that check, which the Gradle plugin keys each compile on: it prints the digest of what the
+compilation the arguments describe observes of its `-classpath` and `-Xfriend-paths` entries. Each
+class of a directory or jar enters by its declarations, not its method bodies, so a dependency's
+body-only edit leaves the digest unchanged. A class declaring an inline function, a synthetic class
+and an anonymous class enter by all their bytes, as a dependent can copy or reach their code.
+`--view-cache` keeps each jar's view under the digest of its bytes, so an unchanged jar is read once.
 Modules run as the toolchain runs its task graph (`src/compile/schedule.rs`): a module starts as
 soon as the modules it compiles against have finished, at most as many at once as the host has
 available processors (the toolchain bounds its task executor the same way and has no option for

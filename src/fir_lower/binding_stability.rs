@@ -114,14 +114,6 @@ impl BodyLowering<'_> {
     /// Authenticated receiver parameters, including lifted receiver captures, are immutable bindings
     /// too. Mutable bindings, shared cells, conversions and unauthenticated reads need a snapshot.
     pub(super) fn stable_value_read(&self, lowered: crate::ir::ExprId) -> Option<u32> {
-        match self.ir.expr(lowered) {
-            crate::ir::IrExpr::GetValue(slot)
-                if self.ir.binding_read_stability.get(&lowered)
-                    == Some(&IrBindingStability::Stable) =>
-            {
-                Some(*slot)
-            }
-            _ => None,
-        }
+        self.ir.stable_value_read(lowered)
     }
 }

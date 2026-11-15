@@ -16,7 +16,7 @@ pub(crate) struct KlibBodyClassParameters {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct KlibBodyClassContract {
+pub struct KlibBodyClassContract {
     pub(crate) module: String,
     pub(crate) signature: KlibPublicIdSignature,
     pub(crate) classifier: TypeName,
@@ -32,9 +32,46 @@ pub(crate) struct KlibBodyClassContract {
 
 impl KlibBodyClassContract {
     /// Whether the common type model carries this class's instances as one of its builtin types,
-    /// as it does an unsigned integer, rather than as an instance of a class.
+    /// as it does an unsigned integer or an array, rather than as an instance of a class. An
+    /// unsigned array is a value class over its signed array, not an array the target carries.
     pub(crate) fn is_builtin_type(&self) -> bool {
         crate::types::builtin_semantic(self.classifier).is_some()
+            || (!self.is_value && Ty::obj_name(self.classifier).is_array())
+    }
+
+    /// Whether a support unit emits this class's members as functions of their receiver value,
+    /// materializing no class: a final builtin type of the common type model that is not a value
+    /// class, whose values the target carries itself, `Array<T>` included. Such a member
+    /// dispatches statically.
+    pub(crate) fn emits_receiver_members(&self) -> bool {
+        self.is_builtin_type()
+            && !self.is_value
+            && self.kind == super::TypeKind::Class
+            && self.modality == KotlinModality::Final
+    }
+
+    /// Whether a support unit materializes this class and emits its members as functions of the
+    /// class it materializes: a value class, or a class without type parameters that is not
+    /// sealed. A builtin type of the common type model is neither, and neither is `kotlin.Any`,
+    /// the root of every class, which each target lays out itself.
+    pub(crate) fn emits_members(&self) -> bool {
+        if self.is_builtin_type() || self.classifier == crate::types::wk::any() {
+            return false;
+        }
+        self.is_value
+            || (self.kind == super::TypeKind::Class
+                && matches!(
+                    self.modality,
+                    KotlinModality::Final | KotlinModality::Open | KotlinModality::Abstract
+                )
+                && !self.is_inner
+                && !self.is_expect
+                && self.parameters.formals.is_empty())
+    }
+
+    /// This class applied to its declared formals. A non-generic class is the bare classifier.
+    pub(crate) fn self_type(&self) -> Ty {
+        Ty::obj_args_name(self.classifier, &self.parameters.formals)
     }
 }
 

@@ -10,7 +10,7 @@ use crate::jvm::method_node::{Constant, Handle, Insn, MethodNode, Node};
 /// A descriptor, internal name or generic signature that does not parse. The regenerated class
 /// would keep whatever part of it names the original, so the whole regeneration is declined.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct MalformedType(pub String);
+pub struct MalformedType(pub String);
 
 /// The classes renamed so far, by internal name, and the inline function's type parameters.
 #[derive(Clone, Debug, Default)]

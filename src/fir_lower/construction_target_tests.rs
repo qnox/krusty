@@ -196,3 +196,20 @@ fn a_cross_file_construction_records_the_selected_constructor_and_its_declaratio
         ]
     );
 }
+
+/// A data class's generated `copy` constructs through its primary constructor, so it records that
+/// selection like a source construction does, beside the secondary constructor that also fits.
+#[test]
+fn a_data_class_copy_names_its_primary_constructor() {
+    let ir = lower_single_source(
+        "data class Label(val count: Int) {\n    constructor(text: String) : this(text.length)\n}\n",
+        "DataClassCopyTarget",
+    );
+    let copy = ir
+        .data_class_member(type_name("Label"), crate::ir::IrDataClassMemberRole::Copy)
+        .expect("a data class has a generated copy");
+    let body = ir.functions[copy as usize]
+        .body
+        .expect("a generated copy has a body");
+    assert_eq!(constructions_under(&ir, body), [(target(0), vec![])]);
+}

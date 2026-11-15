@@ -170,7 +170,7 @@ impl super::IrClass {
 /// and ordinal edge once; later plugin/backend phases must not recover the constructor from
 /// `synthetic`, its parameter arity, descriptor, or generated spelling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum IrSecondaryConstructorRole {
+pub enum IrSecondaryConstructorRole {
     SerializationDeserialization,
     /// kotlinc's no-arg plugin's zero-argument constructor.
     NoArg,
@@ -228,6 +228,9 @@ pub struct IrConstructorCapture {
     /// records it where the capture is produced, and a call-site copy remaps it through the
     /// expansion's bindings; a target reads it instead of tracing the constructor operand back.
     pub crossinline_parameter: Option<u32>,
+    /// The parameter was added when an inline lambda's capture was lifted onto this class. kotlinc
+    /// stores it and names the field, and leaves it out of the constructor's local-variable table.
+    pub inlined: bool,
 }
 
 /// What a captured receiver was in source. kotlinc's LocalDeclarationsLowering names each kind's
@@ -289,7 +292,7 @@ impl IrFile {
     ///
     /// Such a constructor records no generic `Signature`: the attribute exists for a source or Java
     /// caller, and nothing in source can name it.
-    pub(crate) fn is_generated_secondary_constructor(&self, owner: TypeName, ordinal: u32) -> bool {
+    pub fn is_generated_secondary_constructor(&self, owner: TypeName, ordinal: u32) -> bool {
         self.generated_secondary_constructors
             .iter()
             .any(|((registered_owner, _), registered)| {
@@ -297,7 +300,7 @@ impl IrFile {
             })
     }
 
-    pub(crate) fn generated_secondary_constructor_by_owner(
+    pub fn generated_secondary_constructor_by_owner(
         &self,
         owner: TypeName,
         role: IrSecondaryConstructorRole,
@@ -322,7 +325,7 @@ impl IrFile {
         );
     }
 
-    pub(crate) fn generated_secondary_constructor_call(
+    pub fn generated_secondary_constructor_call(
         &self,
         expression: ExprId,
     ) -> Option<(ClassId, IrSecondaryConstructorRole, u32)> {

@@ -68,6 +68,7 @@ mod tests {
     ) -> FrontendPropertyFacts {
         FrontendPropertyFacts {
             annotations: annotations.iter().map(|name| type_name(name)).collect(),
+            type_annotations: Vec::new(),
             has_backing_field: true,
             has_initializer,
             is_lateinit,

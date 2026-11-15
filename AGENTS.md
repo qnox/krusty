@@ -41,6 +41,10 @@ upstream release notes, which can name an assistant that contributed upstream. T
 ## Engineering conventions
 
 - **TDD is required.** Every feature lands with a test; every phase ends on a green harness run.
+- **Register the outcome-manifest merge driver in every clone:** `just install-merge-drivers` (also
+  run by `just install-hooks`). The expected-failure and not-applicable lists merge as sets of
+  entries, so neighbouring removals on two branches never conflict. Without it git merges them line
+  by line and reports conflicts that are not real; never hand-merge one by re-adding entries.
 - **Use the test harness, not plain `cargo test`, for full-suite validation.** Run `./run-tests.sh`
   with no parameters for the normal gate. It self-provisions the reference Kotlin compiler and box
   corpus when `just` is available, uses the fast `gate` Cargo profile, builds once, then runs test
@@ -245,6 +249,17 @@ rg -n 'with_declarations|is_selected|requires_declaration|klib_body_callables|em
 - Compatibility branches are not harmless: if the common path replaces one, delete the branch and
   its helper. Do not retain it behind `#[allow(dead_code)]`.
 
+## One rule, one path
+
+- A Kotlin rule (applicability, candidate ranking, a common-supertype join, a type-variable
+  binding) is implemented once. A fix to a rule goes through the shared path, or deletes the path it
+  patches. Never land the same rule again for another call kind, receiver tower, or typer.
+- `legacy-baseline.tsv` counts the duplicate typers, unifiers and joins, the `fn select_*`
+  definitions, and the lines of the temporary signature bridge. The lint job and the pre-commit
+  hook fail when a row grows (`just legacy-baseline-check`). After deleting legacy surface, lower
+  the rows with `just legacy-baseline`; it never raises one. Raising a row is a hand edit that the
+  pull request must justify.
+
 ## Snapshot publication
 
 - A result derived from a filesystem or classpath snapshot must prove that snapshot is current
@@ -304,7 +319,8 @@ Follow data ownership rather than starting at the changed test:
    metadata becomes common semantic structures at this boundary rather than leaking JVM queries into
    resolution.
 5. Lowering and emission: inspect `src/ir_lower.rs` for accidental lookup or semantic decisions,
-   then the relevant file under `src/jvm/` only for physical representation.
+   then the relevant file in the backend crate (`crates/krusty-jvm/src/`, or the class-file layer
+   under `src/jvm/`) only for physical representation.
 6. Tests: require a repository-owned regression plus kotlinc comparison through the harness when
    behavior or diagnostics are in question. Do not accept a corpus pin as the only regression.
 
@@ -323,8 +339,8 @@ command here. Do not bury recurring rules only in a review comment or session tr
 - Never add a suppression to land a change. `#[allow(dead_code)]` on new code is already a review
   smell (scan item 8); the same applies to `clippy::too_many_arguments` on a new signature.
 - Prefer deleting a suppression to converting it. `#[expect(...)]` reports an *unfulfilled
-  expectation* when the lint does NOT fire, so under the unpinned toolchains this repository builds
-  with it becomes a new baseline row on the next contributor's machine rather than a self-expiring
+  expectation* when the lint does NOT fire, so under contributors' unpinned local toolchains it
+  becomes a new baseline row on the next contributor's machine rather than a self-expiring
   suppression.
 
 ### `clippy-baseline.tsv`
@@ -334,8 +350,10 @@ NEW file+message row or a HIGHER count. Removing findings is therefore always sa
 not: relocating code creates rows under the new path, so an extraction must leave the new files
 with no findings at all.
 
-It is enforced by the lefthook **pre-commit hook** and CI's **lint job**. It can still drift in both
-directions as toolchains move, findings are fixed without unfreezing, or a stale green branch lands
+It is enforced by the lefthook **pre-commit hook** and CI's **lint job**. CI installs one exact Rust
+release, named in its workflows; moving to a newer one is a change of its own that fixes, or states
+what it knowingly accepts of, the new release's findings in the same pull request. It can still
+drift in both directions as toolchains move, findings are fixed without unfreezing, or a stale green branch lands
 after its baseline snapshot: a stale-low entry blocks every commit, and a stale-high one silently
 licenses a real regression in that file.
 

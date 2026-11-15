@@ -40,7 +40,7 @@ fn compile(src: &str) -> (Vec<String>, bool) {
     let outputs = krusty::compiler::emit_analyzed(
         analysis,
         &stems,
-        &krusty::jvm::JvmBackend::new(cp),
+        &krusty_jvm::JvmBackend::new(cp),
         "main",
         &mut d,
     );

@@ -73,18 +73,25 @@ fn integer_constant_sibling_primitive(
     (fits && has_constant).then_some(target)
 }
 
+/// One conditional branch's value expression and the type it produced.
+pub(super) struct BranchValue {
+    pub(super) expression: ExprId,
+    pub(super) ty: Ty,
+}
+
 /// Adapt integer-constant branches, then join the pair the way `if` and elvis do.
 pub(super) fn join_adapted_branches(
     checker: &mut Checker<'_>,
     scope: &CheckerScope<'_>,
     expected: Option<Ty>,
-    left_expr: ExprId,
-    left: Ty,
-    right_expr: ExprId,
-    right: Ty,
+    left: BranchValue,
+    right: BranchValue,
     expression: ExprId,
 ) -> Ty {
-    let adapted = integer_constant_branch_types(checker, &[(left_expr, left), (right_expr, right)]);
+    let adapted = integer_constant_branch_types(
+        checker,
+        &[(left.expression, left.ty), (right.expression, right.ty)],
+    );
     join_types(checker, scope, expected, adapted[0], adapted[1], expression)
 }
 
@@ -261,7 +268,64 @@ pub(super) fn terminal_value_expressions(file: &File, expression: ExprId, out: &
     }
 }
 
+/// The branch value expressions of a conditional used as a call argument, or `None` when
+/// `argument` is not an `if` with an `else`. Each branch is its own lower bound on the formal, as
+/// kotlinc's constraint system sees it: `mk(if (c) 1L else 2)` against `<T : Number>` solves `T`
+/// from `Long` and `Int` rather than from the branches' approximated join `Any`. Nested
+/// conditionals flatten in source order into the same source-argument ordinal, so a later bound
+/// failure is still reported on that argument.
+pub(super) fn conditional_argument_branches(file: &File, argument: ExprId) -> Option<Vec<ExprId>> {
+    let Expr::If {
+        then_branch,
+        else_branch: Some(else_branch),
+        ..
+    } = file.expr(argument)
+    else {
+        return None;
+    };
+    Some(
+        [*then_branch, *else_branch]
+            .into_iter()
+            .flat_map(|branch| {
+                let value = branch_value_expression(file, branch);
+                conditional_argument_branches(file, value).unwrap_or_else(|| vec![value])
+            })
+            .collect(),
+    )
+}
+
 impl Checker<'_> {
+    /// Nominal branch types of a conditional, flattened like [`conditional_argument_branches`];
+    /// any other expression contributes its own type. Expected-type admission reads these, while
+    /// call inference normalizes each branch through its own argument view.
+    pub(super) fn conditional_inference_inputs(&self, expression: ExprId) -> Vec<Ty> {
+        conditional_argument_branches(self.file, expression)
+            .unwrap_or_else(|| vec![expression])
+            .into_iter()
+            .filter_map(|branch| self.expr_types.get(branch.0 as usize).copied())
+            .collect()
+    }
+
+    pub(super) fn conditional_branches_admit_expected(
+        &self,
+        expression: ExprId,
+        expected: Ty,
+    ) -> bool {
+        matches!(
+            self.file.expr(expression),
+            Expr::If {
+                else_branch: Some(_),
+                ..
+            }
+        ) && self
+            .conditional_inference_inputs(expression)
+            .into_iter()
+            .all(|branch| {
+                branch == Ty::Nothing
+                    || (branch != Ty::Error && self.receiver_is_assignable(branch, expected))
+            })
+    }
+
     /// Which expression owns completion of a conditional's still-open branch calls.
     ///
     /// A branch call owns an otherwise open result only while the conditional itself remains a
@@ -372,6 +436,27 @@ impl Checker<'_> {
         }
     }
 
+    /// The evidence the other branches give the branch at `index`: the common supertype of every
+    /// sibling that offers a type (see [`Self::branch_sibling_type`]).
+    pub(super) fn conditional_sibling_evidence(
+        &self,
+        branches: &[(ExprId, Ty)],
+        index: usize,
+    ) -> Option<Ty> {
+        branches
+            .iter()
+            .enumerate()
+            .filter(|(sibling, _)| *sibling != index)
+            .map(|(_, (branch, ty))| self.branch_sibling_type(*branch, *ty))
+            .filter(|ty| *ty != Ty::Error && !ty.mentions_pending())
+            .fold(None, |joined, ty| {
+                Some(match joined {
+                    Some(joined) => self.semantic_common_supertype(joined, ty).unwrap_or(joined),
+                    None => ty,
+                })
+            })
+    }
+
     /// Check one branch of an `if` with an `else` or a `when` with an `else` arm. kotlinc completes
     /// such a conditional as one synthetic call even in statement position, so a sibling branch can
     /// fix a type parameter this branch leaves open (`when (s) { "a" -> build { set(T()) }; else ->
@@ -388,8 +473,11 @@ impl Checker<'_> {
             return self.expr_result(scope, branch, wanted.expected, wanted.value_required);
         }
         self.discarded_exprs.insert(branch);
-        let ty = self.expr_with_context(scope, branch, false);
+        // A block branch's trailing value is checked as the block's statement; the conditional,
+        // not that statement, owns completion of its open result.
         let result = branch_value_expression(self.file, branch);
+        self.joined_branch_values.insert(result);
+        let ty = self.expr_with_context(scope, branch, false);
         if !self.branch_result_is_open(branch)
             && self.report_unbound_call_result_type_parameter(scope, result)
         {

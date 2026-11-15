@@ -124,14 +124,54 @@ fn symbols_at_scope_level(
     src: &dyn SymbolSource,
     name: &str,
     packages: &[TypeName],
+    owners_may_be_classifiers: bool,
 ) -> Vec<Rc<ResolvedSymbols>> {
     packages
         .iter()
         .filter_map(|pkg| {
-            let record = src.symbols(SymbolNamespace::Package(*pkg), name);
+            // An explicit star import (`import a.b.C.*`) names a package or a classifier. A
+            // classifier brings its static-scope callables into scope, as the explicit
+            // `import a.b.C.name` already does through the same namespace.
+            let classifier = owners_may_be_classifiers
+                .then(|| src.classifier(*pkg))
+                .flatten();
+            let Some(classifier) = classifier else {
+                let record = src.symbols(SymbolNamespace::Package(*pkg), name);
+                return (!record.is_empty()).then_some(record);
+            };
+            // An object's own members are what a star import of it names (kotlinc reports the
+            // import itself and still resolves them). A class contributes only its static scope,
+            // never the members of its companion object, which `C.member` reaches through the
+            // companion instance.
+            let record = if classifier.is_object() {
+                imported_object_member_symbols(src, *pkg, name)
+                    .unwrap_or_else(|| src.symbols(SymbolNamespace::Classifier(*pkg), name))
+            } else {
+                without_companion_object_members(
+                    &src.symbols(SymbolNamespace::Classifier(*pkg), name),
+                )
+            };
             (!record.is_empty()).then_some(record)
         })
         .collect()
+}
+
+/// `record` without the callables that dispatch on a companion object's instance.
+fn without_companion_object_members(record: &Rc<ResolvedSymbols>) -> Rc<ResolvedSymbols> {
+    let (mut functions, mut properties) = record.callables.clone().into_parts();
+    let declared = functions.overloads.len() + properties.overloads.len();
+    functions
+        .overloads
+        .retain(|function| function.callable.singleton_dispatch.is_none());
+    properties
+        .overloads
+        .retain(|property| property.getter.singleton_dispatch.is_none());
+    if functions.overloads.len() + properties.overloads.len() == declared {
+        return Rc::clone(record);
+    }
+    let mut filtered = (**record).clone();
+    filtered.callables = Callables::from_parts(functions, properties);
+    Rc::new(filtered)
 }
 
 fn has_callables(record: &ResolvedSymbols) -> bool {
@@ -232,7 +272,7 @@ pub(super) fn declaration_levels_in_function_scope(
 ) -> Vec<FunctionScopeLevel> {
     match scope {
         FunctionScopeRef::Flat(packages) => {
-            let records = symbols_at_scope_level(src, name, packages);
+            let records = symbols_at_scope_level(src, name, packages, false);
             (!records.is_empty())
                 .then_some(FunctionScopeLevel {
                     kind: FunctionScopeLevelKind::Flat,
@@ -272,7 +312,12 @@ pub(super) fn declaration_levels_in_function_scope(
                 });
             }
             for (index, level) in imports.levels().iter().enumerate() {
-                let records = symbols_at_scope_level(src, name, level);
+                let records = symbols_at_scope_level(
+                    src,
+                    name,
+                    level,
+                    u32::try_from(index).is_ok_and(|rank| rank == EXPLICIT_STAR_IMPORT_RANK),
+                );
                 if !records.is_empty() {
                     crate::trace_compiler!(
                         "resolve",
@@ -358,6 +403,33 @@ pub(super) fn level_properties(
 }
 
 impl SymbolResolver<'_> {
+    /// [`Self::top_level_candidates`], each stamped with the scope rung of the level that offers
+    /// them, so one selection can rank them against candidates from another family on the same
+    /// scope tower (a classifier's constructors).
+    pub(crate) fn ranked_top_level_candidates(&self, name: &str) -> Vec<FunctionInfo> {
+        let Some(scope) = self.fn_scope else {
+            return Vec::new();
+        };
+        let levels = tagged_symbol_levels_in_function_scope(&self.src, name, scope);
+        let symbols = levels
+            .iter()
+            .map(|level| level.symbols.clone())
+            .collect::<Vec<_>>();
+        let Some((index, functions)) = self.nearest_top_level_level(&symbols) else {
+            return Vec::new();
+        };
+        let level = &levels[index];
+        functions
+            .into_top_level()
+            .filter(|function| !function.callable.default_call)
+            .map(|mut function| {
+                function.scope_rung = level.kind.callable_scope_rung();
+                function.scope_rank = level.rank;
+                function
+            })
+            .collect()
+    }
+
     /// The receiver-less function overloads named `name` at the nearest scope level that offers one.
     pub(crate) fn top_level_candidates(&self, name: &str) -> Vec<FunctionInfo> {
         let functions = self.nearest_top_level_functions(&self.symbol_levels_in_scope(name));
@@ -433,8 +505,19 @@ impl SymbolResolver<'_> {
         &self,
         levels: &[Vec<Rc<ResolvedSymbols>>],
     ) -> FunctionSet {
+        self.nearest_top_level_level(levels)
+            .map(|(_, functions)| functions)
+            .unwrap_or_default()
+    }
+
+    /// The index of the scope level that owns a receiver-less call, with its functions: the
+    /// nearest level with an accessible receiver-less function, else the nearest with any.
+    fn nearest_top_level_level(
+        &self,
+        levels: &[Vec<Rc<ResolvedSymbols>>],
+    ) -> Option<(usize, FunctionSet)> {
         let mut nearest_inaccessible = None;
-        for symbols in levels {
+        for (index, symbols) in levels.iter().enumerate() {
             let functions = function_set_from_symbols(symbols);
             // Extensions require a receiver. Only the receiver-less facet can own this scope
             // level or supply the inaccessible candidates retained for a bare-call diagnostic.
@@ -445,11 +528,11 @@ impl SymbolResolver<'_> {
                 .top_level()
                 .any(|function| self.non_member_callable_accessible(function))
             {
-                return functions;
+                return Some((index, functions));
             }
-            nearest_inaccessible.get_or_insert(functions);
+            nearest_inaccessible.get_or_insert((index, functions));
         }
-        nearest_inaccessible.unwrap_or_default()
+        nearest_inaccessible
     }
 
     pub(super) fn nearest_top_level_properties(

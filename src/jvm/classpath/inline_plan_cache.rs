@@ -223,7 +223,9 @@ enum PlanBucket {
 }
 
 struct PlanSlot {
-    key: PlanKey,
+    /// The owned key is boxed so a one-entry bucket does not reserve the key's size. A hit still
+    /// compares the borrowed provider view and copies only the memoized plan.
+    key: Box<PlanKey>,
     value: Option<Box<crate::libraries::InlineBodyPlan>>,
     tick: u64,
 }
@@ -278,10 +280,10 @@ impl PlanBucket {
             return self.remove_from_collision(key, tick);
         }
         match self {
-            Self::One(slot) if &slot.key == key && slot.tick != tick => {
+            Self::One(slot) if slot.key.as_ref() == key && slot.tick != tick => {
                 SlotRemoval::Stale(slot.tick)
             }
-            Self::One(slot) if &slot.key == key => SlotRemoval::Removed { empty: true },
+            Self::One(slot) if slot.key.as_ref() == key => SlotRemoval::Removed { empty: true },
             _ => SlotRemoval::Missing,
         }
     }
@@ -290,7 +292,7 @@ impl PlanBucket {
         let Self::Many(mut slots) = std::mem::replace(self, Self::Many(Vec::new())) else {
             unreachable!("a collision removal starts from a collision list");
         };
-        let Some(position) = slots.iter().position(|slot| &slot.key == key) else {
+        let Some(position) = slots.iter().position(|slot| slot.key.as_ref() == key) else {
             *self = Self::Many(slots);
             return SlotRemoval::Missing;
         };
@@ -417,7 +419,7 @@ impl PlanMemo {
             }));
         }
         let slot = PlanSlot {
-            key,
+            key: Box::new(key),
             value: plan,
             tick,
         };
@@ -770,12 +772,12 @@ mod tests {
         );
 
         let mut bucket = PlanBucket::One(PlanSlot {
-            key: plan_key(&first),
+            key: Box::new(plan_key(&first)),
             value: None,
             tick: 1,
         });
         bucket.push_new(PlanSlot {
-            key: plan_key(&second),
+            key: Box::new(plan_key(&second)),
             value: None,
             tick: 2,
         });

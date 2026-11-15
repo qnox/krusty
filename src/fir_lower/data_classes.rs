@@ -9,6 +9,7 @@ use crate::ir::{
 };
 use crate::types::Ty;
 
+use super::equals_guards::{identity_and_type_guards, return_guard};
 use super::FirFileLoweringFailure;
 
 pub(super) fn finalize_data_classes(
@@ -32,7 +33,8 @@ pub(super) fn finalize_data_classes(
         // properties and no generated trio. Only a final one, like a data class, synthesizes
         // `equals`/`hashCode`/`toString`.
         let structural = header.flags.has(DeclarationFlags::DATA)
-            || (header.flags.has(DeclarationFlags::FULL_VALUE)
+            || ((header.flags.has(DeclarationFlags::FULL_VALUE)
+                || header.flags.has(DeclarationFlags::VALUE))
                 && header.flags.has(DeclarationFlags::FINAL));
         if anchor.kind != DeclarationKind::Classifier || !structural {
             continue;
@@ -51,7 +53,8 @@ pub(super) fn finalize_data_classes(
         }
         synthesize_to_string(index, declaration, class, &fields, ir)?;
         synthesize_hash_code(index, declaration, class, &fields, ir)?;
-        synthesize_equals(index, declaration, class, &fields, ir)?;
+        let inline_value = header.flags.has(DeclarationFlags::VALUE);
+        synthesize_equals(index, declaration, class, &fields, inline_value, ir)?;
     }
     Ok(())
 }
@@ -238,6 +241,13 @@ fn synthesize_components_and_copy(
         defaults: Box::new([]),
         default_prefix_count: 0,
     });
+    // `copy` calls the primary constructor; record that selection like a source construction's.
+    let target = super::constructors::primary_constructor_declaration(index, declaration)
+        .and_then(|primary| super::constructors::module_constructor_target(index, primary))
+        .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
+    ir.construction_targets.insert(constructed, target);
+    // The construction is part of the class's own body, so a private primary stays a direct call.
+    ir.expression_owners.insert(constructed, owner);
     let returned = ir.add_expr(IrExpr::Return(Some(constructed)));
     ir.functions[copy as usize].body = Some(ir.add_expr(IrExpr::Block {
         stmts: vec![returned],
@@ -297,10 +307,16 @@ fn synthesize_to_string(
     };
     let owner = ir.classes[class as usize].fq_name_id();
     ir.record_data_class_member(owner, IrDataClassMemberRole::ToString, function);
-    // The rendered internal name spells the package separator and the nesting separator
-    // differently, so the simple name is read through the identity tree rather than by splitting
-    // the rendering. The JVM pool seeding builds the twin recipe from the same operation.
-    let simple = ir.classes[class as usize].fq_name_id().nested_segment_ref();
+    // kotlinc names the class by its own declared name: a nested `C.IC1` prints `IC1(…)`, and a
+    // backticked `Cash$Tag` keeps its `$`, which no segment of a member's binary name preserves.
+    // A local class retains no lexical declaration name; its own identity segment is that name.
+    let declared = &ir.classes[class as usize];
+    let simple = match &declared.declaration_name {
+        Some(name) => name.name(),
+        None => declared.fq_name_id().nested_segment_ref(),
+    }
+    .to_owned();
+    let simple = simple.as_str();
     let singleton = ir.classes[class as usize].is_singleton();
     if singleton {
         let value = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(
@@ -333,7 +349,16 @@ fn synthesize_to_string(
         // A NULLABLE array field renders its contents too — `A(x=[0, 1])` for an `Array<Int>?`
         // holding one, `A(x=null)` for one holding null. Asking `is_array` of the declared type
         // answers `false` for `Array<Int>?`, so the nullable field used to render by identity.
-        if field.ty.non_null().is_array() {
+        // An unsigned array is a value class with its own `toString`, not a primitive array, so
+        // it renders as that class (`UIntArray(storage=[1, 2])`) through the ordinary string
+        // conversion of its value.
+        let unsigned_array = !field.ty.non_null().is_reference_array()
+            && field
+                .ty
+                .non_null()
+                .array_elem()
+                .is_some_and(|element| element.is_unsigned());
+        if field.ty.non_null().is_array() && !unsigned_array {
             value = intrinsic(
                 ir,
                 crate::ir::IrIntrinsic::DataClassArrayToString { ty: field.ty },
@@ -477,6 +502,7 @@ fn synthesize_equals(
     declaration: DeclarationId,
     class: ClassId,
     fields: &[DataField],
+    inline_value: bool,
     ir: &mut IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
     let function = match generated_method(index, declaration, "equals", ir) {
@@ -490,22 +516,15 @@ fn synthesize_equals(
     let classifier = ir.classes[class as usize].fq_name_id();
     let mut statements = Vec::new();
 
-    let this_value = ir.add_expr(IrExpr::GetValue(0));
-    let other_value = ir.add_expr(IrExpr::GetValue(1));
-    let identical = ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: IrBinOp::RefEq,
-        lhs: this_value,
-        rhs: other_value,
-    });
-    statements.push(return_guard(ir, identical, true));
-
-    let other_value = ir.add_expr(IrExpr::GetValue(1));
-    let wrong_type = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::NotInstanceOf,
-        arg: other_value,
-        type_operand: Ty::obj_name(classifier),
-    });
-    statements.push(return_guard(ir, wrong_type, false));
+    statements.extend(identity_and_type_guards(
+        ir,
+        0,
+        1,
+        Ty::obj_name(classifier),
+        // An inline value class has no identity to compare: kotlinc's generated `equals` starts at
+        // the type test.
+        !inline_value,
+    ));
 
     const OTHER: u32 = 2;
     let other_value = ir.add_expr(IrExpr::GetValue(1));
@@ -563,23 +582,6 @@ fn synthesize_equals(
     }));
     ir.open_methods.insert(function);
     Ok(())
-}
-
-fn return_guard(ir: &mut IrFile, condition: u32, value: bool) -> u32 {
-    let value = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Boolean(value)));
-    let returned = ir.add_expr(IrExpr::Return(Some(value)));
-    ir.set_logical_type(returned, Ty::Nothing);
-    let branch = ir.add_expr(IrExpr::Block {
-        stmts: vec![returned],
-        value: None,
-    });
-    ir.set_logical_type(branch, Ty::Unit);
-    // An `if` without an `else` is a `Unit` statement, as the checker types the source form.
-    let guard = ir.add_expr(IrExpr::When {
-        branches: vec![(Some(condition), branch)],
-    });
-    ir.set_logical_type(guard, Ty::Unit);
-    guard
 }
 
 fn has_method(ir: &IrFile, class: ClassId, name: &str, parameter_count: usize) -> bool {

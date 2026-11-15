@@ -7,7 +7,7 @@
 //! including a plain `String`, which has no value-class mangling of its own. A companion `var`
 //! reads and writes that static through `access$getOk$cp` / `access$setOk$cp`. A reference
 //! carrier is unboxed; a nullable primitive carrier stays boxed.
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::common::{self, compile_and_run_box_files};
 
@@ -32,7 +32,7 @@ fn agree(source: &str) {
     assert_eq!(krusty, "OK");
 }
 
-fn kotlinc_box(source: &str, stdlib: &PathBuf, reflect: &PathBuf) -> String {
+fn kotlinc_box(source: &str, stdlib: &Path, reflect: &Path) -> String {
     let work = common::scratch_dir().expect("scratch");
     let source_path = work.join("main.kt");
     std::fs::write(&source_path, source).expect("write source");
@@ -45,8 +45,12 @@ fn kotlinc_box(source: &str, stdlib: &PathBuf, reflect: &PathBuf) -> String {
     ])
     .expect("kotlinc");
     assert_eq!(code, 0, "kotlinc rejected the fixture: {diagnostics}");
-    let result = common::run_box(&[], "MainKt", &[output, stdlib.clone(), reflect.clone()])
-        .expect("kotlinc box");
+    let result = common::run_box(
+        &[],
+        "MainKt",
+        &[output, stdlib.to_path_buf(), reflect.to_path_buf()],
+    )
+    .expect("kotlinc box");
     let _ = std::fs::remove_dir_all(work);
     result
 }

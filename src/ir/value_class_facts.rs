@@ -17,7 +17,7 @@ impl IrFile {
         self.external_value_classes.insert(internal, underlying);
     }
 
-    pub(crate) fn insert_external_value_class_declaration(
+    pub fn insert_external_value_class_declaration(
         &mut self,
         internal: TypeName,
         declaration: crate::types::DeclaredValueClass,
@@ -33,7 +33,7 @@ impl IrFile {
     }
 
     /// A value class declared elsewhere, as its provider published its declaration.
-    pub(crate) fn external_value_class_declaration(
+    pub fn external_value_class_declaration(
         &self,
         internal: TypeName,
     ) -> Option<&crate::types::DeclaredValueClass> {
@@ -49,7 +49,7 @@ impl IrFile {
     }
 
     /// Every value class this IR knows: the file's own and the external ones its checked facts name.
-    pub(crate) fn value_class_names(&self) -> impl Iterator<Item = TypeName> + '_ {
+    pub fn value_class_names(&self) -> impl Iterator<Item = TypeName> + '_ {
         self.classes
             .iter()
             .filter(|class| class.is_value)
@@ -59,7 +59,7 @@ impl IrFile {
 
     /// Return a value class's declared, one-level underlying semantic type without making callers
     /// branch on whether the declaration belongs to this source file or external checked facts.
-    pub(crate) fn value_class_underlying_name(&self, internal: TypeName) -> Option<Ty> {
+    pub fn value_class_underlying_name(&self, internal: TypeName) -> Option<Ty> {
         self.external_value_class_name(internal)
             .copied()
             .or_else(|| {

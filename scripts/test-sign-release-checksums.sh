@@ -30,10 +30,11 @@ version=2.4.21-build.7
 failures=0
 expect() {
   local name=$1 key=$2 id=$3 status=$4 stdout=$5 stderr=$6 actual_status=0
+  local password=${7-fixture}
   local dist=$fixture/dist-$name
   mkdir -p "$dist"
   echo "0000  krusty-$version-x86_64-unknown-linux-gnu.tar.gz" > "$dist/krusty-$version-SHA256SUMS"
-  SIGNING_KEY=$key SIGNING_KEY_ID=$id SIGNING_KEY_PASSWORD=fixture KRUSTY_RELEASE_ROOT_KEY=$fixture/root.asc \
+  SIGNING_KEY=$key SIGNING_KEY_ID=$id SIGNING_KEY_PASSWORD="$password" KRUSTY_RELEASE_ROOT_KEY=$fixture/root.asc \
     "$repo/scripts/sign-release-checksums.sh" "$version" "$dist" > "$fixture/out" 2> "$fixture/err" ||
     actual_status=$?
   if [[ $actual_status != "$status" || $(cat "$fixture/out") != "$stdout" || $(cat "$fixture/err") != "$stderr" ]]; then
@@ -58,8 +59,16 @@ expect foreign "$(cat "$fixture/foreign.asc")" "$foreign" 1 '' \
 expect missing '' "$sign" 1 '' \
   'SIGNING_KEY is not set; refusing to publish compiler archives the Gradle plugin cannot verify'
 
+# A foreign certificate is rejected before its secret key or passphrase is needed.
+expect foreign-wrong-password "$(cat "$fixture/foreign.asc")" "$foreign" 1 '' \
+  "the signing subkey $foreign is not bound by the release root key $root" 'deliberately wrong'
+if [[ -e "$fixture/dist-foreign-wrong-password/krusty-$version-SHA256SUMS.asc" ]]; then
+  echo "foreign-wrong-password: a signature was created before root authentication" >&2
+  failures=$((failures + 1))
+fi
+
 if [[ $failures -ne 0 ]]; then
   echo "$failures release checksum signing case(s) failed" >&2
   exit 1
 fi
-echo "release checksum signing: 4 cases passed"
+echo "release checksum signing: 5 cases passed"

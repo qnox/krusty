@@ -53,11 +53,13 @@ pub(super) fn decode_contract(
             };
             decode_metadata_type(
                 body,
-                type_table,
-                records,
-                d2,
-                type_parameters,
-                &HashMap::default(),
+                &super::MetadataTypeSource {
+                    type_table,
+                    records,
+                    d2,
+                    tparams: type_parameters,
+                    bounds: &HashMap::default(),
+                },
                 table_nullable,
                 0,
             )

@@ -12,7 +12,7 @@
 
 use krusty::compilation_target::CompilationTarget;
 
-#[path = "native_value_class_parameter_diagnostics_e2e.rs"]
+#[path = "value_class_declaration_e2e/native_parameters.rs"]
 mod native_parameters;
 
 use super::common::{
@@ -84,8 +84,8 @@ fn assert_matches_reference(target: CompilationTarget, form: &str) {
         } else {
             (form.to_string(), Vec::new())
         };
-        // kotlinc-native alone may be unprovisioned and unrecorded; the maximum-version Native CI
-        // row and focused local `just klib-semantics` recipe require it.
+        // kotlinc-native alone may be unprovisioned and unrecorded; the normal CI integration
+        // suite and focused local `just klib-semantics` recipe require it.
         let Some(expected) = reference_outcome(target, &[("V.kt", &source)], &args) else {
             continue;
         };

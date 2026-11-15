@@ -5,18 +5,19 @@ use crate::fir::ExternalCallableId;
 use crate::ir::{Callee, ExprId, IrCheckedOperation, IrPropertyDispatch};
 use crate::types::Ty;
 
-pub(crate) struct DependencyAccessor<'a> {
-    pub(crate) target: ExternalCallableId,
-    pub(crate) callable: &'a BackendCallableFact,
-    pub(crate) receiver: Option<ExprId>,
-    pub(crate) arguments: &'a [ExprId],
+pub struct DependencyAccessor<'a> {
+    pub target: ExternalCallableId,
+    pub callable: &'a BackendCallableFact,
+    pub receiver: Option<ExprId>,
+    pub arguments: &'a [ExprId],
     parameters: &'a [Ty],
     result: Ty,
     dispatch: IrPropertyDispatch,
+    write: bool,
 }
 
 impl CheckedBackendCallables {
-    pub(crate) fn dependency_accessor<'a>(
+    pub fn dependency_accessor<'a>(
         &'a self,
         operation: &'a IrCheckedOperation,
     ) -> Option<DependencyAccessor<'a>> {
@@ -59,12 +60,24 @@ impl CheckedBackendCallables {
             parameters,
             result,
             dispatch,
+            write,
         })
     }
 }
 
 impl DependencyAccessor<'_> {
-    pub(crate) fn callee(&self) -> Result<Callee, &'static str> {
+    /// Whether the operation writes the property, through its setter.
+    pub fn writes(&self) -> bool {
+        self.write
+    }
+
+    /// Whether the operation dispatches on its receiver rather than naming a superclass's
+    /// implementation.
+    pub fn dispatches(&self) -> bool {
+        self.dispatch == IrPropertyDispatch::Ordinary
+    }
+
+    pub fn callee(&self) -> Result<Callee, &'static str> {
         if self.dispatch != IrPropertyDispatch::Ordinary {
             return Err("a dependency accessor export called through super");
         }

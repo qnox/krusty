@@ -1,7 +1,8 @@
 //! Array type validity at finalized expression boundaries.
 //!
 //! Class literals own their feature-gated LHS policy. Ordinary values are checked independently,
-//! after their selected call and reified substitutions have committed.
+//! after their selected call and reified substitutions have committed. `Array<Nothing>` is
+//! rejected everywhere; whether `Array<Nothing?>` is a value is the platform's answer.
 
 use super::*;
 use crate::types::TyKind;
@@ -14,14 +15,23 @@ impl Checker<'_> {
                 self.expr_lowers.get(&expression),
                 Some(ExprLowering::ClassLiteral { .. })
             )
-            || !contains_array_of(ty, Ty::Nothing)
         {
             return;
         }
-        self.diags.error(
-            self.call_callee_name_span(expression),
-            "expression cannot have a type of 'Array<Nothing>'.".to_string(),
-        );
+        let nullable = self.libraries.array_of_nullable_nothing_error();
+        let messages = [
+            (
+                Ty::Nothing,
+                Some("expression cannot have a type of 'Array<Nothing>'."),
+            ),
+            (Ty::nullable(Ty::Nothing), nullable),
+        ];
+        for (element, message) in messages {
+            if let Some(message) = message.filter(|_| contains_array_of(ty, element)) {
+                self.diags
+                    .error(self.call_callee_name_span(expression), message.to_string());
+            }
+        }
     }
 }
 

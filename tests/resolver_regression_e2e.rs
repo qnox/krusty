@@ -2067,7 +2067,7 @@ class Box<out T : Any?> private constructor(private val value: Any?) {
         receiver.kind(),
         krusty::types::TyKind::Obj(owner, arguments)
             if owner.matches("Box")
-                && matches!(arguments.as_ref(), [argument]
+                && matches!(arguments.as_slice(), [argument]
                     if matches!(argument.kind(), krusty::types::TyKind::TyParam(receiver_identity, receiver_bound)
                         if receiver_identity == parameter_identity && receiver_bound == parameter_bound))
     ));
@@ -2530,6 +2530,91 @@ fun box(): String {
     );
 }
 
+/// Run a portable box regression as the module it declares and compare its classes with
+/// kotlinc's.
+fn assert_box_regression_matches_kotlinc(source: &str, stem: &str) {
+    let (blocks, java) = krusty::conformance::split_files(source)
+        .unwrap_or_else(|error| panic!("{stem} is not a portable box program: {error}"));
+    assert!(java.is_empty(), "{stem} declares no Java sources");
+    let files = if blocks.is_empty() {
+        vec![(format!("{stem}.kt"), source.to_string())]
+    } else {
+        blocks
+            .into_iter()
+            .map(|(name, body)| (format!("{name}.kt"), body))
+            .collect()
+    };
+    let sources = files
+        .iter()
+        .map(|(name, body)| (name.as_str(), body.as_str()))
+        .collect::<Vec<_>>();
+    assert_accepted_and_runs_files(&sources, stem);
+    let differences = common::classes_against_kotlinc_module(&sources).differences();
+    assert!(
+        differences.is_empty(),
+        "classes differ from kotlinc's:\n\n{}",
+        differences.join("\n\n")
+    );
+}
+
+#[test]
+fn a_package_or_star_imported_function_outranks_the_default_imported_constructor() {
+    assert_box_regression_matches_kotlinc(
+        include_str!("box_regressions/packageFunctionShadowsDefaultConstructor.kt"),
+        "ResolverPackageFunctionShadowsConstructor",
+    );
+}
+
+#[test]
+fn an_inapplicable_package_function_falls_through_to_a_star_imported_constructor() {
+    assert_box_regression_matches_kotlinc(
+        include_str!("box_regressions/packageFunctionFallsThroughToStarImportedConstructor.kt"),
+        "ResolverPackageFunctionStarImportedConstructor",
+    );
+}
+
+#[test]
+fn an_explicitly_imported_classifier_outranks_a_same_package_function() {
+    assert_box_regression_matches_kotlinc(
+        include_str!("box_regressions/explicitImportClassifierOutranksPackageFunction.kt"),
+        "ResolverExplicitImportConstructor",
+    );
+}
+
+#[test]
+fn a_same_named_function_outranks_a_constructor_called_through_a_type_alias() {
+    assert_box_regression_matches_kotlinc(
+        include_str!("box_regressions/aliasFunctionOutranksConstructor.kt"),
+        "ResolverAliasFunctionOutranksConstructor",
+    );
+}
+
+#[test]
+fn an_ambiguous_nearer_function_family_is_not_a_constructor() {
+    // Both same-package functions apply to `Pair(1, 2)` and neither is more specific. The
+    // default-imported constructor is a farther rung and is not a candidate in the ambiguity.
+    let sources = [(
+        "main.kt",
+        r#"package demo
+
+fun Pair(a: Int, b: Number): String = "a"
+fun Pair(a: Number, b: Int): String = "b"
+
+fun box(): String = Pair(1, 2)
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "main.kt:6:21: overload resolution ambiguity between candidates:",
+            "| fun Pair(a: Int, b: Number): String",
+            "| fun Pair(a: Number, b: Int): String",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
 #[test]
 fn an_implicit_receiver_extension_property_root_binds_a_callable_suffix() {
     // The root `kotlin` names both a root package and an extension property on the lambda's
@@ -2599,6 +2684,18 @@ fun <T : Number?, S : T> both(sink: Sink<T>, t: S, n: Int): Int = sink.put(t, n)
         ]
     );
     common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
+#[test]
+fn conditional_argument_branches_leave_bounded_overloads_ambiguous() {
+    // Each branch is a lower bound on `T`, and `Long` and `Int` satisfy both bounds, so neither
+    // overload is more specific.
+    let source = r#"
+fun <T : Number> pick(x: T): String = "number"
+fun <T : Comparable<*>> pick(x: T): String = "comparable"
+fun use(c: Boolean): String = pick(if (c) 1L else 2)
+"#;
+    assert_rejection_same_as_kotlinc("ConditionalArgumentOverloadAmbiguity", source);
 }
 
 /// The builder shape from a SQL library: a member extension's defaulted `separator` rejects the
@@ -2672,6 +2769,36 @@ fun render(items: List<String>): Unit = with(Builder()) {
         ]
     );
     common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
+#[test]
+fn a_rejected_constructor_family_commits_none_of_its_declarations() {
+    // kotlinc reports every inapplicable constructor of the family and selects none of them.
+    let source = r#"
+class Two {
+    constructor(a: Int)
+    constructor(b: String)
+}
+fun several(): Two = Two(1.0)
+"#;
+    assert_rejection_same_as_kotlinc("RejectedConstructorFamily", source);
+}
+
+#[test]
+fn a_rejected_constructor_family_filtered_to_one_is_reported_not_committed() {
+    // Only `constructor(f)` takes one argument, so kotlinc reports that candidate's mismatch
+    // alone; the call is still rejected, and its type is that candidate's result.
+    let source = r#"
+interface Factory<K, E>
+class StrFactory : Factory<String, Char>
+class Two<K, E> {
+    constructor(f: Factory<K, E>)
+    constructor(s: String, n: Int)
+}
+val x: Two<Char, Char> = Two<Char, Char>(StrFactory())
+val y: String = Two<Char, Char>(StrFactory())
+"#;
+    assert_rejection_same_as_kotlinc("RejectedConstructorFilteredToOne", source);
 }
 
 #[test]
@@ -2767,6 +2894,36 @@ fun call(): Int = keepAll(listOf(shape()))
 fun construct(): KeepAll<*> = KeepAll(listOf(shape()))
 "#;
     assert_rejection_same_as_kotlinc("RejectedStructuralArgument", source);
+}
+
+#[test]
+fn a_bound_violating_conditional_branch_rejects_the_whole_argument() {
+    // kotlinc constrains the formal by the conditional as one argument: the `Circle` branch puts
+    // the conditional's `Shape` outside the bound, and no other argument is left to infer `T`.
+    let source = r#"
+open class Shape
+class Square : Shape()
+class Circle : Shape()
+class Keep<T : Square>(item: T)
+fun <T : Square> keep(item: T): Int = 1
+fun call(c: Boolean): Int = keep(if (c) Square() else Circle())
+fun construct(c: Boolean): Keep<*> = Keep(if (c) Square() else Circle())
+"#;
+    assert_rejection_same_as_kotlinc("ConditionalBranchViolatesBound", source);
+}
+
+#[test]
+fn an_invariant_argument_fixes_the_formal_before_a_conditional_argument() {
+    let source = r#"
+open class Shape
+class Square : Shape()
+class Circle : Shape()
+class Same<T>(items: MutableList<T>, item: T)
+fun <T> same(items: MutableList<T>, item: T): Int = items.size
+fun call(c: Boolean): Int = same(mutableListOf<Square>(), if (c) Square() else Circle())
+fun construct(c: Boolean): Same<*> = Same(mutableListOf<Square>(), if (c) Square() else Circle())
+"#;
+    assert_rejection_same_as_kotlinc("InvariantFormalBeforeConditional", source);
 }
 
 #[test]

@@ -134,10 +134,12 @@ pub(in super::super) fn plan(
             None,
             reified_bindings,
             &inline_captures,
-            &mut decisions,
-            &mut functions,
-            &mut requests,
-            &mut visiting,
+            &mut EscapingFunctionPlans {
+                decisions: &mut decisions,
+                planned: &mut functions,
+                requests: &mut requests,
+                visiting: &mut visiting,
+            },
         );
         match planned {
             FunctionPlan::Planned => {}
@@ -164,6 +166,23 @@ fn caller_capturing_substitution(
         && matches!(ir.expr(expression), IrExpr::Lambda { captures, .. } if !captures.is_empty())
 }
 
+/// The caller an escaping-lambda specialization is copied into.
+pub(in super::super) struct EscapingLambdaCaller<'a> {
+    pub(in super::super) declaration: crate::fir::DeclarationId,
+    pub(in super::super) enclosure: Option<crate::ir::IrEnclosure>,
+    pub(in super::super) is_default: bool,
+    pub(in super::super) source_name: &'a str,
+}
+
+/// The inline template whose escaping lambdas are specialized at one call.
+pub(in super::super) struct EscapingInlineTemplate<'a> {
+    pub(in super::super) function: crate::ir::FunId,
+    pub(in super::super) owner: Option<crate::types::TypeName>,
+    pub(in super::super) source: crate::fir::SourceFileId,
+    pub(in super::super) callee: crate::ir::IrInlineCallee,
+    pub(in super::super) callee_source_name: &'a str,
+}
+
 /// Commit a previously validated plan after every fallible transformation of the containing
 /// expansion has succeeded.
 pub(in super::super) fn apply(
@@ -171,16 +190,22 @@ pub(in super::super) fn apply(
     plan: EscapingLambdaPlan,
     bindings: &HashMap<String, Ty>,
     reified_bindings: &HashMap<String, Ty>,
-    caller_declaration: crate::fir::DeclarationId,
-    caller: Option<crate::ir::IrEnclosure>,
-    caller_is_default: bool,
-    caller_source_name: &str,
-    inline_template_function: crate::ir::FunId,
-    inline_template_owner: Option<crate::types::TypeName>,
-    inline_template_source: crate::fir::SourceFileId,
-    inline_callee: crate::fir::CallableId,
-    inline_callee_source_name: &str,
+    caller: EscapingLambdaCaller<'_>,
+    template: EscapingInlineTemplate<'_>,
 ) -> Vec<crate::ir::FunId> {
+    let EscapingLambdaCaller {
+        declaration: caller_declaration,
+        enclosure: caller,
+        is_default: caller_is_default,
+        source_name: caller_source_name,
+    } = caller;
+    let EscapingInlineTemplate {
+        function: inline_template_function,
+        owner: inline_template_owner,
+        source: inline_template_source,
+        callee: inline_callee,
+        callee_source_name: inline_callee_source_name,
+    } = template;
     let mut replacements = HashMap::<u32, u32>::default();
     let mut decisions = HashMap::<u32, bool>::default();
     let mut suppressions = HashSet::<crate::ir::FunId>::default();
@@ -254,8 +279,13 @@ pub(in super::super) fn apply(
             let IrExpr::Lambda { captures, .. } = &mut ir.exprs[copy as usize] else {
                 unreachable!("the specialized escaping value remains a lambda");
             };
-            for (capture, transferred) in inline_captures.iter().zip(transferred).rev() {
+            for (capture, transferred) in inline_captures.iter().zip(transferred.clone()).rev() {
                 captures.splice(capture.parameter..=capture.parameter, transferred);
+            }
+            // The caller's lambda is never built: kotlinc's inliner loads the values it captured
+            // for the regenerated closure with no line of the lambda's.
+            for value in transferred.into_iter().flatten() {
+                ir.clear_position(value);
             }
         }
     }
@@ -278,7 +308,7 @@ struct Specialization<'a> {
     inline_template_function: crate::ir::FunId,
     inline_template_owner: Option<crate::types::TypeName>,
     inline_template_source: crate::fir::SourceFileId,
-    inline_callee: crate::fir::CallableId,
+    inline_callee: crate::ir::IrInlineCallee,
     inline_callee_source_name: &'a str,
 }
 
@@ -304,6 +334,14 @@ struct SpecializationRequest {
     inline_captures: Vec<InlineCapture>,
 }
 
+/// The mutable ledger `plan_function` threads through one escaping-lambda walk.
+struct EscapingFunctionPlans<'a> {
+    decisions: &'a mut HashMap<u32, bool>,
+    planned: &'a mut HashSet<crate::ir::FunId>,
+    requests: &'a mut HashMap<crate::ir::FunId, SpecializationRequest>,
+    visiting: &'a mut HashSet<crate::ir::FunId>,
+}
+
 fn plan_function(
     ir: &crate::ir::IrFile,
     function: crate::ir::FunId,
@@ -311,31 +349,28 @@ fn plan_function(
     parent: Option<crate::ir::FunId>,
     reified_bindings: &HashMap<String, Ty>,
     inline_captures: &[InlineCapture],
-    decisions: &mut HashMap<u32, bool>,
-    planned: &mut HashSet<crate::ir::FunId>,
-    requests: &mut HashMap<crate::ir::FunId, SpecializationRequest>,
-    visiting: &mut HashSet<crate::ir::FunId>,
+    plans: &mut EscapingFunctionPlans<'_>,
 ) -> FunctionPlan {
     let request = SpecializationRequest {
         site,
         parent,
         inline_captures: inline_captures.to_vec(),
     };
-    if let Some(previous) = requests.get(&function) {
+    if let Some(previous) = plans.requests.get(&function) {
         return if previous == &request {
             FunctionPlan::Planned
         } else {
             FunctionPlan::Invalid
         };
     }
-    if !visiting.insert(function) {
+    if !plans.visiting.insert(function) {
         return FunctionPlan::Invalid;
     }
     let uses_reified = function_uses_binding(
         ir,
         function,
         reified_bindings,
-        decisions,
+        plans.decisions,
         &mut HashSet::default(),
         &mut HashSet::default(),
     );
@@ -343,7 +378,7 @@ fn plan_function(
         || function_mentions_anonymous_class(ir, function)
         || !inline_captures.is_empty();
     let valid = if !needed {
-        visiting.remove(&function);
+        plans.visiting.remove(&function);
         return FunctionPlan::NotNeeded;
     } else if let Some(body) = ir
         .functions
@@ -362,11 +397,11 @@ fn plan_function(
         false
     };
     if !valid {
-        visiting.remove(&function);
+        plans.visiting.remove(&function);
         return FunctionPlan::Invalid;
     }
-    requests.insert(function, request);
-    planned.insert(function);
+    plans.requests.insert(function, request);
+    plans.planned.insert(function);
     let body = ir.functions[function as usize]
         .body
         .expect("a validated escaping implementation has a body");
@@ -378,17 +413,14 @@ fn plan_function(
             Some(function),
             reified_bindings,
             &[],
-            decisions,
-            planned,
-            requests,
-            visiting,
+            plans,
         ) == FunctionPlan::Invalid
         {
-            visiting.remove(&function);
+            plans.visiting.remove(&function);
             return FunctionPlan::Invalid;
         }
     }
-    visiting.remove(&function);
+    plans.visiting.remove(&function);
     FunctionPlan::Planned
 }
 
@@ -445,7 +477,7 @@ fn inline_capture_splices_are_valid(
         if ir
             .functions
             .get(*impl_fn as usize)
-            .map_or(true, |function| function.params.len() < transferred.len())
+            .is_none_or(|function| function.params.len() < transferred.len())
         {
             crate::trace_compiler!(
                 "lower",
@@ -597,14 +629,10 @@ fn outer_parameter_sidecars_are_valid(
             return false;
         }
     }
-    if [
-        ir.fn_param_declared_nullable.get(&function).map(Vec::len),
-        ir.fn_param_annotations.get(&function).map(Vec::len),
-        ir.fn_param_no_infer.get(&function).map(Vec::len),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|len| !optional_len(len))
+    if ir
+        .declared_parameters(function)
+        .recorded_lengths()
+        .any(|len| !optional_len(len))
     {
         return false;
     }
@@ -613,8 +641,8 @@ fn outer_parameter_sidecars_are_valid(
         .get(&function)
         .is_some_and(|own_from| *own_from as usize > arity)
         || ir
-            .fn_varargs
-            .get(&function)
+            .declared_parameters(function)
+            .vararg
             .is_some_and(|vararg| vararg.index >= arity)
         || ir
             .shared_capture_parameters
@@ -647,14 +675,9 @@ fn parameter_sidecars_cover(
     function: crate::ir::FunId,
     count: usize,
 ) -> bool {
-    [
-        ir.fn_param_declared_nullable.get(&function).map(Vec::len),
-        ir.fn_param_annotations.get(&function).map(Vec::len),
-        ir.fn_param_no_infer.get(&function).map(Vec::len),
-    ]
-    .into_iter()
-    .flatten()
-    .all(|len| len >= count)
+    ir.declared_parameters(function)
+        .recorded_lengths()
+        .all(|len| len >= count)
 }
 
 fn captured_invocation_is_valid(
@@ -1345,9 +1368,15 @@ fn transfer_inlined_capture_facts(
             (transfer.parameter, receivers)
         })
         .collect::<Vec<_>>();
-    let declared_nullable = source_parameter_values(&ir.fn_param_declared_nullable, &transfers);
-    let annotations = source_parameter_values(&ir.fn_param_annotations, &transfers);
-    let no_infer = source_parameter_values(&ir.fn_param_no_infer, &transfers);
+    let declared_facts = transfers
+        .iter()
+        .map(|transfer| {
+            let facts = ir
+                .declared_parameters(transfer.source)
+                .parameter_range(0, transfer.count);
+            (transfer.parameter, facts)
+        })
+        .collect::<Vec<_>>();
     let transferred_shared = transfers
         .iter()
         .flat_map(|transfer| {
@@ -1449,27 +1478,17 @@ fn transfer_inlined_capture_facts(
         }
         info.captured_receivers = rebuilt_receivers;
     }
-    replace_parallel_map(
-        &mut ir.fn_param_declared_nullable,
-        function,
-        &declared_nullable,
-        old_arity,
-    );
-    replace_parallel_map(
-        &mut ir.fn_param_annotations,
-        function,
-        &annotations,
-        old_arity,
-    );
-    replace_parallel_map(&mut ir.fn_param_no_infer, function, &no_infer, old_arity);
+    ir.declared_parameters_mut(function)
+        .splice_parameters(&declared_facts, old_arity);
     if let Some(&own_from) = ir.lambda_own_params_from.get(&function) {
         assert!(own_from as usize <= old_arity);
     }
     for transfer in transfers.iter().rev() {
         ir.resize_lambda_capture_prefix(function, transfer.parameter, 1, transfer.count);
     }
+    let declared = ir.declared_parameters_mut(function);
     let mut remove_vararg = false;
-    if let Some(vararg) = ir.fn_varargs.get_mut(&function) {
+    if let Some(vararg) = &mut declared.vararg {
         assert!(vararg.index < old_arity);
         for transfer in &transfers {
             if vararg.index == transfer.parameter {
@@ -1483,7 +1502,7 @@ fn transfer_inlined_capture_facts(
         }
     }
     if remove_vararg {
-        ir.fn_varargs.remove(&function);
+        declared.vararg = None;
     }
 
     let old_shared = ir
@@ -1531,36 +1550,6 @@ fn shifted_parameter(parameter: usize, transfers: &[ParameterTransfer]) -> usize
         });
     usize::try_from(parameter as isize + shift)
         .expect("transferred captures keep parameter ordinals non-negative")
-}
-
-fn source_parameter_values<T: Clone + Default>(
-    facts: &HashMap<u32, Vec<T>>,
-    transfers: &[ParameterTransfer],
-) -> Vec<(usize, Vec<T>)> {
-    transfers
-        .iter()
-        .map(|transfer| {
-            let values = facts
-                .get(&transfer.source)
-                .map(|values| values[..transfer.count].to_vec())
-                .unwrap_or_else(|| vec![T::default(); transfer.count]);
-            (transfer.parameter, values)
-        })
-        .collect()
-}
-
-fn replace_parallel_map<T: Clone>(
-    facts: &mut HashMap<u32, Vec<T>>,
-    function: u32,
-    replacements: &[(usize, Vec<T>)],
-    old_arity: usize,
-) {
-    if let Some(values) = facts.get_mut(&function) {
-        if values.is_empty() {
-            return;
-        }
-        replace_parameter_values(values, replacements, old_arity, "parameter fact sidecar");
-    }
 }
 
 fn replace_parameter_values<T: Clone>(

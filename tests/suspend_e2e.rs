@@ -2092,7 +2092,7 @@ fun box(): String {\n\
 /// `when (false) { … }`. The emitter folds the always-false test to an unconditional `goto <else>`,
 /// but used to lay the never-taken branch down after it: unreachable, unframed, and rejected outright
 /// (`VerifyError: Expecting a stack map frame`). Nothing about the jump's target state was ever wrong
-/// — the dead branch was. See `emit_cond_branch`/`emit_when` in `src/jvm/ir_emit.rs`.
+/// — the dead branch was. See `emit_cond_branch`/`emit_when` in `crates/krusty-jvm/src/ir_emit.rs`.
 ///
 /// This is the corpus `codegen/box/coroutines/controlFlow/doubleBreak.kt` shape; the result matches
 /// kotlinc's.

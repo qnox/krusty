@@ -501,6 +501,38 @@ fn publish_constructor(
     Ok(())
 }
 
+/// The module declarations a property reference names: its property, and the classifier the
+/// reference was written on.
+fn referenced_property(
+    index: &ResolvedModuleIndex,
+    target: &FirPropertyReferenceTarget,
+    properties: &mut HashSet<PropertyId>,
+    classifiers: &mut HashSet<TypeName>,
+) {
+    match target {
+        FirPropertyReferenceTarget::Module(property) => {
+            properties.insert(*property);
+        }
+        FirPropertyReferenceTarget::SpecializedModule {
+            property,
+            reflection_owner,
+            ..
+        } => {
+            properties.insert(*property);
+            // The classifier the reference was written on may be a subtype of the declaring
+            // class, and it may live in another file. Realization names the member on that
+            // classifier.
+            if let Some(class) = *reflection_owner {
+                if index.classifier_declaration(class).is_some() {
+                    classifiers.insert(class);
+                }
+            }
+        }
+        FirPropertyReferenceTarget::Classifier { .. }
+        | FirPropertyReferenceTarget::External { .. } => {}
+    }
+}
+
 pub(super) fn publish_referenced(
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
@@ -556,32 +588,29 @@ pub(super) fn publish_referenced(
             IrExpr::Checked(checked_op)
                 if let IrCheckedOperation::PropertyReference { target, .. } = &**checked_op =>
             {
-                match target {
-                    FirPropertyReferenceTarget::Module(property) => {
-                        properties.insert(*property);
-                    }
-                    FirPropertyReferenceTarget::SpecializedModule {
-                        property,
-                        reflection_owner,
-                        ..
-                    } => {
-                        properties.insert(*property);
-                        // The classifier the reference was written on may be a subtype of the
-                        // declaring class, and it may live in another file. Realization names the
-                        // member on that classifier.
-                        if let Some(class) = *reflection_owner {
-                            if index.classifier_declaration(class).is_some() {
-                                classifiers.insert(class);
-                            }
-                        }
-                    }
-                    FirPropertyReferenceTarget::Classifier { .. }
-                    | FirPropertyReferenceTarget::External { .. } => {}
-                }
+                referenced_property(index, target, &mut properties, &mut classifiers);
             }
             IrExpr::CallableReference(reference) => {
-                if let crate::ir::IrCallableReferenceTarget::Module(target) = reference.target {
-                    callables.insert(target);
+                match &reference.target {
+                    crate::ir::IrCallableReferenceTarget::Module(target) => {
+                        callables.insert(*target);
+                    }
+                    // A function-valued property reference names its property, whose getter
+                    // its adapter may splice rather than read.
+                    crate::ir::IrCallableReferenceTarget::Property(property) => {
+                        referenced_property(
+                            index,
+                            &property.target,
+                            &mut properties,
+                            &mut classifiers,
+                        );
+                    }
+                    crate::ir::IrCallableReferenceTarget::Constructor { .. }
+                    | crate::ir::IrCallableReferenceTarget::Local { .. }
+                    | crate::ir::IrCallableReferenceTarget::External { .. }
+                    | crate::ir::IrCallableReferenceTarget::FunctionValueConversion { .. }
+                    | crate::ir::IrCallableReferenceTarget::FunctionInvoke
+                    | crate::ir::IrCallableReferenceTarget::Classifier { .. } => {}
                 }
             }
             IrExpr::SingletonValue { classifier }

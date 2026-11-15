@@ -5,7 +5,7 @@
 //! different field lists, so the read addressed a field the owner does not have:
 //!
 //! ```text
-//! thread 'main' panicked at src/jvm/ir_emit.rs:
+//! thread 'main' panicked at crates/krusty-jvm/src/ir_emit.rs:
 //! index out of bounds: the len is 3 but the index is 3
 //! ```
 //!

@@ -34,6 +34,6 @@ const GROWN_STACK_BYTES: usize = 32 * 1024 * 1024;
 /// deliberately contains non-`Send` `Rc`/`RefCell` values, public runtime traits can be implemented
 /// by callers with thread-affine state, and diagnostics/tracing may acquire thread-local context.
 /// `stacker::maybe_grow` switches stack segments without weakening any of those type guarantees.
-pub(crate) fn on_wide_stack<T>(f: impl FnOnce() -> T) -> T {
+pub fn on_wide_stack<T>(f: impl FnOnce() -> T) -> T {
     stacker::maybe_grow(MIN_REMAINING_STACK_BYTES, GROWN_STACK_BYTES, f)
 }

@@ -400,5 +400,5 @@ fun box(): String = mixed(1, 2, 3).toString()
     );
 }
 
-#[path = "anonymous_capture_demand_e2e.rs"]
+#[path = "local_class_construction_capture_e2e/anonymous_capture_demand.rs"]
 mod anonymous_capture_demand;

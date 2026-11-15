@@ -103,9 +103,7 @@ pub(super) fn classifier_type_parameter_ordinal(
 ) -> Option<u32> {
     let semantic_name = parameter.non_null().ty_param_name()?;
     for ordinal in 0.. {
-        let Some(identity) = index.type_parameter(classifier, ordinal) else {
-            return None;
-        };
+        let identity = index.type_parameter(classifier, ordinal)?;
         if index.type_parameter_semantic_name(identity) == Some(semantic_name) {
             return Some(ordinal);
         }
@@ -471,18 +469,7 @@ pub(super) fn finalize_constructors(
         let Some(class) = ir.checked_classifier_classes.get(&classifier).copied() else {
             continue;
         };
-        let primary = index
-            .owned_declarations(classifier)
-            .iter()
-            .copied()
-            .find(|declaration| {
-                index
-                    .declaration_anchor(*declaration)
-                    .is_some_and(|constructor| {
-                        constructor.kind == crate::fir::DeclarationKind::Constructor
-                            && constructor.sibling == 0
-                    })
-            });
+        let primary = primary_constructor_declaration(index, classifier);
         ir.classes[class as usize].has_primary_ctor = primary.is_some();
         if let Some(visibility) = primary
             .and_then(|declaration| index.declaration_header(declaration))
@@ -1316,7 +1303,7 @@ pub(super) fn finalize_constructor_field_indices(
     pre_super.sort();
     for (class, parameter, field) in pre_super {
         let slots = &mut ir.classes[class as usize].pre_super_param_fields;
-        if !slots.iter().any(|pair| *pair == (parameter, field)) {
+        if !slots.contains(&(parameter, field)) {
             slots.push((parameter, field));
         }
     }
@@ -1501,9 +1488,8 @@ pub(super) fn accept_constructor_body(
             ),
             _ => false,
         })
-        .map(|delegation| {
+        .inspect(|_| {
             roots.remove(0);
-            delegation
         });
     let body = if roots.is_empty() {
         None
@@ -1694,4 +1680,23 @@ pub(super) fn module_constructor_target(
         IrConstructorAccess::Unrestricted
     };
     Some(IrConstructorTarget { ordinal, access })
+}
+
+/// The primary constructor `classifier` declares: its constructor at place 0.
+pub(super) fn primary_constructor_declaration(
+    index: &ResolvedModuleIndex,
+    classifier: DeclarationId,
+) -> Option<DeclarationId> {
+    index
+        .owned_declarations(classifier)
+        .iter()
+        .copied()
+        .find(|declaration| {
+            index
+                .declaration_anchor(*declaration)
+                .is_some_and(|constructor| {
+                    constructor.kind == crate::fir::DeclarationKind::Constructor
+                        && constructor.sibling == 0
+                })
+        })
 }

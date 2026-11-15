@@ -38,7 +38,7 @@ impl AnnotationArgumentProvenance {
 
     /// Selected source slots precede implicit empty-vararg/default synthesis. Repeated vararg
     /// contributions write one member, at the first occurrence of its declaration ordinal.
-    pub(crate) fn from_selected(
+    pub fn from_selected(
         parameter_count: usize,
         slots: &[usize],
         omitted: &[usize],

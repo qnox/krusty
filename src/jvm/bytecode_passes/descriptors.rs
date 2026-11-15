@@ -1,7 +1,7 @@
 //! Field and method descriptors (JVMS §4.3), split the way ASM's `Type` splits them.
 
 /// The argument descriptors of a method descriptor, in order.
-pub(crate) fn argument_types(descriptor: &str) -> Option<Vec<&str>> {
+pub fn argument_types(descriptor: &str) -> Option<Vec<&str>> {
     let inner = descriptor.strip_prefix('(')?;
     let close = inner.find(')')?;
     let mut rest = &inner[..close];
@@ -15,14 +15,14 @@ pub(crate) fn argument_types(descriptor: &str) -> Option<Vec<&str>> {
 }
 
 /// The return descriptor of a method descriptor (`V` for `void`).
-pub(crate) fn return_type(descriptor: &str) -> Option<&str> {
+pub fn return_type(descriptor: &str) -> Option<&str> {
     let close = descriptor.find(')')?;
     let ret = &descriptor[close + 1..];
     (!ret.is_empty()).then_some(ret)
 }
 
 /// Words a value of this field descriptor occupies (`0` for `V`).
-pub(crate) fn size(descriptor: &str) -> usize {
+pub fn size(descriptor: &str) -> usize {
     match descriptor.as_bytes().first() {
         Some(b'J' | b'D') => 2,
         Some(b'V') | None => 0,
@@ -85,7 +85,7 @@ pub(crate) fn int_like(descriptor: &str) -> Option<&'static str> {
 
 /// ASM's `Type.getOpcode` for a load or store: `int_opcode` (`iload` or `istore`) shifted to the
 /// variant of the field descriptor's kind.
-pub(crate) fn typed_opcode(descriptor: &str, int_opcode: u8) -> u8 {
+pub fn typed_opcode(descriptor: &str, int_opcode: u8) -> u8 {
     int_opcode
         + match descriptor.as_bytes().first() {
             Some(b'J') => 1,

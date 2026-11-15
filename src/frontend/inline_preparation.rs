@@ -112,17 +112,13 @@ fn default_check_selection(
         if root.source != provider.source {
             return None;
         }
-        let Some(selected_bodies) = bodies.get_mut(provider.source.raw() as usize) else {
-            return None;
-        };
+        let selected_bodies = bodies.get_mut(provider.source.raw() as usize)?;
         // The provider selects the live syntax; the target selects the surviving semantic
         // declaration after expect/actual actualization. `bind_defaults` aliases both identities
         // to that one parser declaration for this bounded check.
         selected_bodies.insert(work.provider);
         selected_bodies.insert(work.target);
-        let Some(selected_roots) = roots.get_mut(root.source.raw() as usize) else {
-            return None;
-        };
+        let selected_roots = roots.get_mut(root.source.raw() as usize)?;
         selected_roots.insert(root_id);
     }
     Some(DefaultCheckSelection { roots, bodies })
@@ -339,16 +335,29 @@ fn check_default_source(input: DefaultSourceInput<'_>, state: DefaultSourceState
     diagnostic_ranges.dedup();
     let info = diags.with_authoritative_ranges(&diagnostic_ranges, |diags| {
         crate::resolve::check_signature_default_declarations_at_with_index(
-            file,
-            raw_source as u32,
+            crate::resolve::SourceFileUnit {
+                file,
+                file_index: raw_source as u32,
+            },
             &active,
-            &selection.roots[raw_source],
-            &selection.bodies[raw_source],
+            crate::resolve::StableDefaultSelection {
+                roots: &selection.roots[raw_source],
+                defaults: &selection.bodies[raw_source],
+            },
             symbols,
             index,
             diags,
         )
     });
+    if let Err(identity) = store.record_builtin_implementations(&info.builtin_implementations) {
+        diags.error(
+            crate::diag::Span::new(0, 0),
+            format!(
+                "internal error: inconsistent builtin implementation facts for external member {identity:?}"
+            ),
+        );
+        return false;
+    }
     let provider_declarations = items.iter().map(|item| item.provider).collect::<Vec<_>>();
     if let Err(declarations) = crate::resolve::publish_checked_default_local_signatures(
         file,
@@ -468,6 +477,15 @@ pub(super) fn from_checked_analysis(
             return None;
         };
         let info = types.get(raw_source).and_then(Option::as_ref)?;
+        if let Err(identity) =
+            inline_bodies.record_builtin_implementations(&info.builtin_implementations)
+        {
+            crate::trace_compiler!(
+                "fir",
+                "Pass 1 checked inline implementation facts conflict for {identity:?}",
+            );
+            return None;
+        }
         if let Err(declarations) = crate::resolve::publish_checked_inline_local_signatures(
             file, source, symbols, info, &mut index, owners, None,
         ) {
@@ -551,17 +569,27 @@ pub(super) fn from_checked_analysis(
     finish(index, inline_bodies, sources, default_arguments, unexpected)
 }
 
+pub(super) struct StreamingPreparationInputs<'a> {
+    pub(super) files: &'a mut [File],
+    pub(super) local_contexts: &'a [crate::resolve::PassOneLocalClassContext],
+    pub(super) skip: &'a [bool],
+    pub(super) checked_count: usize,
+}
+
 pub(super) fn streaming(
     module: crate::fir::FrontendModule,
     bodies: crate::fir::BodyPartition,
     default_arguments: crate::fir::DefaultArgumentStore,
-    files: &mut [File],
-    local_contexts: &[crate::resolve::PassOneLocalClassContext],
-    skip: &[bool],
-    checked_count: usize,
+    inputs: StreamingPreparationInputs<'_>,
     symbols: &mut FrontendSymbols,
     diags: &mut crate::diag::DiagSink,
 ) -> Option<StreamedPassState> {
+    let StreamingPreparationInputs {
+        files,
+        local_contexts,
+        skip,
+        checked_count,
+    } = inputs;
     let selection = bodies.inline_check_selection(module.index(), files.len());
     let payload_roots = inline_payload_roots(&selection, module.index())?;
     let (mut index, mut inline_bodies, initial_defaults, mut sources) = module.into_parts();
@@ -634,16 +662,31 @@ pub(super) fn streaming(
                 }
             };
             let info = crate::resolve::check_preinferred_inline_declarations_at_with_index(
-                &files[raw_source],
-                raw_source as u32,
-                &selection.roots[raw_source],
-                &selection.bodies[raw_source],
-                &selected_stable_bodies,
+                crate::resolve::SourceFileUnit {
+                    file: &files[raw_source],
+                    file_index: raw_source as u32,
+                },
+                crate::resolve::SpanBodySelection {
+                    declarations: &selection.roots[raw_source],
+                    bodies: &selection.bodies[raw_source],
+                    stable_bodies: &selected_stable_bodies,
+                },
                 &active,
                 &index,
                 symbols,
                 diags,
             );
+            if let Err(identity) =
+                inline_bodies.record_builtin_implementations(&info.builtin_implementations)
+            {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    format!(
+                        "internal error: inconsistent builtin implementation facts for external member {identity:?}"
+                    ),
+                );
+                return None;
+            }
             let file = files.get(raw_source)?;
             if let Err(declarations) = crate::resolve::publish_checked_inline_local_signatures(
                 file,
@@ -755,7 +798,13 @@ fn finish(
         unexpected.0, 0,
         "Pass 1 may retain only semantically inline checked bodies"
     );
-    inline_bodies.retain_defaults(&default_arguments);
+    if let Err(identity) = inline_bodies.retain_defaults(&default_arguments) {
+        crate::trace_compiler!(
+            "fir",
+            "Pass 1 checked default implementation facts conflict for {identity:?}",
+        );
+        return None;
+    }
     index.release_source_coordinates();
     assert!(
         !index.retains_source_coordinates(),

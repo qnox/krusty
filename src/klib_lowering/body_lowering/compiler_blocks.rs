@@ -328,7 +328,7 @@ impl BodyLowering<'_> {
             .initializer
             .ok_or_else(|| mismatch("a compiler temporary has no initializer"))?;
         let symbol = variable.base.symbol.clone();
-        let ty = super::semantic_type(self.arena, self.header.type_parameters(), variable.ty)?;
+        let ty = self.semantic(variable.ty)?;
         let init = self.operand(initializer, ty)?;
         let local = self.locals.temporary(&symbol, ty)?;
         Ok(self.ir.add_expr(IrExpr::Variable {

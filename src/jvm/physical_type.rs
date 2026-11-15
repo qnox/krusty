@@ -56,13 +56,13 @@ pub(super) fn class_descriptor_ty(descriptor: &str) -> Ty {
 /// `reference` is the descriptor's own slot. It is true for every class and array descriptor,
 /// including `Lkotlin/UInt;`, and it is not semantic nullability.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct FieldSlot {
-    pub(crate) ty: Ty,
-    pub(crate) reference: bool,
+pub struct FieldSlot {
+    pub ty: Ty,
+    pub reference: bool,
 }
 
 impl FieldSlot {
-    pub(crate) fn words(self) -> i32 {
+    pub fn words(self) -> i32 {
         if self.reference {
             1
         } else {
@@ -75,12 +75,12 @@ impl FieldSlot {
     }
 }
 
-pub(crate) fn method_return_slot(descriptor: &str) -> FieldSlot {
+pub fn method_return_slot(descriptor: &str) -> FieldSlot {
     let ret = descriptor.rsplit(')').next().unwrap_or("V");
     field_slot(ret)
 }
 
-pub(crate) fn field_slot(descriptor: &str) -> FieldSlot {
+pub fn field_slot(descriptor: &str) -> FieldSlot {
     match descriptor.as_bytes().first() {
         Some(b'I') => FieldSlot {
             ty: Ty::Int,
@@ -149,7 +149,7 @@ pub(crate) fn field_slot(descriptor: &str) -> FieldSlot {
 /// A class descriptor naming an unsigned type (`Lkotlin/ULong;`) is a one-word box even though
 /// [`class_descriptor_ty`] preserves its unsigned semantic classifier. Nullable unsigned spelling
 /// is the backend-local `Ty` representation of that box; the bare type remains its scalar carrier.
-pub(super) fn descriptor_operand_ty(descriptor: &str) -> Ty {
+pub fn descriptor_operand_ty(descriptor: &str) -> Ty {
     let slot = field_slot(descriptor);
     if slot.reference && slot.ty.is_jvm_scalar() {
         Ty::nullable(slot.ty)
@@ -159,7 +159,7 @@ pub(super) fn descriptor_operand_ty(descriptor: &str) -> Ty {
 }
 
 /// Operand types named by a JVM method descriptor, preserving each slot's physical category.
-pub(super) fn method_operand_tys(descriptor: &str) -> Option<(Vec<Ty>, Ty)> {
+pub fn method_operand_tys(descriptor: &str) -> Option<(Vec<Ty>, Ty)> {
     let (parameters, result) = crate::jvm::names::parse_method_descriptor(descriptor)?;
     Some((
         parameters.into_iter().map(descriptor_operand_ty).collect(),
@@ -168,7 +168,7 @@ pub(super) fn method_operand_tys(descriptor: &str) -> Option<(Vec<Ty>, Ty)> {
 }
 
 /// Return operand named by a valid JVM method descriptor, without allocating its parameter list.
-pub(super) fn method_return_operand_ty(descriptor: &str) -> Option<Ty> {
+pub fn method_return_operand_ty(descriptor: &str) -> Option<Ty> {
     let result = crate::jvm::names::parse_method_return_descriptor(descriptor)?;
     Some(descriptor_operand_ty(result))
 }
@@ -180,7 +180,7 @@ pub(super) fn method_return_operand_ty(descriptor: &str) -> Option<Ty> {
 /// `Ty` collapsed a scalar class descriptor (`Lkotlin/UInt;`) onto its unboxed scalar variant.
 /// Arrays preserve that reference category recursively while parsing, and primitive arrays keep
 /// the specialized representation their descriptor names.
-pub(crate) fn operand_slot_ty(descriptor: &str, checked: Option<Ty>) -> Ty {
+pub fn operand_slot_ty(descriptor: &str, checked: Option<Ty>) -> Ty {
     let slot = field_slot(descriptor);
     if !(slot.reference && slot.ty.is_jvm_scalar()) {
         return slot.ty;
@@ -209,7 +209,7 @@ fn specialized_primitive_array(ty: Ty) -> bool {
         .is_some_and(|name| crate::types::prim_array_element(name).is_some())
 }
 
-pub(crate) fn constructor_operand_tys(descriptor: &str, checked: Option<&[Ty]>) -> Option<Vec<Ty>> {
+pub fn constructor_operand_tys(descriptor: &str, checked: Option<&[Ty]>) -> Option<Vec<Ty>> {
     let (params, _) = crate::jvm::names::parse_method_descriptor(descriptor)?;
     Some(
         params
@@ -227,7 +227,7 @@ pub(crate) fn constructor_operand_tys(descriptor: &str, checked: Option<&[Ty]>) 
 /// Each component is erased on its own. One shared carrier is that carrier (`Box<String> &
 /// Box<Int>` is `Box`; two `Function1`s stay `Function1`). Incompatible carriers, including
 /// unrelated classes and interfaces, are `java/lang/Object`.
-pub(crate) fn intersection_jvm_carrier(parts: &[Ty]) -> Ty {
+pub fn intersection_jvm_carrier(parts: &[Ty]) -> Ty {
     let mut carrier = None;
     for part in parts {
         let erased = ir_ty_to_jvm(&part.non_null());

@@ -3,9 +3,9 @@
 
 use super::{
     AnonymousObjectCapture, AnonymousObjectCaptureSource, Checker, CheckerModuleSymbols,
-    CheckerScope, ClassSig, ClassStorageSource, DispatchPropertyBinding, EnumEntryPropertyBinding,
-    ErrorProvenance, ReceiverFnValueOrigin, ScopedProperty, SourceFragmentMode,
-    ValueBindingDeclaration,
+    CheckerScope, ClassSig, ClassStorageSource, DispatchPropertyBinding,
+    DispatchPropertyProvenance, EnumEntryPropertyBinding, ErrorProvenance, ReceiverFnValueOrigin,
+    ScopedProperty, SourceFragmentMode, ValueBindingDeclaration,
 };
 use crate::ast::{Decl, DeclId, PropParam};
 use crate::types::Ty;
@@ -199,8 +199,10 @@ impl Checker<'_> {
             },
             is_var,
             property.owner,
-            None,
-            property.dispatch_receiver_identity,
+            DispatchPropertyProvenance {
+                enum_entry: None,
+                selected_receiver: property.dispatch_receiver_identity,
+            },
         );
     }
 
@@ -264,6 +266,13 @@ impl Checker<'_> {
         for (parameter, ty) in parameters.iter().zip(types) {
             if !parameter.is_property && !parameter.is_script_parameter {
                 self.declare(scope, &parameter.name, ty, parameter.is_var);
+                self.record_lexical_declaration(
+                    scope,
+                    &parameter.name,
+                    super::lexical_bindings::LexicalValueRole::Parameter(
+                        parameter.declaration_span,
+                    ),
+                );
             }
         }
     }
@@ -316,6 +325,7 @@ impl Checker<'_> {
             super::ClassStorageSource { owner, identity },
             capture.shared_cell,
         );
+        self.retain_capture_declaration(scope, &capture);
     }
 
     /// Shadow synthetic immutable capture properties with their semantic source bindings. A shared
@@ -368,6 +378,7 @@ impl Checker<'_> {
                     super::ClassStorageSource { owner, identity },
                     capture.shared_cell,
                 );
+                self.retain_capture_declaration(scope, &capture);
             }
         }
     }

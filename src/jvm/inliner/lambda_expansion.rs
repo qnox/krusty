@@ -30,7 +30,7 @@ const INLINE_MARKER_PREFIXES: [&str; 2] = ["$i$f$", "$i$a$"];
 
 /// An inline lambda argument, as kotlinc's `LambdaInfo` hands it to the inliner.
 #[derive(Clone, Debug)]
-pub(crate) struct Lambda {
+pub struct Lambda {
     /// The lambda's compiled body: its parameters (an extension receiver first) from slot 0, then
     /// the values it captures, then its own locals. It ends each path with a return of
     /// `return_type`.
@@ -58,11 +58,16 @@ pub(crate) struct Lambda {
     /// A suspend lambda (`isSuspend`): its body's suspension points pass a fake continuation,
     /// which only a suspend method's `$$forInline` copy replaces.
     pub suspend: bool,
+    /// The body's last instruction is a `void` return the lambda adapter wrote so a branch to the
+    /// instruction after the lambda's own return stays inside the method. Only the lambda inliner
+    /// removes that instruction. An ordinary inline body, and a lambda the adapter did not close
+    /// this way, has none.
+    pub generated_return_landing: bool,
 }
 
 impl Lambda {
     /// The descriptors of the lambda's captured values, which its node takes after its parameters.
-    pub(crate) fn captured_types(&self) -> Option<Vec<String>> {
+    pub fn captured_types(&self) -> Option<Vec<String>> {
         let arguments = descriptors::argument_types(&self.node.desc)?;
         arguments
             .get(self.parameter_types.len()..)
@@ -71,7 +76,7 @@ impl Lambda {
 }
 
 /// How the inlined code's line numbers reach the caller's line table (kotlinc's `SourceMapper`).
-pub(crate) trait SourceLines {
+pub trait SourceLines {
     /// `SourceMapCopier.mapLineNumber` of a line of the inlined function's own file; `None` for a
     /// line nothing maps, which is dropped.
     fn map(&mut self, line: u16) -> Option<u16>;
@@ -288,7 +293,7 @@ impl LabelImport {
 /// caller's source map. `invokes` names the lambda each `FunctionN.invoke` of the body calls.
 /// `scopes` numbers each lambda's scopes as it is inlined; kotlinc renames the lambda's own node,
 /// so a lambda invoked again is numbered from the names its previous expansion gave it.
-pub(super) fn expand(
+pub fn expand(
     node: &MethodNode,
     context: &Context<'_>,
     invokes: Vec<Option<usize>>,
@@ -596,7 +601,11 @@ fn inline_lambda(
     let mut node = remap_lambda(&node, lambda, host, value_param_shift)?;
     let end = node.new_label();
     node.nodes.push(Node::Label(end));
-    returns::process_returns(&mut node, end);
+    if lambda.generated_return_landing {
+        returns::process_returns_dropping_generated_landing(&mut node, end);
+    } else {
+        returns::process_returns(&mut node, end);
+    }
     Ok(node)
 }
 

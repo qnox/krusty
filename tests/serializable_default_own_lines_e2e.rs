@@ -11,8 +11,8 @@
 //! re-read constructor property, a class-body string and a class-body arithmetic initializer, each
 //! on the line after its property, plus a same-line default.
 
-use super::super::compiler_plugin_fixture::{assert_same_classes_and_box, PluginFixture};
-use super::super::serialization_companion_byte_parity_e2e::plugin_and_runtime;
+use super::compiler_plugin_fixture::{assert_same_classes_and_box, PluginFixture};
+use super::serialization_companion_byte_parity_e2e::plugin_and_runtime;
 
 const SOURCE: &str = "import kotlinx.serialization.Serializable\n\
                       import kotlinx.serialization.json.Json\n\

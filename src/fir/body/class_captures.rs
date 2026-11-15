@@ -38,7 +38,7 @@ impl ClassCaptureBinding {
 /// An implicit receiver is the checker's receiver-rung identity, shared by every classifier that
 /// captured that rung. Label spelling is not part of either coordinate.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum ClassCaptureIdentity {
+pub enum ClassCaptureIdentity {
     /// A capture-transport family anchored by its first capturer and original lexical binding.
     /// It is not a global lexical-variable ID or a physical field position.
     Value {

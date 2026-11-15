@@ -565,7 +565,7 @@ impl Checker<'_> {
                 continue;
             }
             let containing =
-                self.diagnostic_type_name(self.displayed_type(walk, occurrence.ty, &origin), &[]);
+                self.diagnostic_type_name(self.displayed_type(occurrence.ty, &origin), &[]);
             for conflict in conflicts {
                 let diagnostic = if conflict.abbreviated {
                     "TYPE_VARIANCE_CONFLICT_IN_EXPANDED_TYPE"
@@ -624,7 +624,7 @@ impl Checker<'_> {
                     return;
                 };
                 if site.position.allows(declared)
-                    || self.variance_level(walk, site.origin).unsafe_variance
+                    || self.variance_level(site.origin).unsafe_variance
                 {
                     return;
                 }
@@ -685,7 +685,7 @@ impl Checker<'_> {
         arguments: Vec<(usize, Ty, Position)>,
         conflicts: &mut Vec<Conflict>,
     ) {
-        let level = self.variance_level(walk, site.origin);
+        let level = self.variance_level(site.origin);
         let written = site.written.map(written_arguments).unwrap_or_default();
         for (index, argument, position) in arguments {
             let written = written.get(index).copied();
@@ -702,14 +702,14 @@ impl Checker<'_> {
 
     /// `ty` as kotlinc renders the declared type: a written `T & Any` is shown as the
     /// definitely-non-null type it declares.
-    fn displayed_type(&self, walk: &Walk<'_, '_>, ty: Ty, origin: &Origin<'_>) -> Ty {
+    fn displayed_type(&self, ty: Ty, origin: &Origin<'_>) -> Ty {
         match ty.kind() {
             TyKind::TyParam(..) | TyKind::Var(..) if written_definitely_non_null(origin) => {
                 Ty::from(TyKind::DefinitelyNotNull(ty))
             }
-            TyKind::Nullable(inner) => Ty::nullable(self.displayed_type(walk, inner, origin)),
+            TyKind::Nullable(inner) => Ty::nullable(self.displayed_type(inner, origin)),
             TyKind::Obj(classifier, arguments) if !arguments.is_empty() => {
-                let level = self.variance_level(walk, origin);
+                let level = self.variance_level(origin);
                 let arguments = arguments
                     .iter()
                     .enumerate()
@@ -719,13 +719,13 @@ impl Checker<'_> {
                             let argument = *argument;
                             match argument.kind() {
                                 TyKind::InProjection(inner) => {
-                                    Ty::in_projection(self.displayed_type(walk, inner, origin))
+                                    Ty::in_projection(self.displayed_type(inner, origin))
                                 }
                                 TyKind::OutProjection(inner) => {
-                                    Ty::out_projection(self.displayed_type(walk, inner, origin))
+                                    Ty::out_projection(self.displayed_type(inner, origin))
                                 }
                                 TyKind::StarProjection(_) => argument,
-                                _ => self.displayed_type(walk, argument, origin),
+                                _ => self.displayed_type(argument, origin),
                             }
                         }
                     })
@@ -733,7 +733,7 @@ impl Checker<'_> {
                 Ty::obj_args_name(classifier, &arguments)
             }
             TyKind::Fun(signature) => {
-                let level = self.variance_level(walk, origin);
+                let level = self.variance_level(origin);
                 let mut components = signature
                     .params
                     .iter()
@@ -742,7 +742,7 @@ impl Checker<'_> {
                     .enumerate()
                     .map(|(index, component)| {
                         let origin = level.arguments.get(index).unwrap_or(&Origin::Inferred);
-                        self.displayed_type(walk, component, origin)
+                        self.displayed_type(component, origin)
                     })
                     .collect::<Vec<_>>();
                 let ret = components.pop().unwrap_or(signature.ret);
@@ -759,7 +759,7 @@ impl Checker<'_> {
     }
 
     /// The facts kotlinc's cone type carries for the level `origin` describes.
-    fn variance_level<'a>(&self, walk: &Walk<'_, '_>, origin: &Origin<'a>) -> Level<'a> {
+    fn variance_level<'a>(&self, origin: &Origin<'a>) -> Level<'a> {
         match origin {
             Origin::Inferred => Level::inferred(),
             Origin::Vararg(element) => Level {
@@ -798,7 +798,7 @@ impl Checker<'_> {
                 let template_unsafe = spelling_has_unsafe_variance(spelling);
                 match alias_formal(*template, alias) {
                     Some(argument) => {
-                        let mut level = self.variance_level(walk, &Origin::Written(argument));
+                        let mut level = self.variance_level(&Origin::Written(argument));
                         level.unsafe_variance |= template_unsafe;
                         level
                     }

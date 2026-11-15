@@ -1,12 +1,25 @@
 //! Target-neutral semantic validation of declaration headers.
 
-use crate::ast::{FunDecl, PropDecl};
+use crate::ast::{FunDecl, PropDecl, TypeAliasDecl};
 use crate::diag::Span;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct DeclarationDiagnostic {
     pub span: Span,
     pub message: &'static str,
+}
+
+/// kotlinc's BOUND_ON_TYPE_ALIAS_PARAMETER_NOT_ALLOWED: a type alias's type parameters take no
+/// upper bound, reported at each bound written.
+pub(crate) fn type_alias_diagnostics(alias: &TypeAliasDecl) -> Vec<DeclarationDiagnostic> {
+    alias
+        .type_param_bound_spans
+        .iter()
+        .map(|&span| DeclarationDiagnostic {
+            span,
+            message: "bounds on type alias parameters are prohibited.",
+        })
+        .collect()
 }
 
 pub(crate) fn infix_declaration_diagnostics(

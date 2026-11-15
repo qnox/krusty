@@ -44,7 +44,7 @@ pub(super) enum BodyStage {
 
 impl CodeBuilder {
     /// Keep this body as written for an inlining caller: kotlinc writes it unoptimized.
-    pub(crate) fn keep_for_inlining(&mut self) {
+    pub fn keep_for_inlining(&mut self) {
         self.kept_for_inlining = true;
     }
 }
