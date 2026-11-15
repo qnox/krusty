@@ -9,6 +9,7 @@ mod response_page;
 mod semantic_token_response;
 mod status;
 mod workspace_index;
+mod workspace_references;
 pub use engine::{AnalysisBatch, AnalysisJob, DumpResult};
 pub use implementation::*;
 
