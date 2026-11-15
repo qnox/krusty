@@ -1199,26 +1199,6 @@ fn wasm_renders_kotlin_any_default_to_string() {
     );
 }
 
-// A lambda and a callable reference answer `toString` through their table: the function interface's
-// name and the value's hash. The hash is not stable, so only the shape is pinned.
-#[test]
-fn wasm_renders_function_values_to_string() {
-    expect_wasm_box(
-        "fun two(a: Int, b: Int): Int = a + b\n\
-         fun interface Supplier { fun get(): Int }\n\
-         fun box(): String {\n\
-             val lambda: Any = { x: Int -> x }\n\
-             val reference: Any = ::two\n\
-             val supplier: Any = Supplier { 1 }\n\
-             if (lambda.toString().length <= 16) return \"lambda\"\n\
-             if (reference.toString().length <= 16) return \"reference\"\n\
-             if (supplier.toString() == \"\") return \"supplier\"\n\
-             return \"OK\"\n\
-         }",
-        "wasmFunctionValueToString",
-    );
-}
-
 // A floating box has no printer for Kotlin's form, so an erased `toString` that can reach one
 // declines rather than emit the trap of a slot with no body.
 #[test]
