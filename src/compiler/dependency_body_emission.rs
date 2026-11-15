@@ -382,7 +382,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             }
         }
         let mut exports = DependencyExportSignatures::default();
-        if let Err(error) = class_declarations::record(&unit, platform, &mut exports) {
+        if let Err(error) = class_declarations::record(&unit, platform, &callees, &mut exports) {
             diags.error(
                 Span::new(0, 0),
                 format!("internal error: cannot publish materialized class declarations: {error}"),

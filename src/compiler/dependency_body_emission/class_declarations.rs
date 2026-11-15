@@ -1,7 +1,7 @@
 //! Declaration-only identities of classes physically materialized by a closed support unit.
 
 use crate::backend::DependencyExportSignatures;
-use crate::klib_lowering::DependencyBodyUnit;
+use crate::klib_lowering::{DependencyBodyUnit, KlibCalleeFacts};
 use crate::libraries::{
     ExternalCallableKind, KlibAccessorRole, KlibClassIdentity, KlibDeclarationSignature,
     SemanticPlatform, TypeKind,
@@ -11,6 +11,7 @@ use crate::types::SemanticCallableOwner;
 pub(super) fn record(
     unit: &DependencyBodyUnit,
     platform: &dyn SemanticPlatform,
+    callees: &KlibCalleeFacts<'_>,
     exports: &mut DependencyExportSignatures,
 ) -> Result<(), &'static str> {
     let ir = unit.ir();
@@ -30,6 +31,29 @@ pub(super) fn record(
                 KlibDeclarationSignature::FileLocal { .. }
             )
         {
+            continue;
+        }
+        if physical.is_object {
+            // No provider records an object's private constructor: the object's instance is created
+            // by its own declaration, which the closure authenticated as a read object.
+            let contract = callees
+                .read_object(classifier)
+                .ok_or("a materialized object lost its authenticated class declaration")?;
+            if !contract.matches_owner(&constructor.module, classifier)
+                || contract.kind != TypeKind::Object
+                || contract.signature.member_id().is_some()
+                || contract.primary_constructor.as_ref().map(|primary| {
+                    KlibDeclarationSignature::Public(primary.clone())
+                }) != Some(constructor.declaration.clone())
+            {
+                return Err("a materialized object changed its exact constructor or classifier role");
+            }
+            let identity = KlibClassIdentity {
+                module: contract.module.clone(),
+                signature: contract.signature.clone(),
+            };
+            record_class_identity(class, identity, &mut identities, exports)?;
+            classes.insert(classifier);
             continue;
         }
         let (_, selected) = platform
