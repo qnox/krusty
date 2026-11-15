@@ -9,7 +9,8 @@
 //! parameter is the semantic type parameter the declaration's provider record states for it
 //! ([`KlibTypeParameters`]); a body whose declaration binds none of its type parameters declines
 //! on the first use of one. Other type-use annotations carry no semantic type, as in metadata.
-//! Definitely non-null, dynamic, error, suspend and context function types decline by form.
+//! A `kotlin.coroutines.SuspendFunctionN` type is the suspend function type it denotes. Dynamic,
+//! error and context function types decline by form.
 
 use crate::fx_hash::HashMap;
 
@@ -429,5 +430,61 @@ mod tests {
             definitely_non_null(nullable_any),
             Ty::from(TyKind::DefinitelyNotNull(Ty::ty_param("T", nullable_any)))
         );
+    }
+
+    /// A class type `classifier<arguments>` as kotlinc serializes it.
+    fn class_application(
+        arena: &mut KlibIrArena,
+        classifier: &str,
+        arguments: &[KlibIrTypeId],
+    ) -> KlibIrTypeId {
+        arena.push_type(KlibIrType::Simple {
+            classifier: KlibIrSymbol {
+                kind: KlibIrSymbolKind::Class,
+                signature: KlibIrSignature::Public(KlibPublicIdSignature::classifier(
+                    crate::types::type_name(classifier),
+                )),
+            },
+            nullability: KlibIrNullability::NotSpecified,
+            arguments: arguments
+                .iter()
+                .map(|&ty| KlibIrTypeArgument::Type {
+                    variance: KlibIrVariance::Invariant,
+                    ty,
+                })
+                .collect(),
+            annotations: Vec::new(),
+            abbreviation: None,
+        })
+    }
+
+    /// kotlinc serializes the receiver of `startCoroutine`, `suspend () -> T`, as
+    /// `kotlin.coroutines.SuspendFunction0<T>`: the suspend function type checked source gives
+    /// the same declaration. Closure planning gives a suspend lambda no closure arity, since its
+    /// implementation also takes the continuation.
+    #[test]
+    fn a_suspend_function_classifier_is_the_suspend_function_type() {
+        let mut arena = KlibIrArena::default();
+        let int = class_application(&mut arena, "kotlin/Int", &[]);
+        let string = class_application(&mut arena, "kotlin/String", &[]);
+        let suspend = class_application(
+            &mut arena,
+            "kotlin/coroutines/SuspendFunction1",
+            &[int, string],
+        );
+        let plain = class_application(&mut arena, "kotlin/Function1", &[int, string]);
+        let parameters = KlibTypeParameters::default();
+        let int_ty = semantic_type(&arena, &parameters, int).expect("Int");
+        let string_ty = semantic_type(&arena, &parameters, string).expect("String");
+        assert_eq!(
+            semantic_type(&arena, &parameters, suspend).expect("a suspend function type"),
+            Ty::fun_with_shape(vec![int_ty], string_ty, 0, false, true)
+        );
+        assert_eq!(
+            semantic_type(&arena, &parameters, plain).expect("a function type"),
+            Ty::fun_with_shape(vec![int_ty], string_ty, 0, false, false)
+        );
+        assert_eq!(closure_type_arity(&arena, suspend), None);
+        assert_eq!(closure_type_arity(&arena, plain), Some(1));
     }
 }
