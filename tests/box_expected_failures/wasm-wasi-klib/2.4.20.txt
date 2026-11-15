@@ -90,7 +90,6 @@ arrays/multiDecl/kt15560.kt
 arrays/multiDecl/kt15568.kt
 arrays/nonLocalReturnArrayConstructor.kt
 arrays/primitiveArrays.kt
-arrays/stdlib.kt
 associatedObjects/associatedObjectNested.kt
 associatedObjects/findAssociatedObject.kt
 associatedObjects/findAssociatedObjectAndDCE.kt
@@ -3615,8 +3614,6 @@ specialBuiltins/emptyMap.kt
 specialBuiltins/emptyStringMap.kt
 specialBuiltins/enumAsOrdinaled.kt
 specialBuiltins/exceptionCause.kt
-specialBuiltins/irrelevantRemoveAtOverride.kt
-specialBuiltins/maps.kt
 specialBuiltins/notEmptyListAny.kt
 specialBuiltins/notEmptyMap.kt
 specialBuiltins/throwable.kt
