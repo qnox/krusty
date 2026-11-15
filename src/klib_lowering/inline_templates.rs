@@ -400,6 +400,23 @@ impl TemplateCalls<'_> {
             .map(|binding| binding.declaration)
     }
 
+    /// `fact` of the provider record of the declaration `signature` names in the template's
+    /// module, when the calling compilation's provider realizes it; `callee` is the public
+    /// signature a decline names it by.
+    fn provider_fact<T>(
+        &self,
+        signature: &KlibDeclarationSignature,
+        callee: &KlibPublicIdSignature,
+        fact: impl FnOnce(KlibBodyCallable<'_>) -> Option<T>,
+    ) -> Result<Option<T>, KlibBodyDeclineReason> {
+        let identity = self.origin(signature, callee)?;
+        Ok(self
+            .callees
+            .source
+            .external_callable_by_dependency(&identity)
+            .and_then(|(_, realization)| fact(realization.klib_body_callable()?)))
+    }
+
     fn binding(
         &self,
         signature: &KlibDeclarationSignature,
@@ -675,6 +692,43 @@ impl CallLinker for TemplateCalls<'_> {
     ) -> Result<bool, KlibBodyDeclineReason> {
         // No source edge needs a template's callee as target code.
         Ok(false)
+    }
+
+    /// A template counts a `for` loop over a range literal as the loop's caller would: the
+    /// callee building the progression is never called, so its body never becomes target code.
+    fn range_literal(
+        &self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<Option<crate::fir::FirRangeOperation>, KlibBodyDeclineReason> {
+        self.provider_fact(
+            &KlibDeclarationSignature::Public(callee.clone()),
+            callee,
+            super::for_loops::range_literal_operation,
+        )
+    }
+
+    fn indices_receiver(
+        &self,
+        getter: &KlibAccessorIdSignature,
+    ) -> Result<Option<crate::libraries::IndicesReceiver>, KlibBodyDeclineReason> {
+        self.provider_fact(
+            &KlibDeclarationSignature::Accessor(getter.clone()),
+            getter.property(),
+            super::for_loops::indices_receiver,
+        )
+    }
+
+    fn reverses_progression(
+        &self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<bool, KlibBodyDeclineReason> {
+        Ok(self
+            .provider_fact(
+                &KlibDeclarationSignature::Public(callee.clone()),
+                callee,
+                |callable| super::for_loops::reverses_progression(callable).then_some(()),
+            )?
+            .is_some())
     }
 
     fn link(

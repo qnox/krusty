@@ -474,7 +474,8 @@ fn compile_multifile(
     cp_jars: &[std::path::PathBuf],
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
-    // Split on `// FILE: name.kt` markers (the preamble before the first marker is directives).
+    // Split on `// FILE: name.kt` markers; the text before the first marker joins the first
+    // declared file, Kotlin or Java, as Kotlin's test infrastructure keeps it.
     // `.java` blocks are collected separately: javac compiles them first (in-process, via the
     // persistent JavaRunner) and their classes join krusty's classpath as an in-memory overlay,
     // mirroring how kotlinc's test infra makes Java sources visible to the Kotlin compile.
@@ -517,15 +518,24 @@ fn compile_multifile(
                     kotlin: &blocks,
                     common: 0,
                     java: &java_blocks,
+                    compiled_java: &[],
                 };
                 return compile_kotlin_first(src, sources, cp_jars, jdk_modules);
             }
         }
     }
 
-    // Case-wide directives live in the preamble before the first `// FILE:`, so each unit's
-    // arguments are read from the whole case.
-    let compiled = compile_blocks(src, &blocks, cp_jars, &[], jdk_modules, None, &java_classes);
+    // Case-wide directives may sit anywhere in the case, so each unit's arguments are read from
+    // the whole case. The Java javac compiled still carries the unit's leading directives.
+    let sources = UnitSources {
+        module: box_reference_classes::MAIN_MODULE,
+        kotlin: &blocks,
+        common: 0,
+        java: &[],
+        compiled_java: &java_blocks,
+    };
+    let compiled =
+        compile_blocks_mixed(src, sources, cp_jars, &[], jdk_modules, None, &java_classes);
     let mut out = compiled?;
     out.extend(java_classes);
     Some(out)
@@ -588,6 +598,7 @@ fn compile_blocks(
             kotlin: blocks,
             common: 0,
             java: &[],
+            compiled_java: &[],
         },
         cp_jars,
         friend_paths,
@@ -607,6 +618,9 @@ struct UnitSources<'a> {
     kotlin: &'a [(String, String)],
     common: usize,
     java: &'a [(String, String)],
+    /// The unit's Java sources javac already compiled: not compiler inputs, but the module's
+    /// leading directives may travel with one of them, and they still configure the unit.
+    compiled_java: &'a [(String, String)],
 }
 
 /// Compile one unit of `case` under the command line its directives select ([`unit_options`]).
@@ -624,13 +638,20 @@ fn compile_blocks_mixed(
         kotlin: blocks,
         common,
         java: java_blocks,
+        compiled_java,
     } = sources;
     let report = |phase: &str| {
         if let Some(progress) = progress {
             progress(phase);
         }
     };
-    let mut options = unit_options(case, blocks.iter().map(|(_, source)| source.as_str())).ok()?;
+    // The module's leading directives travel with its first declared file, which may be Java.
+    let unit = blocks
+        .iter()
+        .chain(java_blocks)
+        .chain(compiled_java)
+        .map(|(_, source)| source.as_str());
+    let mut options = unit_options(case, unit).ok()?;
     // A folded `dependsOn` chain is a multiplatform compilation even when the fixture does not
     // repeat the feature as a `// LANGUAGE:` directive. The common/platform source roles already
     // carry that topology into the frontend; enable the matching project feature on the exact
@@ -770,6 +791,7 @@ fn compile_module_test(
             kotlin: files,
             common: m.common_file_count,
             java: &[],
+            compiled_java: &[],
         };
         let report = |phase: &str| progress(&format!("module {}: {phase}", m.name));
         // A source-less unit (an empty hmpp intermediate built standalone) emits nothing; it still
@@ -813,7 +835,10 @@ fn compile_module_test(
                         // loses them (measured: -95 box passes).
                         compile_blocks_mixed(
                             src,
-                            kotlin_only,
+                            UnitSources {
+                                compiled_java: java_files,
+                                ..kotlin_only
+                            },
                             &cp,
                             &friend_paths,
                             jdk_modules,
@@ -1312,9 +1337,10 @@ class Registry {\n\
 }\n";
     const PLATFORM: &str = "package folded\n\
 fun box(): String = Registry.value()\n";
+    // The text before the first `// MODULE:` is part of the first module's first file.
+    const LEADING: &str = "// WITH_STDLIB\n// LANGUAGE: +MultiPlatformProjects\n";
     let source = format!(
-        "// WITH_STDLIB\n\
-         // LANGUAGE: +MultiPlatformProjects\n\
+        "{LEADING}\
          // MODULE: common\n\
          // FILE: Common.kt\n\
          {COMMON}\
@@ -1636,6 +1662,77 @@ fn module_codegen_modes_stay_with_their_unit() {
         ])
     );
     assert_eq!(gate, reference);
+}
+
+/// Modes written before the first `// MODULE:` are every module's, but a module that names
+/// kotlinc's default (`INDY`, `enable`) keeps it: the library compiles its class lambdas, class SAM
+/// wrappers and `$DefaultImpls` holder, the consumer its indy lambdas and default methods, and
+/// krusty's classes match kotlinc's byte for byte.
+#[test]
+fn a_modules_explicit_default_mode_overrides_the_case_mode() {
+    let source = "// LAMBDAS: CLASS\n\
+                  // SAM_CONVERSIONS: CLASS\n\
+                  // JVM_DEFAULT_MODE: disable\n\
+                  // MODULE: lib\n\
+                  // FILE: Lib.kt\n\
+                  package modes\n\
+                  \n\
+                  fun interface Task { fun run(): String }\n\
+                  interface Label { fun value(): String = \"OK\" }\n\
+                  fun invoke(task: Task): String = task.run()\n\
+                  \n\
+                  // MODULE: main(lib)\n\
+                  // LAMBDAS: INDY\n\
+                  // SAM_CONVERSIONS: INDY\n\
+                  // JVM_DEFAULT_MODE: enable\n\
+                  // FILE: Main.kt\n\
+                  import modes.*\n\
+                  \n\
+                  class Impl : Label\n\
+                  fun box(): String {\n\
+                  \x20   val f: () -> String = { Impl().value() }\n\
+                  \x20   return invoke(Task { f() })\n\
+                  }\n";
+    let reference = box_reference_classes::checked_prepared_box(source, "main")
+        .expect("the reference compiler compiles the case and its box() returns OK");
+    let classpath = common::classpath_jars_for(source);
+    let jdk = common::jdk_modules();
+    let compiled = compile_module_test(source, &classpath, Some(jdk.as_path()), &|_| {})
+        .expect("krusty compiles the case");
+    let class_file = |(_, bytes): &&(String, Vec<u8>)| bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]);
+    let mut names = BTreeSet::new();
+    for (module, range) in &compiled.module_ranges {
+        let classes: Vec<_> = compiled.flat[range.clone()]
+            .iter()
+            .filter(class_file)
+            .cloned()
+            .collect();
+        names.extend(
+            classes
+                .iter()
+                .map(|(name, _)| (module.clone(), name.trim_end_matches(".class").to_string())),
+        );
+        let expected = reference
+            .module(module)
+            .unwrap_or_else(|| panic!("the reference compiler emits module {module}"));
+        assert_eq!(
+            compare_class_sets(&classes, expected),
+            Ok(()),
+            "module {module}"
+        );
+    }
+    let qualified = |module: &str, name: &str| (module.to_string(), name.to_string());
+    assert_eq!(
+        names,
+        BTreeSet::from([
+            qualified("lib", "modes/Label"),
+            qualified("lib", "modes/Label$DefaultImpls"),
+            qualified("lib", "modes/LibKt"),
+            qualified("lib", "modes/Task"),
+            qualified("main", "Impl"),
+            qualified("main", "MainKt"),
+        ])
+    );
 }
 
 #[test]
