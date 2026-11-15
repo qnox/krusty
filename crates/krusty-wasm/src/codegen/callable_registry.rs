@@ -1233,6 +1233,7 @@ mod tests {
             &mut caller,
             &mut krusty::backend::CheckedBackendCallables::default(),
             |_| false,
+            |_| false,
         );
         let calls = registry
             .file_calls(
@@ -1296,6 +1297,7 @@ mod tests {
         krusty::backend::default_arguments::realize(
             &mut declaration,
             &mut krusty::backend::CheckedBackendCallables::default(),
+            |_| false,
             |_| false,
         );
         let entry = declaration.default_entries[&function];
