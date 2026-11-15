@@ -634,12 +634,17 @@ impl BodyLowering<'_> {
                 .external_singleton_dispatches
                 .insert(call, classifier);
         }
-        // The result of a generic local function is its declared type parameter; the call's
-        // value is that result at the call's type arguments.
+        // The call keeps its callee's declared result, as a source call of a function of its own
+        // file does. The result of a generic local function is its declared type parameter; the
+        // call's value is that result at the call's type arguments.
+        if let Some(declared) = declared_ret {
+            self.ir.call_declared_ret.insert(call, declared);
+        }
         Ok(match declared_ret {
             Some(declared) if declared != operands.ret => {
                 let coerced = self.coercion(call, operands.ret);
                 self.ir.set_logical_type(coerced, operands.ret);
+                self.ir.declaration_result_coercions.insert(coerced);
                 coerced
             }
             _ => call,
