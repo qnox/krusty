@@ -7,7 +7,7 @@ use super::super::array_content_members;
 use super::super::ir_builtins::{
     BuiltinCallDisposition, BuiltinOperator, BuiltinRelation, DataClassArrayMember,
 };
-use super::super::klib_types::function_invocation_arity;
+use super::super::klib_types::{classifier_name, function_invocation_arity, member_owner};
 use super::{
     mismatch, unsupported, BodyLowering, LinkedAccessor, LinkedAccessorTarget, LinkedCallee,
     Lowered,
@@ -21,7 +21,7 @@ use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignatu
 use crate::metadata::klib_ir::tree::{
     KlibIrArguments, KlibIrExprId, KlibIrExprKind, KlibIrMemberAccess,
 };
-use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbolKind};
+use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 use crate::types::{EqualityMode, Ty, TyKind};
 
 use super::super::decline::KlibBodyDeclineReason;
@@ -541,6 +541,72 @@ impl BodyLowering<'_> {
     }
 
     /// A call of a dependency function, which the unit lowers too.
+    /// `super<Q>.f(…)`: the qualifier's own implementation of `f`, called on the receiver without
+    /// dispatch, as checked FIR lowers a source `super` call. The KLIB names the member through
+    /// the qualifier, so the callee must be a member `Q` declares, and only an implementation this
+    /// unit lowers is reached directly: no override of a subclass may replace it.
+    pub(super) fn super_call(
+        &mut self,
+        qualifier: &KlibIrSymbol,
+        access: &KlibIrMemberAccess,
+        ty: Ty,
+    ) -> Lowered<ExprId> {
+        let (KlibIrSymbolKind::Class, KlibIrSignature::Public(qualifier)) =
+            (qualifier.kind, &qualifier.signature)
+        else {
+            return Err(mismatch("a `super` qualifier is not a public class"));
+        };
+        let (KlibIrSymbolKind::Function, KlibIrSignature::Public(callee)) =
+            (access.symbol.kind, &access.symbol.signature)
+        else {
+            return unsupported("a `super` call of a member without a public signature");
+        };
+        if member_owner(callee)? != classifier_name(qualifier)? {
+            return Err(mismatch(
+                "a `super` call names a member its qualifier does not declare",
+            ));
+        }
+        let linked = self.linker.link(self.ir, callee)?;
+        let Callee::Local(function) = linked.callee else {
+            return unsupported("a `super` call of a member this unit does not implement");
+        };
+        if self.ir.functions[function as usize].body.is_none() {
+            return Err(mismatch("a `super` call names an abstract member"));
+        }
+        let linked = self.substituted(linked, access)?;
+        let operands = self.call_operands(
+            access,
+            ty,
+            CalleeShape {
+                receiver: linked.receiver,
+                params: &linked.params,
+                ret: linked.ret,
+                context_count: linked.context_count,
+                class_type_parameters: &linked.class_type_parameters,
+                parameter_defaults: &[],
+            },
+        )?;
+        if operands.receiver.is_none() || !operands.omitted.is_empty() {
+            return Err(mismatch(
+                "a `super` call is called with another shape than its member's",
+            ));
+        }
+        let call = self.ir.add_expr(IrExpr::Call {
+            callee: Box::new(Callee::Local(function)),
+            dispatch_receiver: operands.receiver,
+            args: operands.args,
+        });
+        if let Some(role) = linked.edge.semantic_role {
+            self.ir.semantic_call_roles.insert(call, role);
+        }
+        let declared = self.ir.functions[function as usize].ret;
+        Ok(if declared == operands.ret {
+            call
+        } else {
+            self.coercion(call, operands.ret)
+        })
+    }
+
     fn dependency_call(
         &mut self,
         callee: &KlibPublicIdSignature,

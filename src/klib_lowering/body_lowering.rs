@@ -485,17 +485,19 @@ impl<'a> BodyLowering<'a> {
                 super_qualifier,
             } => {
                 let ty = self.ty(expression, "call")?;
-                if super_qualifier.is_some() {
-                    return unsupported("a `super` call");
-                }
-                let lowered =
-                    match super::range_membership::range_literal_membership(arena, expression) {
+                if let Some(qualifier) = super_qualifier {
+                    (self.super_call(qualifier, access, ty)?, ty)
+                } else {
+                    let lowered = match super::range_membership::range_literal_membership(
+                        arena, expression,
+                    ) {
                         Some(membership) => self.range_literal_membership(membership, ty, false)?,
                         None => None,
                     };
-                match lowered {
-                    Some(lowered) => (lowered, ty),
-                    None => (self.call(access, ty)?, ty),
+                    match lowered {
+                        Some(lowered) => (lowered, ty),
+                        None => (self.call(access, ty)?, ty),
+                    }
                 }
             }
             KlibIrExprKind::Return { target, value } => {
