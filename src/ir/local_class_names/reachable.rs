@@ -334,8 +334,12 @@ fn detach_lambda_impl(ir: &mut IrFile, source: FunId) -> FunId {
     // consumed. This detached implementation belongs to a newly copied site and must remain
     // available until that site's own representation pass either consumes or realizes it. Keeping
     // the source state can emit a continuation for the copy while dropping the method it re-enters.
-    ir.inline_only_fns.remove(&target);
-    ir.must_inline_lambdas.remove(&target);
+    // A source whose body a splice already consumed has no body to give the copy: the copied site
+    // carries only that spliced template, so the copy stays consumed exactly like its source.
+    if ir.functions[target as usize].body.is_some() {
+        ir.inline_only_fns.remove(&target);
+        ir.must_inline_lambdas.remove(&target);
+    }
     target
 }
 
