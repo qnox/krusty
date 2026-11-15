@@ -963,7 +963,6 @@ fakeOverride/privateFakeOverrides1.kt
 fakeOverride/substitutionInLocal.kt
 fir/kt68806.kt
 fir/multipleDefaultsFalsePositiveDelegation.kt
-fir/smartCastToInvisibleClassMember.kt
 fir/sourceBinarySource.kt
 fp/atan2ZeroGuadrantsDouble.kt
 fp/powDouble.kt
