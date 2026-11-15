@@ -905,7 +905,6 @@ delegatedProperty/local/localDelegatedPropertyCall.kt
 delegatedProperty/localDelegatedBoundValueWithSideEffect.kt
 delegatedProperty/map.kt
 delegatedProperty/observable.kt
-delegatedProperty/optimizedDelegatedProperties/kt48825.kt
 delegatedProperty/optimizedDelegatedProperties/lazy.kt
 delegatedProperty/optimizedDelegatedProperties/mixedArgumentSizes.kt
 delegatedProperty/packageLevel.kt
@@ -990,7 +989,6 @@ extensionFunctions/suspendConversionForExtensionFunAsASuperType.kt
 extensionProperties/contextPropertyInInterface.kt
 extensionProperties/extensionPropertyDifferentReceiver.kt
 extensionProperties/genericContextOverride.kt
-fakeOverride/internalFromFriendModule.kt
 fakeOverride/intersectionInLocal.kt
 fakeOverride/privateFakeOverrides0.kt
 fakeOverride/privateFakeOverrides1.kt
@@ -998,7 +996,6 @@ fakeOverride/substitutionInLocal.kt
 fakeOverride/varianceOverload.kt
 fir/kt68806.kt
 fir/multipleDefaultsFalsePositiveDelegation.kt
-fir/nestedClassTypeParameterDeserialization.kt
 fir/smartCastToInvisibleClassMember.kt
 fir/sourceBinarySource.kt
 fir/toLong.kt
@@ -1404,7 +1401,6 @@ ir/enumClass.kt
 ir/enumClass2.kt
 ir/enumClass3.kt
 ir/fileClassInitializers.kt
-ir/kt41765.kt
 ir/serializationRegressions/anonFakeOverride.kt
 ir/serializationRegressions/innerClassInEnumEntryClass.kt
 ir/serializationRegressions/useImportedMember.kt
@@ -1460,7 +1456,6 @@ lower/forLoopsLowering/withIndexUInt.kt
 lower/localDelegatedProperty.kt
 mangling/internal.kt
 mangling/multipleConstructors.kt
-multiplatform/k2/aliasSuperTypeInLazy.kt
 multiplatform/k2/annotations/expectAnnotationCallInLibrary.kt
 multiplatform/k2/anonymousObjectAndSpecificImplementationInDeserializedIr.kt
 multiplatform/k2/basic/contextInFakeOverride.kt
@@ -1498,22 +1493,9 @@ multiplatform/k2/delegation/delegationToExpectInterface_noNewMembers.kt
 multiplatform/k2/enumStaticMethods.kt
 multiplatform/k2/expectStatic.kt
 multiplatform/k2/extensionPropertiesOverloads.kt
-multiplatform/k2/hmpp/abstractExpectedActual2-2.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritance.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflictDefaults.kt
-multiplatform/k2/hmpp/expectActualGeneric2-2.kt
-multiplatform/k2/hmpp/expectActualGeneric3-3.kt
-multiplatform/k2/hmpp/expectActualGenericTwoLibs.kt
-multiplatform/k2/hmpp/expectActualInheritance2-2.kt
-multiplatform/k2/hmpp/expectActualInheritance3-3.kt
-multiplatform/k2/hmpp/expectActualInheritanceTwoLibs.kt
-multiplatform/k2/hmpp/expectActualOverload2-2.kt
-multiplatform/k2/hmpp/expectActualOverload3-3.kt
-multiplatform/k2/hmpp/expectActualOverloadTwoLibs.kt
-multiplatform/k2/hmpp/expectRefinement3-3.kt
-multiplatform/k2/hmpp/fakeOverrideExpectSuperType.kt
-multiplatform/k2/hmpp/fakeOverrideExpectSuperTypeFromLib.kt
 multiplatform/k2/hmpp/friendDependency.kt
 multiplatform/k2/hmpp/genericTypealiasSameNameTwoLibs.kt
 multiplatform/k2/hmpp/iheritanceFromExpected2-2.kt
@@ -1521,13 +1503,9 @@ multiplatform/k2/hmpp/inheritanceFromExpected2-3.kt
 multiplatform/k2/hmpp/inheritanceFromExpected3-3.kt
 multiplatform/k2/hmpp/inheritanceFromExpected3-4.kt
 multiplatform/k2/hmpp/inheritanceFromExpected4-4.kt
-multiplatform/k2/hmpp/inheritanceFromExpectedInApp2-2.kt
-multiplatform/k2/hmpp/inheritanceFromExpectedInApp2-3.kt
-multiplatform/k2/hmpp/inheritanceFromExpectedInApp3-3.kt
 multiplatform/k2/hmpp/inheritanceFromLibraryExpectClass.kt
 multiplatform/k2/hmpp/mutlipleExpectsForOneActual.kt
 multiplatform/k2/hmpp/overloadAlias3-3.kt
-multiplatform/k2/hmpp/overloadAliasTwoLibs.kt
 multiplatform/k2/hmpp/propertyAlias3-3.kt
 multiplatform/k2/hmpp/propertyAliasTwoLibs.kt
 multiplatform/k2/hmpp/typealiasNameClash.kt
@@ -2476,7 +2454,6 @@ typeErasure/twoFunWithReifiedTypeParametersInlineFunWithTwoTypeParameters.kt
 typeErasure/twoFunWithTypeParametersInlineFunWithReifiedTypeParameters.kt
 typeErasure/twoFunWithTypeParametersWithUpperBoundsInlineFunWithReifiedTypeParameters.kt
 typealias/abbreviationWithCapturedType.kt
-typealias/localTypeAliases.kt
 typealias/typeAliasAsBareType.kt
 unitConversion/unitConversionForSubtype.kt
 unitConversion/unitConversionWithSamSubtype.kt
