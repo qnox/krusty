@@ -128,11 +128,9 @@ bridges/internalMethodOverrideInFriendModule.kt
 bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
 bridges/internalMethodOverridePublishedApi.kt
-bridges/kt46389.kt
 bridges/multipleModules1.kt
 bridges/noBridgeOnMutableCollectionInheritance.kt
 bridges/special.kt
-bridges/specialGeneric.kt
 bridges/strListContains.kt
 bridges/test10.kt
 bridges/test11.kt
@@ -842,12 +840,9 @@ dataObjects/toString.kt
 dataflow/scope1.kt
 dataflow/uninitialized_val.kt
 deadCodeElimination/emptyVariableRange.kt
-defaultArguments/complexInheritance.kt
 defaultArguments/constructor/anonymousObjectAsDefaultParam.kt
 defaultArguments/defaultArgumentsInFunctionWithExpressionAsBody.kt
 defaultArguments/function/defaultLambdaInline.kt
-defaultArguments/kt48391.kt
-defaultArguments/protected.kt
 delegatedProperty/DelegationByFunctionWithEnumUpperBound.kt
 delegatedProperty/callableReferenceAsSecondArgumentOfDelegate.kt
 delegatedProperty/correctFieldsOrder.kt
@@ -908,7 +903,6 @@ delegation/delegationDifferentModule.kt
 delegation/delegationDifferentModule2.kt
 delegation/ifWithCallableReferenceInLazy.kt
 delegation/kt30102_comparable.kt
-delegation/withDefaultsMultipleFilesOrder.kt
 devirtualization/anonymousObject.kt
 devirtualization/inline_getter.kt
 devirtualization/lateinitInterface.kt
@@ -1378,7 +1372,6 @@ ir/serializationRegressions/useImportedMember.kt
 ir/serializationRegressions/varAsFunctionCall.kt
 jdk/iteratingOverHashMap.kt
 jdk/noStringToCharArray.kt
-jvmInlineMultiFieldValueClasses/valueClassInValueClass.kt
 kclass/kClassEnumArgument.kt
 kclass/kclass1.kt
 ktype/ktype1_basics1.kt
@@ -1441,7 +1434,6 @@ multiplatform/k2/basic/expectActualTypeParameters.kt
 multiplatform/k2/basic/expectInterfaceInSupertypes.kt
 multiplatform/k2/basic/extensionAndFakeOverride.kt
 multiplatform/k2/basic/interfaceMethodFromSuperTypeIsImplementedInOtherExpectSuperClass.kt
-multiplatform/k2/basic/intersectionOverrideWithDefaultParameterInCommonModule.kt
 multiplatform/k2/basic/localIntersectionOverrideWithDefaultParameterInCommonModule.kt
 multiplatform/k2/basic/localSubstitutionOverrideInCommonModule.kt
 multiplatform/k2/basic/nameBasedDestructuringFullForm.kt
@@ -1671,7 +1663,6 @@ ranges/forInCharSequenceLengthDecreasedInLoopBody.kt
 ranges/forInCharSequenceLengthIncreasedInLoopBody.kt
 ranges/forInCharSequenceWithCustomIterator.kt
 ranges/forInCharSequenceWithMultipleGetFunctions.kt
-ranges/forInCustomIterable.kt
 ranges/forInDoubleRangeWithCustomIterator.kt
 ranges/forInDownTo/forIntInDownTo.kt
 ranges/forInDownTo/forIntInDownToWithNonConstBounds.kt
@@ -2358,7 +2349,6 @@ specialBuiltins/emptyList.kt
 specialBuiltins/emptyMap.kt
 specialBuiltins/emptyStringMap.kt
 specialBuiltins/enumAsOrdinaled.kt
-specialBuiltins/irrelevantRemoveAtOverride.kt
 specialBuiltins/maps.kt
 specialBuiltins/notEmptyListAny.kt
 specialBuiltins/notEmptyMap.kt
@@ -2401,11 +2391,8 @@ suspendConversion/suspendConversionOfAliasedType.kt
 suspendConversion/suspendConversionOnVarargElements.kt
 suspendConversion/suspendConversionWithFunInterfaces.kt
 syntheticAccessors/accessorForAbstractProtected.kt
-syntheticAccessors/accessorForGenericMethodWithDefaults.kt
 syntheticAccessors/accessorForProtectedInvokeVirtual.kt
 syntheticAccessors/accessorForProtectedPropertyReference.kt
-syntheticAccessors/functionsWithDefaultValues/memberFunction.kt
-syntheticAccessors/functionsWithDefaultValues/memberFunctionTransitiveCase.kt
 syntheticAccessors/kt10047.kt
 syntheticAccessors/kt9958.kt
 syntheticAccessors/kt9958Interface.kt
@@ -2476,7 +2463,6 @@ when/enumOptimization/subjectAny.kt
 when/enumOptimization/withoutElse.kt
 when/is.kt
 when/kt45081.kt
-when/range.kt
 when/stringOptimization/duplicatingItems.kt
 when/stringOptimization/duplicatingItemsSameHashCode.kt
 when/stringOptimization/duplicatingItemsSameHashCode2.kt
@@ -2486,7 +2472,6 @@ when/stringOptimization/nullability.kt
 when/stringOptimization/sameHashCode.kt
 when/stringOptimization/statement.kt
 when/stringOptimization/temporaryVarInWhenByStringIsDisposedProperly.kt
-when/whenArgumentIsEvaluatedOnlyOnce.kt
 when/whenSubjectVariable/whenByEnum.kt
 when/whenSubjectVariable/whenByNullableEnum.kt
 when/whenSubjectVariable/whenByString.kt
