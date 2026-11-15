@@ -1041,12 +1041,18 @@ fn language_function_classifier_retains_external_invoke_override_edge() {
         .expect("the language-owned function classifiers need no serialized KLIB");
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
-        &[SourceInput::kotlin(
-            "class Target : (Int) -> String {\n\
-                 override fun invoke(value: Int): String = \"OK\"\n\
-             }\n",
-        )
-        .with_file_stem("LanguageFunctionInvokeOverride")],
+        &[
+            // The language-owned `Function1` names `kotlin.Function` as its supertype, which a
+            // real classpath's builtins declare and an empty provider does not.
+            SourceInput::kotlin("package kotlin\n\ninterface Function<out R>\n")
+                .with_file_stem("FunctionRoot"),
+            SourceInput::kotlin(
+                "class Target : (Int) -> String {\n\
+                     override fun invoke(value: Int): String = \"OK\"\n\
+                 }\n",
+            )
+            .with_file_stem("LanguageFunctionInvokeOverride"),
+        ],
         crate::frontend::PlatformProvider::jvm(Box::new(provider)),
         &LangFeatures::new(),
         &mut diagnostics,
