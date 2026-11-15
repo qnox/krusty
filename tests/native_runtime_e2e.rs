@@ -1274,6 +1274,11 @@ fn a_list_added_to_itself_doubles() {
 }
 
 #[test]
+fn a_list_remove_all_and_retain_all_follow_the_argument() {
+    run_driver("list_remove_all");
+}
+
+#[test]
 fn a_list_modified_during_for_each_ends_the_walk() {
     run_driver("walk_modified_during_for_each");
 }

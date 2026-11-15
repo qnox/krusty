@@ -592,8 +592,11 @@ impl DelegateConventionFamilies {
         self.members.is_empty() && self.member_extensions.is_empty() && self.extensions.is_empty()
     }
 
-    /// The candidates a total failure names. Kotlin 2.4.20 lists every rung's candidates, members
-    /// first; earlier releases named only the earliest rung that contributed any.
+    /// The candidates a total failure names: every rung's candidates, members first, unless the
+    /// release names only the earliest rung that contributed any
+    /// ([`Quirk::DelegateFailureNamesFirstRungOnly`]).
+    ///
+    /// [`Quirk::DelegateFailureNamesFirstRungOnly`]: crate::kotlin_version::Quirk::DelegateFailureNamesFirstRungOnly
     pub(crate) fn diagnostic_candidates(
         &self,
         name: &str,
@@ -601,8 +604,8 @@ impl DelegateConventionFamilies {
             DelegateConventionCandidate<'_>,
         ) -> Result<Ty, crate::fir::DiagnosticId>,
     ) -> Result<Vec<DelegateConventionDiagnosticCandidate>, crate::fir::DiagnosticId> {
-        let every_rung =
-            crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20);
+        let every_rung = !crate::kotlin_version::Quirks::target()
+            .has(crate::kotlin_version::Quirk::DelegateFailureNamesFirstRungOnly);
         let members = every_rung || !self.members.is_empty();
         let member_extensions = every_rung || !members && !self.member_extensions.is_empty();
         let extensions = every_rung || !members && !member_extensions;
