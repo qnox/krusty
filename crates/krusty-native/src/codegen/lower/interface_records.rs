@@ -233,6 +233,25 @@ impl FileLowering<'_> {
         Ok(())
     }
 
+    /// The bridges of a class no instance of which is made here, which a class of another module
+    /// extending it inherits: published like those of an instantiable class, with no record of
+    /// their own since the class has no type to record them for.
+    pub(super) fn publish_dependency_bridges(&mut self, class: ClassId) -> Result<(), Unsupported> {
+        for (identity, implementation) in self.dependency_implementations(class)? {
+            if let DependencyImplementation::Bridge {
+                slot,
+                declared,
+                implemented,
+            } = implementation
+            {
+                let function = self.dependency_bridge(class, slot, &declared, &implemented)?;
+                self.published_dependency_bridges
+                    .insert((class, identity), self.object_function(function));
+            }
+        }
+        Ok(())
+    }
+
     /// A bridge standing for the member a dependency's interface declares as `declared`, which
     /// the override at `slot` implements as `implemented`; see
     /// [`DependencyImplementation::Bridge`].

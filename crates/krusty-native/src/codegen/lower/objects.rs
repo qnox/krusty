@@ -813,6 +813,8 @@ impl<'a> FileLowering<'a> {
         let (qualified_name, simple_name, class_names) = self.reflection_names(class);
         if instantiable {
             self.record_dependency_implementations(descriptor, &base, class, (&vtable, &itable))?;
+        } else if self.exported.contains(&class) {
+            self.publish_dependency_bridges(class)?;
         }
         self.define_type_descriptor(
             descriptor,
