@@ -127,23 +127,45 @@ impl DeclarationAnnotations {
     ) -> Self {
         let mut annotations = Self::default();
         for (checked, annotation) in applications {
-            if checked.retention == crate::types::AnnotationRetention::Source {
-                if !checked.facts.optional_expectation {
-                    annotations.source_applications.push(annotation.internal);
-                }
-                continue;
-            }
-            if checked.facts.optional_expectation {
-                annotations.erased_optional_expectations = true;
-                continue;
-            }
-            annotations.retained.push(RetainedAnnotation {
-                retention: checked.retention,
-                annotation,
-                facts: checked.facts,
-            });
+            annotations.record_checked(checked.retention, annotation, checked.facts);
         }
         annotations
+    }
+
+    /// Folded module declaration applications, paired with the checker's retained policy proof.
+    pub fn from_resolved<'a>(
+        applications: impl IntoIterator<Item = (&'a crate::types::ResolvedAnnotation, AnnoRetention)>,
+    ) -> Self {
+        let mut annotations = Self::default();
+        for (application, retention) in applications {
+            annotations.record_checked(
+                retention,
+                AppliedAnnotation::from(application),
+                application.facts,
+            );
+        }
+        annotations
+    }
+
+    fn record_checked(
+        &mut self,
+        retention: AnnoRetention,
+        annotation: AppliedAnnotation,
+        facts: crate::types::AnnotationSemanticFacts,
+    ) {
+        if retention == AnnoRetention::Source {
+            if !facts.optional_expectation {
+                self.source_applications.push(annotation.internal);
+            }
+        } else if facts.optional_expectation {
+            self.erased_optional_expectations = true;
+        } else {
+            self.retained.push(RetainedAnnotation {
+                retention,
+                annotation,
+                facts,
+            });
+        }
     }
 
     /// Whether the declaration carries annotation provenance: a retained application, an erased
