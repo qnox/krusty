@@ -1004,18 +1004,12 @@ impl<'a> BodyLowering<'a> {
         }
         let parameters = self.header.type_parameters();
         // A value of a subtype of `declared`, as `suspendCoroutine` passes its `SafeContinuation`
-        // to a `(Continuation<T>) -> Unit` block, is one by subsumption. It passes as the checked
-        // source argument does: a reference into a non-null reference parameter unchanged, and any
-        // other value, such as a boxed primitive, with the coercion the checker records for it.
+        // to a `(Continuation<T>) -> Unit` block, is one by subsumption. It crosses as the checked
+        // source argument does, with the conversion the checker decides for the same two types.
         if self.linker.is_subtype(parameters, actual, declared) {
-            let unchanged = actual.is_reference()
-                && declared.is_reference()
-                && !declared.is_nullable()
-                && !declared.accepts_numeric(actual);
-            return Ok(if unchanged {
-                lowered
-            } else {
-                self.coercion(lowered, declared)
+            return Ok(match crate::types::value_conversion(actual, declared) {
+                None => lowered,
+                Some(_) => self.coercion(lowered, declared),
             });
         }
         // A prepared copy also erases the type parameters of the inline functions it already
