@@ -282,17 +282,27 @@ pub(super) fn plan<'a, 'b>(
             };
             type_arguments.push(semantic_type(header.arena, &header.types, argument)?);
         }
-        let Some(declared_superclass) = supertypes.first().copied() else {
+        // The declared supertype the delegation constructs is the one naming the constructor's
+        // class; the class's declaration lists its supertypes in source order, interfaces
+        // included.
+        let mut declared =
+            supertypes
+                .iter()
+                .copied()
+                .filter_map(|supertype| match supertype.kind() {
+                    TyKind::Obj(declared_owner, arguments) if declared_owner == owner => {
+                        Some((supertype, arguments))
+                    }
+                    _ => None,
+                });
+        let (Some((declared_superclass, declared_arguments)), None) =
+            (declared.next(), declared.next())
+        else {
             return Err(mismatch(
-                "a class with a delegated superclass has no declared supertype",
+                "a delegated superclass is not exactly one declared supertype of the class",
             ));
         };
-        let TyKind::Obj(declared_owner, declared_arguments) = declared_superclass.kind() else {
-            return Err(mismatch(
-                "a delegated superclass is not a declared class application",
-            ));
-        };
-        if declared_owner != owner || declared_arguments[..] != type_arguments[..] {
+        if declared_arguments[..] != type_arguments[..] {
             return Err(mismatch(
                 "a superclass constructor's type arguments disagree with the class's declared supertype",
             ));
@@ -339,14 +349,13 @@ pub(super) fn plan<'a, 'b>(
             )
         }
     };
-    if supertypes.first() != Some(&declared_superclass)
-        && !(root
-            && supertypes
-                .iter()
-                .all(|supertype| *supertype != declared_superclass))
+    // `Any` is listed first when a class declares it, and not at all otherwise.
+    if root
+        && supertypes.first() != Some(&declared_superclass)
+        && supertypes.contains(&declared_superclass)
     {
         return Err(mismatch(
-            "a class's first supertype is not the class its constructor delegates to",
+            "a class lists `Any` among its supertypes after another supertype",
         ));
     }
     let mut steps = Vec::new();
@@ -354,11 +363,10 @@ pub(super) fn plan<'a, 'b>(
         super::class_storage::authenticate(&header, declared_superclass, |member, field| {
             record_initializer(member, field, &mut steps)
         })?;
+    // The class lists its supertypes in source order; the class it constructs leads them.
     let mut supertypes = supertypes;
-    if root {
-        supertypes.retain(|supertype| *supertype != declared_superclass);
-        supertypes.insert(0, declared_superclass);
-    }
+    supertypes.retain(|supertype| *supertype != declared_superclass);
+    supertypes.insert(0, declared_superclass);
     Ok(Some(ClassInitialization {
         header,
         field_declarations: storage.field_declarations,
