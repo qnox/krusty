@@ -51,13 +51,14 @@ build_selection() {
 # selected package, so the root package is built apart: with it, `--tests` would also build the
 # conformance and e2e targets this job does not run.
 phase_begin build
-bins=()
-mapfile -t -O "${#bins[@]}" bins < <(build_selection build \
+# Each selection is assigned before it is split: a failed build then stops the script under `set -e`.
+crate_tests="$(build_selection build \
   -p krusty-jvm -p krusty-native -p krusty-wasm -p krusty-cli -p krusty-lsp -p krusty-toolchain \
-  --lib --bins --tests)
+  --lib --bins --tests)"
 compiler_unit_tests="$(build_selection test --no-run -p krusty --lib)"
 phase_end build
 [ -n "$compiler_unit_tests" ] || { echo "own-tests: compiler unit binary missing" >&2; exit 1; }
+mapfile -t bins <<<"$crate_tests"
 bins+=("$compiler_unit_tests")
 
 export KRUSTY_BIN="$target_root/gate/krusty"
