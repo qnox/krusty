@@ -1,8 +1,118 @@
 //! Checked member-call facts for declarations selected by serialized KLIB bodies.
 
-use crate::fir::{CheckedMemberCallEdge, ExternalCallableId};
+#[path = "klib_type_facts.rs"]
+mod klib_type_facts;
+
+use crate::fir::{CheckedKlibDependencyFacts, CheckedMemberCallEdge, ExternalCallableId};
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName};
+
+/// Check and freeze semantic facts for the body graph reachable from the source file's selected
+/// KLIB declarations. Backends may later choose a target-specific subset, but they never resolve
+/// member hierarchy edges or builtin implementations while doing so.
+pub(crate) fn for_checked_klib_bodies<'a>(
+    source: &dyn SymbolSource,
+    bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    roots: impl IntoIterator<Item = crate::libraries::KlibBodyCallable<'a>>,
+) -> Result<CheckedKlibDependencyFacts, ExternalCallableId> {
+    let mut facts = CheckedKlibDependencyFacts::default();
+    let roots = roots.into_iter().collect::<Vec<_>>();
+    let mut classifier_roots = Vec::new();
+    let mut semantic_types = Vec::new();
+    for callable in &roots {
+        semantic_types.extend(callable.params().iter().copied());
+        semantic_types.push(callable.ret());
+        semantic_types.extend(callable.type_parameters().iter().copied());
+    }
+    let mut pending = roots
+        .into_iter()
+        .map(|callable| callable.identity().clone())
+        .collect::<Vec<_>>();
+    let mut visited = crate::fx_hash::HashSet::default();
+    while let Some(identity) = pending.pop() {
+        if !visited.insert(identity.clone()) {
+            continue;
+        }
+        classifier_roots.extend(bodies.type_classifiers_in_body(&identity));
+        pending.extend(bodies.direct_callees(&identity));
+        pending.extend(
+            bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS),
+        );
+
+        // A reached constructor's initialization is serialized on its owning class. These are
+        // declaration facts only: common class initialization still selects executable roots.
+        pending.extend(bodies.constructor_initializer_callables(
+            &identity,
+            crate::klib_lowering::EMITTED_CALL_FORMS,
+        ));
+
+        let Some((external, realization)) = source.external_callable_by_dependency(&identity)
+        else {
+            continue;
+        };
+        if realization.dependency_callable.as_ref() != Some(&identity) {
+            return Err(external);
+        }
+        let Some(selected) = realization.klib_body_callable() else {
+            continue;
+        };
+        semantic_types.extend(selected.params().iter().copied());
+        semantic_types.push(selected.ret());
+        semantic_types.extend(selected.type_parameters().iter().copied());
+        #[cfg(test)]
+        if realization.kind == crate::libraries::ExternalCallableKind::Constructor {
+            facts.reached_constructors.insert(identity.clone());
+        }
+        if realization.kind != crate::libraries::ExternalCallableKind::Member {
+            continue;
+        }
+        let Some(crate::types::SemanticCallableOwner::Classifier(owner)) =
+            selected.declaration_owner()
+        else {
+            return Err(external);
+        };
+        if realization.callable.external_identity != Some(external)
+            || realization.declaration_owner
+                != Some(crate::types::SemanticCallableOwner::Classifier(owner))
+        {
+            return Err(external);
+        }
+        let implementation_name = selected
+            .accessor()
+            .map_or_else(|| selected.name(), |accessor| accessor.name.as_ref());
+        let implementations = crate::symbol_resolver::builtin_implementation_facts(
+            source,
+            owner,
+            implementation_name,
+            external,
+        );
+        match facts.builtin_implementations.entry(external) {
+            std::collections::hash_map::Entry::Occupied(existing)
+                if existing.get() != &implementations =>
+            {
+                return Err(external);
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {}
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(implementations);
+            }
+        }
+        if !matches!(
+            &identity.declaration,
+            crate::libraries::KlibDeclarationSignature::Accessor(_)
+        ) {
+            let edge = klib_dependency_member_call_edge(source, owner, selected.name(), external)?;
+            facts.member_edges.insert(identity, edge);
+        }
+    }
+    facts.type_hierarchy = Some(klib_type_facts::freeze(
+        source,
+        classifier_roots,
+        std::iter::empty(),
+        semantic_types,
+    ));
+    Ok(facts)
+}
 
 /// Resolve the exact declaration in its common member hierarchy and freeze the edge facts that
 /// KLIB dependency-body lowering needs. The body symbol already selected `identity`; this only

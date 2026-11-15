@@ -57,7 +57,7 @@ use crate::name_tree::{NameId, NameTree};
 use interning::ShardedInterner;
 mod primitive_arrays;
 mod raw_erasure;
-pub(crate) use raw_erasure::{formal_erasures, raw_member_type};
+pub(crate) use raw_erasure::{formal_erasures, raw_member_type, DeclaredFormals};
 mod thin_handles;
 mod ty_kind;
 mod ty_table;

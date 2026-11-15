@@ -420,7 +420,7 @@ use context_sensitive_resolution::{expected_nested_classifier, parameterized_cla
 use delegated_properties::{
     select_delegate_operator, select_delegate_operator_return, DelegateConventionSite,
 };
-pub(crate) use dependency_body_call_edges::klib_dependency_member_call_edge;
+pub(crate) use dependency_body_call_edges::for_checked_klib_bodies;
 pub(crate) use dependency_platform::DependencyPlatform;
 pub(crate) use diagnostic_selection::unresolved_member_message;
 use extension_reference_selection::ExtensionReferenceChoice;
