@@ -88,6 +88,14 @@ pub(in crate::codegen) fn dispatches_through_library_member(
         && any_members::call_member(ir, callables, expression).is_none()
 }
 
+/// The library member a call goes through: its KLIB identity, how the call reaches it, and the
+/// Kotlin name of the declaration its overrides share.
+struct LibraryMember {
+    identity: Vec<u8>,
+    role: MemberRole,
+    name: String,
+}
+
 impl Body<'_> {
     /// Emit `id` when it is a call through a library member.
     pub(super) fn library_member_expression(
@@ -95,7 +103,8 @@ impl Body<'_> {
         id: u32,
         node: &IrExpr,
     ) -> Option<Result<(), Unsupported>> {
-        let (target, receiver, args, role) = match node {
+        // A function's overrides are named by the function, an accessor's by its property.
+        let (target, receiver, args, role, property) = match node {
             IrExpr::Call {
                 callee,
                 dispatch_receiver: Some(receiver),
@@ -113,7 +122,13 @@ impl Body<'_> {
                 if !defaults.is_empty() {
                     return None;
                 }
-                (*target, *receiver, args.as_slice(), MemberRole::Function)
+                (
+                    *target,
+                    *receiver,
+                    args.as_slice(),
+                    MemberRole::Function,
+                    None,
+                )
             }
             IrExpr::Checked(operation) => {
                 let access = self.callables.dependency_accessor(operation)?;
@@ -122,11 +137,17 @@ impl Body<'_> {
                 {
                     return None;
                 }
+                let krusty::ir::IrCheckedOperation::ExternalPropertyRead { target, .. } =
+                    &**operation
+                else {
+                    return None;
+                };
                 (
                     access.target,
                     receiver,
                     access.arguments,
                     MemberRole::Getter,
+                    Some(*target),
                 )
             }
             _ => return None,
@@ -138,18 +159,36 @@ impl Body<'_> {
         }
         // A function's identity names a function, and an accessor's a property.
         let identity = library_member_identity(fact, role)?;
-        Some(self.library_member_call(id, fact.clone(), identity, role, receiver, args))
+        let name = match property {
+            Some(property) => self.callables.property(property)?.name.to_string(),
+            None => fact.name.clone(),
+        };
+        Some(self.library_member_call(
+            id,
+            fact.clone(),
+            LibraryMember {
+                identity,
+                role,
+                name,
+            },
+            receiver,
+            args,
+        ))
     }
 
     fn library_member_call(
         &mut self,
         id: u32,
         fact: BackendCallableFact,
-        identity: Vec<u8>,
-        role: MemberRole,
+        member: LibraryMember,
         receiver: u32,
         args: &[u32],
     ) -> Result<(), Unsupported> {
+        let LibraryMember {
+            identity,
+            role,
+            name,
+        } = member;
         let params = fact.declared_params.as_deref().unwrap_or(&fact.params);
         let result = fact.declared_ret.unwrap_or(fact.ret);
         if params.len() != args.len() {
@@ -166,6 +205,7 @@ impl Body<'_> {
         self.runtime.builtin_member(
             self.module,
             member,
+            &name,
             &signature,
             &fact.builtin_implementations,
         )?;

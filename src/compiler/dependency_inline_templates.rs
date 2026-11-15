@@ -39,6 +39,8 @@ impl DependencyInlineTemplates for KlibInlineTemplates {
             self.platform.as_ref(),
             bodies.bodies(),
             [selected],
+            // A template reads only the checked type hierarchy, never builtin implementations.
+            &[],
         )
         .ok()?;
         let callees = TemplateCallees {
