@@ -28,7 +28,59 @@ impl<'s> Linker<'_, 's> {
                 "different dependency identities claim the same materialized classifier".to_owned(),
             ));
         }
-        let class = super::super::same_library_class::installed_class(&prepared);
+        // A same-library superclass is installed first, and the class's constructor passes it the
+        // constructor parameters its delegation names.
+        let superclass = match &prepared.superclass {
+            Some(superclass) => {
+                let declaration = match superclass.constructor {
+                    super::super::same_library_class::SuperclassConstructor::Local(signature) => {
+                        self.link_local_constructor(ir, signature)?.declaration
+                    }
+                    super::super::same_library_class::SuperclassConstructor::Library {
+                        signature,
+                        classifier,
+                    } => {
+                        // The library superclass is extended only where this unit materializes it.
+                        let linked = self.link_constructor(ir, signature)?;
+                        if linked.declaration.classifier != classifier
+                            || !self
+                                .classes
+                                .values()
+                                .any(|class| ir.classes[*class as usize].fq_name_id() == classifier)
+                        {
+                            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                                "a superclass this unit does not materialize",
+                            ));
+                        }
+                        linked.declaration
+                    }
+                };
+                let params = declaration.declared_parameters().to_vec();
+                if params.len() != superclass.operands.len() {
+                    return Err(KlibBodyDeclineReason::SignatureMismatch(
+                        "a superclass delegation passes another number of arguments".to_owned(),
+                    ));
+                }
+                let args = superclass
+                    .operands
+                    .iter()
+                    .zip(&params)
+                    .map(|(&slot, &ty)| {
+                        let value = ir.add_expr(IrExpr::GetValue(slot));
+                        ir.set_logical_type(value, ty);
+                        value
+                    })
+                    .collect::<Vec<_>>();
+                Some((declaration.classifier, params, args))
+            }
+            None => None,
+        };
+        let mut class = super::super::same_library_class::installed_class(&prepared);
+        if let Some((name, params, args)) = superclass {
+            class.superclass = name;
+            class.super_ctor_params = params;
+            class.super_args = args;
+        }
         let class_id = ir.add_class(class);
         ir.record_declared_class_self_type(prepared.classifier, prepared.self_type);
         let init = declare_function(ir, &prepared.init_header);

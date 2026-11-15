@@ -510,6 +510,16 @@ struct FileContext<'a> {
     delegates: &'a local_delegates::Prepared,
 }
 
+/// The wasm value a parameter of type `ty` is received as; `None` for a `Unit` parameter. A
+/// `Nothing` parameter receives no value at run time, but takes the reference of the erased
+/// member it overrides, as `List<Nothing>.contains(Nothing)` overrides `contains(E)`.
+pub(super) fn parameter_value_carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
+    if ty == Ty::Nothing {
+        return Ok(Some(REFERENCE));
+    }
+    carrier(ty)
+}
+
 /// The wasm value a Kotlin type is carried as; `None` for a type with no value (`Unit`,
 /// `Nothing`).
 pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
