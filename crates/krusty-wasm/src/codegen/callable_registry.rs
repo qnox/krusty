@@ -108,6 +108,9 @@ impl CallableRegistry {
                 "an object (`{}`) without its declaring file's entry",
                 classifier.render().replace('/', ".")
             )),
+            Some(InstanceEntry::Constructor { .. }) => {
+                Err("a constructor without its declaring file's entry".to_owned())
+            }
             None => Ok(()),
         }
     }
@@ -217,12 +220,22 @@ impl CallableRegistry {
             member_receivers: HashMap::default(),
             singleton_member_receivers: HashMap::default(),
             singleton_extension_unread_receivers: HashMap::default(),
-            instances: krusty::backend::instance_links::link_reads(
-                ir,
-                module_facts,
-                &mut self.instances,
-                || wasm.declare(),
-            ),
+            instances: {
+                let mut reads = krusty::backend::instance_links::link_reads(
+                    ir,
+                    module_facts,
+                    &mut self.instances,
+                    || wasm.declare(),
+                );
+                reads.extend(krusty::backend::instance_links::link_constructor_reads(
+                    ir,
+                    self.source_module.as_deref().unwrap_or_default(),
+                    module_facts,
+                    &mut self.instances,
+                    || wasm.declare(),
+                ));
+                reads
+            },
         };
         for expression in krusty::ir::emitted_body_roots(ir)
             .into_iter()
@@ -299,6 +312,7 @@ impl CallableRegistry {
                     target,
                     default_provider,
                     params,
+                    ret,
                     defaults,
                     extension_receiver_parameter,
                     ..
@@ -329,6 +343,16 @@ impl CallableRegistry {
                     }
                     if super::lower::declared_by_string_builder(callable) {
                         // The runtime lays `StringBuilder` out and realizes its members.
+                        continue;
+                    }
+                    if super::lower::declared_by_array_list(callable)
+                        || dispatch_receiver.is_some_and(|receiver| {
+                            super::lower::array_list_receiver(ir, receiver)
+                                && super::lower::realized_array_list_member(callable)
+                        })
+                    {
+                        // The runtime lays `ArrayList` out and realizes its members, including
+                        // the ones it inherits from the abstract collection classes.
                         continue;
                     }
                     if super::lower::any_members::call_member(ir, callables, expression).is_some() {
@@ -418,7 +442,18 @@ impl CallableRegistry {
                             callable.ret,
                             callable.overridden_declarations,
                         );
-                        "a dependency callable whose target code was not emitted".to_string()
+                        format!(
+                            "a dependency callable whose target code was not emitted: `{}`; selected declaration {identity:?}; owner {:?}; kind {:?}; realization {:?}; checked parameters {params:?}; checked result {ret:?}; provider parameters {:?}; provider result {:?}; declared parameters {:?}; declared result {:?}; compiler operation {:?}",
+                            callable.name,
+                            callable.declaration_owner,
+                            callable.kind,
+                            callable.member_realization,
+                            callable.params,
+                            callable.ret,
+                            callable.declared_params,
+                            callable.declared_ret,
+                            callable.compiler_operation(),
+                        )
                     })?;
                     targets.external.insert(*target, index);
                     if let Some(entry) = default_entry {
@@ -1142,5 +1177,142 @@ mod tests {
             IrExpr::Call { callee, dispatch_receiver: None, .. }
                 if **callee == Callee::Local(function)
         ));
+    }
+
+    #[test]
+    fn a_cross_file_member_default_entry_reuses_the_provider_index_with_receiver_prefix() {
+        let provider = CallableId::from_raw(20);
+        let target = CallableId::from_raw(21);
+        let owner = krusty::types::type_name("demo/Host");
+        let mut registry = CallableRegistry::default();
+        let mut wasm = Module::default();
+        registry.enter_source_module("app");
+
+        let mut caller = IrFile::default();
+        let receiver = caller.add_expr(IrExpr::GetValue(0));
+        caller.set_logical_type(receiver, Ty::obj_name(owner));
+        caller.referenced_module_callables.insert(
+            provider,
+            krusty::ir::IrModuleCallable {
+                source: krusty::ir::IrModuleSource {
+                    source: krusty::fir::SourceFileId::from_raw(0),
+                    package: krusty::types::type_name("demo"),
+                },
+                name: "answer".into(),
+                owner: Some(owner),
+                owner_kind: Some(krusty::ir::IrClassifierKind::Class),
+                visibility: krusty::types::Visibility::Public,
+                flags: Default::default(),
+                parameters: vec![Ty::String].into_boxed_slice(),
+                default_parameters: vec![0].into_boxed_slice(),
+                type_parameters: Box::default(),
+                owner_type_parameters: Box::default(),
+                parameter_identities: vec![krusty::ir::IrParameterIdentity::source(
+                    "value".to_owned(),
+                )]
+                .into_boxed_slice(),
+                result: Ty::String,
+                annotations: Box::default(),
+                placement: krusty::ir::IrStaticPlacement::Package,
+                overridden_results: Box::default(),
+                overridden_declarations: Box::default(),
+            },
+        );
+        let call = caller.add_expr(IrExpr::Call {
+            callee: Box::new(Callee::ModuleWithDefaults {
+                target,
+                default_provider: krusty::fir::ResolvedFunctionOverrideTarget::Module(provider),
+                name: "answer".to_string(),
+                params: vec![Ty::String],
+                ret: Ty::String,
+                defaults: vec![0].into_boxed_slice(),
+                dispatch_receiver_ty: Some(Ty::obj_name(owner)),
+                extension_receiver_parameter: None,
+            }),
+            dispatch_receiver: Some(receiver),
+            args: Vec::new(),
+        });
+        caller.add_fun(function("box", Some(call)));
+        krusty::backend::default_arguments::realize(
+            &mut caller,
+            &mut krusty::backend::CheckedBackendCallables::default(),
+            |_| false,
+        );
+        let calls = registry
+            .file_calls(
+                &caller,
+                &CheckedBackendCallables::default(),
+                &no_facts(),
+                &mut wasm,
+            )
+            .expect("the remote member-default provider reserves its exact entry");
+        let reserved = calls
+            .module_default(provider)
+            .expect("the entry is keyed by the declaration that owns the defaults");
+        assert_eq!(calls.module_default(target), None);
+        let IrExpr::Call {
+            callee,
+            dispatch_receiver: None,
+            args,
+        } = caller.expr(call)
+        else {
+            panic!("the checked receiver moves into the default entry frame");
+        };
+        assert!(matches!(
+            &**callee,
+            Callee::ModuleDefaultEntry {
+                provider: actual_provider,
+                dispatch_receiver_ty: Some(receiver_ty),
+                ..
+            } if *actual_provider == provider && *receiver_ty == Ty::obj_name(owner)
+        ));
+        assert_eq!(args.first(), Some(&receiver));
+        assert!(matches!(caller.expr(args[1]), IrExpr::AbsentArgument { ty } if *ty == Ty::String));
+        assert!(matches!(
+            caller.expr(args[2]),
+            IrExpr::Const(krusty::ir::IrConst::Int(1))
+        ));
+
+        let mut declaration = IrFile::default();
+        let default = declaration.add_expr(IrExpr::Const(krusty::ir::IrConst::String(
+            krusty::kt_string::KtString::from("OK"),
+        )));
+        let body = declaration.add_expr(IrExpr::GetValue(1));
+        let function = declaration.add_fun(IrFunction {
+            name: "answer".to_string(),
+            param_checks: Vec::new(),
+            params: vec![Ty::String],
+            ret: Ty::String,
+            body: Some(body),
+            is_static: false,
+            dispatch_receiver: Some(owner),
+        });
+        let mut class = krusty::ir::IrClass::synthetic(owner);
+        class.methods.push(function);
+        declaration.add_class(class);
+        declaration
+            .checked_callable_functions
+            .insert(provider, function);
+        let parameters =
+            krusty::ir::FnParamInfo::source_defaults(vec!["value".to_owned()], vec![Some(default)]);
+        declaration.fn_params.insert(function, parameters);
+
+        krusty::backend::default_arguments::realize(
+            &mut declaration,
+            &mut krusty::backend::CheckedBackendCallables::default(),
+            |_| false,
+        );
+        let entry = declaration.default_entries[&function];
+        let functions = registry
+            .declare_file(&declaration, &mut wasm, &[])
+            .expect("the member entry consumes the provider's reserved function index");
+        assert_eq!(functions[entry as usize], Some(reserved));
+        assert_ne!(functions[function as usize], Some(reserved));
+        assert_eq!(registry.module_defaults.get(&provider), Some(&reserved));
+        assert!(!registry.module_defaults.contains_key(&target));
+        assert_eq!(
+            declaration.functions[entry as usize].params,
+            [Ty::obj_name(owner), Ty::String, Ty::Int,]
+        );
     }
 }

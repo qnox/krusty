@@ -116,6 +116,7 @@ fn run_against_official_producer(source: &str, name: &str) {
             &work,
             &format!("official{name}"),
             "import",
+            source,
             box_lane::CompiledProgram {
                 artifacts,
                 native_imports: Vec::new(),

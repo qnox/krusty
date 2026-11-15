@@ -1,21 +1,24 @@
-//! Resolve named JPS repository libraries with Maven.
+//! Resolve named JPS repository libraries with Maven's resolver.
 //!
 //! A repository library maps one `maven-id` onto the jars in its `CLASSES` roots.
-//! Those extra jars are the transitive closure of that coordinate, recorded after
-//! IntelliJ resolved it. They are not coordinates of their own. Transitives are
-//! therefore requested unless the library sets `include-transitive-deps="false"`
-//! (every such library in the IntelliJ model lists only its own jar). Named
-//! `<exclude>` entries are the only other dependencies left out.
+//! The root coordinate keeps its transitive closure unless the library sets
+//! `include-transitive-deps="false"`. Each other `CLASSES` jar is a coordinate of
+//! its own: it is the version IntelliJ recorded, and a fresh resolve of the root
+//! can install a different version at a different path. Named `<exclude>` entries
+//! still apply to the root. A pinned jar is requested on its own, so the file at
+//! the recorded path is what gets installed.
 //!
-//! One `mvn`/`mvnw` invocation resolves every library that still has a missing jar,
-//! with the user's settings, mirrors, and credentials. Editor refresh does not call
-//! this. A library whose jars do not all exist afterwards stays missing.
+//! One `RepositorySystem` request resolves every library that still has a missing
+//! jar: `resolveDependencies` for a transitive root and `resolveArtifact` for a
+//! pinned jar. Settings, mirrors, and credentials come from the embedder session.
+//! Editor refresh does not call this. A library whose jars do not all exist
+//! afterwards stays missing.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::model::{ProviderKind, RepositoryLibrary};
-use super::runner::{Command, CommandRunner, ProcessRunner, MAVEN, SCAN_PROBE_TIMEOUT};
+use super::tooling::{self, MavenArtifactRequest, MavenBatch, MavenExclusion};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InstallResult {
@@ -23,104 +26,116 @@ pub struct InstallResult {
     pub failed: usize,
 }
 
-/// One Maven invocation for every library that still has a missing jar. No repository
-/// URL and no global transitive exclusion: a library that includes transitives must
-/// be able to install them, and a library that opted out excludes them on its own
-/// dependency.
-pub fn maven_batch_command(root: &Path, reactor_pom: &Path) -> Command {
-    Command::new(MAVEN.resolve(root), root)
-        .args([
-            "-B".to_string(),
-            "--quiet".to_string(),
-            "-fae".to_string(),
-            "-f".to_string(),
-            reactor_pom.to_string_lossy().into_owned(),
-            "dependency:resolve".to_string(),
-        ])
-        .with_timeout(SCAN_PROBE_TIMEOUT)
+/// One resolver request for every library that still has a missing jar. No repository
+/// URL is named here: the embedder session supplies mirrors and credentials. A library
+/// that includes transitives asks `resolveDependencies` for them, and a pinned jar asks
+/// `resolveArtifact` for the recorded version only.
+fn resolution_batch(libraries: &[&RepositoryLibrary]) -> MavenBatch {
+    let mut artifacts = Vec::new();
+    for library in libraries {
+        artifacts.push(MavenArtifactRequest {
+            group: library.group.clone(),
+            artifact: library.artifact.clone(),
+            version: library.version.clone(),
+            extension: library.packaging.clone(),
+            classifier: String::new(),
+            transitive: library.include_transitive,
+            exclusions: library
+                .excluded
+                .iter()
+                .map(|excluded| MavenExclusion {
+                    group: excluded.group.clone(),
+                    artifact: excluded.artifact.clone(),
+                })
+                .collect(),
+        });
+        for pin in pinned_jars(library) {
+            artifacts.push(MavenArtifactRequest {
+                group: pin.group,
+                artifact: pin.artifact,
+                version: pin.version,
+                extension: pin.packaging,
+                classifier: pin.classifier.unwrap_or_default(),
+                transitive: false,
+                exclusions: Vec::new(),
+            });
+        }
+    }
+    MavenBatch { artifacts }
 }
 
-fn write_resolution_reactor(
-    directory: &Path,
-    libraries: &[&RepositoryLibrary],
-) -> io::Result<usize> {
-    std::fs::create_dir_all(directory)?;
-    let mut modules = String::new();
-    for (index, library) in libraries.iter().enumerate() {
-        let name = format!("m{index}");
-        let module_dir = directory.join(&name);
-        std::fs::create_dir_all(&module_dir)?;
-        std::fs::write(module_dir.join("pom.xml"), module_pom(index, library))?;
-        modules.push_str(&format!("    <module>{name}</module>\n"));
-    }
-    std::fs::write(directory.join("pom.xml"), aggregator_pom(&modules))?;
-    Ok(libraries.len())
+/// A `CLASSES` jar under `~/.m2/repository` whose filename is the Maven layout
+/// `{artifact}-{version}[-{classifier}].{ext}`.
+struct PinnedJar {
+    group: String,
+    artifact: String,
+    version: String,
+    classifier: Option<String>,
+    packaging: String,
 }
 
-fn module_pom(index: usize, library: &RepositoryLibrary) -> String {
-    let mut exclusions = String::new();
-    if !library.include_transitive {
-        exclusions.push_str(
-            "        <exclusion>\n          <groupId>*</groupId>\n          <artifactId>*</artifactId>\n        </exclusion>\n",
-        );
+fn pinned_jars(library: &RepositoryLibrary) -> Vec<PinnedJar> {
+    let mut pins = Vec::new();
+    for jar in &library.jars {
+        let Some(pin) = pinned_jar(jar) else {
+            continue;
+        };
+        let same_as_root = pin.classifier.is_none()
+            && pin.group == library.group
+            && pin.artifact == library.artifact
+            && pin.version == library.version
+            && pin.packaging == library.packaging;
+        if same_as_root {
+            continue;
+        }
+        if pins.iter().any(|existing: &PinnedJar| {
+            existing.group == pin.group
+                && existing.artifact == pin.artifact
+                && existing.version == pin.version
+                && existing.classifier == pin.classifier
+                && existing.packaging == pin.packaging
+        }) {
+            continue;
+        }
+        pins.push(pin);
     }
-    for excluded in &library.excluded {
-        exclusions.push_str(&format!(
-            "        <exclusion>\n          <groupId>{}</groupId>\n          <artifactId>{}</artifactId>\n        </exclusion>\n",
-            xml_text(&excluded.group),
-            xml_text(&excluded.artifact),
-        ));
+    pins
+}
+
+fn pinned_jar(jar: &Path) -> Option<PinnedJar> {
+    let text = jar.to_string_lossy();
+    let marker = "/.m2/repository/";
+    let relative = text.split_once(marker)?.1;
+    let mut parts = relative.split('/').collect::<Vec<_>>();
+    let filename = parts.pop()?;
+    let version = parts.pop()?.to_string();
+    let artifact = parts.pop()?.to_string();
+    if parts.is_empty() || version.is_empty() || artifact.is_empty() {
+        return None;
     }
-    let exclusions = if exclusions.is_empty() {
-        String::new()
+    let group = parts.join(".");
+    let prefix = format!("{artifact}-{version}");
+    let rest = filename.strip_prefix(&prefix)?;
+    let (classifier, packaging) = if let Some(classified) = rest.strip_prefix('-') {
+        let (classifier, packaging) = classified.rsplit_once('.')?;
+        if classifier.is_empty() || packaging.is_empty() {
+            return None;
+        }
+        (Some(classifier.to_string()), packaging.to_string())
     } else {
-        format!("      <exclusions>\n{exclusions}      </exclusions>\n")
+        let packaging = rest.strip_prefix('.')?;
+        if packaging.is_empty() || packaging.contains('.') {
+            return None;
+        }
+        (None, packaging.to_string())
     };
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<project>
-  <modelVersion>4.0.0</modelVersion>
-  <groupId>krusty.resolution</groupId>
-  <artifactId>library-{index}</artifactId>
-  <version>1</version>
-  <dependencies>
-    <dependency>
-      <groupId>{group}</groupId>
-      <artifactId>{artifact}</artifactId>
-      <version>{version}</version>
-      <type>{packaging}</type>
-{exclusions}    </dependency>
-  </dependencies>
-</project>
-"#,
-        group = xml_text(&library.group),
-        artifact = xml_text(&library.artifact),
-        version = xml_text(&library.version),
-        packaging = xml_text(&library.packaging),
-    )
-}
-
-fn aggregator_pom(modules: &str) -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<project>
-  <modelVersion>4.0.0</modelVersion>
-  <groupId>krusty.resolution</groupId>
-  <artifactId>repository-libraries</artifactId>
-  <version>1</version>
-  <packaging>pom</packaging>
-  <modules>
-{modules}  </modules>
-</project>
-"#
-    )
-}
-
-fn xml_text(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+    Some(PinnedJar {
+        group,
+        artifact,
+        version,
+        classifier,
+        packaging,
+    })
 }
 
 /// JPS only. Gradle and Maven projects keep the classpath their own probe returned.
@@ -130,9 +145,8 @@ pub fn ensure_repository_libraries(
     root: &Path,
     libraries: &[RepositoryLibrary],
 ) -> InstallResult {
-    resolve_missing_libraries(kind, libraries, |libraries| {
-        maven_resolve_all(root, libraries)
-    })
+    let _ = root;
+    resolve_missing_libraries(kind, libraries, maven_resolve_all)
 }
 
 fn library_missing(library: &RepositoryLibrary) -> bool {
@@ -173,38 +187,19 @@ fn resolve_missing_libraries(
     result
 }
 
-fn maven_resolve_all(root: &Path, libraries: &[&RepositoryLibrary]) -> io::Result<()> {
-    let directory = std::env::temp_dir().join(format!(
-        "krusty-maven-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_nanos())
-    ));
-    let _cleanup = RemoveDir(directory.clone());
-    let written = write_resolution_reactor(&directory, libraries)?;
-    if written == 0 {
+fn maven_resolve_all(libraries: &[&RepositoryLibrary]) -> io::Result<()> {
+    let batch = resolution_batch(libraries);
+    if batch.artifacts.is_empty() {
         return Ok(());
     }
-    let command = maven_batch_command(root, &directory.join("pom.xml"));
-    let program = command.program.display().to_string();
-    ProcessRunner
-        .run(&command)
-        .map(|_| ())
-        .map_err(|error| io::Error::other(format!("{program}: {error}")))
-}
-
-struct RemoveDir(PathBuf);
-
-impl Drop for RemoveDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
+    tooling::resolve_maven(&batch)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
     use crate::project::model::ExcludedMavenArtifact;
 
     fn library(name: &str, coordinate: &str, jars: Vec<PathBuf>) -> RepositoryLibrary {
@@ -239,10 +234,9 @@ mod tests {
     }
 
     #[test]
-    fn a_library_with_several_artifacts_is_one_dependency_and_keeps_transitives() {
+    fn a_library_pins_every_recorded_jar_and_keeps_the_root_transitive() {
         let tree = crate::project::testing::TempTree::new("maven-library-reactor");
-        tree.write("mvnw", "#!/bin/sh\n");
-        let repository = tree.directory("m2");
+        let repository = tree.root().join(".m2/repository");
         let classic =
             repository.join("ch/qos/logback/logback-classic/1.3.14/logback-classic-1.3.14.jar");
         let core = repository.join("ch/qos/logback/logback-core/1.3.14/logback-core-1.3.14.jar");
@@ -264,90 +258,70 @@ mod tests {
         );
         dexlib.include_transitive = false;
 
-        let reactor = tree.directory("reactor");
-        let libraries = [&logback, &dexlib];
-        assert_eq!(write_resolution_reactor(&reactor, &libraries).unwrap(), 2);
-        let aggregator = std::fs::read_to_string(reactor.join("pom.xml")).unwrap();
-        assert!(aggregator.contains("<module>m0</module>"), "{aggregator}");
-        assert!(aggregator.contains("<module>m1</module>"), "{aggregator}");
-        assert!(
-            aggregator.contains("<packaging>pom</packaging>"),
-            "{aggregator}"
-        );
-
-        let with_transitives = std::fs::read_to_string(reactor.join("m0/pom.xml")).unwrap();
+        let batch = resolution_batch(&[&logback, &dexlib]);
+        assert_eq!(batch.artifacts.len(), 3, "{:?}", batch.artifacts);
+        let root = &batch.artifacts[0];
+        assert_eq!(root.artifact, "logback-classic");
+        assert!(root.transitive);
         assert_eq!(
-            with_transitives.matches("<dependency>").count(),
-            1,
-            "{with_transitives}"
+            root.exclusions
+                .iter()
+                .map(|exclusion| exclusion.artifact.as_str())
+                .collect::<Vec<_>>(),
+            vec!["slf4j-api", "javax.mail"]
         );
+        assert!(root
+            .exclusions
+            .iter()
+            .all(|exclusion| exclusion.group != "*"));
+        let pinned = &batch.artifacts[1];
+        assert_eq!(pinned.artifact, "logback-core");
+        assert_eq!(pinned.version, "1.3.14");
         assert!(
-            with_transitives.contains("<artifactId>logback-classic</artifactId>"),
-            "{with_transitives}"
+            !pinned.transitive,
+            "a pinned jar is resolveArtifact, not a tree"
         );
-        assert!(
-            !with_transitives.contains("logback-core"),
-            "{with_transitives}"
-        );
-        assert!(
-            !with_transitives.contains("<groupId>*</groupId>"),
-            "{with_transitives}"
-        );
-        assert!(
-            with_transitives.contains("<artifactId>slf4j-api</artifactId>"),
-            "{with_transitives}"
-        );
-        assert!(
-            with_transitives.contains("<artifactId>javax.mail</artifactId>"),
-            "{with_transitives}"
-        );
-
-        let without_transitives = std::fs::read_to_string(reactor.join("m1/pom.xml")).unwrap();
-        assert_eq!(
-            without_transitives.matches("<dependency>").count(),
-            1,
-            "{without_transitives}"
-        );
-        assert!(
-            without_transitives.contains("<artifactId>smali-dexlib2</artifactId>"),
-            "{without_transitives}"
-        );
-        assert!(
-            without_transitives.contains("<groupId>*</groupId>"),
-            "{without_transitives}"
-        );
-        assert!(
-            without_transitives.contains("<artifactId>*</artifactId>"),
-            "{without_transitives}"
-        );
-        assert!(
-            !aggregator.contains("http")
-                && !with_transitives.contains("http")
-                && !without_transitives.contains("curl"),
-            "a resolution reactor must not name a repository"
-        );
-
-        let command = maven_batch_command(tree.root(), &reactor.join("pom.xml"));
-        assert_eq!(command.program, tree.path("mvnw"));
-        assert_eq!(command.working_directory, tree.root());
-        assert_eq!(
-            command.args,
-            vec![
-                "-B".to_string(),
-                "--quiet".to_string(),
-                "-fae".to_string(),
-                "-f".to_string(),
-                reactor.join("pom.xml").to_string_lossy().into_owned(),
-                "dependency:resolve".to_string(),
-            ]
-        );
-        assert!(command.args.iter().all(|arg| {
-            !arg.contains("http")
-                && !arg.contains("curl")
-                && !arg.contains("dependency:get")
-                && !arg.contains("excludeTransitive")
+        assert!(pinned.exclusions.is_empty());
+        let direct = &batch.artifacts[2];
+        assert_eq!(direct.artifact, "smali-dexlib2");
+        assert!(!direct.transitive);
+        assert!(batch.artifacts.iter().all(|artifact| {
+            !artifact.group.contains("http") && !artifact.version.contains("curl")
         }));
-        assert_eq!(command.timeout, SCAN_PROBE_TIMEOUT);
+
+        crate::project::tooling::reset_test_hooks();
+        crate::project::tooling::set_maven_response(Ok(()));
+        maven_resolve_all(&[&logback, &dexlib]).unwrap();
+        let batches = crate::project::tooling::maven_batches();
+        assert_eq!(batches.len(), 1, "one RepositorySystem request");
+        assert_eq!(batches[0], batch);
+    }
+
+    #[test]
+    fn a_pinned_transitive_keeps_the_version_in_its_repository_path() {
+        let tree = crate::project::testing::TempTree::new("maven-library-pin");
+        let repository = tree.root().join(".m2/repository");
+        let archive = repository.join(
+            "com/jetbrains/intellij/idea/idea-community-build-zip/252.11244/idea-community-build-zip-252.11244.jar",
+        );
+        let netty = repository.join("io/netty/netty-buffer/4.2.0.RC2/netty-buffer-4.2.0.RC2.jar");
+        let library = library(
+            "fleet:jetbrains.intellij.idea.community.build.zip",
+            "com.jetbrains.intellij.idea:idea-community-build-zip:252.11244",
+            vec![archive, netty],
+        );
+        let batch = resolution_batch(&[&library]);
+        let pinned = batch
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.artifact == "netty-buffer")
+            .unwrap();
+        assert_eq!(pinned.version, "4.2.0.RC2");
+        assert!(!pinned.transitive);
+        assert!(batch
+            .artifacts
+            .iter()
+            .all(|artifact| artifact.version != "4.2.18.Final"));
     }
 
     #[test]

@@ -547,9 +547,9 @@ pub(super) fn member_class_constructor(
     }
 }
 
-/// The facts the member hierarchy of `selected`'s declaring class decorates a source call of
-/// `selected` (frozen as `target`) with: the declarations it overrides and the semantic role it
-/// inherits from them. A target recognizes a member it implements specially through them.
+/// The checked edge facts the KLIB member hierarchy proved for `selected`: its inherited semantic
+/// role and exact overridden declarations. A target recognizes a specially implemented member
+/// through those facts.
 fn member_edge(
     platform: &dyn SemanticPlatform,
     target: crate::fir::ExternalCallableId,
@@ -570,25 +570,15 @@ fn member_edge(
             selected.identity()
         ));
     };
-    let callables = crate::symbol_resolver::member_declarations_in_hierarchy(
-        platform,
-        crate::types::Ty::obj_name(owner),
-        selected.name(),
-    );
-    let mut found = callables
-        .functions()
-        .iter()
-        .filter(|function| function.callable.external_identity == Some(target));
-    let (Some(function), None) = (found.next(), found.next()) else {
+    let edge =
+        crate::resolve::klib_dependency_member_call_edge(platform, owner, selected.name(), target);
+    let Ok(edge) = edge else {
         return Err(format!(
             "a KLIB member is not one declaration of its class's hierarchy: {:?}",
             selected.identity()
         ));
     };
-    Ok(crate::klib_lowering::CallEdge {
-        semantic_role: function.callable.semantic_role,
-        overridden: function.callable.overridden_declarations.clone(),
-    })
+    Ok(edge)
 }
 
 /// Whether a call with `edge` invokes one of `kotlin.Any`'s members, which every target realizes

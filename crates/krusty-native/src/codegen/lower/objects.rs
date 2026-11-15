@@ -2050,8 +2050,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         defaulted: Option<&[u32]>,
         placement: super::frame_objects::Placement,
     ) -> Result<Option<Value>, Unsupported> {
-        // A class another file declares is constructed through the entry point of the selected
-        // module constructor; its layout and constructor are that file's.
+        // A class another file declares is constructed through the entry its declaring file
+        // realizes for the selected constructor (see `krusty::backend::instance_links`); its
+        // layout and constructor are that file's.
         if self.file.ir.class_id_by_name(internal).is_none() {
             if let Some(constructor) = self.file.ir.module_constructions.selected.get(&site) {
                 return self.module_construction(*constructor, internal, args, defaulted.is_some());
@@ -2651,4 +2652,75 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 pub(super) enum CheckedProperty {
     Member(ClassId, usize),
     TopLevel,
+}
+
+impl BodyLowering<'_, '_, '_> {
+    /// Construct a class another file of this module declares, through the entry its declaring
+    /// file realizes for the constructor the checker selected: the enclosing instance of an inner
+    /// class first, then the declared parameters.
+    fn module_construction(
+        &mut self,
+        constructor: krusty::fir::DeclarationId,
+        internal: TypeName,
+        args: &[u32],
+        defaulted: bool,
+    ) -> Result<Option<Value>, Unsupported> {
+        let name = internal.render();
+        let record = self
+            .file
+            .ir
+            .module_constructions
+            .records
+            .get(&constructor)
+            .ok_or_else(|| {
+                format!("internal: a cross-file constructor of `{name}` with no module record")
+            })?;
+        if record.owner != internal {
+            return Err(format!(
+                "internal: a construction of `{name}` selected another class's constructor"
+            )
+            .into());
+        }
+        if defaulted {
+            return Err(
+                format!("a cross-file constructor with a default argument (`{name}`)").into(),
+            );
+        }
+        let instance = krusty::backend::instance_links::InstanceEntry::Constructor {
+            module: self.file.module_name.into(),
+            declaration: constructor,
+        };
+        let Some(symbol) = self.file.dependency_instances.get(&instance) else {
+            return Err(format!(
+                "a cross-file construction of `{name}` through a constructor its file does not expose"
+            )
+            .into());
+        };
+        let parameters: Vec<Ty> = record
+            .outer
+            .map(Ty::obj_name)
+            .into_iter()
+            .chain(record.parameters.iter().copied())
+            .collect();
+        if args.len() != parameters.len() {
+            return Err(format!(
+                "internal: a construction of `{name}` passes {} arguments to a constructor of {}",
+                args.len(),
+                parameters.len()
+            )
+            .into());
+        }
+        let result = Ty::obj_name(internal);
+        let id = self.file.import(symbol, &parameters, result)?;
+        let arguments = self.arguments(args, &parameters)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let func_ref = self.func_ref(id);
+        let call = self.emit_call(func_ref, &arguments)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        Ok(self.builder.inst_results(call).first().copied())
+    }
 }

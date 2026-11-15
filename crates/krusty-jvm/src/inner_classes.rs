@@ -856,7 +856,7 @@ mod tests {
             lifting_root: None,
             lifting_scope: None,
             bridge: krusty::ir::IrInvokeBridge::logical(Vec::new(), Ty::Unit),
-            kotlin_lambda: None,
+            lambda_origin: None,
             sam: None,
         });
         ir.add_class(closure);

@@ -34,6 +34,7 @@ mod extension_specialization;
 mod generic_inference;
 pub(crate) use generic_inference::{reified_runtime_type, ReifiedDeclarations};
 mod builtin_overrides;
+pub(crate) use builtin_overrides::builtin_implementation_facts;
 mod hierarchy_projection;
 mod indexed_convention_selection;
 mod lambda_call_shape;
@@ -70,7 +71,6 @@ use argument_compatibility::{arg_fits_platform, arg_fits_source, untyped_lambda_
 pub(crate) use argument_compatibility::{
     function_input_types, resolution_subtype, sam_arg_matches, sam_return_matches,
 };
-pub(crate) use builtin_overrides::{builtin_overrides, BuiltinOverride};
 pub(crate) use call_argument::{
     expected_result_keeps_call_evidence, CallArgKind, ProvisionalResult,
 };
@@ -190,7 +190,7 @@ impl crate::assignable::TypeOracle for SourceOracle<'_> {
     }
 }
 
-pub(crate) use crate::types::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
+pub(crate) use crate::types::{ty_subst, ty_subst_keep_unbound};
 
 /// Specialize the selected member's lambda-parameter slots from concrete argument evidence.
 ///
