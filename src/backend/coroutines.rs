@@ -69,6 +69,14 @@ use crate::types::Ty;
 pub trait CoroutineRepresentation {
     /// The constant a fresh temporary of type `ty` starts from before its first real assignment.
     fn zero(&self, ty: &Ty) -> IrConst;
+
+    /// The type of a temporary in the caller that holds a same-file suspend call's result, given
+    /// the callee's `declared` result and the callee's own type parameters, which the caller does
+    /// not declare. A target that stores the value as the callee declares it keeps `declared`.
+    fn suspension_result(&self, declared: Ty, callee_formals: &[crate::ir::IrTypeParameter]) -> Ty {
+        let _ = callee_formals;
+        declared
+    }
 }
 
 /// What hoisting needs to type the temporaries it introduces.

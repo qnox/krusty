@@ -787,6 +787,15 @@ fn hoist_expr(
                     .and_then(|fid| typing.orig_rets.get(fid as usize).cloned())
             })
             .unwrap_or_else(object_ty);
+        // A same-file callee's own type parameters are not the caller's; the target decides what
+        // the caller's temporary holds for them.
+        let ty = match suspend_call_fid(ir, e, suspend_set).and_then(|fid| ir.signatures.get(&fid))
+        {
+            Some(signature) => typing
+                .representation
+                .suspension_result(ty, &signature.type_params),
+            None => ty,
+        };
         let tmp = max_value_index(ir) + 1;
         let var = ir.add_expr(IrExpr::Variable {
             index: tmp,

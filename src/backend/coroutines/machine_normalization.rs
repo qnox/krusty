@@ -1,8 +1,8 @@
 //! The statement normalizations a common-IR state machine runs on a suspend body before splitting
 //! it at its suspension points, as the JVM's coroutine lowering runs them on its own bodies.
 
-use crate::fx_hash::HashSet;
-use crate::ir::{ExprId, IrConst, IrFile};
+use crate::fx_hash::{HashMap, HashSet};
+use crate::ir::{ExprId, IrConst, IrFile, IrTypeParameter};
 use crate::types::Ty;
 
 use super::{
@@ -11,13 +11,24 @@ use super::{
     SuspensionTyping,
 };
 
-/// The semantic zero a fresh temporary starts from. A target that realizes coroutines on common
-/// IR stores each value as its semantic type, so the zero is the type's own.
+/// A target that realizes coroutines on common IR stores each value as its semantic type: a
+/// temporary starts from that type's own zero, and holds a generic callee's result at the
+/// erasure of the callee's own formals, which the caller does not declare.
 struct SemanticZero;
 
 impl CoroutineRepresentation for SemanticZero {
     fn zero(&self, ty: &Ty) -> IrConst {
         IrConst::zero_for_value_type(*ty)
+    }
+
+    fn suspension_result(&self, declared: Ty, callee_formals: &[IrTypeParameter]) -> Ty {
+        // Each formal reads as its representative upper bound.
+        let erasures = callee_formals
+            .iter()
+            .map(|parameter| (parameter.semantic_name.clone(), parameter.upper_bound()))
+            .collect::<HashMap<_, _>>();
+        let formals = erasures.keys().cloned().collect::<Vec<_>>();
+        crate::types::ty_subst_formals(declared, &formals, &erasures)
     }
 }
 
@@ -50,4 +61,45 @@ pub(super) fn normalize(
     desugar_value_try(ir, &SemanticZero, body, suspend_functions, &function_result);
     desugar_value_when(ir, &SemanticZero, body, suspend_functions, &function_result);
     normalize_statement_try_results(ir, body, true);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{wk, TypeVariance};
+
+    fn formal(semantic_name: &str, bounds: Vec<(Ty, bool)>) -> IrTypeParameter {
+        IrTypeParameter {
+            name: "T".to_string(),
+            semantic_name: semantic_name.to_string(),
+            bounds,
+            variance: TypeVariance::Invariant,
+            reified: false,
+            captured_from_enclosing: false,
+        }
+    }
+
+    /// `suspend fun <T> f(): T` called from a caller that does not declare `T`: the caller's
+    /// temporary holds the callee's result at `T`'s bound, nullable as the bound is.
+    #[test]
+    fn a_generic_callee_result_reads_as_its_formal_bounds_in_the_caller() {
+        let any = Ty::nullable(Ty::obj_name(wk::any()));
+        let unbounded = formal("callee:T", Vec::new());
+        assert_eq!(
+            SemanticZero.suspension_result(unbounded.ty(), std::slice::from_ref(&unbounded)),
+            any
+        );
+        let bounded = formal("callee:N", vec![(Ty::obj_name(wk::char_sequence()), false)]);
+        let list = Ty::obj_args_name(wk::iterable(), &[bounded.ty()]);
+        assert_eq!(
+            SemanticZero.suspension_result(list, std::slice::from_ref(&bounded)),
+            Ty::obj_args_name(wk::iterable(), &[Ty::obj_name(wk::char_sequence())])
+        );
+        // A type parameter the callee does not declare stays as written.
+        let caller = formal("caller:R", Vec::new());
+        assert_eq!(
+            SemanticZero.suspension_result(caller.ty(), std::slice::from_ref(&unbounded)),
+            caller.ty()
+        );
+    }
 }
