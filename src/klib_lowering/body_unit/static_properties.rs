@@ -22,7 +22,11 @@ impl Linker<'_, '_> {
         ir: &mut IrFile,
         identity: &KlibDependencyCallable,
     ) -> Result<Option<LinkedAccessor>, KlibBodyDeclineReason> {
-        let Some((_, property, write)) = self.sources.bodies.top_level_accessor_property(identity)
+        let Some((_, property, write)) = self
+            .sources
+            .bodies
+            .top_level_accessor_property(identity)
+            .map_err(|reason| KlibBodyDeclineReason::SignatureMismatch(reason.to_owned()))?
         else {
             return Ok(None);
         };
@@ -111,6 +115,22 @@ impl Linker<'_, '_> {
                 .ok_or(KlibBodyDeclineReason::UnsupportedDeclaration(
                     "an external or unknown static field storage flag",
                 ))?;
+        // The unit initializes its statics from their constants alone, before any export runs,
+        // so the defining file's initialization must have no other effect to preserve.
+        let KlibIrSignature::FileLocal { file, .. } = backing.base.symbol.signature else {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a top-level backing field without a file-local identity".to_owned(),
+            ));
+        };
+        if !self
+            .sources
+            .bodies
+            .module_file_initialization_is_inert(&self.active_module, file)
+        {
+            return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                "a top-level property of a file whose initialization runs code",
+            ));
+        }
         if property.is_lateinit() {
             return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
                 "a `lateinit` top-level property",

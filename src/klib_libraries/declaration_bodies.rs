@@ -612,34 +612,90 @@ impl KlibDeclarationBodies {
         self.libraries[library].local_function(signature)
     }
 
-    /// The top-level property one of whose accessors is exactly `identity`, with the arena that
-    /// owns it, and whether that accessor is its setter.
+    /// The top-level property whose accessor is exactly `identity`, with the arena that owns it,
+    /// and whether that accessor is its setter. The property is the one the accessor's signature
+    /// names, and the accessor sits in the slot of its shape: a getter without value parameters,
+    /// a setter with one. A function signature matching an accessor slot of another property
+    /// proves nothing.
     pub(crate) fn top_level_accessor_property(
         &self,
         identity: &KlibDependencyCallable,
-    ) -> Option<(
-        &KlibIrArena,
-        &crate::metadata::klib_ir::tree::KlibIrProperty,
-        bool,
-    )> {
+    ) -> Result<
+        Option<(
+            &KlibIrArena,
+            &crate::metadata::klib_ir::tree::KlibIrProperty,
+            bool,
+        )>,
+        &'static str,
+    > {
+        let KlibDeclarationSignature::Accessor(accessor) = &identity.declaration else {
+            return Ok(None);
+        };
         let signature = ir_signature(&identity.declaration);
-        let library = *self
+        let Some(&library) = self
             .owners
-            .get(&(identity.module.clone(), signature.clone()))?;
-        self.libraries[library].trees().iter().find_map(|tree| {
+            .get(&(identity.module.clone(), signature.clone()))
+        else {
+            return Ok(None);
+        };
+        let property_signature = KlibIrSignature::Public(accessor.property().clone());
+        let mut found = None;
+        for tree in self.libraries[library].trees() {
             let KlibIrMember::Property(property) = &tree.declaration else {
-                return None;
+                continue;
             };
-            let declares = |accessor: Option<crate::metadata::klib_ir::tree::KlibIrFunctionId>| {
-                accessor
-                    .is_some_and(|id| tree.arena.function(id).base.symbol.signature == signature)
+            if property.base.symbol.kind != KlibIrSymbolKind::Property
+                || property.base.symbol.signature != property_signature
+            {
+                continue;
+            }
+            let slot = |accessor: Option<crate::metadata::klib_ir::tree::KlibIrFunctionId>,
+                        parameters: usize| {
+                accessor.is_some_and(|id| {
+                    let function = tree.arena.function(id);
+                    function.base.symbol.signature == signature
+                        && function.regular_parameters.len() == parameters
+                })
             };
-            if declares(property.getter) {
-                Some((&tree.arena, property, false))
-            } else if declares(property.setter) {
-                Some((&tree.arena, property, true))
-            } else {
-                None
+            for setter in [false, true].into_iter().filter(|&setter| {
+                if setter {
+                    slot(property.setter, 1)
+                } else {
+                    slot(property.getter, 0)
+                }
+            }) {
+                if found.replace((&tree.arena, property, setter)).is_some() {
+                    return Err(
+                        "the serialized accessor is not a unique top-level property member",
+                    );
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// Whether initializing the serialized file `file` of `module` runs no code: every top-level
+    /// backing field of that file is initialized with a constant or not at all. A top-level
+    /// backing field whose identity names no file leaves every file's initialization unproven.
+    pub(crate) fn module_file_initialization_is_inert(&self, module: &str, file: u32) -> bool {
+        let Some(&library) = self.modules.get(module) else {
+            return false;
+        };
+        self.libraries[library].trees().iter().all(|tree| {
+            let KlibIrMember::Property(property) = &tree.declaration else {
+                return true;
+            };
+            let Some(backing) = &property.backing_field else {
+                return true;
+            };
+            match backing.base.symbol.signature {
+                KlibIrSignature::FileLocal { file: declared, .. } if declared != file => true,
+                KlibIrSignature::FileLocal { .. } => {
+                    backing.initializer.is_none_or(|initializer| {
+                        matches!(tree.arena.expr(initializer).kind, KlibIrExprKind::Const(_))
+                    })
+                }
+                KlibIrSignature::Public(_) | KlibIrSignature::Accessor(_) => false,
             }
         })
     }

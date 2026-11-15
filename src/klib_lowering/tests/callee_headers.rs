@@ -1626,14 +1626,16 @@ fn stdlib_calls_reach_header_declared_callees() {
     // inputs were measured on every release. A call of an inherited member no library serializes
     // now links to the declaration it inherits and declines there as a member function call. A
     // `for` loop over a range literal counts, and one over another progression declines at the
-    // loop rather than at its protocol calls.
+    // loop rather than at its protocol calls. A top-level property accessor now lowers from its
+    // own body, so a caller of one (`getCoroutineSuspended` reads `COROUTINE_SUSPENDED`) declines
+    // inside it.
     let expected =
         if crate::kotlin_version::target() >= crate::kotlin_version::KotlinVersion::V2_4_20 {
             vec![
                 ("it calls `kotlin.ArithmeticException.<init>`)", 2),
                 ("it calls `kotlin.NumberFormatException.<init>`)", 4),
                 ("it calls `kotlin.UInt.<init>`)", 4),
-                ("it converts a value implicitly)", 4),
+                ("it converts a value implicitly)", 5),
                 ("it declares type parameters)", 207),
                 (
                     "it uses a `for` loop over a progression that is not a range literal)",
@@ -1645,7 +1647,7 @@ fn stdlib_calls_reach_header_declared_callees() {
                     6,
                 ),
                 ("it uses a call of a member function)", 88),
-                ("it uses a call through a property accessor signature)", 40),
+                ("it uses a call through a property accessor signature)", 41),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses an access of a generic property)", 2),
                 (
@@ -1659,7 +1661,7 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it calls `kotlin.ArithmeticException.<init>`)", 2),
                 ("it calls `kotlin.NumberFormatException.<init>`)", 4),
                 ("it calls `kotlin.UInt.<init>`)", 4),
-                ("it converts a value implicitly)", 4),
+                ("it converts a value implicitly)", 5),
                 ("it declares type parameters)", 189),
                 (
                     "it uses a `for` loop over a progression that is not a range literal)",
@@ -1671,7 +1673,7 @@ fn stdlib_calls_reach_header_declared_callees() {
                     6,
                 ),
                 ("it uses a call of a member function)", 80),
-                ("it uses a call through a property accessor signature)", 40),
+                ("it uses a call through a property accessor signature)", 41),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses an access of a generic property)", 2),
                 (
