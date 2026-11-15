@@ -68,22 +68,34 @@ impl ReleaseRange {
         if range.from.is_none() && range.to.is_none() {
             return Err(invalid());
         }
+        // An interval no release can be in would drop the case from every lane as silently as a
+        // typo; it is a malformed directive.
+        if let (Some(from), Some(to)) = (range.from, range.to) {
+            let (from_key, to_key) = (release_key(from.version), release_key(to.version));
+            if from_key > to_key || (from_key == to_key && !(from.inclusive && to.inclusive)) {
+                return Err(format!("`// {DIRECTIVE}: {payload}` admits no release"));
+            }
+        }
         Ok(range)
     }
 
     fn contains(self, release: KotlinVersion) -> bool {
-        let key = |version: KotlinVersion| (version.major, version.minor, version.patch);
-        let release = key(release);
+        let release = release_key(release);
         let above = self.from.is_none_or(|from| {
-            let from_key = key(from.version);
+            let from_key = release_key(from.version);
             release > from_key || (from.inclusive && release == from_key)
         });
         let below = self.to.is_none_or(|to| {
-            let to_key = key(to.version);
+            let to_key = release_key(to.version);
             release < to_key || (to.inclusive && release == to_key)
         });
         above && below
     }
+}
+
+/// The `major.minor.patch` a bound compares, whatever pre-release a version carries.
+fn release_key(version: KotlinVersion) -> (u16, u16, u16) {
+    (version.major, version.minor, version.patch)
 }
 
 /// Whether `src` applies to the kotlinc `release`: true without a `// KOTLINC_VERSION:` line. A
@@ -139,11 +151,23 @@ mod tests {
         assert!(!applies("[2.4.0,2.5.0)", V2_5_0));
         assert!(applies("(,2.4.20]", KotlinVersion::V2_4_20));
         assert!(!applies("(,2.4.20]", KotlinVersion::V2_4_21));
+        assert!(applies("[2.5.0,2.5.0]", V2_5_0));
     }
 
     #[test]
     fn malformed_and_repeated_directives_are_errors() {
-        for payload in ["", "2.5", "2.5.0-RC", "[2.5.0", "[,)", "[2.5.0;2.6.0)", "x"] {
+        for payload in [
+            "",
+            "2.5",
+            "2.5.0-RC",
+            "[2.5.0",
+            "[,)",
+            "[2.5.0;2.6.0)",
+            "x",
+            "[2.5.0,2.4.0)",
+            "[2.5.0,2.5.0)",
+            "(2.5.0,2.5.0]",
+        ] {
             assert!(
                 kotlinc_release_applicable(&format!("// {DIRECTIVE}: {payload}\n"), V2_5_0)
                     .is_err(),
