@@ -47,7 +47,7 @@ fn int_range_initialization_freezes_any_tostring() {
     )
     .expect("IntRange initialization has checked member edges");
     let edge = facts
-        .member_edges
+        .member_edges()
         .get(&any_to_string)
         .expect("kotlin.Any.toString is reached from IntRange's initialization");
     assert_eq!(
