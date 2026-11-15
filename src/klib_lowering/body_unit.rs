@@ -37,6 +37,7 @@ use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol};
 use crate::types::{Ty, TypeName};
 
 mod class_construction;
+pub(crate) use class_construction::superclass_constructor_ordinal;
 mod enum_materialization;
 mod local_class;
 mod static_properties;
@@ -1241,6 +1242,10 @@ impl CallLinker for Linker<'_, '_> {
         Err(KlibBodyDeclineReason::UnsupportedOperation(
             "an object value",
         ))
+    }
+
+    fn target_represents(&self, classifier: TypeName) -> bool {
+        self.sources.callees.target_represents(classifier)
     }
 
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {

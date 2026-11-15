@@ -175,15 +175,22 @@ pub fn published_entry(ir: &IrFile, declaration: FunId) -> Option<FunId> {
 
 /// The identities other files of the module call `declaration`'s entry by: the declaration whose
 /// defaults it evaluates. An `actual` declaration's entry is keyed by its `expect`, which is what
-/// the callers selected; one whose defaults come from a dependency has no module identity.
+/// the callers selected; one whose defaults come from a dependency has no module identity. An
+/// overriding member likewise leaves the provider identity to the member that owns those defaults.
 pub fn published_identities(ir: &IrFile, declaration: FunId) -> Vec<CallableId> {
-    if ir.functions[declaration as usize]
-        .dispatch_receiver
-        .is_some()
-    {
-        return Vec::new();
-    }
     let mut identities = match ir.inherited_param_default_provider(declaration) {
+        // An overriding member forwards inherited defaults through the entry of the declaration
+        // that owns them. Publishing this implementation under that same provider identity would
+        // make multiple overrides compete for one module entry. Top-level actual declarations
+        // retain the expect identity below; they have no dispatch slot/provider implementation to
+        // publish elsewhere.
+        Some(ResolvedFunctionOverrideTarget::Module(_))
+            if ir.functions[declaration as usize]
+                .dispatch_receiver
+                .is_some() =>
+        {
+            Vec::new()
+        }
         Some(ResolvedFunctionOverrideTarget::Module(provider)) => vec![provider],
         Some(ResolvedFunctionOverrideTarget::External(_)) => Vec::new(),
         None => ir
