@@ -872,7 +872,6 @@ dataObjects/toString.kt
 dataflow/scope1.kt
 dataflow/uninitialized_val.kt
 deadCodeElimination/emptyVariableRange.kt
-defaultArguments/constructor/anonymousObjectAsDefaultParam.kt
 defaultArguments/defaultArgumentsInFunctionWithExpressionAsBody.kt
 defaultArguments/function/defaultLambdaInline.kt
 delegatedProperty/DelegationByFunctionWithEnumUpperBound.kt
@@ -1222,7 +1221,6 @@ inlineClass/nestedInlineClasses.kt
 inlineClass/secondaryConstructorWithGenerics.kt
 inlineClasses/anonymousObjectAsDefaultParam.kt
 inlineClasses/anonymousObjectAsDefaultParamFull.kt
-inlineClasses/anonymousObjectAsDefaultParamSingleFile.kt
 inlineClasses/boxReturnValueInLambda/kt27586_1.kt
 inlineClasses/boxReturnValueInLambda/kt27586_2.kt
 inlineClasses/boxReturnValueOnOverride/covariantOverrideListVsMutableList.kt
@@ -1485,7 +1483,6 @@ multiplatform/k2/basic/overridesOfExpectMembers.kt
 multiplatform/k2/basic/substitutionOverrideInCommonModule.kt
 multiplatform/k2/basic/widerVisibilityInActualClassifier.kt
 multiplatform/k2/defaultArguments/constructor.kt
-multiplatform/k2/defaultArguments/defaultArgumentInDelegatedFunction.kt
 multiplatform/k2/defaultArguments/function.kt
 multiplatform/k2/defaultArguments/inheritedFromCommonClass.kt
 multiplatform/k2/defaultArguments/inheritedFromExpectedClass.kt
@@ -1497,7 +1494,6 @@ multiplatform/k2/defaultArguments/kt67488.kt
 multiplatform/k2/defaultArguments/nestedEnumEntryValue.kt
 multiplatform/k2/defaultArguments/suspend.kt
 multiplatform/k2/defaultArguments/withTypeParameter.kt
-multiplatform/k2/delegation/delegationToExpectInterfaceByExpectFun.kt
 multiplatform/k2/delegation/delegationToExpectInterface_noNewMembers.kt
 multiplatform/k2/enumStaticMethods.kt
 multiplatform/k2/expectStatic.kt
