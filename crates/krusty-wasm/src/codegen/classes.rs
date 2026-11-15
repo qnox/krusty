@@ -67,7 +67,7 @@ use super::super::exception_transport::ExceptionTransport;
 use super::super::identity::PREFIX_FIELDS;
 use super::super::interface_dispatch::{ClassRef, MemberRef};
 use super::super::objects::{immutable, ObjectRoot, ITABLE_FIELD, REFERENCE};
-use super::super::runtime::{Runtime, AND32, EQ32, EQ64, OR32};
+use super::super::runtime::Runtime;
 use super::laid_out_classes::{
     DependencyImplementation, FunctionBridgeEntry, LaidOutClass, LaidOutClasses, Placed,
 };

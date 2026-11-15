@@ -218,7 +218,7 @@ fn authenticate_declaration(
         class_parameters: class.parameters.clone(),
         defaults,
         semantic_role: selected.semantic_role(),
-        class_emits_members: header.contract.emits_members(),
+        class_emits_members: class.emits_members(),
     })
 }
 
