@@ -3,10 +3,12 @@
 //! A `companion { … }` block property is stored with its class, and Kotlin runs its initializer
 //! as part of initializing that class: the first construction of the class, the first call of one
 //! of its block functions or accessors, or the first read or write of the storage itself, whichever
-//! comes first. A superclass is initialized before its subclass. The top-level slots of
-//! [`super::statics`] all run at program start because the file's entry touches the file first;
-//! a class owes no such promise, so an initializer that could observe the difference runs here,
-//! behind a once-only flag, at each of those entry points.
+//! comes first. A superclass, and its companion, is initialized before its subclass: each of
+//! those entry points runs the class's activation (`activate_class`), which initializes every
+//! class of the chain root first, its companion object or its own statics. The top-level slots
+//! of [`super::statics`] all run at program start because the file's entry touches the file
+//! first; a class owes no such promise, so an initializer that could observe the difference
+//! runs here, behind a once-only flag.
 //!
 //! The flag is set before the initializers run, as the file initializer's is: an initializer that
 //! reaches back into its own class sees the slot's default, which is what Kotlin does.
@@ -78,17 +80,11 @@ impl<'a> FileLowering<'a> {
             .any(|initializer| initializer.statics.contains(&index))
     }
 
-    /// The initializer to run before touching `class`: its own, or its nearest initialized
-    /// superclass's, since constructing it runs every superclass constructor.
-    fn initializer_for(&self, class: ClassId) -> Option<FuncId> {
-        let mut current = Some(class);
-        while let Some(class) = current {
-            if let Some(initializer) = self.class_initializers.get(&class) {
-                return Some(initializer.function);
-            }
-            current = self.model.layout(class).superclass;
-        }
-        None
+    /// The function that runs `class`'s own deferred statics, if it has any.
+    pub(super) fn own_class_initializer(&self, class: ClassId) -> Option<FuncId> {
+        self.class_initializers
+            .get(&class)
+            .map(|initializer| initializer.function)
     }
 
     /// Define every class initializer declared by [`Self::defer_to_class`].
@@ -110,11 +106,6 @@ impl<'a> FileLowering<'a> {
                     )
                 })
                 .collect();
-            let superclass = self
-                .model
-                .layout(class)
-                .superclass
-                .and_then(|parent| self.initializer_for(parent));
             let name = format!("{}.<clinit>", self.ir.classes[class as usize].fq_name());
             let signature = self.signature_of(&[], Ty::Unit)?;
             self.emit_function(function, signature, Ty::Unit, &name, &mut |body, _| {
@@ -131,10 +122,6 @@ impl<'a> FileLowering<'a> {
                 let flag_address = body.data_address(flag);
                 let one = body.builder.ins().iconst(types::I8, 1);
                 body.builder.ins().store(trusted(), one, flag_address, 0);
-                if let Some(superclass) = superclass {
-                    let func_ref = body.func_ref(superclass);
-                    body.emit_call(func_ref, &[])?;
-                }
                 for &(slot, ty, init) in &declarations {
                     let Some(init) = init else {
                         continue;
@@ -164,10 +151,12 @@ impl<'a> FileLowering<'a> {
 }
 
 impl BodyLowering<'_, '_, '_> {
-    /// Initialize `class` here unless it already is: the entry of its constructors and of its
-    /// block functions and accessors.
-    pub(super) fn initialize_class(&mut self, class: ClassId) -> Result<(), Unsupported> {
-        let Some(initializer) = self.file.initializer_for(class) else {
+    /// Run `class`'s own deferred statics here unless they already ran: the entry of its
+    /// constructors, which a subclass reaches through `super(…)` even when it was laid out in
+    /// another file. A construction, a block member call, and a storage access initialize the
+    /// whole class first ([`Self::activate_class`]), superclasses and companions included.
+    pub(super) fn initialize_own_statics(&mut self, class: ClassId) -> Result<(), Unsupported> {
+        let Some(initializer) = self.file.own_class_initializer(class) else {
             return Ok(());
         };
         let func_ref = self.func_ref(initializer);
@@ -184,7 +173,7 @@ impl BodyLowering<'_, '_, '_> {
         };
         match self.file.ir.class_id_by_name(owner) {
             Some(class) if self.file.class_initializers.contains_key(&class) => {
-                self.initialize_class(class)
+                self.activate_class(class)
             }
             _ => Ok(()),
         }

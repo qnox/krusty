@@ -1008,7 +1008,7 @@ impl<'a> FileLowering<'a> {
                     lowering.builder.def_var(variable, *value);
                 }
                 if let Some(class) = block_class {
-                    lowering.initialize_class(class)?;
+                    lowering.activate_class(class)?;
                 }
                 lowering.frame_objects = lowering.frame_constructions(body);
                 lowering.statement(body)
