@@ -644,7 +644,14 @@ mod tests {
 
     #[test]
     fn project_repositories_are_normalized_through_the_session() {
-        let jars = maven_classpath_jars().expect("Maven embedder jars");
+        // The other embedder tests record a resolver response and never open Maven. This one
+        // checks the settings.xml session, and only where the embedder jars are installed.
+        let Ok(jars) = maven_classpath_jars() else {
+            eprintln!(
+                "skipping Maven session normalization: Maven embedder jars are not installed"
+            );
+            return;
+        };
         let directory =
             std::env::temp_dir().join(format!("krusty-maven-normalize-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
