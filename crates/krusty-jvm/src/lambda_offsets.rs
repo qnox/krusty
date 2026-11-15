@@ -6,7 +6,8 @@
 //! at its own source position; only this pass moves it.
 //!
 //! The call is the nearest one on the path from the lambda up to its enclosing declaration, however
-//! deep the lambda sits in its arguments (through a constructor call, a conditional or a block). An
+//! deep the lambda sits in its arguments (through a constructor call, a conditional or a block). A
+//! direct field read or write is not a call. An
 //! array factory (`arrayOf`) is that call too: common lowering has already replaced it with the
 //! vararg whose instructions take the first element's line, and the factory's own line is the
 //! vararg's factory line. A local variable's initializer is a declaration of its own, and so are a
@@ -20,8 +21,11 @@
 
 use krusty::ir::{ExprId, IrCheckedOperation, IrExpr, IrFile};
 
+use crate::property_realizations::{PropertyRealization, PropertyRealizations};
+use krusty::jvm::inline::PropertyAccess;
+
 /// Move each lambda literal to the line of the call nearest above it.
-pub(crate) fn patch(ir: &mut IrFile) {
+pub(crate) fn patch(ir: &mut IrFile, properties: &PropertyRealizations) {
     let parents = parents(ir);
     let lambdas = (0..ir.exprs.len())
         .filter_map(|index| {
@@ -35,7 +39,7 @@ pub(crate) fn patch(ir: &mut IrFile) {
             if !ir.is_lambda_literal(*impl_fn) {
                 return None;
             }
-            let line = enclosing_line(ir, &parents, lambda)?;
+            let line = enclosing_line(ir, properties, &parents, lambda)?;
             Some((lambda, line))
         })
         .collect::<Vec<_>>();
@@ -63,7 +67,12 @@ fn parents(ir: &IrFile) -> Vec<Option<ExprId>> {
 }
 
 /// The line of the nearest call above `lambda`, unless a declaration comes first.
-fn enclosing_line(ir: &IrFile, parents: &[Option<ExprId>], lambda: ExprId) -> Option<u32> {
+fn enclosing_line(
+    ir: &IrFile,
+    properties: &PropertyRealizations,
+    parents: &[Option<ExprId>],
+    lambda: ExprId,
+) -> Option<u32> {
     let mut current = parents[lambda as usize]?;
     loop {
         if matches!(ir.expr(current), IrExpr::Variable { .. }) {
@@ -80,11 +89,38 @@ fn enclosing_line(ir: &IrFile, parents: &[Option<ExprId>], lambda: ExprId) -> Op
             }
             continue;
         }
+        // A direct field read or write is `IrGetField` / `IrPutField`, not an `IrCall`. The
+        // realization passes have already recorded that choice: an external field in
+        // `property_external_accessors`, a module `@JvmField` as a physical field access. A
+        // getter or setter is a call and is not one of those.
+        if is_direct_field(ir, properties, current) {
+            current = parents[current as usize]?;
+            continue;
+        }
         if is_call(ir.expr(current)) {
             return ir.source_line(current);
         }
         current = parents[current as usize]?;
     }
+}
+
+/// Whether realization selected a field load or store for this property operation.
+fn is_direct_field(ir: &IrFile, properties: &PropertyRealizations, expression: ExprId) -> bool {
+    let (IrExpr::PropertyRead { operation, .. } | IrExpr::PropertyWrite { operation, .. }) =
+        ir.expr(expression)
+    else {
+        return false;
+    };
+    [*operation, Some(expression)]
+        .into_iter()
+        .flatten()
+        .any(|operation| {
+            ir.property_external_accessors.contains_key(&operation)
+                || matches!(
+                    properties.get(operation),
+                    Some(PropertyRealization::Physical(PropertyAccess::Field { .. }))
+                )
+        })
 }
 
 /// Whether kotlinc realizes `expression` as an `IrCall`: a function, accessor, operator or
