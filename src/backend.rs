@@ -29,6 +29,7 @@ mod source_class_members;
 pub mod value_classes;
 
 pub use crate::fir::{BuiltinImplementation, BuiltinOverrideDeclaration};
+pub use crate::ir::PropertyReferenceObjects;
 pub use constructor_selection::selected_constructor;
 pub use dependency_call_shape::{DeclaredOperandRoles, DependencyCallShape, DependencyExportCall};
 #[cfg(any(test, feature = "test-support"))]
@@ -182,8 +183,8 @@ pub trait Backend {
     /// How common lowering realizes a property reference used as a `KProperty` value for this
     /// backend. A backend whose reference objects are all function values has it materialized as
     /// one; every other backend realizes the checked reference itself.
-    fn property_reference_objects(&self) -> crate::ir::PropertyReferenceObjects {
-        crate::ir::PropertyReferenceObjects::Checked
+    fn property_reference_objects(&self) -> PropertyReferenceObjects {
+        PropertyReferenceObjects::Checked
     }
 
     /// Consume one checked common-IR file produced by the streaming FIR path. No parsed source or

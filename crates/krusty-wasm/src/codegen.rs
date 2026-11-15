@@ -138,8 +138,8 @@ impl Backend for WasmBackend {
 
     /// Every reference object is a function value (`crate::callable_references`), a `KProperty`
     /// one included: its entry reads the property, and its `get` forwards to that entry.
-    fn property_reference_objects(&self) -> krusty::ir::PropertyReferenceObjects {
-        krusty::ir::PropertyReferenceObjects::FunctionValues
+    fn property_reference_objects(&self) -> krusty::backend::PropertyReferenceObjects {
+        krusty::backend::PropertyReferenceObjects::FunctionValues
     }
 
     /// The runtime lays out text, its builders and its exception classes itself: a library
