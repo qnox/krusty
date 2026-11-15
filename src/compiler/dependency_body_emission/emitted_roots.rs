@@ -89,9 +89,10 @@ pub(super) fn declarations(
             read_values(platform, bodies, capabilities.callees, &objects, &mut state)?;
             continue;
         }
-        // A top-level function private to its file has no provider declaration either; only a
-        // body of its own module calls it, and it is emitted with that body.
-        if let crate::libraries::KlibDeclarationSignature::FileLocal { .. } = identity.declaration {
+        // A top-level function private to its file, or a member of a class private to its
+        // library, has no provider declaration either; only a body of its own module calls it, and
+        // it is emitted with that body.
+        if bodies.is_library_private(&identity) {
             state.pending.extend(
                 bodies
                     .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)

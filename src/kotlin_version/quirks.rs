@@ -108,6 +108,14 @@ quirks! {
         since: None,
         fixed_in: Some(KotlinVersion::V2_4_20),
     }
+    /// A callable reference to a `vararg` function takes an expected input that the enclosing call
+    /// declares as one of its own type variables (`f: (T) -> Int`) as one collected element, even
+    /// when the variable is an array of the vararg's own classifier: `arr.let(::count)` counts one
+    /// element (KT-90169). A concrete or array-shaped input still takes the whole array.
+    VarargReferenceTakesTypeVariableInputAsElement {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+    }
 }
 
 const _: () = assert!(Quirk::ALL.len() <= u64::BITS as usize);
