@@ -1344,6 +1344,9 @@ pub struct IrSpecializedFunction {
     pub inline_callee: IrInlineCallee,
     /// Source spelling retained for target-specific debug/artifact rendering.
     pub inline_callee_source_name: String,
+    /// The expanded call omits an argument that has a default, so it is the callee's default entry
+    /// that the expansion copies. A target owns that entry's physical rendering (`$default`).
+    pub inline_callee_default_entry: bool,
     /// Specialized implementation lexically containing this one. Nested copies retain containment
     /// rather than being flattened into another top-level expansion ordinal.
     pub parent: Option<FunId>,
@@ -1370,6 +1373,9 @@ pub struct IrSpecializedAnonymousClass {
     pub caller_source_name: String,
     pub inline_callee: IrInlineCallee,
     pub inline_callee_source_name: String,
+    /// The expanded call goes through the callee's default entry; see
+    /// [`IrSpecializedFunction::inline_callee_default_entry`].
+    pub inline_callee_default_entry: bool,
     /// For each of the callee's operands, by its value slot: the caller's `crossinline` parameter
     /// the expansion binds it to, when it is one. A copy remaps its captures' provenance through
     /// it, and so does an object nested in the copy that is specialized later.

@@ -255,6 +255,7 @@ fn captured_lambda_substitution_refreshes_the_retained_inline_body() {
             source: crate::fir::SourceFileId::from_raw(0),
             callee: crate::ir::IrInlineCallee::Module(crate::fir::CallableId::from_raw(0)),
             callee_source_name: "inlineCall",
+            callee_default_entry: false,
         },
     );
 
@@ -713,6 +714,7 @@ fn caller_captures_transfer_into_the_specialized_declaration_closure() {
             source: crate::fir::SourceFileId::from_raw(0),
             callee: crate::ir::IrInlineCallee::Module(crate::fir::CallableId::from_raw(0)),
             callee_source_name: "inlineCall",
+            callee_default_entry: false,
         },
     );
     assert_eq!(suppressions, [actual_implementation]);
@@ -865,6 +867,7 @@ fn captured_substituted_lambda_stays_materialized_while_capture_free_copy_specia
             source: crate::fir::SourceFileId::from_raw(0),
             callee: crate::ir::IrInlineCallee::Module(crate::fir::CallableId::from_raw(0)),
             callee_source_name: "inlineCall",
+            callee_default_entry: false,
         },
     );
     assert!(suppressions.is_empty());

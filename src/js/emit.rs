@@ -1482,6 +1482,7 @@ mod tests {
                     5,
                 )),
                 inline_callee_source_name: "defineFunc".to_string(),
+                inline_callee_default_entry: false,
                 parent: None,
                 consumed_inline_capture: false,
             },

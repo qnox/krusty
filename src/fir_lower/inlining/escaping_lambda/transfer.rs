@@ -181,6 +181,8 @@ pub(in super::super) struct EscapingInlineTemplate<'a> {
     pub(in super::super) source: crate::fir::SourceFileId,
     pub(in super::super) callee: crate::ir::IrInlineCallee,
     pub(in super::super) callee_source_name: &'a str,
+    /// The expanded call goes through the callee's default entry.
+    pub(in super::super) callee_default_entry: bool,
 }
 
 /// Commit a previously validated plan after every fallible transformation of the containing
@@ -205,6 +207,7 @@ pub(in super::super) fn apply(
         source: inline_template_source,
         callee: inline_callee,
         callee_source_name: inline_callee_source_name,
+        callee_default_entry: inline_callee_default_entry,
     } = template;
     let mut replacements = HashMap::<u32, u32>::default();
     let mut decisions = HashMap::<u32, bool>::default();
@@ -223,6 +226,7 @@ pub(in super::super) fn apply(
         inline_template_source,
         inline_callee,
         inline_callee_source_name,
+        inline_callee_default_entry,
     };
     for PlannedRoot {
         copy,
@@ -310,6 +314,7 @@ struct Specialization<'a> {
     inline_template_source: crate::fir::SourceFileId,
     inline_callee: crate::ir::IrInlineCallee,
     inline_callee_source_name: &'a str,
+    inline_callee_default_entry: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -920,6 +925,7 @@ fn specialized_lambda_function(
             caller_source_name: state.caller_source_name.to_string(),
             inline_callee: state.inline_callee,
             inline_callee_source_name: state.inline_callee_source_name.to_string(),
+            inline_callee_default_entry: state.inline_callee_default_entry,
             parent,
             consumed_inline_capture: !inline_captures.is_empty(),
         },
