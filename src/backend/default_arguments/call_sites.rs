@@ -104,10 +104,11 @@ fn rewrite_of(ir: &IrFile, site: ExprId) -> Option<Rewrite> {
             // An override inherits the defaults of the member it overrides; the provider's entry
             // fills them and dispatches through the slot the override shares.
             let Callee::ModuleWithDefaults {
+                target,
                 default_provider: ResolvedFunctionOverrideTarget::Module(provider),
                 params,
                 defaults,
-                dispatch_receiver_ty: Some(_),
+                dispatch_receiver_ty: Some(receiver_ty),
                 extension_receiver_parameter: None,
                 ..
             } = &**callee
@@ -115,27 +116,27 @@ fn rewrite_of(ir: &IrFile, site: ExprId) -> Option<Rewrite> {
                 return None;
             };
             let Some(&declaration) = ir.checked_callable_functions.get(provider) else {
-                // The provider is declared in another file of the module, which publishes its
-                // entry and dispatches through its own slot.
-                let Callee::ModuleWithDefaults {
-                    target,
-                    ret,
-                    dispatch_receiver_ty,
-                    ..
-                } = &**callee
-                else {
+                let declaration = ir.referenced_module_callables.get(provider)?;
+                if declaration.owner.map(Ty::obj_name) != Some(*receiver_ty)
+                    || declaration.parameters.len() != params.len()
+                    || !defaults.iter().all(|ordinal| {
+                        declaration
+                            .default_parameters
+                            .contains(&(*ordinal as usize))
+                    })
+                {
                     return None;
-                };
+                }
                 return Some(Rewrite::ModuleEntry {
-                    frame: frame(args, defaults, params.len())?,
-                    receiver: Some(*receiver),
                     callee: Callee::ModuleDefaultEntry {
                         target: *target,
                         provider: *provider,
-                        params: params.clone(),
-                        ret: *ret,
-                        dispatch_receiver_ty: *dispatch_receiver_ty,
+                        params: declaration.parameters.to_vec(),
+                        ret: declaration.result,
+                        dispatch_receiver_ty: Some(*receiver_ty),
                     },
+                    receiver: Some(*receiver),
+                    frame: frame(args, defaults, params.len())?,
                 });
             };
             let function = &ir.functions[declaration as usize];
@@ -247,13 +248,16 @@ fn to_module_entry(
         unreachable!("a module default entry call")
     };
     let result = *ret;
-    let args = arguments(ir, &params.clone(), frame);
+    let args = receiver
+        .into_iter()
+        .chain(arguments(ir, &params.clone(), frame))
+        .collect();
     replace(
         ir,
         site,
         IrExpr::Call {
             callee: Box::new(callee),
-            dispatch_receiver: receiver,
+            dispatch_receiver: None,
             args,
         },
         result,

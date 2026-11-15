@@ -258,10 +258,10 @@ impl BodyLowering<'_, '_, '_> {
                 params,
                 ret,
                 dispatch_receiver_ty,
-            } => self.module_default_entry_call(
+            } if dispatch_receiver.is_none() => self.module_default_entry_call(
                 *provider,
                 *target,
-                dispatch_receiver.zip(*dispatch_receiver_ty),
+                *dispatch_receiver_ty,
                 params,
                 *ret,
                 args,

@@ -1215,7 +1215,7 @@ impl<'a> Body<'a> {
             }
             IrExpr::Call {
                 callee: ref call_callee,
-                dispatch_receiver,
+                dispatch_receiver: None,
                 args,
             } if let Callee::ModuleDefaultEntry {
                 provider,
@@ -1228,21 +1228,16 @@ impl<'a> Body<'a> {
                     .calls
                     .module_default(*provider)
                     .ok_or_else(|| "an unregistered source default entry".to_string())?;
-                // A member's entry takes its receiver before the parameter frame.
-                let mut frame = dispatch_receiver_ty.iter().copied().collect::<Vec<_>>();
-                let mut operands = dispatch_receiver.iter().copied().collect::<Vec<_>>();
-                if frame.len() != operands.len() {
-                    return Err(
-                        "a default entry call whose receiver disagrees with its type".to_string(),
-                    );
-                }
-                frame.extend(params.iter().copied());
+                let mut frame = dispatch_receiver_ty
+                    .iter()
+                    .copied()
+                    .chain(params.iter().copied())
+                    .collect::<Vec<_>>();
                 frame.extend(std::iter::repeat_n(
                     Ty::Int,
                     krusty::backend::default_arguments::mask_words(params.len()),
                 ));
-                operands.extend(args.iter().copied());
-                self.direct_call(function, &frame, &operands)?;
+                self.direct_call(function, &frame, &args)?;
             }
             // The target stdlib's own `typeOf` body only says it is a compiler intrinsic.
             IrExpr::Call {
@@ -2247,6 +2242,18 @@ fn callee_kind(callee: &Callee) -> String {
         Callee::CrossFile { .. } | Callee::Module { .. } => {
             "a function of another file".to_string()
         }
+        Callee::ModuleWithDefaults {
+            target,
+            default_provider,
+            name,
+            params,
+            ret,
+            defaults,
+            dispatch_receiver_ty,
+            extension_receiver_parameter,
+        } => format!(
+            "the checked same-module call `{name}` (target {target:?}, default provider {default_provider:?}, dispatch receiver {dispatch_receiver_ty:?}, extension receiver parameter {extension_receiver_parameter:?}, parameters {params:?}, result {ret:?}, omitted ordinals {defaults:?})"
+        ),
         _ => "a function through this calling convention".to_string(),
     }
 }
@@ -2285,6 +2292,31 @@ fn describe_node(node: &IrExpr) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn module_default_decline_renders_the_complete_checked_call() {
+        let target = krusty::fir::CallableId::from_raw(17);
+        let provider = krusty::fir::ResolvedFunctionOverrideTarget::Module(
+            krusty::fir::CallableId::from_raw(23),
+        );
+        let callee = Callee::ModuleWithDefaults {
+            target,
+            default_provider: provider,
+            name: "lookup".into(),
+            params: vec![Ty::String, Ty::Int],
+            ret: Ty::String,
+            defaults: vec![1].into_boxed_slice(),
+            dispatch_receiver_ty: Some(Ty::obj("sample/Owner")),
+            extension_receiver_parameter: None,
+        };
+        let expected = format!(
+            "the checked same-module call `lookup` (target {target:?}, default provider {provider:?}, dispatch receiver {:?}, extension receiver parameter None, parameters {:?}, result {:?}, omitted ordinals [1])",
+            Some(Ty::obj("sample/Owner")),
+            [Ty::String, Ty::Int],
+            Ty::String,
+        );
+        assert_eq!(callee_kind(&callee), expected);
+    }
 
     /// Lower one file with no interface or dependency classifier declarations.
     pub(super) fn lower_alone(

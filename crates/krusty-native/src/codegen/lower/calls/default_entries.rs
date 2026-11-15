@@ -11,7 +11,7 @@ impl BodyLowering<'_, '_, '_> {
         &mut self,
         provider: krusty::fir::CallableId,
         target: krusty::fir::CallableId,
-        receiver: Option<(u32, Ty)>,
+        dispatch_receiver_ty: Option<Ty>,
         params: &[Ty],
         ret: Ty,
         args: &[u32],
@@ -20,18 +20,14 @@ impl BodyLowering<'_, '_, '_> {
             self.file.module_name,
             provider,
         );
-        // A member's entry takes its receiver before the parameter frame.
-        let mut frame = receiver.iter().map(|&(_, ty)| ty).collect::<Vec<_>>();
-        frame.extend(params.iter().copied());
+        let mut frame = dispatch_receiver_ty
+            .into_iter()
+            .chain(params.iter().copied())
+            .collect::<Vec<_>>();
         frame.extend(std::iter::repeat_n(
             Ty::Int,
             krusty::backend::default_arguments::mask_words(params.len()),
         ));
-        let args = receiver
-            .iter()
-            .map(|&(receiver, _)| receiver)
-            .chain(args.iter().copied())
-            .collect::<Vec<_>>();
         if args.len() != frame.len() {
             return Err(declined!(
                 "a default-argument entry call with {} of {} operands (`{symbol}`)",
@@ -40,13 +36,17 @@ impl BodyLowering<'_, '_, '_> {
             ));
         }
         let id = self.file.import(&symbol, &frame, ret)?;
-        let arguments = self.arguments(&args, &frame)?;
+        let arguments = self.arguments(args, &frame)?;
         if self.terminated {
             return Ok(None);
         }
         // As for a call that supplies everything: operands first, then the defining file's
         // initializer, then the call, whose defaults may read that file's top-level state.
-        self.initialize_defining_file(target)?;
+        self.initialize_defining_file(if dispatch_receiver_ty.is_some() {
+            provider
+        } else {
+            target
+        })?;
         if self.terminated {
             return Ok(None);
         }

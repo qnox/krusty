@@ -379,6 +379,8 @@ fn a_member_entry_takes_the_receiver_and_dispatches_through_the_method() {
         Some(owner),
     );
     let class = method_of(&mut ir, "demo/Shape", function);
+    let identity = CallableId::from_raw(42);
+    ir.checked_callable_functions.insert(identity, function);
     let two = int(&mut ir, 2);
     with_defaults(&mut ir, function, vec![Some(two)]);
     let receiver = ir.add_expr(IrExpr::GetValue(0));
@@ -414,10 +416,47 @@ fn a_member_entry_takes_the_receiver_and_dispatches_through_the_method() {
         )
     );
     assert_eq!(body(&ir, caller), format!("fun{entry}($0, absent Int, 1)"));
-    assert!(
-        published_identities(&ir, function).is_empty(),
-        "a member's entry is reached through this file alone"
-    );
+    assert_eq!(published_identities(&ir, function), [identity]);
+}
+
+#[test]
+fn overriding_members_do_not_publish_the_inherited_default_provider_twice() {
+    let mut ir = IrFile::default();
+    let provider = CallableId::from_raw(20);
+    for ordinal in 0..2 {
+        let owner = type_name(if ordinal == 0 {
+            "demo/First"
+        } else {
+            "demo/Second"
+        });
+        let read = ir.add_expr(IrExpr::GetValue(1));
+        let function = declare(
+            &mut ir,
+            "scale",
+            vec![Ty::Int],
+            Ty::Int,
+            Some(read),
+            Some(owner),
+        );
+        method_of(
+            &mut ir,
+            if ordinal == 0 {
+                "demo/First"
+            } else {
+                "demo/Second"
+            },
+            function,
+        );
+        let default = int(&mut ir, 2);
+        with_defaults(&mut ir, function, vec![Some(default)]);
+        ir.fn_params
+            .get_mut(&function)
+            .unwrap()
+            .inherited_default_provider = Some(ResolvedFunctionOverrideTarget::Module(provider));
+        ir.checked_callable_functions
+            .insert(CallableId::from_raw(21 + ordinal), function);
+        assert!(published_identities(&ir, function).is_empty());
+    }
 }
 
 #[test]
@@ -656,58 +695,223 @@ fn an_actual_entry_is_keyed_by_its_expect_and_calls_the_actual() {
     );
 }
 
+fn member_record(
+    owner: TypeName,
+    parameters: Vec<Ty>,
+    result: Ty,
+    defaults: Vec<usize>,
+) -> crate::ir::IrModuleCallable {
+    let parameter_identities = (0..parameters.len())
+        .map(|ordinal| crate::ir::IrParameterIdentity::source(format!("p{ordinal}")))
+        .collect();
+    crate::ir::IrModuleCallable {
+        source: crate::ir::IrModuleSource {
+            source: crate::fir::SourceFileId::from_raw(0),
+            package: type_name("demo"),
+        },
+        name: "inherited".into(),
+        owner: Some(owner),
+        owner_kind: Some(crate::ir::IrClassifierKind::Interface),
+        visibility: crate::types::Visibility::Public,
+        flags: Default::default(),
+        parameters: parameters.into_boxed_slice(),
+        default_parameters: defaults.into_boxed_slice(),
+        type_parameters: Box::default(),
+        owner_type_parameters: Box::default(),
+        parameter_identities,
+        result,
+        annotations: Box::default(),
+        placement: crate::ir::IrStaticPlacement::Package,
+        overridden_results: Box::default(),
+        overridden_declarations: Box::default(),
+    }
+}
+
 #[test]
-fn an_inherited_member_default_calls_the_entry_another_file_publishes() {
+fn inherited_member_defaults_in_another_file_keep_receiver_out_of_masks() {
+    for (parameter_count, expected_masks) in [
+        (1, vec![1]),
+        (32, vec![i32::MIN]),
+        (33, vec![0, 1]),
+        (64, vec![0, i32::MIN]),
+    ] {
+        let mut ir = IrFile::default();
+        let owner = type_name("demo/Host");
+        let provider = CallableId::from_raw(20);
+        let target = CallableId::from_raw(21);
+        let receiver = ir.add_expr(IrExpr::GetValue(0));
+        ir.set_logical_type(receiver, Ty::obj_name(owner));
+        let supplied = (0..parameter_count - 1)
+            .map(|index| ir.add_expr(IrExpr::Const(IrConst::Int(index as i32))))
+            .collect::<Vec<_>>();
+        let parameters = vec![Ty::Int; parameter_count];
+        ir.referenced_module_callables.insert(
+            provider,
+            member_record(
+                owner,
+                parameters.clone(),
+                Ty::Unit,
+                vec![parameter_count - 1],
+            ),
+        );
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Box::new(Callee::ModuleWithDefaults {
+                target,
+                default_provider: ResolvedFunctionOverrideTarget::Module(provider),
+                name: "inherited".to_owned(),
+                params: parameters.clone(),
+                ret: Ty::Unit,
+                defaults: vec![parameter_count as u32 - 1].into_boxed_slice(),
+                dispatch_receiver_ty: Some(Ty::obj_name(owner)),
+                extension_receiver_parameter: None,
+            }),
+            dispatch_receiver: Some(receiver),
+            args: supplied.clone(),
+        });
+        declare(
+            &mut ir,
+            "caller",
+            vec![Ty::obj_name(owner)],
+            Ty::Unit,
+            Some(call),
+            None,
+        );
+        let functions = ir.functions.len();
+
+        realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
+
+        let IrExpr::Call {
+            callee,
+            dispatch_receiver,
+            args,
+        } = ir.expr(call)
+        else {
+            panic!("the inherited default remains an ordinary call");
+        };
+        assert_eq!(
+            **callee,
+            Callee::ModuleDefaultEntry {
+                target,
+                provider,
+                params: parameters,
+                ret: Ty::Unit,
+                dispatch_receiver_ty: Some(Ty::obj_name(owner)),
+            }
+        );
+        assert_eq!(*dispatch_receiver, None);
+        assert_eq!(args[0], receiver);
+        assert_eq!(&args[1..parameter_count], supplied.as_slice());
+        let IrExpr::AbsentArgument { ty } = ir.expr(args[parameter_count]) else {
+            panic!("the omitted semantic parameter retains its typed absent operand");
+        };
+        assert_eq!(*ty, Ty::Int);
+        assert_eq!(args.len(), 1 + parameter_count + expected_masks.len());
+        let actual_masks = args[1 + parameter_count..]
+            .iter()
+            .map(|argument| {
+                let IrExpr::Const(IrConst::Int(mask)) = ir.expr(*argument) else {
+                    panic!("a complete omission-mask word");
+                };
+                *mask
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual_masks, expected_masks);
+        assert_eq!(
+            args.iter()
+                .filter(|&&argument| argument == receiver)
+                .count(),
+            1
+        );
+        assert_eq!(ir.functions.len(), functions);
+        assert!(ir.default_entries.is_empty());
+    }
+}
+
+#[test]
+fn cross_file_member_defaults_use_the_provider_frame_before_coercing_the_result() {
     let mut ir = IrFile::default();
     let owner = type_name("demo/Host");
     let provider = CallableId::from_raw(20);
     let target = CallableId::from_raw(21);
+    let any = Ty::nullable(Ty::obj("kotlin/Any"));
+    let element = Ty::ty_param("provider-element", any);
+    let mut record = member_record(owner, vec![element, element], element, vec![1]);
+    record.owner_type_parameters = vec![crate::ir::IrCallableTypeParameter {
+        semantic_name: "provider-element".into(),
+        bounds: vec![(any, false)].into_boxed_slice(),
+    }]
+    .into_boxed_slice();
+    ir.referenced_module_callables.insert(provider, record);
     let receiver = ir.add_expr(IrExpr::GetValue(0));
-    let call = ir.add_expr(IrExpr::Call {
+    ir.set_logical_type(receiver, Ty::obj_name(owner));
+    let supplied = int(&mut ir, 7);
+    ir.set_logical_type(supplied, Ty::Int);
+    let site = ir.add_expr(IrExpr::Call {
         callee: Box::new(Callee::ModuleWithDefaults {
             target,
             default_provider: ResolvedFunctionOverrideTarget::Module(provider),
-            name: "inherited".to_owned(),
-            params: vec![Ty::Int],
-            ret: Ty::Unit,
-            defaults: Box::new([0]),
+            name: "inherited".into(),
+            params: vec![Ty::Int, Ty::Int],
+            ret: Ty::Int,
+            defaults: Box::new([1]),
             dispatch_receiver_ty: Some(Ty::obj_name(owner)),
             extension_receiver_parameter: None,
         }),
         dispatch_receiver: Some(receiver),
-        args: Vec::new(),
+        args: vec![supplied],
     });
+    ir.set_logical_type(site, Ty::Int);
+    ir.call_declared_ret.insert(site, Ty::Int);
     declare(
         &mut ir,
         "caller",
         vec![Ty::obj_name(owner)],
-        Ty::Unit,
-        Some(call),
+        Ty::Int,
+        Some(site),
         None,
     );
 
     realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
 
+    let IrExpr::TypeOp {
+        op: crate::ir::IrTypeOp::ImplicitCoercion,
+        arg: call,
+        type_operand,
+    } = ir.expr(site)
+    else {
+        panic!("the caller coerces the provider's result to its checked result");
+    };
+    assert_eq!(*type_operand, Ty::Int);
+    assert_eq!(ir.checked_type(*call), Some(element));
     let IrExpr::Call {
         callee,
         dispatch_receiver,
         args,
-    } = ir.expr(call)
+    } = ir.expr(*call)
     else {
-        panic!("the call stays a call");
+        panic!("the exact default provider is an ordinary call");
     };
     assert_eq!(
         **callee,
         Callee::ModuleDefaultEntry {
             target,
             provider,
-            params: vec![Ty::Int],
-            ret: Ty::Unit,
+            params: vec![element, element],
+            ret: element,
             dispatch_receiver_ty: Some(Ty::obj_name(owner)),
         }
     );
-    assert_eq!(*dispatch_receiver, Some(receiver));
-    assert_eq!(args.len(), 2, "the absent argument and one mask word");
+    assert_eq!(*dispatch_receiver, None);
+    assert_eq!(args.len(), 4);
+    assert_eq!(&args[..2], &[receiver, supplied]);
+    let IrExpr::AbsentArgument { ty } = ir.expr(args[2]) else {
+        panic!("the provider owns the omitted operand's type");
+    };
+    assert_eq!(*ty, element);
+    let IrExpr::Const(IrConst::Int(mask)) = ir.expr(args[3]) else {
+        panic!("a complete omission mask");
+    };
+    assert_eq!(*mask, 2);
 }
 
 #[test]
@@ -731,6 +935,21 @@ fn shapes_this_lowering_cannot_realize_keep_their_checked_form() {
         }),
         dispatch_receiver: Some(receiver),
         args: vec![extension],
+    });
+    // A cross-file default call without its frozen provider declaration.
+    let foreign_provider = ir.add_expr(IrExpr::Call {
+        callee: Box::new(Callee::ModuleWithDefaults {
+            target: CallableId::from_raw(21),
+            default_provider: ResolvedFunctionOverrideTarget::Module(provider),
+            name: "inherited".to_owned(),
+            params: vec![Ty::Int],
+            ret: Ty::Unit,
+            defaults: Box::new([0]),
+            dispatch_receiver_ty: Some(Ty::obj_name(owner)),
+            extension_receiver_parameter: None,
+        }),
+        dispatch_receiver: Some(receiver),
+        args: Vec::new(),
     });
     // A `super` call with an omitted argument.
     let super_call = ir.add_expr(IrExpr::Call {
@@ -771,7 +990,12 @@ fn shapes_this_lowering_cannot_realize_keep_their_checked_form() {
         args: Vec::new(),
     });
     let block = ir.add_expr(IrExpr::Block {
-        stmts: vec![member_extension, super_call, dependency_provider],
+        stmts: vec![
+            member_extension,
+            foreign_provider,
+            super_call,
+            dependency_provider,
+        ],
         value: None,
     });
     declare(
