@@ -1051,21 +1051,26 @@ fn type_checks_and_casts_lower_as_the_source_operators_do() {
 }
 
 #[test]
-fn type_operators_checked_fir_expands_decline_by_name() {
-    let cases = [
-        (
+fn a_safe_cast_lowers_as_the_source_safe_cast_does() {
+    let source = "fun f(a: Any?): String? {\n return a as? String\n}\n";
+    assert_eq!(
+        lowered_f(&type_check(
             KlibIrTypeOperator::SafeCast,
-            T::NullableString,
-            T::NullableString,
-            "a safe cast",
-        ),
-        (
-            KlibIrTypeOperator::ImplicitNotNull,
             T::String,
-            T::String,
-            "an implicit non-null assertion",
-        ),
-    ];
+            T::NullableString
+        )),
+        source_body(source, "f", 1)
+    );
+}
+
+#[test]
+fn type_operators_checked_fir_expands_decline_by_name() {
+    let cases = [(
+        KlibIrTypeOperator::ImplicitNotNull,
+        T::String,
+        T::String,
+        "an implicit non-null assertion",
+    )];
     for (operator, target, result, reason) in cases {
         assert_eq!(
             type_check(operator, target, result).declined("f", &[]),
