@@ -1352,6 +1352,9 @@ impl CallLinker for Linker<'_, '_> {
                 reified_type_parameters: Vec::new(),
             });
         }
+        if let Some(linked) = self.top_level_accessor(ir, &identity)? {
+            return Ok(linked);
+        }
         // A complete retained export or positive target plan owns this edge. Other accessors
         // retain the explicit unsupported boundary instead of acquiring a header-only body path.
         if !self
@@ -1764,6 +1767,64 @@ impl<'s> Linker<'_, 's> {
             ret: linked.ret,
             context_count: linked.context_count,
             class_type_parameters: linked.class_type_parameters,
+            callable: None,
+            type_parameters: Vec::new(),
+            type_parameter_bounds: Vec::new(),
+            reified_type_parameters: Vec::new(),
+        }))
+    }
+
+    /// The accessor of a top-level property, when the unit emits its body: a non-generic
+    /// accessor with a body that no retained export realizes is emitted here, as a top-level
+    /// function the support body calls is.
+    fn top_level_accessor(
+        &mut self,
+        ir: &mut IrFile,
+        identity: &KlibDependencyCallable,
+    ) -> Result<Option<LinkedAccessor>, KlibBodyDeclineReason> {
+        if self.sources.externals.contains_key(identity) {
+            return Ok(None);
+        }
+        let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(identity) else {
+            return Ok(None);
+        };
+        let Some(accessor) = callables[0].accessor() else {
+            return Ok(None);
+        };
+        let write = accessor.role == crate::libraries::KlibAccessorRole::Setter;
+        let Some((arena, declaration)) = self.sources.bodies.function(identity) else {
+            return Ok(None);
+        };
+        if declaration.dispatch_receiver.is_some()
+            || !matches!(declaration.body, Some(KlibIrBody::Block(_)))
+        {
+            return Ok(None);
+        }
+        let selected = selected_callable_for_header(
+            Some(SelectedKlibCallables::Variants(callables)),
+            None,
+            arena,
+            declaration,
+        )?;
+        if selected
+            .and_then(|selected| selected.generic_signature())
+            .is_some_and(|signature| !signature.formals.is_empty())
+        {
+            return Ok(None);
+        }
+        let function = match self.functions.get(identity) {
+            Some(function) => *function,
+            None => self.declare(ir, identity, selected, arena, declaration)?,
+        };
+        let declared = &ir.functions[function as usize];
+        Ok(Some(LinkedAccessor {
+            target: LinkedAccessorTarget::Local(function),
+            write,
+            receiver: None,
+            params: declared.params.clone(),
+            ret: declared.ret,
+            context_count: ir.declared_parameters(function).context_count,
+            class_type_parameters: Vec::new(),
             callable: None,
             type_parameters: Vec::new(),
             type_parameter_bounds: Vec::new(),
