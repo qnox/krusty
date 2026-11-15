@@ -625,16 +625,11 @@ impl<'a> BodyLowering<'a> {
                         }
                         None => None,
                     };
+                    let dispatched =
+                        self.record_property_override(&name, &getter, fun, owner, supertypes, ret)?;
                     self.ir.classes[class_id as usize]
                         .properties
-                        .push(property_declaration(
-                            &name,
-                            ret,
-                            fun,
-                            setter,
-                            !getter.overridden.is_empty(),
-                        ));
-                    self.record_property_override(&name, &getter, fun, owner, supertypes, ret)?;
+                        .push(property_declaration(&name, ret, fun, setter, dispatched));
                 }
                 _ => {}
             }
@@ -880,6 +875,49 @@ impl<'a> BodyLowering<'a> {
         Ok(())
     }
 
+    /// An override of the accessor `record` names, which this unit emits as a method of the
+    /// class it materializes: the override edge of a function without parameters.
+    fn record_accessor_method_override(
+        &mut self,
+        getter: &KlibIrFunction,
+        fun: FunId,
+        owner: TypeName,
+        record: crate::klib_lowering::same_library_class::MemberOverride,
+        interface: bool,
+        ty: Ty,
+    ) -> Lowered<()> {
+        let target = crate::fir::ResolvedFunctionOverrideTarget::External(
+            self.linker.external_override(&record.identity)?,
+        );
+        self.ir
+            .function_overrides
+            .entry(owner)
+            .or_default()
+            .push(IrFunctionOverride {
+                implementation: target,
+                implementation_function: Some(fun),
+                implementation_owner: owner,
+                overridden: target,
+                overridden_owner: record.owner,
+                overridden_semantic_role: record.semantic_role,
+                collection_barrier: None,
+                overridden_is_interface: interface,
+                name: getter.name.clone(),
+                declared_parameters: record.declared_parameters,
+                declared_result: record.declared_result,
+                applied_parameters: record.applied_parameters,
+                applied_result: record.applied_result,
+                implementation_parameters: Vec::new(),
+                implementation_parameter_identities: Vec::new(),
+                overridden_parameter_identities: Vec::new(),
+                implementation_result: ty,
+                suspend: false,
+                has_kotlin_superclass_override: false,
+                depth: 1,
+            });
+        Ok(())
+    }
+
     fn record_property_override(
         &mut self,
         name: &str,
@@ -888,16 +926,22 @@ impl<'a> BodyLowering<'a> {
         owner: TypeName,
         supertypes: &[Ty],
         ty: Ty,
-    ) -> Lowered<()> {
+    ) -> Lowered<bool> {
         use crate::fir::ResolvedPropertyOverrideTarget;
+        let mut dispatched = false;
         for symbol in &getter.overridden {
             let Some(record) = self.linker.dependency_override(symbol, supertypes, true)? else {
                 continue;
             };
-            let target = ResolvedPropertyOverrideTarget::External(
-                self.linker.external_override(&record.identity)?,
-            );
+            let external = self.linker.external_override(&record.identity)?;
             let interface = self.linker.is_interface(record.owner)?;
+            // An accessor a class this unit materializes declares is a method of that class,
+            // whose slot a function override edge reaches.
+            if self.ir.dependency_methods.contains_key(&external) {
+                self.record_accessor_method_override(getter, fun, owner, record, interface, ty)?;
+                continue;
+            }
+            let target = ResolvedPropertyOverrideTarget::External(external);
             self.ir
                 .property_overrides
                 .entry(owner)
@@ -921,8 +965,9 @@ impl<'a> BodyLowering<'a> {
                     has_kotlin_superclass_override: false,
                     depth: 1,
                 });
+            dispatched = true;
         }
-        Ok(())
+        Ok(dispatched)
     }
 }
 
@@ -939,7 +984,8 @@ struct MemberFrame<'a> {
 }
 
 /// An object literal's property. The object is final, so the property dispatches only when it
-/// overrides one of its supertypes'.
+/// overrides a property of a supertype the unit does not materialize; an accessor of a class it
+/// materializes is overridden as that class's method.
 fn property_declaration(
     name: &str,
     ty: Ty,
