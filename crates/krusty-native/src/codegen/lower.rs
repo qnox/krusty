@@ -18,6 +18,7 @@ mod boxed;
 mod c_abi;
 mod calls;
 mod carrier;
+mod class_statics;
 mod classes_literal;
 mod classifier_shapes;
 mod compiler_intrinsics;
@@ -378,6 +379,7 @@ pub fn lower_file(
         accessors: HashMap::default(),
         dependency_bridges: 0,
         statics: Vec::new(),
+        class_initializers: HashMap::default(),
         lambdas: HashMap::default(),
         local_delegate_helpers: HashMap::default(),
         reference_identities: HashMap::default(),
@@ -420,6 +422,7 @@ pub fn lower_file(
     lowering.define_local_delegate_helpers()?;
     lowering.define_classes()?;
     let statics_init = lowering.define_statics_init()?;
+    lowering.define_class_initializers()?;
     let file_init_linkage = match unit_kind {
         krusty::backend::CheckedIrUnitKind::Source => Linkage::Hidden,
         krusty::backend::CheckedIrUnitKind::DependencySupport => Linkage::Local,
@@ -618,6 +621,8 @@ struct FileLowering<'a> {
     dependency_bridges: usize,
     /// The global slot of each top-level property, parallel to `ir.statics`.
     statics: Vec<DataId>,
+    /// The initializer of each class that owns a static run when the class is first touched.
+    class_initializers: HashMap<ClassId, class_statics::ClassInitializer>,
     /// The emitted pieces of each lambda, by the expression that creates it.
     lambdas: HashMap<u32, functions::LambdaItems>,
     /// Native-local accessor helper per checked local-delegate plan and accessor side.
@@ -1036,6 +1041,12 @@ impl<'a> FileLowering<'a> {
         semantic_slots.extend(function.params.iter().copied());
         let name = function.name.clone();
         let ret = function.ret;
+        // A block function or accessor is a static member of its class: calling one initializes
+        // the class first.
+        let block_class = self
+            .ir
+            .companion_blocks
+            .declaring_class(index as krusty::ir::FunId);
         let attempt = self.emit_function(
             id,
             signature.clone(),
@@ -1046,6 +1057,9 @@ impl<'a> FileLowering<'a> {
                 lowering.record_semantic_slots(&semantic_slots);
                 for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
                     lowering.bind_parameter(slot as u32, *value, *ty)?;
+                }
+                if let Some(class) = block_class {
+                    lowering.initialize_class(class)?;
                 }
                 lowering.frame_objects = lowering.frame_constructions(body);
                 lowering.statement(body)

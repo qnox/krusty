@@ -1274,6 +1274,7 @@ impl<'a> FileLowering<'a> {
                 ordinal: ordinal as u32 + 1,
             };
             body.record_semantic_slots(&semantic_slots);
+            body.initialize_class(class)?;
             for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
                 body.bind_parameter(slot as u32, *value, *ty)?;
             }
@@ -1804,6 +1805,7 @@ impl<'a> FileLowering<'a> {
         self.emit_function(id, signature, Ty::Unit, &name, &mut |body, params| {
             body.scope = krusty::ir::IrEnclosure::Constructor { class, ordinal: 0 };
             body.record_semantic_slots(&semantic_slots);
+            body.initialize_class(class)?;
             for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
                 body.bind_parameter(slot as u32, *value, *ty)?;
             }
