@@ -61,8 +61,10 @@ fn a_cps_export_authenticates_the_source_signature_and_appended_continuation() {
         authenticate_dependency_coroutine_call(&source, &physical, source_result, &signature),
         Ok(())
     );
-    assert!(authenticate_dependency_coroutine_call(&source, &source, source_result, &signature)
-        .is_err());
+    assert!(
+        authenticate_dependency_coroutine_call(&source, &source, source_result, &signature)
+            .is_err()
+    );
 
     ir.functions[id as usize].params[1] = Ty::Long;
     assert_eq!(
