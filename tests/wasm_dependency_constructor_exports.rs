@@ -40,6 +40,16 @@ fn wasm_official_dependency_secondary_constructors_delegate_to_the_primary() {
     );
 }
 
+/// Generic classes, a generic superclass and a secondary constructor of a generic class lower
+/// from the official producer's bodies.
+#[test]
+fn wasm_official_dependency_generic_classes_lower_from_their_bodies() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyGenericClasses.kt"),
+        "DependencyGenericClasses",
+    );
+}
+
 /// Run the shared two-module program through the product producer, then compile its consumer
 /// against the library the exact official Wasm compiler produces and run it, on every target.
 fn run_against_official_producer(source: &str, name: &str) {

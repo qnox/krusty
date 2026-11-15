@@ -204,7 +204,6 @@ pub(super) fn plan<'a, 'b>(
         ));
     };
     if access.symbol.kind != KlibIrSymbolKind::Constructor
-        || !access.type_arguments.is_empty()
         || !matches!(&header.arena.expr(*initialize).kind,
             KlibIrExprKind::InstanceInitializerCall(class) if class == &header.class.base.symbol)
     {
@@ -212,6 +211,24 @@ pub(super) fn plan<'a, 'b>(
             "an ordinary class does not delegate to its superclass and initialize its own instance",
         ));
     }
+    // The superclass's type arguments, as the class's first supertype applies them.
+    let type_arguments = access
+        .type_arguments
+        .iter()
+        .map(|argument| {
+            let argument = argument.ok_or_else(|| {
+                mismatch("a superclass constructor delegation omits a type argument")
+            })?;
+            semantic_type(header.arena, &header.types, argument)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let applied = |owner| {
+        if type_arguments.is_empty() {
+            Ty::obj_name(owner)
+        } else {
+            Ty::obj_args_name(owner, &type_arguments)
+        }
+    };
     let KlibIrSignature::Public(signature) = &access.symbol.signature else {
         return Ok(None);
     };
@@ -232,7 +249,7 @@ pub(super) fn plan<'a, 'b>(
         callees.validate_root_constructor(&contract.module, signature, bodies)
     })?;
     let (superclass, declared_superclass) = if root {
-        if !arguments.is_empty() {
+        if !arguments.is_empty() || !type_arguments.is_empty() {
             return Err(mismatch(
                 "a delegation to `Any`'s constructor passes arguments",
             ));
@@ -276,7 +293,7 @@ pub(super) fn plan<'a, 'b>(
                     params,
                     materialized: false,
                 }),
-                Ty::obj_name(owner),
+                applied(owner),
             )
         } else {
             let Some(superclass) = plan(selected[0], bodies, callees)? else {
@@ -293,18 +310,16 @@ pub(super) fn plan<'a, 'b>(
                     params,
                     materialized: true,
                 }),
-                Ty::obj_name(superclass.header.contract.classifier),
+                applied(superclass.header.contract.classifier),
             )
         }
     };
-    if supertypes.first() != Some(&declared_superclass)
-        && !(root
-            && supertypes
-                .iter()
-                .all(|supertype| *supertype != declared_superclass))
-    {
+    // Kotlin lists supertypes in any order (`ArrayList` names `MutableList` before
+    // `AbstractMutableList`). The class the constructor delegates to is one of them, or `Any`,
+    // which a class extending no other class may leave implicit; it leads the class's supertypes.
+    if !root && !supertypes.contains(&declared_superclass) {
         return Err(mismatch(
-            "a class's first supertype is not the class its constructor delegates to",
+            "a class's supertypes do not name the class its constructor delegates to",
         ));
     }
     let mut steps = Vec::new();
@@ -313,10 +328,8 @@ pub(super) fn plan<'a, 'b>(
             record_initializer(member, field, &mut steps)
         })?;
     let mut supertypes = supertypes;
-    if root {
-        supertypes.retain(|supertype| *supertype != declared_superclass);
-        supertypes.insert(0, declared_superclass);
-    }
+    supertypes.retain(|supertype| *supertype != declared_superclass);
+    supertypes.insert(0, declared_superclass);
     Ok(Some(ClassInitialization {
         header,
         field_declarations: storage.field_declarations,
@@ -382,9 +395,24 @@ pub(super) fn primary_delegation<'a, 'b>(
     // A delegation to another secondary constructor or to a superclass keeps the boundary.
     if access.symbol.kind != KlibIrSymbolKind::Constructor
         || access.symbol.signature != KlibIrSignature::Public(primary_signature.clone())
-        || !access.type_arguments.is_empty()
     {
         return Ok(None);
+    }
+    // A delegation within the class applies the class's own formals.
+    let type_arguments = access
+        .type_arguments
+        .iter()
+        .map(|argument| {
+            let argument = argument.ok_or_else(|| {
+                mismatch("a primary constructor delegation omits a type argument")
+            })?;
+            semantic_type(header.arena, &header.types, argument)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if *type_arguments != *contract.parameters.formals {
+        return Err(mismatch(
+            "a primary constructor delegation applies other type arguments than the class's own",
+        ));
     }
     let arguments = match &access.arguments {
         KlibIrArguments::Flat(values)
