@@ -1405,7 +1405,6 @@ fir/functionsDifferInTypeParameterBounds.kt
 fir/kt68806.kt
 fir/listAssignmentInWhen.kt
 fir/multipleDefaultsFalsePositiveDelegation.kt
-fir/nestedClassTypeParameterDeserialization.kt
 fir/smartCastToInvisibleClassMember.kt
 fir/toLong.kt
 fp/atan2ZeroGuadrantsDouble.kt
@@ -1555,7 +1554,6 @@ inference/lastExpressionOfLambdaWithNothingConstraint.kt
 inference/mapCollectChainWithNullResult.kt
 inference/noCoercionToUnitWithEqualityConstraintForNullableReturnType.kt
 inference/overrideDefaultProperty.kt
-inference/overrideGenericDefaultMethod.kt
 inference/pcla/builderCallAsReturnTypeInLocalClass.kt
 inference/pcla/callableReferenceAndCoercionToUnit.kt
 inference/pcla/callableReferencesProperCompletion.kt
@@ -2290,7 +2288,6 @@ ir/enumClass.kt
 ir/enumClass2.kt
 ir/enumClass3.kt
 ir/fileClassInitializers.kt
-ir/kt41765.kt
 ir/lambdaWithLoop.kt
 ir/primitiveNumberComparisons/comparableToDouble.kt
 ir/primitiveNumberComparisons/doubleEqeq.kt
@@ -2452,7 +2449,6 @@ multiplatform/k2/hmpp/inheritanceFromLibraryExpectClass.kt
 multiplatform/k2/hmpp/kt83572.kt
 multiplatform/k2/hmpp/mutlipleExpectsForOneActual.kt
 multiplatform/k2/hmpp/overloadAlias3-3.kt
-multiplatform/k2/hmpp/overloadAliasTwoLibs.kt
 multiplatform/k2/hmpp/propertyAlias3-3.kt
 multiplatform/k2/hmpp/propertyAliasTwoLibs.kt
 multiplatform/k2/hmpp/typealiasNameClash.kt
