@@ -395,11 +395,14 @@ impl FileLowering<'_> {
             // A slot or interface number stays one: the subclass reads its own table there, which
             // holds its override where it has one.
             let dependency_implementations = self.dependency_implementations(class)?;
+            let classifier_fact = self
+                .classifiers
+                .classifier(self.ir.classes[class as usize].fq_name);
             let class_identity = crate::laid_out_classes::producer_class_identity(
                 self.unit_kind,
                 self.dependency_signatures.classifier(class),
-                self.classifiers
-                    .classifier(self.ir.classes[class as usize].fq_name)
+                classifier_fact
+                    .as_deref()
                     .and_then(|fact| fact.klib_identity.as_ref()),
             )?;
             let mut record = LaidOutClass {

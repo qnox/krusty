@@ -383,6 +383,7 @@ fn class_tables(
                     planned,
                     file_plan.interfaces(),
                 )?,
+                Some(Err(error)) if laid_out.is_some() => return Err(error.into()),
                 _ if laid_out.is_some() => {
                     return Err(format!(
                         "a class extending one of another file with no module-wide layout (`{}`)",

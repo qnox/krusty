@@ -47,20 +47,22 @@ impl KlibBodyClassContract {
     }
 
     /// Whether the common type model carries this class's instances as one of its builtin types,
-    /// as it does an unsigned integer, rather than as an instance of a class.
+    /// as it does an unsigned integer or an array, rather than as an instance of a class. An
+    /// unsigned array is a value class over its signed array, not an array the target carries.
     pub(crate) fn is_builtin_type(&self) -> bool {
         crate::types::builtin_semantic(self.classifier).is_some()
+            || (!self.is_value && Ty::obj_name(self.classifier).is_array())
     }
 
     /// Whether a support unit emits this class's members as functions of their receiver value,
     /// materializing no class: a final builtin type of the common type model that is not a value
-    /// class, whose values the target carries itself. Such a member dispatches statically.
+    /// class, whose values the target carries itself, `Array<T>` included. Such a member
+    /// dispatches statically.
     pub(crate) fn emits_receiver_members(&self) -> bool {
         self.is_builtin_type()
             && !self.is_value
             && self.kind == super::TypeKind::Class
             && self.modality == KotlinModality::Final
-            && self.parameters.formals.is_empty()
     }
 
     /// Whether a support unit materializes this class and emits its members as functions of the
@@ -89,18 +91,6 @@ impl KlibBodyClassContract {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::test_fixture::generic_member_declaration;
-
-    #[test]
-    fn a_generic_ordinary_class_can_be_materialized_with_its_declared_formals() {
-        let (class, _) = generic_member_declaration();
-        assert!(!class.parameters.formals.is_empty());
-        assert!(class.emits_members());
-    }
-}
-
 /// A complete declared instance layout. Its field ordinals belong to this exact producer class;
 /// retaining the layout grants no constructor, initializer, singleton or descriptor definition.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,6 +112,14 @@ pub(crate) struct KlibStoredField {
 mod tests {
     use super::*;
     use crate::libraries::{KlibClassIdentity, TypeKind};
+    use test_fixture::generic_member_declaration;
+
+    #[test]
+    fn a_generic_ordinary_class_can_be_materialized_with_its_declared_formals() {
+        let (class, _) = generic_member_declaration();
+        assert!(!class.parameters.formals.is_empty());
+        assert!(class.emits_members());
+    }
 
     #[test]
     fn final_dispatch_requires_the_exact_concrete_ordinary_class_contract() {

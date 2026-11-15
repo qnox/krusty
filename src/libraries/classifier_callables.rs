@@ -196,6 +196,7 @@ impl FunctionInfo {
         callable.equality_bound = member.equality_bound;
         callable.plugin_expression = member.plugin_expression;
         callable.external_identity = member.external_identity;
+        callable.declaration_owner = member.declaration_owner;
         callable.external_property_identity = member.external_property_identity;
         callable.reflection_name = Some(member.name.clone());
 

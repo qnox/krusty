@@ -22,7 +22,7 @@ pub(super) fn define_override_bridges(
     runtime: &mut Runtime,
 ) -> Result<(), Unsupported> {
     let ir = context.ir;
-    for (bridge, &function, &ty) in &classes.bridges {
+    for &(ref bridge, function, ty) in &classes.bridges {
         let OverrideBridge { class, member } = bridge.clone();
         let (declared, implemented, target_slot, direct) = match member {
             BridgedMember::Method {

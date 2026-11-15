@@ -4,6 +4,7 @@ use super::*;
 use crate::backend::class_tables::fixtures::{
     add_method, class, function, record_semantic_override,
 };
+use crate::backend::class_tables::module_classes::ModulePropertyOverride;
 use crate::backend::class_tables::{build_numbered, LaidOutSuperclass, Slot, SlotKey};
 use crate::fir::{ExternalCallableId, ResolvedPropertyOverrideTarget};
 use crate::ir::{ClassId, FunId, IrFile, IrPropertyOverride};

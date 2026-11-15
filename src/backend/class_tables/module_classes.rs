@@ -243,16 +243,6 @@ impl ModuleClasses {
             .property_overrides
             .get(&class.fq_name)
             .map_or(&[][..], |e| &e[..]);
-        if !function_edges
-            .iter()
-            .any(|edge| edge.implementation_function.is_some())
-            && !property_edges.iter().any(|edge| {
-                edge.implementation_getter.is_some() || edge.implementation_setter.is_some()
-            })
-        {
-            return None;
-        }
-
         let mut members = Vec::new();
         let mut function_overrides = Vec::new();
         for edge in function_edges {
@@ -282,6 +272,28 @@ impl ModuleClasses {
                 overridden: edge.overridden,
                 overridden_is_interface: edge.overridden_is_interface,
                 overridden_role: edge.overridden_semantic_role,
+            });
+        }
+
+        // A virtual method the class declares without overriding anything still takes a slot after
+        // the producer's prefix; only property accessors are keyed by their property instead.
+        for &function in &class.methods {
+            let declaration = &ir.functions[function as usize];
+            let key = PlanKey::FileFunction(function);
+            if declaration.is_static
+                || declaration.dispatch_receiver != Some(class.fq_name)
+                || super::members::property_accessor_key(ir, id, function).is_some()
+                || members.iter().any(|member: &ModuleMember| {
+                    matches!(member, ModuleMember::Function { callable, .. } if *callable == key)
+                })
+            {
+                continue;
+            }
+            members.push(ModuleMember::Function {
+                callable: key,
+                parameters: declaration.params.clone().into_boxed_slice(),
+                result: declaration.ret,
+                suspend: ir.suspend_funs.contains(&function),
             });
         }
 

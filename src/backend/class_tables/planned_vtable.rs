@@ -190,7 +190,7 @@ pub(super) fn planned_class_table(
             }
             PlannedSlot::Bridge {
                 declared,
-                signature,
+                ref signature,
                 target_slot,
                 target,
             } => match (lowered_key(declared), lowered_key(target)) {
@@ -198,7 +198,7 @@ pub(super) fn planned_class_table(
                 (declared, Some(target)) => Slot::Bridge {
                     declared: declared.map_or_else(
                         || BridgeDeclaration::Signature {
-                            parameters: signature.0,
+                            parameters: signature.0.clone(),
                             result: signature.1,
                         },
                         BridgeDeclaration::Function,

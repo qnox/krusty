@@ -296,7 +296,7 @@ impl ModuleSlotPlan {
                 declared, setter, ..
             } => Some(if *setter {
                 PlannedSignature::Member {
-                    parameters: &accessor_bridge_parameters(*declared, None, true),
+                    parameters: std::slice::from_ref(declared),
                     result: Ty::Unit,
                 }
             } else {

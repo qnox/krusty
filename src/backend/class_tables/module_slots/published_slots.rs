@@ -118,6 +118,14 @@ fn table(
                 let ResolvedPropertyOverrideTarget::External(identity) = property else {
                     return Err("a dependency table containing a source property identity".into());
                 };
+                // The accessor keys are checked before any declaration lookup, so a file-local
+                // accessor is reported as itself rather than as a missing provider declaration.
+                if *getter && !matches!(getter_key, PlanKey::DependencyGetter(_)) {
+                    return Err("a dependency table containing a file-local getter identity".into());
+                }
+                if *setter && !matches!(setter_key, Some(PlanKey::DependencySetter(_))) {
+                    return Err("a dependency table containing a file-local setter identity".into());
+                }
                 let declaration = declarations
                     .declaration_identity(*identity)
                     .ok_or("an inherited property without its frozen getter identity")?;
@@ -141,13 +149,13 @@ fn table(
                     ));
                 }
                 if *setter {
-                    let Some(PlanKey::DependencySetter(_)) = setter_key else {
+                    let Some(setter_key @ PlanKey::DependencySetter(_)) = *setter_key else {
                         return Err(
                             "a dependency table containing a file-local setter identity".into()
                         );
                     };
                     members.push((
-                        *setter_key.expect("validated setter key"),
+                        setter_key,
                         property_member_identity(declaration, true)
                             .ok_or("an inherited setter without accessor identity")?,
                         (
