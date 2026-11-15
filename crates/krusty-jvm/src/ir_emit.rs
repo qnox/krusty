@@ -1970,7 +1970,7 @@ fn emit_class(
     if ir.specialized_anonymous_classes.contains_key(&class_id) {
         start_regenerated_anonymous_source_map(ir, class_id, &mut cw);
     } else {
-        enclosure::start_inline_body_source_map(ir, c, &mut cw);
+        enclosure::start_inline_body_source_map(ir, env.override_results, c, facade, &mut cw);
     }
     let transformed = env.run.transformed_coroutine(&fq_name);
     let transformed_metadata = env

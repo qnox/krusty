@@ -94,35 +94,18 @@ pub(super) fn emit_lambda_class(
             None => cw.set_enclosing_class(&owner),
         }
     }
-    let mut replaced_declaration_enclosure = None;
-    let mut regenerated_inline_class = false;
-    if lambda.inline_origin {
-        match regenerated_inline_origin(ir, env.override_results, lambda.invoke, facade) {
-            Some(origin) => {
-                regenerated_inline_class = true;
-                // AnonymousObjectTransformer visits the declaration class before replacing its
-                // call-site enclosure. Those now-unused constants remain at the front of the
-                // regenerated class's pool.
-                replaced_declaration_enclosure = origin.declaration_enclosure;
-                cw.set_source_file(Some(origin.source_file));
-                cw.start_inline_origin_source_map_at(origin.lines, &origin.path);
-            }
-            None => match foreign_declaration_source(ir, c) {
-                // Another file's class, compiled here for a call site that inlines its declaring
-                // function: that file is its source, as it is where that file writes it.
-                Some((source_file, lines)) => {
-                    cw.set_source_file(Some(source_file));
-                    cw.start_inline_origin_source_map(lines);
-                }
-                None => {
-                    let lines = u16::try_from(ir.source_line_count)
-                        .unwrap_or(u16::MAX)
-                        .max(1);
-                    cw.start_inline_origin_source_map(lines);
-                }
-            },
-        }
-    }
+    let origin = lambda.inline_origin.then(|| {
+        super::enclosure::start_inline_class_source_map(
+            ir,
+            env.override_results,
+            c,
+            Some(lambda.invoke),
+            facade,
+            &mut cw,
+        )
+    });
+    let regenerated_inline_class = origin.as_ref().is_some_and(|origin| origin.regenerated);
+    let replaced_declaration_enclosure = origin.and_then(|origin| origin.declaration_enclosure);
     env.inner_classes.register(&mut cw);
     match &lambda.sam {
         Some(target) => cw.add_interface(&target.classifier.render()),
@@ -365,68 +348,6 @@ pub(super) fn emit_lambda_class(
     } else {
         finish_local_synthetic_class(cw, env)
     }
-}
-
-struct RegeneratedInlineOrigin {
-    source_file: String,
-    path: String,
-    lines: u16,
-    declaration_enclosure: Option<(String, Option<(String, String)>)>,
-}
-
-/// The declaration source and original enclosure a call-site-specialized lambda class was
-/// regenerated from.
-fn regenerated_inline_origin(
-    ir: &IrFile,
-    override_results: &crate::override_results::OverrideResults,
-    mut function: krusty::ir::FunId,
-    facade: &str,
-) -> Option<RegeneratedInlineOrigin> {
-    let template = crate::lambda_classes::specialization_template(ir, function)?;
-    let declaration_facade = ir
-        .foreign_template_facade(template)
-        .map_or(facade, |facade| {
-            krusty::jvm::names::classfile_internal_name_of(facade)
-        });
-    let declaration_enclosure = super::enclosure::scope_enclosure(
-        ir,
-        override_results,
-        krusty::ir::IrEnclosure::Function(template),
-        declaration_facade,
-    );
-    function = crate::lambda_classes::specialization_source(ir, function);
-    let source = if ir.foreign_inline_templates.contains(&template) {
-        ir.foreign_template_source(template)?.source
-    } else {
-        ir.source_debug.current()?
-    };
-    let debug = ir.source_debug.file(source)?;
-    let source_file = debug
-        .name
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(&debug.name)
-        .to_string();
-    let path = ir.lambda_class_names.get(&function)?.render();
-    let lines = u16::try_from(debug.line_count).unwrap_or(u16::MAX).max(1);
-    Some(RegeneratedInlineOrigin {
-        source_file,
-        path,
-        lines,
-        declaration_enclosure,
-    })
-}
-
-/// The source file name and line count of the file whose inline function declares `class`, when
-/// that is another file.
-fn foreign_declaration_source(ir: &IrFile, class: &IrClass) -> Option<(String, u16)> {
-    let template = crate::inner_classes::foreign_declaration(ir, class)?;
-    let debug = ir
-        .source_debug
-        .file(ir.foreign_template_source(template)?.source)?;
-    let source_file = debug.name.rsplit(['/', '\\']).next().unwrap_or(&debug.name);
-    let lines = u16::try_from(debug.line_count).unwrap_or(u16::MAX).max(1);
-    Some((source_file.to_string(), lines))
 }
 
 fn emit_initialization(
