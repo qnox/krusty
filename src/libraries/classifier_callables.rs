@@ -19,6 +19,14 @@ pub struct BoundInnerConstructor {
     pub outer: TypeName,
 }
 
+/// Classifier application fixed at this constructor call before applicability and ranking.
+/// It belongs to this candidate; same-named functions retain their own call constraints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ConstructorCallConstraints {
+    pub(crate) type_arguments: &'static [Ty],
+    pub(crate) expected: Option<Ty>,
+}
+
 /// The constructor facet of a callable candidate: the classifier it constructs, for an `inner`
 /// classifier's constructor the classifier that declares the captured outer instance, and where
 /// the constructor comes from.
@@ -27,6 +35,7 @@ pub struct ConstructorCandidate {
     pub classifier: TypeName,
     pub outer: Option<TypeName>,
     pub origin: ConstructorOrigin,
+    pub(crate) call_constraints: Option<ConstructorCallConstraints>,
 }
 
 /// Where a constructor candidate comes from.
@@ -134,6 +143,27 @@ fn classifier_instance_type(internal: TypeName, classifier: &LibraryType) -> Ty 
 }
 
 impl FunctionInfo {
+    /// Apply a call's classifier arguments without rewriting the declaration's generic signature.
+    pub(crate) fn with_constructor_call_constraints(
+        mut self,
+        constraints: ConstructorCallConstraints,
+    ) -> Self {
+        self.constructor
+            .as_mut()
+            .expect("constructor call constraints require a constructor candidate")
+            .call_constraints = Some(constraints);
+        self
+    }
+
+    /// Consume call-local inference inputs before the selected declaration can be published.
+    pub(crate) fn take_constructor_call_constraints(
+        &mut self,
+    ) -> Option<ConstructorCallConstraints> {
+        self.constructor
+            .as_mut()
+            .and_then(|constructor| constructor.call_constraints.take())
+    }
+
     /// The constructor facet when this candidate constructs an `inner` classifier through a value
     /// of its outer class.
     pub fn bound_inner_constructor(&self) -> Option<BoundInnerConstructor> {
@@ -278,6 +308,7 @@ impl FunctionInfo {
             classifier: internal,
             outer: None,
             origin,
+            call_constraints: None,
         });
         candidate
     }
@@ -325,6 +356,7 @@ impl FunctionInfo {
             classifier: inner,
             outer: Some(outer),
             origin: ConstructorOrigin::Declared,
+            call_constraints: None,
         });
         Some(candidate)
     }
@@ -336,6 +368,49 @@ mod tests {
     use crate::libraries::{
         CompilerIntrinsic, InlineBodyPlan, InlineBodyValue, InlineKind, MemberRealization,
     };
+
+    #[test]
+    fn constructor_application_is_consumed_without_rewriting_its_declaration() {
+        let owner = crate::types::type_name("fixture/Tag");
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let formal = Ty::ty_param("Tag:T", any);
+        let mut classifier = LibraryType::declaration_header();
+        classifier.own_type_parameter_count = 1;
+        classifier.type_parameters =
+            crate::types::TypeParameters::invariant(vec!["Tag:T".into()], vec![vec![any]]);
+        let declaration = LibraryMember::new(
+            "<init>".into(),
+            vec![formal],
+            Ty::Unit,
+            "(Ljava/lang/Object;)V".into(),
+        );
+        let original = FunctionInfo::scope_constructor(
+            owner,
+            &classifier,
+            declaration,
+            ConstructorOrigin::Declared,
+        );
+        let application = Ty::obj_args_name(owner, &[Ty::String]);
+        let constraints = ConstructorCallConstraints {
+            type_arguments: application.type_args(),
+            expected: Some(application),
+        };
+        let mut candidate = original
+            .clone()
+            .with_constructor_call_constraints(constraints);
+        assert_eq!(candidate.generic_sig, original.generic_sig);
+        assert_eq!(
+            candidate.callable.declared_params,
+            original.callable.declared_params
+        );
+        assert_eq!(
+            candidate.take_constructor_call_constraints(),
+            Some(constraints)
+        );
+        assert_eq!(candidate.take_constructor_call_constraints(), None);
+        assert_eq!(candidate.constructor, original.constructor);
+        assert_eq!(candidate.generic_sig, original.generic_sig);
+    }
 
     #[test]
     fn an_inner_constructor_keeps_independent_formals_and_a_complete_instance_result() {
