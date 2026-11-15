@@ -157,7 +157,7 @@ impl Runtime {
                 .expect("a primitive array element names its class"),
         );
         let names = krusty::backend::class_names::member_class_names(class);
-        let to_string = self.identity_to_string(module, class, &names);
+        let to_string = self.identity_to_string(module, &names);
         let methods = [
             self.objects.identity_equals,
             self.identity.hash_code,
