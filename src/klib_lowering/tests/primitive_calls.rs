@@ -489,9 +489,16 @@ fn checked_klib_property_facts_use_the_exact_property_name() {
     let identity = property.getter.external_identity.unwrap();
     let realization = libraries.external_callable(identity).unwrap();
     let selected = realization.klib_body_callable().unwrap();
+    let checked = super::checked_backend_klib_facts(
+        crate::resolve::for_checked_klib_bodies(
+            &libraries,
+            libraries.declaration_bodies(),
+            [selected],
+        )
+        .expect("selected property body has checked facts"),
+    );
     let facts = KlibCalleeFacts::new([selected])
-        .with_builtin_implementation_facts(&libraries)
-        .unwrap();
+        .with_checked_dependency_facts(checked.klib_dependency_facts());
     let [implementation] = facts.builtin_implementation_facts()[&identity].as_ref() else {
         panic!("CharSequence.length has one represented builtin implementation");
     };
@@ -620,10 +627,10 @@ fn an_external_array_size_leaf_keeps_its_authenticated_property_read() {
         .getter
         .external_identity
         .expect("Array.size has an exact provider identity");
-    let realization = libraries
+    let external = libraries
         .external_callable(target)
         .expect("the exact Array.size getter");
-    let selected = realization
+    let selected = external
         .klib_body_callable()
         .expect("the getter has a KLIB declaration contract");
     assert_eq!(
