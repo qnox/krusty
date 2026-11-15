@@ -630,6 +630,8 @@ mod tests {
 
     fn record() -> LaidOutClass {
         LaidOutClass {
+            class_identity: None,
+            published_layout: None,
             table: LaidOutSuperclass::default(),
             descriptor: String::new(),
             fields_end: 0,
@@ -640,6 +642,8 @@ mod tests {
             methods: krusty::fx_hash::HashMap::default(),
             activation: ObjectFunction::Local(String::new()),
             dependency_implementations: Vec::new(),
+            published_constructors: krusty::fx_hash::HashMap::default(),
+            published_methods: krusty::fx_hash::HashMap::default(),
         }
     }
 
