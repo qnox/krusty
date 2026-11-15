@@ -22,17 +22,19 @@ cpu_ticks() {
 pressure_usec() {
     local file=$root/proc/pressure/$1
     if [[ -r $file ]]; then
-        awk '$1 == "some" { for (i = 2; i <= NF; i++) if ($i ~ /^total=/) { sub(/^total=/, "", $i); print $i } }' "$file"
+        awk '$1 == "some" { for (i = 2; i <= NF; i++) if ($i ~ /^total=/) { sub(/^total=/, "", $i); total = $i } }
+             END { print (total == "") ? "-" : total }' "$file"
     else
         echo -
     fi
 }
 
-# Microseconds this job's cgroup was throttled by its CPU quota, or `-` without a cgroup v2 quota.
+# Microseconds this job's cgroup was throttled by its CPU quota, or `-` where its cpu.stat has no
+# throttling counter, as without a cgroup v2 cpu controller or in the root cgroup.
 throttled_usec() {
     local file=$root/sys/fs/cgroup/cpu.stat
     if [[ -r $file ]]; then
-        awk '$1 == "throttled_usec" { print $2 }' "$file"
+        awk '$1 == "throttled_usec" { usec = $2 } END { print (usec == "") ? "-" : usec }' "$file"
     else
         echo -
     fi

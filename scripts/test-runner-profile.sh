@@ -64,6 +64,18 @@ RUNNER_PROFILE_ROOT=$fixture/bare-end "$repo/scripts/runner-profile.sh" report "
 expect bare "machine: 2 cpus (Stand-in CPU @ 2.00GHz), cpu quota max, memory 8.0 GiB, swap 1.0 of 2.0 GiB used
 over 10s: cpu user 50% system 0% iowait 0% steal 0% idle 50% | stalled on cpu n/a, io n/a, memory n/a | throttled n/a"
 
+# A root cgroup: cpu.stat holds usage counters but no throttling counter.
+machine root-start 10 '0 0 0 100 0 0 0 0' 0 0 0 5
+machine root-end 20 '50 0 0 150 0 0 0 0' 0 0 0 5
+for state in start end; do
+    rm "$fixture/root-$state/sys/fs/cgroup/cpu.max"
+    printf 'usage_usec 5\nuser_usec 3\nsystem_usec 2\n' > "$fixture/root-$state/sys/fs/cgroup/cpu.stat"
+done
+RUNNER_PROFILE_ROOT=$fixture/root-start "$repo/scripts/runner-profile.sh" start "$fixture/root.state"
+RUNNER_PROFILE_ROOT=$fixture/root-end "$repo/scripts/runner-profile.sh" report "$fixture/root.state" > "$fixture/root.out"
+expect root "machine: 2 cpus (Stand-in CPU @ 2.00GHz), cpu quota max, memory 8.0 GiB, swap 1.0 of 2.0 GiB used
+over 10s: cpu user 50% system 0% iowait 0% steal 0% idle 50% | stalled on cpu 0s, io 0s, memory 0s | throttled n/a"
+
 status=0
 "$repo/scripts/runner-profile.sh" report "$fixture/missing.state" > "$fixture/missing.out" 2>&1 || status=$?
 expect missing "no runner profile was started at $fixture/missing.state"
@@ -76,4 +88,4 @@ if [[ $failures -ne 0 ]]; then
     echo "$failures runner profile case(s) failed" >&2
     exit 1
 fi
-echo "runner profile: 3 cases passed"
+echo "runner profile: 4 cases passed"
