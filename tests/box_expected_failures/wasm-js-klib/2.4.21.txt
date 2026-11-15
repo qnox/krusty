@@ -67,7 +67,6 @@ arrays/hashMap.kt
 arrays/inProjectionOfList.kt
 arrays/indices.kt
 arrays/indicesChar.kt
-arrays/iterator.kt
 arrays/iteratorBooleanArray.kt
 arrays/iteratorByteArray.kt
 arrays/iteratorByteArrayNextByte.kt
@@ -78,7 +77,6 @@ arrays/iteratorIntArray.kt
 arrays/iteratorLongArray.kt
 arrays/iteratorLongArrayNextLong.kt
 arrays/iteratorShortArray.kt
-arrays/kt1291.kt
 arrays/kt2997.kt
 arrays/kt33.kt
 arrays/kt4118.kt
@@ -3523,7 +3521,6 @@ regressions/multimodule/inlineAssertFailsWithCompletedBlock.kt
 regressions/multimodule/inlineBuiltString.kt
 regressions/multimodule/inlineNarrowElementInRange.kt
 regressions/multimodule/inlineNullCheckReturnTargets.kt
-regressions/multimodule/inlineStdlibRepeat.kt
 regressions/multimodule/inlineTextTrim.kt
 regressions/multimodule/inlineTodoDefaultMessage.kt
 regressions/multimodule/multimoduleDependencyFunctionImplementationMarkers.kt
@@ -3612,7 +3609,6 @@ smartCasts/genericSet.kt
 smartCasts/kt17725.kt
 smartCasts/kt19100.kt
 smartCasts/kt44814.kt
-smartCasts/kt44932.kt
 smartCasts/kt72391.kt
 smartCasts/negativesmartCastAugmentedAssignment.kt
 smartCasts/smartCastedGenericWhenSubjectInRangeCheck.kt

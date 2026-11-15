@@ -593,6 +593,15 @@ impl DependencyBodyUnit {
         &self.ir
     }
 
+    /// Carry the selected declarations' builtin implementations into this checked body unit.
+    pub(crate) fn record_builtin_implementation_facts(
+        &mut self,
+        callees: &KlibCalleeFacts<'_>,
+    ) -> Result<(), crate::fir::ExternalCallableId> {
+        self.ir
+            .record_external_builtin_implementations(callees.builtin_implementation_facts())
+    }
+
     /// Singleton receiver of the exact call-edge variant which authenticated this emitted body.
     pub(crate) fn authenticated_singleton_dispatch(
         &self,
@@ -938,18 +947,7 @@ impl CallLinker for Linker<'_, '_> {
             .declarations
             .external_callable_by_dependency(&identity)
             .and_then(|(_, realization)| {
-                let callable = realization.klib_body_callable()?;
-                callable
-                    .range_construction()
-                    .or(match callable.compiler_intrinsic() {
-                        Some(crate::libraries::CompilerIntrinsic::RangeUntil) => {
-                            Some(crate::fir::FirRangeOperation::Until)
-                        }
-                        Some(crate::libraries::CompilerIntrinsic::RangeDownTo) => {
-                            Some(crate::fir::FirRangeOperation::DownTo)
-                        }
-                        _ => None,
-                    })
+                super::for_loops::range_literal_operation(realization.klib_body_callable()?)
             });
         match operation {
             Some(operation) => Ok(Some(operation)),
@@ -987,10 +985,7 @@ impl CallLinker for Linker<'_, '_> {
             .declarations
             .external_callable_by_dependency(&identity)
             .and_then(|(_, realization)| {
-                match realization.klib_body_callable()?.compiler_intrinsic()? {
-                    crate::libraries::CompilerIntrinsic::Indices(kind) => Some(kind),
-                    _ => None,
-                }
+                super::for_loops::indices_receiver(realization.klib_body_callable()?)
             }))
     }
 
@@ -1023,8 +1018,7 @@ impl CallLinker for Linker<'_, '_> {
             .is_some_and(|(_, realization)| {
                 realization
                     .klib_body_callable()
-                    .and_then(|callable| callable.compiler_intrinsic())
-                    == Some(crate::libraries::CompilerIntrinsic::ProgressionReversed)
+                    .is_some_and(super::for_loops::reverses_progression)
             }))
     }
 
