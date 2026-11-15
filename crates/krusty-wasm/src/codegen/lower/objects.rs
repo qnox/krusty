@@ -1151,6 +1151,7 @@ impl Body<'_> {
                 if !storage.direct_read {
                     return Err("a top-level property read that requires an accessor".to_string());
                 }
+                self.initialize_storage_owner(target)?;
                 self.code.global_get(storage.global);
                 // A `lateinit` property's storage is read through its guard, as a read of the
                 // storage in its own file is, unless it is the raw read `isInitialized` makes.
@@ -1245,6 +1246,7 @@ impl Body<'_> {
                     return Err("a top-level property write that requires an accessor".to_string());
                 }
                 self.value(value, storage.ty)?;
+                self.initialize_storage_owner(target)?;
                 self.code.global_set(storage.global);
                 return Ok(());
             }

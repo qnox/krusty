@@ -358,6 +358,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     ) -> Result<(), Unsupported> {
         match self.top_level(target, true)? {
             TopLevel::Slot(index) => {
+                self.initialize_static_owner(index)?;
                 let slot = self.file.statics[index as usize];
                 let address = self.data_address(slot);
                 self.builder.ins().store(trusted(), value, address, 0);
