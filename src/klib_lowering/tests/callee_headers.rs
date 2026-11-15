@@ -1628,7 +1628,8 @@ fn stdlib_calls_reach_header_declared_callees() {
     // `for` loop over a range literal counts, and one over another progression declines at the
     // loop rather than at its protocol calls. A top-level property accessor now lowers from its
     // own body, so a caller of one (`getCoroutineSuspended` reads `COROUTINE_SUSPENDED`) declines
-    // inside it.
+    // inside it. A file-private top-level function or property now links, so one more body
+    // reaches past it and declines at a member call.
     let expected = if crate::kotlin_version::target()
         >= crate::kotlin_version::KotlinVersion::V2_4_20
     {
@@ -1647,7 +1648,7 @@ fn stdlib_calls_reach_header_declared_callees() {
                      indices)",
                     6,
                 ),
-                ("it uses a call of a member function)", 88),
+                ("it uses a call of a member function)", 89),
                 ("it uses a call through a property accessor signature)", 41),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses an access of a generic property)", 2),
@@ -1673,7 +1674,7 @@ fn stdlib_calls_reach_header_declared_callees() {
                      indices)",
                     6,
                 ),
-                ("it uses a call of a member function)", 80),
+                ("it uses a call of a member function)", 81),
                 ("it uses a call through a property accessor signature)", 41),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses an access of a generic property)", 2),

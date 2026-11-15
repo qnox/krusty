@@ -203,6 +203,9 @@ pub struct DependencyBodyUnit {
     file_initializations: HashMap<static_properties::FileIdentity, FunId>,
     /// The functions that already run their file's initialization first, or need none.
     initialized_functions: HashSet<FunId>,
+    /// Whether the target stores constant top-level initializers before any code of their file
+    /// runs, rather than in its file's initialization order.
+    presets_constant_statics: bool,
     builtins: IrBuiltinOperators,
 }
 
@@ -248,6 +251,7 @@ impl Default for DependencyBodyUnit {
             statics: HashMap::default(),
             file_initializations: HashMap::default(),
             initialized_functions: HashSet::default(),
+            presets_constant_statics: false,
             builtins: IrBuiltinOperators::new(),
         }
     }
@@ -705,6 +709,13 @@ impl DependencyBodyUnit {
         }
     }
 
+    /// This unit for a target that stores constant top-level initializers before any code of
+    /// their file runs (`presets`), or one that runs them in their file's initialization order.
+    pub(crate) fn presetting_constant_statics(mut self, presets: bool) -> Self {
+        self.presets_constant_statics = presets;
+        self
+    }
+
     /// The library and backing field of each top-level property this unit stores.
     pub(crate) fn materialized_statics(&self) -> impl Iterator<Item = (&str, &KlibIrSymbol)> + '_ {
         self.statics
@@ -748,6 +759,7 @@ impl DependencyBodyUnit {
             statics: &mut self.statics,
             file_initializations: &mut self.file_initializations,
             initialized_functions: &mut self.initialized_functions,
+            presets_constant_statics: self.presets_constant_statics,
             pending: &mut pending,
             root: callable,
             active_module: callable.identity().module.clone(),
@@ -880,6 +892,7 @@ struct Linker<'u, 's> {
     statics: &'u mut HashMap<static_properties::StaticIdentity, u32>,
     file_initializations: &'u mut HashMap<static_properties::FileIdentity, FunId>,
     initialized_functions: &'u mut HashSet<FunId>,
+    presets_constant_statics: bool,
     pending: &'u mut VecDeque<PendingBody<'s>>,
     /// The declaration this lowering was asked for, which its own recursive calls select.
     root: KlibBodyCallable<'s>,
