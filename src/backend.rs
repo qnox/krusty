@@ -26,6 +26,7 @@ pub mod property_entries;
 pub mod range_constructions;
 pub mod reference_names;
 mod source_class_members;
+pub use source_class_members::SourceMemberAnnotations;
 pub mod value_classes;
 
 pub use crate::fir::{BuiltinImplementation, BuiltinOverrideDeclaration};
