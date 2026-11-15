@@ -172,10 +172,14 @@ pub(super) fn realize(ir: &mut IrFile, callable_under: &Under, renamed_functions
             // branch for a primitive target slot and produces an impossible stack-map join.
             .map(|parameter| parameter.is_nullable())
             .collect();
+        // The same physical slot decides the result: a `UIntArray` result leaves the target as
+        // its `int[]` carrier and is boxed for `FunctionN.invoke`'s `Object`.
+        let target_ret = super::representation::carrier_slot(fr.target_ret_ty, callable_under)
+            .unwrap_or(fr.target_ret_ty);
         fr.box_ret = fr.ret_ty.non_null().obj_internal().and_then(|fq| {
             (callable_under.contains_key(&fq)
                 && target_decl_ret.non_null().obj_internal() == Some(fq)
-                && fr.ret_ty != fr.target_ret_ty)
+                && fr.ret_ty != target_ret)
                 .then_some(fq)
         });
         fr.invoke_renamed = fr
