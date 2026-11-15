@@ -358,22 +358,15 @@ fn reification_marker() -> Node {
 }
 
 /// The loads of every value the `passed` lambdas capture, from the body's captured parameters, in
-/// the order the copy's constructor takes them: an outer instance once per type.
+/// the order the copy's constructor takes them.
 fn captured_loads(
     parameters: &Parameters,
     lambdas: &[Lambda],
     passed: &[(usize, usize)],
 ) -> Vec<Insn> {
     let mut loads = Vec::new();
-    let mut merged = super::lambda_expansion::merged_outer_instances(
-        passed.iter().map(|&(_, lambda)| &lambdas[lambda]),
-    )
-    .into_iter();
     for &(_, lambda) in passed {
         for index in lambdas[lambda].captured.clone() {
-            if merged.next().unwrap_or(false) {
-                continue;
-            }
             let slot = parameters.real_size()
                 + parameters.captured[..index]
                     .iter()

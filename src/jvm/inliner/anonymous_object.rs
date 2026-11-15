@@ -25,7 +25,7 @@ mod sam_wrapper;
 mod suspend_methods;
 mod type_remapper;
 
-use super::lambda_expansion::{merged_outer_instances, CAPTURED_THIS};
+use super::lambda_expansion::CAPTURED_THIS;
 
 /// The suffix kotlinc gives an object's own outer instance when an inlined lambda captures one too
 /// (`AsmUtil.INLINE_FUN_THIS_0_SUFFIX`).
@@ -756,8 +756,8 @@ fn remap_declaration(
 /// `$inlined` added, numbered when that name is taken (`getNewFieldName`, `addUniqueField`): every
 /// field the original declares is taken first, as kotlinc's `visitField` records each one it
 /// copies before the constructor is patched, and a numbered name the class already holds is
-/// skipped ([`FieldNames`]), where kotlinc would declare it twice. A captured outer instance keeps `this$0`, one field
-/// per type ([`merged_outer_instances`]).
+/// skipped ([`FieldNames`]), where kotlinc would declare it twice. A captured outer instance keeps `this$0`:
+/// the constructor takes it once per lambda and stores the first ([`constructor::Constructor::inline_lambdas`]).
 ///
 /// The object's own outer instance, when a lambda captures one too, is renamed `this$0$inline_fun`
 /// (`INLINE_FUN_THIS_0_SUFFIX`), in the plan and in what is left of the original constructor of
@@ -828,12 +828,9 @@ fn plan_lambdas<'a>(
         .iter()
         .map(|passed| passed.argument)
         .collect();
-    let merged = merged_outer_instances(lambdas.iter().map(|lambda| lambda.lambda));
     let recaptured: Vec<(String, String)> = lambdas
         .iter()
         .flat_map(|lambda| lambda.captured.iter().cloned())
-        .zip(merged)
-        .filter_map(|(captured, merged)| (!merged).then_some(captured))
         .collect();
     let fields = plan.inline_lambdas(call_desc, &arguments, &recaptured)?;
     for (lambda, field) in lambdas.iter_mut().zip(fields) {
