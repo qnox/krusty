@@ -51,6 +51,11 @@ pub trait BackendClassifierSource {
         }
     }
 
+    /// Whether `ancestor` is `classifier` or one of the supertypes its facts publish, transitively.
+    fn is_subclassifier(&self, classifier: TypeName, ancestor: TypeName) -> bool {
+        is_subclassifier(self, classifier, ancestor)
+    }
+
     /// Every builtin class (`String`, a primitive, an unsigned integer) whose classifier is a
     /// proper subtype of `classifier`, through the supertypes the classifier facts publish: the
     /// builtin values a target carrying them in representations of its own must count as
