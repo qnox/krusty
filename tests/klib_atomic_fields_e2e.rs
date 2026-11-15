@@ -1,11 +1,12 @@
 //! PLATFORM-SPECIFIC: the Native stdlib KLIB's own `kotlin.concurrent.atomics` member bodies.
 //!
-//! Native's `AtomicInt`, `AtomicLong` and `AtomicBoolean` are ordinary KLIB classes. Each member
-//! body calls an external `kotlin.concurrent` function whose `TypedIntrinsic` kind names one atomic
-//! operation, passing a property reference bound to the instance's own backing field. The JVM maps
-//! the same classes onto `java.util.concurrent.atomic` and never reads these bodies. The portable
-//! behavior of the classes is `tests/box_regressions/atomics.kt`; this test pins what the shared
-//! KLIB lowering makes of the Native bodies: one atomic operation on that field per member.
+//! Native's `AtomicInt`, `AtomicLong`, `AtomicBoolean` and `AtomicReference` are ordinary KLIB
+//! classes. Each member body calls an external `kotlin.concurrent` function whose `TypedIntrinsic`
+//! kind names one atomic operation, passing a property reference bound to the instance's own
+//! backing field. The JVM maps the same classes onto `java.util.concurrent.atomic` and never reads
+//! these bodies. The portable behavior of the classes is `tests/box_regressions/atomics.kt`; this
+//! test pins what the shared KLIB lowering makes of the Native bodies: one atomic operation on that
+//! field per member.
 
 use krusty::backend::{Artifact, Backend, CheckedIrFile, CheckedIrUnitKind};
 use krusty::diag::DiagSink;
@@ -44,7 +45,17 @@ fun booleans(a: AtomicBoolean): Boolean {
     return a.load()
 }
 
+fun references(a: AtomicReference<String>): String {
+    a.store(\"y\")
+    a.exchange(\"z\")
+    a.compareAndSet(\"z\", \"w\")
+    a.compareAndExchange(\"w\", \"v\")
+    if (a.toString() != a.load()) return \"toString\"
+    return a.load()
+}
+
 fun box(): String {
+    references(AtomicReference(\"x\"))
     ints(AtomicInt(0))
     longs(AtomicLong(0L))
     booleans(AtomicBoolean(false))
@@ -70,6 +81,17 @@ impl Backend for AtomicFieldProbe {
 
     fn emits_dependency_support(&self) -> bool {
         self.native.emits_dependency_support()
+    }
+
+    fn lowers_coroutines_on_common_ir(&self) -> bool {
+        self.native.lowers_coroutines_on_common_ir()
+    }
+
+    fn represents_dependency_classifier(
+        &self,
+        classifier: krusty::backend::DependencyClassifier,
+    ) -> bool {
+        self.native.represents_dependency_classifier(classifier)
     }
 
     fn numbers_slots(&self) -> bool {
@@ -216,14 +238,18 @@ fn native_atomic_members_lower_to_one_atomic_operation_on_their_field() {
             expected.push(field(class, operation));
         }
     }
-    for operation in [
-        "Load",
-        "CompareAndExchange",
-        "CompareAndSet",
-        "Exchange",
-        "Store",
-    ] {
-        expected.push(field("AtomicBoolean", operation));
+    // `AtomicReference<T>` is generic; it is final, so its members are emitted with it as the
+    // non-generic classes' are.
+    for class in ["AtomicBoolean", "AtomicReference"] {
+        for operation in [
+            "Load",
+            "CompareAndExchange",
+            "CompareAndSet",
+            "Exchange",
+            "Store",
+        ] {
+            expected.push(field(class, operation));
+        }
     }
     assert_eq!(probe.seen.into_inner(), expected);
     // `toString` reads the field through its private getter, which no class table numbers. It
