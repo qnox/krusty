@@ -1274,7 +1274,7 @@ impl<'a> FileLowering<'a> {
                 ordinal: ordinal as u32 + 1,
             };
             body.record_semantic_slots(&semantic_slots);
-            body.initialize_class(class)?;
+            body.initialize_own_statics(class)?;
             for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
                 body.bind_parameter(slot as u32, *value, *ty)?;
             }
@@ -1805,7 +1805,7 @@ impl<'a> FileLowering<'a> {
         self.emit_function(id, signature, Ty::Unit, &name, &mut |body, params| {
             body.scope = krusty::ir::IrEnclosure::Constructor { class, ordinal: 0 };
             body.record_semantic_slots(&semantic_slots);
-            body.initialize_class(class)?;
+            body.initialize_own_statics(class)?;
             for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
                 body.bind_parameter(slot as u32, *value, *ty)?;
             }
@@ -2436,6 +2436,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(());
         }
         for &owner in chain.iter().rev() {
+            // A class's own companion-block statics; a class that has them has no companion.
+            self.initialize_own_statics(owner)?;
+            if self.terminated {
+                return Ok(());
+            }
             let getter = {
                 let ir = self.file.ir;
                 let classes = &self.file.classes;

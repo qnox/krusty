@@ -1,6 +1,7 @@
 // LANGUAGE: +CompanionBlocks
 // A companion block property is initialized with its class, not at program start: on the class's
-// first construction, block function call, or storage access, after its superclass, and only once.
+// first construction (before the constructor's arguments), block function call, or storage access,
+// after its superclass and the superclass's companion object, and only once.
 
 var log = ""
 
@@ -35,6 +36,26 @@ class Accessed {
     }
 }
 
+class Argued(val argument: Int) {
+    companion {
+        val value = note("G")
+    }
+}
+
+open class WithCompanion {
+    companion object {
+        init {
+            note("W")
+        }
+    }
+}
+
+class Child : WithCompanion() {
+    companion {
+        val value = note("H")
+    }
+}
+
 fun box(): String {
     note("0")
     if (log != "0") return "Fail: initialized at program start: $log"
@@ -47,5 +68,9 @@ fun box(): String {
     if (Accessed.value != 7) return "Fail: storage access: $log"
     Derived.counter = 10
     if (Derived.counter != 10 || Base.base != 2 || Derived.derived != 3) return "Fail: values"
-    return if (log == "0BDCF1A") "OK" else "Fail: $log"
+    if (log != "0BDCF1A") return "Fail: $log"
+    Argued(note("2"))
+    if (log != "0BDCF1AG2") return "Fail: constructor arguments: $log"
+    if (Child.value != 11) return "Fail: superclass companion: $log"
+    return if (log == "0BDCF1AG2WH") "OK" else "Fail: $log"
 }

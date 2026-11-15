@@ -1059,7 +1059,7 @@ impl<'a> FileLowering<'a> {
                     lowering.bind_parameter(slot as u32, *value, *ty)?;
                 }
                 if let Some(class) = block_class {
-                    lowering.initialize_class(class)?;
+                    lowering.activate_class(class)?;
                 }
                 lowering.frame_objects = lowering.frame_constructions(body);
                 lowering.statement(body)

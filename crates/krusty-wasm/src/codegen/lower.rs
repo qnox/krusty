@@ -338,7 +338,7 @@ pub(super) fn lower_file(
         // A block function or accessor is a static member of its class: calling one initializes
         // the class first.
         if let Some(class) = ir.companion_blocks.declaring_class(id as FunId) {
-            body.initialize_class(class);
+            body.activate_class(class, None)?;
         }
         body.initializers = ir.single_assignment_initializers(root);
         body.shared_cell_parameters(id as FunId)?;
@@ -1239,7 +1239,7 @@ impl<'a> Body<'a> {
                 None => return Err(format!("an assignment to undeclared value {var}")),
             },
             IrExpr::GetStatic(index) => {
-                self.initialize_static_owner(index);
+                self.initialize_static_owner(index)?;
                 self.code.global_get(self.globals[index as usize]);
                 // A read of a `lateinit` top-level property is guarded unless it is the raw
                 // storage read `::p.isInitialized` compares with null.
@@ -1256,7 +1256,7 @@ impl<'a> Body<'a> {
             IrExpr::SetStatic { index, value } => {
                 let ty = self.ir.statics[index as usize].ty;
                 self.value(value, ty)?;
-                self.initialize_static_owner(index);
+                self.initialize_static_owner(index)?;
                 self.code.global_set(self.globals[index as usize]);
             }
             IrExpr::Block { stmts, value } => {

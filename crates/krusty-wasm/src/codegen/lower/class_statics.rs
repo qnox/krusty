@@ -3,8 +3,10 @@
 //! A `companion { … }` block property is stored with its class, and Kotlin runs its initializer
 //! as part of initializing that class: the first construction of the class, the first call of one
 //! of its block functions or accessors, or the first read or write of the storage itself, whichever
-//! comes first. A superclass is initialized before its subclass. Each class gets one function that
-//! runs its initializers behind a once-only flag, called at each of those entry points.
+//! comes first. A superclass, and its companion, is initialized before its subclass: each of
+//! those entry points runs the class's activation (`activate_class`), which initializes every
+//! class of the chain root first, its companion object or its own statics. A class's own
+//! statics run in one function, behind a once-only flag.
 //!
 //! The flag is set before the initializers run: an initializer that reaches back into its own
 //! class sees the storage's default, which is what Kotlin does.
@@ -73,17 +75,11 @@ impl ClassInitializers {
             .any(|initializer| initializer.statics.contains(&index))
     }
 
-    /// The initializer to run before touching `class`: its own, or its nearest initialized
-    /// superclass's, since constructing it runs every superclass constructor.
-    fn for_class(&self, ir: &IrFile, class: ClassId) -> Option<u32> {
-        let mut current = Some(class);
-        while let Some(class) = current {
-            if let Some(initializer) = self.classes.get(&class) {
-                return Some(initializer.function);
-            }
-            current = ir.class_id_by_name(ir.classes[class as usize].superclass);
-        }
-        None
+    /// The function that runs `class`'s own statics, if it has any.
+    fn own(&self, class: ClassId) -> Option<u32> {
+        self.classes
+            .get(&class)
+            .map(|initializer| initializer.function)
     }
 
     /// Define every class initializer [`Self::declare`] reserved.
@@ -112,12 +108,6 @@ impl ClassInitializers {
             body.code.end();
             body.code.i32_const(1);
             body.code.global_set(initializer.flag);
-            let superclass = ir
-                .class_id_by_name(ir.classes[class as usize].superclass)
-                .and_then(|parent| self.for_class(ir, parent));
-            if let Some(superclass) = superclass {
-                body.code.call(superclass);
-            }
             for &index in &initializer.statics {
                 let property = &ir.statics[index as usize];
                 if let Some(init) = property.init {
@@ -133,23 +123,28 @@ impl ClassInitializers {
 }
 
 impl Body<'_> {
-    /// Initialize `class` here unless it already is: the entry of its constructors and of its
-    /// block functions and accessors.
-    pub(super) fn initialize_class(&mut self, class: ClassId) {
-        if let Some(function) = self.class_initializers.for_class(self.ir, class) {
+    /// Run `class`'s own statics here unless they already ran: the entry of its constructors,
+    /// which a subclass reaches through `super(…)` even when it was laid out in another file.
+    /// A construction, a block member call, and a storage access initialize the whole class
+    /// first (`activate_class`), superclasses and companions included.
+    pub(super) fn initialize_own_statics(&mut self, class: ClassId) {
+        if let Some(function) = self.class_initializers.own(class) {
             self.code.call(function);
         }
     }
 
     /// Initialize the class that owns static `index`, before that static is read or written.
-    pub(super) fn initialize_static_owner(&mut self, index: u32) {
+    pub(super) fn initialize_static_owner(&mut self, index: u32) -> Result<(), Unsupported> {
         let property = &self.ir.statics[index as usize];
         let owner = property
             .owner
             .filter(|_| !property.is_const)
             .and_then(|owner| self.ir.class_id_by_name(owner));
-        if let Some(class) = owner {
-            self.initialize_class(class);
+        match owner {
+            Some(class) if self.class_initializers.own(class).is_some() => {
+                self.activate_class(class, None)
+            }
+            _ => Ok(()),
         }
     }
 }
