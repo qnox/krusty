@@ -93,38 +93,63 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 owner.render()
             )));
         }
-        let Some(table) = self.file.slot_plan.table(owner) else {
-            return Some(Err(declined!(
-                "a published dispatch table for `{}`",
-                owner.render()
-            )));
-        };
-        let table = match table {
-            Ok(table) => table,
-            Err(reason) => {
+        let (slot, slot_parameters, slot_result) = match self.file.slot_plan.table(owner) {
+            Some(Ok(table)) => {
+                let Some(&slot) = table.slots.get(&key) else {
+                    return Some(Err(declined!(
+                        "the selected overridable member slot of `{}`",
+                        owner.render()
+                    )));
+                };
+                let Some(PlannedSignature::Member {
+                    parameters: slot_parameters,
+                    result: slot_result,
+                }) = self.file.slot_plan.slot_signature(table, slot)
+                else {
+                    return Some(Err(declined!(
+                        "the selected member frame of `{}`",
+                        owner.render()
+                    )));
+                };
+                (slot, slot_parameters.to_vec(), slot_result)
+            }
+            Some(Err(reason)) => {
                 return Some(Err(declined!(
                     "a published dispatch table for `{}` ({reason})",
                     owner.render()
                 )))
             }
+            // No class of this module extends the owner, so the module plan does not number it:
+            // the layout its producer published numbers the member, and the declaration states the
+            // frame the slot is called with.
+            None => {
+                let layout = match self.file.laid_out.published_layout(identity) {
+                    Ok(Some(layout)) => layout,
+                    Ok(None) => {
+                        return Some(Err(declined!(
+                            "a published dispatch table for `{}`",
+                            owner.render()
+                        )))
+                    }
+                    Err(reason) => return Some(Err(Unsupported::from(reason))),
+                };
+                let Some(&slot) = fact
+                    .member_slot_identity()
+                    .and_then(|member| layout.slots.declarations.get(&member))
+                else {
+                    return Some(Err(declined!(
+                        "the selected overridable member slot of `{}`",
+                        owner.render()
+                    )));
+                };
+                let parameters = fact
+                    .declared_params
+                    .as_deref()
+                    .unwrap_or(fact.params.as_slice())
+                    .to_vec();
+                (slot, parameters, fact.declared_ret.unwrap_or(fact.ret))
+            }
         };
-        let Some(&slot) = table.slots.get(&key) else {
-            return Some(Err(declined!(
-                "the selected overridable member slot of `{}`",
-                owner.render()
-            )));
-        };
-        let Some(PlannedSignature::Member {
-            parameters: slot_parameters,
-            result: slot_result,
-        }) = self.file.slot_plan.slot_signature(table, slot)
-        else {
-            return Some(Err(declined!(
-                "the selected member frame of `{}`",
-                owner.render()
-            )));
-        };
-        let slot_parameters = slot_parameters.to_vec();
         let callee = match callee {
             Ok(callee) => callee,
             Err(reason) => return Some(Err(Unsupported::from(reason))),
