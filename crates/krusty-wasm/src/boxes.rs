@@ -38,19 +38,55 @@ pub(super) struct BoxForm {
     pub(super) booleans: Option<[u32; 2]>,
 }
 
+/// The program-owned operations a generated bridge needs from a box, without retaining the
+/// provider's semantic type or dispatch-class identity.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct BoxAdapter {
+    structure: u32,
+    table: u32,
+    booleans: Option<[u32; 2]>,
+}
+
 /// The value field of a box struct, after the dispatch table.
 const BOX_VALUE_FIELD: u32 = 1;
 
 impl BoxForm {
+    /// Freeze only the module-owned pieces needed to emit a later physical adapter.
+    pub(super) fn adapter(&self) -> BoxAdapter {
+        BoxAdapter {
+            structure: self.structure,
+            table: self.table,
+            booleans: self.booleans,
+        }
+    }
+
     /// Whether boxing needs a scratch local of the value's carrier: every box but a `Boolean`'s,
     /// which is one of two existing instances.
     pub(super) fn needs_scratch(&self) -> bool {
+        self.adapter().needs_scratch()
+    }
+
+    /// Replace the value on the stack with its box, through `scratch` when needed.
+    pub(super) fn emit_box(&self, code: &mut Code, scratch: Option<u32>) {
+        self.adapter().emit_box(code, scratch);
+    }
+
+    /// Replace the reference on the stack with its value.
+    pub(super) fn emit_unbox(&self, code: &mut Code) {
+        self.adapter().emit_unbox(code);
+    }
+}
+
+impl BoxAdapter {
+    /// Whether boxing needs a scratch local of the value's carrier: every box but a `Boolean`'s,
+    /// which is one of two existing instances.
+    pub(super) fn needs_scratch(self) -> bool {
         self.booleans.is_none()
     }
 
     /// Replace the value on the stack with its box, through `scratch` when
     /// [`Self::needs_scratch`].
-    pub(super) fn emit_box(&self, code: &mut Code, scratch: Option<u32>) {
+    pub(super) fn emit_box(self, code: &mut Code, scratch: Option<u32>) {
         if let Some([no, yes]) = self.booleans {
             code.if_(BlockType::Value(super::objects::REFERENCE))
                 .global_get(yes)
@@ -67,7 +103,7 @@ impl BoxForm {
     }
 
     /// Replace the reference on the stack, which the frontend checked is this box, with its value.
-    pub(super) fn emit_unbox(&self, code: &mut Code) {
+    pub(super) fn emit_unbox(self, code: &mut Code) {
         code.ref_cast(false, HeapType::Concrete(self.structure))
             .struct_get(self.structure, BOX_VALUE_FIELD);
     }

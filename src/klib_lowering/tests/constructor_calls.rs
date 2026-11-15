@@ -12,6 +12,8 @@ enum RawConstructorChange {
     ClassMask,
     ConstructorMask,
     MemberSlot,
+    ClassOnly,
+    DuplicateClass,
     SymbolKind,
     ConstructorFlag,
     ParameterKind,
@@ -142,14 +144,22 @@ fn constructor_header_fixture(
                 abbreviation: None,
             });
         }
-        C::None | C::ForeignModule | C::MemberSlot => {}
+        C::None | C::ForeignModule | C::MemberSlot | C::ClassOnly | C::DuplicateClass => {}
     }
-    let function = arena.push_function(function);
-    class.members = if matches!(change, C::MemberSlot) {
+    class.members = if matches!(change, C::ClassOnly) {
         Vec::new()
     } else {
-        vec![KlibIrMember::Function(function)]
+        let function = arena.push_function(function);
+        if matches!(change, C::MemberSlot) {
+            Vec::new()
+        } else {
+            vec![KlibIrMember::Function(function)]
+        }
     };
+    if matches!(change, C::DuplicateClass) {
+        let second = arena.push_class(class.clone());
+        class.members.push(KlibIrMember::Class(second));
+    }
     let class = arena.push_class(class);
     let module = if matches!(change, C::ForeignModule) {
         format!("{}-foreign", contract.module)
@@ -179,6 +189,114 @@ fn pair_constructor(libraries: &KlibLibraries) -> ExternalCallableRealization {
 }
 
 #[test]
+fn an_emitted_generic_initializer_authenticates_without_a_serialized_header() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let provider = pair_constructor(&libraries);
+    let selected = provider.klib_body_callable().unwrap();
+    let facts = KlibCalleeFacts::new([selected]);
+    let absent = KlibDeclarationBodies::default();
+    assert!(facts
+        .authenticates_constructor(selected.identity(), &absent)
+        .is_err());
+    assert!(facts
+        .authenticates_retained_constructor(selected.identity(), &absent)
+        .unwrap());
+    for change in [
+        RawConstructorChange::None,
+        RawConstructorChange::ParameterType,
+        RawConstructorChange::ClassMask,
+        RawConstructorChange::ConstructorMask,
+        RawConstructorChange::MemberSlot,
+        RawConstructorChange::ClassOnly,
+        RawConstructorChange::DuplicateClass,
+        RawConstructorChange::SymbolKind,
+        RawConstructorChange::ConstructorFlag,
+        RawConstructorChange::ParameterKind,
+        RawConstructorChange::ParameterName,
+        RawConstructorChange::DuplicateParameter,
+        RawConstructorChange::ParameterCount,
+        RawConstructorChange::Default,
+        RawConstructorChange::Vararg,
+        RawConstructorChange::Bound,
+        RawConstructorChange::Variance,
+        RawConstructorChange::Reified,
+        RawConstructorChange::ReturnClass,
+        RawConstructorChange::ReturnApplication,
+    ] {
+        let bodies = constructor_header_fixture(&libraries, &provider, change);
+        let result = facts.authenticates_retained_constructor(selected.identity(), &bodies);
+        if matches!(change, RawConstructorChange::None) {
+            assert!(result.unwrap());
+        } else {
+            assert!(
+                result.is_err(),
+                "retained definition must not erase known malformed header: {change:?}"
+            );
+        }
+    }
+    let mut changed = provider.clone();
+    changed
+        .klib_body_class_contract
+        .as_mut()
+        .unwrap()
+        .module
+        .push_str("-foreign");
+    let conflicting = KlibCalleeFacts::new([selected, changed.klib_body_callable().unwrap()]);
+    assert!(conflicting
+        .authenticates_retained_constructor(selected.identity(), &absent)
+        .is_err());
+    for changed in [
+        {
+            let mut bad = provider.clone();
+            bad.callable.name = "not-a-constructor".into();
+            bad
+        },
+        {
+            let mut bad = provider.clone();
+            bad.callable.ret = Ty::String;
+            bad
+        },
+        {
+            let mut bad = provider.clone();
+            bad.klib_body_parameter_defaults = None;
+            bad
+        },
+        {
+            let mut bad = provider.clone();
+            bad.parameter_identities = Box::new([]);
+            bad
+        },
+        {
+            let mut bad = provider.clone();
+            let parameters = &mut bad.klib_body_class_contract.as_mut().unwrap().parameters;
+            parameters.formals[0] = Ty::String;
+            bad
+        },
+        {
+            let mut bad = provider.clone();
+            let parameters = &mut bad.klib_body_class_contract.as_mut().unwrap().parameters;
+            parameters.formals[1] = parameters.formals[0];
+            bad
+        },
+        {
+            let mut bad = provider.clone();
+            bad.declaration_owner = Some(crate::types::SemanticCallableOwner::Classifier(
+                type_name("other/Owner"),
+            ));
+            bad
+        },
+    ] {
+        let facts = KlibCalleeFacts::new([changed.klib_body_callable().unwrap()]);
+        assert!(facts
+            .authenticates_retained_constructor(selected.identity(), &absent)
+            .is_err());
+    }
+}
+
+#[test]
 fn klib_constructor_rejects_malformed_raw_declaration_contracts() {
     use RawConstructorChange as C;
     let Some(root) = distribution_root() else {
@@ -197,6 +315,8 @@ fn klib_constructor_rejects_malformed_raw_declaration_contracts() {
         C::ClassMask,
         C::ConstructorMask,
         C::MemberSlot,
+        C::ClassOnly,
+        C::DuplicateClass,
         C::SymbolKind,
         C::ConstructorFlag,
         C::ParameterKind,
