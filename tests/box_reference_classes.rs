@@ -792,42 +792,12 @@ fn compile_all(
         }
         outputs.insert(&unit.module, output);
     }
-    // kotlinc exit 0 already classified this compile as acceptance. A package-and-import
-    // file emits `META-INF/*.kotlin_module` and no class. Empty output that does not even
-    // contain that module file means the classes were not found.
-    if classes.is_empty()
-        && !outputs
-            .values()
-            .all(|output| output_has_kotlin_module(output))
-    {
+    if classes.is_empty() {
         return Err(ReferenceFailure::NoVerdict(
             "reference compile produced no .class artifacts".to_string(),
         ));
     }
     Ok(classes)
-}
-
-/// Whether kotlinc wrote its module descriptor. A successful compile always does, including one
-/// whose sources declare nothing that emits a class.
-fn output_has_kotlin_module(output: &Path) -> bool {
-    let mut pending = vec![output.to_path_buf()];
-    while let Some(dir) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            return false;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                pending.push(path);
-            } else if path
-                .extension()
-                .is_some_and(|extension| extension == "kotlin_module")
-            {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 /// One planned unit handed to the reference compiler with the classpath its built dependencies

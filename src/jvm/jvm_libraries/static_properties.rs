@@ -242,7 +242,6 @@ impl JvmLibraries {
                         ty,
                         f.access,
                         f.nullability,
-                        f.const_value.is_some(),
                     ))
                 };
                 let constant = f.const_value.as_ref().map(|value| LibraryConst {

@@ -487,18 +487,7 @@ impl Checker<'_> {
     /// Check a lambda result at the terminal expression that semantically owns it.
     pub(super) fn expect_lambda_result(&mut self, body: ExprId, expected: Ty, actual: Ty) {
         let result = super::conditional_branch::branch_value_expression(self.file, body);
-        // A nullable body of an inferred Java SAM misses the expected type argument
-        // (`Supplier { JavaBox(null).a }` against `Supplier<String>`). That failure is the
-        // argument constraint, while a non-null body is still a return-type mismatch.
-        let ctx = if self.inferred_sam_nullable_argument
-            && actual.is_nullable()
-            && !expected.is_nullable()
-        {
-            "argument"
-        } else {
-            "return"
-        };
-        self.expect_assignable(expected, actual, self.span(result), ctx);
+        self.expect_assignable(expected, actual, self.span(result), "return");
     }
 
     /// Move a selected SAM's open-result mismatch from the whole argument to the lambda result

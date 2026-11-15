@@ -97,51 +97,6 @@ impl Checker<'_> {
         Some(ty)
     }
 
-    /// Star imports that each contribute `name`. More than one is an overload-resolution
-    /// ambiguity: a Java static field and enum entries of the same spelling are candidates
-    /// together, in import order. An enum entry is not also reported as a static field.
-    pub(super) fn star_import_name_ambiguity(
-        &self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-    ) -> Option<String> {
-        let mut lines = Vec::new();
-        for import in self
-            .file
-            .import_paths
-            .iter()
-            .filter(|import| import.wildcard)
-        {
-            let Some(owner) = self.select_classifier(scope, &import.path()).found() else {
-                continue;
-            };
-            if self.classifier_has_enum_entry(owner, name) {
-                lines.push(format!("enum entry {name}: {}", owner.nested_segment_ref()));
-                continue;
-            }
-            let properties = self
-                .resolver()
-                .static_scope_associated_properties(owner, name);
-            if let Some(property) = properties.iter().find(|property| {
-                crate::libraries::PropertyInfo::readable(property) && !property.companion_associated
-            }) {
-                lines.push(format!(
-                    "static field {name}: {}",
-                    property.ty.source_name()
-                ));
-            }
-        }
-        if lines.len() < 2 {
-            return None;
-        }
-        let mut message = "overload resolution ambiguity between candidates:".to_string();
-        for line in lines {
-            message.push('\n');
-            message.push_str(&line);
-        }
-        Some(message)
-    }
-
     pub(super) fn star_imported_enum_entry(
         &self,
         scope: &CheckerScope<'_>,

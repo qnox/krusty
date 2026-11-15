@@ -1941,10 +1941,6 @@ pub struct File {
     /// `+PrioritizedEnumEntries`: the synthetic enum property wins over a same-named companion
     /// declaration. With the legacy feature disabled, the companion rung is considered first.
     pub prioritized_enum_entries: bool,
-    /// `+PreciseSimplificationToFlexibleLowerConstraint`: an expected constructor result may
-    /// replace a nullable flexible root when the written arguments still fit that result.
-    /// Disabled, the argument's lower bound stays (`JavaBox(null).a` is `Nothing?`).
-    pub precise_simplification_to_flexible_lower_constraint: bool,
     /// Whether signed integer constant expressions may adapt to unsigned parameters explicitly
     /// marked with `kotlin.internal.ImplicitIntegerCoercion`.
     pub implicit_signed_to_unsigned_integer_conversion: bool,
@@ -2152,31 +2148,6 @@ impl File {
     /// Whether call argument `id` (the inner expr of `*expr`) was written with the spread operator.
     pub fn is_spread_arg(&self, id: ExprId) -> bool {
         self.spread_arg_ids.contains(&id.0)
-    }
-
-    /// Whether `id` is a value written in an annotation (`@B(*arrayOf(1, "b"))`). Such a value is
-    /// a compile-time constant; a reified type argument there is not a runtime reification.
-    pub fn is_annotation_argument(&self, id: ExprId) -> bool {
-        fn listed(groups: &[Vec<ExprId>], id: ExprId) -> bool {
-            groups.iter().any(|group| group.contains(&id))
-        }
-        self.decls
-            .iter()
-            .any(|&declaration| match self.decl(declaration) {
-                Decl::Fun(function) => listed(&function.annotation_args, id),
-                Decl::Property(property) => listed(&property.annotation_args, id),
-                Decl::Class(class) => {
-                    listed(&class.annotation_args, id)
-                        || class
-                            .methods
-                            .iter()
-                            .any(|method| listed(&method.annotation_args, id))
-                        || class
-                            .body_props
-                            .iter()
-                            .any(|property| listed(&property.annotation_args, id))
-                }
-            })
     }
 
     pub fn expr(&self, id: ExprId) -> &Expr {

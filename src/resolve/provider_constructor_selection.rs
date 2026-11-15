@@ -489,24 +489,19 @@ impl Checker<'_> {
                             |actual, bound| self.receiver_is_assignable(actual, bound),
                         )
                     {
-                        if self
-                            .file
-                            .precise_simplification_to_flexible_lower_constraint
-                        {
-                            self.retain_expected_flexible_constructor_bindings(
-                                constructor_commitment::ExpectedConstructorBindingInputs {
-                                    source: &source,
-                                    signature,
-                                    expected,
-                                    expected_bindings: &expected_bindings,
-                                    nullable_flexible_roots: &constraints.nullable_flexible_roots,
-                                    explicit_type_arguments: &explicit_type_arguments,
-                                    actuals: &actuals,
-                                    vararg_index: call_sig.vararg_index,
-                                },
-                                &mut bindings,
-                            );
-                        }
+                        self.retain_expected_flexible_constructor_bindings(
+                            constructor_commitment::ExpectedConstructorBindingInputs {
+                                source: &source,
+                                signature,
+                                expected,
+                                expected_bindings: &expected_bindings,
+                                nullable_flexible_roots: &constraints.nullable_flexible_roots,
+                                explicit_type_arguments: &explicit_type_arguments,
+                                actuals: &actuals,
+                                vararg_index: call_sig.vararg_index,
+                            },
+                            &mut bindings,
+                        );
                         // A caller-owned lexical variable cannot ordinarily be constructed from
                         // its upper bound. Integer constants are the exception when contextual
                         // literal typing can publish that exact symbolic type (`T : Int`, then

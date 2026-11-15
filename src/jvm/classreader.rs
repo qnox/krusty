@@ -61,10 +61,6 @@ pub struct MethodSig {
     /// The classes of the annotations applied to this method (`RuntimeVisibleAnnotations` and
     /// `RuntimeInvisibleAnnotations`), other than nullability qualifiers.
     pub annotations: Box<[crate::types::TypeName]>,
-    /// Source parameter names from `MethodParameters`, in descriptor order. Empty when the
-    /// class file does not carry the attribute. A zero name index is an unnamed parameter and
-    /// is stored as an empty string so the vector stays aligned with the descriptor.
-    pub parameter_names: Vec<String>,
 }
 
 /// The declaration visibility JVM access flags state. No access flag is Java's package-private.
@@ -202,7 +198,6 @@ struct MemberAttributes {
     parameter_nullability: Vec<Option<JavaNullability>>,
     declaration_nullability: Option<JavaNullability>,
     parameter_access: Vec<u16>,
-    parameter_names: Vec<Option<String>>,
     deprecated_hidden: bool,
     type_use_nullability: TypeUseNullability,
     deprecated_hidden_since: Option<LanguageVersion>,
@@ -1245,12 +1240,6 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
             deprecation: member.attributes.deprecation.declared(kotlin_class),
             has_annotation_default: member.attributes.annotation_default.is_some(),
             annotations: member.attributes.annotations.into_boxed_slice(),
-            parameter_names: member
-                .attributes
-                .parameter_names
-                .into_iter()
-                .map(|name| name.unwrap_or_default())
-                .collect(),
         })
         .collect();
 
@@ -1824,14 +1813,8 @@ fn read_member_attributes(r: &mut Reader, cp: &[C]) -> Result<MemberAttributes, 
                 };
                 let parameter_count = body.u1()? as usize;
                 attributes.parameter_access.reserve(parameter_count);
-                attributes.parameter_names.reserve(parameter_count);
                 for _ in 0..parameter_count {
-                    let name_index = body.u2()?;
-                    let name = match cp.get(name_index as usize) {
-                        Some(C::Utf8(text)) if name_index != 0 => Some(text.clone()),
-                        _ => None,
-                    };
-                    attributes.parameter_names.push(name);
+                    body.u2()?;
                     attributes.parameter_access.push(body.u2()?);
                 }
             }

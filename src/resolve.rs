@@ -13152,15 +13152,10 @@ impl<'a> Checker<'a> {
         }
 
         let classifier = expected.and_then(Ty::kotlin_class_internal);
-        // A star element (`Set<*>`) does not choose the literal element's type. Unwrapping it to
-        // the star's bound would type `{ x -> }` as `(Any) -> ...` and hide `cannot infer x`.
         let standard_element_expectation = classifier
             .and_then(standard_factory)
             .and_then(|_| expected.and_then(|expected| expected.type_args().first().copied()))
-            .and_then(|element| match element.kind() {
-                TyKind::StarProjection(_) => None,
-                _ => Some(element.projection_inner().unwrap_or(element)),
-            });
+            .map(|element| element.projection_inner().unwrap_or(element));
         let argument_types = args
             .iter()
             .map(|&argument| match standard_element_expectation {
@@ -15901,16 +15896,13 @@ impl<'a> Checker<'a> {
                     direct_local_overloads.last().cloned()
                 };
                 if let Some(callable) = local_function {
-                    let ambiguous_literal = candidate_arg_tys.as_ref().and_then(|arg_tys| {
-                        self.ambiguous_collection_literal(args, arg_tys, expected)
-                    });
                     let mut sig = callable.signature;
                     // Lexical member callables (notably methods on an enum-entry subclass) own the
                     // same generic specialization step as local functions. The origin changes only
                     // receiver realization; it must not leave `T` unsubstituted before argument
                     // checking merely because the callable dispatches through an entry receiver.
                     if let Some(generic) = sig.generic_sig.clone() {
-                        let mut actuals = candidate_arg_tys.clone().unwrap_or_else(|| {
+                        let actuals = candidate_arg_tys.clone().unwrap_or_else(|| {
                             args.iter()
                                 .map(|&argument| {
                                     if let Expr::Lambda { params, body } =
@@ -15930,13 +15922,6 @@ impl<'a> Checker<'a> {
                                 })
                                 .collect()
                         });
-                        if let Some(literal) = ambiguous_literal {
-                            for (argument, actual) in args.iter().zip(actuals.iter_mut()) {
-                                if *argument == literal {
-                                    *actual = Ty::Error;
-                                }
-                            }
-                        }
                         let call_sig = sig.call_sig();
                         let parameters = call_argument_parameter_indices(
                             args.len(),
@@ -15958,11 +15943,7 @@ impl<'a> Checker<'a> {
                                 // A constructed symbolic type is useful evidence (`Context<T>` can
                                 // bind a helper's `U`); only a bare foreign type variable is wholly
                                 // postponed. Declaration identity keeps same-spelled formals apart.
-                                // An ambiguous collection literal is not evidence for either builder.
-                                .filter(|(_, actual)| {
-                                    !actual.is_ty_param()
-                                        && (ambiguous_literal.is_none() || *actual != Ty::Error)
-                                })
+                                .filter(|(_, actual)| !actual.is_ty_param())
                                 .map(|(parameter, actual)| (parameter, actual, false)),
                             sig.vararg_index,
                         );
@@ -18050,24 +18031,6 @@ impl<'a> Checker<'a> {
                     }
                 }
                 let mut arg_tys: Vec<Ty> = typed_args.into_inner();
-                // A collection literal in a top-level generic call is the same ambiguity as in a
-                // local one: `Set<*> = select(mutableSetOf(), [{}])` can build either `MutableSet`
-                // or `Set`. The literal is not evidence for the call's type variable.
-                let ambiguous_literal = self.ambiguous_collection_literal(args, &arg_tys, expected);
-                if let Some(literal) = ambiguous_literal {
-                    for (argument, actual) in args.iter().zip(arg_tys.iter_mut()) {
-                        if *argument == literal {
-                            *actual = Ty::Error;
-                            self.expr_types[argument.0 as usize] = Ty::Error;
-                        }
-                    }
-                }
-                self.report_unsolved_star_collection_literals(
-                    args,
-                    &mut arg_tys,
-                    expected,
-                    ambiguous_literal,
-                );
                 // Callable references are typed after the ordinary arguments because they need the
                 // outer declaration's parameter shape. Their invariant input types can consequently
                 // fix a generic formal that earlier integer literals deliberately left soft. Apply
@@ -30488,8 +30451,6 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         lambda_returns: LambdaReturnScopes::default(),
         local_function_execution: None,
         lambda_body_results: HashMap::default(),
-        inferred_override_returns: HashMap::default(),
-        inferred_sam_nullable_argument: false,
     };
     if resolved_index.is_none() {
         let (annotations, arguments): (Vec<_>, Vec<_>) =
@@ -33170,14 +33131,6 @@ struct Checker<'a> {
     /// return, keyed by the lambda expression. A rechecked lambda's committed result overwrites a
     /// probing one. Body state (`take_body_state`) deliberately does not swap this published fact.
     lambda_body_results: HashMap<ExprId, Ty>,
-    /// Inferred override body types, keyed by the function name span. The anonymous-object scratch
-    /// check learns the type and then discards its diagnostics; the authoritative check reports
-    /// from this record when it does not type the body again.
-    inferred_override_returns: HashMap<u32, Ty>,
-    /// An inferred Java SAM (`Supplier { body }` against `Supplier<String>`) checks a nullable
-    /// body as an argument constraint of the expected type argument. A written `Supplier<String>`
-    /// keeps the Java method's flexible return and does not use this.
-    inferred_sam_nullable_argument: bool,
 }
 
 /// What a local class reads from its enclosing scope, split by whether the reference is modelled.
@@ -42273,22 +42226,6 @@ impl<'a> Checker<'a> {
                             message,
                         );
                     }
-                    // An explicit return type is already on the header. An inferred one is still
-                    // unresolved here; that diagnostic runs after the body is typed.
-                    if overrides_super && !operator_equals_override && m.ret.is_some() {
-                        let owner_label = if self.file.is_anonymous_object_class(d) {
-                            "<anonymous>"
-                        } else {
-                            cl.name.as_str()
-                        };
-                        self.report_java_type_argument_override_return(
-                            m,
-                            owner_label,
-                            implementation.as_ref(),
-                            &candidates,
-                            None,
-                        );
-                    }
                 }
                 if !self.signature_defaults_only || default_owned_class {
                     self.check_final_property_overrides(&cl.body_props, &direct_supertypes);
@@ -42405,21 +42342,6 @@ impl<'a> Checker<'a> {
                         "skip completed local method declaration={stable_declaration:?}",
                     );
                     self.check_unselected_method_annotation_applications(scope, m);
-                    if m.is_override() && m.ret.is_none() {
-                        if let Some(inferred) =
-                            self.inferred_override_returns.get(&m.name_span.lo).copied()
-                        {
-                            self.report_inferred_java_override_return(
-                                scope,
-                                d,
-                                cl,
-                                m,
-                                method_index,
-                                current_owner,
-                                inferred,
-                            );
-                        }
-                    }
                     method_check_index += 1;
                     continue;
                 }
@@ -42432,27 +42354,6 @@ impl<'a> Checker<'a> {
                     method_check_index,
                     (source_member, stable_declaration),
                 );
-                if m.is_override() && m.ret.is_none() {
-                    // The header result may be the overridden member's flexible return. The
-                    // diagnostic compares the body's own type (`Nothing?`), not that header.
-                    let inferred_return = match &m.body {
-                        FunBody::Expr(body) | FunBody::Block(body) => {
-                            self.expr_types[body.0 as usize]
-                        }
-                        FunBody::None => self.ret_ty,
-                    };
-                    self.inferred_override_returns
-                        .insert(m.name_span.lo, inferred_return);
-                    self.report_inferred_java_override_return(
-                        scope,
-                        d,
-                        cl,
-                        m,
-                        method_index,
-                        current_owner,
-                        inferred_return,
-                    );
-                }
                 if let Some(declaration) = registered {
                     self.finish_registered_local_method(declaration);
                 }
@@ -50947,10 +50848,6 @@ impl<'a> Checker<'a> {
                 if let Some((owner, declared_name)) = self.explicitly_imported_enum_entry(&n) {
                     self.record_enum_entry(e, owner, &declared_name);
                     return self.set(e, Ty::obj_name(owner));
-                }
-                if let Some(message) = self.star_import_name_ambiguity(scope, &n) {
-                    self.diags.error(self.span(e), message);
-                    return self.set(e, Ty::Error);
                 }
                 if let Some(owner) = self.star_imported_enum_entry(scope, &n) {
                     self.record_enum_entry(e, owner, &n);

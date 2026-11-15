@@ -1543,12 +1543,6 @@ where
         // provider anchors and bounded syntax live through the rest of Pass 1. Enumerate ordinary
         // self-owned defaults only after exclusion so a removed expect constructor cannot schedule
         // an orphan target with no surviving signature or callable.
-        let unactualized_members = crate::fir::reconcile_typealias_provider_members(
-            &pass1_headers,
-            &bindings,
-            platform.as_ref(),
-            unactualized_members,
-        );
         let signature_default_work_items = signature_default_work(&pass1_headers, &defaults);
         // Actualization publishes stable expect-default providers before syntax is compacted. Once
         // that source-set operation is complete, retain only Pass-1 signature/inline fragments.

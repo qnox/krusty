@@ -43,9 +43,8 @@ use visibility_suppressions::HeaderVisibilitySuppressionArena;
 mod actualization;
 
 pub use actualization::{
-    actualization, actualized_declaration_pairs, matched_expect_declarations,
-    reconcile_typealias_provider_members, Actualization, ActualizationTypeBindings,
-    ActualizedDeclarationPair, UnactualizedMembers,
+    actualization, actualized_declaration_pairs, matched_expect_declarations, Actualization,
+    ActualizationTypeBindings, ActualizedDeclarationPair, UnactualizedMembers,
 };
 
 pub use super::declaration_stub::*;

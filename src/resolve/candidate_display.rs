@@ -364,33 +364,18 @@ pub(super) fn classifier_access_display_from_shape(
         crate::libraries::TypeKind::Enum => "enum class",
         crate::libraries::TypeKind::Object => "object",
     };
-    // Declaration templates carry the type arguments (`Set<E>`); the name list does not.
-    let supertypes = if shape.supertype_templates.is_empty() {
-        shape
-            .supertypes
-            .iter_ids()
-            .map(|supertype| {
-                let ty = Ty::obj_name(supertype);
-                if ty.is_erased_top() {
-                    "Any".to_string()
-                } else {
-                    ty.source_name()
-                }
-            })
-            .collect::<Vec<_>>()
-    } else {
-        shape
-            .supertype_templates
-            .iter()
-            .map(|supertype| {
-                if supertype.is_erased_top() {
-                    "Any".to_string()
-                } else {
-                    supertype.source_name()
-                }
-            })
-            .collect::<Vec<_>>()
-    };
+    let supertypes = shape
+        .supertypes
+        .iter_ids()
+        .map(|supertype| {
+            let ty = Ty::obj_name(supertype);
+            if ty.is_erased_top() {
+                "Any".to_string()
+            } else {
+                ty.source_name()
+            }
+        })
+        .collect::<Vec<_>>();
     let supertypes = if supertypes.is_empty() {
         String::new()
     } else {

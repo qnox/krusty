@@ -78,9 +78,6 @@ impl Checker<'_> {
         if arguments.is_empty() {
             return;
         }
-        // An annotation argument is a compile-time constant. Kotlinc reports the type mismatch
-        // of `@B(*arrayOf(1, "b"))` and does not also warn that the intersection would be reified.
-        let annotation_argument = self.file.is_annotation_argument(expression);
         let explicit = self.file.call_type_args.get(&expression.0);
         let mut findings = Vec::new();
         for reified in arguments {
@@ -113,9 +110,6 @@ impl Checker<'_> {
         }
         for (span, formal, problems) in findings {
             for problem in problems {
-                if annotation_argument && matches!(problem, ReifiedProblem::Intersection { .. }) {
-                    continue;
-                }
                 self.report_reified_problem(span, &formal, problem);
             }
         }
