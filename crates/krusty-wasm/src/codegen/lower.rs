@@ -1215,22 +1215,34 @@ impl<'a> Body<'a> {
             }
             IrExpr::Call {
                 callee: ref call_callee,
-                dispatch_receiver: None,
+                dispatch_receiver,
                 args,
             } if let Callee::ModuleDefaultEntry {
-                provider, params, ..
+                provider,
+                params,
+                dispatch_receiver_ty,
+                ..
             } = &**call_callee =>
             {
                 let function = self
                     .calls
                     .module_default(*provider)
                     .ok_or_else(|| "an unregistered source default entry".to_string())?;
-                let mut frame = params.clone();
+                // A member's entry takes its receiver before the parameter frame.
+                let mut frame = dispatch_receiver_ty.iter().copied().collect::<Vec<_>>();
+                let mut operands = dispatch_receiver.iter().copied().collect::<Vec<_>>();
+                if frame.len() != operands.len() {
+                    return Err(
+                        "a default entry call whose receiver disagrees with its type".to_string(),
+                    );
+                }
+                frame.extend(params.iter().copied());
                 frame.extend(std::iter::repeat_n(
                     Ty::Int,
                     krusty::backend::default_arguments::mask_words(params.len()),
                 ));
-                self.direct_call(function, &frame, &args)?;
+                operands.extend(args.iter().copied());
+                self.direct_call(function, &frame, &operands)?;
             }
             // The target stdlib's own `typeOf` body only says it is a compiler intrinsic.
             IrExpr::Call {

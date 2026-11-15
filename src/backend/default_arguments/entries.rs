@@ -177,9 +177,12 @@ pub fn published_entry(ir: &IrFile, declaration: FunId) -> Option<FunId> {
 /// defaults it evaluates. An `actual` declaration's entry is keyed by its `expect`, which is what
 /// the callers selected; one whose defaults come from a dependency has no module identity.
 pub fn published_identities(ir: &IrFile, declaration: FunId) -> Vec<CallableId> {
+    // A member that inherits its defaults is reached through its provider's entry, which
+    // dispatches to it; only the provider publishes one.
     if ir.functions[declaration as usize]
         .dispatch_receiver
         .is_some()
+        && ir.inherited_param_default_provider(declaration).is_some()
     {
         return Vec::new();
     }

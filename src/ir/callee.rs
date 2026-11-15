@@ -87,7 +87,7 @@ pub enum Callee {
         /// masks independently from the receiver consumes this fact directly.
         extension_receiver_parameter: Option<u32>,
     },
-    /// The default-argument entry of a top-level callable in another source unit of the current
+    /// The default-argument entry of a top-level callable or member in another source unit of the current
     /// module, published by the file that declares `target` under the identity of `provider`, the
     /// declaration whose defaults it evaluates. The argument vector holds the whole parameter
     /// frame of `params`, with an [`IrExpr::AbsentArgument`](super::IrExpr::AbsentArgument) for
@@ -98,6 +98,9 @@ pub enum Callee {
         provider: crate::fir::CallableId,
         params: Vec<Ty>,
         ret: Ty,
+        /// The type of the dispatch receiver of a member's entry, which the call carries beside
+        /// the frame and the entry takes before it.
+        dispatch_receiver_ty: Option<Ty>,
     },
     /// A dependency callable selected by the frontend. The opaque declaration identity is realized
     /// by the target provider after common lowering; semantic parameters/results remain available to

@@ -11,6 +11,7 @@ impl BodyLowering<'_, '_, '_> {
         &mut self,
         provider: krusty::fir::CallableId,
         target: krusty::fir::CallableId,
+        receiver: Option<(u32, Ty)>,
         params: &[Ty],
         ret: Ty,
         args: &[u32],
@@ -19,11 +20,18 @@ impl BodyLowering<'_, '_, '_> {
             self.file.module_name,
             provider,
         );
-        let mut frame = params.to_vec();
+        // A member's entry takes its receiver before the parameter frame.
+        let mut frame = receiver.iter().map(|&(_, ty)| ty).collect::<Vec<_>>();
+        frame.extend(params.iter().copied());
         frame.extend(std::iter::repeat_n(
             Ty::Int,
             krusty::backend::default_arguments::mask_words(params.len()),
         ));
+        let args = receiver
+            .iter()
+            .map(|&(receiver, _)| receiver)
+            .chain(args.iter().copied())
+            .collect::<Vec<_>>();
         if args.len() != frame.len() {
             return Err(declined!(
                 "a default-argument entry call with {} of {} operands (`{symbol}`)",
@@ -32,7 +40,7 @@ impl BodyLowering<'_, '_, '_> {
             ));
         }
         let id = self.file.import(&symbol, &frame, ret)?;
-        let arguments = self.arguments(args, &frame)?;
+        let arguments = self.arguments(&args, &frame)?;
         if self.terminated {
             return Ok(None);
         }

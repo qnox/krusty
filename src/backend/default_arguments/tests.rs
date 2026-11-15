@@ -651,8 +651,63 @@ fn an_actual_entry_is_keyed_by_its_expect_and_calls_the_actual() {
             provider: expect,
             params: vec![Ty::String],
             ret: Ty::String,
+            dispatch_receiver_ty: None,
         }
     );
+}
+
+#[test]
+fn an_inherited_member_default_calls_the_entry_another_file_publishes() {
+    let mut ir = IrFile::default();
+    let owner = type_name("demo/Host");
+    let provider = CallableId::from_raw(20);
+    let target = CallableId::from_raw(21);
+    let receiver = ir.add_expr(IrExpr::GetValue(0));
+    let call = ir.add_expr(IrExpr::Call {
+        callee: Box::new(Callee::ModuleWithDefaults {
+            target,
+            default_provider: ResolvedFunctionOverrideTarget::Module(provider),
+            name: "inherited".to_owned(),
+            params: vec![Ty::Int],
+            ret: Ty::Unit,
+            defaults: Box::new([0]),
+            dispatch_receiver_ty: Some(Ty::obj_name(owner)),
+            extension_receiver_parameter: None,
+        }),
+        dispatch_receiver: Some(receiver),
+        args: Vec::new(),
+    });
+    declare(
+        &mut ir,
+        "caller",
+        vec![Ty::obj_name(owner)],
+        Ty::Unit,
+        Some(call),
+        None,
+    );
+
+    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
+
+    let IrExpr::Call {
+        callee,
+        dispatch_receiver,
+        args,
+    } = ir.expr(call)
+    else {
+        panic!("the call stays a call");
+    };
+    assert_eq!(
+        **callee,
+        Callee::ModuleDefaultEntry {
+            target,
+            provider,
+            params: vec![Ty::Int],
+            ret: Ty::Unit,
+            dispatch_receiver_ty: Some(Ty::obj_name(owner)),
+        }
+    );
+    assert_eq!(*dispatch_receiver, Some(receiver));
+    assert_eq!(args.len(), 2, "the absent argument and one mask word");
 }
 
 #[test]
@@ -676,21 +731,6 @@ fn shapes_this_lowering_cannot_realize_keep_their_checked_form() {
         }),
         dispatch_receiver: Some(receiver),
         args: vec![extension],
-    });
-    // An inherited default whose provider another file declares.
-    let foreign_provider = ir.add_expr(IrExpr::Call {
-        callee: Box::new(Callee::ModuleWithDefaults {
-            target: CallableId::from_raw(21),
-            default_provider: ResolvedFunctionOverrideTarget::Module(provider),
-            name: "inherited".to_owned(),
-            params: vec![Ty::Int],
-            ret: Ty::Unit,
-            defaults: Box::new([0]),
-            dispatch_receiver_ty: Some(Ty::obj_name(owner)),
-            extension_receiver_parameter: None,
-        }),
-        dispatch_receiver: Some(receiver),
-        args: Vec::new(),
     });
     // A `super` call with an omitted argument.
     let super_call = ir.add_expr(IrExpr::Call {
@@ -731,12 +771,7 @@ fn shapes_this_lowering_cannot_realize_keep_their_checked_form() {
         args: Vec::new(),
     });
     let block = ir.add_expr(IrExpr::Block {
-        stmts: vec![
-            member_extension,
-            foreign_provider,
-            super_call,
-            dependency_provider,
-        ],
+        stmts: vec![member_extension, super_call, dependency_provider],
         value: None,
     });
     declare(

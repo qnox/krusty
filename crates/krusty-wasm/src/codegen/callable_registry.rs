@@ -303,7 +303,7 @@ impl CallableRegistry {
                         .module
                         .insert(*target, self.module_index(*target, wasm));
                 }
-                Callee::ModuleDefaultEntry { provider, .. } if dispatch_receiver.is_none() => {
+                Callee::ModuleDefaultEntry { provider, .. } => {
                     targets
                         .module_defaults
                         .insert(*provider, self.module_default_index(*provider, wasm));
