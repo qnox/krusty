@@ -49,19 +49,8 @@ const DEFAULT_WRAPPER: &str = include_str!("box_regressions/topLevelDefaultWhenM
 /// code of that inline function's scope, so its class's mappings carry the public-ABI flag.
 const MEMBER_DEFAULT: &str = include_str!("box_regressions/inlineMemberDefaultWhenMapping.kt");
 
-const CROSS_DECLARATION: &str = r#"
-enum class Size { S, M, L }
-
-fun before(s: Size): Int = when (s) { Size.L -> 1; else -> 2 }
-
-inline fun label(s: Size): String = when (s) { Size.M -> "m"; Size.S -> "s"; Size.L -> "l" }
-"#;
-
-const CROSS_CALLER: &str = r#"
-fun labels(): String = label(Size.S) + label(Size.L)
-
-fun box(): String = if (labels() == "sl" && before(Size.L) == 1) "OK" else "FAIL ${labels()}"
-"#;
+/// An inline function whose file numbers its own tables, in `Decl.kt`, called from `Caller.kt`.
+const CROSS_FILE: &str = include_str!("box_regressions/crossFileInlineWhenMapping.kt");
 
 /// Kotlin's own program returns `OK` first, then krusty's does.
 fn assert_runs_like_kotlinc(sources: &[(&str, &str)], main_class: &str) {
@@ -114,7 +103,19 @@ fn a_public_inline_functions_lambda_marks_its_tables_public_abi_like_kotlinc() {
 /// that file, not the file's other `when`s that number the tables.
 #[test]
 fn another_files_inline_function_keeps_its_own_tables_like_kotlinc_and_runs() {
-    let sources = [("Decl.kt", CROSS_DECLARATION), ("Caller.kt", CROSS_CALLER)];
+    let (files, java) = krusty::conformance::split_files(CROSS_FILE).expect("// FILE: blocks");
+    assert!(java.is_empty());
+    let [(declaration_stem, declaration), (caller_stem, caller)] = files.as_slice() else {
+        panic!("expected two Kotlin files, found {}", files.len());
+    };
+    assert_eq!(
+        (declaration_stem.as_str(), caller_stem.as_str()),
+        ("Decl", "Caller")
+    );
+    let sources = [
+        ("Decl.kt", declaration.as_str()),
+        ("Caller.kt", caller.as_str()),
+    ];
     let classes = common::classes_against_kotlinc_module(&sources);
     for name in ["DeclKt", "DeclKt$WhenMappings"] {
         assert!(
