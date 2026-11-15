@@ -43,6 +43,8 @@ pub(super) struct SignatureAdapters {
     /// Indexed by physical parameter, including an empty receiver entry at index zero.
     pub(super) parameters: Vec<Option<BoxAdapter>>,
     pub(super) result: Option<BoxAdapter>,
+    /// What a collection special bridge answers when its argument is not the override's element.
+    pub(super) rejection: Option<i32>,
 }
 
 impl SignatureAdapters {
@@ -50,6 +52,7 @@ impl SignatureAdapters {
         Self {
             parameters: vec![None; parameter_count],
             result: None,
+            rejection: None,
         }
     }
 }

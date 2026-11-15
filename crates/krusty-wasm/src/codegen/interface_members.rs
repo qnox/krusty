@@ -493,6 +493,7 @@ impl FileRecorder<'_, '_, '_> {
             return Err(self.declined("an interface member with incompatible adaptation arity"));
         }
         let mut adapters = SignatureAdapters::none(signature.0.len());
+        adapters.rejection = collection_bridge_rejection(declared.1);
         let class = self.recording.ir.classes[self.id as usize].fq_name();
         let unadapted =
             || format!("an interface member implemented with a value it cannot adapt (`{class}`)");
@@ -572,7 +573,7 @@ impl FileRecorder<'_, '_, '_> {
             }
             match (wide, narrow) {
                 (ValType::Ref { .. }, ValType::Ref { nullable, heap }) => {
-                    if let Some(rejected) = collection_bridge_rejection(declared.1) {
+                    if let Some(rejected) = adapters.rejection {
                         // The erased interface method accepts any reference. An argument of
                         // another type is not an element, so the bridge answers its rejection
                         // instead of trapping on the cast.
