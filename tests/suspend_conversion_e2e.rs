@@ -232,7 +232,11 @@ fun box(): String = listOf(
     } else {
         "null,null,null,null,null"
     };
-    assert_eq!(common::kotlinc_box_result(SRC), expected, "kotlinc's observation");
+    assert_eq!(
+        common::kotlinc_box_result(SRC),
+        expected,
+        "kotlinc's observation"
+    );
     assert_eq!(
         common::expect_box_run_with_stdlib(SRC, "NullFunctionValueSuspendConversion"),
         expected
