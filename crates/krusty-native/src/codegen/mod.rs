@@ -368,7 +368,12 @@ impl Backend for CraneliftBackend {
             file.kind != krusty::backend::CheckedIrUnitKind::Source,
         );
         state.laid_out.bind_published_layouts(
-            file.classifiers.module().classes().classifier_names(),
+            file.classifiers
+                .module()
+                .classes()
+                .classifier_names()
+                .into_iter()
+                .chain(file.callables.declaring_classifiers()),
             &file.classifiers,
             slot_plan,
             &file.ir,

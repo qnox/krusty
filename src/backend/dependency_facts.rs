@@ -748,6 +748,19 @@ pub struct CheckedBackendCallables {
 }
 
 impl CheckedBackendCallables {
+    /// The classifiers declaring the member callables this file selected: the classes whose
+    /// layout a call of one of them dispatches through.
+    pub fn declaring_classifiers(&self) -> impl Iterator<Item = TypeName> + '_ {
+        self.callables
+            .values()
+            .filter_map(|callable| match callable.declaration_owner {
+                Some(SemanticCallableOwner::Classifier(owner)) if callable.is_member_function() => {
+                    Some(owner)
+                }
+                _ => None,
+            })
+    }
+
     /// Whether native plugins selected `identity` at the handoff for the code they generate.
     pub fn is_plugin_runtime_callable(&self, identity: ExternalCallableId) -> bool {
         self.plugin_runtime.contains_key(&identity)
