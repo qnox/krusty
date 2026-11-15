@@ -65,6 +65,7 @@ pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;
 pub(crate) use classifier_callables::{
     constructor_declaration_signature, constructor_generic_signature, ConstructorAlias,
+    ConstructorCallConstraints,
 };
 pub use classifier_callables::{BoundInnerConstructor, ConstructorCandidate, ConstructorOrigin};
 pub(crate) use classifier_declaration::type_alias_target_classifier;

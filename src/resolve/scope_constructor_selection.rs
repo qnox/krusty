@@ -87,21 +87,18 @@ impl Checker<'_> {
         call: ScopeConstructorChoiceCall<'_>,
         classifier: TypeName,
         type_parameter_count: usize,
-    ) -> (Vec<Ty>, Option<Ty>) {
+    ) -> crate::libraries::ConstructorCallConstraints {
         let applied = self.alias_constructor_fixed_application(call_expr, call.alias_target);
         let type_args = applied
             .filter(|applied| {
                 applied.kotlin_class_internal() == Some(classifier)
                     && applied.type_args().len() == type_parameter_count
             })
-            .map_or_else(
-                || call.explicit_type_args.to_vec(),
-                |applied| applied.type_args().to_vec(),
-            );
-        (
-            type_args,
-            Self::alias_constructor_result_constraint(applied, call.expected),
-        )
+            .map_or(call.explicit_type_args, |applied| applied.type_args());
+        crate::libraries::ConstructorCallConstraints {
+            type_arguments: Ty::obj_args_name(classifier, type_args).type_args(),
+            expected: Self::alias_constructor_result_constraint(applied, call.expected),
+        }
     }
 
     /// The shared callable selection's decision over a bare call's scope constructors. `None`
@@ -125,7 +122,7 @@ impl Checker<'_> {
         if shape.own_type_parameter_count != shape.type_params().len() {
             return None;
         }
-        let (type_args, expected) = self.scope_constructor_constraints(
+        let constraints = self.scope_constructor_constraints(
             call_args.call,
             call,
             classifier,
@@ -138,10 +135,14 @@ impl Checker<'_> {
         match self.select_callable_candidate(
             scope,
             call_args,
-            &type_args,
+            call.explicit_type_args,
             None,
-            CallResultConstraint::direct(expected),
-            candidates.to_vec(),
+            CallResultConstraint::direct(call.expected),
+            candidates
+                .iter()
+                .cloned()
+                .map(|candidate| candidate.with_constructor_call_constraints(constraints))
+                .collect(),
         ) {
             Some(CallableCandidateSelection::Selected(selected)) => declared(&selected.info)
                 .then(|| ScopeConstructorSelection::Selected(Box::new(selected.info))),
@@ -207,12 +208,27 @@ impl Checker<'_> {
             &[crate::libraries::FunctionInfo],
         ),
     ) -> Option<ScopeCallCompetition> {
-        constructors.first()?.constructor?;
+        let classifier = constructors.first()?.constructor?.classifier;
+        let shape = self.resolved_type_name(classifier)?;
+        if shape.own_type_parameter_count != shape.type_params().len() {
+            return None;
+        }
+        let constraints = self.scope_constructor_constraints(
+            call_args.call,
+            call,
+            classifier,
+            shape.type_params().len(),
+        );
         let family = functions
             .iter()
             .filter(|candidate| candidate.kind == crate::libraries::FnKind::TopLevel)
-            .chain(constructors)
             .cloned()
+            .chain(
+                constructors
+                    .iter()
+                    .cloned()
+                    .map(|candidate| candidate.with_constructor_call_constraints(constraints)),
+            )
             .collect::<Vec<_>>();
         match self.select_callable_candidate(
             scope,

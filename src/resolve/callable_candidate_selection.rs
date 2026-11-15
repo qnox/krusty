@@ -14,7 +14,6 @@ impl Checker<'_> {
         result_constraint: CallResultConstraint,
         overloads: Vec<crate::libraries::FunctionInfo>,
     ) -> Option<CallableCandidateSelection> {
-        let expected = result_constraint.expected();
         let CallArgs {
             call,
             args,
@@ -75,6 +74,15 @@ impl Checker<'_> {
         let mut sam_converted = crate::fx_hash::HashSet::default();
         let mut misfits = crate::fx_hash::HashSet::default();
         for (index, mut candidate) in overloads.iter().cloned().enumerate() {
+            // Inference inputs belong to this call, not to the declaration selection publishes.
+            let constructor_constraints = candidate.take_constructor_call_constraints();
+            let type_args =
+                constructor_constraints.map_or(type_args, |constraints| constraints.type_arguments);
+            let result_constraint = constructor_constraints
+                .map_or(result_constraint, |constraints| {
+                    CallResultConstraint::direct(constraints.expected)
+                });
+            let expected = result_constraint.expected();
             if self.file.infix_calls.contains(&call.0) && !candidate.flags.infix {
                 continue;
             }
