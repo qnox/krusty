@@ -53,10 +53,13 @@ pub(crate) type CallEdge = crate::fir::CheckedMemberCallEdge;
 
 impl<'a> KlibCalleeFacts<'a> {
     /// Derive builtin implementations for the selected KLIB member declarations while provider
-    /// identities and accessor-to-property names are still available to the body checker.
+    /// identities and accessor-to-property names are still available to the body checker. Each
+    /// member also carries what the target's `dispatched` classes below its owner run for it
+    /// ([`crate::backend::Backend::dispatched_dependency_classes`]).
     pub(crate) fn with_builtin_implementation_facts(
         mut self,
         source: &dyn SymbolSource,
+        dispatched: &[crate::types::TypeName],
     ) -> Result<Self, KlibDependencyCallable> {
         for fact in self.callables.values() {
             let IndexedKlibCallee::Selected(callables) = fact else {
@@ -87,8 +90,13 @@ impl<'a> KlibCalleeFacts<'a> {
             let name = callable
                 .accessor()
                 .map_or_else(|| callable.name(), |accessor| accessor.name.as_ref());
-            let implementations =
-                crate::symbol_resolver::builtin_implementation_facts(source, owner, name, external);
+            let mut implementations =
+                crate::symbol_resolver::builtin_implementation_facts(source, owner, name, external)
+                    .into_vec();
+            implementations.extend(crate::symbol_resolver::represented_implementation_facts(
+                source, dispatched, owner, name, external,
+            ));
+            let implementations = implementations.into_boxed_slice();
             if self
                 .builtin_implementation_facts
                 .get(&external)

@@ -148,6 +148,12 @@ impl Backend for WasmBackend {
             || lower::runtime_lays_out(classifier)
     }
 
+    /// The runtime's `StringBuilder` answers the `Appendable` and `CharSequence` members it
+    /// overrides (`crate::builtin_members`).
+    fn dispatched_dependency_classes(&self) -> Vec<krusty::backend::DependencyClassifier> {
+        vec![crate::string_builders::class()]
+    }
+
     fn realizes_dependency_intrinsic(
         &self,
         operation: krusty::backend::BackendCompilerIntrinsic,
