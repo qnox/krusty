@@ -2005,10 +2005,16 @@ pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &mu
             .map(|(classifier, _, _)| *classifier)
             .filter(|classifier| index.classifier_header(*classifier).is_some())
             .collect::<Vec<_>>();
+        let template_superclasses = table
+            .libraries
+            .klib_dependency_body_facts()
+            .map(|bodies| bodies.inline_bodies().local_class_supertypes())
+            .unwrap_or_default();
         let dependency_superclasses = dependency_superclasses::dependency_superclasses(
             index,
             &source,
             &module_classes,
+            &template_superclasses,
             |name| table.class_by_type_name(name).is_some(),
         );
         (
