@@ -2533,7 +2533,8 @@ fun box(): String {
 /// Run a portable box regression as the module it declares and compare its classes with
 /// kotlinc's.
 fn assert_box_regression_matches_kotlinc(source: &str, stem: &str) {
-    let (blocks, java) = krusty::conformance::split_files(source);
+    let (blocks, java) = krusty::conformance::split_files(source)
+        .unwrap_or_else(|error| panic!("{stem} is not a portable box program: {error}"));
     assert!(java.is_empty(), "{stem} declares no Java sources");
     let files = if blocks.is_empty() {
         vec![(format!("{stem}.kt"), source.to_string())]
