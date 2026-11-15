@@ -27,42 +27,11 @@ class C(val a: A, val b: B, val e: E) {
 
 /// A caller declared before an inline function with two tables, whose class's own later `when`
 /// claims a third enum first: the callee's tables are numbered after the caller's own.
-const TWO_TABLES: &str = r#"
-enum class A { X, Y }
-enum class B { P, Q }
-enum class E { M, N }
-
-fun caller(a: A, b: B, e: E): Int = twoTables(a, b) + when (e) { E.N -> 100; E.M -> 200 }
-
-inline fun twoTables(a: A, b: B): Int =
-    when (b) { B.Q -> 1; B.P -> 2 } + when (a) { A.Y -> 10; A.X -> 20 }
-
-fun own(e: E, a: A): Int = when (a) { A.X -> 1; A.Y -> 2 } + when (e) { E.M -> 3; E.N -> 4 }
-
-fun box(): String {
-    val sum = caller(A.X, B.Q, E.N) + own(E.M, A.Y)
-    return if (sum == 1 + 20 + 100 + 2 + 3) "OK" else "FAIL $sum"
-}
-"#;
+const TWO_TABLES: &str = include_str!("box_regressions/inlineTwoWhenMappingTablesBeforeOwnUses.kt");
 
 /// An inline member of a class of the same file, inlined into a top-level function: the inlined
 /// code reads the member's class's tables.
-const MEMBER: &str = r#"
-enum class Color { RED, GREEN, BLUE }
-
-class Palette(val fallback: Color) {
-    fun own(c: Color): Int = when (c) { Color.BLUE -> 7; else -> 8 }
-    inline fun shade(c: Color): String =
-        when (c) { Color.GREEN -> "g"; Color.RED -> "r"; Color.BLUE -> "b" }
-}
-
-fun paint(p: Palette, c: Color): String = p.shade(c) + p.shade(p.fallback)
-
-fun box(): String {
-    val painted = paint(Palette(Color.BLUE), Color.GREEN)
-    return if (painted == "gb") "OK" else "FAIL $painted"
-}
-"#;
+const MEMBER: &str = include_str!("box_regressions/inlineMemberWhenMapping.kt");
 
 /// A lambda written in a public inline function is a class of its own whose tables are part of
 /// that function's ABI.
@@ -74,16 +43,7 @@ inline fun label(s: Size): () -> String = { when (s) { Size.M -> "m"; else -> "x
 
 /// An enum `when` that only a top-level function's `$default` wrapper evaluates. `box` passes
 /// both arguments, so no call site copies the default.
-const DEFAULT_WRAPPER: &str = r#"
-enum class E { A, B }
-
-fun pick(e: E, s: String = when (e) {
-    E.A -> "OK"
-    E.B -> "FAIL"
-}): String = s
-
-fun box(): String = pick(E.A, "OK")
-"#;
+const DEFAULT_WRAPPER: &str = include_str!("box_regressions/topLevelDefaultWhenMapping.kt");
 
 /// An enum `when` that only a public inline member's `$default` wrapper evaluates: the default is
 /// code of that inline function's scope, so its class's mappings carry the public-ABI flag.
