@@ -500,7 +500,6 @@ pub(super) fn authenticate(
 ) -> Option<KlibIntrinsicShape> {
     if declaration.context_count != 0
         || !declaration.context_kinds.is_empty()
-        || !declaration.formals.is_empty()
         || declaration.is_suspend
         || declaration.is_inline
         || declaration.is_expect
@@ -512,10 +511,151 @@ pub(super) fn authenticate(
     {
         return None;
     }
-    match platform? {
-        TargetIntrinsicPlatform::Native => native(placement, declaration),
-        TargetIntrinsicPlatform::Wasm => wasm(placement, declaration),
+    // Only `wasm_array_copy` is generic: its one type parameter is the GC array type both
+    // operands share.
+    match (platform?, declaration.formals.is_empty()) {
+        (TargetIntrinsicPlatform::Native, true) => native(placement, declaration),
+        (TargetIntrinsicPlatform::Wasm, true) => wasm(placement, declaration),
+        (TargetIntrinsicPlatform::Wasm, false) => wasm_array_copy(placement, declaration),
+        (TargetIntrinsicPlatform::Native, false) => None,
     }
+}
+
+/// Native's `arrayCopy(array, fromIndex, destination, toIndex, count)` in `kotlin.collections`:
+/// one `@GCUnsafeCall` entry per array classifier, both arrays of that classifier.
+const NATIVE_ARRAY_COPY_ENTRIES: [(&str, &str); 9] = [
+    ("Kotlin_Array_copyImpl", "kotlin/Array"),
+    ("Kotlin_BooleanArray_copyImpl", "kotlin/BooleanArray"),
+    ("Kotlin_ByteArray_copyImpl", "kotlin/ByteArray"),
+    ("Kotlin_CharArray_copyImpl", "kotlin/CharArray"),
+    ("Kotlin_ShortArray_copyImpl", "kotlin/ShortArray"),
+    ("Kotlin_IntArray_copyImpl", "kotlin/IntArray"),
+    ("Kotlin_LongArray_copyImpl", "kotlin/LongArray"),
+    ("Kotlin_FloatArray_copyImpl", "kotlin/FloatArray"),
+    ("Kotlin_DoubleArray_copyImpl", "kotlin/DoubleArray"),
+];
+
+fn native_array_copy(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+    classifier: &str,
+) -> Option<KlibIntrinsicShape> {
+    let [array, from, destination, to, count] = declaration.params.as_slice() else {
+        return None;
+    };
+    let array_ty = native_array_type(array, classifier)?;
+    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin/collections"))
+        && declaration.receiver.is_none()
+        && destination == array
+        && [from, to, count]
+            .into_iter()
+            .all(|index| semantic_type(index) == Some(Ty::Int))
+        && exact_type(&declaration.ret, "kotlin/Unit"))
+    .then(|| KlibIntrinsicShape {
+        operation: CompilerIntrinsic::ArrayCopy,
+        kind: ExternalCallableKind::TopLevel,
+        receiver: None,
+        params: vec![array_ty, Ty::Int, array_ty, Ty::Int, Ty::Int],
+        ret: Ty::Unit,
+    })
+}
+
+/// A primitive array classifier exactly, or `Array<Any?>`: the reference array entry copies
+/// references whatever the arrays' element types.
+fn native_array_type(ty: &KotlinType, classifier: &str) -> Option<Ty> {
+    if classifier != "kotlin/Array" {
+        return exact_type(ty, classifier).then(|| Ty::obj(classifier));
+    }
+    let KotlinType::Class {
+        internal,
+        args,
+        nullable: false,
+        shape:
+            KotlinFunctionTypeShape {
+                receiver: false,
+                context_count: 0,
+                suspend: false,
+            },
+    } = ty
+    else {
+        return None;
+    };
+    let [element] = args.as_slice() else {
+        return None;
+    };
+    (internal == classifier && is_nullable_any(element)).then(|| {
+        Ty::obj_args(
+            classifier,
+            &[Ty::nullable(Ty::obj_name(crate::types::wk::any()))],
+        )
+    })
+}
+
+fn is_nullable_any(ty: &KotlinType) -> bool {
+    matches!(
+        ty,
+        KotlinType::Class {
+            internal,
+            args,
+            nullable: true,
+            shape: KotlinFunctionTypeShape {
+                receiver: false,
+                context_count: 0,
+                suspend: false,
+            },
+        } if internal == "kotlin/Any" && args.is_empty()
+    )
+}
+
+/// `wasm_array_copy<T>(destination: T, destinationIndex: Int, source: T, sourceIndex: Int,
+/// length: Int)` in `kotlin.wasm.internal`. It is `@ExcludedFromCodegen`: kotlinc binds the
+/// declaration by this name and lowers its call to `array.copy` over the two GC arrays, whose
+/// type is the call's type argument.
+fn wasm_array_copy(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    let [element] = declaration.formals.as_slice() else {
+        return None;
+    };
+    let [destination, destination_index, source, source_index, length] =
+        declaration.params.as_slice()
+    else {
+        return None;
+    };
+    let is_element = |ty: &KotlinType| matches!(ty, KotlinType::Param { id, nullable: false, .. } if *id == element.id);
+    let excluded = declaration
+        .annotation_applications
+        .iter()
+        .filter(|annotation| {
+            annotation.identity == type_name("kotlin/wasm/internal/ExcludedFromCodegen")
+        })
+        .count();
+    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin/wasm/internal"))
+        && declaration.name == "wasm_array_copy"
+        && excluded == 1
+        && declaration.receiver.is_none()
+        && !element.reified
+        && element.bounds.iter().all(is_nullable_any)
+        && is_element(destination)
+        && is_element(source)
+        && [destination_index, source_index, length]
+            .into_iter()
+            .all(|index| semantic_type(index) == Some(Ty::Int))
+        && exact_type(&declaration.ret, "kotlin/Unit"))
+    .then(|| {
+        let array = Ty::ty_param(
+            &element.name,
+            Ty::nullable(Ty::obj_name(crate::types::wk::any())),
+        );
+        KlibIntrinsicShape {
+            operation: CompilerIntrinsic::ArrayStorageCopy,
+            kind: ExternalCallableKind::TopLevel,
+            receiver: None,
+            params: vec![array, Ty::Int, array, Ty::Int, Ty::Int],
+            ret: Ty::Unit,
+        }
+    })
 }
 
 /// `intToString(value: Int, radix: Int): String` and its `Long` counterpart in `kotlin.text`.
@@ -577,6 +717,13 @@ fn native(
                 },
                 Ty::Double,
             ),
+            entry
+                if let Some((_, classifier)) = NATIVE_ARRAY_COPY_ENTRIES
+                    .iter()
+                    .find(|(array_copy, _)| *array_copy == entry) =>
+            {
+                return native_array_copy(placement, declaration, classifier)
+            }
             "Kotlin_Int_toStringRadix" => return radix_to_string(placement, declaration, Ty::Int),
             "Kotlin_Long_toStringRadix" => {
                 return radix_to_string(placement, declaration, Ty::Long)
@@ -1407,5 +1554,212 @@ mod tests {
             gc_unsafe("Kotlin_Int_toStringRadix"),
         );
         assert!(authenticate(native, text, &swapped).is_none());
+    }
+
+    #[test]
+    fn native_gc_unsafe_array_copy_requires_the_exact_entry_package_and_shape() {
+        let gc_unsafe = |callee: &str| AnnotationApplication {
+            identity: type_name("kotlin/native/internal/GCUnsafeCall"),
+            arguments: vec![(
+                "callee".to_owned(),
+                AnnotationArgument::String(callee.to_owned()),
+            )],
+        };
+        let native = Some(TargetIntrinsicPlatform::Native);
+        let collections =
+            crate::libraries::CallablePlacement::Package(type_name("kotlin/collections"));
+        let ints = [
+            "kotlin/IntArray",
+            "kotlin/Int",
+            "kotlin/IntArray",
+            "kotlin/Int",
+            "kotlin/Int",
+        ];
+        let exact = declaration(
+            "arrayCopy",
+            &ints,
+            "kotlin/Unit",
+            gc_unsafe("Kotlin_IntArray_copyImpl"),
+        );
+        let array = Ty::obj("kotlin/IntArray");
+        assert_eq!(
+            authenticate(native, collections, &exact),
+            Some(KlibIntrinsicShape {
+                operation: CompilerIntrinsic::ArrayCopy,
+                kind: ExternalCallableKind::TopLevel,
+                receiver: None,
+                params: vec![array, Ty::Int, array, Ty::Int, Ty::Int],
+                ret: Ty::Unit,
+            })
+        );
+        assert!(authenticate(Some(TargetIntrinsicPlatform::Wasm), collections, &exact).is_none());
+        let spoof = crate::libraries::CallablePlacement::Package(type_name("spoof"));
+        assert!(authenticate(native, spoof, &exact).is_none());
+        let other_entry = declaration(
+            "arrayCopy",
+            &ints,
+            "kotlin/Unit",
+            gc_unsafe("Kotlin_LongArray_copyImpl"),
+        );
+        assert!(authenticate(native, collections, &other_entry).is_none());
+        let mixed = declaration(
+            "arrayCopy",
+            &[
+                "kotlin/IntArray",
+                "kotlin/Int",
+                "kotlin/LongArray",
+                "kotlin/Int",
+                "kotlin/Int",
+            ],
+            "kotlin/Unit",
+            gc_unsafe("Kotlin_IntArray_copyImpl"),
+        );
+        assert!(authenticate(native, collections, &mixed).is_none());
+        let short = declaration(
+            "arrayCopy",
+            &ints[..4],
+            "kotlin/Unit",
+            gc_unsafe("Kotlin_IntArray_copyImpl"),
+        );
+        assert!(authenticate(native, collections, &short).is_none());
+        let mut bodyful = declaration(
+            "arrayCopy",
+            &ints,
+            "kotlin/Unit",
+            gc_unsafe("Kotlin_IntArray_copyImpl"),
+        );
+        bodyful.is_external = false;
+        assert!(authenticate(native, collections, &bodyful).is_none());
+
+        let any_array = KotlinType::Class {
+            internal: "kotlin/Array".to_owned(),
+            args: vec![KotlinType::Class {
+                internal: "kotlin/Any".to_owned(),
+                args: Vec::new(),
+                nullable: true,
+                shape: KotlinFunctionTypeShape::default(),
+            }],
+            nullable: false,
+            shape: KotlinFunctionTypeShape::default(),
+        };
+        let mut references = declaration(
+            "arrayCopy",
+            &ints,
+            "kotlin/Unit",
+            gc_unsafe("Kotlin_Array_copyImpl"),
+        );
+        references.params[0] = any_array.clone();
+        references.params[2] = any_array;
+        let reference_array = Ty::obj_args(
+            "kotlin/Array",
+            &[Ty::nullable(Ty::obj_name(crate::types::wk::any()))],
+        );
+        assert_eq!(
+            authenticate(native, collections, &references),
+            Some(KlibIntrinsicShape {
+                operation: CompilerIntrinsic::ArrayCopy,
+                kind: ExternalCallableKind::TopLevel,
+                receiver: None,
+                params: vec![reference_array, Ty::Int, reference_array, Ty::Int, Ty::Int],
+                ret: Ty::Unit,
+            })
+        );
+        let mut raw = declaration(
+            "arrayCopy",
+            &ints,
+            "kotlin/Unit",
+            gc_unsafe("Kotlin_Array_copyImpl"),
+        );
+        let raw_array = KotlinType::class("kotlin/Array");
+        raw.params[0] = raw_array.clone();
+        raw.params[2] = raw_array;
+        assert!(authenticate(native, collections, &raw).is_none());
+    }
+
+    #[test]
+    fn wasm_array_copy_requires_its_exact_generic_declaration() {
+        let wasm = Some(TargetIntrinsicPlatform::Wasm);
+        let internal =
+            crate::libraries::CallablePlacement::Package(type_name("kotlin/wasm/internal"));
+        let excluded = AnnotationApplication {
+            identity: type_name("kotlin/wasm/internal/ExcludedFromCodegen"),
+            arguments: Vec::new(),
+        };
+        let element = crate::metadata::semantic::KotlinTypeParameterId(7);
+        let element_type = KotlinType::Param {
+            name: "T".to_owned(),
+            id: element,
+            nullable: false,
+        };
+        let generic = |name: &str, annotation: AnnotationApplication| {
+            let mut copy = declaration(
+                name,
+                &[
+                    "kotlin/Int",
+                    "kotlin/Int",
+                    "kotlin/Int",
+                    "kotlin/Int",
+                    "kotlin/Int",
+                ],
+                "kotlin/Unit",
+                annotation,
+            );
+            copy.is_external = false;
+            copy.formals = vec![crate::metadata::semantic::KotlinTypeParameter {
+                id: element,
+                name: "T".to_owned(),
+                bounds: Vec::new(),
+                variance: crate::types::TypeVariance::Invariant,
+                only_input: false,
+                reified: false,
+            }];
+            copy.params[0] = element_type.clone();
+            copy.params[2] = element_type.clone();
+            copy
+        };
+        let exact = generic("wasm_array_copy", excluded.clone());
+        let storage = Ty::ty_param("T", Ty::nullable(Ty::obj_name(crate::types::wk::any())));
+        assert_eq!(
+            authenticate(wasm, internal, &exact),
+            Some(KlibIntrinsicShape {
+                operation: CompilerIntrinsic::ArrayStorageCopy,
+                kind: ExternalCallableKind::TopLevel,
+                receiver: None,
+                params: vec![storage, Ty::Int, storage, Ty::Int, Ty::Int],
+                ret: Ty::Unit,
+            })
+        );
+        assert!(authenticate(Some(TargetIntrinsicPlatform::Native), internal, &exact).is_none());
+        assert!(authenticate(
+            wasm,
+            crate::libraries::CallablePlacement::Package(type_name("kotlin")),
+            &exact
+        )
+        .is_none());
+        assert!(
+            authenticate(wasm, internal, &generic("wasm_array_new", excluded.clone())).is_none()
+        );
+        assert!(authenticate(
+            wasm,
+            internal,
+            &generic("wasm_array_copy", wasm_annotation("ARRAY_COPY"))
+        )
+        .is_none());
+        let mut nullable = generic("wasm_array_copy", excluded.clone());
+        nullable.params[2] = KotlinType::Param {
+            name: "T".to_owned(),
+            id: element,
+            nullable: true,
+        };
+        assert!(authenticate(wasm, internal, &nullable).is_none());
+        let mut bounded = generic("wasm_array_copy", excluded.clone());
+        bounded.formals[0].bounds = vec![KotlinType::class("kotlin/Any")];
+        assert!(authenticate(wasm, internal, &bounded).is_none());
+        let mut reified = generic("wasm_array_copy", excluded.clone());
+        reified.formals[0].reified = true;
+        assert!(authenticate(wasm, internal, &reified).is_none());
+        let mut concrete = generic("wasm_array_copy", excluded);
+        concrete.params[2] = KotlinType::class("kotlin/Int");
+        assert!(authenticate(wasm, internal, &concrete).is_none());
     }
 }

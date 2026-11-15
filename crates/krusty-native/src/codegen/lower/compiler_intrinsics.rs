@@ -303,6 +303,23 @@ impl BodyLowering<'_, '_, '_> {
                     self.runtime_call(symbol, &params, ret, &arguments)
                 })());
             }
+            Some(krusty::backend::BackendCompilerIntrinsic::ArrayCopy) => {
+                let (None, [array, from, destination, to, count]) = (receiver, args) else {
+                    return Some(Err("an array copy with malformed operands".into()));
+                };
+                if ret != Ty::Unit {
+                    return Some(Err("an array copy with a non-Unit result".into()));
+                }
+                let params = [any(), Ty::Int, any(), Ty::Int, Ty::Int];
+                return Some((|| {
+                    let arguments =
+                        self.arguments(&[*array, *from, *destination, *to, *count], &params)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call("kt_array_copy_range", &params, ret, &arguments)
+                })());
+            }
             Some(krusty::backend::BackendCompilerIntrinsic::FloatingIsNaN { operand }) => {
                 let Some(value) = floating_extension_operand(operand) else {
                     return Some(Err(

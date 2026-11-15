@@ -79,6 +79,14 @@ pub enum CompilerIntrinsic {
     /// element store for the same reason as [`Self::ArrayGet`].
     ArraySet,
     ArraySize,
+    /// The Wasm stdlib's `wasm_array_copy<T>(destination, destinationIndex, source, sourceIndex,
+    /// length)`, an `@ExcludedFromCodegen` declaration kotlinc lowers to `array.copy` over the
+    /// two storage arrays.
+    ArrayStorageCopy,
+    /// Native's `arrayCopy` of one array classifier (`@GCUnsafeCall("Kotlin_IntArray_copyImpl")`):
+    /// copy `count` elements of `array` from `fromIndex` to `destination` at `toIndex`, as if
+    /// through a temporary when the two ranges overlap.
+    ArrayCopy,
     CharCode,
     StringLength,
     /// `String.get(Int): Char`, the index operator on a string.

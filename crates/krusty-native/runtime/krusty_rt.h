@@ -14,6 +14,8 @@
    runtime's other translation units can call them without a C library's `<string.h>`. */
 void *memcpy(void *destination, const void *source, size_t length);
 void *memset(void *destination, int value, size_t length);
+/* Defined with the other string functions (`krusty_posix_string.c`). */
+void *memmove(void *destination, const void *source, size_t length);
 
 typedef int8_t   kt_byte;
 typedef int16_t  kt_short;
@@ -286,6 +288,7 @@ KRef kt_unsigned_array_wrap(const KType *type, KRef storage);
 /* Copy `source`'s elements into `destination` at `at`, answering where the next element goes. What
    a spread needs: `f(a, *xs, b)` builds one array whose size only run time knows. */
 kt_int kt_array_copy_into(KRef destination, kt_int at, KRef source);
+void kt_array_copy_range(KRef array, kt_int from, KRef destination, kt_int to, kt_int count);
 
 /* An index outside `0 until size`: raises Kotlin's `IndexOutOfBoundsException`, with the JVM's
    wording, and returns; the caller returns too. */

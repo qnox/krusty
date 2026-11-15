@@ -3000,3 +3000,33 @@ kt_int kt_array_copy_into(KRef destination, kt_int at, KRef source) {
            (const char *)(const KArray *)source + sizeof(KArray), (size_t)length * stride);
     return at + length;
 }
+
+/* `arrayCopy(array, fromIndex, destination, toIndex, count)`, the stdlib's `Kotlin_<X>Array_copyImpl`
+   behind `copyInto`: `count` elements of `array` from `from` into `destination` at `to`. The two
+   are arrays of the declaration's one classifier and may be the same array, whose overlapping
+   ranges copy as if through a temporary. */
+void kt_array_copy_range(KRef array, kt_int from, KRef destination, kt_int to, kt_int count) {
+    if (array == NULL || destination == NULL) {
+        kt_null_receiver();
+        return;
+    }
+    array = kt_array_storage(array);
+    destination = kt_array_storage(destination);
+    if (array->header.type != destination->header.type
+        || destination->header.type->element_size == 0) {
+        KT_FAIL("krusty: an array copy between arrays of different kinds\n");
+    }
+    kt_int length = ((const KArray *)array)->length;
+    kt_int capacity = ((const KArray *)destination)->length;
+    /* The ends are taken at 64 bits, so a start near `Int.MAX_VALUE` cannot wrap past the check. */
+    if (count < 0 || from < 0 || to < 0 || (kt_long)from + count > length
+        || (kt_long)to + count > capacity) {
+        kt_index_out_of_bounds(from < 0 || (kt_long)from + count > length ? from : to,
+                               from < 0 || (kt_long)from + count > length ? length : capacity);
+        return;
+    }
+    uint32_t stride = destination->header.type->element_size;
+    memmove((char *)(KArray *)destination + sizeof(KArray) + (size_t)to * stride,
+            (const char *)(const KArray *)array + sizeof(KArray) + (size_t)from * stride,
+            (size_t)count * stride);
+}
