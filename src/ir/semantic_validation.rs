@@ -260,6 +260,7 @@ fn validate_checked_operation(operation: &IrCheckedOperation) -> Result<(), Unde
         IrCheckedOperation::RangeContains { counter, .. }
         | IrCheckedOperation::RangeLoop { counter, .. } => reject("range counter", *counter),
         IrCheckedOperation::IllegalProgressionStep { .. }
+        | IrCheckedOperation::AtomicField { .. }
         | IrCheckedOperation::ComparableRangeContains { .. } => Ok(()),
         IrCheckedOperation::PropertyReference { substitutions, .. } => {
             for substitution in substitutions {

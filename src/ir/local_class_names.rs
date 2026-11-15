@@ -422,6 +422,7 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
             return;
         }
         IrCheckedOperation::IllegalProgressionStep { .. }
+        | IrCheckedOperation::AtomicField { .. }
         | IrCheckedOperation::ComparableRangeContains { .. } => return,
         IrCheckedOperation::PropertyReference {
             target,

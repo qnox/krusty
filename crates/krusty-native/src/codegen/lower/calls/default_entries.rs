@@ -63,16 +63,16 @@ impl BodyLowering<'_, '_, '_> {
         receiver: u32,
     ) -> Result<Option<Value>, Unsupported> {
         let declaration = &self.file.ir.functions[function as usize];
-        let Some(owner) = declaration
+        let Some(carried) = declaration
             .dispatch_receiver
-            .filter(|&owner| self.file.values.is_value_class(owner))
+            .and_then(|owner| self.file.value_receiver(owner))
         else {
             return Err(declined!(
                 "a direct call of `{}` with a receiver",
                 declaration.name
             ));
         };
-        let value = self.coerce(receiver, Ty::obj_name(owner))?;
+        let value = self.coerce(receiver, carried)?;
         if self.terminated {
             return Ok(None);
         }

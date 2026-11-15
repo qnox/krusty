@@ -277,7 +277,7 @@ impl BodyLowering<'_, '_, '_> {
                         if let Some(owner) =
                             self.file.ir.functions[*function as usize].dispatch_receiver
                         {
-                            if !self.file.values.is_value_class(owner) {
+                            if self.file.value_receiver(owner).is_none() {
                                 return self.own_class_member(*function, owner, receiver, args);
                             }
                         }

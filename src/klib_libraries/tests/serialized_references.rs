@@ -454,3 +454,48 @@ fn native_stdlib_fake_override_references_preserve_applied_parent_arguments() {
         );
     }
 }
+
+#[test]
+// Platform-specific: Native's stdlib declares its atomic field accesses as typed intrinsics.
+fn native_stdlib_authenticates_its_atomic_field_accesses() {
+    let Some(root) = std::env::var_os("KRUSTY_KOTLIN_NATIVE") else {
+        assert!(std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none());
+        return;
+    };
+    let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
+        std::path::PathBuf::from(root).join("klib/common/stdlib"),
+        KlibStdlibSemantics::Native,
+    )])
+    .unwrap();
+    let mut authenticated = libraries
+        .intrinsic_facts()
+        .atomic_field_declarations()
+        .map(|(identity, operation)| {
+            let crate::libraries::KlibDeclarationSignature::Public(signature) =
+                &identity.declaration
+            else {
+                panic!("an atomic field access without a public signature");
+            };
+            (
+                signature.package().segments().join("."),
+                signature.declaration().segments().join("."),
+                operation,
+            )
+        })
+        .collect::<Vec<_>>();
+    authenticated.sort_by_key(|entry| format!("{entry:?}"));
+    use crate::libraries::AtomicOperation::*;
+    let expected = [
+        ("atomicGetField", Load),
+        ("atomicSetField", Store),
+        ("compareAndExchangeField", CompareAndExchange),
+        ("compareAndSetField", CompareAndSet),
+        ("getAndAddField", FetchAndAdd),
+        ("getAndAddField", FetchAndAdd),
+        ("getAndAddField", FetchAndAdd),
+        ("getAndAddField", FetchAndAdd),
+        ("getAndSetField", Exchange),
+    ]
+    .map(|(name, operation)| ("kotlin.concurrent".to_owned(), name.to_owned(), operation));
+    assert_eq!(authenticated, expected);
+}

@@ -185,6 +185,15 @@ pub(super) trait CallLinker {
         Ok(false)
     }
 
+    /// The atomic field access `callee` is, when its exact declaration is the target stdlib's
+    /// authenticated intrinsic over a property reference. Template linkers keep an ordinary call.
+    fn atomic_field(
+        &self,
+        _callee: &KlibPublicIdSignature,
+    ) -> Lowered<Option<crate::libraries::AtomicOperation>> {
+        Ok(None)
+    }
+
     /// The function a call of the public declaration `callee` invokes.
     fn link(&mut self, ir: &mut IrFile, callee: &KlibPublicIdSignature) -> Lowered<LinkedCallee>;
 
@@ -415,11 +424,13 @@ impl<'a> BodyLowering<'a> {
     }
 
     /// This body as a member of the materialized class `class`, which reads its receiver's
-    /// `fields`. A value class member reads its one value and writes nothing.
+    /// `fields`, the backing fields of `properties`. A value class member reads its one value
+    /// and writes nothing.
     pub(super) fn reading_through(
         mut self,
         class: crate::ir::ClassId,
         fields: &[&'a crate::metadata::klib_ir::tree::KlibIrField],
+        properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
         value: bool,
     ) -> Self {
         let declared = &self.ir.classes[class as usize].fields;
@@ -429,6 +440,7 @@ impl<'a> BodyLowering<'a> {
                 .iter()
                 .zip(declared)
                 .map(|(field, declared)| (&field.base.symbol, declared.ty, declared.is_final())),
+            properties,
             self.header.value_receiver(),
             value,
         ));
