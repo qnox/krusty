@@ -70,7 +70,13 @@ fn class_type(
         if !function.is_reflective() {
             let ret = arguments.pop().expect("a function type has its result");
             let receiver = receiver && !arguments.is_empty();
-            return Ok(Ty::fun_with_shape(arguments, ret, 0, receiver, false));
+            return Ok(Ty::fun_with_shape(
+                arguments,
+                ret,
+                0,
+                receiver,
+                function.is_suspend(),
+            ));
         }
     }
     if receiver {
@@ -202,11 +208,6 @@ fn function_shape(
     arguments: usize,
 ) -> Result<Option<function_classifiers::FunctionClassifier>, KlibBodyDeclineReason> {
     if let Some(function) = function_classifiers::classifier(name) {
-        if function.is_suspend() {
-            return Err(KlibBodyDeclineReason::UnsupportedType(
-                "a suspend function type",
-            ));
-        }
         if !function.is_reflective() && arguments != function.arity() + 1 {
             return Err(mismatch(
                 "a function type has another number of arguments than its arity",
@@ -237,7 +238,9 @@ pub(super) fn closure_type_arity(arena: &KlibIrArena, id: KlibIrTypeId) -> Optio
     }
     let (name, _) = class_head(classifier, annotations, &|_| Ok(None)).ok()?;
     let function = function_shape(name, arguments.len()).ok()??;
-    (!function.is_reflective()).then(|| function.arity())
+    // A suspend lambda's implementation also takes the continuation, which closure planning does
+    // not model yet.
+    (!function.is_reflective() && !function.is_suspend()).then(|| function.arity())
 }
 
 /// One type argument, as the provider converts a metadata type argument.
