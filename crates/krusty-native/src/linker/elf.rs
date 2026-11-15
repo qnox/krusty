@@ -96,7 +96,7 @@ pub(super) fn symbol_name<'data>(
 /// The identification bytes, `e_type` and `e_machine` are checked by hand before anything else: an
 /// object for another machine can otherwise parse cleanly and have its relocation numbers read as
 /// this architecture's, which either fails as an unknown relocation or patches the wrong bits.
-fn parse<'data>(
+pub(super) fn parse<'data>(
     what: &str,
     bytes: &'data [u8],
     arch: Arch,
