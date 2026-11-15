@@ -1802,17 +1802,25 @@ impl<'s> Linker<'_, 's> {
         self.private_members.insert(identity.clone());
         let function = match self.functions.get(identity) {
             Some(&function) => function,
-            None => self.queue(
-                ir,
-                identity,
-                None,
-                arena,
-                declaration,
-                BodyHeader {
-                    header,
-                    value_member: Some(active),
-                },
-            )?,
+            None => {
+                let class = active.class;
+                let function = self.queue(
+                    ir,
+                    identity,
+                    None,
+                    arena,
+                    declaration,
+                    BodyHeader {
+                        header,
+                        value_member: Some(active),
+                    },
+                )?;
+                // It is a member of its class like any other, one no subclass overrides.
+                ir.set_method_visibility(function, crate::types::Visibility::Private);
+                ir.classes[class as usize].methods.push(function);
+                ir.note_class_method(class, function);
+                function
+            }
         };
         let declared = &ir.functions[function as usize];
         let (Some(receiver), params) = (
