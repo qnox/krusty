@@ -497,6 +497,12 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         };
+        if let Err(error) =
+            super::backend_handoff::record_checked_klib_dependency_facts(&mut callables, platform)
+        {
+            diags.error(Span::new(0, 0), format!("internal error: {error}"));
+            return Vec::new();
+        }
         if let Err(identity) =
             super::builtin_implementations::record_checked(&mut callables, unit.ir(), platform)
         {

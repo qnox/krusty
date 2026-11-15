@@ -152,8 +152,9 @@ pub(super) fn checked_ir_file<'a>(
 
 /// Check the KLIB body graph reachable from the frozen callables and store its facts, before the
 /// checked callable facts are completed. A refreeze after common preparation checks the graph of
-/// the calls the preparation introduced the same way.
-fn record_checked_klib_dependency_facts(
+/// the calls the preparation introduced the same way, and a dependency support unit checks the
+/// graph its own bodies reach.
+pub(super) fn record_checked_klib_dependency_facts(
     callables: &mut CheckedBackendCallables,
     platform: &dyn crate::libraries::SemanticPlatform,
 ) -> Result<(), String> {
