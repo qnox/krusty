@@ -526,17 +526,53 @@ fn maven_classpath_jars() -> io::Result<Vec<PathBuf>> {
 fn maven_lib() -> io::Result<PathBuf> {
     for variable in ["MAVEN_HOME", "M2_HOME"] {
         if let Ok(home) = std::env::var(variable) {
-            let lib = PathBuf::from(home).join("lib");
-            if lib.join("maven-resolver-api.jar").is_file() {
+            if let Some(lib) = embedder_lib(Path::new(&home)) {
                 return Ok(lib);
             }
         }
     }
-    let system = PathBuf::from("/usr/share/maven/lib");
-    if system.join("maven-resolver-api.jar").is_file() {
-        return Ok(system);
+    if let Some(lib) = embedder_lib(Path::new("/usr/share/maven")) {
+        return Ok(lib);
+    }
+    // The Maven the plugin jobs install is on PATH. Its lib jars are versioned
+    // (`maven-resolver-api-1.9.24.jar`), unlike the unversioned names in a distro package.
+    if let Some(path) = std::env::var_os("PATH") {
+        if let Some(lib) = embedder_lib_on_path(&path) {
+            return Ok(lib);
+        }
     }
     Err(io::Error::other("Maven embedder jars are not installed"))
+}
+
+fn embedder_lib(home: &Path) -> Option<PathBuf> {
+    let lib = home.join("lib");
+    has_resolver_api(&lib).then_some(lib)
+}
+
+fn embedder_lib_on_path(path: &std::ffi::OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path).find_map(|dir| {
+        if !dir.join("mvn").is_file() {
+            return None;
+        }
+        dir.parent().and_then(embedder_lib)
+    })
+}
+
+fn has_resolver_api(lib: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(lib) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .any(|entry| entry.path().is_file() && is_resolver_api_name(&entry.file_name()))
+}
+
+fn is_resolver_api_name(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    name == "maven-resolver-api.jar"
+        || (name.starts_with("maven-resolver-api-") && name.ends_with(".jar"))
 }
 
 fn gradle_user_home() -> PathBuf {
@@ -610,6 +646,7 @@ fn log_tail(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project::testing::TempTree;
 
     #[test]
     fn the_gradle_client_opens_a_tooling_connection() {
@@ -643,15 +680,34 @@ mod tests {
     }
 
     #[test]
+    fn an_official_distribution_on_path_is_the_embedder() {
+        let tree = TempTree::new("maven-official-home");
+        let home = tree.directory("apache-maven");
+        let lib = tree.directory("apache-maven/lib");
+        let bin = tree.directory("apache-maven/bin");
+        assert!(embedder_lib(&home).is_none());
+        tree.write("apache-maven/lib/maven-core.jar", "");
+        assert!(embedder_lib(&home).is_none());
+        tree.write("apache-maven/bin/mvn", "");
+        assert!(embedder_lib_on_path(bin.as_os_str()).is_none());
+        tree.write("apache-maven/lib/maven-resolver-api-1.9.24.jar", "");
+        assert_eq!(embedder_lib(&home).as_deref(), Some(lib.as_path()));
+        assert_eq!(
+            embedder_lib_on_path(bin.as_os_str()).as_deref(),
+            Some(lib.as_path())
+        );
+
+        let packaged = tree.directory("share/maven");
+        tree.write("share/maven/lib/maven-resolver-api.jar", "");
+        assert_eq!(
+            embedder_lib(&packaged).as_deref(),
+            Some(packaged.join("lib").as_path())
+        );
+    }
+
+    #[test]
     fn project_repositories_are_normalized_through_the_session() {
-        // The other embedder tests record a resolver response and never open Maven. This one
-        // checks the settings.xml session, and only where the embedder jars are installed.
-        let Ok(jars) = maven_classpath_jars() else {
-            eprintln!(
-                "skipping Maven session normalization: Maven embedder jars are not installed"
-            );
-            return;
-        };
+        let jars = maven_classpath_jars().expect("Maven embedder jars");
         let directory =
             std::env::temp_dir().join(format!("krusty-maven-normalize-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
