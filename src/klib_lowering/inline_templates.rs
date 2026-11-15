@@ -216,6 +216,14 @@ fn lower(
     )?;
     ir.inline_fns.insert(template);
     ir.inline_only_fns.insert(template);
+    // A suspend template is a suspend function of the file, as a same-module inline one is: its
+    // body may suspend, and every expansion runs in a suspend caller.
+    if callable
+        .declaration_modifiers()
+        .is_some_and(|modifiers| modifiers.is_suspend)
+    {
+        ir.suspend_funs.push(template);
+    }
     Ok((template, class_type_parameters))
 }
 
