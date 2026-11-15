@@ -1863,7 +1863,8 @@ impl<'s> CallLinker for Linker<'_, 's> {
 impl<'s> Linker<'_, 's> {
     /// The type parameters of the generic class declaring `selected`, which a call of the member
     /// binds from its dispatch receiver; none for a top-level function or a non-generic class.
-    /// The accessor of a property of a class whose members the unit emits, when it has a body.
+    /// The accessor of a property of a class whose members the unit emits, when it has a body or
+    /// is abstract.
     fn materialized_member_accessor(
         &mut self,
         ir: &mut IrFile,
@@ -1889,7 +1890,12 @@ impl<'s> Linker<'_, 's> {
         let Some((arena, declaration)) = self.sources.bodies.function(identity) else {
             return Ok(None);
         };
-        if !matches!(declaration.body, Some(KlibIrBody::Block(_))) {
+        // An abstract accessor is declared with its class, as an abstract member function is,
+        // and a call of it dispatches to the instance's override.
+        let abstract_ = declaration.body.is_none()
+            && crate::metadata::semantic::declaration_modality(declaration.base.flags)
+                == crate::metadata::semantic::KotlinModality::Abstract;
+        if !abstract_ && !matches!(declaration.body, Some(KlibIrBody::Block(_))) {
             return Ok(None);
         }
         let selected = selected_callable_for_header_purpose(
