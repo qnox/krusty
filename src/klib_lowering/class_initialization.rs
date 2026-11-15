@@ -574,7 +574,7 @@ pub(super) fn value_class_overrides(
                 overridden.extend(
                     bodies
                         .overridden_declarations(module, &signature)
-                        .map_err(|reason| mismatch(reason))?,
+                        .map_err(mismatch)?,
                 );
             }
             overrides.push(ValueClassOverride {
