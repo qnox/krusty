@@ -323,7 +323,6 @@ callableReference/function/overloadedFunVsVal.kt
 callableReference/function/referenceToCompanionMember.kt
 callableReference/function/sortListOfStrings.kt
 callableReference/genericConstructorReference.kt
-callableReference/genericLocalClassConstructorReference.kt
 callableReference/generticReferences.kt
 callableReference/interfaceMethodReference.kt
 callableReference/kt21014.kt
@@ -470,7 +469,6 @@ constants/kt9532.kt
 contextParameters/contextOnInvokeResolve.kt
 contextParameters/contextPropertyInInterface.kt
 contextParameters/explicitPassing.kt
-contextParameters/inferGenericPropertyType.kt
 contextParameters/kt51863.kt
 contextParameters/kt52213.kt
 contextParameters/kt53551.kt
@@ -1230,7 +1228,6 @@ delegatedProperty/valInInnerClass.kt
 delegatedProperty/varInInnerClass.kt
 delegation/delegationDifferentModule.kt
 delegation/delegationDifferentModule2.kt
-delegation/genericProperty.kt
 delegation/ifWithCallableReferenceInLazy.kt
 delegation/kt30102_comparable.kt
 delegation/kt44199.kt
@@ -1317,7 +1314,6 @@ extensionFunctions/extensionFunctionAsASupertypeOfValueClass.kt
 extensionFunctions/extensionFunctionAsATypeLocal.kt
 extensionFunctions/extensionFunctionAsSupertype.kt
 extensionFunctions/extensionFunctionDifferentReceivers.kt
-extensionFunctions/extensionFunctionFakeOverride.kt
 extensionFunctions/extensionFunctionInValueClass.kt
 extensionFunctions/extensionFunctionWithExtensionAsAReceiver.kt
 extensionFunctions/extensionFunctionWithInlineModifier.kt
@@ -1335,12 +1331,8 @@ extensionFunctions/thisMethodInObjectLiteral.kt
 extensionProperties/contextPropertyInInterface.kt
 extensionProperties/extensionPropertyDelegated.kt
 extensionProperties/extensionPropertyDifferentReceiver.kt
-extensionProperties/extensionPropertyWithAnonymoesExtensionWithALabel.kt
-extensionProperties/extensionPropertyWithAnonymousExtensionFunWithTypeParam.kt
 extensionProperties/extensionPropertyWithExtensionAsReceiver.kt
-extensionProperties/extensionProperyWithExtensionType.kt
 extensionProperties/genericContextOverride.kt
-extensionProperties/genericValForPrimitiveType.kt
 fakeOverride/fakeOverrideWithMissingClassInSignature.kt
 fakeOverride/internalFromFriendModule.kt
 fakeOverride/intersectionInLocal.kt
@@ -1431,7 +1423,6 @@ functions/bigArity/instanceOfCallableReference.kt
 functions/bigArity/invokeLambda.kt
 functions/bigArity/subclass.kt
 functions/functionExpression/functionExpression.kt
-functions/functionExpression/functionExpressionWithThisReference.kt
 functions/functionExpression/functionLiteralExpression.kt
 functions/invoke/kt3190.kt
 functions/kt1199.kt
@@ -1524,12 +1515,9 @@ inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/Enclos
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/GenericLocalClass.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/GenericLocalClassWithLeakingTypeParameter.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/Int.kt
-inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/IntersectionType.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/LocalClass.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/NullableTypeParameter.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/TypeParameter.kt
-inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/typeInfoSinks/ImmutableExtensionProperties.kt
-inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/typeInfoSinks/MutableExtensionPropertiesMaterializeCase.kt
 inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
 inference/pcla/specialCallsWithCallableReferencesDontRewriteAtSlice.kt
 inference/pcla/specialCallsWithLambdas.kt
@@ -2444,8 +2432,6 @@ objects/localFunctionInObjectInitializer_kt4516.kt
 objects/objectInLocalAnonymousObject.kt
 objects/receiverInConstructor.kt
 objects/useAnonymousObjectFunction.kt
-objects/useImportedMember.kt
-objects/useImportedMemberFromCompanion.kt
 operatorConventions/BoundedGenericValueInRangeCheck.kt
 operatorConventions/assignToDotQualifiedWithSideEffect.kt
 operatorConventions/compareTo/doubleInt.kt
