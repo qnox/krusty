@@ -1328,7 +1328,6 @@ fir/functionsDifferInTypeParameterBounds.kt
 fir/kt68806.kt
 fir/listAssignmentInWhen.kt
 fir/multipleDefaultsFalsePositiveDelegation.kt
-fir/smartCastToInvisibleClassMember.kt
 fp/atan2ZeroGuadrantsDouble.kt
 fp/powDouble.kt
 fp/powFloat.kt
