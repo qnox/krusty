@@ -13,6 +13,9 @@ use super::{FirBody, LocalValueId, ResolvedTy};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FirEqualityBoundGuard {
     pub parameter: LocalValueId,
+    /// The parameter's ordinal among the declaration's parameters, context parameters first. The
+    /// declaration's `@Metadata` records the bound on that parameter.
+    pub ordinal: u32,
     pub bound: ResolvedTy,
 }
 

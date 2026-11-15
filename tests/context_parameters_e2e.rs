@@ -1893,7 +1893,8 @@ fn an_inferred_property_getter_reads_its_context_parameters() {
 fn varargs_after_context_parameters_take_only_the_arguments_that_reach_them() {
     let (sources, java) = krusty::conformance::split_files(include_str!(
         "box_regressions/contextParameters/contextVararg.kt"
-    ));
+    ))
+    .expect("the regression partitions into files");
     assert!(java.is_empty());
     let [(stem, src)] = sources.as_slice() else {
         panic!("the complete same-file context-vararg program")
@@ -1931,7 +1932,8 @@ fn dependency_varargs_after_context_parameters_take_only_the_arguments_that_reac
 fn varargs_after_context_parameters_reach_operator_invokes_and_local_functions() {
     let (sources, java) = krusty::conformance::split_files(include_str!(
         "box_regressions/contextParameters/contextVarargInvokes.kt"
-    ));
+    ))
+    .expect("the regression partitions into files");
     assert!(java.is_empty());
     let [(stem, src)] = sources.as_slice() else {
         panic!("the complete member-invoke and local-function program")

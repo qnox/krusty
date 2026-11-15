@@ -32,6 +32,9 @@ on:
 permissions:
   contents: read
 
+env:
+  KRUSTY_TEST_FAILURE_DIR: ${{ github.workspace }}/test-failures
+
 # One run per queue branch (each is unique). Every master run uses a unique group and remains
 # authoritative evidence even when a newer one is started.
 concurrency:
@@ -63,7 +66,7 @@ jobs:
         run: if command -v just > /dev/null; then echo "found=true" >> "$GITHUB_OUTPUT"; fi
       - &install-just
         if: steps.just-on-path.outputs.found != 'true'
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: just
       # The same value build-tool-bins publishes as its matrix output.
@@ -232,7 +235,7 @@ jobs:
         name: look for an installed cargo-llvm-cov
         run: if command -v cargo-llvm-cov > /dev/null; then echo "found=true" >> "$GITHUB_OUTPUT"; fi
       - if: steps.llvm-cov-on-path.outputs.found != 'true'
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-llvm-cov
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -504,6 +507,14 @@ jobs:
   # rows' critical path; no row waits for it, and it checks every release's exact Native and Wasm
   # stdlib in one pass. The full cfg(test) unit harness exceeded the 8 GB self-hosted runners
   # before, so it stays on hosted capacity.
+      - name: upload failed program evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-failures
+          path: test-failures/
+          if-no-files-found: ignore
+
   klib-implementation-coverage:
     runs-on: ubuntu-latest
     steps:
@@ -546,6 +557,8 @@ jobs:
             rm -rf "$PWD/target/cache/kotlin-native/$version"
             echo "::endgroup::"
           done
+
+
 
   build-tool-bins:
     runs-on: [self-hosted, rust-4c-8gb]
@@ -807,8 +820,8 @@ jobs:
         if: matrix.target == 'jvm'
         env:
           # A cold lane compiles every missing kotlinc reference before it can publish the cache.
-          # Keep the 120-second local default; give GHA enough time to bootstrap an empty cache.
-          KRUSTY_CONFORMANCE_TIMEOUT_SECONDS: "1800"
+          # The full JVM corpus can exceed 30 minutes on slower self-hosted workers.
+          KRUSTY_CONFORMANCE_TIMEOUT_SECONDS: "2400"
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
           KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}
@@ -1012,6 +1025,14 @@ jobs:
         with:
           path: target/cache/box-corpus/${{ matrix.version }}
           key: ${{ steps.box-corpus.outputs.cache-primary-key }}
+      - name: upload failed program evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: conformance-failures-${{ matrix.version }}-${{ matrix.target }}
+          path: test-failures/
+          if-no-files-found: ignore
+
 
   # The one check a ruleset requires: its context does not change with either matrix. A required
   # check that is skipped counts as passing, so this job is always scheduled and fails itself unless
@@ -1085,12 +1106,14 @@ jobs:
         run: |
           echo "GRADLE_USER_HOME=$RUNNER_TEMP/krusty-gradle-user-home" >> "$GITHUB_ENV"
           echo "version=$(sed -n 's/^distributionUrl=.*gradle-\(.*\)-bin\.zip$/\1/p' tools/krusty-gradle/gradle/wrapper/gradle-wrapper.properties)" >> "$GITHUB_OUTPUT"
-      # One dependency cache per Gradle version, shared by every job that runs that Gradle: the
-      # resolved artifacts and the wrapper distribution only. Transforms, instrumented jars and the
-      # Kotlin DSL workspace are rebuilt, since the plugin under test changes them every run. A job
-      # saves a new generation only when it downloaded files the restored one lacked, so the
-      # entry stops changing once it holds what every job on that Gradle reads; restore takes the
-      # newest generation and the older ones are never read again.
+      # One cache per Gradle version, shared by every job that runs that Gradle: the resolved
+      # artifacts, the wrapper distribution, and the transforms, instrumented jars and generated API
+      # jars built from them (without these a full lane's tests ran about 150 s longer on the slower
+      # pool). The Kotlin DSL workspace is rebuilt. A job saves a new generation only when it
+      # downloaded artifacts the restored one lacked: the transforms of the plugin under test change
+      # every run and never cause a save on their own. The entry stops changing once it holds what
+      # every job on that Gradle reads; restore takes the newest generation and the older ones are
+      # never read again.
       - &restore-gradle-home
         name: restore Gradle ${{ steps.gradle-home.outputs.version }} dependencies
         id: gradle-deps
@@ -1098,8 +1121,12 @@ jobs:
         with:
           path: &gradle-home-paths |
             ${{ runner.temp }}/krusty-gradle-user-home/caches/modules-2
+            ${{ runner.temp }}/krusty-gradle-user-home/caches/transforms-*
+            ${{ runner.temp }}/krusty-gradle-user-home/caches/*/transforms
+            ${{ runner.temp }}/krusty-gradle-user-home/caches/jars-*
+            ${{ runner.temp }}/krusty-gradle-user-home/caches/*/generated-gradle-jars
             ${{ runner.temp }}/krusty-gradle-user-home/wrapper/dists
-            !${{ runner.temp }}/krusty-gradle-user-home/caches/modules-2/*.lock
+            !${{ runner.temp }}/krusty-gradle-user-home/caches/**/*.lock
             !${{ runner.temp }}/krusty-gradle-user-home/caches/modules-2/gc.properties
           key: gradle-${{ steps.gradle-home.outputs.version }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}
           restore-keys: |
@@ -1573,7 +1600,7 @@ jobs:
       - name: publish this validated master commit
         id: tip
         run: scripts/release-publisher.sh check >> "$GITHUB_OUTPUT"
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         if: steps.tip.outputs.publish == 'true'
         with:
           tool: just

@@ -22,6 +22,7 @@ use collection_canonicalization::{
     canonicalize_jvm_collections, overlay_metadata_collection_names,
 };
 #[cfg(test)]
+#[path = "jvm_libraries/tests/contract_dsl_tests.rs"]
 mod contract_dsl_tests;
 mod dependency_access_policy;
 mod dependency_deprecation;
@@ -85,9 +86,11 @@ use crate::libraries::{
     PropertyInfo, PropertyProducer, PropertySet, ReturnInfo, Visibility,
 };
 use crate::runtime::{PlatformRangeCtor, RangeConstruction};
-use crate::symbol_resolver::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
-use crate::types::{type_name, SemanticCallableOwner, Ty, TyKind, TypeName, TypeNameList};
+use crate::types::{
+    ty_subst, ty_subst_all, ty_subst_keep_unbound, type_name, SemanticCallableOwner, Ty, TyKind,
+    TypeName, TypeNameList,
+};
 
 use java_operator_convention::java_method_has_operator_convention;
 
@@ -2745,6 +2748,7 @@ impl JvmLibraries {
             // realization consumed after checked FIR has supplied both receivers.
             self.register_external_callable(&mut callable, FnKind::Member, declaration_owner);
             member.external_identity = callable.external_identity;
+            member.declaration_owner = callable.declaration_owner;
             member.inline_body_plan = callable.inline_body_plan;
         }
         for member in &mut classifier.companion {
@@ -2766,6 +2770,7 @@ impl JvmLibraries {
             callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
             self.register_external_callable(&mut callable, FnKind::TopLevel, declaration_owner);
             member.external_identity = callable.external_identity;
+            member.declaration_owner = callable.declaration_owner;
             member.inline_body_plan = callable.inline_body_plan;
         }
         for declarations in classifier.declared_callables.values_mut() {

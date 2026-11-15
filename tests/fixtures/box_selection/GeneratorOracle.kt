@@ -40,18 +40,35 @@ class TestClass(val dataRoot: String, val runner: String) {
         selectedRoots.add(relativeRoot)
         val matcher = Pattern.compile(pattern)
         val excluded = excludedPattern?.let { Pattern.compile(it) }
-        val files = if (recursive) directory.walkTopDown().asSequence()
-                    else directory.listFiles().orEmpty().asSequence()
-        for (file in files) {
-            if (!file.isFile || !matcher.matcher(file.name).matches()) continue
+        for (file in listing(relativeRoot, directory, recursive)) {
+            if (!matcher.matcher(file.name).matches()) continue
             if (excluded?.matcher(file.name)?.matches() == true) continue
-            val relative = file.relativeTo(directory).invariantSeparatorsPath
+            val relative = file.relative
             if (excludeDirs.any { relative == it || relative.startsWith(it + "/") }) continue
-            if (relative.split('/').dropLast(1).any { it in excludeDirsRecursively }) continue
-            selectedFiles.add(file.relativeTo(File(checkoutRoot)).invariantSeparatorsPath)
+            if (file.parents.any { it in excludeDirsRecursively }) continue
+            selectedFiles.add(file.fromCheckout)
         }
     }
 }
+class ListedFile(val name: String, val relative: String, val parents: List<String>, val fromCheckout: String)
+
+// Generators declare many models over the same box root. The tree is read once per root and
+// traversal kind; every model still applies its own pattern and exclusions to that listing.
+val listings = HashMap<Pair<String, Boolean>, List<ListedFile>>()
+fun listing(relativeRoot: String, directory: File, recursive: Boolean): List<ListedFile> =
+    listings.getOrPut(relativeRoot to recursive) {
+        val files = if (recursive) directory.walkTopDown().asSequence()
+                    else directory.listFiles().orEmpty().asSequence()
+        files.filter { it.isFile }.map { file ->
+            val relative = file.relativeTo(directory).invariantSeparatorsPath
+            ListedFile(
+                file.name,
+                relative,
+                relative.split('/').dropLast(1),
+                file.relativeTo(File(checkoutRoot)).invariantSeparatorsPath,
+            )
+        }.toList()
+    }
 fun generateTestGroupSuiteWithJUnit5(
     args: Array<String>,
     mainClassName: String = "",

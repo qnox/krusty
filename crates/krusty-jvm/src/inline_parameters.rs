@@ -16,6 +16,17 @@ pub(crate) fn is_inline_parameter(ir: &IrFile, call: ExprId, parameter: usize) -
     Some(modifier != InlineParameterModifier::Noinline && declared.is_fun())
 }
 
+/// Whether operand `parameter` of the realized inline call `call` is a `crossinline` parameter.
+/// `None` when the call published no modifier for that operand.
+pub(crate) fn is_crossinline_parameter(
+    ir: &IrFile,
+    call: ExprId,
+    parameter: usize,
+) -> Option<bool> {
+    let modifier = *ir.call_inline_modifiers.get(&call)?.get(parameter)?;
+    Some(modifier == InlineParameterModifier::Crossinline)
+}
+
 /// Whether operand `parameter` of the realized inline call `call` is an inline parameter of a
 /// suspend function type, whose function value, when the call does not inline it, the inlined
 /// code invokes as a suspension point. `None` when the call published either fact for no such

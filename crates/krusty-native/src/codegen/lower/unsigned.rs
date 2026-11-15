@@ -36,19 +36,24 @@ fn declared_unsigned_array_carrier(
     declared.filter(|carrier| *carrier == expected)
 }
 
-/// Select the allocating constructor; a raw signed array is not an unsigned nominal view.
-fn unsigned_array_size_argument(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnsignedArrayArgument {
+    Size(u32),
+    Storage(u32),
+}
+
+/// The selected constructor's one operand, kept distinct until its representation is realized.
+fn unsigned_array_argument(
     owner: krusty::types::TypeName,
     carrier: Ty,
     args: &[u32],
     selected: Option<&[Ty]>,
-) -> Result<u32, Unsupported> {
+) -> Result<UnsignedArrayArgument, Unsupported> {
     match (args, selected) {
-        ([size], Some([Ty::Int])) => Ok(*size),
-        ([_], Some([parameter])) if *parameter == carrier => Err(
-            "a signed-carrier constructor of an unsigned array without an alias-preserving view"
-                .into(),
-        ),
+        ([size], Some([Ty::Int])) => Ok(UnsignedArrayArgument::Size(*size)),
+        ([storage], Some([parameter])) if *parameter == carrier => {
+            Ok(UnsignedArrayArgument::Storage(*storage))
+        }
         _ => Err(declined!(
             "construction of `{}` from {} arguments",
             owner.render(),
@@ -95,7 +100,7 @@ impl BodyLowering<'_, '_, '_> {
 
     /// Whether `target` is an array's `size`, by its getter's provider realization, or the `size`
     /// an unsigned array declares. That one is an ordinary member of the value class, but this
-    /// target stores an unsigned array as its signed carrier, so it is the carrier's length.
+    /// target retains that signed carrier in its unsigned view, whose length is the same.
     pub(super) fn is_array_size(&self, target: krusty::fir::ExternalPropertyId) -> bool {
         let Some(property) = self.file.callables.property(target) else {
             return false;
@@ -132,8 +137,8 @@ impl BodyLowering<'_, '_, '_> {
     /// The carrier array operation an unsigned array's own `get`/`set` operator is on this target.
     ///
     /// `xs[i]` and `xs[i] = v` select the value class's members, as kotlinc does. This target
-    /// stores the unsigned array as its signed carrier, so `get(Int): E` is the carrier's element
-    /// load and `set(Int, E): Unit` its store, with the declaring classifier decided as for `size`.
+    /// retains the signed array behind the nominal view, so `get(Int): E` is its element load and
+    /// `set(Int, E): Unit` its store, with the declaring classifier decided as for `size`.
     pub(super) fn unsigned_array_carrier_access(
         &self,
         callable: &krusty::backend::BackendCallableFact,
@@ -155,12 +160,11 @@ impl BodyLowering<'_, '_, '_> {
         }
     }
 
-    /// A construction of an unsigned array, which this target stores with its signed carrier's
-    /// layout under the unsigned array's own type.
+    /// A construction of an unsigned array, retaining its original signed array in a nominal view.
     ///
     /// The class declares two constructors with one parameter each, and the selected one decides:
-    /// `constructor(size: Int)` allocates the array with its own descriptor. The primary
-    /// signed-carrier constructor needs an alias-preserving unsigned view, which is not available.
+    /// `constructor(size: Int)` allocates fresh storage. The primary signed-carrier constructor
+    /// retains the supplied signed array, so an underlying-property read returns that same object.
     pub(super) fn unsigned_array_carrier_construction(
         &mut self,
         internal: krusty::types::TypeName,
@@ -169,12 +173,33 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Option<Result<Option<Value>, Unsupported>> {
         let carrier = self.unsigned_array_carrier(internal)?;
         Some(
-            unsigned_array_size_argument(internal, carrier, args, selected)
-                .and_then(|size| self.new_array(Ty::obj_name(internal), size)),
+            unsigned_array_argument(internal, carrier, args, selected).and_then(|argument| {
+                match argument {
+                    UnsignedArrayArgument::Size(size) => {
+                        self.new_array(Ty::obj_name(internal), size)
+                    }
+                    UnsignedArrayArgument::Storage(storage) => {
+                        let storage = self.reference(storage)?;
+                        if self.terminated {
+                            return Ok(None);
+                        }
+                        self.null_check(storage)?;
+                        let (symbol, _) = super::arrays::array_type(Ty::obj_name(internal))?;
+                        let descriptor = self.file.import_data(symbol)?;
+                        let descriptor = self.data_address(descriptor);
+                        self.runtime_call(
+                            "kt_unsigned_array_wrap",
+                            &[any(), carrier],
+                            Ty::obj_name(internal),
+                            &[descriptor, storage],
+                        )
+                    }
+                }
+            }),
         )
     }
 
-    /// The unsigned element of `owner` when it is an unsigned array stored as a signed carrier.
+    /// The unsigned element of `owner` when it retains an authenticated signed array carrier.
     fn unsigned_array_carrier_element(&self, owner: krusty::types::TypeName) -> Option<Ty> {
         self.unsigned_array_carrier(owner)?;
         Ty::obj_name(owner).array_elem()
@@ -201,22 +226,33 @@ impl BodyLowering<'_, '_, '_> {
         let Some(property) = self.file.callables.property(target) else {
             return false;
         };
-        Ty::obj_name(property.owner).is_unsigned()
+        (Ty::obj_name(property.owner).is_unsigned()
+            || self.unsigned_array_carrier(property.owner).is_some())
             && self
                 .file
                 .classifiers
                 .classifier(property.owner)
                 .and_then(|fact| fact.value_declaration.clone())
-                .is_some_and(|declaration| declaration.property == property.name)
+                .is_some_and(|declaration| {
+                    declaration.property == property.name
+                        && declaration.underlying == property.result
+                })
     }
 
-    /// The value an unsigned receiver wraps: the same bits at the signed carrier, since this
-    /// target carries the unsigned type as its underlying value.
+    /// The scalar bits, or the original signed array object, the unsigned value class retains.
     pub(super) fn unsigned_storage_read(
         &mut self,
         receiver: u32,
         result: Ty,
     ) -> Result<Option<Value>, Unsupported> {
+        if result.non_null().is_array() {
+            let value = self.reference(receiver)?;
+            if self.terminated {
+                return Ok(None);
+            }
+            self.null_check(value)?;
+            return self.runtime_call("kt_array_storage", &[any()], result, &[value]);
+        }
         self.coerce(receiver, result)
     }
 

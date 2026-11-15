@@ -10,11 +10,15 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 use crate::libraries::{KlibBodyCallable, KlibDependencyCallable};
+use crate::symbol_source::SymbolSource;
 
 /// Frozen dependency declarations by their exact module-qualified KLIB identity.
 #[derive(Clone, Default)]
 pub struct KlibCalleeFacts<'a> {
     callables: HashMap<&'a KlibDependencyCallable, IndexedKlibCallee<'a>>,
+    /// Builtin dispatch facts derived for each exact member identity before common-IR lowering.
+    builtin_implementation_facts:
+        HashMap<crate::fir::ExternalCallableId, Box<[crate::fir::BuiltinImplementation]>>,
     /// Header evidence is not a checked source call which requires an executable export.
     selected: HashSet<&'a KlibDependencyCallable>,
     /// Same-compilation declaration identities for reference equality. These do not grant an
@@ -44,17 +48,66 @@ pub(super) enum KlibCalleeFact<'facts, 'callable> {
     Ambiguous,
 }
 
-/// The facts a call of a member realized outside a support unit carries beyond its callee, as the
-/// member hierarchy decorates a source call of the same declaration: its semantic role, inherited
-/// from a declaration it overrides when it has none of its own, and the declarations it
-/// overrides, through which a target recognizes a member it implements specially.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct CallEdge {
-    pub(crate) semantic_role: Option<crate::types::SemanticCallRole>,
-    pub(crate) overridden: Box<[crate::types::OverriddenDeclaration]>,
-}
+/// Shared name retained for the checked member-call edge consumed by KLIB body lowering.
+pub(crate) type CallEdge = crate::fir::CheckedMemberCallEdge;
 
 impl<'a> KlibCalleeFacts<'a> {
+    /// Derive builtin implementations for the selected KLIB member declarations while provider
+    /// identities and accessor-to-property names are still available to the body checker.
+    pub(crate) fn with_builtin_implementation_facts(
+        mut self,
+        source: &dyn SymbolSource,
+    ) -> Result<Self, KlibDependencyCallable> {
+        for fact in self.callables.values() {
+            let IndexedKlibCallee::Selected(callables) = fact else {
+                continue;
+            };
+            let callable = callables[0];
+            if !callable.is_member() {
+                continue;
+            }
+            let Some(crate::types::SemanticCallableOwner::Classifier(owner)) =
+                callable.declaration_owner()
+            else {
+                return Err(callable.identity().clone());
+            };
+            let Some((external, realization)) =
+                source.external_callable_by_dependency(callable.identity())
+            else {
+                return Err(callable.identity().clone());
+            };
+            if realization.dependency_callable.as_ref() != Some(callable.identity())
+                || realization.callable.external_identity != Some(external)
+                || realization.kind != crate::libraries::ExternalCallableKind::Member
+                || realization.declaration_owner
+                    != Some(crate::types::SemanticCallableOwner::Classifier(owner))
+            {
+                return Err(callable.identity().clone());
+            }
+            let name = callable
+                .accessor()
+                .map_or_else(|| callable.name(), |accessor| accessor.name.as_ref());
+            let implementations =
+                crate::symbol_resolver::builtin_implementation_facts(source, owner, name, external);
+            if self
+                .builtin_implementation_facts
+                .get(&external)
+                .is_some_and(|existing| existing != &implementations)
+            {
+                return Err(callable.identity().clone());
+            }
+            self.builtin_implementation_facts
+                .insert(external, implementations);
+        }
+        Ok(self)
+    }
+
+    pub(crate) fn builtin_implementation_facts(
+        &self,
+    ) -> &HashMap<crate::fir::ExternalCallableId, Box<[crate::fir::BuiltinImplementation]>> {
+        &self.builtin_implementation_facts
+    }
+
     /// The call edge facts of the members realized outside the unit, frozen with its closure.
     pub(crate) fn with_member_edges(
         mut self,
@@ -164,6 +217,23 @@ impl<'a> KlibCalleeFacts<'a> {
 
     pub(super) fn same_type(&self, left: crate::types::Ty, right: crate::types::Ty) -> bool {
         super::type_evidence::same_type(self.class_type_oracle, left, right)
+    }
+
+    /// Apply a receiver to the declaring classifier through the calling compilation's explicit
+    /// class evidence. Without that evidence, only the receiver's own classifier is known.
+    pub(super) fn applied_supertype(
+        &self,
+        receiver: crate::types::Ty,
+        owner: crate::types::TypeName,
+    ) -> Option<crate::types::Ty> {
+        match self.class_type_oracle {
+            Some(classes) => crate::assignable::applied_supertype(
+                classes,
+                receiver,
+                crate::types::Ty::obj_name(owner),
+            ),
+            None => (receiver.kotlin_class_internal() == Some(owner)).then_some(receiver),
+        }
     }
 
     pub(super) fn constructor(

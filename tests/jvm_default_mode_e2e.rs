@@ -143,18 +143,32 @@ fn compile_reference(flag: &str) -> Vec<(String, Vec<u8>)> {
 }
 
 fn compile_reference_source(flag: &str, source_text: &str, stem: &str) -> Vec<(String, Vec<u8>)> {
+    compile_reference_sources(flag, &[(stem, source_text)])
+}
+
+fn compile_reference_sources(flag: &str, sources: &[(&str, &str)]) -> Vec<(String, Vec<u8>)> {
     let work = common::scratch_dir().expect("allocate kotlinc fixture");
-    let source = work.join(format!("{stem}.kt"));
     let output = work.join("out");
     std::fs::create_dir_all(&output).expect("create kotlinc output");
-    std::fs::write(&source, source_text).expect("write kotlinc fixture");
-    let args = vec![
+    let source_paths = sources
+        .iter()
+        .map(|(stem, source_text)| {
+            let source = work.join(format!("{stem}.kt"));
+            std::fs::write(&source, source_text).expect("write kotlinc fixture");
+            source
+        })
+        .collect::<Vec<_>>();
+    let mut args = vec![
         "-d".to_string(),
         output.to_string_lossy().into_owned(),
         "-nowarn".to_string(),
         format!("-jvm-default={flag}"),
-        source.to_string_lossy().into_owned(),
     ];
+    args.extend(
+        source_paths
+            .iter()
+            .map(|source| source.to_string_lossy().into_owned()),
+    );
     let (code, stderr) = common::kotlinc_compile(&args).expect("reference compiler unavailable");
     assert_eq!(code, 0, "kotlinc failed under {flag}: {stderr}");
     let mut classes = Vec::new();
@@ -1606,4 +1620,104 @@ fn an_any_carrier_default_runs_through_its_bridge_and_overriding_super_call() {
         "AnyCarrierDefault",
         &["-jvm-default=disable"],
     );
+}
+
+/// `@JvmDefaultWithoutCompatibility` (allowed under `enable`) and `@JvmDefaultWithCompatibility`
+/// (allowed under `no-compatibility`) put one interface or class under the other mode. Whether its
+/// `$DefaultImpls` holder exists, which forwarders and erased bridges the class writes, and the
+/// interface's `access$…$jd` surface follow the declaration and not the module mode.
+const WITHOUT_COMPATIBILITY_SOURCE: &str = "interface Plain<T> { fun m(t: T): T = t }\n\
+@JvmDefaultWithoutCompatibility\n\
+interface Lean<T> { fun n(t: T): T = t }\n\
+interface Sub : Lean<String> { override fun n(t: String): String = t }\n\
+class Implements : Plain<String>, Lean<String>\n\
+@JvmDefaultWithoutCompatibility\n\
+class LeanClass : Plain<String>, Lean<String>\n\
+class Inherits : Sub\n";
+
+const WITH_COMPATIBILITY_SOURCE: &str = "interface Plain<T> { fun m(t: T): T = t }\n\
+@JvmDefaultWithCompatibility\n\
+interface Compat<T> { fun o(t: T): T = t }\n\
+interface Sub : Compat<String> { override fun o(t: String): String = t }\n\
+class Implements : Plain<String>, Compat<String>\n\
+@JvmDefaultWithCompatibility\n\
+class CompatClass : Plain<String>, Compat<String>\n\
+class Inherits : Sub\n";
+
+#[test]
+fn a_declaration_annotated_with_a_jvm_default_mode_matches_kotlinc() {
+    for (mode, flag, source) in [
+        (
+            JvmDefaultMode::Enable,
+            "enable",
+            WITHOUT_COMPATIBILITY_SOURCE,
+        ),
+        (
+            JvmDefaultMode::NoCompatibility,
+            "no-compatibility",
+            WITH_COMPATIBILITY_SOURCE,
+        ),
+    ] {
+        let ours = compile_source(mode, source, "Declared");
+        let reference = compile_reference_source(flag, source, "Declared");
+        assert_eq!(
+            class_names(&ours),
+            class_names(&reference),
+            "-jvm-default={flag}: the emitted classes differ"
+        );
+        for (name, _) in &reference {
+            assert_eq!(
+                public_method_shape(&ours, name),
+                public_method_shape(&reference, name),
+                "-jvm-default={flag}: {name} diverges"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_annotated_value_class_in_another_file_uses_its_own_default_mode() {
+    const LIBRARY: &str = "package mode\n\
+        interface Defaults {\n\
+            fun answer(): Int = 42\n\
+            val label: String get() = \"ready\"\n\
+        }\n\
+        @JvmInline\n\
+        @JvmDefaultWithoutCompatibility\n\
+        value class Lean(val raw: Int) : Defaults\n\
+        fun libraryResult(): Boolean {\n\
+            val direct = Lean(3)\n\
+            return direct.answer() == 42 && direct.label == \"ready\"\n\
+        }\n";
+    const MAIN: &str = "package mode\n\
+        fun box(): String {\n\
+            if (!libraryResult()) return \"same-file\"\n\
+            val direct = Lean(3)\n\
+            val boxed: Defaults = direct\n\
+            if (direct.answer() != 42 || boxed.answer() != 42) return \"function\"\n\
+            if (direct.label != \"ready\" || boxed.label != \"ready\") return \"property\"\n\
+            return \"OK\"\n\
+        }\n";
+    let sources = [("Defaults", LIBRARY), ("Main", MAIN)];
+    let ours = compile_sources(JvmDefaultMode::Enable, &sources);
+    let reference = compile_reference_sources("enable", &sources);
+    let classes = common::ClassSets {
+        reference: reference.iter().cloned().collect(),
+        krusty: ours.iter().cloned().collect(),
+    };
+    for class in ["mode/Defaults", "mode/Lean"] {
+        let (reference, krusty) = classes.class_listing(class);
+        assert_eq!(krusty, reference, "{class} differs from kotlinc");
+    }
+
+    let stdlib = common::stdlib_jar();
+    let ours_box = common::find_box_class(&ours).expect("krusty box class");
+    let reference_box = common::find_box_class(&reference).expect("kotlinc box class");
+    let ours_result = common::run_box(&ours, &ours_box, std::slice::from_ref(&stdlib))
+        .expect("JVM unavailable for krusty output");
+    let reference_result = common::run_box(&reference, &reference_box, &[stdlib])
+        .expect("JVM unavailable for kotlinc output");
+    assert_eq!(ours_result, "OK");
+    assert_eq!(reference_result, "OK");
+    assert_eq!(ours_result, reference_result);
 }

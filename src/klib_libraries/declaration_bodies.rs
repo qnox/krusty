@@ -553,15 +553,28 @@ impl KlibDeclarationBodies {
         &self,
         identity: &KlibDependencyCallable,
     ) -> Option<(&KlibIrArena, &KlibIrFunction)> {
+        self.function_with_trees(identity)
+            .map(|(_, arena, function)| (arena, function))
+    }
+
+    /// [`Self::function`], with the decoded trees that serialize it. A file-local identity the
+    /// body names is a slot of one of their files' signature tables, so it is resolved in those
+    /// same trees and nowhere else.
+    fn function_with_trees(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Option<(&KlibIrModuleTrees, &KlibIrArena, &KlibIrFunction)> {
         let signature = ir_signature(&identity.declaration);
         if let KlibDeclarationSignature::FileLocal { .. } = identity.declaration {
-            let library = *self.modules.get(&identity.module)?;
-            return self.libraries[library].file_private_function(&signature);
+            let trees = &self.libraries[*self.modules.get(&identity.module)?];
+            let (arena, function) = trees.file_private_function(&signature)?;
+            return Some((trees, arena, function));
         }
-        let library = *self
+        let trees = &self.libraries[*self
             .owners
-            .get(&(identity.module.clone(), signature.clone()))?;
-        self.libraries[library].function(&signature)
+            .get(&(identity.module.clone(), signature.clone()))?];
+        let (arena, function) = trees.function(&signature)?;
+        Some((trees, arena, function))
     }
 
     /// The file-local class `module` itself serializes under `signature`.
@@ -725,21 +738,24 @@ impl KlibDeclarationBodies {
         identity: &KlibDependencyCallable,
         forms: crate::metadata::klib_ir::tree::EmittedCallForms,
     ) -> Vec<KlibDependencyCallable> {
-        let Some((arena, function)) = self.function(identity) else {
+        let Some((trees, arena, function)) = self.function_with_trees(identity) else {
             return Vec::new();
         };
         let mut symbols = arena.emitted_callable_symbols(function, forms);
         // A file-local class the body constructs, an object literal's among them, is
         // materialized with the body, every member included, since dispatch can run any of them.
+        // A private class of the same file is its own declaration tree, so its members are read
+        // in the arena that serializes the class.
         let mut classes = crate::fx_hash::HashSet::default();
         let mut next = 0;
         while let Some(symbol) = symbols.get(next).copied() {
             next += 1;
-            if let Some(class) = self.constructed_local_class(&identity.module, arena, symbol) {
+            if let Some((class_arena, class)) = constructed_local_class(trees, symbol) {
                 if classes.insert(&class.base.symbol) {
-                    symbols.extend(
-                        arena.emitted_callable_symbols_from(arena.class_member_roots(class), forms),
-                    );
+                    symbols.extend(class_arena.emitted_callable_symbols_from(
+                        class_arena.class_member_roots(class),
+                        forms,
+                    ));
                 }
             }
         }
@@ -753,29 +769,6 @@ impl KlibDeclarationBodies {
                 },
             )
             .collect()
-    }
-
-    /// The file-local class of `module` whose constructor `symbol` names, serialized in `arena`.
-    fn constructed_local_class<'a>(
-        &'a self,
-        module: &str,
-        arena: &'a KlibIrArena,
-        symbol: &KlibIrSymbol,
-    ) -> Option<&'a KlibIrClass> {
-        if symbol.kind != KlibIrSymbolKind::Constructor
-            || !matches!(symbol.signature, KlibIrSignature::FileLocal { .. })
-        {
-            return None;
-        }
-        let (function_arena, function) = self.module_local_function(module, &symbol.signature)?;
-        let KlibIrType::Simple { classifier, .. } = function_arena.ty(function.return_type) else {
-            return None;
-        };
-        let (class_arena, class) = self.module_local_class(module, &classifier.signature)?;
-        (function.constructor
-            && std::ptr::eq(arena, function_arena)
-            && std::ptr::eq(arena, class_arena))
-        .then_some(class)
     }
 
     /// Whether `identity` is an executable dependency-support root: its own serialized body has a
@@ -1022,6 +1015,27 @@ fn ir_signature(declaration: &KlibDeclarationSignature) -> KlibIrSignature {
             KlibIrSignature::FileLocal { file, slot }
         }
     }
+}
+
+/// The file-local class whose constructor `symbol` names, resolved in `trees`, the decoded trees
+/// whose signature tables numbered the symbol, with the arena that serializes the class and its
+/// constructor.
+fn constructed_local_class<'a>(
+    trees: &'a KlibIrModuleTrees,
+    symbol: &KlibIrSymbol,
+) -> Option<(&'a KlibIrArena, &'a KlibIrClass)> {
+    if symbol.kind != KlibIrSymbolKind::Constructor
+        || !matches!(symbol.signature, KlibIrSignature::FileLocal { .. })
+    {
+        return None;
+    }
+    let (function_arena, function) = trees.local_function(&symbol.signature)?;
+    let KlibIrType::Simple { classifier, .. } = function_arena.ty(function.return_type) else {
+        return None;
+    };
+    let (class_arena, class) = trees.local_class(&classifier.signature)?;
+    (function.constructor && std::ptr::eq(function_arena, class_arena))
+        .then_some((class_arena, class))
 }
 
 fn declaration_signature(signature: &KlibIrSignature) -> Option<KlibDeclarationSignature> {

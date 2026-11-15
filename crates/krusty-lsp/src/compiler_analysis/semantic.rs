@@ -215,7 +215,7 @@ impl HighlightSymbols {
                 .classes
                 .iter()
                 .map(|(internal, class)| {
-                    let kind = if symbols.enums.contains_key(internal) {
+                    let kind = if class.is_enum() {
                         HighlightKind::Enum
                     } else if class.is_annotation() {
                         HighlightKind::Decorator
@@ -2751,8 +2751,7 @@ impl<'a> SemanticClassifier<'a> {
             }
             if self
                 .symbols
-                .enums
-                .get(&owner)
+                .enum_entries_of(owner)
                 .is_some_and(|entries| entries.iter().any(|entry| entry == name))
             {
                 return MemberHighlight {

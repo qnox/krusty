@@ -36,6 +36,8 @@ const THIS_SLOT: u32 = 44;
 const PARAMETER_SLOT: u32 = 45;
 const MARK_SLOT: u32 = 46;
 const INITIALIZER_SLOT: u32 = 47;
+const MEMBER_SLOT: u32 = 48;
+const MEMBER_THIS_SLOT: u32 = 49;
 
 const MAKE: Shape = ("make", &[T::Int], T::Any);
 const EMPTY_MAKE: Shape = ("make", &[], T::Any);
@@ -242,6 +244,15 @@ fn hidden_class(supertype: T) -> KlibIrDeclarationTree {
 
 /// A non-generic class whose only store is the constant `value`, not a constructor parameter.
 fn counted_class(value: i32) -> KlibIrDeclarationTree {
+    counted_class_with(value, |_, _| Vec::new())
+}
+
+/// [`counted_class`] with the further `members` it builds in the class's own arena, given the
+/// class type.
+fn counted_class_with(
+    value: i32,
+    members: impl FnOnce(&mut KlibIrArena, KlibIrTypeId) -> Vec<KlibIrMember>,
+) -> KlibIrDeclarationTree {
     let mut arena = KlibIrArena::default();
     let symbol = class_symbol();
     let class_ty = plain_hidden(&mut arena);
@@ -267,6 +278,7 @@ fn counted_class(value: i32) -> KlibIrDeclarationTree {
         prepared_inline_file: None,
         body: Some(KlibIrBody::Block(constructor_body)),
     });
+    let extra = members(&mut arena, class_ty);
     let class = arena.push_class(KlibIrClass {
         base: private(base(symbol.clone())),
         name: "Hidden".to_owned(),
@@ -279,10 +291,13 @@ fn counted_class(value: i32) -> KlibIrDeclarationTree {
         }),
         type_parameters: Vec::new(),
         supertypes: vec![any],
-        members: vec![
+        members: [
             KlibIrMember::Field(field(STORED_SLOT, "stored", int, initializer)),
             KlibIrMember::Function(constructor),
-        ],
+        ]
+        .into_iter()
+        .chain(extra)
+        .collect(),
         value_class_representation: None,
         sealed_subclasses: Vec::new(),
     });
@@ -1065,4 +1080,153 @@ fn marker_externals(
     )]
     .into_iter()
     .collect()
+}
+
+/// A non-public class is its own declaration tree, apart from the body constructing it. The
+/// callees of its members are emitted with that body, as dispatch can run any member.
+#[test]
+fn a_constructed_class_of_its_own_tree_contributes_its_member_callees() {
+    const HELPER: Shape = ("helper", &[], T::Int);
+    let build = |name: &str, body: &mut super::demo_package::Body| match name {
+        "make" => {
+            let constructed = counted_construction(body);
+            Some(vec![body.ret(constructed)])
+        }
+        "helper" => {
+            let value = body.int(1);
+            Some(vec![body.ret(value)])
+        }
+        _ => None,
+    };
+    let shapes = [EMPTY_MAKE, HELPER];
+    let signed = demo_with(&shapes, vec![counted_class(3)], build);
+    let Some(crate::libraries::KlibDeclarationSignature::Public(helper)) =
+        signed.facts["helper"].declaration_signature.clone()
+    else {
+        panic!("a top-level KLIB function freezes its public signature")
+    };
+    let class = helper_calling_class(helper);
+    let demo = demo_with(&shapes, vec![class], build);
+    let make = demo.callable("make").identity().clone();
+    let helper = demo.callable("helper").identity().clone();
+    assert_eq!(
+        demo.bodies
+            .emitted_body_callables(&make, crate::klib_lowering::EMITTED_CALL_FORMS),
+        vec![helper]
+    );
+}
+
+/// A file-local symbol is a slot of the signature tables of the trees that serialize the body.
+/// A body of another component (a prepared-inline copy) that names the same file and slot as an
+/// ordinary private class does not reach that class, so its members contribute nothing.
+#[test]
+fn a_colliding_file_local_symbol_of_another_component_contributes_nothing() {
+    const HELPER: Shape = ("helper", &[], T::Int);
+    let build = |name: &str, body: &mut super::demo_package::Body| match name {
+        "make" => {
+            let constructed = counted_construction(body);
+            Some(vec![body.ret(constructed)])
+        }
+        "helper" => {
+            let value = body.int(1);
+            Some(vec![body.ret(value)])
+        }
+        _ => None,
+    };
+    let shapes = [EMPTY_MAKE, HELPER];
+    let signed = demo_with(&shapes, vec![counted_class(3)], build);
+    let Some(crate::libraries::KlibDeclarationSignature::Public(helper)) =
+        signed.facts["helper"].declaration_signature.clone()
+    else {
+        panic!("a top-level KLIB function freezes its public signature")
+    };
+    let ordinary = demo_with(&shapes, vec![helper_calling_class(helper)], build);
+    let make = ordinary.callable("make").identity().clone();
+    assert_eq!(
+        ordinary
+            .bodies
+            .emitted_body_callables(&make, crate::klib_lowering::EMITTED_CALL_FORMS),
+        vec![ordinary.callable("helper").identity().clone()]
+    );
+    // The other component serializes the same constructing body but no class at those
+    // coordinates.
+    let (_, prepared) = module_trees("demo", &shapes, Vec::new(), build);
+    let prepared = KlibDeclarationBodies::from_libraries(vec![("demo".to_owned(), prepared)])
+        .expect("one library");
+    assert_eq!(
+        prepared.emitted_body_callables(&make, crate::klib_lowering::EMITTED_CALL_FORMS),
+        Vec::new()
+    );
+}
+
+/// The prepared-inline component and the ordinary IR number their file-local symbols with
+/// different signature tables, and the file index of a prepared table can equal an ordinary
+/// file's. The two are never decoded into one set of trees (`read_declaration_trees_from` takes
+/// one component per archive), and a library set refuses a second library for one module (and a
+/// second owner of a declaration), so a file-local
+/// symbol is resolved against the single table kind that numbered it.
+#[test]
+fn one_module_cannot_hold_the_ordinary_and_the_prepared_component_together() {
+    let build = |name: &str, body: &mut super::demo_package::Body| match name {
+        "make" => {
+            let constructed = counted_construction(body);
+            Some(vec![body.ret(constructed)])
+        }
+        _ => None,
+    };
+    let shapes = [EMPTY_MAKE];
+    let (_, ordinary) = module_trees("demo", &shapes, vec![counted_class(3)], build);
+    let (_, prepared) = module_trees("demo", &shapes, Vec::new(), build);
+    let error = match KlibDeclarationBodies::from_libraries(vec![
+        ("demo".to_owned(), ordinary),
+        ("demo".to_owned(), prepared),
+    ]) {
+        Ok(_) => panic!("two components of one module are refused"),
+        Err(error) => error,
+    };
+    assert_eq!(error.libraries(), [0, 1]);
+}
+
+/// A private class whose member `read` calls the public function `helper`.
+fn helper_calling_class(helper: KlibPublicIdSignature) -> KlibIrDeclarationTree {
+    counted_class_with(3, |arena, class_ty| {
+        let int = arena.push_type(T::Int.klib());
+        let call = arena.push_expr(
+            Some(int),
+            KlibIrExprKind::Call {
+                access: KlibIrMemberAccess {
+                    symbol: public_symbol(KlibIrSymbolKind::Function, helper),
+                    arguments: KlibIrArguments::Flat(Vec::new()),
+                    type_arguments: Vec::new(),
+                    origin: None,
+                },
+                super_qualifier: None,
+            },
+        );
+        let member = arena.push_function(KlibIrFunction {
+            base: private(base(file_local(KlibIrSymbolKind::Function, MEMBER_SLOT))),
+            name: "read".to_owned(),
+            constructor: false,
+            type_parameters: Vec::new(),
+            dispatch_receiver: Some(KlibIrParameter {
+                base: base(file_local(
+                    KlibIrSymbolKind::ValueParameter,
+                    MEMBER_THIS_SLOT,
+                )),
+                name: "<this>".to_owned(),
+                ty: class_ty,
+                vararg_element_type: None,
+                default_value: None,
+            }),
+            context_parameters: Vec::new(),
+            extension_receiver: None,
+            regular_parameters: Vec::new(),
+            return_type: int,
+            overridden: Vec::new(),
+            companion_extension_class: None,
+            prepared_inline_file: None,
+            body: Some(KlibIrBody::Block(vec![KlibIrStatement::Expression(call)])),
+        });
+        vec![KlibIrMember::Function(member)]
+    })
 }

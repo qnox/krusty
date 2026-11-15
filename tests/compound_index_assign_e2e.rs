@@ -54,7 +54,8 @@ fn plain_compound_index_assign_still_works() {
 fn plain_array_store_checks_the_index_after_the_value() {
     let (sources, java) = krusty::conformance::split_files(include_str!(
         "box_regressions/arrayStoreIndexAfterValue.kt"
-    ));
+    ))
+    .expect("partition");
     assert!(java.is_empty());
     let [(stem, program)] = sources.as_slice() else {
         panic!("the complete completed-RHS array-store regression")

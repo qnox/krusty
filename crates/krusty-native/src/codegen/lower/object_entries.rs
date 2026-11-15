@@ -2,6 +2,15 @@
 
 use super::*;
 
+/// What a converting bridge forwards to.
+#[derive(Clone, Copy)]
+pub(super) enum BridgeTarget {
+    /// The receiver's own table, at this slot.
+    Slot(u32),
+    /// This method of the file, called outright.
+    Function(krusty::ir::FunId),
+}
+
 impl FileLowering<'_> {
     /// A bridge: the base's signature in, the override's out, and a dispatch between them.
     ///
@@ -87,14 +96,43 @@ impl FileLowering<'_> {
     ) -> Result<(), Unsupported> {
         let base = self.ir.functions[declared as usize].clone();
         let carried = super::super::super::captures::carried_parameters(self.ir, declared);
-        let mut params = vec![any()];
-        params.extend(carried.iter().copied());
-        let result = base.ret;
-        let signature = self.signature_of(&params, result)?;
         let forwarded = super::super::super::captures::carried_parameters(self.ir, target);
         let forwarded_ret = self.ir.functions[target as usize].ret;
-        let name = format!("bridge to `{}`", base.name);
-        self.emit_function(id, signature, result, &name, &mut |body, values| {
+        // Through the slot where there is one, so a further subclass's override is reached
+        // through the same base. An INTERFACE's own bridge has none — see `Slot::Bridge` — and
+        // calls the default body outright, which is where it is the only implementation.
+        let target = match target_slot {
+            Some(slot) => BridgeTarget::Slot(slot),
+            None => BridgeTarget::Function(target),
+        };
+        self.define_converting_bridge(
+            (&carried, base.ret),
+            (&forwarded, forwarded_ret),
+            target,
+            &format!("bridge to `{}`", base.name),
+            id,
+        )
+    }
+
+    /// The bridge [`Self::define_bridge`] writes, between two signatures given by their types:
+    /// `declared`'s operands in (after the receiver), each converted to `implemented`'s, the
+    /// call to `target`, and its answer converted back. A member of a dependency's interface an
+    /// override carries differently (`next(): Int` implementing `Iterator<T>.next(): T`) stands
+    /// in the type's records as one dispatching through the override's slot.
+    pub(super) fn define_converting_bridge(
+        &mut self,
+        declared: (&[Ty], Ty),
+        implemented: (&[Ty], Ty),
+        target: BridgeTarget,
+        name: &str,
+        id: FuncId,
+    ) -> Result<(), Unsupported> {
+        let (carried, result) = declared;
+        let (forwarded, forwarded_ret) = implemented;
+        let mut params = vec![any()];
+        params.extend(carried.iter().copied());
+        let signature = self.signature_of(&params, result)?;
+        self.emit_function(id, signature, result, name, &mut |body, values| {
             let mut arguments = Vec::with_capacity(forwarded.len());
             for (index, &want) in forwarded.iter().enumerate() {
                 let have = carried.get(index).copied();
@@ -103,14 +141,11 @@ impl FileLowering<'_> {
                 };
                 arguments.push(value);
             }
-            // Through the slot where there is one, so a further subclass's override is reached
-            // through the same base. An INTERFACE's own bridge has none — see `Slot::Bridge` —
-            // and calls the default body outright, which is where it is the only implementation.
-            let answer = match target_slot {
-                Some(slot) => {
-                    body.dispatch(values[0], slot, &forwarded, forwarded_ret, &arguments)?
+            let answer = match target {
+                BridgeTarget::Slot(slot) => {
+                    body.dispatch(values[0], slot, forwarded, forwarded_ret, &arguments)?
                 }
-                None => {
+                BridgeTarget::Function(target) => {
                     let Some(target) = body.file.functions[target as usize] else {
                         return Err("a bridge to a method with no body".into());
                     };

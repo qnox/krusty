@@ -585,6 +585,7 @@ impl FirReferenceAdaptation {
                         values.len() * std::mem::size_of::<u32>()
                     }
                     FirAdaptedReferenceArgument::Value(_)
+                    | FirAdaptedReferenceArgument::Context
                     | FirAdaptedReferenceArgument::Default => 0,
                 })
                 .sum::<usize>()
@@ -828,6 +829,8 @@ impl FirCallableReferenceTarget {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FirAdaptedReferenceArgument {
     Value(u32),
+    /// A leading context parameter, taken in order from the reference's context arguments.
+    Context,
     Default,
     Vararg {
         values: Box<[u32]>,
@@ -1144,6 +1147,10 @@ pub enum FirExprKind {
         binding: FirCallableReferenceBinding,
         dispatch_receiver: Option<FirReceiver>,
         extension_receiver: Option<FirReceiver>,
+        /// Values selected at the reference site for the declaration's leading context
+        /// parameters (`CallableReferencesToContextual`), evaluated once when the reference is
+        /// created and bound into it.
+        context_arguments: Box<[FirReceiver]>,
         substitutions: Box<[FirTypeSubstitution]>,
         adaptation: Option<Box<FirReferenceAdaptation>>,
         reflection_owner: Option<crate::types::TypeName>,
