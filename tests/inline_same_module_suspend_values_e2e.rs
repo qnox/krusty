@@ -10,7 +10,8 @@ const PROGRAM: &str = include_str!("box_regressions/inlineSameModuleNoinlineSusp
 
 /// `Declaration.kt` and `Caller.kt`, split from [`PROGRAM`] as the box gate splits it.
 fn sources() -> Vec<(String, String)> {
-    let (kotlin, java) = krusty::conformance::split_files(PROGRAM).expect("the program splits into files");
+    let (kotlin, java) =
+        krusty::conformance::split_files(PROGRAM).expect("the program splits into files");
     assert!(java.is_empty(), "the program has no Java files");
     kotlin
         .into_iter()
