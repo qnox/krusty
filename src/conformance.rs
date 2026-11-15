@@ -340,7 +340,8 @@ pub fn prepare_test_source(src: &str, target: TestTarget) -> String {
 /// krusty's configuration: **Kotlin 2.4.0 (K2) frontend + JVM_IR backend**.
 /// - `// TARGET_BACKEND:` restricts the test to the listed backends (absent = all).
 /// - `// IGNORE_BACKEND:` mutes the test on the listed backends for ALL frontends → exclude.
-/// - `// IGNORE_BACKEND_K2[_MULTI_MODULE]:` mutes it under the K2 frontend → exclude (krusty is K2).
+/// - `// IGNORE_BACKEND_K2[_MULTI_MODULE]:` (and Kotlin 2.5's `// IGNORE_BACKEND_MULTI_MODULE:`, see
+///   [`K2_MUTE_DIRECTIVES`]) mutes it under the K2 frontend → exclude (krusty is K2).
 /// - `// DONT_TARGET_EXACT_BACKEND:` the test doesn't target that backend → exclude.
 /// - `// IGNORE_BACKEND_K1:` mutes it under the OLD K1 frontend ONLY → krusty is NOT K1, so this must
 ///   NOT exclude (excluding it under-counts: the test is valid for krusty's K2 semantics).
@@ -433,8 +434,7 @@ pub fn frontend_applicable(src: &str, names: &[&str]) -> bool {
         })
     };
     let ignored_k1 = ignored("// IGNORE_BACKEND_K1:");
-    let ignored_k2 =
-        ignored("// IGNORE_BACKEND_K2:") || ignored("// IGNORE_BACKEND_K2_MULTI_MODULE:");
+    let ignored_k2 = K2_MUTE_DIRECTIVES.iter().any(|prefix| ignored(prefix));
     !(ignored_k1 && ignored_k2)
 }
 
@@ -495,13 +495,25 @@ pub fn backend_targeted(src: &str, names: &[&str]) -> bool {
     }
 }
 
+/// The directives that mute a test under the K2 frontend.
+///
+/// Kotlin 2.5 removed the K1 frontend from its test runner and renamed
+/// `IGNORE_BACKEND_K2_MULTI_MODULE` to `IGNORE_BACKEND_MULTI_MODULE`; both spellings carry the same
+/// mute, so a corpus of either release is classified the same way.
+const K2_MUTE_DIRECTIVES: &[&str] = &[
+    "// IGNORE_BACKEND_K2:",
+    "// IGNORE_BACKEND_K2_MULTI_MODULE:",
+    "// IGNORE_BACKEND_MULTI_MODULE:",
+];
+
 /// Whether any mute directive names one of `names`.
 pub fn backend_muted(src: &str, names: &[&str]) -> bool {
     src.lines()
         .filter(|l| {
             l.starts_with("// IGNORE_BACKEND:")
-                || l.starts_with("// IGNORE_BACKEND_K2:")
-                || l.starts_with("// IGNORE_BACKEND_K2_MULTI_MODULE:")
+                || K2_MUTE_DIRECTIVES
+                    .iter()
+                    .any(|prefix| l.starts_with(prefix))
                 || l.starts_with("// DONT_TARGET_EXACT_BACKEND:")
         })
         .any(|l| mentions(l.split_once(':').map(|x| x.1).unwrap_or("").trim(), names))
@@ -1487,6 +1499,27 @@ mod tests {
         ));
         assert!(!backend_applicable(
             "// IGNORE_BACKEND_K2_MULTI_MODULE: JVM_IR",
+            BACKENDS
+        ));
+    }
+
+    #[test]
+    fn backend_applicable_kotlin_2_5_multi_module_mute_excludes() {
+        // Kotlin 2.5's spelling of `IGNORE_BACKEND_K2_MULTI_MODULE`.
+        assert!(!backend_applicable(
+            "// IGNORE_BACKEND_MULTI_MODULE: ANY",
+            BACKENDS
+        ));
+        assert!(!backend_applicable(
+            "// IGNORE_BACKEND_MULTI_MODULE: JVM_IR",
+            BACKENDS
+        ));
+        assert!(backend_applicable(
+            "// IGNORE_BACKEND_MULTI_MODULE: JS_IR",
+            BACKENDS
+        ));
+        assert!(!frontend_applicable(
+            "// IGNORE_BACKEND_K1: ANY\n// IGNORE_BACKEND_MULTI_MODULE: ANY",
             BACKENDS
         ));
     }
