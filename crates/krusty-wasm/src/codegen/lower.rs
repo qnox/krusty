@@ -949,19 +949,17 @@ impl<'a> Body<'a> {
     fn value(&mut self, id: u32, target: Ty) -> Result<(), Unsupported> {
         let source_ty = self.type_of(id)?;
         self.expression(id)?;
-        // A statement-shaped operand may return/throw before its enclosing value use resumes.
-        // Its Unit annotation must stay Unit; only the common completion proof removes the
-        // impossible conversion. Live Unit operands still fail below rather than invent a value.
-        if source_ty == Some(Ty::Unit) && carrier(target)?.is_some() && self.diverges(id) {
+        // An operand may return, throw or enter a loop it never leaves before its enclosing value
+        // use resumes, whatever type it is annotated with: an inlined `Nothing` body keeps its
+        // caller's `Int`, and a statement-shaped one stays `Unit`. Only the common completion
+        // proof removes the impossible conversion; `unreachable` discards whatever the operand
+        // left and restores stack polymorphism. An inlined generic result may retain `Nothing`
+        // yet complete normally, so a live operand still converts or fails below.
+        if self.diverges(id) {
             self.code.unreachable();
             return Ok(());
         }
         let Some(source) = source_ty else {
-            // Restore stack polymorphism after structured control only when completion proves
-            // divergence: an inlined generic result may retain Nothing but complete normally.
-            if self.diverges(id) {
-                self.code.unreachable();
-            }
             return Ok(());
         };
         if source == Ty::Unit && carrier(target)?.is_some() {

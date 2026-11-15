@@ -2459,7 +2459,6 @@ when/enumOptimization/nullability.kt
 when/enumOptimization/subjectAny.kt
 when/enumOptimization/withoutElse.kt
 when/is.kt
-when/kt45081.kt
 when/stringOptimization/duplicatingItems.kt
 when/stringOptimization/duplicatingItemsSameHashCode.kt
 when/stringOptimization/duplicatingItemsSameHashCode2.kt

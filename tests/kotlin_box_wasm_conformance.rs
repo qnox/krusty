@@ -1393,6 +1393,10 @@ fn wasm_whole_catch_programs_realize_their_library_member_calls() {
             include_str!("box_regressions/inlineCatchParameterNames.kt"),
             "wasmInlineCatchLibraryMembers",
         ),
+        (
+            include_str!("box_regressions/inlinedLibraryErrorInsideTry.kt"),
+            "wasmInlinedLibraryErrorInsideTry",
+        ),
     ] {
         expect_wasm_box(source, stem);
     }
