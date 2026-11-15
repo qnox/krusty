@@ -9,9 +9,12 @@
 //! beside its number, which is what a dependent module's classes name their implementations by.
 //!
 //! An implementation carrying a reference more narrowly than its member does stands behind a thunk
-//! with the member's signature that casts the operand and calls it; one whose member carries a
-//! value the implementation does not (a primitive behind a type parameter) declines, since that
-//! thunk does not box or unbox yet (see `super::super::boxes`).
+//! with the member's signature. A collection bridge (`contains`/`remove` answering `Boolean`,
+//! `indexOf`/`lastIndexOf` answering `Int`) tests that narrower reference and answers the
+//! rejection (`false` or `-1`) when the argument is some other type, as the erased interface
+//! method does; any other narrower reference is cast. A member that carries a value the
+//! implementation does not (a primitive behind a type parameter) is unboxed or boxed
+//! (see `super::super::boxes`).
 
 use krusty::fx_hash::HashMap;
 
@@ -29,7 +32,7 @@ use krusty::ir::{ClassId, IrFile, IrLocalPropertyLayout};
 use krusty::types::Ty;
 
 use super::super::boxes::BoxForm;
-use super::super::encode::{Code, Function, Module, ValType};
+use super::super::encode::{BlockType, Code, Function, Module, ValType};
 use super::super::interface_dispatch::{ClassRef, MemberRef};
 use super::super::objects::REFERENCE;
 use super::super::runtime::Runtime;
@@ -434,9 +437,10 @@ impl FileRecorder<'_, '_, '_> {
 
     /// `implementation`, which takes `implemented`, as a function taking `declared`: itself when
     /// both are carried alike, else a thunk adapting each operand the member carries as a
-    /// reference: a narrower reference is cast, and a scalar the implementation carries itself
-    /// (`next(): Int` implementing `Iterator<T>.next(): T`) is read out of its box, or boxed as the
-    /// result.
+    /// reference. A collection bridge answers `false` or `-1` when its narrower reference
+    /// argument is a different type; any other narrower reference is cast. A scalar the
+    /// implementation carries itself (`next(): Int` implementing `Iterator<T>.next(): T`) is
+    /// read out of its box, or boxed as the result.
     fn thunk(
         &mut self,
         declared: (&[Ty], Ty),
@@ -464,6 +468,18 @@ impl FileRecorder<'_, '_, '_> {
             }
             match (wide, narrow) {
                 (ValType::Ref { .. }, ValType::Ref { nullable, heap }) => {
+                    if let Some(rejected) = collection_bridge_rejection(declared.1) {
+                        // The erased interface method accepts any reference. An argument of
+                        // another type is not an element, so the bridge answers its rejection
+                        // instead of trapping on the cast.
+                        code.ref_test(*nullable, *heap)
+                            .if_(BlockType::Empty)
+                            .else_()
+                            .i32_const(rejected)
+                            .return_()
+                            .end();
+                        code.local_get(local as u32);
+                    }
                     code.ref_cast(*nullable, *heap);
                 }
                 (ValType::Ref { .. }, scalar) => {
@@ -900,5 +916,17 @@ impl FileRecorder<'_, '_, '_> {
             "{construct} (`{}`)",
             self.recording.ir.classes[self.id as usize].fq_name()
         )
+    }
+}
+
+/// What a collection special bridge answers when its argument is not the override's element.
+///
+/// `contains` and `remove` answer `false`. `indexOf` and `lastIndexOf` answer `-1`. Any other
+/// result keeps the cast: a mismatch there is a use the frontend said was the narrower type.
+fn collection_bridge_rejection(result: Ty) -> Option<i32> {
+    match result {
+        Ty::Boolean => Some(0),
+        Ty::Int => Some(-1),
+        _ => None,
     }
 }

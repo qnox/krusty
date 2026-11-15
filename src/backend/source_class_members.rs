@@ -1,5 +1,5 @@
-//! The declared superclass, type parameters, instance functions and instance properties of every
-//! named source classifier of the module, frozen before Pass 2 starts.
+//! The declared superclass, type parameters, instance functions, instance properties and applied
+//! supertypes of every named source classifier of the module, frozen before Pass 2 starts.
 //!
 //! Only the declaring file's IR holds a class's members, so a target asking what a class inherits
 //! from a source supertype declared in another file of the module cannot find it there. These
@@ -23,6 +23,9 @@ pub struct SourceClassMembers {
     pub functions: Box<[SourceMemberFunction]>,
     /// Instance properties in source order.
     pub properties: Box<[SourceMemberProperty]>,
+    /// Every classifier the classifier reaches, applied in its own type parameters, itself first
+    /// at depth 0. `None` when its header did not complete.
+    pub hierarchy: Option<Box<[crate::ir::IrAppliedClassifier]>>,
 }
 
 /// One instance property a source classifier declares.
@@ -102,6 +105,16 @@ pub(super) fn from_resolved_index(
         type_parameters,
         functions,
         properties: properties(index, declaration),
+        hierarchy: index.classifier_hierarchy(declaration).map(|hierarchy| {
+            hierarchy
+                .iter()
+                .map(|entry| crate::ir::IrAppliedClassifier {
+                    classifier: entry.classifier,
+                    applied: entry.applied.get(),
+                    depth: entry.depth,
+                })
+                .collect()
+        }),
     }
 }
 

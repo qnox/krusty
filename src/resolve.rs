@@ -107,6 +107,7 @@ mod class_names_aliases;
 mod expression_finalization;
 mod reference_array_spread;
 mod reference_context_arguments;
+mod reference_type_variable_inputs;
 mod star_projected_classifier;
 use candidate_display::{
     ambiguous_classifier_message, classifier_access_display_from_shape,
@@ -421,7 +422,7 @@ use context_sensitive_resolution::{expected_nested_classifier, parameterized_cla
 use delegated_properties::{
     select_delegate_operator, select_delegate_operator_return, DelegateConventionSite,
 };
-pub(crate) use dependency_body_call_edges::klib_dependency_member_call_edge;
+pub(crate) use dependency_body_call_edges::for_checked_klib_bodies;
 pub(crate) use dependency_platform::DependencyPlatform;
 pub(crate) use diagnostic_selection::unresolved_member_message;
 use extension_reference_selection::ExtensionReferenceChoice;
@@ -16580,6 +16581,10 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                if let Some(signature) = known_sig.as_ref().filter(|_| has_callable_ref_argument) {
+                    let parameters = known_argument_parameters.as_deref();
+                    self.record_call_reference_type_variable_inputs(args, signature, parameters);
+                }
                 // EXPLICIT type arguments (`build<C> { … }`): they bind the callee's formals ahead
                 // of any argument unification, so the lambda shape's receiver/params substitute to
                 // the written types instead of the formals' bounds.
@@ -20327,8 +20332,14 @@ impl<'a> Checker<'a> {
                             {
                                 // This assignment may be sequential for reads in its own lambda,
                                 // but the closure still invalidates a proof owned by the enclosing
-                                // scope once that closure exists.
-                                if self.capturing_closure_reassigned_before(&name, target_span) {
+                                // scope once that closure exists, unless the value it stores is
+                                // already of the proven type.
+                                if self.closure_assignment_breaks_proof(
+                                    &name,
+                                    target_span,
+                                    vt,
+                                    cur.ty,
+                                ) {
                                     scope.decline_cast_at_binding(&name, cur.ty);
                                 }
                                 let flow = narrowing.unwrap_or(declared);
@@ -30270,6 +30281,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         expected: None,
         callable_reference_literal_constraints: HashMap::default(),
         active_callable_reference: None,
+        reference_type_variable_inputs: HashMap::default(),
         active_postponed_callable_reference_recheck: None,
         completed_failed_postponed_callable_rechecks: crate::fx_hash::HashSet::default(),
         imports,
@@ -32709,6 +32721,10 @@ struct Checker<'a> {
     /// during that one reference's selection and is discarded with the bounded checker.
     callable_reference_literal_constraints: HashMap<ExprId, HashMap<String, Vec<CallArgKind>>>,
     active_callable_reference: Option<ExprId>,
+    /// Per callable-reference argument, the inputs its selected parameter declares as call type
+    /// variables, as `reference_type_variable_inputs` records them.
+    reference_type_variable_inputs:
+        HashMap<ExprId, callable_reference_selection::TypeVariableInputs>,
     /// The callable-reference expression whose concrete postponed shape is being rechecked.
     /// Candidate selection uses this semantic ownership marker to leave a shape mismatch to the
     /// enclosing call without suppressing diagnostics produced inside the reference itself.
@@ -34833,7 +34849,7 @@ impl<'a> Checker<'a> {
                 &candidates,
                 self.file.callable_references_to_contextual,
                 None,
-                expected,
+                self.instance_reference_expectation(expected),
                 |actual, target| self.receiver_is_assignable(actual, target),
                 |left_params, right_params| {
                     self.callable_ref_parameter_shape_at_least_as_specific(
@@ -35555,7 +35571,7 @@ impl<'a> Checker<'a> {
                 overloads,
                 self.file.callable_references_to_contextual,
                 None,
-                expected,
+                self.instance_reference_expectation(expected),
                 |actual, target| self.receiver_is_assignable(actual, target),
                 |left_params, right_params| {
                     self.callable_ref_parameter_shape_at_least_as_specific(
@@ -36619,68 +36635,6 @@ impl<'a> Checker<'a> {
         );
     }
 
-    /// Semantic callable shape of a local function reference. The lifted method signature keeps
-    /// erased JVM parameter/return types in `params`/`ret`; source generic types live in
-    /// `generic_sig` and must be applied to the reference receiver before the value is exposed.
-    fn local_function_reference_shape(
-        signature: &Signature,
-        receiver: Option<Ty>,
-    ) -> (Vec<Ty>, Ty) {
-        let Some(generic) = signature.generic_sig.as_ref() else {
-            return (signature.params.clone(), signature.ret);
-        };
-        let mut bindings = crate::symbol_resolver::GSigBinds::default();
-        if let Some((declared, actual)) = generic.receiver.zip(receiver) {
-            crate::symbol_resolver::unify_ty(declared, actual, &mut bindings);
-        }
-        (
-            generic
-                .params
-                .iter()
-                .map(|parameter| {
-                    crate::symbol_resolver::ty_subst_keep_unbound(*parameter, &bindings)
-                })
-                .collect(),
-            crate::symbol_resolver::ty_subst_keep_unbound(generic.ret, &bindings),
-        )
-    }
-
-    /// Apply a contextual callable shape to a generic local declaration through the same
-    /// provider-neutral specialization used for module and dependency candidates. Local lifting is
-    /// a lowering detail; it must not create a second inference algorithm for callable references.
-    fn contextual_local_function_reference_shape(
-        &self,
-        signature: &Signature,
-        receiver: Option<Ty>,
-        expected_params: &[Ty],
-        expected_ret: Ty,
-    ) -> Option<(Vec<Ty>, Ty)> {
-        let Some(generic) = signature.generic_sig.as_ref() else {
-            return Some(Self::local_function_reference_shape(signature, receiver));
-        };
-        let call_sig = CallSig {
-            param_defaults: signature.param_defaults,
-            required: signature.required,
-            vararg: signature.vararg(),
-            vararg_index: signature.vararg_index,
-            ..CallSig::default()
-        };
-        let source = self.fed_source();
-        let specialized = callable_reference_selection::specialize_generic_signature(
-            &source,
-            generic,
-            &call_sig,
-            receiver,
-            callable_reference_selection::ReferenceExpectation {
-                params: Some(expected_params),
-                ret: Some(expected_ret),
-                bound_contexts: 0,
-            },
-            |actual, bound| self.generic_bound_admits(actual, bound),
-        )
-        .ok()?;
-        Some((specialized.params, specialized.ret))
-    }
     fn mark_local_function_call(
         &mut self,
         call: ExprId,
@@ -40024,52 +39978,6 @@ impl<'a> Checker<'a> {
         StablePathRead::new(self).ty(scope, path, site)
     }
 
-    /// The one stability failure kotlinc reports as SMARTCAST_IMPOSSIBLE: the path's root is a
-    /// local `var` a capturing closure mutates. Returns the variable's name and its DECLARED type
-    /// (the proof's starting point) so the declined cast can be recorded next to the narrowings
-    /// and named at the use that needed it.
-    fn closure_mutated_decline(
-        &self,
-        scope: &CheckerScope<'_>,
-        path: &NarrowPath,
-        site: Span,
-    ) -> Option<(String, Ty)> {
-        let (scope::PathRoot::Value(identity), true) = (&path.root, path.segments.is_empty())
-        else {
-            return None;
-        };
-        let (name, local) = self.visible_flow_value(scope, *identity)?;
-        if local.is_var
-            && matches!(local.origin, ReceiverFnValueOrigin::Local)
-            && self.closure_reassigned_before(&name, site)
-        {
-            Some((name, local.write_ty.unwrap_or(local.ty)))
-        } else {
-            None
-        }
-    }
-
-    /// The stability gate for an `is T` proof, shared by the condition and contract shapes: a
-    /// stable path narrows; a path declined only because a capturing closure mutates its root
-    /// records the cast (with its target) so the use that needed it reports kotlinc's
-    /// SMARTCAST_IMPOSSIBLE.
-    fn is_proof_stable_or_decline(
-        &self,
-        scope: &CheckerScope<'_>,
-        path: &NarrowPath,
-        target: Ty,
-        declined: &mut Vec<(String, Ty)>,
-        site: Span,
-    ) -> bool {
-        if self.stable_path_ty(scope, path, site).is_some() {
-            return true;
-        }
-        if let Some((name, _)) = self.closure_mutated_decline(scope, path, site) {
-            declined.push((name, target));
-        }
-        false
-    }
-
     /// The type a successful `value is tested` proves for a value declared `stable_ty`: shared by
     /// the `is` operator and a contract's `returns(…) implies (value is T)` conclusion, so the two
     /// cannot disagree about scalars, nullable tests, or type arguments the test leaves implicit.
@@ -40123,38 +40031,6 @@ impl<'a> Checker<'a> {
                 .filter(|declared| crate::assignable::is_subtype(&context, self, *declared, target))
                 .unwrap_or(target)
         })
-    }
-
-    /// The NULL branch of a null check: the operand is proven null, so a stable nullable path
-    /// narrows to `Nothing?` (kotlinc's exact receiver wording there). A root-only local made
-    /// unstable only by closure writes still narrows when every such write stores null — the
-    /// proven null joined with the writes kotlinc can interleave stays `Nothing?`. A SAFE-CALL
-    /// chain proves nothing here: a null result means SOME link failed, not which one.
-    fn null_branch_narrowings(
-        &self,
-        scope: &CheckerScope<'_>,
-        operand: ExprId,
-        out: &mut Vec<(NarrowPath, Ty)>,
-    ) {
-        if matches!(self.file.expr(operand), Expr::SafeCall { .. }) {
-            return;
-        }
-        let Some(path) = self.expr_access_path(operand) else {
-            return;
-        };
-        let site = self.span(operand);
-        if matches!(self.stable_path_ty(scope, &path, site), Some(ty) if ty.is_nullable()) {
-            out.push((path, Ty::nullable(Ty::Nothing)));
-            return;
-        }
-        if let Some((name, _)) = self
-            .closure_mutated_decline(scope, &path, site)
-            .filter(|(_, ty)| ty.is_nullable())
-        {
-            if self.closure_writes_only_null(&name, site) {
-                out.push((path, Ty::nullable(Ty::Nothing)));
-            }
-        }
     }
 
     /// Compiler-known equality bound selected by the receiver's semantic `equals` declaration.
@@ -45337,6 +45213,7 @@ impl<'a> Checker<'a> {
         implicit_lambda_label: Option<&str>,
     ) {
         let ParameterTypeExpectation { expected, declared } = parameter;
+        self.record_reference_type_variable_inputs(argument, declared);
         // Some selected call paths validate their arguments directly rather than through
         // `selected_argument_type` (notably source constructors). Once selection supplies a
         // function expectation, postponed lambdas and callable references must be committed here as
@@ -52721,7 +52598,7 @@ impl<'a> Checker<'a> {
                             &candidates,
                             self.file.callable_references_to_contextual,
                             None,
-                            expected,
+                            self.instance_reference_expectation(expected),
                             |actual, target| self.receiver_is_assignable(actual, target),
                             |left_params, right_params| {
                                 self.callable_ref_parameter_shape_at_least_as_specific(
@@ -53020,7 +52897,7 @@ impl<'a> Checker<'a> {
                         &receiver_candidates.overloads,
                         self.file.callable_references_to_contextual,
                         Some(receiver_ty),
-                        expected,
+                        self.instance_reference_expectation(expected),
                         |actual, target| self.receiver_is_assignable(actual, target),
                         |left_params, right_params| {
                             self.callable_ref_parameter_shape_at_least_as_specific(
