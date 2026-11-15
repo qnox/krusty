@@ -12,7 +12,8 @@ use super::common;
 fn with_same_module_sources<T>(run: impl FnOnce(&[(&str, &str)]) -> T) -> T {
     let (blocks, java) = krusty::conformance::split_files(include_str!(
         "box_regressions/inlineCompiledBodyObjects.kt"
-    ));
+    ))
+    .expect("partition");
     assert!(java.is_empty());
     let files: Vec<_> = blocks
         .into_iter()
