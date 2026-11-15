@@ -305,6 +305,89 @@ pub(super) struct ReferenceExpectation<'a> {
     pub(super) params: Option<&'a [Ty]>,
     pub(super) ret: Option<Ty>,
     pub(super) bound_contexts: usize,
+    /// Which of `params` the enclosing call declares as one of its own type variables.
+    pub(super) type_variable_inputs: TypeVariableInputs,
+}
+
+/// The inputs of an expected function type that the call passing the reference declares as one of
+/// its own type variables (`f: (T) -> Int`), by position in `params`. A concrete input, one built
+/// from a type variable (`(Array<T>) -> Int`), and an input a receiver already substituted
+/// (`C<Array<String>>.run(f: (T) -> Int)`) are not type variables.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct TypeVariableInputs(u64);
+
+impl TypeVariableInputs {
+    pub(super) const NONE: Self = Self(0);
+
+    /// The type-variable inputs of `declared`, the call's declared parameter type with only its
+    /// receiver's type arguments substituted.
+    pub(super) fn of_declared(declared: Ty) -> Self {
+        let TyKind::Fun(function) = declared.non_null().kind() else {
+            return Self::NONE;
+        };
+        let bits = function
+            .params
+            .iter()
+            .take(u64::BITS as usize)
+            .enumerate()
+            .filter(|(_, input)| {
+                matches!(
+                    input.non_null().kind(),
+                    TyKind::TyParam(..) | TyKind::Var(..)
+                )
+            })
+            .fold(0, |bits, (index, _)| bits | 1 << index);
+        Self(bits)
+    }
+
+    fn has(self, index: usize) -> bool {
+        index < u64::BITS as usize && self.0 & 1 << index != 0
+    }
+
+    /// These inputs once the input at `index` is taken out of the expected parameters (an unbound
+    /// extension reference's receiver).
+    pub(super) fn without(self, index: usize) -> Self {
+        if index >= u64::BITS as usize {
+            return self;
+        }
+        let below = self.0 & ((1 << index) - 1);
+        let above = (self.0 >> 1) & !((1 << index) - 1);
+        Self(below | above)
+    }
+}
+
+/// The function type an instance reference is selected against, with its type-variable inputs.
+#[derive(Clone, Copy)]
+pub(super) struct InstanceReferenceExpectation {
+    pub(super) shape: &'static crate::types::FnSig,
+    pub(super) type_variable_inputs: TypeVariableInputs,
+}
+
+impl From<&'static crate::types::FnSig> for InstanceReferenceExpectation {
+    fn from(shape: &'static crate::types::FnSig) -> Self {
+        Self {
+            shape,
+            type_variable_inputs: TypeVariableInputs::NONE,
+        }
+    }
+}
+
+/// Whether the expected input at `index` can supply a whole vararg array `declared`. kotlinc
+/// reads an input its call declares as a type variable as one collected element on releases with
+/// [`Quirk::VarargReferenceTakesTypeVariableInputAsElement`] (KT-90169), whatever array it
+/// later binds to.
+///
+/// [`Quirk::VarargReferenceTakesTypeVariableInputAsElement`]: crate::kotlin_version::Quirk::VarargReferenceTakesTypeVariableInputAsElement
+fn input_supplies_whole_vararg(
+    quirks: crate::kotlin_version::Quirks,
+    inputs: TypeVariableInputs,
+    index: usize,
+    actual: Ty,
+    declared: Ty,
+) -> bool {
+    !(inputs.has(index)
+        && quirks.has(crate::kotlin_version::Quirk::VarargReferenceTakesTypeVariableInputAsElement))
+        && same_array_classifier(actual, declared)
 }
 
 pub(super) fn specialize_generic_signature(
@@ -319,6 +402,7 @@ pub(super) fn specialize_generic_signature(
         params: expected_params,
         ret: expected_ret,
         bound_contexts,
+        type_variable_inputs,
     } = expectation;
     let mut bindings = crate::symbol_resolver::GSigBinds::default();
     if let (Some(declared), Some(actual)) = (generic.receiver, extension_receiver) {
@@ -333,11 +417,21 @@ pub(super) fn specialize_generic_signature(
         let whole_vararg = vararg.is_some_and(|index| {
             index
                 .checked_sub(bound_contexts)
-                .is_some_and(|expected_index| expected.len() == expected_index + 1)
-                && expected
-                    .get(index - bound_contexts)
-                    .zip(generic.params.get(index))
-                    .is_some_and(|(&actual, &declared)| same_array_classifier(actual, declared))
+                .is_some_and(|expected_index| {
+                    expected.len() == expected_index + 1
+                        && expected
+                            .get(expected_index)
+                            .zip(generic.params.get(index))
+                            .is_some_and(|(&actual, &declared)| {
+                                input_supplies_whole_vararg(
+                                    crate::kotlin_version::Quirks::target(),
+                                    type_variable_inputs,
+                                    expected_index,
+                                    actual,
+                                    declared,
+                                )
+                            })
+                })
         });
         let actuals = expected
             .iter()
@@ -435,10 +529,8 @@ pub(super) fn specialize_generic_signature(
 pub(super) fn specialize_candidate_with_type_arguments(
     source: &dyn SymbolSource,
     function: &mut FunctionInfo,
-    bound_contexts: usize,
     extension_receiver: Option<Ty>,
-    expected_params: Option<&[Ty]>,
-    expected_ret: Option<Ty>,
+    expectation: ReferenceExpectation<'_>,
     is_assignable: impl FnMut(Ty, Ty) -> bool,
 ) -> Result<Vec<Ty>, CallableRefSpecialization> {
     let Some(generic) = function.generic_sig.clone() else {
@@ -449,11 +541,7 @@ pub(super) fn specialize_candidate_with_type_arguments(
         &generic,
         &function.call_sig,
         extension_receiver,
-        ReferenceExpectation {
-            params: expected_params,
-            ret: expected_ret,
-            bound_contexts,
-        },
+        expectation,
         is_assignable,
     )?;
     let type_arguments = specialized.type_arguments;
@@ -484,10 +572,13 @@ pub(super) fn specialize_candidate(
     specialize_candidate_with_type_arguments(
         source,
         function,
-        bound_contexts,
         extension_receiver,
-        expected_params,
-        expected_ret,
+        ReferenceExpectation {
+            params: expected_params,
+            ret: expected_ret,
+            bound_contexts,
+            type_variable_inputs: TypeVariableInputs::NONE,
+        },
         is_assignable,
     )
     .map_or_else(
@@ -850,10 +941,14 @@ fn select_adapted_bound_instance_candidate(
     source: &dyn SymbolSource,
     overloads: &[FunctionInfo],
     bind_contexts: bool,
-    expected: &'static crate::types::FnSig,
+    expected: InstanceReferenceExpectation,
     mut is_assignable: impl FnMut(Ty, Ty) -> bool,
     shape_at_least_as_specific: impl FnMut(&[Ty], &[Ty]) -> bool,
 ) -> Option<(FunctionInfo, Vec<AdaptedRefArgument>, Vec<Ty>)> {
+    let InstanceReferenceExpectation {
+        shape: expected,
+        type_variable_inputs,
+    } = expected;
     let mut candidates = overloads
         .iter()
         .filter(|candidate| candidate.kind == crate::libraries::FnKind::Member)
@@ -871,10 +966,13 @@ fn select_adapted_bound_instance_candidate(
             let type_arguments = specialize_candidate_with_type_arguments(
                 source,
                 &mut candidate,
-                bound_contexts,
                 None,
-                Some(&expected.params),
-                Some(expected.ret),
+                ReferenceExpectation {
+                    params: Some(&expected.params),
+                    ret: Some(expected.ret),
+                    bound_contexts,
+                    type_variable_inputs,
+                },
                 &mut is_assignable,
             )
             .ok()?;
@@ -953,10 +1051,18 @@ pub(super) fn select_adapted_instance_candidate(
     overloads: &[FunctionInfo],
     bind_contexts: bool,
     unbound_receiver: Option<Ty>,
-    expected: &'static crate::types::FnSig,
+    expected: impl Into<InstanceReferenceExpectation>,
     mut is_assignable: impl FnMut(Ty, Ty) -> bool,
     shape_at_least_as_specific: impl FnMut(&[Ty], &[Ty]) -> bool,
 ) -> Option<(FunctionInfo, Vec<AdaptedRefArgument>, Vec<Ty>)> {
+    let InstanceReferenceExpectation {
+        shape: expected,
+        type_variable_inputs,
+    } = expected.into();
+    let type_variable_inputs = match unbound_receiver {
+        Some(_) => type_variable_inputs.without(0),
+        None => type_variable_inputs,
+    };
     let method = match unbound_receiver {
         Some(receiver) => {
             let (&expected_receiver, expected_values) = expected.params.split_first()?;
@@ -981,7 +1087,10 @@ pub(super) fn select_adapted_instance_candidate(
         source,
         overloads,
         bind_contexts,
-        method,
+        InstanceReferenceExpectation {
+            shape: method,
+            type_variable_inputs,
+        },
         is_assignable,
         shape_at_least_as_specific,
     )?;
@@ -1084,6 +1193,69 @@ pub(super) fn shift_plan_values_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kotlin_version::{Quirk, Quirks};
+
+    fn formal(name: &str) -> Ty {
+        Ty::ty_param(name, Ty::nullable(Ty::obj("kotlin/Any")))
+    }
+
+    #[test]
+    fn a_bare_or_nullable_formal_input_is_a_type_variable_input() {
+        let t = formal("call:T");
+        let declared = Ty::fun(vec![t, Ty::nullable(t), Ty::array(t), Ty::String], Ty::Int);
+        let inputs = TypeVariableInputs::of_declared(declared);
+        assert_eq!(
+            (0..5).map(|index| inputs.has(index)).collect::<Vec<_>>(),
+            [true, true, false, false, false]
+        );
+        assert_eq!(
+            TypeVariableInputs::of_declared(Ty::nullable(declared)),
+            inputs
+        );
+        assert_eq!(TypeVariableInputs::of_declared(t), TypeVariableInputs::NONE);
+    }
+
+    #[test]
+    fn removing_an_input_shifts_the_later_ones() {
+        let inputs = TypeVariableInputs(0b1011);
+        assert_eq!(inputs.without(0), TypeVariableInputs(0b101));
+        assert_eq!(inputs.without(1), TypeVariableInputs(0b101));
+        assert_eq!(inputs.without(2), TypeVariableInputs(0b111));
+        assert_eq!(inputs.without(64), inputs);
+    }
+
+    #[test]
+    fn a_type_variable_input_takes_the_whole_vararg_only_without_the_quirk() {
+        let quirk = Quirk::VarargReferenceTakesTypeVariableInputAsElement;
+        let with = Quirks::NONE.with(quirk, true);
+        let actual = Ty::array(Ty::String);
+        let declared = Ty::array(Ty::out_projection(formal("ref:E")));
+        let from_variable = TypeVariableInputs(1);
+        assert!(!input_supplies_whole_vararg(
+            with,
+            from_variable,
+            0,
+            actual,
+            declared
+        ));
+        assert!(input_supplies_whole_vararg(
+            Quirks::NONE,
+            from_variable,
+            0,
+            actual,
+            declared
+        ));
+        // A concrete input takes the whole array either way.
+        for quirks in [with, Quirks::NONE] {
+            assert!(input_supplies_whole_vararg(
+                quirks,
+                TypeVariableInputs::NONE,
+                0,
+                actual,
+                declared
+            ));
+        }
+    }
 
     #[test]
     fn repeated_outer_formal_preserves_distinct_reference_constraints() {
