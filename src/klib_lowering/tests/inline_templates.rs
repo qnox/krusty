@@ -314,7 +314,7 @@ fn a_scope_function_body_is_a_generic_template_that_splices_its_lambda() {
             "takeIf",
             &["T"][..],
             "scope {scope {return@Some(0) when[invoke(v1!: (T) -> Boolean, v0!: T): Boolean -> \
-             ImplicitCoercion<T?>(v0!: T), else -> Null: Null]: T?: Nothing}: Nothing}",
+             ImplicitCoercion<T?>(v0!: T): T?, else -> Null: Null]: T?: Nothing}: Nothing}",
         ),
     ] {
         let selected = kotlin_function(&libraries, name);
