@@ -270,9 +270,8 @@ mod tests {
             let mut candidate = property.clone();
             candidate.getter.compiler_intrinsic = None;
             candidate.getter.member_realization = crate::libraries::MemberRealization::Dispatch;
-            match mutate {
-                1 => candidate.ty = Ty::String,
-                _ => {}
+            if mutate == 1 {
+                candidate.ty = Ty::String;
             }
             realize_result_failure_property(owner, builtin, &mut candidate);
             assert_eq!(candidate.getter.compiler_intrinsic, None);

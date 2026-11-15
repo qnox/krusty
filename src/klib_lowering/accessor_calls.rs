@@ -107,7 +107,7 @@ pub(super) fn authenticate(
         .type_parameters()
         .iter()
         .map(|parameter| match parameter.kind() {
-            crate::types::TyKind::TyParam(name, _) => Some(name.clone()),
+            crate::types::TyKind::TyParam(name, _) => Some(name),
             _ => None,
         })
         .collect::<Option<Vec<_>>>()
