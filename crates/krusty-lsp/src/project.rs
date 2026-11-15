@@ -17,6 +17,7 @@ pub mod runner;
 mod source_digest;
 mod sources;
 pub mod sync;
+mod tooling;
 mod walk;
 mod xml;
 

@@ -32,20 +32,22 @@ pub struct KlibBodyClassContract {
 
 impl KlibBodyClassContract {
     /// Whether the common type model carries this class's instances as one of its builtin types,
-    /// as it does an unsigned integer, rather than as an instance of a class.
+    /// as it does an unsigned integer or an array, rather than as an instance of a class. An
+    /// unsigned array is a value class over its signed array, not an array the target carries.
     pub(crate) fn is_builtin_type(&self) -> bool {
         crate::types::builtin_semantic(self.classifier).is_some()
+            || (!self.is_value && Ty::obj_name(self.classifier).is_array())
     }
 
     /// Whether a support unit emits this class's members as functions of their receiver value,
     /// materializing no class: a final builtin type of the common type model that is not a value
-    /// class, whose values the target carries itself. Such a member dispatches statically.
+    /// class, whose values the target carries itself, `Array<T>` included. Such a member
+    /// dispatches statically.
     pub(crate) fn emits_receiver_members(&self) -> bool {
         self.is_builtin_type()
             && !self.is_value
             && self.kind == super::TypeKind::Class
             && self.modality == KotlinModality::Final
-            && self.parameters.formals.is_empty()
     }
 
     /// Whether a support unit materializes this class and emits its members as functions of the

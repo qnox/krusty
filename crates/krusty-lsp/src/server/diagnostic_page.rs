@@ -446,6 +446,7 @@ mod tests {
         let wire_message = format!("M{}", &message[1..]);
         let files: Vec<IndexedFile> = (0..80)
             .map(|index| IndexedFile {
+                references: crate::DefinitionIndex::default(),
                 uri: format!("file:///w/F{index:03}.kt"),
                 diagnostics: vec![Diagnostic {
                     span: krusty::diag::Span::new(0, 1),
