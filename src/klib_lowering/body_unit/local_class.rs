@@ -37,6 +37,8 @@ impl<'s> Linker<'_, 's> {
         ir.note_class_method(class_id, init);
         let receiver = ir.add_expr(IrExpr::GetValue(0));
         ir.set_logical_type(receiver, prepared.self_type);
+        // The initialization takes the constructor's value parameters, after an outer instance.
+        let prefix = usize::from(prepared.outer.is_some());
         let args = prepared
             .init_header
             .params()
@@ -44,7 +46,7 @@ impl<'s> Linker<'_, 's> {
             .enumerate()
             .map(|(index, ty)| {
                 let value = ir.add_expr(IrExpr::GetValue(
-                    u32::try_from(index + 1).expect("a value index fits u32"),
+                    u32::try_from(index + 1 + prefix).expect("a value index fits u32"),
                 ));
                 ir.set_logical_type(value, *ty);
                 Some(value)
@@ -76,6 +78,7 @@ impl<'s> Linker<'_, 's> {
                     receiver_ty: prepared.receiver_ty,
                     fields: prepared.stored.clone(),
                     steps: prepared.steps,
+                    outer: prepared.outer,
                 },
             )),
         });
@@ -157,6 +160,7 @@ impl<'s> Linker<'_, 's> {
                         class: class_id,
                         receiver: prepared.self_type,
                         fields: prepared.stored.clone(),
+                        outer: prepared.outer,
                     },
                 )),
             });

@@ -82,6 +82,7 @@ pub(super) struct LocalInitialize<'a> {
     pub(super) receiver_ty: Ty,
     pub(super) fields: Vec<LocalStoredField<'a>>,
     pub(super) steps: Vec<InitializationStep<'a>>,
+    pub(super) outer: Option<OuterInstance<'a>>,
 }
 
 /// The field frame of one member of a file-local class.
@@ -89,6 +90,7 @@ pub(super) struct LocalMemberFields<'a> {
     pub(super) class: ClassId,
     pub(super) receiver: Ty,
     pub(super) fields: Vec<LocalStoredField<'a>>,
+    pub(super) outer: Option<OuterInstance<'a>>,
 }
 
 /// Work a file-local class adds to the body queue.
@@ -390,6 +392,16 @@ pub(super) struct PreparedLocalClass<'a> {
     pub(super) init_header: FunctionHeader,
     pub(super) steps: Vec<InitializationStep<'a>>,
     pub(super) members: Vec<PreparedMember<'a>>,
+    /// An inner class's outer instance.
+    pub(super) outer: Option<OuterInstance<'a>>,
+}
+
+/// The outer instance an inner class holds: the outer class's `this`, which the inner class's
+/// bodies read, and the field the constructor stores it in.
+#[derive(Clone, Copy)]
+pub(super) struct OuterInstance<'a> {
+    pub(super) symbol: &'a KlibIrSymbol,
+    pub(super) field: u32,
 }
 
 /// The classifier identity of a class only `module`'s bodies link. A file-local class is named
@@ -536,8 +548,7 @@ pub(super) fn link<'bodies>(
         return Err(unsupported("a call of a file-private constructor"));
     };
     require_constructor_kind(function)?;
-    if function.dispatch_receiver.is_some()
-        || function.extension_receiver.is_some()
+    if function.extension_receiver.is_some()
         || !function.context_parameters.is_empty()
         || function.companion_extension_class.is_some()
         || !function.overridden.is_empty()
@@ -573,6 +584,14 @@ pub(super) fn link<'bodies>(
     };
     if !std::ptr::eq(arena, class_arena) {
         return Err(mismatch("a constructor is not a member of its class"));
+    }
+    // Only an inner class's constructor takes the outer instance as its dispatch receiver.
+    if function.dispatch_receiver.is_some()
+        != crate::metadata::semantic::class_is_inner(class.base.flags)
+    {
+        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+            "a constructor receiver or context",
+        ));
     }
     Ok(LocalLink::Prepared(Box::new(prepare(
         source, signature, arena, class, function, key,
@@ -614,7 +633,17 @@ fn prepare<'a>(
     let class_name = classifier(source.bodies, source.module, &class.base.symbol.signature)?
         .ok_or_else(non_public_type)?;
     let resolve = |signature: &KlibIrSignature| classifier(source.bodies, source.module, signature);
-    let formals = class_formals(arena, class, &resolve)?;
+    // An inner class also reads its outer class's type parameters, which its type applies after
+    // its own.
+    let outer = match &function.dispatch_receiver {
+        Some(_) => Some(
+            arena
+                .enclosing_class(class)
+                .ok_or_else(|| mismatch("an inner class is not a member of a class"))?,
+        ),
+        None => None,
+    };
+    let formals = class_formals(arena, class, outer, &resolve)?;
     prepare_class(
         source,
         signature,
@@ -624,6 +653,7 @@ fn prepare<'a>(
             function,
             key,
             class_name,
+            outer,
         },
         formals,
     )
@@ -636,6 +666,8 @@ struct ClassDeclaration<'a> {
     function: &'a KlibIrFunction,
     key: LocalIdentity,
     class_name: TypeName,
+    /// The class an inner class's instance holds an instance of.
+    outer: Option<&'a KlibIrClass>,
 }
 
 fn prepare_class<'a>(
@@ -650,6 +682,7 @@ fn prepare_class<'a>(
         function,
         key,
         class_name,
+        outer,
     } = declaration;
     if declaration_modality(class.base.flags).is_abstract() {
         return Err(unsupported("a non-public abstract class"));
@@ -713,16 +746,62 @@ fn prepare_class<'a>(
         interfaces: &interfaces,
     };
     let StoredMembers {
-        fields,
+        mut fields,
         stored,
         steps,
         members,
     } = members_and_storage(arena, class, &scope)?;
     let ConstructorParameters {
-        params,
-        defaults,
-        arguments: ctor_args,
+        mut params,
+        mut defaults,
+        arguments: mut ctor_args,
     } = constructor_parameters(arena, function, &types, &resolve)?;
+    // An inner class stores the outer instance its constructor receives first in a field after
+    // its own, before the superclass constructor runs, and its members read the outer class's
+    // `this` from there.
+    let outer_instance = match (outer, &function.dispatch_receiver) {
+        (Some(outer), Some(receiver)) => {
+            let ty = semantic_type_in(arena, &types, receiver.ty, &resolve)?;
+            let this = outer
+                .this_receiver
+                .as_ref()
+                .ok_or_else(|| mismatch("an outer class has no instance receiver"))?;
+            if semantic_type_in(arena, &types, this.ty, &resolve)? != ty {
+                return Err(mismatch(
+                    "an inner class constructor receives another outer instance",
+                ));
+            }
+            let field = u32::try_from(fields.len()).expect("a field list fits u32");
+            fields.push(IrField::new("this$0".to_owned(), ty).with_is_final(true));
+            params.insert(0, ty);
+            defaults.insert(0, false);
+            ctor_args.insert(
+                0,
+                IrCtorArg {
+                    name: None,
+                    context_kind: crate::types::ContextParameterKind::None,
+                    ty,
+                    declared_ty: None,
+                    is_field: true,
+                    field_index: Some(field),
+                    has_default: false,
+                    is_vararg: false,
+                    type_param: None,
+                    check: None,
+                    anonymous_super_forward: None,
+                    capture: None,
+                    provenance: IrCtorParameterProvenance::EnclosingInstance,
+                    capture_identity: None,
+                },
+            );
+            Some(OuterInstance {
+                symbol: &this.base.symbol,
+                field,
+            })
+        }
+        (None, None) => None,
+        _ => return Err(mismatch("an inner class constructor has no outer instance")),
+    };
     let class_type_parameters = formals
         .iter()
         .map(|formal| match formal.kind() {
@@ -742,17 +821,24 @@ fn prepare_class<'a>(
         fields,
         stored,
         ctor_args,
-        declaration: ConstructorDeclaration::local(
-            class_name,
-            params,
-            KlibBodyClassParameters {
-                formals: formals.clone().into_boxed_slice(),
-                bounds: bounds.into_boxed_slice(),
-                variances: variances.into_boxed_slice(),
-                own_count: formals.len(),
-            },
-            defaults.into_iter().collect(),
-        ),
+        declaration: {
+            let declaration = ConstructorDeclaration::local(
+                class_name,
+                params,
+                KlibBodyClassParameters {
+                    formals: formals.clone().into_boxed_slice(),
+                    bounds: bounds.into_boxed_slice(),
+                    variances: variances.into_boxed_slice(),
+                    own_count: class.type_parameters.len(),
+                },
+                defaults.into_iter().collect(),
+            );
+            if outer_instance.is_some() {
+                declaration.with_enclosing_instance()
+            } else {
+                declaration
+            }
+        },
         access: match declaration_visibility(function.base.flags) {
             Visibility::Private => IrConstructorAccess::Private,
             _ => IrConstructorAccess::Unrestricted,
@@ -767,6 +853,7 @@ fn prepare_class<'a>(
         init_header,
         steps,
         members,
+        outer: outer_instance,
     })
 }
 
@@ -1102,12 +1189,18 @@ struct ClassFormals {
 fn class_formals(
     arena: &KlibIrArena,
     class: &KlibIrClass,
+    outer: Option<&KlibIrClass>,
     resolve: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
 ) -> Result<ClassFormals, KlibBodyDeclineReason> {
+    let parameters = class
+        .type_parameters
+        .iter()
+        .chain(outer.into_iter().flat_map(|outer| &outer.type_parameters))
+        .collect::<Vec<_>>();
     let mut types = KlibTypeParameters::default();
-    let mut formals = Vec::with_capacity(class.type_parameters.len());
-    let mut variances = Vec::with_capacity(class.type_parameters.len());
-    for parameter in &class.type_parameters {
+    let mut formals = Vec::with_capacity(parameters.len());
+    let mut variances = Vec::with_capacity(parameters.len());
+    for &parameter in &parameters {
         if parameter.is_reified() {
             return Err(unsupported(
                 "a reified type parameter of a non-public class",
@@ -1127,8 +1220,8 @@ fn class_formals(
         formals.push(formal);
         variances.push(variance);
     }
-    let mut bounds = Vec::with_capacity(class.type_parameters.len());
-    for parameter in &class.type_parameters {
+    let mut bounds = Vec::with_capacity(parameters.len());
+    for parameter in parameters {
         let mut parameter_bounds = Vec::with_capacity(parameter.supertypes.len());
         for bound in &parameter.supertypes {
             parameter_bounds.push(semantic_type_in(arena, &types, *bound, resolve)?);
@@ -1292,5 +1385,10 @@ pub(super) fn installed_class(prepared: &PreparedLocalClass<'_>) -> IrClass {
     class.ctor_args = prepared.ctor_args.clone();
     class.ctor_param_count = 0;
     class.explicit_param_stores = true;
+    if let Some(outer) = &prepared.outer {
+        class.is_inner_class = true;
+        class.constructor_prefix_count = 1;
+        class.pre_super_param_fields.push((0, outer.field));
+    }
     class
 }
