@@ -475,7 +475,7 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
                 }
                 | super::IrIntrinsic::GeneratedPropertyEquals { ty: classifier }
                 | super::IrIntrinsic::GeneratedPropertyHash { ty: classifier }
-                | super::IrIntrinsic::DataClassArrayToString { ty: classifier }
+                | super::IrIntrinsic::GeneratedPropertyArrayToString { ty: classifier }
                 | super::IrIntrinsic::TypeOf { ty: classifier }
                 | super::IrIntrinsic::Ieee754Equals {
                     operand: classifier,
@@ -501,7 +501,7 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
             tys(params, names);
             *ret = ty(*ret, names);
         }
-        Callee::Module { params, ret, .. } | Callee::ModuleDefaultEntry { params, ret, .. } => {
+        Callee::Module { params, ret, .. } => {
             tys(params, names);
             *ret = ty(*ret, names);
         }
@@ -520,6 +520,12 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
             }
         }
         Callee::ModuleWithDefaults {
+            params,
+            ret,
+            dispatch_receiver_ty,
+            ..
+        }
+        | Callee::ModuleDefaultEntry {
             params,
             ret,
             dispatch_receiver_ty,

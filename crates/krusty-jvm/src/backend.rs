@@ -348,12 +348,15 @@ fn run_backend_passes_after_plugins(
     let abstract_overrides = crate::abstract_builtin_overrides::select(ir, classpath, classifiers)?;
     crate::bridges::derive_bridges(
         ir,
-        classpath,
         callables,
         &facts.override_results,
         &mut facts.function_argument_arrays,
         facts.jvm_default,
-        &abstract_overrides,
+        &crate::bridges::SuperclassSources {
+            classpath,
+            module: classifiers.module(),
+            abstract_overrides: &abstract_overrides,
+        },
     )?;
     crate::collection_barriers::select(
         ir,

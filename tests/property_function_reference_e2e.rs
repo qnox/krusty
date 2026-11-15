@@ -80,18 +80,7 @@ fn a_property_reference_function_value_is_a_property_reference_carrier() {
     }
 }
 
-const EQUALITY: &str = "\
-class Point(val x: Int)\n\
-\n\
-fun value(transform: (Point) -> Int): Any = transform\n\
-\n\
-fun box(): String {\n\
-    val first = value(Point::x)\n\
-    val second = value(Point::x)\n\
-    if (first != second) return \"unequal\"\n\
-    return if (first.hashCode() == second.hashCode()) \"OK\" else \"hash\"\n\
-}\n\
-";
+const EQUALITY: &str = include_str!("box_regressions/propertyReferenceEquality.kt");
 
 /// Two function values of the same property reference are equal, as property references are.
 #[test]
