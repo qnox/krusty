@@ -48,7 +48,9 @@ fn main() {
     let mut buckets: HashMap<String, (u32, Vec<String>)> = HashMap::default();
     for f in &files {
         let src = std::fs::read_to_string(f).unwrap_or_default();
-        if src.contains("// FILE:") || src.contains("// MODULE:") {
+        if krusty::conformance::contains_directive(&src, "FILE")
+            || krusty::conformance::contains_directive(&src, "MODULE")
+        {
             continue;
         }
         if !src.contains("fun box()") {

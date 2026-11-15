@@ -108,6 +108,9 @@ impl CallableRegistry {
                 "an object (`{}`) without its declaring file's entry",
                 classifier.render().replace('/', ".")
             )),
+            Some(InstanceEntry::Constructor { .. }) => {
+                Err("a constructor without its declaring file's entry".to_owned())
+            }
             None => Ok(()),
         }
     }
@@ -217,12 +220,22 @@ impl CallableRegistry {
             member_receivers: HashMap::default(),
             singleton_member_receivers: HashMap::default(),
             singleton_extension_unread_receivers: HashMap::default(),
-            instances: krusty::backend::instance_links::link_reads(
-                ir,
-                module_facts,
-                &mut self.instances,
-                || wasm.declare(),
-            ),
+            instances: {
+                let mut reads = krusty::backend::instance_links::link_reads(
+                    ir,
+                    module_facts,
+                    &mut self.instances,
+                    || wasm.declare(),
+                );
+                reads.extend(krusty::backend::instance_links::link_constructor_reads(
+                    ir,
+                    self.source_module.as_deref().unwrap_or_default(),
+                    module_facts,
+                    &mut self.instances,
+                    || wasm.declare(),
+                ));
+                reads
+            },
         };
         for expression in krusty::ir::emitted_body_roots(ir)
             .into_iter()
@@ -299,6 +312,7 @@ impl CallableRegistry {
                     target,
                     default_provider,
                     params,
+                    ret,
                     defaults,
                     extension_receiver_parameter,
                     ..
@@ -325,6 +339,10 @@ impl CallableRegistry {
                         == Some(krusty::backend::BackendCompilerIntrinsic::TypeOf)
                     {
                         // `typeOf` keeps its checked call, and emission makes the `KType` it names.
+                        continue;
+                    }
+                    if super::lower::declared_by_string_builder(callable) {
+                        // The runtime lays `StringBuilder` out and realizes its members.
                         continue;
                     }
                     if super::lower::any_members::call_member(ir, callables, expression).is_some() {
@@ -414,7 +432,18 @@ impl CallableRegistry {
                             callable.ret,
                             callable.overridden_declarations,
                         );
-                        "a dependency callable whose target code was not emitted".to_string()
+                        format!(
+                            "a dependency callable whose target code was not emitted: `{}`; selected declaration {identity:?}; owner {:?}; kind {:?}; realization {:?}; checked parameters {params:?}; checked result {ret:?}; provider parameters {:?}; provider result {:?}; declared parameters {:?}; declared result {:?}; compiler operation {:?}",
+                            callable.name,
+                            callable.declaration_owner,
+                            callable.kind,
+                            callable.member_realization,
+                            callable.params,
+                            callable.ret,
+                            callable.declared_params,
+                            callable.declared_ret,
+                            callable.compiler_operation(),
+                        )
                     })?;
                     targets.external.insert(*target, index);
                     if let Some(entry) = default_entry {

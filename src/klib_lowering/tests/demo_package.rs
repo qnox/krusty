@@ -802,6 +802,18 @@ impl Body {
         )
     }
 
+    /// A composite of `statements`: a block whose declarations its enclosing form reads, as a
+    /// KLIB serializes a `do`-`while` body.
+    pub(super) fn composite(&mut self, statements: Vec<KlibIrStatement>, ty: T) -> KlibIrExprId {
+        self.expr(
+            ty,
+            KlibIrExprKind::Composite {
+                statements,
+                origin: None,
+            },
+        )
+    }
+
     /// `value` coerced to `Unit`, as a KLIB states a discarded value of another type.
     pub(super) fn coerced(&mut self, value: KlibIrExprId) -> KlibIrExprId {
         self.type_operator(KlibIrTypeOperator::ImplicitCoercionToUnit, value, T::Unit)

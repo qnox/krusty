@@ -70,11 +70,12 @@ pub struct IrLambdaClass {
     pub lifting_scope: Option<IrLiftingRoot>,
     /// What the erased `FunctionN.invoke` bridge adapts, once `invoke` has its physical signature.
     pub bridge: IrInvokeBridge,
-    /// The class is a `-Xlambdas=class` Kotlin lambda: it extends `kotlin.jvm.internal.Lambda`
-    /// and carries the source lambda's reflection record. `None` for a class the runtime factory
-    /// forces (it extends `Object`). The source form is kept here because realization moves the
-    /// implementation out of the lambda-origin table.
-    pub kotlin_lambda: Option<IrLambdaOrigin>,
+    /// The source lambda form whose reflection record this class carries. A `-Xlambdas=class`
+    /// lambda also extends `kotlin.jvm.internal.Lambda`; a SAM-converted source lambda keeps this
+    /// origin for metadata while its class extends `Object`. `None` for generated adapters and
+    /// classes the runtime factory forces without a source-lambda body. The origin is kept here
+    /// because realization moves the implementation out of the lambda-origin table.
+    pub lambda_origin: Option<IrLambdaOrigin>,
     /// The functional interface the class implements in place of `FunctionN`, for a SAM-converted
     /// lambda: `invoke` is then that interface's method, under the method's name, and the bridge
     /// adapts the method's declared shape rather than `FunctionN.invoke`.

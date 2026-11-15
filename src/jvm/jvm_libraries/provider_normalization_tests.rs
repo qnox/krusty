@@ -3,6 +3,37 @@ use crate::symbol_source::SymbolNamespace;
 use crate::types::{type_name, Ty};
 
 #[test]
+fn string_comparison_keeps_its_jvm_call_and_publishes_its_language_role() {
+    let stdlib = crate::toolchain::stdlib_jar().expect("selected reference stdlib");
+    let jdk = crate::toolchain::jdk_modules().expect("selected reference JDK modules");
+    let libraries =
+        initialized_libraries(std::rc::Rc::new(super::Classpath::new(vec![stdlib, jdk])));
+    let declarations =
+        crate::symbol_resolver::declared_member_callables(&libraries, Ty::String, "compareTo");
+    let [comparison] = declarations.functions() else {
+        panic!(
+            "expected one declared String comparison, got {}",
+            declarations.functions().len()
+        )
+    };
+    let callable = &comparison.callable;
+    assert_eq!(
+        callable.semantic_role,
+        Some(crate::types::SemanticCallRole::KotlinStringCompareTo)
+    );
+    assert_eq!(callable.compiler_intrinsic, None);
+    assert_eq!(
+        callable.member_realization,
+        crate::libraries::MemberRealization::Dispatch
+    );
+    assert_eq!(callable.owner, type_name("java/lang/String"));
+    assert_eq!(callable.physical_name(), "compareTo");
+    assert_eq!(callable.descriptor, "(Ljava/lang/String;)I");
+    assert_eq!(callable.params, [Ty::String]);
+    assert_eq!(callable.ret, Ty::Int);
+}
+
+#[test]
 fn stdlib_kclass_name_getters_carry_the_class_name_operation() {
     use crate::libraries::{ClassNameKind, CompilerIntrinsic};
     let stdlib = crate::toolchain::stdlib_jar().expect("selected reference stdlib");

@@ -67,6 +67,43 @@ impl Checker<'_> {
         }
     }
 
+    /// Report `CYCLIC_GENERIC_UPPER_BOUND` for a declaration whose bounds `written` resolved
+    /// beside `source_bounds`, where `identities` are the declaration's own type-parameter
+    /// identities in `source_names` order. A classifier reports each bound that closes a cycle,
+    /// a callable each type parameter on one. Returns, per bound, whether it closes a cycle.
+    pub(super) fn report_cyclic_type_parameter_bounds(
+        &mut self,
+        source_names: &[String],
+        identities: &[&str],
+        source_bounds: &[(String, TypeRef)],
+        written: &[Ty],
+        callable_bounds: bool,
+    ) -> Vec<bool> {
+        let diags = &mut *self.diags;
+        super::cyclic_upper_bounds::report(
+            source_names,
+            source_bounds.iter().map(|(owner, reference)| {
+                let owners = &self.file.type_parameter_bound_owners;
+                let owner_span = owners.get(&reference.span.lo).copied();
+                (
+                    owner.as_str(),
+                    reference.span,
+                    owner_span.unwrap_or(reference.span),
+                )
+            }),
+            written,
+            identities,
+            !callable_bounds,
+            &mut |span, message| {
+                diags.error_named(
+                    span,
+                    crate::diag::names::CYCLIC_GENERIC_UPPER_BOUND,
+                    message,
+                )
+            },
+        )
+    }
+
     /// Bind a deferred local declaration's written bounds once, while all of its formal identities
     /// are already present in the lexical rung, then build the semantic type-parameter view from
     /// those checked results. The provisional rung contains identities only; it performs no lookup.
@@ -104,17 +141,40 @@ impl Checker<'_> {
         }
         scope.declare_tparams(source_names, &provisional, |_| false);
         let mut checked = vec![Vec::new(); source_names.len()];
+        let mut written = Vec::with_capacity(source_bounds.len());
         for (owner, reference) in source_bounds {
             let bound = if callable_bounds {
                 self.check_callable_type_parameter_bound(scope, reference)
             } else {
                 self.check_type_parameter_bound(scope, reference)
             };
+            written.push(bound);
             if let Some(ordinal) = source_names.iter().position(|source| source == owner) {
                 checked[ordinal].push(bound);
             }
         }
         let implicit = Ty::nullable(Ty::obj("kotlin/Any"));
+        let cyclic = self.report_cyclic_type_parameter_bounds(
+            source_names,
+            &identities,
+            source_bounds,
+            &written,
+            callable_bounds,
+        );
+        if cyclic.contains(&true) {
+            // A cyclic bound is erroneous: it constrains nothing, as kotlinc's error-typed bound
+            // does. Its occurrence keeps the declaration's bound count.
+            let mut ordinals = vec![0usize; source_names.len()];
+            for ((owner, _), cyclic) in source_bounds.iter().zip(&cyclic) {
+                let Some(parameter) = source_names.iter().position(|source| source == owner) else {
+                    continue;
+                };
+                if *cyclic {
+                    checked[parameter][ordinals[parameter]] = implicit;
+                }
+                ordinals[parameter] += 1;
+            }
+        }
         let semantic_bounds = identities
             .iter()
             .enumerate()

@@ -3,7 +3,9 @@
 
 mod annotation_values;
 pub use annotation_values::AnnotationValue;
+mod builtin_classes;
 pub(crate) use annotation_values::ExactFloat;
+pub use builtin_classes::REPRESENTED_BUILTINS;
 mod classifier_declarations;
 mod deprecation;
 mod diagnostic_rendering;

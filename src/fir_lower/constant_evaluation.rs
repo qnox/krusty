@@ -800,7 +800,7 @@ fn declared_operation(
         }
         // `String.compareTo` is Java's: the first differing UTF-16 unit's difference, else the
         // length difference. A primitive's `compareTo` is the `PrimitiveCompare` intrinsic.
-        (SemanticCallRole::KotlinComparableCompareTo, [other]) => {
+        (SemanticCallRole::KotlinStringCompareTo, [other]) => {
             let (FirConstant::String(lhs), FirConstant::String(rhs)) =
                 (&receiver.value, &other.value)
             else {
@@ -971,7 +971,7 @@ mod tests {
         let text = |value: &str| constant(FirConstant::String(KtString::from(value)), Ty::String);
         let order = |lhs, rhs| {
             declared_operation(
-                crate::types::SemanticCallRole::KotlinComparableCompareTo,
+                crate::types::SemanticCallRole::KotlinStringCompareTo,
                 text(lhs),
                 &[text(rhs)],
                 Ty::Int,

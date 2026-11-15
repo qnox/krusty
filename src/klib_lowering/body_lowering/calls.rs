@@ -3,7 +3,10 @@
 //! A built-in operator lowers as checked FIR lowers the source operator the KLIB serializes as a
 //! call of it; a dependency function lowers as a call of its function in the same unit.
 
-use super::super::ir_builtins::{BuiltinCallDisposition, BuiltinOperator, BuiltinRelation};
+use super::super::array_content_members;
+use super::super::ir_builtins::{
+    BuiltinCallDisposition, BuiltinOperator, BuiltinRelation, DataClassArrayMember,
+};
 use super::super::klib_types::function_invocation_arity;
 use super::{
     mismatch, unsupported, BodyLowering, LinkedAccessor, LinkedAccessorTarget, LinkedCallee,
@@ -85,6 +88,9 @@ impl BodyLowering<'_> {
             BuiltinOperator::Relation(relation) => self.relation(access, relation, ty),
             BuiltinOperator::Not => self.negation(access, ty),
             BuiltinOperator::IsNan { operand } => self.is_nan(access, operand, ty),
+            BuiltinOperator::DataClassArrayMember(member) => {
+                self.data_class_array_member(access, member, ty)
+            }
             BuiltinOperator::NumericConversion { from, to } => {
                 self.numeric_conversion(access, from, to, ty)
             }
@@ -242,6 +248,40 @@ impl BodyLowering<'_> {
         }))
     }
 
+    /// A data class array member, as a call of the array's content extension on the operand.
+    /// The prewalk adds the same extension as the call's edge (`array_content_members`).
+    fn data_class_array_member(
+        &mut self,
+        access: &KlibIrMemberAccess,
+        member: DataClassArrayMember,
+        ty: Ty,
+    ) -> Lowered<ExprId> {
+        let Some(array) = array_content_members::operand(access) else {
+            return Err(mismatch(
+                "a data class array member is called with another shape than its declaration's",
+            ));
+        };
+        let Some(callee) = array_content_members::array_element(self.arena, array)
+            .and_then(|element| array_content_members::content_callee(member, element))
+        else {
+            return unsupported("a data class array member over a non-primitive array");
+        };
+        let KlibIrSignature::Public(signature) = &callee.signature else {
+            unreachable!("an array content extension is a public declaration");
+        };
+        let access = KlibIrMemberAccess {
+            symbol: callee.clone(),
+            arguments: KlibIrArguments::Split {
+                dispatch_receiver: None,
+                extension_receiver: Some(array),
+                values: Vec::new(),
+            },
+            type_arguments: Vec::new(),
+            origin: access.origin.clone(),
+        };
+        self.dependency_call(signature, &access, ty)
+    }
+
     /// `Float.isNaN()` / `Double.isNaN()` as the IEEE fact `value != value`. The dependency body
     /// form admitted here reads a value parameter, so sharing that lowered read between both sides
     /// preserves single evaluation while keeping the operation in common semantic IR.
@@ -358,7 +398,8 @@ impl BodyLowering<'_> {
                 | BuiltinOperator::Not
                 | BuiltinOperator::IsNan { .. }
                 | BuiltinOperator::NumericConversion { .. }
-                | BuiltinOperator::CheckNotNull,
+                | BuiltinOperator::CheckNotNull
+                | BuiltinOperator::DataClassArrayMember(_),
                 _,
             ) => {
                 unreachable!("only an equality operator is lowered as an equality")

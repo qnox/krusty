@@ -567,7 +567,7 @@ fn materialized_secondary(
 /// The ordinal of the constructor a delegation with `params` reaches in a materialized superclass.
 /// A superclass without a primary constructor is reached through the secondary one declaring the
 /// selected parameters; Kotlin declares no two constructors of a class with the same ones.
-pub(in crate::klib_lowering) fn superclass_constructor_ordinal(
+pub(crate) fn superclass_constructor_ordinal(
     superclass: Option<&IrClass>,
     params: &[Ty],
 ) -> Result<u32, KlibBodyDeclineReason> {

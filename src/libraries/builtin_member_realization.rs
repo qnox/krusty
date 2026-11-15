@@ -374,6 +374,21 @@ pub(crate) fn unsigned_member_operation(
     Some((class, operation))
 }
 
+/// `String.compareTo(other: String): Int`, by its exact declaration. Only a provider whose
+/// strings a target lays out itself realizes it as [`CompilerIntrinsic::StringCompare`]; a JVM
+/// string is a platform class whose own `compareTo` a call reaches.
+pub(crate) fn string_compare_intrinsic(
+    facts: &BuiltinMemberDeclaration<'_>,
+) -> Option<CompilerIntrinsic> {
+    (facts.owner == crate::types::wk::string()
+        && facts.name == "compareTo"
+        && !facts.is_property
+        && !facts.is_infix
+        && facts.params == [Ty::String]
+        && facts.ret == Ty::Int)
+        .then_some(CompilerIntrinsic::StringCompare)
+}
+
 /// The primitive operation implemented by one exact unsigned bitwise member signature.
 ///
 /// This is deliberately the same declaration-to-intrinsic mapping used for signed builtin

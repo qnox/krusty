@@ -153,6 +153,9 @@ pub struct HeaderTypeParameter {
 pub struct HeaderTypeBound {
     pub parameter: LookupNameId,
     pub ty: HeaderTypeId,
+    /// The declaring type parameter as its `<…>` list wrote it, annotations and inline bound
+    /// included: where kotlinc anchors a diagnostic about the parameter itself.
+    pub owner: crate::diag::Span,
 }
 
 /// The runtime value source for one interface-delegation edge while compact header syntax exists.
@@ -1907,12 +1910,17 @@ pub fn extract_file_header_syntax(
         headers: &mut HeaderSyntaxArena,
         names: &mut LookupNames,
         values: &[(String, TypeRef)],
+        owners: &crate::fx_hash::HashMap<u32, crate::diag::Span>,
     ) -> HeaderTypeBoundRange {
         let mut packed = Vec::with_capacity(values.len());
         for (parameter, ty) in values {
             packed.push(HeaderTypeBound {
                 parameter: names.intern(parameter),
                 ty: headers.add_type(ty, names),
+                owner: owners
+                    .get(&ty.span.lo)
+                    .copied()
+                    .unwrap_or_else(|| crate::diag::Span::new(ty.span.lo, ty.span.hi)),
             });
         }
         headers.add_bound_range(packed)
@@ -1962,7 +1970,12 @@ pub fn extract_file_header_syntax(
             |name| function.non_null_type_params.contains(name),
             |name| function.reified_type_params.contains(name),
         );
-        let bounds = bounds(headers, names, &function.type_param_bounds);
+        let bounds = bounds(
+            headers,
+            names,
+            &function.type_param_bounds,
+            &file.type_parameter_bound_owners,
+        );
         headers.insert_declaration(HeaderDeclaration {
             declaration,
             name_span: Some(function.name_span),
@@ -2036,7 +2049,12 @@ pub fn extract_file_header_syntax(
             |_| false,
             |name| property.reified_type_params.contains(name),
         );
-        let bounds = bounds(headers, names, &property.type_param_bounds);
+        let bounds = bounds(
+            headers,
+            names,
+            &property.type_param_bounds,
+            &file.type_parameter_bound_owners,
+        );
         headers.insert_declaration(HeaderDeclaration {
             declaration,
             name_span: Some(property.name_span),
@@ -2130,7 +2148,12 @@ pub fn extract_file_header_syntax(
             |_| false,
             |_| false,
         );
-        let bounds = bounds(headers, names, class.type_param_bounds());
+        let bounds = bounds(
+            headers,
+            names,
+            class.type_param_bounds(),
+            &file.type_parameter_bound_owners,
+        );
         let supertype_ids = class
             .supertypes
             .iter()

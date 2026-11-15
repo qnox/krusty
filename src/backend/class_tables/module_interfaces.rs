@@ -107,8 +107,10 @@ impl ModuleInterfaces {
         let mut result = numbering.result;
         for (_, interface) in classes.interfaces() {
             for edge in interface.function_overrides.iter() {
-                if let Some(slot) = any_slot(edge.overridden_role) {
-                    result.fixed.insert(edge.implementation, slot);
+                if let (Some(slot), ResolvedFunctionOverrideTarget::Module(implementation)) =
+                    (any_slot(edge.overridden_role), edge.implementation)
+                {
+                    result.fixed.insert(implementation, slot);
                 }
             }
         }
@@ -276,7 +278,9 @@ impl Numbering<'_> {
                 let edges = interface
                     .function_overrides
                     .iter()
-                    .filter(|edge| edge.implementation == *callable)
+                    .filter(|edge| {
+                        edge.implementation == ResolvedFunctionOverrideTarget::Module(*callable)
+                    })
                     .collect::<Vec<_>>();
                 // A member standing in one of `kotlin.Any`'s fixed slots is numbered there, the
                 // same way for every object.
@@ -317,7 +321,8 @@ impl Numbering<'_> {
                     };
                     let mut group = vec![(key(*property), false)];
                     for edge in interface.property_overrides.iter().filter(|edge| {
-                        edge.implementation == *property && edge.overridden_is_interface
+                        edge.implementation == ResolvedPropertyOverrideTarget::Module(*property)
+                            && edge.overridden_is_interface
                     }) {
                         let ResolvedPropertyOverrideTarget::Module(overridden) = edge.overridden
                         else {

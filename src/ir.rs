@@ -2420,6 +2420,10 @@ pub struct IrFile {
     pub semantic_call_roles: crate::fx_hash::HashMap<ExprId, crate::types::SemanticCallRole>,
     /// See [`external_overrides::ExternalOverriddenDeclarations`].
     pub external_overridden_declarations: external_overrides::ExternalOverriddenDeclarations,
+    /// Builtin override implementations computed by the checker for selected external members.
+    /// Backends consume this fact table without traversing the source member hierarchy.
+    pub(crate) external_builtin_implementations:
+        crate::fx_hash::HashMap<ExternalCallableId, Box<[crate::fir::BuiltinImplementation]>>,
     /// The dependency member declarations this file emits as methods of a class it materializes,
     /// so an override edge naming one is an override of a method of this file.
     pub dependency_methods: crate::fx_hash::HashMap<crate::fir::ExternalCallableId, FunId>,
@@ -2847,6 +2851,7 @@ mod class_skeletons;
 mod data_class_members;
 mod debug_lines;
 mod debug_locals;
+mod external_builtin_implementations;
 mod external_overrides;
 mod generated_members;
 pub use data_class_members::IrDataClassMemberRole;

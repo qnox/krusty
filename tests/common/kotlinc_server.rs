@@ -214,8 +214,9 @@ pub fn kotlin_compiler_jar() -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
-/// Compile the pure-JDK `KotlincServer.java` driver once (via `javac`) into a stable cache dir; return it.
-/// The driver uses only reflection + `URLClassLoader`, so it needs no compiler jar to compile OR to run.
+/// Compile the reference driver and typed settings updater into a stable cache directory.
+/// The updater compiles against the selected Kotlin compiler; the driver loads it in that compiler's
+/// class loader. These infrastructure helpers require no annotation processing.
 fn setup_kotlinc_server(java_home: &str, _compiler_jar: &Path) -> Option<PathBuf> {
     // The JDK is part of the cache key: a class compiled by a NEWER javac (another session's
     // JAVA_HOME) is unloadable by an older runtime, and the server-spawn failure then reads as
@@ -260,6 +261,7 @@ fn setup_kotlinc_server(java_home: &str, _compiler_jar: &Path) -> Option<PathBuf
         return None;
     }
     let out = Command::new(&javac)
+        .arg("-proc:none")
         .arg("-cp")
         .arg(format!("{}/*", _compiler_jar.parent()?.to_string_lossy()))
         .arg("-d")

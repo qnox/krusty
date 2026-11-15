@@ -10,3 +10,7 @@ compiler/tests-spec/testFixtures/org/jetbrains/kotlin/spec/utils/tasks/GenerateS
 compiler/tests-spec/testFixtures/org/jetbrains/kotlin/spec/utils/GeneralConfiguration.kt
 compiler/test-infrastructure-utils/testFixtures/org/jetbrains/kotlin/test/utils/CustomTestDataUtils.kt
 compiler/test-infrastructure-utils.common/testFixtures/org/jetbrains/kotlin/test/TargetBackend.kt
+native/native.tests/testFixtures/org/jetbrains/kotlin/konan/test/blackbox/support/ConfigurationProperties.kt
+native/native.tests/testFixtures/org/jetbrains/kotlin/konan/test/blackbox/support/group/ExtTestCaseGroupProvider.kt
+native/native.tests/testFixtures/org/jetbrains/kotlin/konan/test/blackbox/support/group/IgnoreDisableHelper.kt
+native/native.tests/testFixtures/org/jetbrains/kotlin/konan/test/blackbox/support/util/CInteropUtils.kt

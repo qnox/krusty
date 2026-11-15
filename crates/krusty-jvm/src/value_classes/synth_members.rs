@@ -1167,6 +1167,24 @@ fn nested_value_text(
     value: ExprId,
     rendered_value_class_text: &mut HashSet<ExprId>,
 ) -> ExprId {
+    // An array renders by its contents, as a data class's array property does; an unsigned array
+    // is a value class of its own and renders as that class through its carrier below.
+    if underlying.non_null().is_array()
+        && (underlying.non_null().is_reference_array()
+            || !underlying
+                .non_null()
+                .array_elem()
+                .is_some_and(|element| element.is_unsigned()))
+    {
+        return ir.add_expr(IrExpr::Call {
+            callee: Box::new(Callee::Intrinsic {
+                operation: krusty::ir::IrIntrinsic::DataClassArrayToString { ty: underlying },
+                ret: Ty::String,
+            }),
+            dispatch_receiver: None,
+            args: vec![value],
+        });
+    }
     if underlying.is_nullable() {
         return value;
     }

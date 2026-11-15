@@ -13,9 +13,14 @@ use crate::fx_hash::{HashMap, HashSet};
 
 use crate::fir::{
     CallableId, DeclarationFlags, DeclarationId, DeclarationKind, PropertyId,
-    ResolvedFunctionOverrideTarget, ResolvedModuleIndex, ResolvedPropertyOverrideTarget,
+    ResolvedDelegatedMember, ResolvedFunctionOverrideTarget, ResolvedInterfaceDelegation,
+    ResolvedModuleIndex, ResolvedPropertyOverrideTarget,
 };
 use crate::types::{SemanticCallRole, Ty, TypeName};
+
+#[cfg(test)]
+#[path = "module_classes/forwarder_tests.rs"]
+mod forwarder_tests;
 
 /// The named classes of one module, by identity.
 #[derive(Debug, Default)]
@@ -30,15 +35,40 @@ pub struct ModuleClasses {
 pub struct ModuleClass {
     /// The declared superclass, or `None` for `kotlin.Any`.
     pub(crate) superclass: Option<TypeName>,
+    /// A dependency class a module class extends, whose members are its provider's
+    /// ([`crate::fir::ResolvedDependencySuperclass`]).
+    pub(crate) dependency: bool,
     /// Function types among the declared supertypes, by arity.
     pub(crate) function_type_arities: Box<[usize]>,
     /// Instance members in source order.
     pub(crate) members: Box<[ModuleMember]>,
     pub(crate) function_overrides: Box<[ModuleFunctionOverride]>,
     pub(crate) property_overrides: Box<[ModulePropertyOverride]>,
-    /// Whether it implements an interface `by` a delegate, which the declaring file realizes
-    /// with forwarders after the members numbered here.
-    pub(crate) delegates_interfaces: bool,
+    /// The forwarders its interface delegations (`I by d`) generate, in the order the declaring
+    /// file creates them: delegation by delegation, each member's function, or getter then
+    /// setter.
+    pub(crate) forwarders: Box<[ModuleForwarder]>,
+}
+
+/// One forwarder an interface delegation generates.
+#[derive(Debug)]
+pub(crate) struct ModuleForwarder {
+    /// What it takes after the dispatch receiver and answers.
+    pub(crate) parameters: Box<[Ty]>,
+    pub(crate) result: Ty,
+    /// A `suspend` function, which takes its caller's continuation after `parameters`.
+    pub(crate) suspend: bool,
+    /// The declarations it realizes, the delegated interface member first. A class member among
+    /// them gives up its slot to the forwarder.
+    pub(crate) realizes: Box<[ForwardedMember]>,
+}
+
+/// A declaration a forwarder realizes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ForwardedMember {
+    Function(ResolvedFunctionOverrideTarget),
+    Getter(ResolvedPropertyOverrideTarget),
+    Setter(ResolvedPropertyOverrideTarget),
 }
 
 /// One named interface: what its member numbers are computed from.
@@ -66,18 +96,19 @@ pub(crate) enum ModuleInterfaceMember {
     },
 }
 
-/// An instance member a table can hold.
+/// An instance member a table can hold: a declaration of the module, or of a dependency class a
+/// module class extends ([`crate::fir::ResolvedDependencySuperclass`]).
 #[derive(Debug)]
 pub(crate) enum ModuleMember {
     Function {
-        callable: CallableId,
+        callable: ResolvedFunctionOverrideTarget,
         parameters: Box<[Ty]>,
         result: Ty,
         /// A `suspend` function, which takes its caller's continuation after `parameters`.
         suspend: bool,
     },
     Property {
-        property: PropertyId,
+        property: ResolvedPropertyOverrideTarget,
         /// What its accessors take after the dispatch receiver: its context parameters, then a
         /// member extension's receiver. A setter takes `value` after them.
         accessor_parameters: Box<[Ty]>,
@@ -96,7 +127,7 @@ pub(crate) enum ModuleMember {
 /// A function override edge of a class's own member.
 #[derive(Debug)]
 pub(crate) struct ModuleFunctionOverride {
-    pub(crate) implementation: CallableId,
+    pub(crate) implementation: ResolvedFunctionOverrideTarget,
     pub(crate) overridden_owner: TypeName,
     pub(crate) overridden: ResolvedFunctionOverrideTarget,
     pub(crate) overridden_is_interface: bool,
@@ -106,7 +137,7 @@ pub(crate) struct ModuleFunctionOverride {
 /// A property override edge of a class's own member.
 #[derive(Debug)]
 pub(crate) struct ModulePropertyOverride {
-    pub(crate) implementation: PropertyId,
+    pub(crate) implementation: ResolvedPropertyOverrideTarget,
     pub(crate) overridden: ResolvedPropertyOverrideTarget,
     pub(crate) overridden_is_interface: bool,
     pub(crate) declared_type: Ty,
@@ -179,6 +210,14 @@ impl ModuleClasses {
         self.classes.get(&classifier)
     }
 
+    /// Whether `classifier` is a dependency class a module class extends, which the support unit
+    /// materializing it lays out for that subclass ([`crate::fir::ResolvedDependencySuperclass`]).
+    pub fn is_dependency_class(&self, classifier: TypeName) -> bool {
+        self.classes
+            .get(&classifier)
+            .is_some_and(|class| class.dependency)
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (TypeName, &ModuleClass)> {
         self.classes.iter().map(|(name, class)| (*name, class))
     }
@@ -243,45 +282,26 @@ impl ModuleClasses {
                 index
                     .function_overrides(declaration)
                     .iter()
-                    .filter_map(|edge| {
-                        let ResolvedFunctionOverrideTarget::Module(implementation) =
-                            edge.implementation
-                        else {
-                            return None;
-                        };
-                        Some(ModuleFunctionOverride {
-                            implementation,
-                            overridden_owner: edge.overridden_owner,
-                            overridden: edge.overridden,
-                            overridden_is_interface: edge.overridden_is_interface,
-                            overridden_role: edge.overridden_semantic_role,
-                        })
+                    .filter(|edge| {
+                        matches!(
+                            edge.implementation,
+                            ResolvedFunctionOverrideTarget::Module(_)
+                        )
                     })
+                    .map(function_override)
                     .collect::<Box<[_]>>()
             };
             let property_overrides = || {
                 index
                     .property_overrides(declaration)
                     .iter()
-                    .filter_map(|edge| {
-                        let ResolvedPropertyOverrideTarget::Module(implementation) =
-                            edge.implementation
-                        else {
-                            return None;
-                        };
-                        Some(ModulePropertyOverride {
-                            implementation,
-                            overridden: edge.overridden,
-                            overridden_is_interface: edge.overridden_is_interface,
-                            declared_type: edge.declared_type.get(),
-                            implementation_type: edge.implementation_type.get(),
-                            declared_receiver: edge.declared_receiver.map(|ty| ty.get()),
-                            implementation_receiver: edge
-                                .implementation_receiver
-                                .map(|ty| ty.get()),
-                            depth: edge.depth,
-                        })
+                    .filter(|edge| {
+                        matches!(
+                            edge.implementation,
+                            ResolvedPropertyOverrideTarget::Module(_)
+                        )
                     })
+                    .map(property_override)
                     .collect::<Box<[_]>>()
             };
             if flags.has(DeclarationFlags::INTERFACE) {
@@ -312,6 +332,7 @@ impl ModuleClasses {
             classes.insert(
                 classifier.classifier,
                 ModuleClass {
+                    dependency: false,
                     superclass: classifier
                         .superclass
                         .and_then(|superclass| superclass.get().non_null().obj_internal())
@@ -320,14 +341,98 @@ impl ModuleClasses {
                     members,
                     function_overrides: function_overrides(),
                     property_overrides: property_overrides(),
-                    delegates_interfaces: !classifier.interface_delegations.is_empty(),
+                    forwarders: forwarders(&classifier.interface_delegations),
                 },
             );
+        }
+        for superclass in index.dependency_superclasses() {
+            classes.insert(superclass.classifier, dependency_class(superclass));
         }
         Self {
             classes,
             interfaces,
         }
+    }
+}
+
+/// A dependency class a module class extends, as Pass 1 froze its dispatch shape.
+fn dependency_class(superclass: &crate::fir::ResolvedDependencySuperclass) -> ModuleClass {
+    let members = superclass
+        .members
+        .iter()
+        .map(|member| match member {
+            crate::fir::ResolvedDependencyMember::Function {
+                callable,
+                parameters,
+                result,
+                suspend,
+            } => ModuleMember::Function {
+                callable: ResolvedFunctionOverrideTarget::External(*callable),
+                parameters: parameters.iter().map(|parameter| parameter.get()).collect(),
+                result: result.get(),
+                suspend: *suspend,
+            },
+            crate::fir::ResolvedDependencyMember::Property {
+                getter,
+                setter,
+                accessor_parameters,
+                value,
+            } => {
+                ModuleMember::Property {
+                    property: ResolvedPropertyOverrideTarget::External(*getter),
+                    accessor_parameters: accessor_parameters
+                        .iter()
+                        .map(|parameter| parameter.get())
+                        .collect(),
+                    value: value.get(),
+                    // Its accessors dispatch, so its getter answers the declared value.
+                    getter_value: value.get(),
+                    getter: true,
+                    setter: *setter,
+                }
+            }
+        })
+        .collect();
+    ModuleClass {
+        dependency: true,
+        superclass: superclass.superclass,
+        function_type_arities: Box::default(),
+        members,
+        function_overrides: superclass
+            .function_overrides
+            .iter()
+            .map(function_override)
+            .collect(),
+        property_overrides: superclass
+            .property_overrides
+            .iter()
+            .map(property_override)
+            .collect(),
+        // A dependency class's delegations are realized where it is declared.
+        forwarders: Box::default(),
+    }
+}
+
+fn function_override(edge: &crate::fir::ResolvedFunctionOverride) -> ModuleFunctionOverride {
+    ModuleFunctionOverride {
+        implementation: edge.implementation,
+        overridden_owner: edge.overridden_owner,
+        overridden: edge.overridden,
+        overridden_is_interface: edge.overridden_is_interface,
+        overridden_role: edge.overridden_semantic_role,
+    }
+}
+
+fn property_override(edge: &crate::fir::ResolvedPropertyOverride) -> ModulePropertyOverride {
+    ModulePropertyOverride {
+        implementation: edge.implementation,
+        overridden: edge.overridden,
+        overridden_is_interface: edge.overridden_is_interface,
+        declared_type: edge.declared_type.get(),
+        implementation_type: edge.implementation_type.get(),
+        declared_receiver: edge.declared_receiver.map(|ty| ty.get()),
+        implementation_receiver: edge.implementation_receiver.map(|ty| ty.get()),
+        depth: edge.depth,
     }
 }
 
@@ -418,7 +523,7 @@ fn members(
                 let callable = index.callable_for_declaration(declaration)?;
                 let (parameters, result) = index.callable_carriers(callable.id)?;
                 members.push(ModuleMember::Function {
-                    callable: callable.id,
+                    callable: ResolvedFunctionOverrideTarget::Module(callable.id),
                     parameters: parameters.into_boxed_slice(),
                     result,
                     suspend: flags.has(DeclarationFlags::SUSPEND),
@@ -460,7 +565,7 @@ fn members(
                     _ => value,
                 };
                 members.push(ModuleMember::Property {
-                    property,
+                    property: ResolvedPropertyOverrideTarget::Module(property),
                     accessor_parameters: parameters.into_boxed_slice(),
                     value,
                     getter_value,
@@ -496,4 +601,69 @@ fn interface_implementations(index: &ResolvedModuleIndex) -> HashSet<PropertyId>
         }
     }
     properties
+}
+
+/// The forwarders `delegations` generate, in the order the declaring file creates them.
+fn forwarders(delegations: &[ResolvedInterfaceDelegation]) -> Box<[ModuleForwarder]> {
+    let mut forwarders = Vec::new();
+    for delegation in delegations {
+        for member in &delegation.members {
+            match member {
+                ResolvedDelegatedMember::Function(function) => {
+                    forwarders.push(ModuleForwarder {
+                        parameters: function.call.parameters.iter().map(|ty| ty.get()).collect(),
+                        result: function.call.result.get(),
+                        suspend: function.call.suspend,
+                        realizes: function
+                            .overridden
+                            .iter()
+                            .map(|declaration| ForwardedMember::Function(declaration.target))
+                            .collect(),
+                    });
+                }
+                ResolvedDelegatedMember::Property(property) => {
+                    // An accessor takes the context parameters, then a member extension's
+                    // receiver; the setter takes the value after them.
+                    let mut parameters = property
+                        .context_parameters
+                        .iter()
+                        .map(|parameter| parameter.ty.get())
+                        .collect::<Vec<_>>();
+                    if let Some(position) = property.getter.extension_receiver_parameter {
+                        if let Some(receiver) = property.getter.parameters.get(position as usize) {
+                            parameters.push(receiver.get());
+                        }
+                    }
+                    let realized = property
+                        .overridden
+                        .iter()
+                        .map(|declaration| declaration.target)
+                        .collect::<Vec<_>>();
+                    let ty = property.ty.get();
+                    forwarders.push(ModuleForwarder {
+                        parameters: parameters.clone().into_boxed_slice(),
+                        result: ty,
+                        suspend: false,
+                        realizes: realized
+                            .iter()
+                            .map(|&p| ForwardedMember::Getter(p))
+                            .collect(),
+                    });
+                    if property.setter.is_some() {
+                        parameters.push(ty);
+                        forwarders.push(ModuleForwarder {
+                            parameters: parameters.into_boxed_slice(),
+                            result: Ty::Unit,
+                            suspend: false,
+                            realizes: realized
+                                .iter()
+                                .map(|&p| ForwardedMember::Setter(p))
+                                .collect(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    forwarders.into_boxed_slice()
 }

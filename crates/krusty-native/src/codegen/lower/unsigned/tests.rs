@@ -1,4 +1,4 @@
-use super::{declared_unsigned_array_carrier, unsigned_array_size_argument};
+use super::{declared_unsigned_array_carrier, unsigned_array_argument, UnsignedArrayArgument};
 use krusty::types::{Ty, TypeName};
 
 const WIDTHS: [(Ty, Ty); 4] = [
@@ -78,28 +78,20 @@ fn a_changed_or_nonprimitive_carrier_does_not_authenticate_storage() {
 #[test]
 fn every_size_frame_selects_only_its_single_size_operand() {
     for (unsigned, signed) in WIDTHS {
-        let argument = unsigned_array_size_argument(
-            owner(unsigned),
-            Ty::array(signed),
-            &[17],
-            Some(&[Ty::Int]),
-        )
-        .unwrap();
-        assert_eq!(argument, 17);
+        let argument =
+            unsigned_array_argument(owner(unsigned), Ty::array(signed), &[17], Some(&[Ty::Int]))
+                .unwrap();
+        assert_eq!(argument, UnsignedArrayArgument::Size(17));
     }
 }
 
 #[test]
-fn a_primary_signed_carrier_requires_an_alias_preserving_view() {
+fn a_primary_signed_carrier_selects_an_alias_preserving_view() {
     for (unsigned, signed) in WIDTHS {
         let carrier = Ty::array(signed);
-        let error = unsigned_array_size_argument(owner(unsigned), carrier, &[17], Some(&[carrier]))
-            .unwrap_err();
-        assert_eq!(
-            error.construct(),
-            "a signed-carrier constructor of an unsigned array without an alias-preserving view"
-        );
-        assert_eq!(error.origin(), None);
+        let argument =
+            unsigned_array_argument(owner(unsigned), carrier, &[17], Some(&[carrier])).unwrap();
+        assert_eq!(argument, UnsignedArrayArgument::Storage(17));
     }
 }
 
@@ -119,7 +111,7 @@ fn missing_or_changed_selected_frames_decline_before_allocation() {
         (&[17, 19], Some(&carrier_parameters)),
     ];
     for (args, selected) in frames {
-        let error = unsigned_array_size_argument(array, carrier, args, selected).unwrap_err();
+        let error = unsigned_array_argument(array, carrier, args, selected).unwrap_err();
         assert_eq!(
             error.construct(),
             format!(

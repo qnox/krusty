@@ -2926,12 +2926,6 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             .or_default()
                             .push(copy.signature());
                     }
-                    if classifier_is_enum {
-                        table.enums.insert(
-                            internal,
-                            c.enum_entries.iter().map(|e| e.name.clone()).collect(),
-                        );
-                    }
                     let mut resolve_super = |s: &str| -> String {
                         let resolved =
                             declared_supertype_name(c, s, &header_class_names, &lexical_inheritors)
@@ -3441,6 +3435,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             declared_callable_order,
                             source_methods,
                             flags: classifier_flags,
+                            enum_entries: c.enum_entries.iter().map(|e| e.name.clone()).collect(),
                             inner_of: inner_of_ref,
                             companion_internal: companion_internal_ref,
                             lateinit_props,

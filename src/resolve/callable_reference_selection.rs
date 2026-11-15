@@ -8,6 +8,9 @@ use crate::types::{Ty, TyKind};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AdaptedRefArgument {
     Value(usize),
+    /// A leading context parameter, supplied from the reference site rather than by the
+    /// reference's own callers (`CallableReferencesToContextual`).
+    Context,
     Default,
     Vararg {
         values: Vec<usize>,
@@ -86,6 +89,16 @@ pub(super) fn maximal_adapted_references(
     }
 }
 
+/// A declaration's value parameters as overload specificity compares them: each of its own type
+/// parameters erased to its upper bound.
+pub(super) fn erased_declared_parameters(parameters: &[Ty]) -> Vec<Ty> {
+    let unbound = crate::fx_hash::HashMap::<String, Ty>::default();
+    parameters
+        .iter()
+        .map(|parameter| parameter.substitute_erased(&unbound))
+        .collect()
+}
+
 fn adaptation_specificity_shape(params: &[Ty], plan: &[AdaptedRefArgument]) -> Vec<Ty> {
     let mut shape = Vec::new();
     for (index, argument) in plan.iter().enumerate() {
@@ -94,7 +107,7 @@ fn adaptation_specificity_shape(params: &[Ty], plan: &[AdaptedRefArgument]) -> V
         };
         match argument {
             AdaptedRefArgument::Value(_) => shape.push(declared),
-            AdaptedRefArgument::Default => {}
+            AdaptedRefArgument::Context | AdaptedRefArgument::Default => {}
             AdaptedRefArgument::Vararg {
                 values,
                 whole_array: true,
@@ -263,15 +276,50 @@ fn receiver_validated_projected_formals(
     validated
 }
 
+/// Whether an expected input can supply a whole vararg array: it must be the declared array's own
+/// classifier (`Array<out E>` takes an `Array<…>`; `IntArray` takes an `IntArray`). Any other
+/// input, including a primitive array against `Array<out E>`, is one collected vararg element.
+fn same_array_classifier(actual: Ty, declared: Ty) -> bool {
+    fn array_classifier(ty: Ty) -> Option<Ty> {
+        match ty.non_null().kind() {
+            TyKind::TyParam(_, bound) | TyKind::Var(_, bound) | TyKind::PlatformNullable(bound) => {
+                array_classifier(bound)
+            }
+            TyKind::Obj(..) if ty.non_null().is_array() => Some(ty.non_null()),
+            _ => None,
+        }
+    }
+    match (array_classifier(actual), array_classifier(declared)) {
+        (Some(actual), Some(declared)) => match (actual.kind(), declared.kind()) {
+            (TyKind::Obj(actual, _), TyKind::Obj(declared, _)) => actual == declared,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// What a reference is selected against: the function type's parameters and result, which exclude
+/// the `bound_contexts` leading context parameters the reference site supplies.
+#[derive(Clone, Copy)]
+pub(super) struct ReferenceExpectation<'a> {
+    pub(super) params: Option<&'a [Ty]>,
+    pub(super) ret: Option<Ty>,
+    pub(super) bound_contexts: usize,
+}
+
 pub(super) fn specialize_generic_signature(
     source: &dyn SymbolSource,
     generic: &crate::libraries::GenericSig,
     call_sig: &CallSig,
     extension_receiver: Option<Ty>,
-    expected_params: Option<&[Ty]>,
-    expected_ret: Option<Ty>,
+    expectation: ReferenceExpectation<'_>,
     mut is_assignable: impl FnMut(Ty, Ty) -> bool,
 ) -> Result<SpecializedGenericCallableReference, CallableRefSpecialization> {
+    let ReferenceExpectation {
+        params: expected_params,
+        ret: expected_ret,
+        bound_contexts,
+    } = expectation;
     let mut bindings = crate::symbol_resolver::GSigBinds::default();
     if let (Some(declared), Some(actual)) = (generic.receiver, extension_receiver) {
         let mut inferred = crate::symbol_resolver::GSigBinds::default();
@@ -280,17 +328,23 @@ pub(super) fn specialize_generic_signature(
     }
     if let Some(expected) = expected_params {
         let vararg = call_sig.vararg_index;
+        // A whole array is the vararg's single input. When it is the last expected input, any
+        // parameters after the vararg take their defaults (`vararg xs: E, k: Int = 0`).
         let whole_vararg = vararg.is_some_and(|index| {
-            expected.len() == generic.params.len()
+            index
+                .checked_sub(bound_contexts)
+                .is_some_and(|expected_index| expected.len() == expected_index + 1)
                 && expected
-                    .get(index)
-                    .is_some_and(|parameter| parameter.array_elem().is_some())
+                    .get(index - bound_contexts)
+                    .zip(generic.params.get(index))
+                    .is_some_and(|(&actual, &declared)| same_array_classifier(actual, declared))
         });
         let actuals = expected
             .iter()
             .copied()
             .enumerate()
             .filter_map(|(index, actual)| {
+                let index = index + bound_contexts;
                 let parameter = match vararg {
                     Some(vararg) if index >= vararg => vararg,
                     _ if index < generic.params.len() => index,
@@ -381,6 +435,7 @@ pub(super) fn specialize_generic_signature(
 pub(super) fn specialize_candidate_with_type_arguments(
     source: &dyn SymbolSource,
     function: &mut FunctionInfo,
+    bound_contexts: usize,
     extension_receiver: Option<Ty>,
     expected_params: Option<&[Ty]>,
     expected_ret: Option<Ty>,
@@ -394,8 +449,11 @@ pub(super) fn specialize_candidate_with_type_arguments(
         &generic,
         &function.call_sig,
         extension_receiver,
-        expected_params,
-        expected_ret,
+        ReferenceExpectation {
+            params: expected_params,
+            ret: expected_ret,
+            bound_contexts,
+        },
         is_assignable,
     )?;
     let type_arguments = specialized.type_arguments;
@@ -417,6 +475,7 @@ pub(super) fn specialize_candidate_with_type_arguments(
 pub(super) fn specialize_candidate(
     source: &dyn SymbolSource,
     function: &mut FunctionInfo,
+    bound_contexts: usize,
     extension_receiver: Option<Ty>,
     expected_params: Option<&[Ty]>,
     expected_ret: Option<Ty>,
@@ -425,6 +484,7 @@ pub(super) fn specialize_candidate(
     specialize_candidate_with_type_arguments(
         source,
         function,
+        bound_contexts,
         extension_receiver,
         expected_params,
         expected_ret,
@@ -526,7 +586,7 @@ pub(super) fn inputs_agree_with_result(
                         .is_none_or(|&input| fits(input, declared))
                 })
             }
-            AdaptedRefArgument::Default => true,
+            AdaptedRefArgument::Context | AdaptedRefArgument::Default => true,
         }
     })
 }
@@ -578,7 +638,7 @@ pub(super) fn realize_expected_shape(
                     }
                 }
             }
-            AdaptedRefArgument::Default => {}
+            AdaptedRefArgument::Context | AdaptedRefArgument::Default => {}
         }
     }
     let result = specialize_occurrence(expected.ret, target_ret);
@@ -608,9 +668,20 @@ pub(super) fn input_parameter_fits(
     }
 }
 
+/// [`parameter_plan`] for a reference that binds no context arguments.
+pub(super) fn plain_parameter_plan(
+    params: &[Ty],
+    call_sig: &CallSig,
+    expected_params: &[Ty],
+    is_assignable: impl FnMut(Ty, Ty) -> bool,
+) -> Option<Vec<AdaptedRefArgument>> {
+    parameter_plan(params, call_sig, 0, expected_params, is_assignable)
+}
+
 pub(super) fn parameter_plan(
     params: &[Ty],
     call_sig: &CallSig,
+    context_count: usize,
     expected_params: &[Ty],
     mut is_assignable: impl FnMut(Ty, Ty) -> bool,
 ) -> Option<Vec<AdaptedRefArgument>> {
@@ -749,12 +820,19 @@ pub(super) fn parameter_plan(
         false
     }
 
+    // Leading context parameters are filled from the reference site; the expected shape maps onto
+    // the remaining declaration inputs only.
+    let context_count = context_count.min(params.len());
     let mut plan = Vec::with_capacity(params.len());
+    plan.extend(std::iter::repeat_n(
+        AdaptedRefArgument::Context,
+        context_count,
+    ));
     map_from(
         params,
         call_sig,
         expected_params,
-        0,
+        context_count,
         0,
         &mut plan,
         &mut is_assignable,
@@ -771,6 +849,7 @@ pub(super) fn parameter_plan(
 fn select_adapted_bound_instance_candidate(
     source: &dyn SymbolSource,
     overloads: &[FunctionInfo],
+    bind_contexts: bool,
     expected: &'static crate::types::FnSig,
     mut is_assignable: impl FnMut(Ty, Ty) -> bool,
     shape_at_least_as_specific: impl FnMut(&[Ty], &[Ty]) -> bool,
@@ -783,9 +862,15 @@ fn select_adapted_bound_instance_candidate(
             if candidate.callable.suspend && !expected.suspend {
                 return None;
             }
+            let bound_contexts = if bind_contexts {
+                candidate.context_count
+            } else {
+                0
+            };
             let type_arguments = specialize_candidate_with_type_arguments(
                 source,
                 &mut candidate,
+                bound_contexts,
                 None,
                 Some(&expected.params),
                 Some(expected.ret),
@@ -795,6 +880,11 @@ fn select_adapted_bound_instance_candidate(
             let plan = parameter_plan(
                 &candidate.semantic_params(),
                 &candidate.call_sig,
+                if bind_contexts {
+                    candidate.context_count
+                } else {
+                    0
+                },
                 &expected.params,
                 &mut is_assignable,
             )?;
@@ -852,6 +942,7 @@ fn select_adapted_bound_instance_candidate(
 pub(super) fn select_adapted_instance_candidate(
     source: &dyn SymbolSource,
     overloads: &[FunctionInfo],
+    bind_contexts: bool,
     unbound_receiver: Option<Ty>,
     expected: &'static crate::types::FnSig,
     mut is_assignable: impl FnMut(Ty, Ty) -> bool,
@@ -880,6 +971,7 @@ pub(super) fn select_adapted_instance_candidate(
     let (selected, mut plan, type_arguments) = select_adapted_bound_instance_candidate(
         source,
         overloads,
+        bind_contexts,
         method,
         is_assignable,
         shape_at_least_as_specific,
@@ -953,7 +1045,7 @@ pub(super) fn constructor_plan_without_receiver(
                     without_receiver(value)?;
                 }
             }
-            AdaptedRefArgument::Default => {}
+            AdaptedRefArgument::Context | AdaptedRefArgument::Default => {}
         }
     }
     Some(plan)
@@ -973,7 +1065,9 @@ pub(super) fn shift_plan_values_from(
                     .filter(|value| **value >= first_value)
                     .for_each(|value| *value += offset);
             }
-            AdaptedRefArgument::Value(_) | AdaptedRefArgument::Default => {}
+            AdaptedRefArgument::Value(_)
+            | AdaptedRefArgument::Context
+            | AdaptedRefArgument::Default => {}
         }
     }
 }

@@ -478,15 +478,16 @@ fn compile_multifile(
     // `.java` blocks are collected separately: javac compiles them first (in-process, via the
     // persistent JavaRunner) and their classes join krusty's classpath as an in-memory overlay,
     // mirroring how kotlinc's test infra makes Java sources visible to the Kotlin compile.
-    let (mut blocks, java_blocks) = krusty::conformance::split_files(src);
+    let (mut blocks, java_blocks) = krusty::conformance::split_files(src).ok()?;
     // Single-file (no `// FILE:` markers) but routed here for coroutine-helper injection: the whole
     // source is the one main block.
     if blocks.is_empty() && java_blocks.is_empty() {
         blocks.push((main_stem.to_string(), src.to_string()));
     }
     // Mirror kotlinc: a `// WITH_COROUTINES` test gets the generated `helpers` source as an extra file.
-    if src.contains("// WITH_COROUTINES") {
-        blocks.push(("CoroutineUtil".to_string(), COROUTINE_HELPERS.to_string()));
+    if krusty::conformance::directive(src, "WITH_COROUTINES") {
+        let helpers = krusty::conformance::coroutine_sources(src, COROUTINE_HELPERS).ok()?;
+        blocks.extend(helpers);
     }
     // A lone `// FILE: main.kt` block still names the file (and so its facade class), exactly as
     // kotlinc's test infra compiles it; only a source with no Kotlin at all is rejected here.
@@ -726,7 +727,7 @@ fn compile_module_test(
     let mut modules = split_modules(src)?;
     // kotlinc's `// WITH_COROUTINES` helpers live in an implicit `support` module every module sees.
     if krusty::conformance::directive(src, "WITH_COROUTINES") {
-        krusty::conformance::inject_support_module(&mut modules, COROUTINE_HELPERS);
+        krusty::conformance::inject_coroutine_support(&mut modules, src, COROUTINE_HELPERS).ok()?;
     }
     let uid = UID.fetch_add(1, Ordering::Relaxed);
     let tmp = std::env::temp_dir().join(format!("krusty_modtest_{}_{uid}", std::process::id()));
@@ -1335,22 +1336,36 @@ fun box(): String = Registry.value()\n";
         .filter(|(_, bytes)| bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]))
         .collect();
 
+    // kotlinc's test infrastructure compiles the partitioned files, which keep the test data's
+    // line numbers, so the reference compiles the same unit the module harness compiled.
+    let modules = split_modules(&source).expect("the fixture declares two modules");
+    let units = krusty::conformance::module_units(&modules);
+    let [unit] = units.as_slice() else {
+        panic!("the folded common module compiles into the platform unit: {units:?}");
+    };
+    assert_eq!(
+        unit.common_file_count, 1,
+        "Common.kt is the folded common source"
+    );
     let reference_root = common::scratch_dir().expect("allocate reference source-set directory");
     let reference_output = reference_root.join("classes");
-    let common_path = reference_root.join("Common.kt");
-    let platform_path = reference_root.join("Platform.kt");
-    fs::write(&common_path, COMMON).expect("write common reference source");
-    fs::write(&platform_path, PLATFORM).expect("write platform reference source");
-    let arguments = vec![
+    let mut arguments = vec![
         "-d".to_string(),
         reference_output.to_string_lossy().into_owned(),
         "-module-name".to_string(),
-        "platform".to_string(),
+        unit.name.clone(),
         "-Xmulti-platform".to_string(),
-        format!("-Xcommon-sources={}", common_path.to_string_lossy()),
-        common_path.to_string_lossy().into_owned(),
-        platform_path.to_string_lossy().into_owned(),
     ];
+    let mut paths = Vec::new();
+    for (index, (name, text)) in unit.files.iter().enumerate() {
+        let path = reference_root.join(format!("{name}.kt"));
+        fs::write(&path, text).expect("write reference source");
+        if index < unit.common_file_count {
+            arguments.push(format!("-Xcommon-sources={}", path.to_string_lossy()));
+        }
+        paths.push(path.to_string_lossy().into_owned());
+    }
+    arguments.extend(paths);
     let (reference_status, reference_diagnostics) =
         common::kotlinc_compile(&arguments).expect("reference compiler is provisioned");
     assert_eq!(

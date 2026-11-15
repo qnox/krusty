@@ -2880,15 +2880,16 @@ fn emit_interface_class(
     env.inner_classes.register(&mut cw);
     let mut default_impls: Option<ClassWriter> = None;
     // Whether this compilation publishes the `<Iface>$DefaultImpls` compatibility holder at all.
-    let emits_default_impls = opts.jvm_default != JvmDefaultMode::NoCompatibility;
+    let jvm_default = crate::declared_jvm_default::of_class(c, opts.jvm_default);
+    let emits_default_impls = jvm_default != JvmDefaultMode::NoCompatibility;
     // `disable` puts NO body on the interface: every member is abstract and the bodies live on the
     // holder as statics taking the receiver as parameter 0. The other two modes emit the body here as
     // a JVM default method.
-    let bodies_on_interface = opts.jvm_default != JvmDefaultMode::Disable;
+    let bodies_on_interface = jvm_default != JvmDefaultMode::Disable;
     // `enable` additionally publishes the compatibility surface next to each default method: an
     // `access$<name>$jd` bridge on the interface (emitted after every member, kotlinc's order) and a
     // holder forward per non-private body.
-    let enable_compat = opts.jvm_default == JvmDefaultMode::Enable;
+    let enable_compat = jvm_default == JvmDefaultMode::Enable;
     let mut jd_bridge_fids: Vec<u32> = Vec::new();
     // kotlinc emits interface members in SOURCE order — a property's accessors sit at the
     // property's declared position among the functions — while lowering registers declared
@@ -4579,6 +4580,8 @@ struct Emitter<'a> {
     function: Option<u32>,
     /// Declaration scope of a scratch inline-lambda body, without changing emission ownership.
     type_parameter_function: Option<u32>,
+    /// Inside a lambda passed to a `crossinline` parameter, which kotlinc may move into another class.
+    crossinline_lambda_body: bool,
     export_private_calls: bool,
     method_exports_private_access: bool,
     /// This method is `inline`, so each copy of a `finally` is bracketed by
@@ -4798,6 +4801,7 @@ impl<'a> Emitter<'a> {
             static_owner,
             function: None,
             type_parameter_function: None,
+            crossinline_lambda_body: false,
             export_private_calls: false,
             method_exports_private_access: false,
             finally_markers: false,
@@ -6392,37 +6396,6 @@ fn emit_return(t: Ty, code: &mut CodeBuilder) {
         Ty::Unit | Ty::Nothing => code.ret_void(),
         _ => code.areturn(),
     }
-}
-
-fn methodref_owner<'a>(body: &'a MethodCode, name: &str, descriptor: &str) -> Option<&'a str> {
-    fn utf8(cp: &[C], idx: u16) -> Option<&str> {
-        match cp.get(idx as usize)? {
-            C::Utf8(s) => Some(s.as_str()),
-            _ => None,
-        }
-    }
-    fn class_name(cp: &[C], idx: u16) -> Option<&str> {
-        match cp.get(idx as usize)? {
-            C::Class(name_idx) => utf8(cp, *name_idx),
-            _ => None,
-        }
-    }
-    fn name_and_desc(cp: &[C], idx: u16) -> Option<(&str, &str)> {
-        match cp.get(idx as usize)? {
-            C::NameAndType(name_idx, desc_idx) => {
-                Some((utf8(cp, *name_idx)?, utf8(cp, *desc_idx)?))
-            }
-            _ => None,
-        }
-    }
-
-    body.source_cp.iter().find_map(|entry| {
-        let C::Methodref(class_idx, nt_idx) = entry else {
-            return None;
-        };
-        let (n, d) = name_and_desc(&body.source_cp, *nt_idx)?;
-        (n == name && d == descriptor).then(|| class_name(&body.source_cp, *class_idx))?
-    })
 }
 
 #[cfg(test)]

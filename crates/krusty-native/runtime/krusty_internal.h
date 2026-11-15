@@ -144,6 +144,9 @@ static inline KRef *kt_elements_of(KRef array) { return (KRef *)((KArray *)array
 /* An array's element count, from the header every array begins with. */
 static inline kt_int kt_length_of(KRef array) { return ((const KArray *)array)->length; }
 
+/* The exact signed array a nominal unsigned array class retains, or NULL for another class. */
+const KType *kt_unsigned_array_carrier(const KType *type);
+
 /* `kotlin.Any`'s three members, the table of every runtime type that overrides none of them. */
 extern const kt_fn kt_any_vtable[3];
 

@@ -98,12 +98,21 @@ fn score(
     actual: Result<QualifiedArtifacts, String>,
 ) -> CaseScore {
     let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("Case");
-    let units = match units(source, stem, target) {
+    let source = match target {
+        TestTarget::WasmJs | TestTarget::WasmWasi => {
+            match krusty::conformance::with_wasm_additional_sources(source, file) {
+                Ok(prepared) => prepared,
+                Err(error) => return CaseScore::RefFail(error),
+            }
+        }
+        TestTarget::Jvm | TestTarget::Native => source.to_string(),
+    };
+    let units = match units(&source, stem, target) {
         Ok(units) => units,
         Err(error) => return CaseScore::RefFail(error),
     };
     let reference = box_lane_profile::timed(Stage::TargetOracle, || {
-        reference::compile(target, source, &units).map(|(entries, _)| entries)
+        reference::compile(target, &source, &units).map(|(entries, _)| entries)
     });
     let actual = if matches!(outcome, Outcome::Pass) {
         // A KLIB emission failure earns no byte credit; it cannot change the execution verdict.
@@ -122,13 +131,14 @@ fn score(
 }
 
 fn units(source: &str, stem: &str, target: TestTarget) -> Result<Vec<ModuleUnit>, String> {
-    if source.contains("// MODULE:") {
+    if krusty::conformance::contains_directive(source, "MODULE") {
         let mut modules = reference::module_blocks(source, target)?;
         if krusty::conformance::directive(source, "WITH_COROUTINES") {
-            krusty::conformance::inject_support_module(
+            krusty::conformance::inject_coroutine_support(
                 &mut modules,
+                source,
                 krusty::conformance::COROUTINE_HELPERS,
-            );
+            )?;
         }
         Ok(krusty::conformance::module_units(&modules))
     } else {
