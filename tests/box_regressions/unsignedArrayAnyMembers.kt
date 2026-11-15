@@ -1,7 +1,3 @@
-// TARGET_BACKEND: JVM_IR, NATIVE
-// Not Wasm yet: `UByteArray.toString` reaches the library's `kotlin.wasm.internal.itoa32`, which
-// wasm-js declares as a bodyless JavaScript `external` and wasm-wasi implements through the
-// `UInt` constructor; the Wasm backend can lower neither.
 // An unsigned array is a value class over the signed array of its width. Its generated `toString`
 // and `hashCode` answer through that carrier on all four widths, called directly, through string
 // concatenation and a template, and through an `Any` box.
