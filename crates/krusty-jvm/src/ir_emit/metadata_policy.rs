@@ -108,14 +108,17 @@ fn in_public_inline_scope(
         })
 }
 
-/// `@Metadata.xi` of a `k=3` synthetic class. Kotlin 2.4.20 packs the class's normalized
-/// visibility into bits 8–10; earlier releases wrote the IR flags alone.
+/// `@Metadata.xi` of a `k=3` synthetic class: the IR flags with the class's normalized visibility
+/// in bits 8–10, unless the release writes the flags alone
+/// ([`krusty::kotlin_version::Quirk::SyntheticClassXiOmitsVisibility`]).
 pub(super) fn synthetic_class_xi(visibility: i32) -> i32 {
     const JVM_IR_AND_STABLE_ABI: i32 = 48;
-    if krusty::kotlin_version::at_least(krusty::kotlin_version::KotlinVersion::V2_4_20) {
-        JVM_IR_AND_STABLE_ABI | (visibility << 8)
-    } else {
+    if krusty::kotlin_version::Quirks::target()
+        .has(krusty::kotlin_version::Quirk::SyntheticClassXiOmitsVisibility)
+    {
         JVM_IR_AND_STABLE_ABI
+    } else {
+        JVM_IR_AND_STABLE_ABI | (visibility << 8)
     }
 }
 
@@ -175,7 +178,8 @@ pub(super) fn finish_public_synthetic_class(
 }
 
 /// Whether a synthetic annotation implementation stamps nullability on its constructor, `equals`
-/// and `toString`. Kotlin 2.4.20 stopped; earlier releases did.
+/// and `toString` ([`krusty::kotlin_version::Quirk::AnnotationImplCarriesNullability`]).
 pub(super) fn annotation_impl_carries_nullability() -> bool {
-    !krusty::kotlin_version::at_least(krusty::kotlin_version::KotlinVersion::V2_4_20)
+    krusty::kotlin_version::Quirks::target()
+        .has(krusty::kotlin_version::Quirk::AnnotationImplCarriesNullability)
 }

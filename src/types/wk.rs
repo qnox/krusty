@@ -44,6 +44,7 @@ names! {
     array => "kotlin/Array",
     string => "kotlin/String",
     char_sequence => "kotlin/CharSequence",
+    string_builder => "kotlin/text/StringBuilder",
     iterable => "kotlin/collections/Iterable",
     collection => "kotlin/collections/Collection",
     sequence => "kotlin/sequences/Sequence",

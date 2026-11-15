@@ -154,6 +154,7 @@ impl Backend for WasmBackend {
             || classifier == crate::boxes::result_companion_classifier()
             || classifier == krusty::types::wk::string()
             || lower::is_string_builder(classifier)
+            || lower::is_array_list(classifier)
             || lower::runtime_lays_out(classifier)
     }
 

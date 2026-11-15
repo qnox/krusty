@@ -64,6 +64,12 @@ pub(super) fn checked_ir_file<'a>(
             return None;
         }
     };
+    if let Err(error) =
+        record_checked_klib_dependency_facts(&mut callables, symbols.semantic_platform())
+    {
+        diags.error(Span::new(0, 0), format!("internal error: {error}"));
+        return None;
+    }
     if let Err(identity) = super::builtin_implementations::record_checked(
         &mut callables,
         &ir,
@@ -144,13 +150,39 @@ pub(super) fn checked_ir_file<'a>(
     })
 }
 
+/// Check the KLIB body graph reachable from the frozen callables and store its facts, before the
+/// checked callable facts are completed. A refreeze after common preparation checks the graph of
+/// the calls the preparation introduced the same way, and a dependency support unit checks the
+/// graph its own bodies reach.
+pub(super) fn record_checked_klib_dependency_facts(
+    callables: &mut CheckedBackendCallables,
+    platform: &dyn crate::libraries::SemanticPlatform,
+) -> Result<(), String> {
+    let Some(dependency_bodies) = platform.klib_dependency_body_facts() else {
+        return Ok(());
+    };
+    let checked = crate::resolve::for_checked_klib_bodies(
+        platform,
+        dependency_bodies.bodies(),
+        callables.klib_body_callables(),
+    )
+    .map_err(|identity| {
+        format!("checked KLIB body graph has no exact member facts for {identity:?}")
+    })?;
+    callables
+        .record_klib_dependency_facts(checked)
+        .map_err(|identity| {
+            format!("checked KLIB body graph has conflicting facts for {identity:?}")
+        })
+}
+
 /// Run common IR preparations after the target's exact dependency exports have been attached, but
 /// before target lowering computes its emission closure. `provider` remains live here, so the
 /// final callable freeze includes calls introduced by common lowering. Dependency-support units
 /// can use this entry point after their checked unit and exact exports have been constructed.
 pub(super) fn prepare_common_ir(
     file: &mut CheckedIrFile<'_>,
-    provider: &dyn crate::symbol_source::SymbolSource,
+    provider: &dyn crate::libraries::SemanticPlatform,
     preparation: crate::backend::CommonIrPreparation,
 ) -> Result<(), crate::backend::CommonIrPreparationError> {
     if !file.ir.suspend_funs.is_empty() && file.ir.coroutine_runtime.is_none() {
@@ -171,6 +203,8 @@ pub(super) fn prepare_common_ir(
             "cannot freeze prepared dependency declarations: {error:?}"
         ))
     })?;
+    record_checked_klib_dependency_facts(&mut callables, provider)
+        .map_err(crate::backend::CommonIrPreparationError::Invariant)?;
     super::builtin_implementations::record_checked(&mut callables, &file.ir, provider).map_err(
         |identity| {
             crate::backend::CommonIrPreparationError::Invariant(format!(

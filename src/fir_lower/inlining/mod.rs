@@ -1860,7 +1860,7 @@ fn specialize_intrinsic(operation: &mut IrIntrinsic, bindings: &HashMap<String, 
         | IrIntrinsic::GeneratedPropertyEquals { ty: operand }
         | IrIntrinsic::Ieee754Equals { operand }
         | IrIntrinsic::GeneratedPropertyHash { ty: operand }
-        | IrIntrinsic::DataClassArrayToString { ty: operand }
+        | IrIntrinsic::GeneratedPropertyArrayToString { ty: operand }
         | IrIntrinsic::TypeOf { ty: operand } => specialize_ty(operand, bindings),
         IrIntrinsic::Assert { .. }
         | IrIntrinsic::ArrayGet
@@ -1886,12 +1886,17 @@ fn specialize_callee(
         }
         Callee::CrossFile { params, ret, .. }
         | Callee::Module { params, ret, .. }
-        | Callee::ModuleDefaultEntry { params, ret, .. }
         | Callee::Super { params, ret, .. } => {
             specialize_tys(params, bindings);
             specialize_ty(ret, bindings);
         }
         Callee::ModuleWithDefaults {
+            params,
+            ret,
+            dispatch_receiver_ty,
+            ..
+        }
+        | Callee::ModuleDefaultEntry {
             params,
             ret,
             dispatch_receiver_ty,

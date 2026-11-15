@@ -213,9 +213,9 @@ pub(super) fn property_annotation_marker_locals(
     )
 }
 
-/// Kotlin 2.4.20 names an anonymous context parameter by its generated label in the IR itself, so
-/// the label is also its local-variable name; earlier releases left it unnamed there, publishing the
-/// label only to reflection and null assertions. A lambda literal's own context-function parameter
+/// kotlinc names an anonymous context parameter by its generated label in the IR itself, so the
+/// label is also its local-variable name, unless the release leaves it unnamed there
+/// ([`krusty::kotlin_version::Quirk::AnonymousContextParameterIsNotLocal`]). A lambda literal's own context-function parameter
 /// stays unnamed in the method's `LocalVariableTable` at every version: the label is only the
 /// null-check message.
 fn anonymous_context_locals(ir: &IrFile, function: u32) -> bool {
@@ -227,7 +227,8 @@ fn anonymous_context_locals(ir: &IrFile, function: u32) -> bool {
 }
 
 fn anonymous_context_parameters_are_locals() -> bool {
-    krusty::kotlin_version::at_least(krusty::kotlin_version::KotlinVersion::V2_4_20)
+    !krusty::kotlin_version::Quirks::target()
+        .has(krusty::kotlin_version::Quirk::AnonymousContextParameterIsNotLocal)
 }
 
 /// kotlinc's spelling of the extension receiver of a value class's interface entry. The entry is a
