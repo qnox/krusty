@@ -62,6 +62,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             || fact.member_realization != krusty::libraries::MemberRealization::Dispatch
             || fact.compiler_intrinsic.is_some()
             || fact.direct_c_function.is_some()
+            // A final member has no consumer-side override and no slot of its own.
+            || fact
+                .klib_body_declaration_modifiers
+                .is_some_and(|modifiers| !modifiers.is_overridable())
         {
             return None;
         }

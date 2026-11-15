@@ -899,6 +899,13 @@ impl Body<'_> {
                 Some(&function) => self.direct_member_call(function, receiver, args),
                 None => self.laid_out_super_call(*callable, (params, *ret), receiver, args),
             },
+            Callee::Super {
+                kind: IrSuperCallKind::Function,
+                declaration: Some(ResolvedFunctionOverrideTarget::External(target)),
+                params,
+                ret,
+                ..
+            } => self.dependency_super_call(*target, params.len(), *ret, receiver, args),
             Callee::Super { .. } => Err("a `super` call to a library member".to_string()),
             _ => Err("a member call through this calling convention".to_string()),
         }

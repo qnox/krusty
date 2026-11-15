@@ -144,20 +144,28 @@ pub(super) struct Accessor {
 /// A representation bridge a table slot holds (see [`Slot::Bridge`] and [`Slot::AccessorBridge`]):
 /// `class` is the class that introduced it, whose table type every receiver reaching the bridge
 /// has.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct OverrideBridge {
     pub(super) class: ClassId,
     pub(super) member: BridgedMember,
 }
 
 /// The member a bridge wears the base's signature of, and where it forwards.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum BridgedMember {
     /// A method: the base method `declared`, forwarded through `target_slot` (see
     /// [`Slot::Bridge`]) to `target`.
     Method {
         declared: FunId,
         target_slot: Option<u32>,
+        target: FunId,
+    },
+    /// A method of a base no file declares, wearing the carriers the base declares (see
+    /// [`Slot::DeclaredBridge`]).
+    DeclaredMethod {
+        parameters: Box<[Ty]>,
+        result: Ty,
+        target_slot: u32,
         target: FunId,
     },
     /// A property accessor: the property type as the base declares it and as the implementation
@@ -179,7 +187,18 @@ pub(super) enum BridgedMember {
 impl BridgedMember {
     /// The bridge `entry` stands for, or `None` for an entry that is not one this form carries.
     fn of(entry: &Slot) -> Option<Self> {
-        match *entry {
+        match entry.clone() {
+            Slot::DeclaredBridge {
+                parameters,
+                result,
+                target_slot,
+                target,
+            } => Some(Self::DeclaredMethod {
+                parameters,
+                result,
+                target_slot,
+                target,
+            }),
             Slot::Bridge {
                 declared,
                 target_slot,
@@ -619,6 +638,21 @@ pub(super) fn method_type(
         );
     }
     let results = carrier(declaration.ret)?.into_iter().collect();
+    Ok(module.func_type(params, results))
+}
+
+/// The function type of a method of a base no file declares, as its carriers are recorded: an
+/// object receiver, then each operand.
+fn declared_method_type(
+    module: &mut Module,
+    parameters: &[Ty],
+    result: Ty,
+) -> Result<u32, Unsupported> {
+    let mut params = vec![REFERENCE];
+    for parameter in parameters {
+        params.push(carrier(*parameter)?.ok_or_else(|| "a `Unit` parameter".to_string())?);
+    }
+    let results = carrier(result)?.into_iter().collect();
     Ok(module.func_type(params, results))
 }
 
@@ -1119,7 +1153,10 @@ impl TableEntries<'_> {
                     };
                     accessor_function(module, accessors, accessor, ty)
                 }
-                Slot::Bridge { .. } | Slot::AccessorBridge { .. } | Slot::FunctionBridge { .. } => {
+                Slot::Bridge { .. }
+                | Slot::DeclaredBridge { .. }
+                | Slot::AccessorBridge { .. }
+                | Slot::FunctionBridge { .. } => {
                     let member = BridgedMember::of(entry).ok_or_else(|| {
                         format!(
                             "an override carried differently from the member it overrides (`{}`)",
@@ -1331,6 +1368,9 @@ fn slot_types<'r>(
                     None => None,
                 },
                 Slot::Bridge { declared, .. } => Some(method_type(module, ir, *declared)?),
+                Slot::DeclaredBridge {
+                    parameters, result, ..
+                } => Some(declared_method_type(module, parameters, *result)?),
                 Slot::AccessorBridge {
                     declared, setter, ..
                 } => Some(accessor_type(module, *declared, *setter)?),
