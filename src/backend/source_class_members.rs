@@ -174,3 +174,120 @@ fn signature(
         result: signature.result.get(),
     })
 }
+
+/// Checked annotation payloads of registered module member declarations, before any file emits.
+/// An empty value proves a known unannotated declaration; a missing identity proves nothing.
+#[derive(Clone, Debug, Default)]
+pub struct SourceMemberAnnotations {
+    functions: crate::fx_hash::HashMap<crate::fir::CallableId, crate::ir::DeclarationAnnotations>,
+    getters: crate::fx_hash::HashMap<crate::fir::PropertyId, crate::ir::DeclarationAnnotations>,
+    setters: crate::fx_hash::HashMap<crate::fir::PropertyId, crate::ir::DeclarationAnnotations>,
+}
+
+impl SourceMemberAnnotations {
+    pub(super) fn record_class(
+        &mut self,
+        index: &ResolvedModuleIndex,
+        class: DeclarationId,
+    ) -> Result<(), super::BackendFactError> {
+        for &declaration in index.owned_declarations(class) {
+            let Some(header) = index.declaration_header(declaration) else {
+                continue;
+            };
+            match header.kind {
+                DeclarationKind::Function => {
+                    let Some(callable) = index.callable_for_declaration(declaration) else {
+                        continue;
+                    };
+                    let annotations = checked_applications(
+                        index,
+                        index.declaration_applied_annotations(declaration),
+                    )?;
+                    assert!(
+                        self.functions.insert(callable.id, annotations).is_none(),
+                        "a source member declaration is frozen once"
+                    );
+                }
+                DeclarationKind::Property => {
+                    let Some(property) = index.property_for_declaration(declaration) else {
+                        continue;
+                    };
+                    let getter = checked_applications(
+                        index,
+                        index.property_accessor_applied_annotations(
+                            declaration,
+                            crate::fir::PropertyAccessor::Getter,
+                        ),
+                    )?;
+                    assert!(
+                        self.getters.insert(property, getter).is_none(),
+                        "a source getter declaration is frozen once"
+                    );
+                    if index
+                        .property(property)
+                        .expect("a published property keeps its header")
+                        .mutable
+                    {
+                        let setter = checked_applications(
+                            index,
+                            index.property_accessor_applied_annotations(
+                                declaration,
+                                crate::fir::PropertyAccessor::Setter,
+                            ),
+                        )?;
+                        assert!(
+                            self.setters.insert(property, setter).is_none(),
+                            "a source setter declaration is frozen once"
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    pub fn function(
+        &self,
+        callable: crate::fir::CallableId,
+    ) -> Option<&crate::ir::DeclarationAnnotations> {
+        self.functions.get(&callable)
+    }
+
+    pub fn getter(
+        &self,
+        property: crate::fir::PropertyId,
+    ) -> Option<&crate::ir::DeclarationAnnotations> {
+        self.getters.get(&property)
+    }
+
+    pub fn setter(
+        &self,
+        property: crate::fir::PropertyId,
+    ) -> Option<&crate::ir::DeclarationAnnotations> {
+        self.setters.get(&property)
+    }
+}
+
+fn checked_applications(
+    index: &ResolvedModuleIndex,
+    applications: &[crate::types::ResolvedAnnotation],
+) -> Result<crate::ir::DeclarationAnnotations, super::BackendFactError> {
+    let applications = applications
+        .iter()
+        .map(|application| {
+            let retention = index
+                .checked_annotation_retention(application.annotation)
+                .ok_or(super::BackendFactError::IncompleteAnnotation(
+                    application.annotation,
+                ))?;
+            Ok((application, retention))
+        })
+        .collect::<Result<Vec<_>, super::BackendFactError>>()?;
+    Ok(crate::ir::DeclarationAnnotations::from_resolved(
+        applications,
+    ))
+}
+
+#[cfg(test)]
+mod annotation_tests;
