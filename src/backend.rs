@@ -151,6 +151,12 @@ pub trait Backend {
         None
     }
 
+    /// The diagnostic declining a `construct` this backend cannot lower yet. Each backend names
+    /// itself, so a harness can tell a capability decline from a frontend error.
+    fn capability_decline(&self, construct: &str) -> String {
+        format!("krusty: the IR backend does not support {construct} yet")
+    }
+
     /// Report a capability decline or invariant failure from common-IR preparation.
     fn report_common_ir_preparation_error(
         &self,
@@ -158,9 +164,9 @@ pub trait Backend {
         diags: &mut DiagSink,
     ) {
         match decline {
-            CommonIrPreparationError::Suspend(_) => diags.error(
+            CommonIrPreparationError::Suspend(declined) => diags.error(
                 crate::diag::Span::new(0, 0),
-                "krusty: this suspend-function shape is not yet supported by the IR backend",
+                self.capability_decline(declined.construct()),
             ),
             CommonIrPreparationError::Invariant(error) => diags.error(
                 crate::diag::Span::new(0, 0),

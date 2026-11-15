@@ -194,6 +194,10 @@ impl Backend for CraneliftBackend {
         true
     }
 
+    fn capability_decline(&self, construct: &str) -> String {
+        format!("krusty: the native backend does not support {construct} yet")
+    }
+
     fn common_ir_preparation(&self) -> Option<krusty::backend::CommonIrPreparation> {
         Some(krusty::backend::CommonIrPreparation {
             counted_loops: COUNTED_LOOPS,

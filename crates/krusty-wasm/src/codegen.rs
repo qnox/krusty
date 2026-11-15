@@ -128,6 +128,10 @@ impl Backend for WasmBackend {
         true
     }
 
+    fn capability_decline(&self, construct: &str) -> String {
+        format!("{DECLINE_PREFIX}{construct} yet")
+    }
+
     fn common_ir_preparation(&self) -> Option<krusty::backend::CommonIrPreparation> {
         Some(krusty::backend::CommonIrPreparation {
             counted_loops: COUNTED_LOOPS,
@@ -381,10 +385,33 @@ mod tests {
     mod reference_array_size;
 
     use super::{WasmBackend, WasmTarget};
-    use krusty::backend::{Artifact, Entry};
+    use krusty::backend::{Artifact, Backend, CommonIrPreparationError, Entry};
     use krusty::diag::DiagSink;
     use krusty::libraries::EmptySymbolSource;
     use krusty::source::SourceInput;
+
+    /// A suspend shape common preparation cannot lower is this backend's capability decline,
+    /// reported with the prefix the box lanes classify declines by, never as an internal error.
+    #[test]
+    fn a_common_preparation_suspend_decline_is_a_wasm_capability_decline() {
+        let backend = WasmBackend::new(WasmTarget::Js);
+        let mut diags = DiagSink::new();
+        backend.report_common_ir_preparation_error(
+            &CommonIrPreparationError::Suspend(
+                krusty::backend::coroutines::ContinuationDecline::Suspends,
+            ),
+            &mut diags,
+        );
+        let messages = diags
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            ["krusty: the wasm backend does not support a suspend function that suspends yet"]
+        );
+    }
 
     /// Compile `sources`, the file stemmed `Main` first and then `Other1`, `Other2`, …, into a
     /// program starting in `entry`.
