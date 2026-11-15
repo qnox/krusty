@@ -575,12 +575,12 @@ impl BodyFirChecker<'_> {
         if let Some(conversion) = self.selected_argument_conversion(expression, cause)? {
             return Ok(Some(conversion));
         }
-        if let Some((from, to)) = self
+        if let Some((from, to, keeps_null)) = self
             .info
             .selected_function_value_conversions
             .get(&expression)
             .copied()
-            .filter(|(_, selected_target)| *selected_target == target.get())
+            .filter(|(_, selected_target, _)| *selected_target == target.get())
         {
             let span = self.file.expr_span(expression);
             let info = self.info;
@@ -604,6 +604,7 @@ impl BodyFirChecker<'_> {
                         self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
                     })?,
                     ordinal: name.ordinal,
+                    keeps_null,
                 },
             }));
         }
