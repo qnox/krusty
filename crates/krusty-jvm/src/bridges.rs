@@ -687,9 +687,11 @@ fn property_bridges(
         };
         let declared_here = match edge.implementation_getter {
             Some(getter) => ir.classes[cid].methods.contains(&getter),
-            None => {
-                implementation_property.is_some_and(|property| property.class == Some(cid as u32))
-            }
+            None => implementation_property
+                .and_then(|property| property.class)
+                .is_some_and(|declaration| {
+                    crate::override_results::realizes_members_of(ir, cid, declaration)
+                }),
         };
         if edge.implementation_owner == internal_name && !declared_here {
             continue;
