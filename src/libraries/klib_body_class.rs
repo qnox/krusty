@@ -138,11 +138,12 @@ mod tests {
             TypeKind::Enum,
             TypeKind::Interface,
             TypeKind::Annotation,
-            TypeKind::Object,
         ] {
             contract.kind = kind;
             assert!(!contract.proves_final_class(&identity, owner), "{kind:?}");
         }
+        contract.kind = TypeKind::Object;
+        assert!(contract.proves_final_class(&identity, owner));
         contract.kind = TypeKind::Class;
         for modality in [
             KotlinModality::Open,
