@@ -601,6 +601,23 @@ impl KlibDeclarationBodies {
         self.libraries[library].local_function(signature)
     }
 
+    /// Whether `identity` is private to its library: a file-local function, or a constructor or
+    /// member of a class private to its enclosing class. No provider publishes it; the library's
+    /// own bodies link it as a file-local declaration.
+    pub(crate) fn is_library_private(&self, identity: &KlibDependencyCallable) -> bool {
+        let signature = match &identity.declaration {
+            KlibDeclarationSignature::FileLocal { .. } => return true,
+            KlibDeclarationSignature::Public(signature) => {
+                KlibIrSignature::Public(signature.clone())
+            }
+            KlibDeclarationSignature::Accessor(signature) => {
+                KlibIrSignature::Accessor(signature.clone())
+            }
+        };
+        self.module_local_function(&identity.module, &signature)
+            .is_some()
+    }
+
     /// The class in `module` that declares the file-local function `signature` directly.
     pub(crate) fn module_class_declaring<'a>(
         &'a self,
