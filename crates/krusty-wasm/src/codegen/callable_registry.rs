@@ -399,16 +399,6 @@ impl CallableRegistry {
                         // during both dependency prewalking and body emission.
                         continue;
                     }
-                    if super::lower::declared_by_array_list(callable)
-                        || dispatch_receiver.is_some_and(|receiver| {
-                            super::lower::array_list_receiver(ir, receiver)
-                                && super::lower::realized_array_list_member(callable)
-                        })
-                    {
-                        // The runtime lays `ArrayList` out and realizes its members, including
-                        // the ones it inherits from the abstract collection classes.
-                        continue;
-                    }
                     if super::lower::any_members::call_member(ir, callables, expression).is_some() {
                         // `kotlin.Any`'s members, and the declarations overriding them, are
                         // realized through the receiver's own representation.

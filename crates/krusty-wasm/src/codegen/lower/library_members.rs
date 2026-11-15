@@ -31,7 +31,31 @@ pub(in crate::codegen) fn target_owns_call(
     fact: &BackendCallableFact,
 ) -> bool {
     super::declared_by_string_builder(fact)
+        || super::declared_by_array_list(fact)
+        || array_list_realizes(ir, callables, expression, fact)
         || super::any_members::call_member(ir, callables, expression).is_some()
+}
+
+/// Whether the runtime realizes `fact` on the `ArrayList` receiver of `expression`, including
+/// members the list inherits from the abstract collection classes.
+fn array_list_realizes(
+    ir: &IrFile,
+    callables: &CheckedBackendCallables,
+    expression: u32,
+    fact: &BackendCallableFact,
+) -> bool {
+    let receiver = match ir.expr(expression) {
+        IrExpr::Call {
+            dispatch_receiver, ..
+        } => *dispatch_receiver,
+        IrExpr::Checked(operation) => callables
+            .dependency_accessor(operation)
+            .and_then(|access| access.receiver),
+        _ => None,
+    };
+    receiver.is_some_and(|receiver| {
+        super::array_list_receiver(ir, receiver) && super::realized_array_list_member(fact)
+    })
 }
 
 /// How a library member is reached.
