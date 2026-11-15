@@ -6,13 +6,15 @@
 
 use krusty::types::{Ty, TyKind};
 
-/// What separates a repeated anonymous context label from its ordinal: `$context-String$1` since
-/// Kotlin 2.4.20, `$context-String#1` before it.
+/// What separates a repeated anonymous context label from its ordinal: `$context-String$1`, or
+/// `$context-String#1` ([`krusty::kotlin_version::Quirk::AnonymousContextOrdinalAfterHash`]).
 fn ordinal_separator() -> char {
-    if krusty::kotlin_version::at_least(krusty::kotlin_version::KotlinVersion::V2_4_20) {
-        '$'
-    } else {
+    if krusty::kotlin_version::Quirks::target()
+        .has(krusty::kotlin_version::Quirk::AnonymousContextOrdinalAfterHash)
+    {
         '#'
+    } else {
+        '$'
     }
 }
 

@@ -2582,6 +2582,14 @@ fn an_explicitly_imported_classifier_outranks_a_same_package_function() {
 }
 
 #[test]
+fn a_same_named_function_outranks_a_constructor_called_through_a_type_alias() {
+    assert_box_regression_matches_kotlinc(
+        include_str!("box_regressions/aliasFunctionOutranksConstructor.kt"),
+        "ResolverAliasFunctionOutranksConstructor",
+    );
+}
+
+#[test]
 fn an_ambiguous_nearer_function_family_is_not_a_constructor() {
     // Both same-package functions apply to `Pair(1, 2)` and neither is more specific. The
     // default-imported constructor is a farther rung and is not a candidate in the ambiguity.
