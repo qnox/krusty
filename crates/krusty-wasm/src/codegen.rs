@@ -463,15 +463,31 @@ mod tests {
             "{}a `toString` of `kotlin.Any?` reaching an object another file creates yet",
             super::DECLINE_PREFIX
         )];
+        let other = "fun function(): String = show { 1 }";
+        for target in WasmTarget::ALL {
+            for sources in [[show, other], [other, show]] {
+                let (outputs, diagnostics) = compile_program(target, Entry::Box, &sources);
+                assert_eq!(diagnostics, expected, "{sources:?}");
+                assert!(outputs.is_empty());
+            }
+        }
+    }
+
+    /// A floating box prints its value, so another file boxing one leaves an erased `toString`
+    /// compilable.
+    #[test]
+    fn an_erased_to_string_prints_another_files_floating_box() {
+        let show = "fun show(value: Any?): String = value.toString()\n\
+                    fun box(): String = \"OK\"";
         for other in [
             "fun double(): String = show(1.5)",
-            "fun function(): String = show { 1 }",
+            "fun float(): String = show(1.5f)",
         ] {
             for target in WasmTarget::ALL {
                 for sources in [[show, other], [other, show]] {
                     let (outputs, diagnostics) = compile_program(target, Entry::Box, &sources);
-                    assert_eq!(diagnostics, expected, "{sources:?}");
-                    assert!(outputs.is_empty());
+                    assert_eq!(diagnostics, Vec::<String>::new(), "{sources:?}");
+                    assert!(!outputs.is_empty(), "{sources:?}");
                 }
             }
         }
