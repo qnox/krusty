@@ -394,6 +394,8 @@ impl FileClasses {
                     .copied()
                     .flatten();
                 match (inherited, function) {
+                    // The superclass adapts no function type, so neither does this class.
+                    (None, None) => return Ok(None),
                     (Some(inherited), Some(function)) if inherited.function == function => {
                         inherited
                     }
@@ -1080,6 +1082,9 @@ impl TableEntries<'_> {
                             superclass.entries.get(*slot as usize).copied().flatten()
                         });
                         match (inherited, function) {
+                            // A superclass that adapts no function type leaves the reserved slot
+                            // empty, as the class that declares none does.
+                            (None, None) => resolved.push(None),
                             (Some(inherited), Some(function))
                                 if inherited.function == function
                                     && runtime.function_shape(module, inherited.arity).invoke
