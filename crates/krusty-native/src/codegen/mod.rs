@@ -372,7 +372,6 @@ impl Backend for CraneliftBackend {
                 .module()
                 .classes()
                 .classifier_names()
-                .into_iter()
                 .chain(file.callables.declaring_classifiers()),
             &file.classifiers,
             slot_plan,
