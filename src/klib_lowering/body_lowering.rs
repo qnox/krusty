@@ -810,22 +810,39 @@ impl<'a> BodyLowering<'a> {
         if actual.is_nullable() && !expected.is_nullable() {
             return false;
         }
-        let Some(name) = actual.non_null().kotlin_class_internal() else {
-            return false;
-        };
-        let Some(class) = self.ir.classes.iter().find(|class| {
-            class.fq_name == name && (class.is_anonymous_object || class.is_local_class)
-        }) else {
-            return false;
-        };
         let parameters = self.header.type_parameters();
-        class
-            .supertypes
-            .iter()
-            .any(|supertype| self.linker.is_subtype(parameters, *supertype, expected))
-            || self
-                .linker
-                .is_subtype(parameters, Ty::obj_name(class.superclass), expected)
+        self.local_class_supertypes(actual)
+            .is_some_and(|mut supertypes| {
+                supertypes.any(|supertype| self.linker.is_subtype(parameters, supertype, expected))
+            })
+    }
+
+    /// The direct supertypes recorded for the local or anonymous class lowered in this body that
+    /// the non-null `actual` names; `None` when it names no such class.
+    fn local_class_supertypes(&self, actual: Ty) -> Option<impl Iterator<Item = Ty> + '_> {
+        let name = actual.non_null().kotlin_class_internal()?;
+        let class = self.ir.classes.iter().find(|class| {
+            class.fq_name == name && (class.is_anonymous_object || class.is_local_class)
+        })?;
+        Some(
+            class
+                .supertypes
+                .iter()
+                .copied()
+                .chain(std::iter::once(Ty::obj_name(class.superclass))),
+        )
+    }
+
+    /// The generic class `owner` as `sub` applies it through its hierarchy: through the supertypes
+    /// recorded for a local or anonymous class lowered in this body, or the calling compilation's
+    /// class model otherwise.
+    fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
+        match self.local_class_supertypes(sub) {
+            Some(mut supertypes) => {
+                supertypes.find_map(|supertype| self.linker.applied_supertype(supertype, owner))
+            }
+            None => self.linker.applied_supertype(sub, owner),
+        }
     }
 
     /// Whether `supertype` counts as a supertype of `subtype`: one recorded for a local or

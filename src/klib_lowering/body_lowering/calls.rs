@@ -1007,7 +1007,6 @@ impl BodyLowering<'_> {
             return Err(KlibBodyDeclineReason::ImplicitConversion);
         }
         let applied = self
-            .linker
             .applied_supertype(actual, owner)
             .ok_or(KlibBodyDeclineReason::ImplicitConversion)?;
         if applied.type_args().len() != declared.type_args().len() {
