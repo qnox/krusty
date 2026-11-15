@@ -46,7 +46,7 @@ impl Parser<'_> {
 
     /// A single annotation argument value: an array literal `[…]`, a nested annotation `@Foo(…)`,
     /// or an ordinary expression (including `Foo::class`).
-    fn parse_annotation_value(&mut self) -> Option<ExprId> {
+    pub(super) fn parse_annotation_value(&mut self) -> Option<ExprId> {
         // Annotation arrays, nested annotations, and spreads recurse while a declaration prefix is
         // still being consumed, before `parse_bp` or a class-like parser is necessarily entered.
         // They are expression syntax, so join the shared expression lane instead of owning another

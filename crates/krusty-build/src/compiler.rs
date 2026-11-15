@@ -4,8 +4,9 @@
 //! `Rc`/`RefCell` so it is not `Send`, and interning leaks for the life of the process (which is why
 //! the language server restarts its worker every 64 analyses). A thread-per-module driver is not
 //! available without redesigning both. Spawning the binary also gives crash isolation for free —
-//! `docs/PROJECT_PARITY.md` records 10 SIGBUS crashes across 931 real modules, and a crashed module
-//! must fail its own build step rather than take the whole build down.
+//! `docs/PROJECT_PARITY.md` records 101 processes that exited 101 and one SIGABRT across 1059
+//! real modules, and a crashed module must fail its own build step rather than take the whole
+//! build down.
 //!
 //! # Determinism
 //!

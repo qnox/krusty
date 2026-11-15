@@ -79,13 +79,23 @@ fn a_companion_holder_with_a_realized_export_entry_is_supported() {
             declaration: KlibDeclarationSignature::Public(signature),
         },
     );
-    assert_eq!(
-        ir.construction_entries()
-            .values()
-            .copied()
-            .collect::<Vec<_>>(),
-        [class]
-    );
+    // The constructor's entry, and the instance entry every object and companion has.
+    let companion = ir
+        .class_id_by_name(
+            ir.classes[class as usize]
+                .companion_class
+                .expect("the holder's companion"),
+        )
+        .expect("the companion's class");
+    let mut entries = ir
+        .construction_entries()
+        .values()
+        .copied()
+        .collect::<Vec<_>>();
+    entries.sort_unstable();
+    let mut expected = [class, companion];
+    expected.sort_unstable();
+    assert_eq!(entries, expected);
     assert_eq!(super::check_supported(&ir, class), Ok(()));
 }
 

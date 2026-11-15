@@ -22,7 +22,7 @@ type CellAccess = (ExprId, ExprId, Ty);
 const OBJECT_REF: &str = "kotlin/jvm/internal/Ref$ObjectRef";
 
 /// The JVM holder class and its `element` field descriptor for one captured element type.
-pub(super) fn holder_class(elem: &Ty) -> (&'static str, &'static str) {
+pub(crate) fn holder_class(elem: &Ty) -> (&'static str, &'static str) {
     if elem.is_nullable() {
         return ("kotlin/jvm/internal/Ref$ObjectRef", "Ljava/lang/Object;");
     }

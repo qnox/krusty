@@ -297,6 +297,9 @@ fn freezing_keeps_constructor_and_accessor_references_as_exact_declarations() {
             KlibDeclarationSignature::Accessor(signature) => {
                 KlibIrSignature::Accessor(signature.clone())
             }
+            &KlibDeclarationSignature::FileLocal { file, slot } => {
+                KlibIrSignature::FileLocal { file, slot }
+            }
         };
         let access = KlibIrMemberAccess {
             symbol: KlibIrSymbol {

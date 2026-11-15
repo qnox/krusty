@@ -39,6 +39,10 @@
 //! the enum and constant name, as it exports an object's instance entry. Only the declaring file
 //! holds the constants' storage, so every read of a constant, in any file, finds the one object.
 //!
+//! A file may read a constant before the file declaring its enum is lowered. Both files link the
+//! read by the constant's identity, as they link an object's instance (see
+//! [`super::instance_links`]), so the order of files does not matter.
+//!
 //! A target runs this before the shared default-argument lowering, which then realizes a
 //! constant that leaves constructor arguments out like any other construction. The JVM keeps
 //! kotlinc's `<clinit>`, `$VALUES` and `$ENTRIES` and does not run it. An enum that another file
@@ -85,10 +89,15 @@ pub enum Contract {
     KotlinWasm,
 }
 
-/// Build the entry answering each constant of every enum `exports` publishes from `ir`, before
-/// [`realize`] rewrites the entries' reads into reads of the constants' storage.
+/// Build the entry answering each constant of every enum `ir` declares, before [`realize`] rewrites
+/// the entries' reads into reads of the constants' storage. Every enum gets them, whether its
+/// module is a library or the program: another file of the module, as much as another module, may
+/// read any of its constants.
 pub fn publish_constants(ir: &mut IrFile, exports: &mut super::DependencyExportSignatures) {
-    let enums = exports.enums().to_vec();
+    let enums: Vec<ClassId> = (0..ir.classes.len())
+        .map(|class| ClassId::try_from(class).expect("too many classes"))
+        .filter(|&class| is_enum(&ir.classes[class as usize]))
+        .collect();
     for class in enums {
         let classifier = ir.classes[class as usize].fq_name_id();
         let Some(result) = ir.declared_class_self_type(classifier) else {
@@ -113,7 +122,13 @@ pub fn publish_constants(ir: &mut IrFile, exports: &mut super::DependencyExportS
                 value,
             );
             ir.construction_entries.insert(entry, class);
-            exports.record_enum_constant_entry(super::EnumConstant { classifier, name }, entry);
+            exports.record_instance_entry(
+                super::instance_links::InstanceEntry::EnumConstant(super::EnumConstant {
+                    classifier,
+                    name,
+                }),
+                entry,
+            );
         }
     }
 }

@@ -9,7 +9,6 @@
 
 use krusty::backend::class_tables::AnyMember;
 
-use super::ElementRead;
 use super::*;
 
 impl Body<'_> {
@@ -53,59 +52,22 @@ impl Body<'_> {
             .local_get(holder)
             .ref_as_non_null()
             .struct_get(form.object, super::STORAGE_FIELD)
-            .local_set(elements)
-            .i32_const(1)
-            .local_set(hash)
-            .i32_const(0)
-            .local_set(index)
-            .block(BlockType::Empty)
-            .loop_(BlockType::Empty)
-            .local_get(index)
-            .local_get(elements)
-            .ref_as_non_null()
-            .array_len()
-            .op(GE_S32)
-            .br_if(1)
-            .i32_const(31)
-            .local_get(hash)
-            .op(MUL32)
-            .local_get(elements)
-            .ref_as_non_null()
-            .local_get(index);
-        match form.read {
-            ElementRead::Plain => {
-                self.code.array_get(form.storage);
-            }
-            ElementRead::Signed => {
-                self.code.array_get_s(form.storage);
-            }
-            ElementRead::Unsigned => {
-                self.code.array_get_u(form.storage);
-            }
-        }
-        if reference {
-            // The runtime hash answers `0` for null, a string's own hash, and every other object
-            // through its table.
-            self.code.call(self.runtime.hashing.hash_code);
-        } else if !self
-            .runtime
-            .hashing
-            .emit_scalar_hash(&mut self.code, stored)
-        {
+            .local_set(elements);
+        if !self.runtime.hashing.emit_array_content_hash(
+            &mut self.code,
+            crate::hashing::ArrayHash {
+                storage: form.storage,
+                read: form.read,
+                element: stored,
+                reference,
+                values: elements,
+                index,
+                hash,
+            },
+        ) {
             return Err(format!("the content hash of a `{}` property", describe(ty)));
         }
-        self.code
-            .op(ADD32)
-            .local_set(hash)
-            .local_get(index)
-            .i32_const(1)
-            .op(ADD32)
-            .local_set(index)
-            .br(0)
-            .end()
-            .end()
-            .local_get(hash)
-            .end();
+        self.code.end();
         Ok(())
     }
 }

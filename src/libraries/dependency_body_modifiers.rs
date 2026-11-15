@@ -26,6 +26,12 @@ impl KlibBodyDeclarationModifiers {
             && matches!(self.modality, KotlinModality::Final | KotlinModality::Open)
     }
 
+    /// Whether the declaration is an abstract member implementation: a call of it always reaches
+    /// an override, which the receiver's class supplies.
+    pub(crate) fn declares_abstract_implementation(self) -> bool {
+        !self.is_external && !self.property_is_external && self.modality.is_abstract()
+    }
+
     pub(crate) fn function(declaration: &KotlinFunction) -> Self {
         Self {
             is_inline: declaration.is_inline,

@@ -425,6 +425,24 @@ fn nested_class_block_members_belong_to_the_nested_class() {
     assert_eq!(run(SRC).expect("nested block"), "OK");
 }
 
+/// A block member's source position is among its class's members, where it was written: the
+/// accessors and functions of a block between two methods sit between those methods.
+#[test]
+fn block_members_keep_their_place_among_class_members() {
+    const SRC: &str = "class Foo(val f: String) {\n\
+        \x20   fun first() = f\n\
+        \x20   companion {\n\
+        \x20       val blockProp: String = \"b\"\n\
+        \x20       fun describe() = blockProp\n\
+        \x20   }\n\
+        \x20   fun last() = f\n\
+        \x20   companion { fun after() = \"OK\" }\n\
+        }\n\
+        fun box() = if (Foo(\"a\").first() + Foo(\"b\").last() + Foo.describe() == \"abb\") Foo.after() else \"FAIL\"\n";
+    assert_members_and_metadata_match_kotlinc("BlockMemberPlace", SRC, &["Foo"]);
+    assert_eq!(run(SRC).expect("block member place"), "OK");
+}
+
 /// An enum class's block members are declared members like an ordinary class's: the property's
 /// storage is a private static behind a public static accessor, and the accessors and functions
 /// precede the synthesized `values`/`valueOf`/`getEntries`.

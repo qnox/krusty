@@ -5,7 +5,7 @@
 //! spreads, reads, stores and bounds checks are shared. A generated `hashCode` hashes an array
 //! property by its contents, and a generated `toString` renders one by its contents.
 
-use crate::array_objects::{ArrayForm, ElementRead, STORAGE_FIELD};
+use crate::array_objects::{ArrayForm, ElementRead, STORAGE_FIELD, VIEW_FIELD};
 use krusty::backend::BackendCompilerIntrinsic;
 use krusty::ir::{IrCheckedOperation, IrPropertyDispatch};
 use krusty::libraries::RuntimeExceptionKind;
@@ -20,6 +20,24 @@ use super::*;
 const I32_ADD: u8 = 0x6a;
 const I32_GE_U: u8 = 0x4f;
 const I32_LT_S: u8 = 0x48;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArrayViewConversion {
+    Wrap,
+    Unwrap,
+}
+
+fn array_view_conversion(from: ArrayForm, to: ArrayForm) -> Option<ArrayViewConversion> {
+    match (from.view, to.view) {
+        (None, Some((signed, table))) if (signed, table) == (from.object, from.table) => {
+            Some(ArrayViewConversion::Wrap)
+        }
+        (Some((signed, table)), None) if (signed, table) == (to.object, to.table) => {
+            Some(ArrayViewConversion::Unwrap)
+        }
+        _ => None,
+    }
+}
 
 /// The complete selected getter frame, before any receiver is evaluated.
 /// The source type is the array the length is read from.
@@ -71,7 +89,7 @@ impl Body<'_> {
     }
 
     /// The form of `array`'s values and the element type its storage holds.
-    fn array_form(&mut self, array: Ty) -> Result<(ArrayForm, Ty), Unsupported> {
+    pub(super) fn array_form(&mut self, array: Ty) -> Result<(ArrayForm, Ty), Unsupported> {
         self.runtime
             .array_form(self.module, array)
             .ok_or_else(|| format!("array storage for `{}`", describe(array)))
@@ -255,15 +273,78 @@ impl Body<'_> {
         Ok(())
     }
 
-    /// Wrap the freshly allocated backing array on the stack in its Kotlin identity object.
+    /// Wrap the freshly allocated backing array on the stack in its Kotlin identity object. An
+    /// unsigned array class wraps a signed array object over the same storage.
     fn wrap_array(&mut self, form: ArrayForm) {
         let storage = self.local(ValType::reference(form.storage));
-        self.code
-            .local_set(storage)
-            .global_get(form.table)
-            .call(self.runtime.identity.allocate)
-            .local_get(storage)
-            .struct_new(form.object);
+        self.code.local_set(storage);
+        if let Some((view, view_table)) = form.view {
+            let signed = self.local(ValType::reference(view));
+            self.code
+                .global_get(view_table)
+                .call(self.runtime.identity.allocate)
+                .local_get(storage)
+                .struct_new(view)
+                .local_set(signed);
+            self.code
+                .global_get(form.table)
+                .call(self.runtime.identity.allocate)
+                .local_get(storage)
+                .local_get(signed)
+                .struct_new(form.object);
+        } else {
+            self.code
+                .global_get(form.table)
+                .call(self.runtime.identity.allocate)
+                .local_get(storage)
+                .struct_new(form.object);
+        }
+    }
+
+    /// Authenticate the runtime-owned view and its declared backing before evaluating operands.
+    pub(super) fn require_array_view(
+        &mut self,
+        owner: Ty,
+        underlying: Ty,
+    ) -> Result<(), Unsupported> {
+        let (owner, _) = self.array_form(owner)?;
+        let (underlying, _) = self.array_form(underlying)?;
+        if array_view_conversion(owner, underlying) != Some(ArrayViewConversion::Unwrap) {
+            return Err("an array view apart from its declared signed backing".into());
+        }
+        Ok(())
+    }
+
+    /// Replace the `from` array object on the stack by a `to` object over the same backing
+    /// storage: how a value class over a signed array (`UIntArray`) and that array alias each
+    /// other, each with its own class identity. The unsigned object holds the signed object it
+    /// wraps, so unwrapping answers the array it was made from, and the same one each time.
+    pub(super) fn rewrap_array(&mut self, from: Ty, to: Ty) -> Result<(), Unsupported> {
+        let (from, _) = self.array_form(from)?;
+        let (to, _) = self.array_form(to)?;
+        match array_view_conversion(from, to) {
+            Some(ArrayViewConversion::Wrap) => {
+                let signed = self.local(REFERENCE);
+                self.code.local_set(signed).local_get(signed);
+                self.array_storage(from);
+                let storage = self.local(ValType::reference(from.storage));
+                self.code
+                    .local_set(storage)
+                    .global_get(to.table)
+                    .call(self.runtime.identity.allocate)
+                    .local_get(storage)
+                    .local_get(signed)
+                    .ref_cast(false, HeapType::Concrete(from.object))
+                    .struct_new(to.object);
+            }
+            Some(ArrayViewConversion::Unwrap) => {
+                self.code
+                    .ref_cast(false, HeapType::Concrete(from.object))
+                    .struct_get(from.object, VIEW_FIELD);
+            }
+            _ => return Err("a conversion between two array classes of one kind".to_string()),
+        }
+        Ok(())
     }
 
     /// Read the backing array of the checked Kotlin array value on the stack.

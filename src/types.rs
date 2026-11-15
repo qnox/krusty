@@ -3,7 +3,9 @@
 
 mod annotation_values;
 pub use annotation_values::AnnotationValue;
+mod builtin_classes;
 pub(crate) use annotation_values::ExactFloat;
+pub use builtin_classes::REPRESENTED_BUILTINS;
 mod classifier_declarations;
 mod deprecation;
 mod diagnostic_rendering;
@@ -13,6 +15,7 @@ mod overridden_declaration;
 mod qualified_name;
 mod semantic_call_role;
 mod semantic_callable_owner;
+mod suspension;
 pub use classifier_declarations::{
     ClassifierDeclarationFacts, ClassifierDeclarationKind, ClassifierDeclarationName,
     DeclaredValueClass, GeneratedClassifierFact, GeneratedClassifierKind,
@@ -26,6 +29,7 @@ pub use deprecation::{
 pub use overridden_declaration::OverriddenDeclaration;
 pub use semantic_call_role::{ConstNumericOperation, SemanticCallRole};
 pub use semantic_callable_owner::SemanticCallableOwner;
+pub use suspension::continuation_passing;
 mod annotation_targets;
 mod interning;
 mod spelling;
@@ -171,7 +175,7 @@ const BUILTIN_TYPE_NAMES: [(&str, TypeName); 16] = [
 ///
 /// `Unit` and `Nothing` are the enum variants. The scalar and `String` classifiers are the
 /// `Ty::Obj` constants. Every other name, including `kotlin/Array`, is `None`.
-pub(crate) fn builtin_semantic(name: TypeName) -> Option<Ty> {
+pub fn builtin_semantic(name: TypeName) -> Option<Ty> {
     Some(match name {
         KOTLIN_BOOLEAN => Ty::Boolean,
         KOTLIN_BYTE => Ty::Byte,
@@ -1925,6 +1929,11 @@ impl Ty {
     /// True for the unsigned integer types (inline classes over a signed primitive).
     pub fn is_unsigned(self) -> bool {
         matches!(self, Ty::UByte | Ty::UShort | Ty::UInt | Ty::ULong)
+    }
+
+    /// True for a builtin scalar classifier: a signed number, `Char`, `Boolean`, or unsigned.
+    pub fn is_builtin_scalar(self) -> bool {
+        self.is_numeric_or_char() || self == Ty::Boolean || self.is_unsigned()
     }
 
     /// Whether a property of this type may carry metadata `HAS_CONSTANT`.

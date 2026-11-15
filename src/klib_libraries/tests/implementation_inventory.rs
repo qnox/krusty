@@ -378,6 +378,9 @@ pub(super) fn declaration_ir_tree_kind(
         KlibDeclarationSignature::Accessor(signature) => {
             KlibIrSignature::Accessor(signature.clone())
         }
+        &KlibDeclarationSignature::FileLocal { file, slot } => {
+            KlibIrSignature::FileLocal { file, slot }
+        }
     };
     let mut arena = KlibIrArena::default();
     let return_type = arena.push_type(KlibIrType::Error {

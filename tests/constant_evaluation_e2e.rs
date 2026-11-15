@@ -375,3 +375,42 @@ fn overflowing_constant_arithmetic_folds_without_a_diagnostic() {
     assert_eq!(krusty, Vec::<String>::new());
     assert_matches_kotlinc("FoldedOverflow", src);
 }
+
+/// The program both cases compile: the raw bits of NaN constants of each sign.
+const NAN_CONSTANTS: &str = "const val positiveFloat = 0.0f / 0.0f
+const val negativeFloat = -(0.0f / 0.0f)
+const val positiveDouble = 0.0 / 0.0
+const val negativeDouble = -(0.0 / 0.0)
+fun box(): String = listOf(
+    positiveFloat.toRawBits().toLong(),
+    negativeFloat.toRawBits().toLong(),
+    positiveDouble.toRawBits(),
+    negativeDouble.toRawBits(),
+).joinToString()
+";
+
+/// Under `+NormalizeNaNValuesInConstContext` every NaN a constant evaluates to is the canonical
+/// NaN of its type, whatever sign the arithmetic produced.
+#[test]
+fn a_nan_constant_is_canonical_when_the_feature_is_enabled() {
+    let source = format!("// LANGUAGE: +NormalizeNaNValuesInConstContext\n{NAN_CONSTANTS}");
+    assert_eq!(
+        common::expect_box_run_with_stdlib(&source, "NanConstantsOn"),
+        "2143289344, 2143289344, 9221120237041090560, 9221120237041090560"
+    );
+}
+
+/// Without the feature a NaN constant keeps the sign bit its arithmetic gave it, so negating a
+/// NaN constant changes its bits.
+#[test]
+fn a_nan_constant_keeps_the_bits_of_its_arithmetic_when_the_feature_is_disabled() {
+    let source = format!("// LANGUAGE: -NormalizeNaNValuesInConstContext\n{NAN_CONSTANTS}");
+    let answer = common::expect_box_run_with_stdlib(&source, "NanConstantsOff");
+    let bits: Vec<i64> = answer
+        .split(", ")
+        .map(|bits| bits.parse().expect("raw bits"))
+        .collect();
+    assert_eq!(bits.len(), 4, "{answer}");
+    assert_ne!(bits[0], bits[1], "float NaN constants: {answer}");
+    assert_ne!(bits[2], bits[3], "double NaN constants: {answer}");
+}

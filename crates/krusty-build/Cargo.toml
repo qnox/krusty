@@ -27,5 +27,5 @@ krusty-test-support = { path = "../krusty-test-support" }
 # dev-dependencies (pprof, backtrace, object) give them, so CI links this test binary against the
 # krusty library its conformance build already compiled (`just krusty-build-tests`).
 libc = { version = "0.2", features = ["extra_traits"] }
-object = { version = "0.40.0", default-features = false, features = ["archive", "unaligned"] }
+object = { version = "0.41.0", default-features = false, features = ["archive", "unaligned"] }
 once_cell = "1"

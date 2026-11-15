@@ -172,6 +172,7 @@ impl ProjectProvider for MavenProvider {
                 kind: ProviderKind::Maven,
                 jdk_home: None,
                 modules,
+                repository_libraries: Vec::new(),
             })
         })();
         self.cleanup_probe_files();

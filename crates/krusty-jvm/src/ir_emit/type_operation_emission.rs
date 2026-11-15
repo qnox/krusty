@@ -606,6 +606,7 @@ impl Emitter<'_> {
         } else if physical_arg.is_jvm_scalar() && target.is_jvm_scalar() && physical_arg != target {
             emit_num_conv(physical_arg, target, code);
         } else {
+            let cast_at = code.bytes.len();
             implicit_reference_coercion::emit(
                 self.ir.expr(arg),
                 physical_arg,
@@ -613,6 +614,17 @@ impl Emitter<'_> {
                 self.cw,
                 code,
             );
+            let regenerated =
+                super::local_variable_representation::initializer_constructs_regenerated_anonymous(
+                    self.ir, arg,
+                );
+            let end = u16::try_from(cast_at).ok();
+            let extra = u16::try_from(code.bytes.len() - cast_at).ok();
+            if let (true, Some(end), Some(extra)) = (regenerated, end, extra) {
+                if extra > 0 {
+                    code.extend_inline_frame_locals_ending_at(end, extra);
+                }
+            }
         }
     }
 

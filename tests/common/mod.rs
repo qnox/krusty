@@ -1,12 +1,16 @@
 //! Shared test helpers.
 
 use krusty::compilation_target::CompilationTarget;
+mod box_execution;
+pub use box_execution::run_box;
 pub(crate) mod byte_dump;
 pub(crate) mod conformance_report;
 pub(crate) mod kotlin_metadata;
 pub(crate) mod kotlinc_lib;
 pub(crate) mod kotlinc_server;
 pub mod language_directives;
+pub(crate) mod reference_diagnostics;
+pub use reference_diagnostics::*;
 mod metadata_diff;
 pub mod native_backend;
 pub(crate) mod producing_jdk;
@@ -1031,7 +1035,7 @@ import java.util.concurrent.*;
 // threads keeps N calls in flight). Responses are written back tagged with their id — possibly out of
 // order — under a lock on the output stream. The Rust client demuxes replies by id.
 public class BoxRunner {
-    static final long TIMEOUT_MS = 10000;
+    static final long TIMEOUT_MS = Long.getLong("krusty.box.timeout.ms", 10000L);
     static final ExecutorService EXEC = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r);
         t.setDaemon(true);
@@ -1138,32 +1142,31 @@ pub fn java_home() -> String {
     })
 }
 
-/// Compile `BoxRunner.java` once into a stable cache dir keyed by the source hash; return its dir.
-fn setup_runner(java_home: &str) -> Option<PathBuf> {
-    static SETUP: OnceLock<Option<PathBuf>> = OnceLock::new();
-    SETUP
-        .get_or_init(|| {
-            let mut hash: u64 = 0xcbf29ce484222325;
-            for b in BOX_RUNNER_SRC.bytes() {
-                hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
-            }
-            let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join(format!("target/box_runner_{hash:016x}"));
-            if dir.join("BoxRunner.class").is_file() {
-                return Some(dir);
-            }
-            std::fs::create_dir_all(&dir).ok()?;
-            let src_path = dir.join("BoxRunner.java");
-            std::fs::write(&src_path, BOX_RUNNER_SRC).ok()?;
-            let javac = format!("{java_home}/bin/javac");
-            let out = Command::new(&javac)
-                .args(["-source", "8", "-target", "8", "-d", dir.to_str().unwrap()])
-                .arg(&src_path)
-                .output()
-                .ok()?;
-            out.status.success().then_some(dir)
-        })
-        .clone()
+/// Parse a millisecond deadline from the environment variable `name`, read as `raw`.
+///
+/// Unset or blank keeps `default_ms`. An explicit value must be an integer from 1 through
+/// `u32::MAX`, so the Java long and the client's added margin stay representable.
+pub fn timeout_ms_from(name: &str, raw: Option<&str>, default_ms: u64) -> u64 {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return default_ms;
+    };
+    match raw.parse::<u32>() {
+        Ok(value) if value > 0 => u64::from(value),
+        _ => panic!("{name} must be an integer from 1 through 4294967295, got {raw}"),
+    }
+}
+
+/// Milliseconds the shared `BoxRunner` waits for one `box()` call: `KRUSTY_BOX_TIMEOUT_MS`, 10s by
+/// default. Slower or busier hosts raise it; the runner JVM reads it at startup.
+pub fn box_timeout_ms() -> u64 {
+    static TIMEOUT: OnceLock<u64> = OnceLock::new();
+    *TIMEOUT.get_or_init(|| {
+        timeout_ms_from(
+            "KRUSTY_BOX_TIMEOUT_MS",
+            std::env::var("KRUSTY_BOX_TIMEOUT_MS").ok().as_deref(),
+            10_000,
+        )
+    })
 }
 
 /// A persistent JVM subprocess that runs `box()` calls CONCURRENTLY. Requests are tagged with an id
@@ -1226,7 +1229,9 @@ impl BoxRunner {
         // C1-only JIT (-XX:TieredStopAtLevel=1) throttles the whole pool at every GC / starves hot loops
         // — that alone ballooned the suite from minutes to hours. The heap cap bounds footprint; G1 keeps
         // throughput.
-        cmd.args(["-Xmx512m", "-cp", cp, "BoxRunner"])
+        cmd.arg("-Xmx512m")
+            .arg(format!("-Dkrusty.box.timeout.ms={}", box_timeout_ms()))
+            .args(["-cp", cp, "BoxRunner"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped());
         // Under KRUSTY_JVM_GCLOG, keep the runner's stderr (a crash/OOM reason) instead of discarding it.
@@ -1320,7 +1325,10 @@ impl BoxRunner {
             stdin.flush()?;
         }
 
-        match rx.recv_timeout(Duration::from_secs(15)) {
+        // The runner answers a timed-out box() itself; this covers a JVM that stopped answering.
+        match rx.recv_timeout(Duration::from_millis(
+            box_timeout_ms().saturating_add(5_000),
+        )) {
             Ok(body) => Ok(String::from_utf8_lossy(&body).into_owned()),
             Err(_) => {
                 self.waiters.lock().unwrap().remove(&id);
@@ -1511,90 +1519,6 @@ fn dir_classes(dir: &Path) -> Option<Arc<ClassSet>> {
         .unwrap_or_else(|e| e.into_inner())
         .insert(dir.to_path_buf(), arc.clone());
     Some(arc)
-}
-
-/// Run `box()` on already-compiled classes via a persistent JVM keyed by `cp_jars` (the runtime
-/// classpath — typically the stdlib jar so loaded classes resolve `kotlin.jvm.internal.*`). Returns
-/// the `box()` return value (or `ERROR:…`), or `None` if the JVM environment is unavailable.
-///
-/// The runner is concurrency-safe (id-tagged requests, demuxed responses), so callers on different
-/// threads share one JVM without an exclusive round-trip lock.
-#[allow(dead_code)]
-pub fn run_box(
-    classes: &[(String, Vec<u8>)],
-    box_class: &str,
-    cp_jars: &[PathBuf],
-) -> Option<String> {
-    static POOL: OnceLock<Mutex<RunnerPool>> = OnceLock::new();
-    let _pg = ProfGuard::new("box");
-    let java_home = java_home();
-    let java = format!("{java_home}/bin/java");
-    if !Path::new(&java).exists() {
-        return None;
-    }
-    let runner_dir = setup_runner(&java_home)?;
-    // DIRECTORY classpath entries (kotlinc-built dependency libs) are shipped as bytes into the
-    // per-request TestClassLoader instead of onto the runner JVM's system classpath. Two reasons:
-    // the runner is keyed by its classpath string, so per-lib dirs would spawn a runner JVM per lib
-    // (churn), and system-classpath classes are initialized ONCE per JVM, so a box() that mutates a
-    // lib object's static state would poison every later box() sharing that (now cached) lib. Jars
-    // (stdlib, reflect, coroutines) stay on the system classpath: they are large, shared, and tests
-    // don't assert on their mutable static state.
-    let mut request_classes: Vec<(String, Vec<u8>)> = Vec::new();
-    let mut cp = runner_dir.to_string_lossy().into_owned();
-    for j in cp_jars {
-        if j.is_dir() {
-            request_classes.extend(dir_classes(j)?.iter().cloned());
-        } else {
-            cp.push(':');
-            cp.push_str(&j.to_string_lossy());
-        }
-    }
-    let classes = if request_classes.is_empty() {
-        std::borrow::Cow::Borrowed(classes)
-    } else {
-        request_classes.extend(classes.iter().cloned());
-        std::borrow::Cow::Owned(request_classes)
-    };
-    let classes: &[(String, Vec<u8>)] = &classes;
-    let pool = POOL.get_or_init(|| {
-        sweep_stale_temp_dirs();
-        Mutex::new(RunnerPool::new())
-    });
-
-    // Fetch (or spin up) the runner for this classpath under the pool lock, then release the lock so
-    // the actual round-trip runs concurrently with other threads' calls. The pool is capped because a
-    // single grouped e2e binary can see many short-lived temp classpaths; without recycling, each one
-    // leaves behind a persistent JVM for the rest of the process.
-    let get_runner = || -> Option<Arc<BoxRunner>> {
-        let mut map = pool.lock().unwrap();
-        let needs_runner = map.get(&cp).is_none_or(|r| !r.alive.load(Ordering::SeqCst));
-        if needs_runner {
-            map.insert(cp.clone(), Arc::new(BoxRunner::new(&java, &cp)?));
-        }
-        map.get(&cp)
-    };
-
-    let runner = get_runner()?;
-    match runner.try_run(classes, box_class) {
-        Ok(s) => Some(s),
-        Err(_) => {
-            // The JVM died or timed out. Replace the dead runner (if another thread hasn't already)
-            // and retry once on a fresh one.
-            {
-                let mut map = pool.lock().unwrap();
-                if map
-                    .runners
-                    .get(&cp)
-                    .is_some_and(|r| Arc::ptr_eq(r, &runner))
-                {
-                    map.remove(&cp);
-                }
-            }
-            let fresh = get_runner()?;
-            fresh.try_run(classes, box_class).ok()
-        }
-    }
 }
 
 /// Compile `src` in-process and run `box()` on the persistent JVM. `cp_jars` is BOTH the compile

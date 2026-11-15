@@ -38,6 +38,7 @@ mod delegated_properties;
 mod dependency_templates;
 #[cfg(test)]
 mod entry_point_tests;
+mod equals_guards;
 mod erased_parameters;
 mod error;
 mod expect_realization;
@@ -326,7 +327,7 @@ pub(crate) fn lower_body_with_context(
         })
         .collect::<Result<Vec<_>, FirLoweringFailure>>()?;
     lowering.in_default_argument = root_is_default;
-    let mut roots = Vec::new();
+    let mut roots = lowering.equality_bound_prologue(declaration)?;
     for root in body.roots().iter().copied() {
         let lowered = lowering.statement(root)?;
         // A destructuring declaration lowers to several declarations in the surrounding lexical
@@ -929,7 +930,7 @@ impl<'a> BodyLowering<'a> {
         let extension = self
             .has_extension_receiver
             .then_some(context_start + self.context_parameter_count);
-        let dispatch = self.has_dispatch_receiver.then_some(self.capture_count);
+        let dispatch = self.dispatch_receiver_slot();
         extension
             .into_iter()
             .chain(
@@ -1111,7 +1112,9 @@ pub(super) enum UnitReturnLine {
 /// return belongs to that call expression, so keep the region's end.
 pub(super) fn implicit_return_end(ir: &IrFile, value: ExprId) -> Option<u32> {
     let mut end = ir.end_line(value);
-    let inline_call_end = ir.inline_regions.contains(&value);
+    // The outermost inline expansion owns the call's end line. A region nested inside it, and the
+    // value that region returns, keep their own ends for SMAP and do not replace the call.
+    let mut inline_call_end = ir.inline_regions.contains(&value);
     let mut returned = value;
     while let crate::ir::IrExpr::Block {
         value: Some(inner), ..
@@ -1119,6 +1122,13 @@ pub(super) fn implicit_return_end(ir: &IrFile, value: ExprId) -> Option<u32> {
     {
         returned = *inner;
         let inner_end = ir.end_line(returned);
+        if ir.inline_regions.contains(&returned) {
+            if !inline_call_end {
+                inline_call_end = true;
+                end = inner_end.or(end);
+            }
+            continue;
+        }
         end = if inline_call_end {
             end.or(inner_end)
         } else {

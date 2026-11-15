@@ -180,10 +180,13 @@ pub struct SamWrapperCopy {
     pub bytes: Vec<u8>,
 }
 
+/// The field an object stores its enclosing instance in (`AsmUtil.CAPTURED_THIS_FIELD`).
+const CAPTURED_THIS_FIELD: &str = "this$0";
+
 /// `isCapturedFieldName`: a field an object's constructor fills from a captured value.
 pub(super) fn is_captured_field_name(name: &str) -> bool {
     name.starts_with('$') && !name.starts_with("$$") && name != "$assertionsDisabled"
-        || name == "this$0"
+        || name == CAPTURED_THIS_FIELD
         || name == "receiver$0"
 }
 

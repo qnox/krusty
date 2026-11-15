@@ -21,13 +21,35 @@ impl Body<'_> {
         if ty.is_unsigned() {
             return self.unsigned_string_of(id, ty);
         }
+        let proven = self.proven_type(id, ty)?;
         self.expression(id)?;
-        self.stacked_string_of(ty)
+        self.stacked_string_of_value(ty, proven)
+    }
+
+    /// The type `id`'s value is proven to have, narrowing its static `ty`: a read of a variable
+    /// nothing assigns again yields the value its initializer computed.
+    fn proven_type(&self, mut id: u32, ty: Ty) -> Result<Ty, Unsupported> {
+        while let IrExpr::GetValue(slot) = self.ir.expr(id) {
+            match self.initializers.get(slot) {
+                Some(&initializer) => id = initializer,
+                None => return Ok(ty),
+            }
+        }
+        Ok(self.type_of(id)?.unwrap_or(ty))
     }
 
     /// Replace the `ty` value on the stack with its non-null `String`, as a string template
     /// renders it. `Unit` is not one of these values: it may have no carrier to replace.
     pub(super) fn stacked_string_of(&mut self, ty: Ty) -> Result<(), Unsupported> {
+        self.stacked_string_of_value(ty, ty)
+    }
+
+    /// [`Self::stacked_string_of`] of a value proven to be a `proven`, a subtype of `ty`.
+    fn stacked_string_of_value(&mut self, ty: Ty, proven: Ty) -> Result<(), Unsupported> {
+        if ty.is_unsigned() {
+            self.stacked_unsigned_string(ty);
+            return Ok(());
+        }
         let nullable_scalar = match ty.kind() {
             TyKind::Nullable(inner) => self
                 .scalar_string_function(inner)
@@ -55,6 +77,11 @@ impl Body<'_> {
             ty if self.scalar_string_function(ty).is_some() => {
                 self.scalar_string_function(ty).expect("checked above")
             }
+            // A builder's table answers its contents, and a `null` one renders as `"null"`.
+            ty if super::string_builders::is_string_builder_type(ty) => {
+                self.dispatch_to_string();
+                return Ok(());
+            }
             // A `KType` object prints through its own slot. Every other reference, including a
             // class and an erased `Any`, prints through the shared runtime `toString`.
             ty if ty.non_null().obj_internal()
@@ -63,7 +90,7 @@ impl Body<'_> {
                 return self.type_object_to_string(ty);
             }
             ty if matches!(carrier(ty)?, Some(ValType::Ref { .. })) => {
-                return self.reference_string(ty);
+                return self.reference_string(ty, proven);
             }
             other => {
                 return Err(format!(
@@ -84,6 +111,12 @@ impl Body<'_> {
             );
         }
         self.expression(id)?;
+        self.stacked_unsigned_string(source);
+        Ok(())
+    }
+
+    /// Replace the exact non-null unsigned scalar `source` on the stack with its decimal text.
+    fn stacked_unsigned_string(&mut self, source: Ty) {
         if let Some(mask) = source.unsigned_widen_mask() {
             self.code.i32_const(mask).op(AND32);
         }
@@ -92,13 +125,12 @@ impl Body<'_> {
         } else {
             self.runtime.string_of_u32
         });
-        Ok(())
     }
 
-    /// Replace the reference on the stack, statically of type `ty`, with `toString()` of whatever
-    /// it holds at run time, or `"null"`.
-    fn reference_string(&mut self, ty: Ty) -> Result<(), Unsupported> {
-        if self.may_reach_unrealized(ty, AnyMember::ToString)? {
+    /// Replace the reference on the stack, statically of type `ty` and proven to be a `proven`,
+    /// with `toString()` of whatever it holds at run time, or `"null"`.
+    fn reference_string(&mut self, ty: Ty, proven: Ty) -> Result<(), Unsupported> {
+        if self.may_reach_unrealized(proven, AnyMember::ToString)? {
             return Err(format!(
                 "a `toString` of `{}` reaching a runtime object this target cannot print",
                 describe(ty)

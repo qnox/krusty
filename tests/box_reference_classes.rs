@@ -21,8 +21,9 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use krusty::conformance::{
-    directive, inject_support_module, module_units, reference_only_kotlinc_arguments, split_files,
-    split_modules, unit_compiler_configuration, BoxJdk, FragmentUnit,
+    contains_directive, coroutine_sources, directive, inject_coroutine_support, module_units,
+    reference_only_kotlinc_arguments, source_modules, split_files, unit_compiler_configuration,
+    BoxJdk, FragmentUnit,
 };
 
 use super::common::{self, byte_dump};
@@ -99,8 +100,10 @@ pub fn checked_prepared_box(src: &str, stem: &str) -> Result<ReferenceClasses, S
 /// its own `// LAMBDAS:`/`// SAM_CONVERSIONS:`/`// JVM_DEFAULT_MODE:` modes and keys on the producing
 /// JDK, so an older entry compiled under kotlinc's default modes or another JDK is never replayed.
 /// Every directive-selected argument rides its unit's `unit_arguments` and the test-only feature
-/// property rides `jvm_properties`, so a change of either re-keys itself.
-const REF_CACHE_SALT: &str = "ref-classes-v6-typed-language-settings";
+/// property rides `jvm_properties`, so a change of either re-keys itself. `v7` keys on the planned
+/// units' files and topology as well as the case text, so a partition change (such as leading code
+/// moving onto the first declared FILE) never replays an entry compiled from another partition.
+const REF_CACHE_SALT: &str = "ref-classes-v7-planned-units";
 
 /// A reference `.class` inventory grouped by module identity.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -272,10 +275,28 @@ fn cache_key(
         byte_dump::immutable_classpath_content_fingerprint(&content_paths, &producing_jdk_modules)?;
     let compiler_id = byte_dump::published_compiler_id();
     let producing_jdk = producing_jdk_identity()?;
+    let planned_units = units
+        .iter()
+        .map(|unit| {
+            format!(
+                "{:?}",
+                (
+                    &unit.module,
+                    &unit.kotlin,
+                    &unit.java,
+                    &unit.fragments,
+                    &unit.deps,
+                    &unit.friends,
+                )
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\0");
     Ok(ReferenceCacheInputs {
         src,
         stem,
         coroutine_helpers,
+        planned_units: &planned_units,
         base_args: &base_args,
         jvm_properties,
         unit_arguments: &unit_arguments,
@@ -523,6 +544,9 @@ pub struct ReferenceCacheInputs<'a> {
     pub src: &'a str,
     pub stem: &'a str,
     pub coroutine_helpers: &'a str,
+    /// Each planned unit's module, Kotlin and Java files, fragments, dependencies and friends: the
+    /// partition kotlinc actually compiles, which the case text alone does not determine.
+    pub planned_units: &'a str,
     /// The case's classpath and JDK arguments.
     pub base_args: &'a [String],
     /// The JVM properties the reference compiler server runs under ([`reference_jvm_properties`]).
@@ -553,6 +577,7 @@ impl ReferenceCacheInputs<'_> {
             self.src.as_bytes(),
             self.stem.as_bytes(),
             self.coroutine_helpers.as_bytes(),
+            self.planned_units.as_bytes(),
         ];
         let base_count = (self.base_args.len() as u64).to_le_bytes();
         parts.push(&base_count);
@@ -651,12 +676,12 @@ fn plan_units(src: &str, stem: &str, coroutine_helpers: &str) -> Result<Vec<Plan
             })
             .map_err(|error| format!("reference oracle: {error}"))
     };
-    if src.contains("// MODULE:") {
-        let Some(mut modules) = split_modules(src) else {
+    if contains_directive(src, "MODULE") {
+        let Some(mut modules) = source_modules(src) else {
             return Err("reference oracle does not support this // MODULE: shape".to_string());
         };
         if directive(src, "WITH_COROUTINES") {
-            inject_support_module(&mut modules, coroutine_helpers);
+            inject_coroutine_support(&mut modules, src, coroutine_helpers)?;
         }
         return module_units(&modules)
             .into_iter()
@@ -676,13 +701,13 @@ fn plan_units(src: &str, stem: &str, coroutine_helpers: &str) -> Result<Vec<Plan
             })
             .collect();
     }
-    let (mut kotlin, java) = if src.contains("// FILE:") {
-        split_files(src)
+    let (mut kotlin, java) = if contains_directive(src, "FILE") {
+        split_files(src)?
     } else {
         (vec![(stem.to_string(), src.to_string())], Vec::new())
     };
     if directive(src, "WITH_COROUTINES") {
-        kotlin.push(("CoroutineUtil".to_string(), coroutine_helpers.to_string()));
+        kotlin.extend(coroutine_sources(src, coroutine_helpers)?);
     }
     let configuration = configuration(&kotlin)?;
     Ok(vec![PlannedUnit {
@@ -924,7 +949,7 @@ fn write_group(dir: &Path, blocks: &[(String, String)]) -> Result<Vec<PathBuf>, 
 /// An open marker is recognized only when an upper-snake-case name follows `<!` AND a closing `!>`
 /// appears on the same line, so a real `a < !b` is left intact. Markers never span a line, so
 /// removing them preserves line numbers — and thus `LineNumberTable` bytes — on both sides.
-fn strip_diagnostic_markers(src: &str) -> String {
+pub(super) fn strip_diagnostic_markers(src: &str) -> String {
     let b = src.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -1168,6 +1193,7 @@ mod tests {
             src: "fun box() = \"OK\"",
             stem: "Box",
             coroutine_helpers: NO_HELPERS,
+            planned_units: "main: Box.kt",
             base_args,
             jvm_properties: &[],
             unit_arguments,
@@ -1207,6 +1233,15 @@ mod tests {
             base.fingerprint(),
             ReferenceCacheInputs {
                 src: "fun box() = \"FAIL\"",
+                ..base
+            }
+            .fingerprint()
+        );
+        // The same case text planned into another partition is another compilation.
+        assert_ne!(
+            base.fingerprint(),
+            ReferenceCacheInputs {
+                planned_units: "main: Box.kt, Leading.kt",
                 ..base
             }
             .fingerprint()

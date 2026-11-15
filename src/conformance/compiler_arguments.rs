@@ -61,7 +61,23 @@ fn case_compiler_configuration_for_release(
     src: &str,
     compiler: KotlinVersion,
 ) -> Result<UnitCompilerConfiguration, String> {
-    let mut arguments = case_cli_arguments(src, compiler)?;
+    platform_compiler_configuration_for_release(src, super::TestTarget::Jvm, compiler)
+}
+
+/// Case-wide source settings plus only the selected reference backend's physical options.
+pub fn platform_compiler_configuration(
+    src: &str,
+    target: super::TestTarget,
+) -> Result<UnitCompilerConfiguration, String> {
+    platform_compiler_configuration_for_release(src, target, crate::kotlin_version::target())
+}
+
+fn platform_compiler_configuration_for_release(
+    src: &str,
+    target: super::TestTarget,
+    compiler: KotlinVersion,
+) -> Result<UnitCompilerConfiguration, String> {
+    let mut arguments = case_cli_arguments(src, target, compiler)?;
     let api_version = exact_version(src, "API_VERSION", compiler)?;
     let language_version = exact_version(src, "LANGUAGE_VERSION", compiler)?.or_else(|| {
         // Kotlin's test settings raise the implicit language level when the requested API is newer
@@ -75,7 +91,8 @@ fn case_compiler_configuration_for_release(
         arguments,
         language_version,
         api_version,
-        inline_scopes_numbers: super::directive(src, "USE_INLINE_SCOPES_NUMBERS"),
+        inline_scopes_numbers: target == super::TestTarget::Jvm
+            && super::directive(src, "USE_INLINE_SCOPES_NUMBERS"),
     })
 }
 
@@ -128,17 +145,27 @@ pub fn case_kotlinc_arguments(src: &str) -> Result<Vec<String>, String> {
     Ok(configuration.arguments)
 }
 
-fn case_cli_arguments(src: &str, compiler: KotlinVersion) -> Result<Vec<String>, String> {
-    if let Some(directive) = super::unsupported_codegen_mode_directive(src) {
+fn case_cli_arguments(
+    src: &str,
+    target: super::TestTarget,
+    compiler: KotlinVersion,
+) -> Result<Vec<String>, String> {
+    if let Some(directive) = (target == super::TestTarget::Jvm)
+        .then(|| super::unsupported_codegen_mode_directive(src))
+        .flatten()
+    {
         return Err(format!(
             "box directive `{directive}` names no code-generation mode"
         ));
     }
+    let features = crate::features::FeatureTable::for_version(compiler)
+        .ok_or_else(|| format!("kotlinc {compiler} has no language feature table"))?;
     let mut arguments: Vec<String> = values(src, "LANGUAGE")
         .flat_map(|payload| payload.split([' ', ',', '\t']))
         .filter(|token| !token.is_empty())
-        .map(|token| format!("-XXLanguage:{token}"))
+        .map(|token| features.language_argument(token))
         .collect();
+    arguments.dedup();
     if let Some(version) = exact_version(src, "API_VERSION", compiler)?.filter(|v| v.major >= 2) {
         arguments.extend(["-api-version".to_string(), version.to_string()]);
     }
@@ -154,17 +181,26 @@ fn case_cli_arguments(src: &str, compiler: KotlinVersion) -> Result<Vec<String>,
     if directive(src, "ALLOW_KOTLIN_PACKAGE") || declares_reserved_kotlin_package(src) {
         arguments.push("-Xallow-kotlin-package".to_string());
     }
-    if let Some(target) = last_value(src, "JVM_TARGET") {
-        arguments.extend(["-jvm-target".to_string(), target.to_string()]);
+    if target == super::TestTarget::Native {
+        arguments.extend(
+            values(src, "FREE_COMPILER_ARGS")
+                .flat_map(str::split_whitespace)
+                .map(str::to_owned),
+        );
     }
-    if let Some(mode) = last_value(src, "STRING_CONCAT") {
-        arguments.push(format!("-Xstring-concat={mode}"));
-    }
-    if let Some(mode) = last_value(src, "ASSERTIONS_MODE") {
-        arguments.push(format!("-Xassertions={mode}"));
-    }
-    if let Some(mode) = last_value(src, "WHEN_EXPRESSIONS") {
-        arguments.push(format!("-Xwhen-expressions={}", mode.to_ascii_lowercase()));
+    if target == super::TestTarget::Jvm {
+        if let Some(target) = last_value(src, "JVM_TARGET") {
+            arguments.extend(["-jvm-target".to_string(), target.to_string()]);
+        }
+        if let Some(mode) = last_value(src, "STRING_CONCAT") {
+            arguments.push(format!("-Xstring-concat={mode}"));
+        }
+        if let Some(mode) = last_value(src, "ASSERTIONS_MODE") {
+            arguments.push(format!("-Xassertions={mode}"));
+        }
+        if let Some(mode) = last_value(src, "WHEN_EXPRESSIONS") {
+            arguments.push(format!("-Xwhen-expressions={}", mode.to_ascii_lowercase()));
+        }
     }
     if directive(src, "WITH_COMPOSE") {
         // The reference distribution's own plugin jar, with source information on so a case
@@ -207,8 +243,16 @@ fn case_cli_arguments(src: &str, compiler: KotlinVersion) -> Result<Vec<String>,
 /// `// USE_INLINE_SCOPES_NUMBERS` selects `-Xuse-inline-scopes-numbers`, which krusty's compile
 /// receives as [`UnitCompilerConfiguration::inline_scopes_numbers`] instead.
 pub fn reference_only_kotlinc_arguments(src: &str) -> Result<Vec<String>, String> {
+    reference_only_kotlinc_arguments_for_target(src, super::TestTarget::Jvm)
+}
+
+/// Reference-only settings shared across backends, with JVM debug options confined to JVM.
+pub fn reference_only_kotlinc_arguments_for_target(
+    src: &str,
+    target: super::TestTarget,
+) -> Result<Vec<String>, String> {
     let mut arguments = Vec::new();
-    if super::directive(src, "USE_INLINE_SCOPES_NUMBERS") {
+    if target == super::TestTarget::Jvm && super::directive(src, "USE_INLINE_SCOPES_NUMBERS") {
         arguments.push("-Xuse-inline-scopes-numbers".to_string());
     }
     let Some(mode) = last_value(src, "RETURN_VALUE_CHECKER_MODE") else {
@@ -340,6 +384,38 @@ mod tests {
                     "box directive `// LANGUAGE_VERSION: LATEST` names no language level"
                         .to_owned()
                 )
+            );
+        }
+    }
+
+    #[test]
+    fn non_jvm_reference_settings_preserve_source_versions_and_ignore_jvm_physical_modes() {
+        let source = "// LANGUAGE_VERSION: 1.9\n// API_VERSION: 1.8\n// OPT_IN: demo.Marker\n// JVM_TARGET: 21\n// STRING_CONCAT: inline\n// ASSERTIONS_MODE: always-enable\n// USE_INLINE_SCOPES_NUMBERS\n// RETURN_VALUE_CHECKER_MODE: FULL\n// FREE_COMPILER_ARGS: -Xbinary=genericSafeCasts=true\n";
+        for target in [
+            super::super::TestTarget::Native,
+            super::super::TestTarget::WasmJs,
+            super::super::TestTarget::WasmWasi,
+        ] {
+            let arguments = if target == super::super::TestTarget::Native {
+                vec![
+                    "-opt-in=demo.Marker".into(),
+                    "-Xbinary=genericSafeCasts=true".into(),
+                ]
+            } else {
+                vec!["-opt-in=demo.Marker".into()]
+            };
+            assert_eq!(
+                platform_compiler_configuration(source, target),
+                Ok(UnitCompilerConfiguration {
+                    arguments,
+                    language_version: Some(LanguageVersion::new(1, 9)),
+                    api_version: Some(LanguageVersion::new(1, 8)),
+                    inline_scopes_numbers: false,
+                })
+            );
+            assert_eq!(
+                reference_only_kotlinc_arguments_for_target(source, target),
+                Ok(vec!["-Xreturn-value-checker=full".into()])
             );
         }
     }

@@ -182,3 +182,28 @@ impl ConstructorSlots {
         out.extend(super_roots.map(|root| (root, self.super_args[class].clone())));
     }
 }
+
+/// Realize the value-class carriers of every constructor delegation's selected parameters: the
+/// superclass constructor's and each secondary constructor's `this(...)`/`super(...)` target.
+/// These lists keep the checker-selected declaration shape until the argument boundary operations
+/// have read it, so a value class passed where its delegation target declares the value class
+/// itself is not mistaken for one passed to its own underlying type. Shared mutable-capture
+/// positions are rewritten to their holder types by the following JVM pass from their separate
+/// exact coordinate map.
+pub(super) fn erase_delegation_targets(ir: &mut IrFile, under: &super::Under) {
+    for class in &mut ir.classes {
+        let delegations = class.secondary_ctors.iter_mut().filter_map(|constructor| {
+            match &mut constructor.delegate {
+                CtorDelegateTarget::This { target_params, .. }
+                | CtorDelegateTarget::Super { target_params, .. } => Some(target_params),
+                CtorDelegateTarget::ImplicitEnumBase => None,
+            }
+        });
+        for parameter in delegations
+            .flatten()
+            .chain(class.super_ctor_params.iter_mut())
+        {
+            *parameter = super::erase(parameter, under);
+        }
+    }
+}

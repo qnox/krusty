@@ -9,7 +9,7 @@
 use super::common;
 
 fn fixture_sources(source: &str, expected: &[&str]) -> Vec<(String, String)> {
-    let (files, java) = krusty::conformance::split_files(source);
+    let (files, java) = krusty::conformance::split_files(source).expect("partition");
     assert!(java.is_empty());
     let files = files
         .into_iter()

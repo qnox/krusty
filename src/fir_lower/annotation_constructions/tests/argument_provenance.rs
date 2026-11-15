@@ -29,7 +29,7 @@ fn closed_default_replay_preserves_written_order_and_omitted_members() {
             .lines()
             .map(str::to_owned)
             .collect::<Vec<_>>();
-            let mut strings = StringTable::klib(&|_| Ok(None));
+            let mut strings = StringTable::klib(&|_| Ok(crate::metadata::ClassifierApplication::Direct));
             for string in &expected_strings {
                 strings.local(string);
             }

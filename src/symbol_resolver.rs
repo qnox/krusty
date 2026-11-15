@@ -33,6 +33,8 @@ mod declaration_specificity;
 mod extension_specialization;
 mod generic_inference;
 pub(crate) use generic_inference::{reified_runtime_type, ReifiedDeclarations};
+mod builtin_overrides;
+pub(crate) use builtin_overrides::builtin_implementation_facts;
 mod hierarchy_projection;
 mod indexed_convention_selection;
 mod lambda_call_shape;
@@ -41,7 +43,6 @@ mod member_property_selection;
 mod member_specialization;
 mod overload_selection;
 mod postponed_lambda_selection;
-mod primitive_overrides;
 mod property_candidates;
 mod qualified_classifiers;
 mod raw_member_view;
@@ -135,7 +136,6 @@ use overload_selection::{
     unique_most_specific_with_conflicts_and_ties, ExtCtx, IndexedConvention, OverloadCall,
     SelectionMode,
 };
-pub(crate) use primitive_overrides::{primitive_overrides, PrimitiveOverride};
 use property_candidates::{
     generic_property_more_specific, source_property_visible, specialize_property,
 };
@@ -190,7 +190,7 @@ impl crate::assignable::TypeOracle for SourceOracle<'_> {
     }
 }
 
-pub(crate) use crate::types::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
+pub(crate) use crate::types::{ty_subst, ty_subst_keep_unbound};
 
 /// Specialize the selected member's lambda-parameter slots from concrete argument evidence.
 ///

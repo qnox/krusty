@@ -234,6 +234,10 @@ pub struct ClassTable {
     /// program-wide number is filled with the bridge recorded here instead of an alias of this
     /// class's slot.
     pub interface_bridges: HashMap<SlotKey, Slot>,
+    /// Methods of a dependency class that dispatch never reaches, such as its constructor's body
+    /// or a final member: the plan numbers only what a subclass can override, so a call of one of
+    /// these runs the method itself.
+    pub direct_methods: crate::fx_hash::HashSet<FunId>,
 }
 
 /// How many slots `kotlin.Any` occupies at the front of every table.

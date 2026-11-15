@@ -6,6 +6,8 @@
 //! later type test can tell an `IntArray` from a `FloatArray`; tests and casts against array types
 //! still decline today.
 
+mod value_methods;
+
 use krusty::fx_hash::HashMap;
 use krusty::types::{Ty, TyKind};
 
@@ -15,6 +17,10 @@ use super::objects::{immutable, ObjectRoot};
 use super::runtime::Runtime;
 
 pub(super) const STORAGE_FIELD: u32 = super::identity::PREFIX_FIELDS;
+
+/// The field of an unsigned array object holding the signed array object it wraps: the signed
+/// array keeps its identity through the view, so unwrapping answers the one it was made from.
+pub(super) const VIEW_FIELD: u32 = STORAGE_FIELD + 1;
 
 /// How an element is read out of its storage: as stored, or widened from a packed width with or
 /// without its sign.
@@ -32,6 +38,9 @@ pub(super) struct ArrayForm {
     pub(super) storage: u32,
     pub(super) table: u32,
     pub(super) read: ElementRead,
+    /// For an unsigned array class, the signed array object type its [`VIEW_FIELD`] refers to and
+    /// the global holding that type's dispatch table.
+    pub(super) view: Option<(u32, u32)>,
 }
 
 /// The array object types this module has declared.
@@ -39,6 +48,8 @@ pub(super) struct ArrayObjects {
     reference: ArrayForm,
     /// Primitive arrays by element type.
     primitives: HashMap<Ty, ArrayForm>,
+    /// Unsigned array classes by element type.
+    unsigned: HashMap<Ty, ArrayForm>,
 }
 
 impl ArrayObjects {
@@ -49,13 +60,14 @@ impl ArrayObjects {
         storage: u32,
         to_string: u32,
     ) -> Self {
+        let methods = [objects.identity_equals, identity.hash_code, to_string];
         let (object, table) = declare_object(
             module,
             objects,
             identity,
             storage,
             krusty::types::wk::array(),
-            to_string,
+            (methods, None),
         );
         Self {
             reference: ArrayForm {
@@ -63,8 +75,10 @@ impl ArrayObjects {
                 storage,
                 table,
                 read: ElementRead::Plain,
+                view: None,
             },
             primitives: HashMap::default(),
+            unsigned: HashMap::default(),
         }
     }
 }
@@ -82,6 +96,54 @@ impl Runtime {
             return None;
         }
         let element = array.array_elem()?;
+        if let Some(signed) = unsigned_carrier_element(element) {
+            // An unsigned array class is a value class over the signed array: its own object
+            // type, so `is UIntArray` and `is IntArray` tell them apart, wrapping the signed
+            // array's storage and reading it back with its own element's width.
+            if let Some(form) = self.arrays.unsigned.get(&element) {
+                return Some((*form, element));
+            }
+            let (signed_form, _) = self.array_form(module, Ty::array(signed))?;
+            let (_, read) = primitive_storage(element)?;
+            let class = krusty::types::type_name(
+                krusty::types::prim_array_name(element)
+                    .expect("an unsigned array element names its class"),
+            );
+            let names = krusty::backend::class_names::member_class_names(class);
+            let to_string = module.declare();
+            let equals = module.declare();
+            let hash_code = module.declare();
+            let (object, table) = declare_object(
+                module,
+                &mut self.objects,
+                &self.identity,
+                signed_form.storage,
+                class,
+                ([equals, hash_code, to_string], Some(signed_form.object)),
+            );
+            self.define_unsigned_array_value_methods(
+                module,
+                (equals, hash_code),
+                object,
+                signed_form,
+                signed,
+            );
+            self.define_unsigned_array_to_string(
+                module,
+                to_string,
+                (object, signed_form.storage),
+                (&names.simple, element),
+            );
+            let form = ArrayForm {
+                object,
+                storage: signed_form.storage,
+                table,
+                read,
+                view: Some((signed_form.object, signed_form.table)),
+            };
+            self.arrays.unsigned.insert(element, form);
+            return Some((form, element));
+        }
         let (packed, read) = primitive_storage(element)?;
         if let Some(form) = self.arrays.primitives.get(&element) {
             return Some((*form, element));
@@ -96,29 +158,50 @@ impl Runtime {
         );
         let names = krusty::backend::class_names::member_class_names(class);
         let to_string = self.identity_to_string(module, class, &names);
+        let methods = [
+            self.objects.identity_equals,
+            self.identity.hash_code,
+            to_string,
+        ];
         let (object, table) = declare_object(
             module,
             &mut self.objects,
             &self.identity,
             storage,
             class,
-            to_string,
+            (methods, None),
         );
         let form = ArrayForm {
             object,
             storage,
             table,
             read,
+            view: None,
         };
         self.arrays.primitives.insert(element, form);
         Some((form, element))
     }
 }
 
-/// The storage of a primitive array's element; `None` for an element that is not a primitive (an
-/// unsigned array is a value class over a signed one).
+/// The signed element whose array an unsigned array class (`UIntArray`) wraps.
+fn unsigned_carrier_element(element: Ty) -> Option<Ty> {
+    Some(match element.kind() {
+        TyKind::UBYTE => Ty::Byte,
+        TyKind::USHORT => Ty::Short,
+        TyKind::UINT => Ty::Int,
+        TyKind::ULONG => Ty::Long,
+        _ => return None,
+    })
+}
+
+/// The storage of a primitive array's element, and how a read of it widens; `None` for an element
+/// that has no storage of its own.
 fn primitive_storage(element: Ty) -> Option<(StorageType, ElementRead)> {
     Some(match element.kind() {
+        TyKind::UBYTE => (StorageType::I8, ElementRead::Unsigned),
+        TyKind::USHORT => (StorageType::I16, ElementRead::Unsigned),
+        TyKind::UINT => (StorageType::Val(ValType::I32), ElementRead::Plain),
+        TyKind::ULONG => (StorageType::Val(ValType::I64), ElementRead::Plain),
         TyKind::BOOLEAN => (StorageType::I8, ElementRead::Unsigned),
         TyKind::BYTE => (StorageType::I8, ElementRead::Signed),
         TyKind::SHORT => (StorageType::I16, ElementRead::Signed),
@@ -132,21 +215,26 @@ fn primitive_storage(element: Ty) -> Option<(StorageType, ElementRead)> {
 }
 
 /// Declare an array object type over `storage` and the global holding its dispatch table: identity
-/// equality and hash, and `to_string` (`kotlin.Any`'s default for that array class).
+/// equality, hash and rendering methods. Primitive arrays use identity methods; unsigned wrappers
+/// compare backing identity and hash its signed contents.
 fn declare_object(
     module: &mut Module,
     objects: &mut ObjectRoot,
     identity: &IdentityObjects,
     storage: u32,
     class: krusty::types::TypeName,
-    to_string: u32,
+    (methods, view): ([u32; 3], Option<u32>),
 ) -> (u32, u32) {
+    let mut fields = vec![
+        immutable(ValType::reference(objects.any_table)),
+        immutable(ValType::I32),
+        immutable(ValType::reference(storage)),
+    ];
+    if let Some(view) = view {
+        fields.push(immutable(ValType::reference(view)));
+    }
     let object = module.subtype(SubType {
-        composite: CompositeType::Struct(vec![
-            immutable(ValType::reference(objects.any_table)),
-            immutable(ValType::I32),
-            immutable(ValType::reference(storage)),
-        ]),
+        composite: CompositeType::Struct(fields),
         supertype: Some(identity.object),
         open: false,
     });
@@ -155,7 +243,7 @@ fn declare_object(
         .class(module, objects.itable, vec![object]);
     let info = objects.type_infos.global(module, class);
     let mut init = Code::default();
-    for function in [objects.identity_equals, identity.hash_code, to_string] {
+    for function in methods {
         module.reference_function(function);
         init.ref_func(function);
     }

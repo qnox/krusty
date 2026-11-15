@@ -23,15 +23,6 @@ fn constructions(ir: &IrFile, name: &str) -> usize {
         .count()
 }
 
-fn function(ir: &IrFile, name: &str) -> u32 {
-    ir.functions
-        .iter()
-        .position(|function| function.name == name)
-        .expect("the function is lowered") as u32
-}
-
-const DECLINED: &str = "an annotation instance (`Tag`)";
-
 #[test]
 fn an_applied_annotation_class_is_laid_out() {
     let ir = lower(include_str!(
@@ -46,48 +37,21 @@ fn an_applied_annotation_class_is_laid_out() {
     }
 }
 
+/// A constructed annotation instance is laid out like any class. Its `equals`, `hashCode` and
+/// `toString` have no body here, so the layout is the only obligation a construction adds.
 #[test]
-fn a_constructed_annotation_instance_is_declined() {
+fn a_constructed_annotation_instance_is_laid_out() {
     let ir = lower(
         "annotation class Tag(val n: Int)\n\
-         fun box(): String = if (Tag(1) == Tag(1)) \"OK\" else \"fail\"\n",
+         fun box(): String = if (Tag(1).n == 1) \"OK\" else \"fail\"\n",
     );
-    assert_eq!(
-        check_supported(&ir, annotation(&ir, "Tag")),
-        Err(DECLINED.to_string())
-    );
-}
-
-/// A construction only in a cloning-only `@InlineOnly` template, or in an expression no body owns,
-/// is never emitted, so a program that otherwise only applies the annotation is laid out. The same
-/// IR with the construction's function emitted still declines.
-#[test]
-fn an_unemitted_construction_is_no_obligation() {
-    let mut ir = lower(
-        "annotation class Tag(val n: Int)\n\
-         fun template(): Tag = Tag(1)\n\
-         @Tag(2) fun box(): String = \"OK\"\n",
-    );
-    assert_eq!(
-        constructions(&ir, "Tag"),
-        1,
-        "the template holds the construction"
-    );
-    let tag = annotation(&ir, "Tag");
-    assert_eq!(check_supported(&ir, tag), Err(DECLINED.to_string()));
-
-    let template = function(&ir, "template");
-    ir.inline_fns.insert(template);
-    ir.inline_only_fns.insert(template);
-    assert_eq!(check_supported(&ir, tag), Ok(()), "an inline-only template");
-
-    ir.inline_fns.remove(&template);
-    ir.inline_only_fns.remove(&template);
-    ir.functions[template as usize].body = None;
-    assert_eq!(
-        constructions(&ir, "Tag"),
-        1,
-        "the construction is now an orphan"
-    );
-    assert_eq!(check_supported(&ir, tag), Ok(()), "an orphan expression");
+    assert_eq!(constructions(&ir, "Tag"), 1);
+    for (id, class) in ir.classes.iter().enumerate() {
+        assert_eq!(
+            check_supported(&ir, id as ClassId),
+            Ok(()),
+            "{}",
+            class.fq_name()
+        );
+    }
 }

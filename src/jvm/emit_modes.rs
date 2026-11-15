@@ -88,6 +88,20 @@ impl JvmDefaultMode {
         }
     }
 
+    /// The mode one class is compiled under: `@JvmDefaultWithCompatibility` and
+    /// `@JvmDefaultWithoutCompatibility` on a class or interface override the module's mode for
+    /// that declaration (`Enable` and `NoCompatibility`, respectively); `Disable` modules reject
+    /// both annotations, so they never reach here.
+    pub fn declared(self, with_compatibility: bool, without_compatibility: bool) -> Self {
+        if with_compatibility {
+            Self::Enable
+        } else if without_compatibility {
+            Self::NoCompatibility
+        } else {
+            self
+        }
+    }
+
     /// The `jvmClassFlags` (`Class` JvmProtoBuf extension field 104) an interface carries under this
     /// mode: bit 0 `hasMethodBodiesInInterface`, bit 1 `isCompiledInCompatibilityMode`. `Disable`
     /// sets neither, and kotlinc then omits the field entirely.

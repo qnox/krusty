@@ -794,6 +794,9 @@ fn fixture_classes_realize_the_signatures_their_ir_declares() {
                     signature.name()
                 ));
             }
+            KlibDeclarationSignature::FileLocal { .. } => {
+                panic!("a provider realized a file-private declaration")
+            }
         }
     }
     paths.sort();

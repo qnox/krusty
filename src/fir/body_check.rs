@@ -1,6 +1,7 @@
 //! Transient AST to checked FIR construction.
 //! Owns source traversal; semantic facts come from the checker and migration seams fail explicitly.
 
+mod argument_vararg;
 mod arguments;
 mod arrays;
 #[cfg(test)]
@@ -108,6 +109,7 @@ pub use failure::{BodyCheckFailure, BodyCheckFailureKind, CheckedBodyDriverFailu
 
 use crate::fx_hash::{HashMap, HashSet};
 
+use argument_vararg::ArgumentVararg;
 use receiver_provenance::ReceiverFrame;
 
 use crate::ast::{BinOp, Expr, ExprId, File, RangeKind, Stmt, StmtId, TemplatePart, UnOp};
@@ -500,6 +502,25 @@ fn bind_parameters_and_check_defaults(
             _ => FirValueParameter::bound(origin, value, parameter.ty),
         };
         checker.body.add_parameter(parameter_record);
+        if let Some(&bound) = checker
+            .info
+            .equality_bound_parameters
+            .get(&(parameter.span.lo, parameter.span.hi))
+        {
+            let bound = ResolvedTy::new(bound).map_err(|error| {
+                checker.failure(
+                    Some(parameter.span),
+                    BodyCheckFailureKind::UnpublishableType(error),
+                )
+            })?;
+            checker
+                .body
+                .publish_equality_bound_guard(crate::fir::FirEqualityBoundGuard {
+                    parameter: value,
+                    ordinal,
+                    bound,
+                });
+        }
         if parameter.inline_expansion_mode() == crate::types::InlineExpansionMode::Splice {
             checker.body.add_spliced_inline_parameter(value);
         }
@@ -1656,6 +1677,7 @@ impl BodyFirChecker<'_> {
                                 end_type: self.expression_type(*end)?,
                                 ends_inlined_call: self
                                     .selected_range_inlines(expression, operator),
+                                declaration: self.selected_range_declaration(expression, operator),
                             }
                         } else {
                             self.source_member_operator_call(expression, operator, *start, &[*end])?

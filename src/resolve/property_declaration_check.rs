@@ -240,6 +240,11 @@ impl Checker<'_> {
                     continue;
                 }
                 self.declare_context_parameter(scope, &parameter.name, parameter_type);
+                self.record_lexical_declaration(
+                    scope,
+                    &parameter.name,
+                    super::lexical_bindings::LexicalValueRole::Parameter(parameter.span),
+                );
             }
             if let Some(rt) = value_receiver {
                 self.this_labels.push((

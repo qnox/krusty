@@ -95,12 +95,14 @@ fn source_constructor_accepts_suspend_callable_value_through_sam_parameter() {
 
 #[test]
 fn source_classifier_shadows_same_named_builtin_array_constructor() {
-    let (body, index) = checked_function_body(
-        "class UIntArray(private val storage: IntArray) {\n\
+    let (body, index) = checked_function_body_with_platform(
+        "// WITH_STDLIB\n\
+         class UIntArray(private val storage: IntArray) {\n\
              val size get() = storage.size\n\
          }\n\
          fun make(): UIntArray = UIntArray(intArrayOf(1, 2, 3))\n",
         "make",
+        jvm_stdlib_semantics(),
     );
     let FirExprKind::ConstructorCall(call) = &body
         .expr(root_expression(&body))
@@ -1149,11 +1151,13 @@ fn constructor_vararg_elements_keep_source_order_and_spread_decisions() {
 
 #[test]
 fn omitted_constructor_vararg_with_a_declared_default_uses_that_default() {
-    let (body, _) = checked_function_body(
-        "class Element\n\
+    let (body, _) = checked_function_body_with_platform(
+        "// WITH_STDLIB\n\
+         class Element\n\
          class Box(vararg values: Element = arrayOf(Element(), Element()))\n\
          fun make(): Box = Box()\n",
         "make",
+        jvm_stdlib_semantics(),
     );
     let FirExprKind::ConstructorCall(call) = &body
         .expr(root_expression(&body))

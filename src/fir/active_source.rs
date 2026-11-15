@@ -193,6 +193,7 @@ impl ActiveSourceCursor {
         let mut parser_names = LookupNames::default();
         let parser_len =
             extract_file_stubs_for_stable_binding(file, source, &mut parser_ids, &mut parser_names)
+                .0
                 .into_iter()
                 .filter(|stub| stub.kind != DeclarationKind::TypeAlias)
                 .count();
@@ -417,7 +418,7 @@ impl ActiveSourceDeclarations {
         } = selection;
         let mut parser_ids = DeclarationIds::default();
         let mut parser_names = LookupNames::default();
-        let mut parser_stubs =
+        let (mut parser_stubs, lexical_owners) =
             extract_file_stubs_for_stable_binding(file, source, &mut parser_ids, &mut parser_names);
         // A source typealias has no ordinary executable unit. The streaming parser can accumulate
         // one immediately before the next declaration callback, while Pass 2 receives its complete
@@ -426,7 +427,7 @@ impl ActiveSourceDeclarations {
         parser_stubs.retain(|stub| stub.kind != DeclarationKind::TypeAlias);
         // Re-form exactly the stream Pass 1 captured from this bounded parse. The shared ordering
         // operation consumes only live syntax coordinates; none survive as a Pass-2 locator.
-        order_file_stubs(&mut parser_stubs, &parser_ids);
+        order_file_stubs(&mut parser_stubs, &parser_ids, &lexical_owners);
         let mut stable = stable.to_vec();
         stable.sort_by_key(|declaration| index.source_order(*declaration).unwrap_or(u32::MAX));
         let retained_fragment = unit_roots.is_none();
@@ -677,7 +678,7 @@ impl ActiveSourceDeclarations {
     ) -> Result<Vec<super::BodyWorkItem>, ActiveSourceBindingError> {
         let mut parser_ids = DeclarationIds::default();
         let mut parser_names = LookupNames::default();
-        let parser_stubs =
+        let (parser_stubs, _) =
             extract_file_stubs_for_stable_binding(file, source, &mut parser_ids, &mut parser_names);
         let retained_by_inline_owner = |declaration: DeclarationId| {
             let mut current = Some(declaration);

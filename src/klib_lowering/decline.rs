@@ -98,6 +98,9 @@ impl std::fmt::Display for KlibBodyDecline {
                 write_qualified(formatter, accessor.property())?;
                 write!(formatter, ".{}", accessor.name())?;
             }
+            KlibDeclarationSignature::FileLocal { .. } => {
+                write!(formatter, "a file-private function")?;
+            }
         }
         write!(formatter, "` (")?;
         match &self.reason {

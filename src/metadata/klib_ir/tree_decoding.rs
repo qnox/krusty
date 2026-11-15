@@ -90,6 +90,18 @@ impl KlibIrModuleTrees {
         Some((arena, arena.function(function)))
     }
 
+    /// The top-level function private to its file that a body of this module calls under the
+    /// file-local `signature`: the declaration of its own tree, not a member or a local function.
+    pub fn file_private_function(
+        &self,
+        signature: &KlibIrSignature,
+    ) -> Option<(&KlibIrArena, &KlibIrFunction)> {
+        let (tree, function) = *self.local_functions.get(signature)?;
+        let tree = &self.trees[tree];
+        (tree.declaration == KlibIrMember::Function(function))
+            .then(|| (&tree.arena, tree.arena.function(function)))
+    }
+
     /// The file-local class this library serializes under `signature`.
     pub(crate) fn local_class(
         &self,

@@ -314,18 +314,15 @@ impl Checker<'_> {
         let primitive_element = array
             .filter(|ty| !ty.is_reference_array())
             .and_then(Ty::array_elem);
-        let synthetic = match primitive_element {
-            Some(element) => crate::synthetics::by_kind(
-                crate::synthetics::SyntheticKind::PrimitiveVararg(element),
-            ),
-            None => crate::synthetics::lookup("arrayOf"),
-        }
-        .expect("annotation arrays use a declared compiler array operation");
+        let kind = match primitive_element {
+            Some(element) => crate::synthetics::SyntheticKind::PrimitiveVararg(element),
+            None => crate::synthetics::SyntheticKind::ReferenceVararg,
+        };
         let ty = self
             .check_array_builtin(
                 scope,
                 expression,
-                synthetic,
+                super::ArrayBuiltin::of(kind),
                 elements,
                 self.span(expression),
                 primitive_element,

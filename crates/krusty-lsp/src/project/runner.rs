@@ -5,13 +5,18 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-const BUILD_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const BUILD_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
+/// A first-time scan of a large build. The editor probe keeps [`BUILD_TOOL_TIMEOUT`].
+pub(crate) const SCAN_PROBE_TIMEOUT: Duration = Duration::from_secs(45 * 60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Command {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub working_directory: PathBuf,
+    /// How long `ProcessRunner` waits before killing the child. The default is the short ceiling
+    /// used by ordinary probes. A command that must configure a large build sets its own.
+    pub timeout: Duration,
 }
 
 impl Command {
@@ -20,7 +25,13 @@ impl Command {
             program: program.into(),
             args: Vec::new(),
             working_directory: working_directory.into(),
+            timeout: BUILD_TOOL_TIMEOUT,
         }
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     pub fn arg(mut self, argument: impl Into<String>) -> Self {
@@ -62,7 +73,7 @@ pub struct ProcessRunner;
 
 impl CommandRunner for ProcessRunner {
     fn run(&self, command: &Command) -> io::Result<CommandOutput> {
-        run_process(command, BUILD_TOOL_TIMEOUT)
+        run_process(command, command.timeout)
     }
 }
 

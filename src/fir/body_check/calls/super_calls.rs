@@ -84,7 +84,7 @@ impl BodyFirChecker<'_> {
                     arguments,
                     &target.params,
                     0,
-                    target.vararg_index,
+                    ArgumentVararg::of_source_parameters(target.vararg_index),
                 )?
                 .into_vec(),
             None => {

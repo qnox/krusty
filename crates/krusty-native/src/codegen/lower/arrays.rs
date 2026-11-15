@@ -1,6 +1,7 @@
 //! Arrays: one object shape, a stride from the element type, and a bounds check at every access.
 //!
-//! Every array is the same object — a header, a length, then the elements — and what distinguishes
+//! Owning arrays have a header, a length, then the elements. Unsigned array value classes retain
+//! an owning signed array through a nominal view. What distinguishes
 //! an `IntArray` from an `Array<String>` is two numbers in its type descriptor: how wide an element
 //! is, and whether the collector should look inside. That is why the array types are the RUNTIME's
 //! rather than something each file emits: an array's descriptor depends on the element width, not
@@ -88,7 +89,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let shape = self.array_shape(ty)?;
         let array = self.reference(receiver)?;
         self.null_check(array)?;
-        Ok((array, shape))
+        Ok((self.array_storage(array, &shape)?, shape))
+    }
+
+    /// The owning array used for inline element addressing. An unsigned array is a nominal
+    /// value-class view; its declared element is unsigned, while its retained owner is signed.
+    fn array_storage(&mut self, array: Value, shape: &Shape) -> Result<Value, Unsupported> {
+        if !shape.stored.is_unsigned() {
+            return Ok(array);
+        }
+        self.runtime_call("kt_array_storage", &[any()], any(), &[array])?
+            .ok_or_else(|| "an unsigned array view without its signed storage".into())
     }
 
     /// The address of one element, after proving the index is inside the array.
@@ -214,12 +225,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 &[descriptor, length],
             )?
             .expect("`kt_array_new` returns the array");
+        let storage = self.array_storage(array, &shape)?;
         if !spread {
             for (index, value) in values.into_iter().enumerate() {
                 let offset = ELEMENTS + (index as i64) * i64::from(shape.stride);
                 self.builder
                     .ins()
-                    .store(trusted(), value, array, offset as i32);
+                    .store(trusted(), value, storage, offset as i32);
             }
             return Ok(Some(array));
         }
@@ -241,7 +253,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 .builder
                 .ins()
                 .imul_imm_s(offset, i64::from(shape.stride));
-            let address = self.builder.ins().iadd_imm_s(array, ELEMENTS);
+            let address = self.builder.ins().iadd_imm_s(storage, ELEMENTS);
             let address = self.builder.ins().iadd(address, offset);
             self.builder.ins().store(trusted(), value, address, 0);
             at = self.builder.ins().iadd_imm_s(at, 1);

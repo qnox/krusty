@@ -41,6 +41,7 @@ fn captured_class() -> IrFile {
                 }),
             }),
             crossinline_parameter: None,
+            inlined: false,
         }),
         provenance: IrCtorParameterProvenance::Capture,
         capture_identity: Some(ClassCaptureIdentity::EnclosingClass("p/Outer".into())),

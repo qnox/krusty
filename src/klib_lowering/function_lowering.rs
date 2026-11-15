@@ -25,7 +25,9 @@ use crate::types::{Ty, TyKind, TypeName};
 
 mod class_initializers;
 mod closure_headers;
-pub(super) use class_initializers::{local_initializer_header, local_member_header};
+pub(super) use class_initializers::{
+    initializer_header, local_initializer_header, local_member_header,
+};
 mod declared_type_parameters;
 pub(super) use closure_headers::{closure_header, CaptureParameter};
 mod reference_headers;
@@ -485,11 +487,11 @@ pub(super) fn function_header_with_emitted_dispatch(
 pub(super) enum HeaderPurpose {
     Body(Option<Ty>),
     External,
-    /// The body of a private member of the value class `TypeName`, which no provider records. A
+    /// The body of a private member of the materialized class `TypeName`, which no provider records. A
     /// private member is called only from its class, so the calling member's authenticated class
     /// is its class ([`super::class_headers::authenticate_private_member`] proves the raw header
     /// against it first), and it is emitted as that class's other members are.
-    PrivateValueMember(TypeName),
+    PrivateClassMember(TypeName),
 }
 
 pub(super) fn raw_function_header(
@@ -588,16 +590,16 @@ fn header(
     vararg_parameters::reject_dispatch_marker(function.dispatch_receiver.as_ref())?;
     let emitted_singleton_dispatch = match purpose {
         HeaderPurpose::Body(singleton) => singleton,
-        HeaderPurpose::External | HeaderPurpose::PrivateValueMember(_) => None,
+        HeaderPurpose::External | HeaderPurpose::PrivateClassMember(_) => None,
     };
-    let private_value_class = match purpose {
-        HeaderPurpose::PrivateValueMember(class) => {
+    let private_member_class = match purpose {
+        HeaderPurpose::PrivateClassMember(class) => {
             if selected.is_some()
                 || crate::metadata::semantic::declaration_visibility(function.base.flags)
                     != crate::types::Visibility::Private
             {
                 return Err(mismatch(
-                    "a value class member without a provider record is not private".to_owned(),
+                    "a class member without a provider record is not private".to_owned(),
                 ));
             }
             Some(class)
@@ -662,20 +664,19 @@ fn header(
                     "a dispatch receiver",
                 ));
             }
-            (Some(receiver), None) if private_value_class.is_some() => {
+            (Some(receiver), None) if private_member_class.is_some() => {
                 let serialized = semantic_type(arena, types, receiver.ty)?;
-                if serialized.kotlin_class_internal() != private_value_class {
+                if serialized.kotlin_class_internal() != private_member_class {
                     return Err(mismatch(
-                        "a private value class member's receiver is not its calling class"
-                            .to_owned(),
+                        "a private class member's receiver is not its calling class".to_owned(),
                     ));
                 }
                 value_receiver = Some((&receiver.base.symbol, serialized));
                 Some(serialized)
             }
-            (None, None) if private_value_class.is_some() => {
+            (None, None) if private_member_class.is_some() => {
                 return Err(mismatch(
-                    "a private value class member has no dispatch receiver".to_owned(),
+                    "a private class member has no dispatch receiver".to_owned(),
                 ));
             }
             (Some(_), None) if emitted_singleton_dispatch.is_none() => {
@@ -686,14 +687,15 @@ fn header(
             (Some(receiver), Some(selected))
                 if selected
                     .class_contract()
-                    .is_some_and(|class| class.is_value) =>
+                    .is_some_and(crate::libraries::KlibBodyClassContract::emits_members) =>
             {
-                // A value class's member is final and is emitted as a member of its class, whose
-                // `this` is the value it is called on. Semantic conversion interns the class path,
-                // so the raw receiver proves the exact class identity first.
+                // A member of a class the unit materializes dispatches statically and is emitted
+                // as a member of its class, whose `this` is the instance it is called on. Semantic
+                // conversion interns the class path, so the raw receiver proves the exact class
+                // identity first.
                 let class = selected
                     .class_contract()
-                    .expect("the guard selected a value class member");
+                    .expect("the guard selected a materialized class member");
                 super::class_headers::authenticate_receiver(class, arena, function)?;
                 let serialized = semantic_type(arena, types, receiver.ty)?;
                 if selected.declaration_owner()
@@ -702,7 +704,27 @@ fn header(
                         .map(crate::types::SemanticCallableOwner::Classifier)
                 {
                     return Err(mismatch(
-                        "a value class member's receiver is not its declaring class".to_owned(),
+                        "a class member's receiver is not its declaring class".to_owned(),
+                    ));
+                }
+                value_receiver = Some((&receiver.base.symbol, serialized));
+                Some(serialized)
+            }
+            (Some(receiver), Some(selected))
+                if selected.class_contract().is_some_and(
+                    crate::libraries::KlibBodyClassContract::emits_receiver_members,
+                ) =>
+            {
+                // A builtin type's member is a function of its receiver value, which its body
+                // reads as the value the target carries.
+                let serialized = semantic_type(arena, types, receiver.ty)?;
+                if selected.declaration_owner()
+                    != serialized
+                        .kotlin_class_internal()
+                        .map(crate::types::SemanticCallableOwner::Classifier)
+                {
+                    return Err(mismatch(
+                        "a builtin type member's receiver is not its declaring type".to_owned(),
                     ));
                 }
                 value_receiver = Some((&receiver.base.symbol, serialized));
@@ -790,7 +812,7 @@ fn header(
             )?;
         }
         params.push(packed);
-        identities.push(serialized_identity(*role, parameter));
+        identities.push(serialized_identity(*role, function, parameter));
     }
     varargs.authenticate(selected, function.companion_extension_class.is_some())?;
     let ret = semantic_type(arena, types, function.return_type)?;
@@ -882,21 +904,29 @@ fn header(
 }
 
 /// The identity a serialized parameter has by its role alone: an extension receiver is the
-/// receiver, a value parameter its source name. A context parameter's role among the context
-/// kinds (named, anonymous, legacy receiver) is recorded only by a provider, so the header alone
-/// gives it none.
+/// receiver, a value parameter its source name. The value of a compiler-generated property
+/// setter declares no name, whatever placeholder the producer spells it with. A context
+/// parameter's role among the context kinds (named, anonymous, legacy receiver) is recorded only
+/// by a provider, so the header alone gives it none.
 fn serialized_identity(
     role: SerializedRole,
+    function: &KlibIrFunction,
     parameter: &KlibIrParameter,
 ) -> Option<ResolvedParameterIdentity> {
     match role {
         SerializedRole::Context => None,
         SerializedRole::ExtensionReceiver => Some(ResolvedParameterIdentity::ExtensionReceiver),
+        SerializedRole::Value if function.base.origin == DEFAULT_PROPERTY_ACCESSOR => {
+            Some(ResolvedParameterIdentity::setter_value(None))
+        }
         SerializedRole::Value => Some(ResolvedParameterIdentity::Source(
             parameter.name.as_str().into(),
         )),
     }
 }
+
+/// The origin a producer records for a property accessor it generates.
+const DEFAULT_PROPERTY_ACCESSOR: &str = "DEFAULT_PROPERTY_ACCESSOR";
 
 /// The parameter identities of `selected`, after checking that it describes the serialized
 /// declaration: the same name, parameter list, parameter types and identities, and result.
@@ -1050,7 +1080,9 @@ fn parameter_role(role: SerializedRole, identity: &ResolvedParameterIdentity) ->
         | (SerializedRole::ExtensionReceiver, ResolvedParameterIdentity::ExtensionReceiver)
         | (
             SerializedRole::Value,
-            ResolvedParameterIdentity::Source(_) | ResolvedParameterIdentity::Unnamed { .. },
+            ResolvedParameterIdentity::Source(_)
+            | ResolvedParameterIdentity::Unnamed { .. }
+            | ResolvedParameterIdentity::PropertySetterValue,
         ) => Some(true),
         _ => None,
     }

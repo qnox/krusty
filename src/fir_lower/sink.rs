@@ -59,6 +59,7 @@ pub enum FirFileLoweringFailure {
     DuplicateBody(CallableId),
     DuplicateNonCallableBody(DeclarationId),
     InlineBodyOwnerMismatch(CallableId),
+    BuiltinImplementationConflict(crate::fir::ExternalCallableId),
     InvalidDelegatedCallShape {
         expected: u32,
         actual: u32,
@@ -245,6 +246,7 @@ impl<'a> CommonIrBodySink<'a> {
         finalize_inherited_statuses(index, self.ir);
         finalize_constructors(index, self.ir)?;
         super::annotation_constructions::finalize_defaults(self.ir)?;
+        super::annotation_constructions::normalize_declaration_defaults(self.ir);
         super::annotation_constructions::assign_evaluation_scopes(self.ir);
         super::constructors::finalize_local_superclass_captures(self.ir)?;
         finalize_enum_entries(self.ir)?;
@@ -334,6 +336,9 @@ impl<'a> CommonIrBodySink<'a> {
         index: &ResolvedModuleIndex,
         bodies: &InlineBodyStore,
     ) -> Result<(), FirFileLoweringFailure> {
+        self.ir
+            .record_external_builtin_implementations(bodies.builtin_implementations())
+            .map_err(FirFileLoweringFailure::BuiltinImplementationConflict)?;
         // A retained body-local template whose exact owner is still deferred has no common-IR
         // callable yet; its first checked caller may materialize it through
         // `accept_inline_dependencies` after owner publication and declaration refresh. The final
@@ -693,6 +698,9 @@ impl<'a> CommonIrBodySink<'a> {
         inline_bodies: &InlineBodyStore,
         bodies: &mut crate::fir::DefaultArgumentStore,
     ) -> Result<(), FirFileLoweringFailure> {
+        self.ir
+            .record_external_builtin_implementations(bodies.builtin_implementations())
+            .map_err(FirFileLoweringFailure::BuiltinImplementationConflict)?;
         let ready = bodies.take_for_source_matching(index, self.source, |_, body| {
             let declaration = DeclarationId::from_raw(body.owner().raw());
             matches!(
@@ -1594,6 +1602,13 @@ impl<'a> CommonIrBodySink<'a> {
             .has(crate::fir::DeclarationFlags::COMPANION);
         if !default_fragment && self.ir.functions[function as usize].body.is_some() {
             return Err(FirFileLoweringFailure::DuplicateBody(callable.id));
+        }
+        if let Some(guard) = body.equality_bound_guard() {
+            self.ir.declared_parameters_mut(function).equality_bound =
+                Some(crate::ir::IrEqualityBoundParameter {
+                    index: guard.ordinal as usize,
+                    bound: guard.bound.get(),
+                });
         }
         if callable.is_inline() {
             let (modifiers, modes) = body.inline_parameter_contract();
