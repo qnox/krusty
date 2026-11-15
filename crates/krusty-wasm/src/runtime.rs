@@ -19,12 +19,14 @@
 mod exception_classes;
 mod object_equality;
 mod object_strings;
+mod root_any;
 mod string_order;
 
 pub(super) use object_strings::ObjectStrings;
 
 use krusty::fx_hash::HashMap;
 
+use super::array_lists::ArrayLists;
 use super::array_objects::ArrayObjects;
 use super::boxes::Boxes;
 use super::builtin_instances::BuiltinInstances;
@@ -77,6 +79,8 @@ pub(super) struct Runtime {
     pub(super) identity: IdentityObjects,
     /// `kotlin.text.StringBuilder`, which the runtime lays out.
     pub(super) string_builders: StringBuilders,
+    /// `kotlin.collections.ArrayList`, which the runtime lays out.
+    pub(super) array_lists: ArrayLists,
     /// Kotlin's `hashCode()` rules.
     pub(super) hashing: Hashing,
     pub(super) exceptions: ExceptionTransport,
@@ -97,6 +101,8 @@ pub(super) struct Runtime {
     pub(super) class_tokens: ClassTokens,
     /// Offsets of string constants already in the data segment.
     constants: HashMap<Vec<u16>, u32>,
+    /// Dispatch and type information for directly allocated root `Any` instances.
+    root_any_table: Option<u32>,
 }
 
 impl Runtime {
@@ -146,6 +152,15 @@ impl Runtime {
         let string_builders =
             StringBuilders::declare(module, &mut objects, &identity, chars, string);
         let object_equals = module.declare();
+        let array_lists = ArrayLists::declare(
+            module,
+            &mut objects,
+            &identity,
+            references,
+            chars,
+            string,
+            object_equals,
+        );
         let callable_references = CallableReferences::declare(module, &objects, object_equals);
         let string_concat = module.declare();
         let hashing = Hashing::declare(module);
@@ -180,6 +195,7 @@ impl Runtime {
             objects,
             identity,
             string_builders,
+            array_lists,
             hashing,
             class_tokens,
             exceptions,
@@ -191,6 +207,7 @@ impl Runtime {
             callable_references,
             type_objects: TypeObjects::default(),
             constants: HashMap::default(),
+            root_any_table: None,
         };
         runtime.define_string_equals(module);
         runtime.define_object_equals(module);

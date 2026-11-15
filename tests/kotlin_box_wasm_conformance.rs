@@ -51,6 +51,7 @@ impl WasmLane {
         scratch: &Path,
         stem: &str,
         suffix: &str,
+        source: &str,
         program: box_lane::CompiledProgram,
     ) -> Outcome {
         if !program.native_imports.is_empty() {
@@ -80,6 +81,12 @@ impl WasmLane {
             Command::new("node")
                 .arg("--no-warnings")
                 .arg(directory.join("box.mjs")),
+        );
+        let outcome = box_lane::retain_failure(
+            &format!("{}-{stem}-{suffix}", self.target.name()),
+            source,
+            &artifacts,
+            outcome,
         );
         let _ = std::fs::remove_dir_all(&directory);
         outcome
@@ -179,7 +186,7 @@ impl Lane for WasmLane {
             Ok(program) => program,
             Err(outcome) => return outcome,
         };
-        self.run_artifacts(scratch, stem, "single", program)
+        self.run_artifacts(scratch, stem, "single", directive_source, program)
     }
 
     fn compile_modules_and_run(
@@ -224,7 +231,7 @@ impl Lane for WasmLane {
             Ok(program) => program,
             Err(outcome) => return outcome,
         };
-        self.run_artifacts(scratch, stem, "modules", program)
+        self.run_artifacts(scratch, stem, "modules", directive_source, program)
     }
 }
 
@@ -563,7 +570,20 @@ import kotlin.math.pow
 fun box(): String = if (2.0.pow(3.0) == 8.0) "OK" else "pow"
 "#,
         "wasmUnmodelledInstructionWrapper",
-        "a dependency callable whose target code was not emitted",
+        concat!(
+            r#"a dependency callable whose target code was not emitted: `pow`; "#,
+            r#"selected declaration KlibDependencyCallable { module: "kotlin", declaration: Public(KlibPublicIdSignature { package: KlibNamePath { segments: ["kotlin", "math"] }, declaration: KlibNamePath { segments: ["pow"] }, member_id: Some(15712335000106601333), mask: 0 }) }; "#,
+            r#"owner Some(Package(TypeName("kotlin/math"))); "#,
+            r#"kind Extension; "#,
+            r#"realization Dispatch; "#,
+            r#"checked parameters [Obj(TypeName("kotlin/Double"), [])]; "#,
+            r#"checked result Obj(TypeName("kotlin/Double"), []); "#,
+            r#"provider parameters [Obj(TypeName("kotlin/Double"), []), Obj(TypeName("kotlin/Double"), [])]; "#,
+            r#"provider result Obj(TypeName("kotlin/Double"), []); "#,
+            r#"declared parameters Some([Obj(TypeName("kotlin/Double"), []), Obj(TypeName("kotlin/Double"), [])]); "#,
+            r#"declared result None; "#,
+            r#"compiler operation None"#,
+        ),
     );
 }
 
@@ -847,10 +867,12 @@ fn explicit_array_checks_share_metadata_with_the_reference_compiler() {
     let [(stem, written_source)] = sources.as_slice() else {
         panic!("one complete array-store source")
     };
+    // `ModuleStructureExtractorImpl` keeps the leading text and the FILE marker in the first file,
+    // preserving original source lines. The option above is the compilation context's one
+    // decision: it reaches both compilers as arguments, never by re-reading a file.
     assert_eq!(
-        krusty::conformance::WasmCompilerOptions::from_source(written_source),
-        Ok(krusty::conformance::WasmCompilerOptions::default()),
-        "the pre-FILE option belongs to compilation context, not the split program"
+        written_source, source,
+        "the written file retains the leading text, marker, and original line positions"
     );
     for target in WasmTarget::ALL {
         let lane = WasmLane { target };
@@ -948,7 +970,7 @@ fn expect_reference_array_bounds(source: &str, name: &str) {
 "#.to_vec()));
             }
             assert_eq!(
-                lane.run_artifacts(&std::env::temp_dir(), &stem, "bounds", program),
+                lane.run_artifacts(&std::env::temp_dir(), &stem, "bounds", source, program),
                 Outcome::Pass,
                 "{stem} on {}",
                 target.name()

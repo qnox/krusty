@@ -205,6 +205,7 @@ fn assert_bound_lowering(libraries: &KlibLibraries) {
         assert_bound_reference(unit.ir(), expected);
         if inline {
             let mut prepared = IrFile::default();
+            let hierarchy = checked_template_hierarchy(libraries, &declaration);
             lower_inline_template(
                 &mut prepared,
                 &declaration,
@@ -213,6 +214,7 @@ fn assert_bound_lowering(libraries: &KlibLibraries) {
                     declarations: libraries.declaration_bodies(),
                     references: libraries.reference_bindings(),
                     source: libraries,
+                    type_hierarchy: &hierarchy,
                 },
             )
             .unwrap()

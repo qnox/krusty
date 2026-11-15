@@ -24,7 +24,7 @@ pub(super) fn also_run_natively(src: &str, stem: &str, expected: &str) {
     if !krusty_native::can_link(target) {
         return;
     }
-    match native_box_outcome(src, stem, target) {
+    match native_sources_outcome(&[(stem, src)], target, Some(expected)) {
         NativeBox::Declined(_) | NativeBox::Unavailable => {}
         NativeBox::Answered(answer) if answer == expected => {}
         NativeBox::Answered(answer) => panic!(
@@ -49,7 +49,7 @@ pub fn expect_native_sources(sources: &[(&str, &str)], expected: &str) {
         return;
     }
     let stem = sources.first().map(|(stem, _)| *stem).unwrap_or("module");
-    match native_sources_outcome(sources, target) {
+    match native_sources_outcome(sources, target, Some(expected)) {
         NativeBox::Unavailable => {}
         NativeBox::Answered(answer) => assert_eq!(answer, expected, "{stem}"),
         NativeBox::Declined(reason) => {
@@ -103,7 +103,7 @@ pub fn native_decline(sources: &[(&str, &str)]) -> Option<String> {
         return None;
     }
     let stem = sources.first().map(|(stem, _)| *stem).unwrap_or("module");
-    match native_sources_outcome(sources, target) {
+    match native_sources_outcome(sources, target, None) {
         NativeBox::Unavailable => None,
         NativeBox::Declined(said) => Some(said),
         NativeBox::Answered(answer) => {
@@ -156,6 +156,7 @@ pub fn expect_native_exit(src: &str, stem: &str, code: i32, said: &str) {
     }
 }
 
+#[derive(Debug)]
 pub enum NativeBox {
     /// What `box()` returned. The JVM's answer for the same program is the oracle.
     Answered(String),
@@ -195,9 +196,8 @@ impl NativeBox {
     }
 }
 
-#[allow(dead_code)]
 fn native_box_outcome(src: &str, stem: &str, target: krusty_native::NativeTarget) -> NativeBox {
-    native_sources_outcome(&[(stem, src)], target)
+    native_sources_outcome(&[(stem, src)], target, None)
 }
 
 /// The analysis a Native compilation of `sources` (`(stem, text)`) starts from: the semantic
@@ -383,6 +383,31 @@ pub fn run_native_image(
         }
         child.wait_with_output()
     });
+    let failure = match &output {
+        Ok(output) if !output.status.success() => Some(format!(
+            "native execution: {:?}; arguments {arguments:?}; status {}; stdout {:?}; stderr {:?}",
+            executable,
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )),
+        Err(error) => Some(format!(
+            "native execution: {:?}; arguments {arguments:?}; could not run: {error}",
+            executable
+        )),
+        _ => None,
+    };
+    if let Some(report) = failure {
+        let mut files: Vec<(&str, &[u8])> = vec![("program.elf", image), ("stdin", input)];
+        if let Ok(output) = &output {
+            files.push(("stdout", &output.stdout));
+            files.push(("stderr", &output.stderr));
+        }
+        match crate::failure_evidence::retain(stem, &report, &files) {
+            Ok(path) => eprintln!("{report}; failure artifacts: {}", path.display()),
+            Err(error) => eprintln!("{report}; could not preserve failure artifacts: {error}"),
+        }
+    }
     let _ = std::fs::remove_file(&executable);
     let _ = std::fs::remove_dir(&directory);
     output.map_err(|error| NativeBox::Failed(format!("running it: {error}")))
@@ -393,6 +418,7 @@ pub fn run_native_image(
 fn native_sources_outcome(
     sources: &[(&str, &str)],
     target: krusty_native::NativeTarget,
+    expected: Option<&str>,
 ) -> NativeBox {
     let image = match native_image(sources, target) {
         Ok(image) => image,
@@ -403,26 +429,44 @@ fn native_sources_outcome(
         Ok(output) => output,
         Err(outcome) => return outcome,
     };
-    if !output.status.success() {
-        return NativeBox::Exited {
+    let outcome = if !output.status.success() {
+        NativeBox::Exited {
             code: output.status.code(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        };
-    }
-    // The entry prints what `box()` returned after a frame marker, and nothing after it: the
-    // answer is every byte past the one marker. What comes before is the
-    // program's own output — `when (b) { true -> println("t") … }` prints `t` and then answers
-    // `OK` — which the JVM path never sees, because there the answer is a return value rather
-    // than a stream. Reading the last LINE instead would take `"FAIL\nOK"` for `OK`.
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    match stdout.split_once(krusty_native::BOX_RESULT_FRAME) {
-        Some((_, answer)) if answer.contains(krusty_native::BOX_RESULT_FRAME) => {
-            NativeBox::Failed("the program printed more than one box result frame".to_string())
         }
-        Some((_, answer)) => NativeBox::Answered(answer.to_owned()),
-        None => NativeBox::Failed(format!(
-            "the program ended without framing an answer; stdout {stdout:?}"
-        )),
+    } else {
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        // The answer is every byte after the sole frame, including any embedded newline.
+        match stdout.split_once(krusty_native::BOX_RESULT_FRAME) {
+            Some((_, answer)) if answer.contains(krusty_native::BOX_RESULT_FRAME) => {
+                NativeBox::Failed("the program printed more than one box result frame".to_string())
+            }
+            Some((_, answer)) => NativeBox::Answered(answer.to_owned()),
+            None => NativeBox::Failed(format!(
+                "the program ended without framing an answer; stdout {stdout:?}"
+            )),
+        }
+    };
+    let matches_expected =
+        matches!(&outcome, NativeBox::Answered(answer) if expected == Some(answer.as_str()));
+    if !matches_expected {
+        let source = sources
+            .iter()
+            .map(|(stem, text)| format!("// FILE: {stem}.kt\n{text}\n"))
+            .collect::<String>();
+        let report =
+            format!("target: {target:?}; expected box result: {expected:?}; actual: {outcome:?}");
+        let files: &[(&str, &[u8])] = &[
+            ("program.elf", &image),
+            ("source.kt", source.as_bytes()),
+            ("stdout", &output.stdout),
+            ("stderr", &output.stderr),
+        ];
+        match crate::failure_evidence::retain(stem, &report, files) {
+            Ok(path) => eprintln!("{report}; failure artifacts: {}", path.display()),
+            Err(error) => eprintln!("{report}; could not preserve failure artifacts: {error}"),
+        }
     }
+    outcome
 }

@@ -8,6 +8,70 @@ use super::*;
 use crate::types::TyKind;
 
 impl Checker<'_> {
+    /// Semantic callable shape of a local function reference. The lifted method signature keeps
+    /// erased JVM parameter/return types in `params`/`ret`; source generic types live in
+    /// `generic_sig` and must be applied to the reference receiver before the value is exposed.
+    pub(super) fn local_function_reference_shape(
+        signature: &Signature,
+        receiver: Option<Ty>,
+    ) -> (Vec<Ty>, Ty) {
+        let Some(generic) = signature.generic_sig.as_ref() else {
+            return (signature.params.clone(), signature.ret);
+        };
+        let mut bindings = crate::symbol_resolver::GSigBinds::default();
+        if let Some((declared, actual)) = generic.receiver.zip(receiver) {
+            crate::symbol_resolver::unify_ty(declared, actual, &mut bindings);
+        }
+        (
+            generic
+                .params
+                .iter()
+                .map(|parameter| {
+                    crate::symbol_resolver::ty_subst_keep_unbound(*parameter, &bindings)
+                })
+                .collect(),
+            crate::symbol_resolver::ty_subst_keep_unbound(generic.ret, &bindings),
+        )
+    }
+
+    /// Apply a contextual callable shape to a generic local declaration through the same
+    /// provider-neutral specialization used for module and dependency candidates. Local lifting is
+    /// a lowering detail; it must not create a second inference algorithm for callable references.
+    pub(super) fn contextual_local_function_reference_shape(
+        &self,
+        signature: &Signature,
+        receiver: Option<Ty>,
+        expected_params: &[Ty],
+        expected_ret: Ty,
+    ) -> Option<(Vec<Ty>, Ty)> {
+        let Some(generic) = signature.generic_sig.as_ref() else {
+            return Some(Self::local_function_reference_shape(signature, receiver));
+        };
+        let call_sig = CallSig {
+            param_defaults: signature.param_defaults,
+            required: signature.required,
+            vararg: signature.vararg(),
+            vararg_index: signature.vararg_index,
+            ..CallSig::default()
+        };
+        let source = self.fed_source();
+        let specialized = callable_reference_selection::specialize_generic_signature(
+            &source,
+            generic,
+            &call_sig,
+            receiver,
+            callable_reference_selection::ReferenceExpectation {
+                params: Some(expected_params),
+                ret: Some(expected_ret),
+                bound_contexts: 0,
+                type_variable_inputs: self.active_reference_type_variable_inputs(),
+            },
+            |actual, bound| self.generic_bound_admits(actual, bound),
+        )
+        .ok()?;
+        Some((specialized.params, specialized.ret))
+    }
+
     pub(super) fn select_receiverless_local_reference(
         &mut self,
         scope: &CheckerScope<'_>,

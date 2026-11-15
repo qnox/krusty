@@ -700,9 +700,48 @@ pub fn compile_modules<B: Backend, M: krusty::backend::DependencyMetadata>(
     })
 }
 
+/// Preserve accepted-but-failing programs at their owning execution boundary. The report's path
+/// travels with the failure, so the original CI job contains everything needed for inspection.
+pub fn retain_failure(
+    label: &str,
+    source: &str,
+    artifacts: &[(String, Vec<u8>)],
+    outcome: Outcome,
+) -> Outcome {
+    if !matches!(
+        outcome,
+        Outcome::Failed(_) | Outcome::Harness(_) | Outcome::CompilerPanic(_)
+    ) {
+        return outcome;
+    }
+    let mut files = artifacts
+        .iter()
+        .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+        .collect::<Vec<_>>();
+    files.push(("source.kt", source.as_bytes()));
+    let report = format!("case: {label}\n{outcome:?}");
+    let evidence = match crate::failure_evidence::retain(label, &report, &files) {
+        Ok(path) => format!("failure artifacts: {}", path.display()),
+        Err(error) => format!("could not preserve failure artifacts: {error}"),
+    };
+    match outcome {
+        Outcome::Failed(reason) => Outcome::Failed(format!("{reason}; {evidence}")),
+        Outcome::Harness(reason) => Outcome::Harness(format!("{reason}; {evidence}")),
+        Outcome::CompilerPanic(reason) => Outcome::CompilerPanic(format!("{reason}; {evidence}")),
+        other => other,
+    }
+}
+
 /// Run a program with the lane's deadline; its framed verdict.
 pub fn run_program(command: &mut Command) -> Outcome {
-    match timed(Stage::Run, || run_with_timeout(command, RUN_TIMEOUT)) {
+    let invocation = format!(
+        "program {:?}; arguments {:?}; cwd {:?}; deadline {}s",
+        command.get_program(),
+        command.get_args().collect::<Vec<_>>(),
+        command.get_current_dir(),
+        RUN_TIMEOUT.as_secs()
+    );
+    let outcome = match timed(Stage::Run, || run_with_timeout(command, RUN_TIMEOUT)) {
         // The entry prints what `box()` returned after `BOX_RESULT_FRAME`, and nothing after it:
         // the answer is every byte past the one frame. Anything before it is the PROGRAM's own
         // output — `controlStructures/kt513.kt` builds a list and `println`s it before returning
@@ -712,6 +751,11 @@ pub fn run_program(command: &mut Command) -> Outcome {
         Ok(output) => framed_outcome(output),
         Err(ProgramRunError::Harness(error)) => Outcome::Harness(error),
         Err(ProgramRunError::Program(error)) => Outcome::Failed(error),
+    };
+    match outcome {
+        Outcome::Failed(reason) => Outcome::Failed(format!("{invocation}; {reason}")),
+        Outcome::Harness(reason) => Outcome::Harness(format!("{invocation}; {reason}")),
+        other => other,
     }
 }
 
@@ -748,11 +792,13 @@ fn run_with_timeout(
             Ok(None) if started.elapsed() > timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = stdout.join();
-                let _ = stderr.join();
+                let stdout = captured_output(stdout, "stdout").map_err(ProgramRunError::Harness)?;
+                let stderr = captured_output(stderr, "stderr").map_err(ProgramRunError::Harness)?;
                 return Err(ProgramRunError::Program(format!(
-                    "the program did not finish within {}s",
-                    timeout.as_secs()
+                    "the program did not finish within {}s; stdout (bounded tail) {:?}; stderr (bounded tail) {:?}",
+                    timeout.as_secs(),
+                    String::from_utf8_lossy(&stdout.bytes),
+                    String::from_utf8_lossy(&stderr.bytes)
                 )));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(2)),
@@ -887,7 +933,8 @@ fn complete_program_output(stdout: String) -> ProgramOutput {
 }
 
 /// Expand runner-provided declarations and recover the Kotlin source set represented by one corpus
-/// file. The preamble stays the authoritative directive source; split blocks deliberately omit it.
+/// file. Case-wide directives are still read from the whole source; the text before the first
+/// `// FILE:` also stays in the first Kotlin block, as Kotlin's test infrastructure keeps it.
 pub fn prepare_sources(
     source: &str,
     fallback_stem: &str,
@@ -1239,11 +1286,17 @@ pub fn run(lane: &dyn Lane) {
 
     let bytes = super::box_klib_bytes::ByteRun::new(lane);
     let started = Instant::now();
+    let progress = super::box_lane_profile::ProgressReporter::new(
+        lane.label(),
+        files.len(),
+        Duration::from_secs(60),
+    );
     let timed_outcomes: Vec<((&PathBuf, Outcome), Duration)> = pool.install(|| {
         files
             .par_iter()
             .map(|file| {
                 let case_started = Instant::now();
+                let _case_progress = progress.start_case(relative(file));
                 // A panic inside the compiler is a failure of THAT case, recorded like any other
                 // so one bug does not hide the picture for the rest of the corpus; the test still
                 // fails.
@@ -1277,6 +1330,7 @@ pub fn run(lane: &dyn Lane) {
             })
             .collect()
     });
+    drop(progress);
     let wall = started.elapsed();
     let case_times = timed_outcomes
         .iter()
@@ -1600,8 +1654,11 @@ fn unexpected_rejection_reporting_uses_exact_ratchet_keys_and_preserves_diagnost
         ),
     ];
     assert_eq!(
-        unexpected_failure_reason_report(&traced, &mismatches.unexpected_failures, |file|
-            file.strip_prefix("/corpus").unwrap().to_string_lossy().into_owned()),
+        unexpected_failure_reason_report(&traced, &mismatches.unexpected_failures, |file| file
+            .strip_prefix("/corpus")
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()),
         "  unexpected /corpus/regressions/z.kt: z.kt:2:3: unresolved reference\nz.kt:4:5: second diagnostic\n  unexpected /corpus/regressions/a.kt: the checked operation `SelectedCall`\n",
     );
 }
@@ -1659,7 +1716,10 @@ fn a_missing_program_is_a_harness_error_not_a_recordable_failure() {
     let error = Command::new(&missing).output().unwrap_err();
     assert_eq!(
         run_program(&mut Command::new(&missing)),
-        Outcome::Harness(format!("could not start the program: {error}"))
+        Outcome::Harness(format!(
+            "program {missing:?}; arguments []; cwd None; deadline {}s; could not start the program: {error}",
+            RUN_TIMEOUT.as_secs()
+        ))
     );
 }
 
@@ -1705,12 +1765,16 @@ fn a_frame_discarded_from_the_bounded_tail_still_invalidates_the_verdict() {
 #[test]
 fn runner_kills_a_program_at_its_deadline() {
     let scratch = Scratch::new("runner");
-    let executable = executable_script(&scratch, "timeout", "while :; do :; done");
+    let executable = executable_script(
+        &scratch,
+        "timeout",
+        "printf before-timeout; printf timeout-error >&2; while :; do :; done",
+    );
 
     assert_eq!(
         run_with_timeout(&mut Command::new(&executable), Duration::from_millis(20)),
         Err(ProgramRunError::Program(
-            "the program did not finish within 0s".to_string()
+            "the program did not finish within 0s; stdout (bounded tail) \"before-timeout\"; stderr (bounded tail) \"timeout-error\"".to_string()
         ))
     );
 }

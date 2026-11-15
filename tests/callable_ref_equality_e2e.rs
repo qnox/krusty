@@ -138,3 +138,74 @@ suspend fun probe(): String {\n\
         "OK",
     );
 }
+
+/// A property reference outside `Foo` names the visible extension property, not the private member
+/// of the same name, so it differs from the reference taken inside `Foo`. The same equality holds
+/// for references to one declaration made from another file. Property references have no Wasm or
+/// Native realization yet, so this stays a JVM test rather than a shared box case.
+#[test]
+fn property_reference_equality_follows_the_visible_declaration() {
+    const TEST: &str = r#"
+val topLevelVal = ""
+var topLevelVar = ""
+
+val String.bar get() = "top"
+val Foo.baz get() = "top"
+
+class Foo {
+    val memberVal = ""
+    var memberVar = ""
+
+    val bar = "member"
+    private val baz = "member"
+
+    companion object {
+        fun referenceToMemberBaz() = Foo::baz
+    }
+}
+
+fun box(): String {
+    checkEqual(::topLevelVal, ::topLevelVal)
+    checkEqual(::topLevelVar, ::topLevelVar)
+    checkEqual(::topLevelVal, referenceTopLevelValFromOtherFile())
+    checkEqual(::topLevelVar, referenceTopLevelVarFromOtherFile())
+
+    checkEqual(Foo::memberVal, Foo::memberVal)
+    checkEqual(Foo::memberVar, Foo::memberVar)
+    checkEqual(Foo::memberVal, referenceMemberValFromOtherFile())
+    checkEqual(Foo::memberVar, referenceMemberVarFromOtherFile())
+
+    checkNotEqual(String::bar, Foo::bar)
+    if (String::bar.get("") != "top") return "FAIL: extension bar"
+    if (Foo::bar.get(Foo()) != "member") return "FAIL: member bar"
+
+    checkNotEqual(Foo::baz, Foo.referenceToMemberBaz())
+    if (Foo::baz.get(Foo()) != "top") return "FAIL: extension baz"
+    if (Foo.referenceToMemberBaz().get(Foo()) != "member") return "FAIL: member baz"
+
+    return "OK"
+}
+
+fun checkEqual(x: Any, y: Any) {
+    if (x != y || y != x) throw AssertionError("$x and $y should be equal")
+    if (x.hashCode() != y.hashCode()) throw AssertionError("$x and $y should have the same hash code")
+}
+
+fun checkNotEqual(x: Any, y: Any) {
+    if (x == y || y == x) throw AssertionError("$x and $y should NOT be equal")
+}
+"#;
+    const OTHER: &str = r#"
+fun referenceTopLevelValFromOtherFile() = ::topLevelVal
+fun referenceTopLevelVarFromOtherFile() = ::topLevelVar
+fun referenceMemberValFromOtherFile() = Foo::memberVal
+fun referenceMemberVarFromOtherFile() = Foo::memberVar
+"#;
+    let sources = [("test.kt", TEST), ("otherFile.kt", OTHER)];
+    assert_eq!(
+        common::kotlinc_box_files_result(&sources, "TestKt"),
+        "OK",
+        "the reference compiler disagrees"
+    );
+    common::expect_box_ok_files_with_stdlib(&sources, "property_reference_equality");
+}

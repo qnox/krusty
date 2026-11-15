@@ -39,6 +39,18 @@ proves no invocation occurred. Clearing a completed Gradle lane validates it bef
 leaves it absent; the toolchain's cumulative snapshot and consume/recreate operations retain their
 existing contracts.
 
+## Evidence from failed programs
+
+Inspect the original job's failure report before rerunning a test. Runtime failures include the
+invoked program, arguments, deadline and bounded output tails. Conformance failures preserve the
+whole source and emitted Wasm module/loader or Native objects/executable under
+`target/test-failures/`; `KRUSTY_TEST_FAILURE_DIR` selects another destination. Each case has a
+`failure.txt` containing its test identity, configured Kotlin version, reason and artifact inventory.
+JVM request/setup failures retain classes or runner source and the original error before any
+existing runner recovery. Native e2e verdict failures retain source, executable and process output.
+CI uploads these directories as `e2e-failures` and `conformance-failures-<version>-<target>`, including
+when the test step fails. These are outputs of the original attempt, not diagnostic reruns.
+
 ## Agent Quick Reference
 
 - Use `./run-tests.sh` for the full suite; it provisions kotlinc and the Kotlin codegen/box corpus.

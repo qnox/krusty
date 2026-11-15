@@ -5,6 +5,7 @@ pub mod classpath_presence;
 pub mod detect;
 pub mod fingerprint;
 pub mod gradle;
+mod intellij_classpath;
 pub mod jdk;
 pub mod jps;
 mod lock;
@@ -17,6 +18,7 @@ pub mod runner;
 mod source_digest;
 mod sources;
 pub mod sync;
+mod tooling;
 mod walk;
 mod xml;
 

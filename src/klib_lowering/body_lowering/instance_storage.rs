@@ -130,6 +130,21 @@ impl<'a> InstanceStorageFrame<'a> {
         }
     }
 
+    /// A member of an object literal, whose fields hold its captured values first and then the
+    /// `fields` its properties with storage declare, from `first_index`.
+    pub(super) fn object_member(
+        class: ClassId,
+        first_index: u32,
+        fields: impl IntoIterator<Item = (&'a KlibIrSymbol, Ty, bool)>,
+        receiver: Ty,
+    ) -> Self {
+        let mut frame = Self::member(class, fields, Some(receiver), false);
+        for field in &mut frame.fields {
+            field.index += first_index;
+        }
+        frame
+    }
+
     fn field(&self, symbol: &KlibIrSymbol) -> Lowered<Field<'a>> {
         let mut matches = self.fields.iter().filter(|field| field.symbol == symbol);
         let Some(field) = matches.next().copied() else {

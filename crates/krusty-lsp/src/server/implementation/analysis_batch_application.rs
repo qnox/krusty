@@ -112,6 +112,7 @@ where
         let push = self.pushes_diagnostics();
         let mut messages = Vec::with_capacity(documents.len());
         let mut analyzed_documents = Vec::with_capacity(documents.len());
+        let mut bound_documents = Vec::new();
         let mut workspace_symbols = WorkspaceSymbolIndex::default();
         for (document, fresh) in documents.into_iter().zip(fresh) {
             if !fresh {
@@ -128,6 +129,7 @@ where
                 signature_help,
                 semantic_tokens,
                 definitions,
+                workspace_references: _,
                 type_definitions,
                 implementations,
                 library_definitions,
@@ -154,6 +156,7 @@ where
                 open.definitions = definitions;
                 open.type_definitions = type_definitions;
                 open.implementations = implementations;
+                bound_documents.push(uri.clone());
             }
             open.diagnostics =
                 DiagnosticIndex::from_diagnostics(diagnostics, &open.text, &mut diagnostic_budget);
@@ -175,13 +178,23 @@ where
                 .chain(support_documents)
                 .collect();
             // Bind each source-set slot to its URI before the index records those positions.
-            let uris = self
+            // Owned copies so definition indexes can be bound while the documents are mutable.
+            let file_uris = self
                 .source_set
                 .iter()
-                .map(|(uri, _)| uri.as_str())
+                .map(|(uri, _)| uri.clone())
                 .collect::<Vec<_>>();
-            workspace_symbols.assign_uris(&uris);
+            let uri_refs = file_uris.iter().map(String::as_str).collect::<Vec<_>>();
+            workspace_symbols.assign_uris(&uri_refs);
             self.workspace_symbols = workspace_symbols;
+            for uri in bound_documents {
+                let Some(open) = self.documents.get_mut(&uri) else {
+                    continue;
+                };
+                open.definitions.bind_uris(&uri_refs);
+                open.type_definitions.bind_uris(&uri_refs);
+                open.implementations.bind_uris(&uri_refs);
+            }
         }
         messages.extend(self.diagnostic_refresh());
         if resubmit {

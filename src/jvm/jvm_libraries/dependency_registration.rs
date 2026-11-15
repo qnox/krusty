@@ -37,6 +37,7 @@ impl JvmLibraries {
                 )
             });
         member.external_identity = Some(identity);
+        member.declaration_owner = declaration_owner;
     }
 
     pub(super) fn register_external_callable(
@@ -122,6 +123,26 @@ impl JvmLibraries {
             Some(SemanticCallableOwner::Classifier(owner)),
         );
         member.external_identity = callable.external_identity;
+        member.declaration_owner = callable.declaration_owner;
+    }
+
+    /// Kotlin property metadata names the accessor's exact physical method, but its type-name
+    /// annotation inventory lives on that method header. Publish it before interning the accessor
+    /// so property-first and method-first discovery carry the same declaration evidence. A field
+    /// or property annotation marker is never an accessor method. Ordinary Kotlin accessor
+    /// factories require this exact header before publishing a callable; compiler intrinsic
+    /// declarations without a physical method keep their existing semantic evidence.
+    fn publish_accessor_method_annotations(&self, callable: &mut LibraryCallable) {
+        if !matches!(callable.origin, crate::libraries::Origin::Library) {
+            return;
+        }
+        let Some(class) = self.cp.find_name(callable.owner) else {
+            return;
+        };
+        let Some(method) = class.method(callable.physical_name(), &callable.descriptor) else {
+            return;
+        };
+        callable.annotations = method.annotations.to_vec();
     }
 
     pub(super) fn register_external_property(
@@ -130,6 +151,12 @@ impl JvmLibraries {
         declaration_owner: Option<SemanticCallableOwner>,
     ) {
         property.metadata_constant_read = self.java_field_is_metadata_constant_read(property);
+        if property.producer == crate::libraries::PropertyProducer::KotlinAccessor {
+            self.publish_accessor_method_annotations(&mut property.getter);
+            if let Some(setter) = &mut property.setter {
+                self.publish_accessor_method_annotations(setter);
+            }
+        }
         // A JavaBean projection reuses the Java methods' declarations; it does not declare Kotlin
         // accessors with generated property-parameter roles. The function provider publishes those
         // methods' exact parameter identities before this projection is registered.
