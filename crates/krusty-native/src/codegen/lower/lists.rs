@@ -236,6 +236,16 @@ fn list_symbol(
         ("remove", [element], Ty::Boolean) if mutates && element.is_reference() => {
             ("kt_mutable_list_remove", vec![any(), any()], Ty::Boolean)
         }
+        ("removeAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => (
+            "kt_mutable_list_remove_all",
+            vec![any(), any()],
+            Ty::Boolean,
+        ),
+        ("retainAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => (
+            "kt_mutable_list_retain_all",
+            vec![any(), any()],
+            Ty::Boolean,
+        ),
         ("clear", [], Ty::Unit) if mutates => ("kt_mutable_list_clear", vec![any()], Ty::Unit),
         ("addAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => (
             "kt_mutable_collection_add_all",
@@ -244,6 +254,35 @@ fn list_symbol(
         ),
         _ => return None,
     })
+}
+
+/// The runtime function for one list or collection member, selected by the receiver's collection
+/// kind and the declaration's physical parameters.
+///
+/// `ArrayList.contains` is declared on `AbstractMutableList`. The receiver is still the runtime's
+/// list, so the operation is that list's, not a member the owner alone names.
+pub(super) fn collection_runtime_member(
+    file: &FileLowering<'_>,
+    ty: Ty,
+    signature: super::super::super::intrinsics::FunctionSignature<'_>,
+    physical: &[Ty],
+) -> Option<(&'static str, Vec<Ty>, Ty)> {
+    let list = is_list(file, ty);
+    if !(list || is_collection(file, ty)) {
+        return None;
+    }
+    let owner = signature.owner.semantic_classifier()?;
+    let declaration =
+        classifier_shapes::collection_declaration(file.classifiers, owner).or_else(|| {
+            let internal = ty.non_null().obj_internal()?;
+            file.standard_collection_implementation(internal)
+                .map(classifier_shapes::CollectionDeclaration::Implementation)
+        })?;
+    if list {
+        list_symbol(declaration, signature, physical)
+    } else {
+        collection_symbol(declaration, signature)
+    }
 }
 
 /// The runtime function answering one member declared on `Collection` itself, for a receiver
@@ -471,12 +510,18 @@ impl BodyLowering<'_, '_, '_> {
             }
             operands.push((value, self.physical_type(*argument)));
         }
-        let produced =
-            self.dispatch_by_implementor_with(implementors, object, &operands, ret, |body, _| {
+        let produced = self.dispatch_by_implementor_with(
+            implementors,
+            object,
+            &operands,
+            ret,
+            false,
+            |body, _| {
                 // Unreachable: the arms above cover every class that can stand behind the type.
                 body.runtime_call("kt_abstract_method_called", &[], Ty::Unit, &[])?;
                 Ok(Some(body.builder.ins().iconst(types::I64, 0)))
-            })?;
+            },
+        )?;
         Ok(produced)
     }
 
@@ -787,6 +832,15 @@ impl BodyLowering<'_, '_, '_> {
                 "value" => ("kt_indexed_value_value", any()),
                 _ => return None,
             }
+        } else if (is_list(self.file, ty) || is_collection(self.file, ty))
+            && self.file.implements_collection_of(ty)
+        {
+            // The class publishes its `size` getter on the descriptor. `kt_collection_size`
+            // calls that for a program object and the runtime layout otherwise.
+            match name {
+                "getSize" | "size" => ("kt_collection_size", Ty::Int),
+                _ => return None,
+            }
         } else if is_list(self.file, ty) && !self.file.implements_collection_of(ty) {
             match name {
                 "getSize" | "size" => ("kt_list_size", Ty::Int),
@@ -861,22 +915,14 @@ impl BodyLowering<'_, '_, '_> {
             return Some(self.list_call(symbol, &carried, answer, receiver, args, ret));
         }
         // A LIST's OWN members — indexed access, size, removal — are about the runtime's list
-        // REPRESENTATION rather than about walking, and no thunk of a class's would reach one. A
-        // file putting a class of its own behind a list declines them; see
-        // [`FileLowering::implements_collection_of`].
-        let list = is_list(self.file, ty);
-        if !(list || is_collection(self.file, ty)) || self.file.implements_collection_of(ty) {
+        // REPRESENTATION rather than about walking. A file that also puts a class of its own
+        // behind the receiver's type dispatches that class first; this direct call is only for a
+        // receiver no class of the file can be. See [`FileLowering::implements_collection_of`].
+        if self.file.implements_collection_of(ty) {
             return None;
         }
-        let declaration = classifier_shapes::collection_declaration(
-            self.file.classifiers,
-            signature.owner.semantic_classifier()?,
-        )?;
-        let (symbol, carried, answer) = if list {
-            list_symbol(declaration, signature, physical)?
-        } else {
-            collection_symbol(declaration, signature)?
-        };
+        let (symbol, carried, answer) =
+            collection_runtime_member(self.file, ty, signature, physical)?;
         Some(self.list_call(symbol, &carried, answer, receiver, args, ret))
     }
 
@@ -1261,6 +1307,7 @@ impl BodyLowering<'_, '_, '_> {
             object,
             &operands,
             answer,
+            false,
             move |body, object| {
                 let mut values = Vec::with_capacity(runtime_operands.len() + 1);
                 values.push(object);
