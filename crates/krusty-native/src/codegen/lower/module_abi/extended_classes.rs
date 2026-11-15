@@ -427,9 +427,7 @@ impl FileLowering<'_> {
                 published_constructors: HashMap::default(),
                 published_methods: HashMap::default(),
             };
-            if self.unit_kind == krusty::backend::CheckedIrUnitKind::Source {
-                record.published_layout = self.published_native_layout(class, &record)?;
-            }
+            record.published_layout = self.published_native_layout(class, &record)?;
             records.push((self.ir.classes[class as usize].fq_name, record));
         }
         Ok(records)
