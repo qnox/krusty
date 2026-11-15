@@ -520,7 +520,10 @@ pub fn lower_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, by: u32) 
     remap_value_indices(ir, e, threshold, &|index| index - by);
 }
 
-fn remap_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, map: &dyn Fn(u32) -> u32) {
+/// Map every value index (`GetValue`/`SetValue`/`Variable`) `>= threshold` through `map`,
+/// throughout the expression tree rooted at `e`, with the same lambda boundary as
+/// [`shift_value_indices`].
+pub fn remap_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, map: &dyn Fn(u32) -> u32) {
     fn shift(
         ir: &mut IrFile,
         e: ExprId,

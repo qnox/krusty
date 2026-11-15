@@ -481,20 +481,16 @@ fn specialized_class(
             ir.record_inline_copy_owner(*copy, function, None, source);
         }
     }
-    let omitted_capture_fields = consume_trivially_spliceable_lambdas(
-        ir,
-        class_id,
-        order,
-        &property_copies,
-        &lambdas,
-        class_name,
-        expansion.site.inline_callee_source_name,
-    )?;
-    let field_count = u32::try_from(ir.classes[class_id as usize].fields.len())
-        .map_err(|_| malformed(class_name))?
-        .checked_add(omitted_capture_fields)
-        .ok_or_else(|| malformed(class_name))?;
     renames.insert(internal, placeholder);
+    // The record exists before the copy's lambdas are consumed: removing or adding a constructor
+    // parameter of the copy keeps its `constructor_parameters` current.
+    let constructor_parameters = (0..ir.classes[class_id as usize].ctor_args.len())
+        .map(|parameter| u32::try_from(parameter).ok())
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| malformed(class_name))?
+        .into_iter()
+        .map(Some)
+        .collect();
     ir.specialized_anonymous_classes.insert(
         class_id,
         crate::ir::IrSpecializedAnonymousClass {
@@ -510,13 +506,33 @@ fn specialized_class(
             method_clones: cloned,
             bindings: expansion.bindings.clone(),
             reified_bindings: expansion.reified_bindings.clone(),
-            field_count,
+            field_count: 0,
             property_count,
-            omitted_capture_fields,
+            omitted_capture_fields: 0,
+            constructor_parameters,
             caller_property_uses: Vec::new(),
-            pending_property_roots: property_copies,
+            pending_property_roots: property_copies.clone(),
         },
     );
+    let omitted_capture_fields = consume_trivially_spliceable_lambdas(
+        ir,
+        class_id,
+        order,
+        &property_copies,
+        &lambdas,
+        class_name,
+        expansion.site.inline_callee_source_name,
+    )?;
+    let field_count = u32::try_from(ir.classes[class_id as usize].fields.len())
+        .map_err(|_| malformed(class_name))?
+        .checked_add(omitted_capture_fields)
+        .ok_or_else(|| malformed(class_name))?;
+    let record = ir
+        .specialized_anonymous_classes
+        .get_mut(&class_id)
+        .ok_or_else(|| malformed(class_name))?;
+    record.field_count = field_count;
+    record.omitted_capture_fields = omitted_capture_fields;
     for method in ir.classes[class_id as usize].methods.clone() {
         if let Some(body) = ir.functions[method as usize].body {
             let owned = expression_ids(ir, body);
@@ -617,6 +633,104 @@ fn clone_optional_body(
             .ok_or_else(|| malformed(class_name))?;
     }
     Ok((Some(cloned_body), copied))
+}
+
+/// The copy's superclass constructor call, taken from the declaration's. Lowering realizes a
+/// class's primary super call with its constructor, which can come after the inline call that
+/// took the copy, so the copy takes it here, as it takes the initializer. The roots of the copied
+/// call, which nested expansions specialize in turn.
+fn clone_super_call(
+    ir: &mut crate::ir::IrFile,
+    source: ClassId,
+    copy_id: ClassId,
+    spec: &crate::ir::IrSpecializedAnonymousClass,
+    source_name: TypeName,
+    copy_name: TypeName,
+) -> Result<Vec<ExprId>, super::super::FirLoweringFailure> {
+    let declaration = &ir.classes[source as usize];
+    let prelude = declaration.super_arg_prelude.len();
+    let roots = declaration
+        .super_arg_prelude
+        .iter()
+        .chain(&declaration.super_args)
+        .copied()
+        .collect::<Vec<_>>();
+    let parameters = declaration.super_ctor_params.clone();
+    let target = declaration.super_ctor;
+    let superclass = declaration.superclass;
+    let (roots, cloned) = crate::ir::clone_expression_dags(ir, &roots);
+    let mut copied = cloned.values().copied().collect::<Vec<_>>();
+    copied.sort_unstable();
+    for copy in &copied {
+        specialize_inline_copy(ir, *copy, &spec.bindings, &spec.reified_bindings)
+            .ok_or_else(|| malformed(source_name))?;
+    }
+    remap_owned_class(ir, &copied, source, copy_id, source_name, copy_name);
+    read_copy_parameters(ir, source, spec, &roots, source_name)?;
+    let copy = &mut ir.classes[copy_id as usize];
+    copy.super_arg_prelude = roots[..prelude].to_vec();
+    copy.super_args = roots[prelude..].to_vec();
+    copy.super_ctor_params = parameters;
+    copy.super_ctor = target;
+    copy.superclass = superclass;
+    if let Some(external) = ir.external_super_constructors.get(&source_name).cloned() {
+        ir.external_super_constructors.insert(copy_name, external);
+    }
+    if let Some(defaults) = ir
+        .super_constructor_default_arguments
+        .get(&source_name)
+        .cloned()
+    {
+        ir.super_constructor_default_arguments
+            .insert(copy_name, defaults);
+    }
+    Ok(roots)
+}
+
+/// Point constructor code copied from the declaration at the copy's own constructor parameters.
+/// The copy drops the parameter of each lambda it inlines and adds the values the lambda captured,
+/// so a declaration parameter can sit at another index of the copy, and the copy's locals follow
+/// its parameters. Code that reads a parameter the copy dropped is malformed: a lambda the copy
+/// inlines is only ever invoked.
+fn read_copy_parameters(
+    ir: &mut crate::ir::IrFile,
+    source: ClassId,
+    spec: &crate::ir::IrSpecializedAnonymousClass,
+    roots: &[ExprId],
+    source_name: TypeName,
+) -> Result<(), super::super::FirLoweringFailure> {
+    let declared = u32::try_from(ir.classes[source as usize].ctor_args.len())
+        .map_err(|_| malformed(source_name))?;
+    let copied =
+        u32::try_from(spec.constructor_parameters.len()).map_err(|_| malformed(source_name))?;
+    // Value 0 is `this`; parameters are values `1..=N`.
+    let mut slots = vec![None; declared as usize + 1];
+    for (index, parameter) in spec.constructor_parameters.iter().enumerate() {
+        if let Some(parameter) = parameter {
+            let slot = slots
+                .get_mut(*parameter as usize + 1)
+                .ok_or_else(|| malformed(source_name))?;
+            *slot = Some(u32::try_from(index).map_err(|_| malformed(source_name))? + 1);
+        }
+    }
+    let mut dropped = false;
+    for &root in roots {
+        let read = std::cell::Cell::new(false);
+        crate::ir::remap_value_indices(ir, root, 1, &|value| {
+            if value > declared {
+                return value - declared + copied;
+            }
+            slots[value as usize].unwrap_or_else(|| {
+                read.set(true);
+                value
+            })
+        });
+        dropped |= read.get();
+    }
+    if dropped {
+        return Err(malformed(source_name));
+    }
+    Ok(())
 }
 
 fn remap_property_accessors(
@@ -860,6 +974,14 @@ fn publish_one_copy(
         property.setter = setter;
         ir.classes[copy_id as usize].properties.push(property);
     }
+    nested.extend(clone_super_call(
+        ir,
+        source,
+        copy_id,
+        &spec,
+        source_name,
+        copy_name,
+    )?);
     let init_clones = clone_initializer(ir, source, copy_id, &spec, source_name, copy_name)?;
     if init_clones.is_none()
         && source_properties
@@ -1361,6 +1483,7 @@ fn clone_initializer(
             .ok_or_else(|| malformed(source_name))?;
     }
     remap_owned_class(ir, &copied, source, copy_id, source_name, copy_name);
+    read_copy_parameters(ir, source, spec, &[cloned_body], source_name)?;
     ir.classes[copy_id as usize].init_body = Some(cloned_body);
     Ok(Some(cloned))
 }
@@ -1973,6 +2096,15 @@ fn append_lifted_captures(
         declaration.constructor_prefix_count += added;
         (insert_at, field_base, added)
     };
+    if let Some(record) = ir.specialized_anonymous_classes.get_mut(&class) {
+        if insert_at > record.constructor_parameters.len() {
+            return Err(malformed(class_name));
+        }
+        record.constructor_parameters.splice(
+            insert_at..insert_at,
+            std::iter::repeat_n(None, captures.len()),
+        );
+    }
     if let Some(order) = ir.class_capture_order.get_mut(&class) {
         // The recorded order is a permutation of the prefix that existed before these fields. A
         // shorter order is a partial record; extending it with a later field index would name an
@@ -2338,8 +2470,16 @@ fn remove_capture(
         declaration.ctor_param_annotations.remove(parameter);
     }
     declaration.ctor_args.remove(parameter);
+    if let Some(record) = ir.specialized_anonymous_classes.get_mut(&class) {
+        if parameter >= record.constructor_parameters.len() {
+            return Err(malformed(class_name));
+        }
+        record.constructor_parameters.remove(parameter);
+    }
     shift_capture_map(&mut ir.shared_class_capture_fields, class, field);
-    shift_capture_map(&mut ir.class_capture_identities, class, field);
+    // Closure identities are keyed by constructor parameter, which is not the field index when
+    // an earlier prefix value is kept in no field.
+    shift_capture_map(&mut ir.class_capture_identities, class, parameter_index);
     if let Some(order) = ir.class_capture_order.get_mut(&class) {
         *order = order
             .iter()
