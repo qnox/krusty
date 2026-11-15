@@ -37,12 +37,26 @@ fun booleans(): String {
     return "OK"
 }
 
+// References compare by identity, so each value is a distinct instance rather than a string literal,
+// which a backend may or may not intern.
+class Item(val name: String) {
+    override fun toString() = name
+}
+
 fun references(): String {
-    val a = AtomicReference("x")
-    a.store("y")
-    if (a.exchange("z") != "y" || !a.compareAndSet("z", "w")) return "reference"
-    val load: String = a.load()
-    return if (load == "w") "OK" else "load $load"
+    val x = Item("x")
+    val y = Item("y")
+    val z = Item("z")
+    val w = Item("w")
+    val a = AtomicReference(x)
+    a.store(y)
+    if (a.exchange(z) !== y) return "exchange"
+    if (a.compareAndSet(Item("z"), w) || !a.compareAndSet(z, w)) return "compareAndSet"
+    if (a.compareAndExchange(z, x) !== w) return "compareAndExchange failure"
+    if (a.compareAndExchange(w, x) !== w) return "compareAndExchange success"
+    if (a.toString() != "x") return "toString $a"
+    val load: Item = a.load()
+    return if (load === x) "OK" else "load $load"
 }
 
 fun arrays(): String {
@@ -58,13 +72,17 @@ fun arrays(): String {
     if (longs.exchangeAt(0, 3L) != 10L || !longs.compareAndSetAt(0, 3L, 4L)) return "long exchange"
     if (longs.loadAt(0) != 4L) return "long load"
 
-    val references = AtomicArray(arrayOf("a", "b"))
-    references.storeAt(1, "c")
-    if (references.exchangeAt(1, "d") != "c" || !references.compareAndSetAt(1, "d", "e")) {
-        return "reference exchange"
+    val c = Item("c")
+    val d = Item("d")
+    val e = Item("e")
+    val references = AtomicArray(arrayOf(Item("a"), Item("b")))
+    references.storeAt(1, c)
+    if (references.exchangeAt(1, d) !== c) return "reference exchange"
+    if (references.compareAndSetAt(1, Item("d"), e) || !references.compareAndSetAt(1, d, e)) {
+        return "reference compareAndSet"
     }
-    val load: String = references.loadAt(1)
-    return if (load == "e" && references.size == 2) "OK" else "reference load $load"
+    val load: Item = references.loadAt(1)
+    return if (load === e && references.size == 2) "OK" else "reference load $load"
 }
 
 fun box(): String {
