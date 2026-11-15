@@ -1,0 +1,70 @@
+//! A callable reference to a generic `vararg` function, passed where the enclosing call declares
+//! the function's input as one of its own type variables (`f: (T) -> Int`). kotlinc releases with
+//! `Quirk::VarargReferenceTakesTypeVariableInputAsElement` (KT-90169) bind that input as one
+//! collected element; later ones bind the whole array, as they already do for a concrete or
+//! array-shaped input.
+//!
+//! The program is the shared box regression, whose `box()` only asserts that the cases agree on
+//! one binding. This test runs it with every input and assertion kept and also returns its `describe()`, pinning which
+//! binding the reference release chooses.
+
+use krusty::kotlin_version::{Quirk, Quirks};
+
+use super::common;
+
+const PORTABLE: &str = include_str!("box_regressions/varargReferenceTypeVariableInput.kt");
+
+/// The shared program with its `box()` renamed `portableBox()`, and a `box()` that answers
+/// `portableBox()`'s result followed by `describe()`.
+fn source() -> String {
+    let portable = "fun box(): String {";
+    assert_eq!(
+        PORTABLE.matches(portable).count(),
+        1,
+        "one box() in the fixture"
+    );
+    let renamed = PORTABLE.replacen(portable, "fun portableBox(): String {", 1);
+    format!("{renamed}\nfun box(): String = portableBox() + \";\" + describe()\n")
+}
+
+/// `box()`'s answer followed by every case's value, where `element` means an input from a call
+/// type variable binds one element.
+fn expected(element: bool) -> String {
+    let (count, first) = if element { (1, true) } else { (2, false) };
+    let cases = [
+        format!("top={count}"),
+        format!("explicit={count}"),
+        format!("let={count}"),
+        format!("nullable={count}"),
+        format!("result={first}"),
+        format!("list={count}"),
+        format!("member={count}"),
+        format!("extension={count}"),
+        format!("local={count}"),
+        format!("ownFormal={count}"),
+        "receiverFormal=2".to_string(),
+        "arrayInput=2".to_string(),
+        "concreteVararg=2".to_string(),
+        "primitive=3".to_string(),
+        "declared=2".to_string(),
+    ]
+    .join(",");
+    format!("OK;{cases}")
+}
+
+#[test]
+fn a_type_variable_input_binds_the_vararg_as_the_reference_release_does() {
+    let element = Quirks::target().has(Quirk::VarargReferenceTakesTypeVariableInputAsElement);
+    let source = source();
+    let reference = common::kotlinc_box_result(&source);
+    assert_eq!(reference, expected(element), "kotlinc");
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let krusty = common::compile_and_run_box(
+        &source,
+        "Main",
+        std::slice::from_ref(&stdlib),
+        Some(jdk.as_path()),
+    );
+    assert_eq!(krusty.as_deref(), Some(reference.as_str()), "krusty");
+}
