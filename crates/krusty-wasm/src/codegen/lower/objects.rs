@@ -738,6 +738,30 @@ impl Body<'_> {
             .struct_get(object, 0);
     }
 
+    /// A call to member `function` of this file: through its class's dispatch slot when it has
+    /// one, as an override reached through the receiver's own table answers it, and directly
+    /// otherwise.
+    pub(super) fn local_member_call(
+        &mut self,
+        function: FunId,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        let class = self.ir.functions[function as usize]
+            .dispatch_receiver
+            .and_then(|owner| self.classes.and(self.ir.class_id_by_name(owner)));
+        if let Some(class) = class {
+            let tables = &self.file_classes()?.tables;
+            let key = function_key(self.ir, class, function);
+            if !tables.table(class).direct_methods.contains(&function)
+                && tables.slot(class, &key).is_some()
+            {
+                return self.dispatch_function(class, function, receiver, args);
+            }
+        }
+        self.direct_member_call(function, receiver, args)
+    }
+
     /// A call to member `function` of this file, without dispatch.
     pub(super) fn direct_member_call(
         &mut self,

@@ -1809,7 +1809,7 @@ impl<'a> Body<'a> {
                 dispatch_receiver: Some(receiver),
                 args,
             } if let Callee::Local(function) = &**call_callee => {
-                self.direct_member_call(*function, receiver, &args)?
+                self.local_member_call(*function, receiver, &args)?
             }
             IrExpr::Call {
                 callee: ref call_callee,

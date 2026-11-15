@@ -627,7 +627,13 @@ impl<'a> BodyLowering<'a> {
                     };
                     self.ir.classes[class_id as usize]
                         .properties
-                        .push(property_declaration(&name, ret, fun, setter));
+                        .push(property_declaration(
+                            &name,
+                            ret,
+                            fun,
+                            setter,
+                            !getter.overridden.is_empty(),
+                        ));
                     self.record_property_override(&name, &getter, fun, owner, supertypes, ret)?;
                 }
                 _ => {}
@@ -932,7 +938,15 @@ struct MemberFrame<'a> {
     null_proven: HashSet<super::safe_calls::NullProvenRead>,
 }
 
-fn property_declaration(name: &str, ty: Ty, getter: FunId, setter: Option<FunId>) -> IrProperty {
+/// An object literal's property. The object is final, so the property dispatches only when it
+/// overrides one of its supertypes'.
+fn property_declaration(
+    name: &str,
+    ty: Ty,
+    getter: FunId,
+    setter: Option<FunId>,
+    overrides: bool,
+) -> IrProperty {
     IrProperty {
         name: name.to_owned(),
         origin: crate::ir::IrPropertyOrigin::Declaration,
@@ -952,9 +966,13 @@ fn property_declaration(name: &str, ty: Ty, getter: FunId, setter: Option<FunId>
         storage_ty: None,
         backing_field: None,
         is_var: setter.is_some(),
-        is_open: true,
+        is_open: overrides,
         modifiers: crate::ir::IrPropertyModifiers {
-            modality: crate::ir::IrPropertyModality::Open,
+            modality: if overrides {
+                crate::ir::IrPropertyModality::Open
+            } else {
+                crate::ir::IrPropertyModality::Final
+            },
             declared_getter: true,
             ..crate::ir::IrPropertyModifiers::default()
         },
