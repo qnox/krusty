@@ -19210,24 +19210,38 @@ impl<'a> Checker<'a> {
                     || !candidates.is_empty()
                     || !local_overloads.is_empty();
                 let explicit_type_args = self.resolved_explicit_type_args(scope, call);
-                if call_diagnostics::report_inapplicable_callable_candidates(
-                    InapplicableTopLevelCall {
-                        call,
-                        name: &fname,
-                        args,
-                        argument_names: arg_names.as_deref(),
-                        trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
-                        mapping_error_reported: false,
-                        explicit_type_args,
+                let constructors_own_failure = self.rejected_constructors_outrank_callables(
+                    call,
+                    args,
+                    &candidates,
+                    call_diagnostics::RejectedConstructors {
+                        source: source_constructor_failure
+                            .as_ref()
+                            .map(|(arguments, candidates, ..)| (arguments, candidates.as_slice())),
+                        provider: constructor_mapping_failure.as_ref(),
                     },
-                    candidates,
-                    self,
-                ) {
+                );
+                if !constructors_own_failure
+                    && call_diagnostics::report_inapplicable_callable_candidates(
+                        InapplicableTopLevelCall {
+                            call,
+                            name: &fname,
+                            args,
+                            argument_names: arg_names.as_deref(),
+                            trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
+                            mapping_error_reported: false,
+                            explicit_type_args,
+                        },
+                        candidates,
+                        self,
+                    )
+                {
                     return Ty::Error;
                 }
-                if retained_receiver_call_rejections
-                    .as_ref()
-                    .is_some_and(|rejections| rejections.has_mapping_failure())
+                if !constructors_own_failure
+                    && retained_receiver_call_rejections
+                        .as_ref()
+                        .is_some_and(|rejections| rejections.has_mapping_failure())
                 {
                     let retained = retained_receiver_call_rejections
                         .take()
@@ -38180,67 +38194,6 @@ impl<'a> Checker<'a> {
     /// "mentions a type variable" to a boolean. `<T>` itself is inference-only, a function containing
     /// `T` still constrains its outer shape, and a constructed type such as `List<T>` still constrains
     /// its argument by the `List` head.
-    /// Report WHY no source constructor accepted the call, when every candidate agrees on the reason.
-    ///
-    /// `select_source_constructor` answers only yes/no, so the reason was dropped and the caller fell back
-    /// to the generic "none of the following candidates is applicable:" list — `Point()` on
-    /// `class Point(val x: Int)` said that instead of "no value passed for parameter 'x'.", which is what
-    /// every other callable origin reports for the same mistake. Re-run the argument mapping over the
-    /// candidates to recover it. Returns whether a canonical error was reported.
-    fn report_source_constructor_mapping_error(
-        &mut self,
-        call: ExprId,
-        args: &[ExprId],
-        arguments: &CtorDelegationCall,
-        candidates: &[CtorDelegationCandidate],
-        class_name: &str,
-    ) -> bool {
-        let names: Option<&[Option<String>]> = arguments
-            .names
-            .iter()
-            .any(Option::is_some)
-            .then_some(&arguments.names);
-        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
-        let mut failures = Vec::new();
-        for (index, candidate) in candidates.iter().enumerate() {
-            let params = crate::libraries::ParamList {
-                visibility: Visibility::Public,
-                names: candidate.param_names.clone(),
-                defaults: candidate.defaults.as_slice().into(),
-                types: candidate.target.params().to_vec(),
-                recv_fun: candidate.lambda_receivers.as_slice().into(),
-                vararg: candidate.vararg,
-                annotation: None,
-            };
-            if let Err(failure) = map_param_list_args(args, names, &params, trailing_lambda) {
-                failures.push((failure, index));
-            }
-        }
-        match take_unanimous_mapping_error(&mut failures) {
-            Some((failure, index)) => {
-                if let Some(candidate) = candidates.get(index) {
-                    if self.report_constructor_too_many_arguments(
-                        call,
-                        args,
-                        &failure,
-                        class_name,
-                        ConstructorValueParameters {
-                            types: candidate.target.params(),
-                            names: &candidate.param_names,
-                            defaults: &candidate.defaults,
-                            vararg: candidate.vararg,
-                        },
-                    ) {
-                        return true;
-                    }
-                }
-                self.report_call_arg_mapping_error(call, args, failure);
-                true
-            }
-            None => false,
-        }
-    }
-
     fn report_constructor_too_many_arguments(
         &mut self,
         call: ExprId,

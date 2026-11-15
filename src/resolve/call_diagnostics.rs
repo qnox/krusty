@@ -3,9 +3,11 @@
 use super::*;
 
 mod argument_completion;
+mod constructor_rejections;
 mod rejection_plan;
 mod top_level_rejections;
 
+pub(super) use constructor_rejections::RejectedConstructors;
 pub(super) use top_level_rejections::report_inapplicable_callable_candidates;
 
 use rejection_plan::{
