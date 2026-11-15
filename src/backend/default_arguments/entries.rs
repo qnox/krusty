@@ -181,13 +181,11 @@ pub fn published_identities(ir: &IrFile, declaration: FunId) -> Vec<CallableId> 
     let mut identities = match ir.inherited_param_default_provider(declaration) {
         // An overriding member forwards inherited defaults through the entry of the declaration
         // that owns them. Publishing this implementation under that same provider identity would
-        // make multiple overrides compete for one module entry. Top-level actual declarations
-        // retain the expect identity below; they have no dispatch slot/provider implementation to
-        // publish elsewhere.
-        Some(ResolvedFunctionOverrideTarget::Module(_))
-            if ir.functions[declaration as usize]
-                .dispatch_receiver
-                .is_some() =>
+        // make multiple overrides compete for one module entry. An `actual` declaration, top-level
+        // or member, overrides nothing: it retains the expect identity below, which is what the
+        // callers selected.
+        Some(ResolvedFunctionOverrideTarget::Module(provider))
+            if overrides(ir, declaration, provider) =>
         {
             Vec::new()
         }
@@ -202,6 +200,22 @@ pub fn published_identities(ir: &IrFile, declaration: FunId) -> Vec<CallableId> 
     };
     identities.sort_unstable_by_key(|callable| callable.raw());
     identities
+}
+
+/// Whether member `declaration` implements `provider` by an override edge: its own, one a subclass
+/// records when `declaration` implements a supertype member it does not itself override, or the
+/// edge of a delegation forwarder.
+fn overrides(ir: &IrFile, declaration: FunId, provider: CallableId) -> bool {
+    ir.function_overrides.values().flatten().any(|edge| {
+        let implements = edge.implementation_function == Some(declaration)
+            || match edge.implementation {
+                ResolvedFunctionOverrideTarget::Module(implementation) => {
+                    ir.checked_callable_functions.get(&implementation) == Some(&declaration)
+                }
+                ResolvedFunctionOverrideTarget::External(_) => false,
+            };
+        implements && edge.overridden == ResolvedFunctionOverrideTarget::Module(provider)
+    })
 }
 
 /// How the entry of `declaration` reaches it, when this lowering can build one.
