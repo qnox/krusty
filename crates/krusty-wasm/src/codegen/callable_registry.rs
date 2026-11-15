@@ -1314,6 +1314,8 @@ mod tests {
                 &caller,
                 &CheckedBackendCallables::default(),
                 &no_facts(),
+                &NoClassifiers,
+                &super::super::laid_out_classes::LaidOutClasses::default(),
                 &mut wasm,
             )
             .expect("the remote member-default provider reserves its exact entry");
