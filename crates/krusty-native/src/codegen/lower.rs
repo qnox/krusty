@@ -565,7 +565,7 @@ struct FileLowering<'a> {
     data_imports: HashMap<String, DataId>,
     /// The static `KType` object of each distinct type a `typeOf` in this file names.
     type_of_objects: HashMap<Ty, DataId>,
-    dependency_interface_descriptors: HashMap<krusty::libraries::KlibClassIdentity, DataId>,
+    dependency_interface_descriptors: HashMap<krusty::backend::KlibClassIdentity, DataId>,
     /// The static `KClass` of each descriptor a `typeOf` classifier names.
     static_classes: HashMap<DataId, DataId>,
     /// The program-wide static objects this file emits, each the COMDAT group of its own section.
