@@ -65,7 +65,8 @@ impl KlibBodyClassContract {
                     KotlinModality::Final | KotlinModality::Open | KotlinModality::Abstract
                 )
                 && !self.is_inner
-                && !self.is_expect)
+                && !self.is_expect
+                && self.parameters.formals.is_empty())
     }
 
     /// This class applied to its declared formals. A non-generic class is the bare classifier.
