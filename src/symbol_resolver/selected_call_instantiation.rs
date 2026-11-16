@@ -40,10 +40,12 @@ pub(crate) fn selected_default_callable(base: &FunctionInfo) -> Option<LibraryCa
     Some(callable)
 }
 
-/// The selected declaration itself, when it fills its own omitted defaults and its body is not
-/// spliced at the call: the call keeps its identity and the target realizes the omission.
+/// The selected declaration itself, when it fills its own omitted defaults: the call keeps its
+/// identity and the target realizes the omission. An inline declaration with a legal call keeps
+/// it too; a call site may still expand its body, and only a declaration without a legal call
+/// (`@InlineOnly`, reified) must be spliced.
 pub(crate) fn declaration_default_callable(base: &FunctionInfo) -> Option<LibraryCallable> {
-    if !base.callable.defaults_from_declaration || base.flags.inline.can_inline() {
+    if !base.callable.defaults_from_declaration || base.flags.inline.must_inline() {
         return None;
     }
     let mut callable = base.callable.clone();
