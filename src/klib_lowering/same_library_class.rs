@@ -10,6 +10,9 @@
 //! subtyping reads: `Any`, because the constructor's delegation to it was authenticated, or an
 //! interface this library's producer graph serializes. Any other hierarchy is refused before the
 //! class is admitted.
+//!
+//! A class private to its enclosing class is linked the same way. Its signatures are public, but
+//! no provider publishes it and no other library names it.
 
 use super::class_initialization::{record_initializer, InitializationStep};
 use super::class_storage::{member_field, stored_field};
@@ -389,11 +392,16 @@ pub(super) struct PreparedLocalClass<'a> {
     pub(super) members: Vec<PreparedMember<'a>>,
 }
 
-/// The classifier identity of a file-local class in `module`. The file and slot are the identity;
-/// the source spelling is not.
+/// The classifier identity of a class only `module`'s bodies link. A file-local class is named
+/// by its file and slot, not its source spelling. A class private to its enclosing class keeps
+/// the qualified name its public signature serializes, as every type that mentions it does.
 pub(super) fn classifier_name(module: &str, signature: &KlibIrSignature) -> Option<TypeName> {
-    let KlibIrSignature::FileLocal { file, slot } = signature else {
-        return None;
+    let (file, slot) = match signature {
+        KlibIrSignature::FileLocal { file, slot } => (file, slot),
+        KlibIrSignature::Public(public) => {
+            return super::klib_types::classifier_name(public).ok();
+        }
+        KlibIrSignature::Accessor(_) => return None,
     };
     Some(
         TypeName::ROOT
@@ -588,8 +596,10 @@ fn constructor_class(
     }
     let _ = arguments;
     match &classifier.signature {
-        KlibIrSignature::FileLocal { .. } => Ok(classifier.signature.clone()),
-        KlibIrSignature::Public(_) | KlibIrSignature::Accessor(_) => Err(non_public_type()),
+        KlibIrSignature::FileLocal { .. } | KlibIrSignature::Public(_) => {
+            Ok(classifier.signature.clone())
+        }
+        KlibIrSignature::Accessor(_) => Err(non_public_type()),
     }
 }
 
@@ -872,9 +882,9 @@ fn members_and_storage<'a>(
                 }
             }
             KlibIrMember::Field(_) | KlibIrMember::AnonymousInitializer { .. } => {}
-            KlibIrMember::Class(_) => {
-                return Err(unsupported("a nested class of a non-public class"))
-            }
+            // A nested class is its own declaration, prepared when a body constructs it or
+            // calls one of its members. It shares no storage or initialization with this class.
+            KlibIrMember::Class(_) => {}
             KlibIrMember::EnumEntry(_) => return Err(unsupported("a non-public enum")),
             KlibIrMember::TypeAlias(_) => {
                 return Err(unsupported("a type alias of a non-public class"))
