@@ -131,6 +131,7 @@ impl EmittedDependencyCallable {
         matches!(
             self.realization,
             DependencyExternalRealization::EmittedBody
+                | DependencyExternalRealization::TargetIntrinsic(_)
                 | DependencyExternalRealization::PropertyGetter
                 | DependencyExternalRealization::TargetMember
                 | DependencyExternalRealization::ProviderLeaf

@@ -372,3 +372,102 @@ fn a_generic_extension_getter_keeps_its_selected_formal_through_body_lowering() 
     );
     assert_eq!(substitutions[0].value, Ty::String);
 }
+
+#[test]
+fn a_getter_realized_by_a_target_operation_links_as_a_checked_property_read() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let work = ProducerDirectory::new();
+    let source = work.0.join("TargetGetter.kt");
+    std::fs::write(
+        &source,
+        "package fixture\nclass Holder(val text: String)\nfun read(holder: Holder): String = holder.text\n",
+    )
+    .unwrap();
+    let library = work.0.join("target-getter");
+    let output = std::process::Command::new(root.join("bin/kotlinc-native"))
+        .args(["-p", "library", "-nopack", "-o"])
+        .arg(&library)
+        .arg(&source)
+        .output()
+        .expect("run target getter producer");
+    assert!(
+        output.status.success(),
+        "producer: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let libraries = KlibLibraries::open(&[
+        crate::klib_libraries::KlibLibraryInput::platform_stdlib(
+            root.join("klib/common/stdlib"),
+            crate::klib_libraries::KlibStdlibSemantics::Native,
+        ),
+        crate::klib_libraries::KlibLibraryInput::dependency(library),
+    ])
+    .unwrap();
+    let holder = libraries.classifier(type_name("fixture/Holder")).unwrap();
+    let [property] = holder.declared_callables["text"].properties() else {
+        panic!("one provider member property")
+    };
+    let getter_id = property.getter.external_identity.expect("exact getter id");
+    let getter = libraries
+        .external_callable(getter_id)
+        .expect("the provider realizes its getter");
+    let selected_getter = getter.klib_body_callable().expect("signed getter");
+    let read_symbols = libraries.symbols(SymbolNamespace::Package(type_name("fixture")), "read");
+    let [read] = read_symbols.callables.functions() else {
+        panic!("one provider read function")
+    };
+    let read = libraries
+        .external_callable(read.callable.external_identity.expect("exact read id"))
+        .expect("the provider realizes read");
+    let lower = |realization| {
+        let mut unit = super::super::DependencyBodyUnit::default();
+        let mut externals = crate::fx_hash::HashMap::default();
+        externals.insert(selected_getter.identity().clone(), realization);
+        let lowered = unit.lower_function_with_declarations(
+            read.klib_body_callable().expect("signed read"),
+            libraries.declaration_bodies(),
+            &super::super::KlibCalleeFacts::new([selected_getter]),
+            crate::klib_libraries::KlibIntrinsicFacts::empty(),
+            &externals,
+            &libraries,
+        );
+        (unit, lowered)
+    };
+    let (emitted, emitted_function) = lower(super::super::EmittedDependencyCallable::new(
+        getter_id, None, None,
+    ));
+    let emitted_function =
+        emitted_function.unwrap_or_else(|decline| panic!("emitted getter body: {decline}"));
+    let (target, target_function) =
+        lower(super::super::EmittedDependencyCallable::target_realization(
+            getter_id,
+            crate::libraries::CompilerIntrinsic::ResultFailureException,
+        ));
+    let target_function =
+        target_function.unwrap_or_else(|decline| panic!("target-operation getter body: {decline}"));
+    super::validated(target.ir());
+    assert_eq!(
+        super::lowered_body(&target, target_function),
+        super::lowered_body(&emitted, emitted_function),
+        "the target operation keeps the checked property-read lowering of an emitted getter"
+    );
+    let reads = target
+        .ir()
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            crate::ir::IrExpr::Checked(operation) => match operation.as_ref() {
+                crate::ir::IrCheckedOperation::ExternalPropertyRead { target, .. } => Some(*target),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reads,
+        [property.getter.external_property_identity.unwrap()],
+        "the authenticated getter identity remains one external property read"
+    );
+}
