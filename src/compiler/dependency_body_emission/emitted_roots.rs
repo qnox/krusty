@@ -8,13 +8,17 @@ use crate::libraries::{
     ExternalCallableKind, ExternalCallableRealization, KlibBodyCallable, KlibDependencyCallable,
     SemanticPlatform,
 };
+use crate::types::Ty;
 use std::collections::VecDeque;
 
-/// The declarations a unit's closure freezes, and the call edge facts of its members realized
-/// outside the unit.
+/// The declarations a unit's closure freezes.
 pub(super) struct FrozenClosure {
     pub(super) declarations: Vec<(crate::fir::ExternalCallableId, ExternalCallableRealization)>,
-    pub(super) member_edges: HashMap<KlibDependencyCallable, crate::klib_lowering::CallEdge>,
+    /// Edges that authorize a provider call of a member realized outside the unit. Function edges
+    /// are the ones the checker froze. An accessor has no function-hierarchy edge; the closure's
+    /// empty edge is the authorization the provider call consumes.
+    pub(super) authorized_member_edges:
+        HashMap<KlibDependencyCallable, crate::klib_lowering::CallEdge>,
     /// The library objects whose values the closure's bodies read, which the unit materializes.
     pub(super) read_objects: Vec<crate::libraries::KlibBodyClassContract>,
 }
@@ -41,7 +45,7 @@ pub(super) fn declarations(
     // Each callee, with the materialized class whose member's body calls it.
     let root_objects = roots.objects;
     let mut visited = HashSet::default();
-    let mut member_edges = HashMap::default();
+    let mut authorized_member_edges = HashMap::default();
     let mut state = ClosureState {
         pending: roots
             .callables
@@ -222,6 +226,14 @@ pub(super) fn declarations(
                 }
             }
         }
+        // So does a construction of one, whose box the unit's entry for the constructor builds.
+        if constructor
+            && selected
+                .class_contract()
+                .is_some_and(unit_boxes_value_class)
+        {
+            walk_value_class_overrides(platform, bodies, &facts, selected, &mut state)?;
+        }
         let primitive = facts
             .common_primitive(&identity, bodies)
             .map_err(|reason| format!("an invalid common primitive declaration: {reason:?}"))?;
@@ -246,7 +258,7 @@ pub(super) fn declarations(
         // has no other such leaf: body lowering declines a call of one, as it declines any
         // unmodelled form.
         let outside_edge = if member || is_outside_units(platform, bodies, &facts, selected)? {
-            Some(member_edge(platform, declaration_target, selected)?)
+            Some(member_edge(&facts, selected)?)
         } else {
             None
         };
@@ -256,7 +268,7 @@ pub(super) fn declarations(
         // A call of a member realized outside the unit carries the facts the member hierarchy
         // decorates a source call of it with; the edge is what authorizes the call.
         if let Some(edge) = outside_edge.filter(|_| external_member) {
-            member_edges.insert(identity.clone(), edge);
+            authorized_member_edges.insert(identity.clone(), edge);
         }
         let emits_body = !externals.contains_key(&identity)
             && !member
@@ -296,6 +308,15 @@ pub(super) fn declarations(
             {
                 state.pending.push_back((primary, None));
             }
+            // A member of a value class materializes the class, whose boxed instances dispatch to
+            // its overrides.
+            if selected
+                .class_contract()
+                .is_some_and(unit_boxes_value_class)
+                && selected.kind() == ExternalCallableKind::Member
+            {
+                walk_value_class_overrides(platform, bodies, &facts, selected, &mut state)?;
+            }
             // A member of an object reads the instance the object's own initialization created,
             // which materializes the object once with every member dispatch reaches. So does a
             // body reading an object's value, unless the target represents that object itself.
@@ -320,7 +341,7 @@ pub(super) fn declarations(
     }
     Ok(FrozenClosure {
         declarations: state.declarations,
-        member_edges,
+        authorized_member_edges,
         read_objects: state.read_objects,
     })
 }
@@ -544,13 +565,17 @@ pub(super) fn ordinary_roots<'a>(
             if bodies.function_has_body(selected.identity()) != Some(true) {
                 continue;
             }
-            // The constructor's delegation chain is admitted with the declarations it reaches,
-            // as the closure admits it.
+            // A value class's box is materialized by the construction itself. The constructor's
+            // delegation chain is admitted with the declarations it reaches, as the closure
+            // admits it.
             let superclasses = superclass_realizations(platform, bodies, selected.identity());
-            if with_realized_declarations(callees.clone(), &superclasses)
-                .constructor_initialization_callees(selected.identity(), bodies)
-                .map_err(|reason| format!("an invalid constructor root: {reason:?}"))?
-                .is_some()
+            if (selected
+                .class_contract()
+                .is_some_and(unit_boxes_value_class)
+                || with_realized_declarations(callees.clone(), &superclasses)
+                    .constructor_initialization_callees(selected.identity(), bodies)
+                    .map_err(|reason| format!("an invalid constructor root: {reason:?}"))?
+                    .is_some())
                 && seen.insert(selected.identity())
             {
                 roots.push(selected);
@@ -668,12 +693,7 @@ fn is_materialized_class_member(
     if crate::klib_lowering::is_receiver_member(callable, bodies, callees) {
         // Every target realizes one of `kotlin.Any`'s members from the receiver's own
         // representation, a builtin value included, so such a member stays the target's.
-        let (target, _) = platform
-            .external_callable_by_dependency(callable.identity())
-            .ok_or("a builtin-type member has no provider declaration")?;
-        return Ok(!realizes_any_member(&member_edge(
-            platform, target, callable,
-        )?));
+        return Ok(!realizes_any_member(&member_edge(callees, callable)?));
     }
     let Some(class) = callable
         .class_contract()
@@ -879,8 +899,7 @@ pub(super) fn member_class_constructor(
 /// role and exact overridden declarations. A target recognizes a specially implemented member
 /// through those facts.
 fn member_edge(
-    platform: &dyn SemanticPlatform,
-    target: crate::fir::ExternalCallableId,
+    callees: &crate::klib_lowering::KlibCalleeFacts<'_>,
     selected: KlibBodyCallable<'_>,
 ) -> Result<crate::klib_lowering::CallEdge, String> {
     // The hierarchy decorates function calls. A property accessor is read as its property, which
@@ -891,22 +910,15 @@ fn member_edge(
     ) {
         return Ok(crate::klib_lowering::CallEdge::default());
     }
-    let Some(crate::types::SemanticCallableOwner::Classifier(owner)) = selected.declaration_owner()
-    else {
-        return Err(format!(
-            "a KLIB member has no declaring class: {:?}",
-            selected.identity()
-        ));
-    };
-    let edge =
-        crate::resolve::klib_dependency_member_call_edge(platform, owner, selected.name(), target);
-    let Ok(edge) = edge else {
-        return Err(format!(
-            "a KLIB member is not one declaration of its class's hierarchy: {:?}",
-            selected.identity()
-        ));
-    };
-    Ok(edge)
+    callees
+        .member_edge(selected.identity())
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "the checker stored no member edge for KLIB declaration {:?}",
+                selected.identity()
+            )
+        })
 }
 
 /// Whether a call with `edge` invokes one of `kotlin.Any`'s members, which every target realizes
@@ -950,4 +962,52 @@ fn is_outside_units(
 ) -> Result<bool, String> {
     Ok(callable.kind() == ExternalCallableKind::Member
         && !is_materialized_class_member(platform, bodies, callees, callable)?)
+}
+
+/// Whether the unit lays out a box of the value class `class`. A value class the type model
+/// classifies as a builtin scalar or array (an unsigned number or array) has none: its boxes are
+/// the target's.
+fn unit_boxes_value_class(class: &crate::libraries::KlibBodyClassContract) -> bool {
+    let modeled = Ty::obj_name(class.classifier).canonical_semantic();
+    class.is_value && !modeled.is_builtin_scalar() && !modeled.is_array()
+}
+
+/// Walk the overrides a boxed instance of the value class `selected` belongs to dispatches to:
+/// each one with an exact provider declaration, as are the declarations it overrides, is walked
+/// with the class. The unit leaves any other slot unrealized.
+fn walk_value_class_overrides(
+    platform: &dyn SemanticPlatform,
+    bodies: &KlibDeclarationBodies,
+    facts: &crate::klib_lowering::KlibCalleeFacts<'_>,
+    selected: crate::libraries::KlibBodyCallable<'_>,
+    state: &mut ClosureState<'_, '_>,
+) -> Result<(), String> {
+    let overrides = facts
+        .value_class_overrides(selected, bodies)
+        .map_err(|reason| format!("an invalid value class member: {reason:?}"))?;
+    let provided =
+        |identity: &KlibDependencyCallable| platform.external_callable_by_dependency(identity);
+    for value_override in overrides {
+        if provided(&value_override.identity).is_none()
+            || !value_override
+                .overridden
+                .iter()
+                .all(|overridden| provided(overridden).is_some())
+        {
+            continue;
+        }
+        for overridden in value_override.overridden {
+            if state.declared.insert(overridden.clone()) {
+                state
+                    .declarations
+                    .push(provided(&overridden).expect("checked above"));
+            }
+        }
+        if state.dispatched.insert(value_override.identity.clone()) {
+            state
+                .pending
+                .push_back((value_override.identity, selected.class_contract().cloned()));
+        }
+    }
+    Ok(())
 }

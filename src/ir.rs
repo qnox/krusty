@@ -2867,6 +2867,7 @@ pub use generated_members::{
 };
 mod checked_operation;
 pub use checked_operation::IrCheckedOperation;
+mod construction_entries;
 mod exported_entries;
 mod function_parameters;
 pub use function_parameters::*;

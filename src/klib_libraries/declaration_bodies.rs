@@ -734,6 +734,26 @@ impl KlibDeclarationBodies {
             .map(|(_, function)| function.body.is_some())
     }
 
+    /// Public classifiers present in the serialized type table of one exact body declaration.
+    ///
+    /// The arena can also contain nested declarations that share the body's storage. Including
+    /// those types is intentional: common lowering may emit their bodies as part of the same
+    /// dependency unit.
+    pub(crate) fn type_classifiers_in_body(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Vec<TypeName> {
+        let Some((arena, _)) = self.function(identity) else {
+            return Vec::new();
+        };
+        let mut names = HashSet::default();
+        arena
+            .classifier_signatures_in_types()
+            .filter_map(class_identity)
+            .filter(|name| names.insert(*name))
+            .collect()
+    }
+
     /// Exact producer-resolved callees named directly by this function body. Missing and
     /// ambiguous origins stay absent here and are diagnosed by body lowering; consumers use this
     /// inventory only to prepare capabilities for declarations which the same lowering reaches.
@@ -753,6 +773,43 @@ impl KlibDeclarationBodies {
                     KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
                 },
             )
+            .collect()
+    }
+
+    /// The public classes the file-local classes of these bodies directly name as supertypes, each
+    /// once and in a stable order. Over the prepared-inline copies, these are the dependency
+    /// classes an object literal or local class extends wherever a call expands its template.
+    pub(crate) fn local_class_supertypes(&self) -> Vec<TypeName> {
+        let mut supertypes = self
+            .libraries
+            .iter()
+            .flat_map(|library| library.local_classes())
+            .flat_map(|(arena, class)| {
+                class
+                    .supertypes
+                    .iter()
+                    .filter_map(|&supertype| match arena.ty(supertype) {
+                        KlibIrType::Simple { classifier, .. }
+                            if classifier.kind == KlibIrSymbolKind::Class =>
+                        {
+                            match &classifier.signature {
+                                KlibIrSignature::Public(signature) => Some(signature),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    })
+            })
+            .collect::<Vec<_>>();
+        // Stable across processes: ordered by the serialized identity, not by interning order.
+        supertypes.sort_by(|left, right| {
+            (left.package().segments(), left.declaration().segments())
+                .cmp(&(right.package().segments(), right.declaration().segments()))
+        });
+        supertypes.dedup();
+        supertypes
+            .into_iter()
+            .filter_map(|signature| class_identity(&KlibIrSignature::Public(signature.clone())))
             .collect()
     }
 
@@ -828,6 +885,39 @@ impl KlibDeclarationBodies {
                 _ => None,
             })
             .filter(|signature| seen.insert(signature.clone()))
+            .collect()
+    }
+
+    /// Declaration facts of the class whose exact reached constructor is `identity`. Field and
+    /// anonymous initializers live beside that constructor, not in its function body. Reuse the
+    /// same structural initializer walker as local-class preparation; this inventory freezes facts
+    /// only and must not replace the initialization plan's executable root selection.
+    pub(crate) fn constructor_initializer_callables(
+        &self,
+        identity: &KlibDependencyCallable,
+        forms: crate::metadata::klib_ir::tree::EmittedCallForms,
+    ) -> Vec<KlibDependencyCallable> {
+        let Some((_, function)) = self.function(identity) else {
+            return Vec::new();
+        };
+        if !function.constructor {
+            return Vec::new();
+        }
+        let Some((arena, class)) =
+            self.module_class_declaring(&identity.module, &ir_signature(&identity.declaration))
+        else {
+            return Vec::new();
+        };
+        arena
+            .emitted_callable_symbols_from(arena.class_initializer_roots(class), forms)
+            .into_iter()
+            .filter_map(|symbol| declaration_signature(&symbol.signature))
+            .filter_map(
+                |declaration| match self.linked_origin(&identity.module, &declaration) {
+                    KlibCalleeOrigin::Exact(callee) => Some(callee),
+                    KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
+                },
+            )
             .collect()
     }
 

@@ -1038,7 +1038,7 @@ struct MemberFrame<'a> {
     compiler_aliases: HashMap<KlibIrSymbol, crate::metadata::klib_ir::tree::KlibIrExprId>,
     returnable_targets: Vec<KlibIrSymbol>,
     returnable_frames: Vec<super::compiler_blocks::ReturnableFrame>,
-    null_proven: HashSet<KlibIrSymbol>,
+    null_proven: HashSet<super::safe_calls::NullProvenRead>,
 }
 
 /// An object literal's property. The object is final, so the property dispatches only when it

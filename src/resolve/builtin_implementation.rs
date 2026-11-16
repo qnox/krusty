@@ -152,10 +152,19 @@ pub(super) fn for_checked_unit(checker: &Checker<'_>) -> Result<Facts, ExternalC
             )
         })
         .collect::<Facts>();
-    // A checked `super` target is emitted as a direct call. It cannot dynamically dispatch to a
-    // represented builtin override, but still needs an explicit checked record at backend freeze.
+    // A checked `super` target is emitted as a direct call, so the call itself does not dispatch.
+    // The declaration still has the same builtin implementations a virtual call of it has; an
+    // empty placeholder would disagree with the facts frozen from a KLIB body of that declaration.
     for identity in nonvirtual {
-        facts.entry(identity).or_default();
+        if facts.contains_key(&identity) {
+            continue;
+        }
+        let selected =
+            for_checked_external_members(checker.libraries, [identity], &Facts::default(), &[])?;
+        facts.insert(
+            identity,
+            selected.get(&identity).cloned().unwrap_or_default(),
+        );
     }
     Ok(facts)
 }

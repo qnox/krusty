@@ -28,6 +28,9 @@ pub struct ModuleClasses {
     classes: HashMap<TypeName, ModuleClass>,
     /// In declaration order, so numbering them visits them the same way in every process.
     interfaces: Vec<(TypeName, ModuleInterface)>,
+    /// The dependency classes among `classes` that a local class of a dependency inline template
+    /// extends ([`crate::fir::ResolvedDependencySuperclass::extended_by_inline_template`]).
+    inline_template_superclasses: HashSet<TypeName>,
 }
 
 /// One named class: what its dispatch table is built from.
@@ -218,6 +221,13 @@ impl ModuleClasses {
             .is_some_and(|class| class.dependency)
     }
 
+    /// Whether a local class of a dependency inline template extends the dependency class
+    /// `classifier`: wherever a call expands that template, a file other than the one
+    /// materializing the class extends it, though [`Self::subclasses_of`] names no class for it.
+    pub fn is_inline_template_superclass(&self, classifier: TypeName) -> bool {
+        self.inline_template_superclasses.contains(&classifier)
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (TypeName, &ModuleClass)> {
         self.classes.iter().map(|(name, class)| (*name, class))
     }
@@ -353,12 +363,17 @@ impl ModuleClasses {
                 },
             );
         }
+        let mut inline_template_superclasses = HashSet::default();
         for superclass in index.dependency_superclasses() {
             classes.insert(superclass.classifier, dependency_class(superclass));
+            if superclass.extended_by_inline_template {
+                inline_template_superclasses.insert(superclass.classifier);
+            }
         }
         Self {
             classes,
             interfaces,
+            inline_template_superclasses,
         }
     }
 }

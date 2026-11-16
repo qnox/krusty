@@ -976,7 +976,7 @@ impl<'a> Body<'a> {
 
     /// Evaluate `id` and convert its value to the carrier of `target`.
     fn value(&mut self, id: u32, target: Ty) -> Result<(), Unsupported> {
-        let source_ty = self.type_of(id)?;
+        let source_ty = self.completing_type(id)?;
         self.expression(id)?;
         // A statement-shaped operand may return/throw before its enclosing value use resumes.
         // Its Unit annotation must stay Unit; only the common completion proof removes the
@@ -1001,6 +1001,21 @@ impl<'a> Body<'a> {
             );
         }
         self.coerce_emitted_value(source, target)
+    }
+
+    /// The type `id` completes with. An inline body spliced at its call keeps the `Nothing` (or no
+    /// type) its blocks had around the callee's `return`, though they complete with the body's
+    /// result; such a block completes with its value's type.
+    fn completing_type(&self, id: u32) -> Result<Option<Ty>, Unsupported> {
+        let ty = self.type_of(id)?;
+        match self.ir.expr(id) {
+            IrExpr::Block {
+                value: Some(value), ..
+            } if ty.is_none_or(|ty| ty == Ty::Nothing) && !self.diverges(id) => {
+                self.completing_type(*value)
+            }
+            _ => Ok(ty),
+        }
     }
 
     /// Whether evaluating `id` as a value never completes: it ends in a jump or a `throw`, or in an
@@ -1143,8 +1158,13 @@ impl<'a> Body<'a> {
                 for statement in stmts {
                     self.statement(statement)?;
                 }
+                // The block's value is delivered at the type the block completes with, which an
+                // inline body's erased generic result is narrower than at its call.
                 if let Some(value) = value {
-                    self.expression(value)?;
+                    match self.completing_type(id)? {
+                        Some(ty) => self.value(value, ty)?,
+                        None => self.expression(value)?,
+                    }
                 }
             }
             IrExpr::Return(value) => {

@@ -28,16 +28,14 @@ const LENGTH_FIELD: u32 = CHARS_FIELD + 1;
 const MINIMUM_CAPACITY: i32 = 16;
 
 /// The class the runtime lays out.
-const CLASS: &str = "kotlin/text/StringBuilder";
-
 /// `kotlin.text.StringBuilder`.
 pub(super) fn class() -> TypeName {
-    krusty::types::type_name(CLASS)
+    krusty::types::wk::string_builder()
 }
 
 /// Whether `classifier` is `kotlin.text.StringBuilder`, which the runtime lays out.
 pub(super) fn lays_out(classifier: TypeName) -> bool {
-    classifier.matches(CLASS)
+    classifier == class()
 }
 
 /// The runtime's `StringBuilder` type and the functions realizing its members.

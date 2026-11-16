@@ -15,6 +15,8 @@ pub(super) fn record_checked(
     source: &dyn crate::symbol_source::SymbolSource,
     represented: &[crate::types::TypeName],
 ) -> Result<(), crate::fir::ExternalCallableId> {
+    // The checked KLIB graph froze its members' facts with the same `represented` overrides
+    // (`for_checked_klib_bodies`); recording rejects a member whose two facts disagree.
     let implementations = crate::resolve::for_checked_external_members(
         source,
         callables.external_member_identities(),
