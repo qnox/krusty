@@ -92,8 +92,28 @@ fn handoff(
             self.target
         }
 
-        fn lowers_coroutines_on_common_ir(&self) -> bool {
+        fn common_ir_preparation(&self) -> Option<krusty::backend::CommonIrPreparation> {
             self.common_ir_coroutines
+                .then(|| krusty::backend::CommonIrPreparation {
+                    counted_loops: krusty::backend::counted_loops::CountedLoopPolicy {
+                        style: krusty::backend::counted_loops::CounterLoopStyle::PreTested,
+                        inlining: krusty::backend::counted_loops::HeaderInlining::None,
+                        until_steps: if self.target == CompilationTarget::WasmJs
+                            || self.target == CompilationTarget::WasmWasi
+                        {
+                            krusty::backend::counted_loops::UntilSteps::Built
+                        } else {
+                            krusty::backend::counted_loops::UntilSteps::Counted
+                        },
+                    },
+                    enums: match self.target {
+                        CompilationTarget::Native => krusty::backend::enums::Contract::KotlinNative,
+                        CompilationTarget::WasmJs | CompilationTarget::WasmWasi => {
+                            krusty::backend::enums::Contract::KotlinWasm
+                        }
+                        _ => unreachable!("this probe only visits Native and Wasm targets"),
+                    },
+                })
         }
 
         fn lower_ir_file(
