@@ -3,10 +3,12 @@
 //! Native's `AtomicInt`, `AtomicLong`, `AtomicBoolean` and `AtomicReference` are ordinary KLIB
 //! classes. Each member body calls an external `kotlin.concurrent` function whose `TypedIntrinsic`
 //! kind names one atomic operation, passing a property reference bound to the instance's own
-//! backing field. The JVM maps the same classes onto `java.util.concurrent.atomic` and never reads
+//! backing field. `AtomicIntArray`, `AtomicLongArray` and `AtomicArray` hold an array instead, and
+//! each member calls the `TypedIntrinsic` extension of that array naming its atomic element
+//! operation. The JVM maps the same classes onto `java.util.concurrent.atomic` and never reads
 //! these bodies. The portable behavior of the classes is `tests/box_regressions/atomics.kt`; this
 //! test pins what the shared KLIB lowering makes of the Native bodies: one atomic operation on that
-//! field per member.
+//! field, or on an element of that array, per member.
 
 use krusty::backend::{Artifact, Backend, CheckedIrFile, CheckedIrUnitKind};
 use krusty::diag::DiagSink;
@@ -70,6 +72,8 @@ struct AtomicFieldProbe {
     seen: std::cell::RefCell<Vec<(String, String, String)>>,
     /// Each unit function with a dispatch receiver, as `(class, function, a method of its class)`.
     members: std::cell::RefCell<Vec<(String, String, bool)>>,
+    /// Every atomic array element operation, as `(array class, operation)`.
+    elements: std::cell::RefCell<Vec<(String, String)>>,
 }
 
 impl Backend for AtomicFieldProbe {
@@ -146,6 +150,24 @@ impl Backend for AtomicFieldProbe {
             let IrExpr::Checked(checked) = expression else {
                 continue;
             };
+            if let IrCheckedOperation::AtomicArrayElement {
+                operation, array, ..
+            } = &**checked
+            {
+                assert_eq!(file.kind, CheckedIrUnitKind::DependencySupport);
+                let array = file
+                    .ir
+                    .checked_type(*array)
+                    .expect("an atomic array element access names a typed array");
+                let class = array
+                    .obj_internal()
+                    .expect("an atomic array element access names an array class");
+                self.elements.borrow_mut().push((
+                    class.render().replace('/', "."),
+                    format!("{operation:?}"),
+                ));
+                continue;
+            }
             let IrCheckedOperation::AtomicField {
                 operation,
                 class,
@@ -171,18 +193,17 @@ impl Backend for AtomicFieldProbe {
     }
 }
 
-#[test]
-fn native_atomic_members_lower_to_one_atomic_operation_on_their_field() {
+/// The probe after the Native stdlib lowered `consumer`'s dependency support, or `None` without
+/// a Native distribution for the host.
+fn lowered(consumer: &str) -> Option<AtomicFieldProbe> {
     let Some(root) = std::env::var_os("KRUSTY_KOTLIN_NATIVE").map(std::path::PathBuf::from) else {
         assert!(
             std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none(),
             "Native distribution required"
         );
-        return;
+        return None;
     };
-    let Some(target) = krusty_native::NativeTarget::host() else {
-        return;
-    };
+    let target = krusty_native::NativeTarget::host()?;
     let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
         root.join("klib/common/stdlib"),
         KlibStdlibSemantics::Native,
@@ -190,7 +211,7 @@ fn native_atomic_members_lower_to_one_atomic_operation_on_their_field() {
     .expect("open the Native stdlib KLIB");
     let mut diags = DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
-        &[krusty::source::SourceInput::kotlin(CONSUMER).with_file_stem("Consumer")],
+        &[krusty::source::SourceInput::kotlin(consumer).with_file_stem("Consumer")],
         krusty::frontend::PlatformProvider::new(
             krusty::compilation_target::CompilationTarget::Native,
             Box::new(libraries.for_compilation()),
@@ -202,6 +223,7 @@ fn native_atomic_members_lower_to_one_atomic_operation_on_their_field() {
         native: krusty_native::CraneliftBackend::new(target).with_entry(krusty_native::Entry::Box),
         seen: std::cell::RefCell::default(),
         members: std::cell::RefCell::default(),
+        elements: std::cell::RefCell::default(),
     };
     krusty::compiler::emit_analyzed(
         analysis,
@@ -218,6 +240,14 @@ fn native_atomic_members_lower_to_one_atomic_operation_on_their_field() {
             .collect::<Vec<_>>(),
         Vec::<&str>::new()
     );
+    Some(probe)
+}
+
+#[test]
+fn native_atomic_members_lower_to_one_atomic_operation_on_their_field() {
+    let Some(probe) = lowered(CONSUMER) else {
+        return;
+    };
     let field = |class: &str, operation: &str| {
         (
             format!("kotlin.concurrent.atomics.{class}"),
@@ -265,4 +295,66 @@ fn native_atomic_members_lower_to_one_atomic_operation_on_their_field() {
         "<get-value>".to_owned(),
         true
     )));
+}
+
+const ARRAY_CONSUMER: &str = "\
+@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+
+import kotlin.concurrent.atomics.*
+
+fun ints(a: AtomicIntArray): Int {
+    a.storeAt(0, 1)
+    a.exchangeAt(0, 2)
+    a.compareAndSetAt(0, 2, 3)
+    a.compareAndExchangeAt(0, 3, 4)
+    a.fetchAndAddAt(0, 5)
+    return a.loadAt(0) + a.size
+}
+
+fun longs(a: AtomicLongArray): Long {
+    a.storeAt(0, 1L)
+    a.exchangeAt(0, 2L)
+    a.compareAndSetAt(0, 2L, 3L)
+    a.compareAndExchangeAt(0, 3L, 4L)
+    a.fetchAndAddAt(0, 5L)
+    return a.loadAt(0)
+}
+
+fun references(a: AtomicArray<String>): String {
+    a.storeAt(0, \"y\")
+    a.exchangeAt(0, \"z\")
+    a.compareAndSetAt(0, \"z\", \"w\")
+    a.compareAndExchangeAt(0, \"w\", \"v\")
+    return a.loadAt(0)
+}
+
+fun box(): String {
+    ints(AtomicIntArray(intArrayOf(0)))
+    longs(AtomicLongArray(1))
+    references(AtomicArray(arrayOf(\"x\")))
+    return \"OK\"
+}
+";
+
+#[test]
+fn native_atomic_array_members_lower_to_one_atomic_operation_on_an_element() {
+    let Some(probe) = lowered(ARRAY_CONSUMER) else {
+        return;
+    };
+    assert_eq!(probe.seen.into_inner(), Vec::<(String, String, String)>::new());
+    // `toString` loads each element as `loadAt` does; `AtomicArray<T>` has no addition.
+    let mut expected = Vec::new();
+    for (array, operations) in [
+        ("kotlin.IntArray", &["Load", "Load", "FetchAndAdd"][..]),
+        ("kotlin.LongArray", &["Load", "Load", "FetchAndAdd"][..]),
+        ("kotlin.Array", &["Load", "Load"][..]),
+    ] {
+        for operation in operations
+            .iter()
+            .chain(&["CompareAndExchange", "CompareAndSet", "Exchange", "Store"])
+        {
+            expected.push((array.to_owned(), (*operation).to_owned()));
+        }
+    }
+    assert_eq!(probe.elements.into_inner(), expected);
 }

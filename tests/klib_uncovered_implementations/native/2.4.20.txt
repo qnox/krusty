@@ -133,15 +133,6 @@ module=6:stdlib public package=2[6:kotlin,10:properties] declaration=2[16:ReadOn
 module=6:stdlib public package=2[6:kotlin,10:properties] declaration=2[17:ReadWriteProperty,8:getValue] member=13346812139690943289 mask=0
 module=6:stdlib public package=2[6:kotlin,10:properties] declaration=2[17:ReadWriteProperty,8:setValue] member=7688624837178785408 mask=0
 module=6:stdlib public package=2[6:kotlin,10:properties] declaration=2[24:PropertyDelegateProvider,15:provideDelegate] member=5888708956688296971 mask=0
-module=6:stdlib public package=2[6:kotlin,11:collections] declaration=1[9:arrayCopy] member=13545272020067663780 mask=0
-module=6:stdlib public package=2[6:kotlin,11:collections] declaration=1[9:arrayCopy] member=13549018740936055716 mask=0
-module=6:stdlib public package=2[6:kotlin,11:collections] declaration=1[9:arrayCopy] member=17661935486320792565 mask=0
-module=6:stdlib public package=2[6:kotlin,11:collections] declaration=1[9:arrayCopy] member=1815732224448287885 mask=0
-module=6:stdlib public package=2[6:kotlin,11:collections] declaration=1[9:arrayCopy] member=2321101033029010604 mask=0
-module=6:stdlib public package=2[6:kotlin,11:collections] declaration=1[9:arrayCopy] member=2857425943391506200 mask=0
-module=6:stdlib public package=2[6:kotlin,11:collections] declaration=1[9:arrayCopy] member=4165441488373797670 mask=0
-module=6:stdlib public package=2[6:kotlin,11:collections] declaration=1[9:arrayCopy] member=7057190928634314952 mask=0
-module=6:stdlib public package=2[6:kotlin,11:collections] declaration=1[9:arrayCopy] member=9983852991989775524 mask=0
 module=6:stdlib public package=2[6:kotlin,11:collections] declaration=1[9:arrayFill] member=11464546202475400980 mask=0
 module=6:stdlib public package=2[6:kotlin,11:collections] declaration=1[9:arrayFill] member=11752721796219483825 mask=0
 module=6:stdlib public package=2[6:kotlin,11:collections] declaration=1[9:arrayFill] member=14213365153037388122 mask=0
