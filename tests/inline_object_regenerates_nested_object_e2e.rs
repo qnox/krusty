@@ -40,3 +40,20 @@ fn the_regenerated_classes_take_kotlinc_names() {
         ]
     );
 }
+
+const SUPER_ARGUMENT: &str =
+    include_str!("box_regressions/inlineObjectRegeneratesNestedObjectWithSuperArgument.kt");
+
+/// The outer object forwards a superclass argument, which its constructor takes after the
+/// captured lambda. Dropping the lambda's parameter from the copy moves that argument one slot
+/// down in the superclass call the copy already cloned.
+#[test]
+fn a_forwarded_superclass_argument_follows_the_dropped_lambda_parameter() {
+    assert_eq!(
+        common::expect_box_run_with_stdlib(
+            SUPER_ARGUMENT,
+            "InlineObjectRegeneratesNestedObjectWithSuperArgument"
+        ),
+        "OK"
+    );
+}

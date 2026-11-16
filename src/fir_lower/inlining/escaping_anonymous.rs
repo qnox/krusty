@@ -1860,7 +1860,18 @@ fn consume_parameter_lambdas(
             ir.inline_only_fns.insert(impl_fn);
             ir.functions[impl_fn as usize].body = None;
         }
-        remove_capture_parameter(ir, copy_id, spec.order, body, parameter, source_name)?;
+        remove_capture(
+            ir,
+            copy_id,
+            spec.order,
+            &[],
+            CaptureRemoval {
+                parameter,
+                field: None,
+                constructor_forest: &constructor_forest(ir, copy_id),
+            },
+            source_name,
+        )?;
     }
     Ok(())
 }
@@ -1944,75 +1955,6 @@ fn parameter_lambda_uses(
     }
     uses.forwards.sort_unstable();
     Some(uses)
-}
-
-/// Remove capture parameter `parameter`, which no field stores, from `class`'s constructor and
-/// from `construction`, and renumber the later values of constructor code `body`.
-fn remove_capture_parameter(
-    ir: &mut crate::ir::IrFile,
-    class: ClassId,
-    construction: ExprId,
-    body: ExprId,
-    parameter: usize,
-    class_name: TypeName,
-) -> Result<(), super::super::FirLoweringFailure> {
-    let index = u32::try_from(parameter).map_err(|_| malformed(class_name))?;
-    crate::ir::lower_value_indices(ir, body, index + 2, 1);
-    let declaration = &mut ir.classes[class as usize];
-    // `ctor_param_count` counts only the parameters a field stores, so it keeps its value.
-    if parameter >= declaration.ctor_args.len()
-        || declaration.ctor_args[parameter].field_index.is_some()
-        || declaration.constructor_prefix_count == 0
-    {
-        return Err(malformed(class_name));
-    }
-    declaration.constructor_prefix_count -= 1;
-    declaration
-        .pre_super_param_fields
-        .retain(|(param, _)| *param != index);
-    for (param, _) in &mut declaration.pre_super_param_fields {
-        if *param > index {
-            *param -= 1;
-        }
-    }
-    if !declaration.ctor_param_annotations.is_empty() {
-        if declaration.ctor_param_annotations.len() != declaration.ctor_args.len() {
-            return Err(malformed(class_name));
-        }
-        declaration.ctor_param_annotations.remove(parameter);
-    }
-    declaration.ctor_args.remove(parameter);
-    shift_capture_map(&mut ir.class_capture_identities, class, index);
-    if let Some(order) = ir.class_capture_order.get_mut(&class) {
-        *order = order
-            .iter()
-            .filter(|&&capture| capture != index)
-            .map(|&capture| capture - u32::from(capture > index))
-            .collect();
-    }
-    let IrExpr::New {
-        args,
-        ctor_params,
-        default_prefix_count,
-        ..
-    } = &mut ir.exprs[construction as usize]
-    else {
-        return Err(malformed(class_name));
-    };
-    if parameter >= args.len() {
-        return Err(malformed(class_name));
-    }
-    args.remove(parameter);
-    if let Some(parameters) = ctor_params {
-        if parameter >= parameters.len() {
-            return Err(malformed(class_name));
-        }
-        parameters.remove(parameter);
-    }
-    if parameter < *default_prefix_count as usize {
-        *default_prefix_count -= 1;
-    }
-    Ok(())
 }
 
 /// Exact substituted capture edges owned by an anonymous-object copy.
@@ -2143,8 +2085,11 @@ fn consume_trivially_spliceable_lambdas(
             class,
             construction,
             pending_property_roots,
-            parameter,
-            field,
+            CaptureRemoval {
+                parameter,
+                field: Some(field),
+                constructor_forest: &[],
+            },
             class_name,
         )?;
     }
@@ -2215,8 +2160,11 @@ fn lift_capturing_lambda(
         class,
         construction,
         pending_property_roots,
-        lambda.parameter,
-        lambda.field,
+        CaptureRemoval {
+            parameter: lambda.parameter,
+            field: Some(lambda.field),
+            constructor_forest: &[],
+        },
         class_name,
     )?;
     let field_base = append_lifted_captures(
@@ -2715,56 +2663,111 @@ fn capture_field_remains(
     false
 }
 
+/// The constructor code cloned onto `class`: its constructor body and its superclass call's
+/// argument prelude and arguments, which share operands.
+fn constructor_forest(ir: &crate::ir::IrFile, class: ClassId) -> Vec<ExprId> {
+    let class = &ir.classes[class as usize];
+    class
+        .init_body
+        .iter()
+        .chain(&class.super_arg_prelude)
+        .chain(&class.super_args)
+        .copied()
+        .collect()
+}
+
+/// The capture parameter [`remove_capture`] removes.
+struct CaptureRemoval<'a> {
+    parameter: usize,
+    /// The field that stores the parameter, if any.
+    field: Option<u32>,
+    /// Constructor code already cloned onto the class: its constructor body and superclass-call
+    /// roots, which still read the parameter slots from before the removal.
+    constructor_forest: &'a [ExprId],
+}
+
+/// Remove capture parameter `parameter` from `class`'s constructor and from `construction`,
+/// with the field `field` that stores it, if any. Constructor code already cloned onto the class
+/// (`constructor_forest`: its constructor body and superclass-call roots) is renumbered as one
+/// forest: it reads the later parameters one slot lower and must not read the removed one. Code
+/// cloned later reads the copy's parameters through `constructor_parameters`, which drops the
+/// removed parameter's source mapping here.
 fn remove_capture(
     ir: &mut crate::ir::IrFile,
     class: ClassId,
     construction: ExprId,
     pending_property_roots: &[ExprId],
-    parameter: usize,
-    field: u32,
+    removal: CaptureRemoval<'_>,
     class_name: TypeName,
 ) -> Result<(), super::super::FirLoweringFailure> {
-    if ir.classes[class as usize].ctor_args.iter().any(|argument| matches!(
-        argument.provenance,
-        crate::ir::IrCtorParameterProvenance::InterfaceDelegate { field: stored, .. } if stored == field
-    )) {
+    let CaptureRemoval {
+        parameter,
+        field,
+        constructor_forest,
+    } = removal;
+    if let Some(field) = field {
+        if ir.classes[class as usize].ctor_args.iter().any(|argument| matches!(
+            argument.provenance,
+            crate::ir::IrCtorParameterProvenance::InterfaceDelegate { field: stored, .. } if stored == field
+        )) {
+            return Err(malformed(class_name));
+        }
+        shift_capture_reads(ir, class, pending_property_roots, field);
+    }
+    let parameter_index = u32::try_from(parameter).map_err(|_| malformed(class_name))?;
+    // Value 0 is `this`; parameter `i` is value `i + 1`.
+    let slot = parameter_index + 1;
+    let read_removed = std::cell::Cell::new(false);
+    crate::ir::remap_forest_value_indices(ir, constructor_forest, slot, &|value| {
+        if value == slot {
+            read_removed.set(true);
+            value
+        } else {
+            value - 1
+        }
+    });
+    if read_removed.get() {
         return Err(malformed(class_name));
     }
-    shift_capture_reads(ir, class, pending_property_roots, field);
     let declaration = &mut ir.classes[class as usize];
-    if field as usize >= declaration.fields.len()
-        || parameter >= declaration.ctor_args.len()
-        || declaration.ctor_param_count == 0
+    if parameter >= declaration.ctor_args.len()
+        || declaration.ctor_args[parameter].field_index != field
         || declaration.constructor_prefix_count == 0
     {
         return Err(malformed(class_name));
     }
-    let parameter_index = u32::try_from(parameter).map_err(|_| malformed(class_name))?;
-    declaration.fields.remove(field as usize);
-    declaration.ctor_param_count -= 1;
-    declaration.constructor_prefix_count -= 1;
-    for argument in &mut declaration.ctor_args {
-        if let crate::ir::IrCtorParameterProvenance::InterfaceDelegate { field: stored, .. } =
-            &mut argument.provenance
-        {
-            if *stored > field {
-                *stored -= 1;
-            }
+    if let Some(field) = field {
+        if field as usize >= declaration.fields.len() || declaration.ctor_param_count == 0 {
+            return Err(malformed(class_name));
         }
-        if let Some(index) = argument.field_index.as_mut() {
-            if *index > field {
-                *index -= 1;
+        declaration.fields.remove(field as usize);
+        // `ctor_param_count` counts only the parameters a field stores.
+        declaration.ctor_param_count -= 1;
+        for argument in &mut declaration.ctor_args {
+            if let crate::ir::IrCtorParameterProvenance::InterfaceDelegate {
+                field: stored, ..
+            } = &mut argument.provenance
+            {
+                if *stored > field {
+                    *stored -= 1;
+                }
+            }
+            if let Some(index) = argument.field_index.as_mut() {
+                if *index > field {
+                    *index -= 1;
+                }
             }
         }
     }
+    declaration.constructor_prefix_count -= 1;
     declaration
         .pre_super_param_fields
-        .retain(|(param, stored)| *param != parameter_index && *stored != field);
+        .retain(|(param, stored)| *param != parameter_index && Some(*stored) != field);
     for (param, stored) in &mut declaration.pre_super_param_fields {
         if *param > parameter_index {
             *param -= 1;
         }
-        if *stored > field {
+        if field.is_some_and(|field| *stored > field) {
             *stored -= 1;
         }
     }
@@ -2781,7 +2784,9 @@ fn remove_capture(
         }
         record.constructor_parameters.remove(parameter);
     }
-    shift_capture_map(&mut ir.shared_class_capture_fields, class, field);
+    if let Some(field) = field {
+        shift_capture_map(&mut ir.shared_class_capture_fields, class, field);
+    }
     // Closure identities are keyed by constructor parameter, which is not the field index when
     // an earlier prefix value is kept in no field.
     shift_capture_map(&mut ir.class_capture_identities, class, parameter_index);
