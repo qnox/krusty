@@ -18,20 +18,17 @@ fun named(import: String) = import
 fun box(): String {
     val directive = Directive("O")
     var collected = ""
-    for (import in arrayOf("O", "K")) {
+    for (import in listOf("O", "K")) {
         collected += import
     }
     val lambda = { import: String -> import }
     val reference = Directive::import
-    val results = arrayOf(
+    val result = listOf(
         describe(directive) + named(import = "K"),
         collected,
         lambda("O") + Importer("").import("K"),
         reference.get(Directive("OK")),
-        import + if (abs(-1) == 1) "K" else "abs",
+        import + abs(-1).toString().replace("1", "K"),
     )
-    for (result in results) {
-        if (result != "OK") return "FAIL: $result"
-    }
-    return "OK"
+    return if (result.all { it == "OK" }) "OK" else "FAIL: $result"
 }
