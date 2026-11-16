@@ -1471,7 +1471,6 @@ compiler/testData/diagnostics/tests/typealias/localTypeAliasConstructor.kt
 compiler/testData/diagnostics/tests/typealias/returnTypeNothingShouldBeSpecifiedExplicitly.kt
 compiler/testData/diagnostics/tests/typealias/typeAliasConstructorForProjection.kt
 compiler/testData/diagnostics/tests/typealias/typeAliasConstructorForProjectionInSupertypes.kt
-compiler/testData/diagnostics/tests/typealias/typeAliasConstructorInferenceInSupertypesList.kt
 compiler/testData/diagnostics/tests/typealias/typeAliasConstructorVsFunction.kt
 compiler/testData/diagnostics/tests/typealias/typeAliasExpansionRepeatedAnnotations.kt
 compiler/testData/diagnostics/tests/typealias/typeAliasForProjectionInSuperInterfaces.kt

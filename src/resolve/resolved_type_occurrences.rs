@@ -358,6 +358,7 @@ impl Checker<'_> {
             .insert((reference.span.lo, reference.span.hi), spelled.clone());
         self.retain_finalized_alias_applications(reference, spelled);
         self.check_finalized_type_reference_usage(reference, declaration);
+        self.check_finalized_type_arity(reference, declaration, spelled);
         self.check_finalized_type_bounds(reference, declaration, spelled);
         self.check_finalized_package_type_arguments(reference, declaration, spelled);
         semantic
@@ -380,6 +381,7 @@ impl Checker<'_> {
             .insert((reference.span.lo, reference.span.hi), spelled.clone());
         self.retain_finalized_alias_applications(reference, spelled);
         self.check_finalized_type_reference_usage(reference, semantic);
+        self.check_finalized_type_arity(reference, semantic, spelled);
         self.check_finalized_type_bounds(reference, semantic, spelled);
         self.check_finalized_package_type_arguments(reference, semantic, spelled);
         semantic

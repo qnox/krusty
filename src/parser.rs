@@ -3060,7 +3060,11 @@ impl<'a> Parser<'a> {
                 // recovers a member's concrete generic return — kept on the interface `TypeRef`. Also note
                 // whether any is a non-nullable primitive (`A<Long>` delegation needs substituted bridges).
                 let targs: Vec<TypeRef> = if self.at(TokenKind::Lt) {
-                    self.parse_type_args()
+                    let (targs, list) = self.parse_type_argument_list();
+                    if !targs.is_empty() {
+                        self.file.type_argument_list_spans.insert(sup_span, list);
+                    }
+                    targs
                 } else {
                     Vec::new()
                 };
@@ -3747,6 +3751,12 @@ impl<'a> Parser<'a> {
                 targs = segment_targs;
             }
             // The last segment's list is the classifier's own.
+            if let Some(own) = qualifier_arguments
+                .iter()
+                .find(|list: &&QualifierSegmentArguments| list.segment == segment)
+            {
+                self.file.type_argument_list_spans.insert(span, own.span);
+            }
             qualifier_arguments.retain(|list: &QualifierSegmentArguments| list.segment != segment);
             let nullable = self.eat_type_nullable(); // `T?`
             let base = TypeRef {
