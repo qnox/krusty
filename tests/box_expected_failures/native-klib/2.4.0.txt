@@ -1182,7 +1182,6 @@ inlineClass/secondaryConstructorWithGenerics.kt
 inlineClasses/anonymousObjectAsDefaultParam.kt
 inlineClasses/anonymousObjectAsDefaultParamFull.kt
 inlineClasses/anonymousObjectAsDefaultParamSingleFile.kt
-inlineClasses/boxReturnValueInLambda/kt27586_1.kt
 inlineClasses/boxReturnValueInLambda/kt27586_2.kt
 inlineClasses/boxReturnValueOnOverride/covariantOverrideListVsMutableList.kt
 inlineClasses/boxReturnValueOnOverride/covariantOverrideListVsMutableListGeneric.kt
@@ -1250,8 +1249,6 @@ inlineClasses/kt28405.kt
 inlineClasses/kt32793.kt
 inlineClasses/kt44141.kt
 inlineClasses/kt44867.kt
-inlineClasses/kt45991.kt
-inlineClasses/kt50974_resultMultiModule.kt
 inlineClasses/kt70461.kt
 inlineClasses/multifileClass.kt
 inlineClasses/privateConstructorFunInterfaceMultiModule.kt
