@@ -28,6 +28,7 @@ pub fn jvm_can_emit(ir: &IrFile) -> bool {
             // default-argument lowering that builds a module default entry.
             Callee::Module { .. }
             | Callee::ModuleDefaultEntry { .. }
+            | Callee::ModuleConstructorDefaultEntry { .. }
             | Callee::ModuleWithDefaults { .. }
             | Callee::LocalWithDefaults { .. }
             | Callee::ClassStaticWithDefaults { .. }

@@ -16,6 +16,7 @@ mod qualified_name;
 mod semantic_call_role;
 mod semantic_callable_owner;
 mod suspension;
+mod value_conversion;
 pub use classifier_declarations::{
     ClassifierDeclarationFacts, ClassifierDeclarationKind, ClassifierDeclarationName,
     DeclaredValueClass, GeneratedClassifierFact, GeneratedClassifierKind,
@@ -30,6 +31,7 @@ pub use overridden_declaration::OverriddenDeclaration;
 pub use semantic_call_role::{ConstNumericOperation, SemanticCallRole};
 pub use semantic_callable_owner::SemanticCallableOwner;
 pub use suspension::continuation_passing;
+pub(crate) use value_conversion::{value_conversion, ValueConversion};
 mod annotation_targets;
 mod interning;
 mod spelling;

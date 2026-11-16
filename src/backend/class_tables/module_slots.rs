@@ -634,6 +634,11 @@ impl PlannedTable {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Whether the class is a dependency class, planned from its provider's declarations.
+    pub fn is_dependency(&self) -> bool {
+        self.dependency
+    }
 }
 
 /// What a slot holding a function of `parameters` answering `result` is typed by: a `suspend`

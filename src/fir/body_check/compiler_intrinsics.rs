@@ -30,6 +30,7 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::FloatingIsNaN { .. }
         | CompilerIntrinsic::FloatingIsInfinite { .. }
         | CompilerIntrinsic::RadixToString { .. }
+        | CompilerIntrinsic::StringRangeEquals
         | CompilerIntrinsic::ArrayGet
         | CompilerIntrinsic::ArraySet
         | CompilerIntrinsic::ArraySize

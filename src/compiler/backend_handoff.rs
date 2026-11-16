@@ -191,9 +191,21 @@ pub(super) fn prepare_common_ir(
     crate::backend::counted_loops::realize(&mut file.ir, preparation.counted_loops);
     crate::backend::enums::publish_constants(&mut file.ir, &mut file.dependency_exports);
     crate::backend::enums::realize(&mut file.ir, preparation.enums);
-    crate::backend::default_arguments::realize(&mut file.ir, &mut file.callables, |function| {
-        file.dependency_exports.callable(function).is_some()
-    });
+    let classifiers = file.classifiers.module();
+    let module_name = file.module_name;
+    crate::backend::default_arguments::realize(
+        &mut file.ir,
+        &mut file.callables,
+        |function| file.dependency_exports.callable(function).is_some(),
+        |constructor| {
+            classifiers.declares_instance(
+                &crate::backend::instance_links::InstanceEntry::Constructor {
+                    module: module_name.into(),
+                    declaration: constructor,
+                },
+            )
+        },
+    );
     crate::backend::coroutines::add_continuation_parameters(&mut file.ir)
         .map_err(crate::backend::CommonIrPreparationError::Suspend)?;
 

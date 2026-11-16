@@ -948,18 +948,7 @@ impl CallLinker for Linker<'_, '_> {
             .declarations
             .external_callable_by_dependency(&identity)
             .and_then(|(_, realization)| {
-                let callable = realization.klib_body_callable()?;
-                callable
-                    .range_construction()
-                    .or(match callable.compiler_intrinsic() {
-                        Some(crate::libraries::CompilerIntrinsic::RangeUntil) => {
-                            Some(crate::fir::FirRangeOperation::Until)
-                        }
-                        Some(crate::libraries::CompilerIntrinsic::RangeDownTo) => {
-                            Some(crate::fir::FirRangeOperation::DownTo)
-                        }
-                        _ => None,
-                    })
+                super::for_loops::range_literal_operation(realization.klib_body_callable()?)
             });
         match operation {
             Some(operation) => Ok(Some(operation)),
@@ -997,10 +986,7 @@ impl CallLinker for Linker<'_, '_> {
             .declarations
             .external_callable_by_dependency(&identity)
             .and_then(|(_, realization)| {
-                match realization.klib_body_callable()?.compiler_intrinsic()? {
-                    crate::libraries::CompilerIntrinsic::Indices(kind) => Some(kind),
-                    _ => None,
-                }
+                super::for_loops::indices_receiver(realization.klib_body_callable()?)
             }))
     }
 
@@ -1033,8 +1019,7 @@ impl CallLinker for Linker<'_, '_> {
             .is_some_and(|(_, realization)| {
                 realization
                     .klib_body_callable()
-                    .and_then(|callable| callable.compiler_intrinsic())
-                    == Some(crate::libraries::CompilerIntrinsic::ProgressionReversed)
+                    .is_some_and(super::for_loops::reverses_progression)
             }))
     }
 
@@ -1043,6 +1028,17 @@ impl CallLinker for Linker<'_, '_> {
         signature: &KlibIrSignature,
     ) -> Result<Option<TypeName>, KlibBodyDeclineReason> {
         super::same_library_class::classifier(self.sources.bodies, &self.active_module, signature)
+    }
+
+    fn links_privately(&self, callee: &KlibIrSignature) -> bool {
+        matches!(
+            callee,
+            KlibIrSignature::Public(_) | KlibIrSignature::Accessor(_)
+        ) && self
+            .sources
+            .bodies
+            .module_local_function(&self.active_module, callee)
+            .is_some()
     }
 
     fn link_local_constructor(
@@ -1075,9 +1071,13 @@ impl CallLinker for Linker<'_, '_> {
         callee: &KlibIrSignature,
     ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
         let &KlibIrSignature::FileLocal { file, slot } = callee else {
-            return Err(KlibBodyDeclineReason::SignatureMismatch(
-                "a file-local call names a public signature".to_owned(),
-            ));
+            // A member of a class private to its enclosing class keeps its public signature.
+            if !self.links_privately(callee) {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "a file-local call names a public signature".to_owned(),
+                ));
+            }
+            return self.link_local_member(ir, callee);
         };
         let signature = KlibDeclarationSignature::FileLocal { file, slot };
         // A top-level function private to its file is the declaration of its own tree; every
