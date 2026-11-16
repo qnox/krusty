@@ -13,6 +13,9 @@ use super::class_storage::{plan_frame_values, realize_frame_values, Continuation
 use super::label_reentry::{split_at_suspensions, ReentryDecline};
 use super::value_namespace::max_value_index;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Clone, Copy)]
 struct ResumeContract {
     class: ClassId,
@@ -517,6 +520,7 @@ fn build_resume_with(ir: &mut IrFile, contract: ResumeContract) -> Result<u32, R
         finally: None,
         result: Ty::Unit,
     });
+    ir.set_logical_type(attempt, Ty::Unit);
     let marker = ir.add_expr(IrExpr::Checked(Box::new(
         crate::ir::IrCheckedOperation::ExternalPropertyRead {
             target: runtime.suspended,
@@ -558,6 +562,7 @@ fn build_resume_with(ir: &mut IrFile, contract: ResumeContract) -> Result<u32, R
     let not_pending = ir.add_expr(IrExpr::When {
         branches: vec![(Some(pending), pending_body), (None, success_body)],
     });
+    ir.set_logical_type(not_pending, Ty::Unit);
     let body = ir.add_expr(IrExpr::Block {
         stmts: vec![store, attempt, not_pending],
         value: None,
