@@ -246,7 +246,14 @@ pub(super) fn prepare_common_ir(
 
     let plugin_runtime = file.callables.plugin_runtime_bindings();
     let char_sequence_protocol = file.callables.char_sequence_protocol();
-    let mut callables = CheckedBackendCallables::freeze(&file.ir, provider).map_err(|error| {
+    // The handoff froze the declarations of the module's class members too, which a target's slot
+    // plan binds a published dependency layout by; the refreeze keeps them.
+    let mut callables = CheckedBackendCallables::freeze_with_class_declarations(
+        &file.ir,
+        provider,
+        file.classifiers.module().classes(),
+    )
+    .map_err(|error| {
         crate::backend::CommonIrPreparationError::Invariant(format!(
             "cannot freeze prepared dependency declarations: {error:?}"
         ))
