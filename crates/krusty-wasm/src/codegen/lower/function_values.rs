@@ -23,7 +23,7 @@ pub(super) enum FunctionEquality {
 impl Body<'_> {
     /// A new function value, created by the expression `site`, whose body is `function`, carrying
     /// `captures` as its leading arguments. With `sam`, the value is also an instance of that
-    /// `fun interface`, whose member it implements.
+    /// `fun interface`, whose member it implements. Answers the class the value is an instance of.
     pub(super) fn function_value(
         &mut self,
         site: u32,
@@ -31,7 +31,7 @@ impl Body<'_> {
         captures: &[u32],
         equality: FunctionEquality,
         sam: Option<&krusty::ir::IrSamTarget>,
-    ) -> Result<(), Unsupported> {
+    ) -> Result<crate::interface_dispatch::ClassRef, Unsupported> {
         let instance = self.type_of(site)?;
         let declaration = self
             .ir
@@ -210,7 +210,7 @@ impl Body<'_> {
             self.code.local_get(local);
         }
         self.code.struct_new(structure);
-        Ok(())
+        Ok(class)
     }
 
     /// A new function value for the callable reference `id`. Its adapter takes the referenced
@@ -227,7 +227,7 @@ impl Body<'_> {
             .chain(reference.bound_receiver)
             .collect();
         let kind = self.callable_reference_kind(reference)?;
-        self.function_value(
+        let class = self.function_value(
             id,
             reference.adapter,
             &captures,
@@ -236,7 +236,17 @@ impl Body<'_> {
                 receiver: reference.bound_receiver.map(|_| reference.captures.len()),
             },
             None,
-        )
+        )?;
+        // A reference answers `KCallable.name` with its declaration's name, whatever type the
+        // program reads it through. One that cannot say its name gets no `name` member.
+        if let Some(name) = krusty::backend::reference_names::callable_reference_name(
+            self.ir,
+            self.callables,
+            reference,
+        ) {
+            self.runtime.reference_name(self.module, class, &name)?;
+        }
+        Ok(())
     }
 
     /// Make the function value of `record`, whose boxed entry is `invoke`, an instance of the
