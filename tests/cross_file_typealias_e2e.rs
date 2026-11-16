@@ -221,10 +221,8 @@ fn cross_file_alias_wrong_arity_reports_arity() {
     ]) else {
         return;
     };
-    assert!(
-        diags
-            .iter()
-            .any(|d| d.contains("wrong number of type arguments for type alias 'P'")),
-        "expected the alias arity diagnostic, got: {diags:?}"
+    assert_eq!(
+        diags,
+        vec!["one type argument expected for 'typealias P<T> = Map<T, Long>'.".to_string()],
     );
 }

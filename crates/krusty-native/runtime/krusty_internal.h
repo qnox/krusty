@@ -87,6 +87,11 @@ struct KThread {
     KRef start_argument;
     /* Its start order, which names it in an uncaught report. */
     uint32_t number;
+    /* A managed or explicitly registered OS-thread lifetime outlives individual callbacks. */
+    bool persistent;
+    /* Outside every callback: only object slots remain roots, never the old callback stack. */
+    bool dormant;
+    struct KThreadObjectSlot *object_slots;
 };
 
 /* The roots a collection finds outside its own stack, which `krusty_threads.c` knows and

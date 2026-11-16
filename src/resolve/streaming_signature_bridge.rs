@@ -860,21 +860,8 @@ impl ProductionSignatureSemantics<'_> {
         source: crate::fir::SourceFileId,
         reference: &TypeRef,
     ) -> Option<crate::fir::DiagnosticId> {
-        fn extent(reference: &TypeRef, lo: &mut u32, hi: &mut u32) {
-            *lo = (*lo).min(reference.span.lo);
-            *hi = (*hi).max(reference.span.hi);
-            for component in reference
-                .fun_params
-                .iter()
-                .chain(reference.arg.iter().map(|argument| &**argument))
-                .chain(reference.targs.iter())
-            {
-                extent(component, lo, hi);
-            }
-        }
-        let mut lo = reference.span.lo;
-        let mut hi = reference.span.hi;
-        extent(reference, &mut lo, &mut hi);
+        let (lo, hi) =
+            super::type_argument_arity::written_extent(&self.headers.syntax, source, reference);
         self.diagnostics
             .borrow()
             .iter()
