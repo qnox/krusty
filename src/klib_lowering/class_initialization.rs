@@ -249,6 +249,11 @@ pub(super) fn plan<'a, 'b>(
             ));
         }
         (None, Ty::obj_name(crate::types::wk::any()))
+    } else if !access.type_arguments.is_empty() {
+        // A delegation applying type arguments names a generic superclass, whose layout is that
+        // class applied to them. This plan does not describe it, so the class keeps its target
+        // boundary.
+        return Ok(None);
     } else {
         // The superclass constructor the delegation names, by its exact declaration.
         let constructor_identity = match bodies.linked_origin(

@@ -46,7 +46,7 @@ ci: lint coverage-gate
 # Lint gate (enforced locally + in CI + by the pre-commit hook): formatting must be clean, and
 # clippy must introduce NO new findings beyond the frozen baseline (clippy-baseline.tsv). Existing
 # findings are tolerated; any new one fails. Identical behaviour everywhere — it's plain cargo + sh.
-lint: versioning-tests release-tests legacy-ratchet-tests reference-cache-tests outcome-set-merge-tests fmt-check legacy-baseline-check clippy-baseline-check
+lint: versioning-tests runner-profile-tests release-tests legacy-ratchet-tests reference-cache-tests outcome-set-merge-tests fmt-check legacy-baseline-check clippy-baseline-check
 
 # The CI step that drops kotlinc reference inventories no recent run read, before master saves them.
 reference-cache-tests:
@@ -55,6 +55,10 @@ reference-cache-tests:
 # Cheap release-version contracts, without a compiler build or reference-toolchain download.
 versioning-tests:
     bash scripts/test-versioning.sh
+
+# The CI runner profile's machine and contention report, against stand-in /proc and /sys trees.
+runner-profile-tests:
+    bash scripts/test-runner-profile.sh
 
 # The release job's signing key id selection, against keys generated in a throwaway keyring, its
 # Maven Central upload, against a stand-in Gradle build and Central Portal, and the Gradle wrapper
@@ -583,7 +587,7 @@ test-all *ARGS:
 # Build the krusty-build library test binary and print its path. Gradle lanes run this prebuilt
 # binary; they do not compile krusty again.
 #
-# CI builds this right after `just conformance-bin-and-cli`, and must reuse that build's krusty.
+# CI builds this right after `just tool-test-bin`, and must reuse that build's krusty.
 # Selecting krusty-cli's binary here keeps the Native backend in the graph: without it bumpalo
 # (under zopfli) loses Cranelift's `allocator-api2` feature and krusty, which links zopfli,
 # compiled a second time (484 s of a 1157 s build). krusty-build's own dev-dependencies add the
@@ -618,13 +622,15 @@ conformance-bin:
     set -euo pipefail
     scripts/cargo-test-binary.sh conformance --test conformance
 
-# CI's tool-bins job: the conformance binary and the `krusty` CLI (target/gate/krusty) from one
-# Cargo invocation. The CLI alone resolves libc, object and once_cell without the features the
-# root package's dev-dependencies add, so building the two apart compiled krusty twice.
-conformance-bin-and-cli:
+# CI's tool-bins job: the conformance and e2e binaries and the `krusty` CLI (target/gate/krusty)
+# from one Cargo invocation, printing the TARGET test binary (`conformance` or `e2e`). The CLI alone
+# resolves libc, object and once_cell without the features the root package's dev-dependencies
+# add, so building them apart compiled krusty twice. The same selection again only prints the
+# other target: Cargo finds nothing to rebuild.
+tool-test-bin TARGET:
     #!/usr/bin/env bash
     set -euo pipefail
-    scripts/cargo-test-binary.sh --build conformance -p krusty-cli -p krusty --test conformance --bin krusty
+    scripts/cargo-test-binary.sh --build "{{TARGET}}" -p krusty-cli -p krusty --test conformance --test e2e --bin krusty
 
 # Run the codegen/box conformance suite and print the case report "<pct> <passed> <applicable>":
 # applicable cases whose box() returns "OK". The same run's JVM byte report "<pct> <matched> <total>",

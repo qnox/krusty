@@ -293,6 +293,8 @@ struct BodyHeader<'a> {
 struct MemberClass<'a> {
     class: crate::ir::ClassId,
     fields: Vec<&'a KlibIrField>,
+    /// The class's properties with a backing field, each with that field.
+    properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
     contract: &'a crate::libraries::KlibBodyClassContract,
 }
 
@@ -797,7 +799,12 @@ impl DependencyBodyUnit {
                     (Some((class, plan)), _) => lowering.initialize_class(*class, plan),
                     (None, value_member) => match value_member {
                         Some(member) => lowering
-                            .reading_through(member.class, &member.fields, member.contract.is_value)
+                            .reading_through(
+                                member.class,
+                                &member.fields,
+                                member.properties.clone(),
+                                member.contract.is_value,
+                            )
                             .body(body.statements),
                         None => lowering.body(body.statements),
                     }
@@ -857,6 +864,25 @@ struct Linker<'u, 's> {
 }
 
 impl CallLinker for Linker<'_, '_> {
+    fn atomic_field(
+        &self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<Option<crate::libraries::AtomicOperation>, KlibBodyDeclineReason> {
+        let signature = KlibDeclarationSignature::Public(callee.clone());
+        Ok(
+            match self
+                .sources
+                .bodies
+                .linked_origin(&self.active_module, &signature)
+            {
+                KlibCalleeOrigin::Exact(identity) => {
+                    self.sources.intrinsics.atomic_field(&identity)
+                }
+                KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
+            },
+        )
+    }
+
     fn common_primitive(
         &self,
         signature: &KlibDeclarationSignature,
@@ -873,6 +899,17 @@ impl CallLinker for Linker<'_, '_> {
         self.primitive_at(signature, false, |facts, identity, bodies| {
             facts.range_literal_bounds(identity, bodies)
         })
+    }
+
+    fn declares_implementation(
+        &self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<bool, KlibBodyDeclineReason> {
+        let identity = self.callee_identity(callee)?;
+        self.sources
+            .bodies
+            .function_has_body(&identity)
+            .ok_or_else(|| KlibBodyDeclineReason::UnsupportedCallee(Box::new(callee.clone())))
     }
 
     fn range_membership_header(
@@ -949,18 +986,7 @@ impl CallLinker for Linker<'_, '_> {
             .declarations
             .external_callable_by_dependency(&identity)
             .and_then(|(_, realization)| {
-                let callable = realization.klib_body_callable()?;
-                callable
-                    .range_construction()
-                    .or(match callable.compiler_intrinsic() {
-                        Some(crate::libraries::CompilerIntrinsic::RangeUntil) => {
-                            Some(crate::fir::FirRangeOperation::Until)
-                        }
-                        Some(crate::libraries::CompilerIntrinsic::RangeDownTo) => {
-                            Some(crate::fir::FirRangeOperation::DownTo)
-                        }
-                        _ => None,
-                    })
+                super::for_loops::range_literal_operation(realization.klib_body_callable()?)
             });
         match operation {
             Some(operation) => Ok(Some(operation)),
@@ -998,10 +1024,7 @@ impl CallLinker for Linker<'_, '_> {
             .declarations
             .external_callable_by_dependency(&identity)
             .and_then(|(_, realization)| {
-                match realization.klib_body_callable()?.compiler_intrinsic()? {
-                    crate::libraries::CompilerIntrinsic::Indices(kind) => Some(kind),
-                    _ => None,
-                }
+                super::for_loops::indices_receiver(realization.klib_body_callable()?)
             }))
     }
 
@@ -1034,8 +1057,7 @@ impl CallLinker for Linker<'_, '_> {
             .is_some_and(|(_, realization)| {
                 realization
                     .klib_body_callable()
-                    .and_then(|callable| callable.compiler_intrinsic())
-                    == Some(crate::libraries::CompilerIntrinsic::ProgressionReversed)
+                    .is_some_and(super::for_loops::reverses_progression)
             }))
     }
 
@@ -1044,6 +1066,17 @@ impl CallLinker for Linker<'_, '_> {
         signature: &KlibIrSignature,
     ) -> Result<Option<TypeName>, KlibBodyDeclineReason> {
         super::same_library_class::classifier(self.sources.bodies, &self.active_module, signature)
+    }
+
+    fn links_privately(&self, callee: &KlibIrSignature) -> bool {
+        matches!(
+            callee,
+            KlibIrSignature::Public(_) | KlibIrSignature::Accessor(_)
+        ) && self
+            .sources
+            .bodies
+            .module_local_function(&self.active_module, callee)
+            .is_some()
     }
 
     fn link_local_constructor(
@@ -1076,9 +1109,13 @@ impl CallLinker for Linker<'_, '_> {
         callee: &KlibIrSignature,
     ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
         let &KlibIrSignature::FileLocal { file, slot } = callee else {
-            return Err(KlibBodyDeclineReason::SignatureMismatch(
-                "a file-local call names a public signature".to_owned(),
-            ));
+            // A member of a class private to its enclosing class keeps its public signature.
+            if !self.links_privately(callee) {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "a file-local call names a public signature".to_owned(),
+                ));
+            }
+            return self.link_local_member(ir, callee);
         };
         let signature = KlibDeclarationSignature::FileLocal { file, slot };
         // A top-level function private to its file is the declaration of its own tree; every
@@ -1864,17 +1901,22 @@ impl<'s> Linker<'_, 's> {
         self.private_members.insert(identity.clone());
         let function = match self.functions.get(identity) {
             Some(&function) => function,
-            None => self.queue(
-                ir,
-                identity,
-                None,
-                arena,
-                declaration,
-                BodyHeader {
-                    header,
-                    value_member: Some(active),
-                },
-            )?,
+            None => {
+                let class = active.class;
+                let function = self.queue(
+                    ir,
+                    identity,
+                    None,
+                    arena,
+                    declaration,
+                    BodyHeader {
+                        header,
+                        value_member: Some(active),
+                    },
+                )?;
+                register_class_method(ir, class, function);
+                function
+            }
         };
         let declared = &ir.functions[function as usize];
         let (Some(receiver), params) = (
@@ -2162,7 +2204,8 @@ impl<'s> Linker<'_, 's> {
             }
             (None, _) => None,
         };
-        self.queue(
+        let class = value_member.as_ref().map(|member| member.class);
+        let declared = self.queue(
             ir,
             identity,
             selected,
@@ -2172,7 +2215,11 @@ impl<'s> Linker<'_, 's> {
                 header,
                 value_member,
             },
-        )
+        )?;
+        if let Some(class) = class {
+            register_class_method(ir, class, declared);
+        }
+        Ok(declared)
     }
 
     /// Declare `function` with `header` and queue its body.
@@ -2267,6 +2314,15 @@ fn private_class_member_header<'b>(
         member.types,
     )?;
     Ok((member.arena, member.function, header))
+}
+
+/// Record `function` as a method of the materialized `class`, once. A member no class table
+/// numbers (a final or private one) still belongs to its class, so a call of it runs it directly.
+fn register_class_method(ir: &mut IrFile, class: crate::ir::ClassId, function: FunId) {
+    if !ir.classes[class as usize].methods.contains(&function) {
+        ir.classes[class as usize].methods.push(function);
+        ir.note_class_method(class, function);
+    }
 }
 
 /// The statements of the body `function` serializes.

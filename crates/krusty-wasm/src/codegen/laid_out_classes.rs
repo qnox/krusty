@@ -101,6 +101,12 @@ impl LaidOutClasses {
         self.support = true;
     }
 
+    /// Whether the file being laid out is a dependency support unit, whose classes are the
+    /// program's.
+    pub(super) fn lays_out_dependencies(&self) -> bool {
+        self.support
+    }
+
     pub(super) fn get(&self, class: TypeName) -> Option<&LaidOutClass> {
         self.classes
             .get(&class)

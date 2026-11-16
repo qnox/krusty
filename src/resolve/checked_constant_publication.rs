@@ -181,6 +181,8 @@ fn fold_member_constant(
             resolved_constants: &checker.resolved_constants,
             resolved_calls: &checker.resolved_calls,
             resolved_operator_calls: &checker.resolved_operator_calls,
+            resolved_enum_entries: &checker.resolved_enum_entries,
+            expr_lowers: &checker.expr_lowers,
         },
         initializer,
         declared_ty,

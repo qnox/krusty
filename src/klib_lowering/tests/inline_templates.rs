@@ -386,21 +386,33 @@ fn a_scope_function_body_is_a_generic_template_that_splices_its_lambda() {
 }
 
 #[test]
-fn repeat_uses_the_canonical_declaration_of_its_inherited_iterator() {
+fn repeat_counts_its_range_loop_instead_of_iterating() {
     let Some(root) = distribution_root() else {
         return;
     };
     let libraries = stdlib(&root);
     let selected = kotlin_function(&libraries, "repeat");
     let mut ir = IrFile::default();
-    // The original `repeat` body now lowers: its exact `IntRange.iterator` reference is bound at
-    // provider publication to the real `IntProgression.iterator`, not a fabricated range member.
+    // `for (index in 0 until times)` in `repeat`'s body is a counted loop, as kotlinc's
+    // `ForLoopsLowering` makes it: no `IntRange` is built and no iterator is called.
     let template = template(&mut ir, &libraries, &selected).expect("the real repeat template");
     let function = &ir.functions[template.function as usize];
     assert_eq!(function.params, selected.callable.params);
     assert_eq!(function.ret, selected.callable.ret);
     assert!(ir.inline_only_fns.contains(&template.function));
-    assert!(ir.exprs.iter().any(|expression| {
+    let counters: Vec<Ty> = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::Checked(operation) => match operation.as_ref() {
+                crate::ir::IrCheckedOperation::RangeLoop { counter, .. } => Some(*counter),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(counters, [Ty::Int]);
+    let iterates = ir.exprs.iter().any(|expression| {
         let IrExpr::Call { callee, .. } = expression else {
             return false;
         };
@@ -414,7 +426,8 @@ fn repeat_uses_the_canonical_declaration_of_its_inherited_iterator() {
             Some(KlibDeclarationSignature::Public(signature))
                 if signature.matches_exact(&["kotlin", "ranges"],
                     &["IntProgression", "iterator"], 8062689420742628886, 0))
-    }));
+    });
+    assert!(!iterates, "a counted loop calls no iterator");
     validated(&ir);
 }
 

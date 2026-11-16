@@ -195,6 +195,9 @@ impl SingletonMemberReceiver {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DependencyExportSignatures {
     callables: HashMap<FunId, KlibDependencyCallable>,
+    /// Generated implementations behind exact property-accessor exports. They are private
+    /// trampoline targets; the accessor identity belongs to the exported wrapper, not this body.
+    property_accessor_entries: HashMap<FunId, ExportedPropertyAccessor>,
     /// Every visible function an interface of this file declares, abstract ones included: the
     /// identity a dependent module's implementation of the member is recorded under.
     interface_members: HashMap<FunId, KlibDependencyCallable>,
@@ -265,6 +268,11 @@ impl DependencyExportSignatures {
     /// another module and has a callable realization.
     pub fn callable(&self, callable: FunId) -> Option<&KlibDependencyCallable> {
         self.callables.get(&callable)
+    }
+
+    /// Whether `callable` is the private implementation behind an exact property-accessor export.
+    pub fn is_property_accessor_entry(&self, callable: FunId) -> bool {
+        self.property_accessor_entries.contains_key(&callable)
     }
 
     /// Iterate every callable identity this file publishes so a target can install its complete
@@ -363,6 +371,18 @@ impl DependencyExportSignatures {
         assert!(
             previous.is_none(),
             "one common-IR callable cannot export two KLIB declaration identities"
+        );
+    }
+
+    pub(crate) fn record_property_accessor_entry(
+        &mut self,
+        callable: FunId,
+        accessor: ExportedPropertyAccessor,
+    ) {
+        let previous = self.property_accessor_entries.insert(callable, accessor);
+        assert!(
+            previous.is_none(),
+            "one callable realizes one property accessor entry"
         );
     }
 

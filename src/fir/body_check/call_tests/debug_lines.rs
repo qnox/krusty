@@ -3,8 +3,7 @@ use crate::fir::FirExpressionDebugLines;
 
 #[test]
 fn multiline_member_call_keeps_the_selected_call_source_and_end_lines() {
-    let (body, index) = checked_function_body(
-        "class Recorder {\n\
+    let source = "class Recorder {\n\
              suspend fun save(label: String, value: Int): Int = value\n\
          }\n\
          suspend fun work(recorder: Recorder): Int {\n\
@@ -13,9 +12,8 @@ fn multiline_member_call_keeps_the_selected_call_source_and_end_lines() {
                  label = \"entry\",\n\
              )\n\
              return result\n\
-         }\n",
-        "work",
-    );
+         }\n";
+    let (body, index) = checked_function_body(source, "work");
     let call = (0..body.expression_count())
         .map(|raw| FirExprId::from_raw(raw as u32))
         .find(|expression| {
@@ -38,6 +36,9 @@ fn multiline_member_call_keeps_the_selected_call_source_and_end_lines() {
             start: 5,
             source: 5,
             end: 8,
+            start_offset: source
+                .find("recorder.save(")
+                .expect("the call is in the source") as u32,
             positionless: false
         }
     );

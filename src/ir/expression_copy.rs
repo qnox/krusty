@@ -307,6 +307,7 @@ fn expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId, action: Exp
         inline_anonymous_lambdas: _,
         class_method_owners: _,
         default_entries: _,
+        constructor_default_entries: _,
         construction_entries: _,
         dispatch_entries: _,
         enum_initializers: _,

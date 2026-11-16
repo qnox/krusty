@@ -432,6 +432,12 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
                 *end = map(*end);
             }
             IrCheckedOperation::IllegalProgressionStep { step } => *step = map(*step),
+            IrCheckedOperation::AtomicField {
+                receiver, operands, ..
+            } => {
+                *receiver = map(*receiver);
+                operands.iter_mut().for_each(|value| *value = map(*value));
+            }
             IrCheckedOperation::RangeContains {
                 value, start, end, ..
             } => {
