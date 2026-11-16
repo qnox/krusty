@@ -792,7 +792,7 @@ impl Body<'_> {
             .ok_or("a `super` call to a function of no function type")?;
         let mut expected = vec![REFERENCE];
         for param in params {
-            expected.push(carrier(*param)?.ok_or("a `Unit` parameter")?);
+            expected.push(super::parameter_carrier_of(*param)?.ok_or("a `Unit` parameter")?);
         }
         if params.len() != args.len()
             || carried != expected

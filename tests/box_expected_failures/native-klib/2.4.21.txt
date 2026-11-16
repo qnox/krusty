@@ -923,7 +923,6 @@ enum/defaultCtor/noPrimaryConstructor.kt
 enum/enumEntriesMultimoduleNoMappings.kt
 enum/enumEntriesNameClashes.kt
 enum/enumEntryMembers.kt
-enum/enumMultiModule.kt
 enum/enumValueOf.kt
 enum/interfaceCallNoEntryClass.kt
 enum/interfaceCallWithEntryClass.kt
@@ -1412,7 +1411,6 @@ multiplatform/k2/defaultArguments/nestedEnumEntryValue.kt
 multiplatform/k2/defaultArguments/suspend.kt
 multiplatform/k2/defaultArguments/withTypeParameter.kt
 multiplatform/k2/delegation/delegationToExpectInterface_noNewMembers.kt
-multiplatform/k2/enumStaticMethods.kt
 multiplatform/k2/expectStatic.kt
 multiplatform/k2/extensionPropertiesOverloads.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt
