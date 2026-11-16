@@ -1013,6 +1013,43 @@ impl KlibDeclarationBodies {
             .collect()
     }
 
+    /// The public classes the file-local classes of these bodies directly name as supertypes, each
+    /// once and in a stable order. Over the prepared-inline copies, these are the dependency
+    /// classes an object literal or local class extends wherever a call expands its template.
+    pub(crate) fn local_class_supertypes(&self) -> Vec<TypeName> {
+        let mut supertypes = self
+            .libraries
+            .iter()
+            .flat_map(|library| library.local_classes())
+            .flat_map(|(arena, class)| {
+                class
+                    .supertypes
+                    .iter()
+                    .filter_map(|&supertype| match arena.ty(supertype) {
+                        KlibIrType::Simple { classifier, .. }
+                            if classifier.kind == KlibIrSymbolKind::Class =>
+                        {
+                            match &classifier.signature {
+                                KlibIrSignature::Public(signature) => Some(signature),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    })
+            })
+            .collect::<Vec<_>>();
+        // Stable across processes: ordered by the serialized identity, not by interning order.
+        supertypes.sort_by(|left, right| {
+            (left.package().segments(), left.declaration().segments())
+                .cmp(&(right.package().segments(), right.declaration().segments()))
+        });
+        supertypes.dedup();
+        supertypes
+            .into_iter()
+            .filter_map(|signature| class_identity(&KlibIrSignature::Public(signature.clone())))
+            .collect()
+    }
+
     /// The serialized declarations the member function `identity` overrides. A materialized
     /// class carries each as an override edge its dispatch goes through, so the declarations are
     /// reached with the member even though its body never names them.

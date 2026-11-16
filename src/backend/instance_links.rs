@@ -1,10 +1,11 @@
 //! Links from one file to an instance of a classifier another file realizes: an object's single
-//! instance, one constant of an enum, or a new instance built by one of its constructors.
+//! instance, one constant of an enum, or a new instance built by one of its constructors; and to
+//! an enum's `values()` and `valueOf`, which answer its constants.
 //!
 //! Only the declaring file holds such an instance's layout, storage and initialization, so it
 //! realizes an entry, an ordinary function answering the instance: an object's and a
-//! constructor's in `super::construction_entries`, an enum constant's in `super::enums`. Every
-//! other file reads the instance by calling that entry. These are the same problem, so they
+//! constructor's in `super::construction_entries`, an enum constant's, `values()` and `valueOf`
+//! in `super::enums`. Every other file reads the instance by calling that entry. These are the same problem, so they
 //! share one identity ([`InstanceEntry`]), one Pass-1 fact
 //! (`super::BackendModuleFacts::declares_instance`) and one table of links
 //! ([`super::module_links::ModuleLinks`]): whichever of the reading and the declaring file is
@@ -25,6 +26,12 @@ pub enum InstanceEntry {
     /// The single instance of an `object` or companion object.
     Object(TypeName),
     EnumConstant(EnumConstant),
+    /// The `values()` or `valueOf` of an enum, which read the constants the declaring file holds;
+    /// the entry takes the member's own parameters.
+    EnumMember {
+        classifier: TypeName,
+        member: super::enums::StaticMember,
+    },
     /// A new instance, built by the checked constructor declaration of the named source module;
     /// the entry takes the constructor's declared parameters. A declaration identity belongs to
     /// one module's analysis, so the module qualifies it.
@@ -48,7 +55,10 @@ impl InstanceEntry {
     pub fn enum_constant(&self) -> Option<&EnumConstant> {
         match self {
             Self::EnumConstant(constant) => Some(constant),
-            Self::Object(_) | Self::Constructor { .. } | Self::ConstructorDefaults { .. } => None,
+            Self::Object(_)
+            | Self::EnumMember { .. }
+            | Self::Constructor { .. }
+            | Self::ConstructorDefaults { .. } => None,
         }
     }
 }
@@ -72,7 +82,8 @@ pub fn link_entries<V: Clone>(
         .collect()
 }
 
-/// The link of each instance of another file's classifier that `ir` emits a read of: the declaring
+/// The link of each instance of another file's classifier that `ir` emits a read of, and of each
+/// `values()` and `valueOf` of another file's enum it calls: the declaring
 /// file's defined link, or, for an instance `module` certifies but whose file comes later, a link
 /// reserved from `allocate` for that file to define. An instance of neither kind has no link, and
 /// the target declines its read.
@@ -93,10 +104,20 @@ pub fn link_reads<V: Clone>(
                 name: name.clone(),
             }),
             IrExpr::SingletonValue { classifier } => InstanceEntry::Object(*classifier),
+            IrExpr::EnumValues { classifier } => InstanceEntry::EnumMember {
+                classifier: *classifier,
+                member: super::enums::StaticMember::Values,
+            },
+            IrExpr::EnumValueOf { classifier, .. } => InstanceEntry::EnumMember {
+                classifier: *classifier,
+                member: super::enums::StaticMember::ValueOf,
+            },
             _ => continue,
         };
         let declared_here = match &instance {
-            InstanceEntry::Object(classifier) => ir.class_id_by_name(*classifier).is_some(),
+            InstanceEntry::Object(classifier) | InstanceEntry::EnumMember { classifier, .. } => {
+                ir.class_id_by_name(*classifier).is_some()
+            }
             InstanceEntry::EnumConstant(constant) => {
                 ir.class_id_by_name(constant.classifier).is_some()
             }

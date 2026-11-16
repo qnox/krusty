@@ -5,7 +5,7 @@
 //! resulting semantic `Ty` and never repeat spelling-based resolution.
 
 use crate::ast::{File, TypeRef};
-use crate::diag::{DiagSink, Span};
+use crate::diag::DiagSink;
 use crate::types::{type_name, Ty, TyKind, TypeName};
 
 use super::{ClassNames, ClassifierBindingError, SymbolTable, TParams};
@@ -155,8 +155,6 @@ fn apply_alias_expansion(
     resolved: TypeName,
     args: &[Ty],
     import_path: bool,
-    span: Span,
-    diags: &mut DiagSink,
 ) -> Ty {
     let base = Ty::obj_args_name(resolved, args);
     // An import path resolves a declaration identity; it is not a use of the alias as a type and
@@ -174,14 +172,8 @@ fn apply_alias_expansion(
         return base;
     }
     if alias.formals.len() != args.len() {
-        diags.error(
-            span,
-            format!(
-                "wrong number of type arguments for type alias '{name}': expected {}, found {}.",
-                alias.formals.len(),
-                args.len()
-            ),
-        );
+        // A wrong argument count has no expansion. The signature pass reports the application at
+        // its written argument list (`type_argument_arity`), which this name-keyed table lacks.
         return Ty::Error;
     }
     let bindings = alias
@@ -281,8 +273,6 @@ fn function_alias_expansion_use(
         alias.target,
         &args,
         false,
-        reference.span,
-        diags,
     ))
 }
 
@@ -329,8 +319,6 @@ pub(super) fn ty_of_ref_with(
                 internal,
                 &args,
                 reference.is_import(),
-                reference.span,
-                diags,
             )
         })
     };
@@ -367,8 +355,6 @@ pub(super) fn ty_of_ref_with(
                 internal,
                 &args,
                 reference.is_import(),
-                reference.span,
-                diags,
             )
         }
     } else if let Some(expanded) =
@@ -381,12 +367,8 @@ pub(super) fn ty_of_ref_with(
         expanded
     } else {
         match failed_binding {
-            Some(ClassifierBindingError::Ambiguous(_)) => {
-                diags.error(
-                    reference.span,
-                    "overload resolution ambiguity between candidates:",
-                );
-            }
+            // The signature pass reports an ambiguous classifier with its candidates.
+            Some(ClassifierBindingError::Ambiguous(_)) => {}
             Some(ClassifierBindingError::Unresolved(segment)) => {
                 diags.error(reference.span, format!("unresolved reference '{segment}'."));
             }
