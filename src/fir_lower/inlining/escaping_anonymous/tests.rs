@@ -245,3 +245,90 @@ fn copied_constructor_code_rewrites_a_shared_operand_once() {
     assert!(matches!(ir.exprs[parameter as usize], IrExpr::GetValue(2)));
     assert!(matches!(ir.exprs[local as usize], IrExpr::GetValue(3)));
 }
+
+/// An anonymous object whose constructor prefix is `[fieldless, lambda, other]`: the first value
+/// is kept in no field, the lambda is field 0 and the other capture field 1. kotlinc's first-use
+/// order of the prefix is `[0, 2, 1]`.
+fn object_with_a_fieldless_prefix_capture(ir: &mut crate::ir::IrFile) -> (ClassId, ExprId) {
+    let name = crate::types::type_name("sample/InlineAnonymous");
+    let mut class = crate::ir::IrClass::synthetic(name);
+    class.is_anonymous_object = true;
+    for field in [None, Some(0), Some(1)] {
+        class.ctor_args.push(crate::ir::IrCtorArg {
+            name: None,
+            context_kind: crate::types::ContextParameterKind::None,
+            ty: Ty::Int,
+            declared_ty: None,
+            is_field: field.is_some(),
+            field_index: field,
+            has_default: false,
+            is_vararg: false,
+            type_param: None,
+            check: None,
+            anonymous_super_forward: None,
+            capture: None,
+            provenance: crate::ir::IrCtorParameterProvenance::Capture,
+            capture_identity: None,
+        });
+    }
+    class
+        .fields
+        .push(crate::ir::IrField::new("$lambda".into(), Ty::Int));
+    class
+        .fields
+        .push(crate::ir::IrField::new("$other".into(), Ty::Int));
+    class.constructor_prefix_count = 3;
+    class.ctor_param_count = 3;
+    let class = ir.add_class(class);
+    ir.class_capture_order
+        .insert(class, vec![0, 2, 1].into_boxed_slice());
+    let args = (0..3)
+        .map(|_| ir.add_expr(IrExpr::UnitInstance))
+        .collect::<Vec<_>>();
+    let construction = ir.add_expr(IrExpr::New {
+        internal: name,
+        args,
+        ctor_params: None,
+        declared_params: None,
+        ctor_desc: None,
+        external_target: None,
+        defaults: Box::new([]),
+        default_prefix_count: 0,
+    });
+    (class, construction)
+}
+
+#[test]
+fn removing_a_capture_after_a_fieldless_one_keeps_the_recorded_order_by_constructor_identity() {
+    let mut ir = crate::ir::IrFile::default();
+    let (class, construction) = object_with_a_fieldless_prefix_capture(&mut ir);
+    let name = ir.classes[class as usize].fq_name;
+
+    remove_capture(&mut ir, class, construction, &[], 1, 0, name).unwrap();
+
+    assert_eq!(&*ir.class_capture_order[&class], &[0, 1]);
+    assert_eq!(ir.classes[class as usize].ctor_args[1].field_index, Some(0));
+}
+
+#[test]
+fn lifted_captures_after_a_fieldless_one_extend_the_recorded_order_by_constructor_identity() {
+    let mut ir = crate::ir::IrFile::default();
+    let (class, construction) = object_with_a_fieldless_prefix_capture(&mut ir);
+    let name = ir.classes[class as usize].fq_name;
+    let lifted = ir.add_expr(IrExpr::UnitInstance);
+
+    let field_base = append_lifted_captures(
+        &mut ir,
+        class,
+        construction,
+        &[lifted],
+        &[Ty::Int],
+        &["$lifted".to_string()],
+        name,
+    )
+    .unwrap();
+
+    assert_eq!(field_base, 2);
+    assert_eq!(&*ir.class_capture_order[&class], &[0, 2, 1, 3]);
+    assert_eq!(ir.classes[class as usize].ctor_args[3].field_index, Some(2));
+}
