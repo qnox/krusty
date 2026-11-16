@@ -1,12 +1,18 @@
 // LANGUAGE: +CompanionBlocks
 // Receiver-less properties realized only through their accessors, read and written from another
-// file: computed package properties, and computed `companion { }` block properties of a class and
-// of a value class.
+// file: computed package properties, a stored package property with both accessors written, and
+// computed `companion { }` block properties of a class and of a value class. The defining file comes
+// first; crossFileAccessorPropertiesUsedFirst.kt covers the other order.
 // FILE: declarations.kt
 private var cell = 1
 private var log = ""
 
 val computed get() = cell + 1
+var backed = 1
+    get() = field + 1
+    set(value) {
+        field = value
+    }
 var forwarded: Int
     get() = cell
     set(value) {
@@ -38,6 +44,9 @@ fun log() = log
 // FILE: main.kt
 fun box(): String {
     if (computed != 2) return "computed: $computed"
+    if (backed != 2) return "initial getter: $backed"
+    backed = 3
+    if (backed != 4) return "setter/getter: $backed"
     forwarded = 3
     if (forwarded != 3 || computed != 4) return "forwarded: $forwarded"
     forwarded += 1

@@ -950,15 +950,17 @@ impl Body<'_> {
         receiver: Option<u32>,
     ) -> Result<(), Unsupported> {
         if receiver.is_none() {
+            // Another file's property realized through accessors also has a storage record when
+            // its defining file was lowered first; the accessor entry is its access path.
+            if let Some(entry) = self.module_accessor_property(target) {
+                self.code.call(entry.getter);
+                return Ok(());
+            }
             if let Some(storage) = self.top_level_property(target)? {
                 if !storage.direct_read {
                     return Err("a top-level property read that requires an accessor".to_string());
                 }
                 self.code.global_get(storage.global);
-                return Ok(());
-            }
-            if let Some(entry) = self.module_accessor_property(target) {
-                self.code.call(entry.getter);
                 return Ok(());
             }
         }
@@ -1020,6 +1022,14 @@ impl Body<'_> {
         value: u32,
     ) -> Result<(), Unsupported> {
         if receiver.is_none() {
+            if let Some(entry) = self.module_accessor_property(target) {
+                let setter = entry
+                    .setter
+                    .ok_or_else(|| "a read-only cross-file property was written".to_string())?;
+                self.value(value, entry.ty)?;
+                self.code.call(setter);
+                return Ok(());
+            }
             if let Some(storage) = self.top_level_property(target)? {
                 if !storage.mutable {
                     return Err("an assignment to an immutable top-level property".to_string());
@@ -1029,14 +1039,6 @@ impl Body<'_> {
                 }
                 self.value(value, storage.ty)?;
                 self.code.global_set(storage.global);
-                return Ok(());
-            }
-            if let Some(entry) = self.module_accessor_property(target) {
-                let setter = entry
-                    .setter
-                    .ok_or_else(|| "a read-only cross-file property was written".to_string())?;
-                self.value(value, entry.ty)?;
-                self.code.call(setter);
                 return Ok(());
             }
         }
