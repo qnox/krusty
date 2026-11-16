@@ -31,6 +31,7 @@ mod property_shape;
 mod type_refs;
 pub use type_refs::{QualifierArgumentLists, QualifierSegmentArguments, TrFlags, TypeRef};
 mod use_site_annotations;
+mod value_class_syntax;
 pub use backing_field_reads::{accessor_uses_backing_field, getter_declares_field};
 pub use binary_reference_tokens::BinaryReferenceTokens;
 pub(crate) use call_shape::explicit_call_receiver;
@@ -49,6 +50,7 @@ pub use property_shape::{
     is_computed_member_prop,
 };
 pub use use_site_annotations::UseSiteAnnotation;
+pub use value_class_syntax::ValueClassKeyword;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct ExprId(pub u32);

@@ -17,6 +17,7 @@
 //! segment with `array.new_data`.
 
 mod exception_classes;
+mod floating_strings;
 mod object_equality;
 mod object_strings;
 mod root_any;
@@ -62,6 +63,8 @@ pub(super) struct Runtime {
     pub(super) string_equals: u32,
     /// `String.compareTo(String)`, once a call needs it.
     string_compare: Option<u32>,
+    /// `Double.toString()` and `Float.toString()`, once a conversion needs them.
+    floating_strings: floating_strings::FloatingStrings,
     pub(super) object_equals: u32,
     pub(super) string_concat: u32,
     pub(super) string_of_i32: u32,
@@ -180,6 +183,7 @@ impl Runtime {
             arrays,
             string_equals: module.declare(),
             string_compare: None,
+            floating_strings: Default::default(),
             object_equals,
             string_concat,
             string_of_i32: module.declare(),

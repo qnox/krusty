@@ -234,6 +234,9 @@ pub enum CompilerIntrinsic {
     RadixToString {
         operand: crate::types::Ty,
     },
+    /// Native's runtime comparison of two `String` ranges' UTF-16 units, whose bounds the stdlib
+    /// already checked (`kotlin.text.unsafeRangeEquals`, a private `@GCUnsafeCall` external).
+    StringRangeEquals,
     /// A fully normalized `Result` helper reached from an expanded library inline body.
     ResultFailure(ResultFailureIntrinsic),
     /// `next()` declared by a Kotlin primitive iterator (`kotlin.collections.IntIterator.next`).

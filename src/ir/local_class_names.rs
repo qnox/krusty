@@ -506,6 +506,15 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
             tys(params, names);
             *ret = ty(*ret, names);
         }
+        Callee::ModuleConstructorDefaultEntry {
+            outer, params, ret, ..
+        } => {
+            if let Some(outer) = outer {
+                *outer = ty(*outer, names);
+            }
+            tys(params, names);
+            *ret = ty(*ret, names);
+        }
         Callee::External {
             params,
             ret,
