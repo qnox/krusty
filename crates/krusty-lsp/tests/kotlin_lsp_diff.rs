@@ -13,6 +13,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use krusty::kotlin_version::KotlinVersion;
 use krusty_lsp::{read_framed, write_framed, MAX_MESSAGE_BYTES};
 use serde_json::{json, Value};
 
@@ -21,20 +22,6 @@ use common::TempProject;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(300);
 static OFFICIAL_DIFFERENTIAL: Mutex<()> = Mutex::new(());
-
-fn reference_version_key(version: &str) -> [u32; 3] {
-    let mut parts = version.split('.');
-    let key = [
-        parts.next().and_then(|part| part.parse().ok()),
-        parts.next().and_then(|part| part.parse().ok()),
-        parts.next().and_then(|part| part.parse().ok()),
-    ];
-    assert!(
-        parts.next().is_none() && key.iter().all(Option::is_some),
-        "invalid reference version {version:?} in kotlin-versions"
-    );
-    key.map(Option::unwrap)
-}
 
 fn reference_kotlin_version_from(manifest: &str) -> &str {
     manifest
@@ -47,7 +34,11 @@ fn reference_kotlin_version_from(manifest: &str) -> &str {
                 line.split_whitespace().next()
             }
         })
-        .max_by_key(|version| reference_version_key(version))
+        .max_by_key(|version| {
+            KotlinVersion::parse(version).unwrap_or_else(|| {
+                panic!("invalid reference version {version:?} in kotlin-versions")
+            })
+        })
         .expect("kotlin-versions must contain a reference version")
 }
 
@@ -700,6 +691,14 @@ fn lsp_position_offset(source: &str, position: &Value) -> usize {
 fn reference_version_selection_is_semantic_and_order_independent() {
     let manifest = "2.10.0 newer\n# ignored\n2.9.9 older\n";
     assert_eq!(reference_kotlin_version_from(manifest), "2.10.0");
+    assert_eq!(
+        reference_kotlin_version_from("2.5.0 stable\n2.5.0-RC beta\n2.4.21 older\n"),
+        "2.5.0"
+    );
+    assert_eq!(
+        reference_kotlin_version_from("2.5.0-RC beta\n2.4.21 older\n"),
+        "2.5.0-RC"
+    );
 }
 
 #[test]

@@ -635,9 +635,23 @@ impl Options {
         for marker in &self.opt_in {
             settings.features.opt_in(marker);
         }
+        // From 2.5 kotlinc models `-Xuse-inline-scopes-numbers` as the `JvmInlineScopesNumbers`
+        // language feature, which its JVM backend configuration reads; the feature's state, set by
+        // the argument or `-XXLanguage`, is then the setting. Earlier releases keep the argument.
+        if settings
+            .features
+            .table()
+            .get(INLINE_SCOPES_NUMBERS_FEATURE)
+            .is_some()
+        {
+            self.inline_scopes_numbers = settings.features.has(INLINE_SCOPES_NUMBERS_FEATURE);
+        }
         self.language_settings = settings;
     }
 }
+
+/// kotlinc's language feature for inline scope numbering, where its release has one.
+const INLINE_SCOPES_NUMBERS_FEATURE: &str = "JvmInlineScopesNumbers";
 
 /// Something wrong with a user-supplied `-cp` entry, found before analysis opens it.
 ///
@@ -792,23 +806,54 @@ mod tests {
         parse(args.iter().map(|s| s.to_string()))
     }
 
-    /// `-progressive` accepts a release whose progressive features are all modeled, and turns
-    /// them on; every supported release's are.
+    /// `-progressive` turns on every progressive feature krusty models. A feature it would turn
+    /// on that no phase implements refuses the command line, the same way `-XXLanguage:+…` and
+    /// an `@Enables` argument refuse that name. There is no list of features that are accepted
+    /// unimplemented.
     #[test]
     fn progressive_turns_on_every_modeled_progressive_feature() {
+        use krusty::features::LangFeatures;
+
         for release in KotlinVersion::supported() {
-            let release = release.to_string();
+            let label = release.to_string();
             let o = parse_args(&[
-                &format!("-Xkotlin-reference-version={release}"),
+                &format!("-Xkotlin-reference-version={label}"),
                 "-progressive",
                 "f.kt",
             ]);
-            assert_eq!(o.errors, Vec::<String>::new(), "kotlinc {release}");
+            let language = LanguageVersion::default_for(release);
+            let before = LangFeatures::for_release(release, language, language);
+            let mut refusal = None;
+            for feature in before.table().progressive() {
+                if before.has(&feature.name) {
+                    continue;
+                }
+                if LangFeatures::models(&feature.name) {
+                    assert!(
+                        o.language_settings.features.has(&feature.name),
+                        "kotlinc {label} {}",
+                        feature.name
+                    );
+                } else if refusal.is_none() {
+                    refusal = Some(feature.name.as_str());
+                }
+            }
+            match refusal {
+                None => assert_eq!(o.errors, Vec::<String>::new(), "kotlinc {label}"),
+                Some(feature) => assert_eq!(
+                    o.errors,
+                    [format!(
+                        "krusty does not implement the language feature '{feature}' selected by \
+                         '-progressive'"
+                    )],
+                    "kotlinc {label}"
+                ),
+            }
             assert!(
                 o.language_settings
                     .features
                     .has("ReportTypeVarianceConflictsInDnnAndFlexible"),
-                "kotlinc {release}"
+                "kotlinc {label}"
             );
         }
         let o = parse_args(&["-Xkotlin-reference-version=2.4.20", "-progressive", "f.kt"]);
@@ -843,6 +888,25 @@ mod tests {
         assert!(parsed.inline_scopes_numbers);
         assert_eq!(parsed.ignored, Vec::<String>::new());
         assert!(!parse_args(&["x.kt"]).inline_scopes_numbers);
+    }
+
+    /// kotlinc 2.5 reads inline scope numbering from the `JvmInlineScopesNumbers` feature that
+    /// `-Xuse-inline-scopes-numbers` enables, so either spelling selects it and neither is refused.
+    #[test]
+    fn inline_scopes_numbers_follow_the_language_feature_where_the_release_has_one() {
+        for arguments in [
+            &["-Xuse-inline-scopes-numbers"][..],
+            &["-XXLanguage:+JvmInlineScopesNumbers"][..],
+        ] {
+            let mut command = vec!["-Xkotlin-reference-version=2.5.0-RC"];
+            command.extend_from_slice(arguments);
+            command.push("x.kt");
+            let parsed = parse_args(&command);
+            assert_eq!(parsed.refusals, Vec::<String>::new(), "{arguments:?}");
+            assert!(parsed.inline_scopes_numbers, "{arguments:?}");
+        }
+        let parsed = parse_args(&["-Xkotlin-reference-version=2.5.0-RC", "x.kt"]);
+        assert!(!parsed.inline_scopes_numbers);
     }
 
     /// Every assertion flag must reach `Options`, not fall through to `ignored`: a missing match arm
@@ -1302,12 +1366,12 @@ mod tests {
         let o = parse_args(&[
             "-include-runtime",
             "-api-version",
-            "2.0",
+            "2.4",
             "-Xsomething",
             "f.kt",
         ]);
         assert_eq!(o.sources, vec!["f.kt".to_string()]);
-        assert_eq!(o.language_settings.api_version, LanguageVersion::V2_0);
+        assert_eq!(o.language_settings.api_version, LanguageVersion::V2_4);
         assert_eq!(o.ignored, Vec::<String>::new());
         assert_eq!(
             o.errors,
@@ -1386,18 +1450,31 @@ mod tests {
         assert!(stamp.errors.is_empty(), "{:?}", stamp.errors);
         assert!(stamp.ignored.is_empty(), "{:?}", stamp.ignored);
 
-        for experimental in [LanguageVersion::V2_5, LanguageVersion::V2_6] {
+        let compiler = krusty::kotlin_version::target();
+        let policy = krusty::features::LanguageVersionPolicy::for_release(compiler)
+            .unwrap_or_else(|| panic!("{compiler} has no language policy"));
+        for &experimental in policy.supported() {
+            if policy.language(experimental).unwrap().stable {
+                continue;
+            }
             let parsed = parse_args(&["-language-version", &experimental.to_string(), "f.kt"]);
-            assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+            assert!(
+                parsed.errors.is_empty(),
+                "{experimental}: {:?}",
+                parsed.errors
+            );
             assert_eq!(parsed.language_settings.language_version, experimental);
             assert_eq!(parsed.language_settings.api_version, experimental);
-            assert_eq!(parsed.warnings.len(), 1);
+            assert_eq!(parsed.warnings.len(), 1, "{experimental}");
         }
 
-        let supported = "2.0 (deprecated), 2.1 (deprecated), 2.2, 2.3, 2.4, 2.5 (experimental), 2.6 (experimental)";
+        let supported = LanguageVersion::supported_text_for(compiler);
         for bad in [
             "banana", "2", "2.4.0", "2.x", "-2.2", "+2.2", "0.0", "2.7", "999.1", "",
         ] {
+            if LanguageVersion::parse_supported_for(bad, compiler).is_some() {
+                continue;
+            }
             let language = parse_args(&["-language-version", bad, "f.kt"]);
             assert_eq!(
                 language.errors,

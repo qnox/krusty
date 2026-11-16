@@ -9,6 +9,10 @@
 //! reported, is the eager form: `MISSING_DEPENDENCY_SUPERCLASS_WARNING` unless
 //! `AllowEagerSupertypeAccessibilityChecks` makes it the error.
 //!
+//! From 2.5.0-RC, a SAM constructor call and a SAM conversion report that diagnostic for the
+//! interface itself. `ForbidSamConstructorCallsWithMissingDependencySupertype` makes it an error;
+//! while the feature is off it is the warning. A release without the feature does not report it.
+//!
 //! A supertype the current module names but cannot resolve is an unresolved reference, never a
 //! missing dependency; only an edge leading out of a classpath classifier is one.
 
@@ -66,6 +70,8 @@ enum Severity {
     Error,
     /// kotlinc's eager check: an error only under `AllowEagerSupertypeAccessibilityChecks`.
     Eager,
+    /// The SAM-constructor check while its feature is disabled.
+    Warning,
 }
 
 impl Checker<'_> {
@@ -98,8 +104,11 @@ impl Checker<'_> {
     ) -> bool {
         let (parents, binary) = self.direct_supertype_names(classifier);
         let missing = missing_inherited_supertypes(&self.fed_source(), parents, binary);
-        let warning =
-            severity == Severity::Eager && !self.file.allow_eager_supertype_accessibility_checks;
+        let warning = match severity {
+            Severity::Error => false,
+            Severity::Warning => true,
+            Severity::Eager => !self.file.allow_eager_supertype_accessibility_checks,
+        };
         for supertype in &missing {
             let supertype = access_control::owner_display(*supertype);
             if warning {
@@ -361,6 +370,18 @@ impl Checker<'_> {
     fn check_access_missing_supertypes(&mut self, access: SelectedAccess) {
         let mut checked = Vec::new();
         let mut reported_receiver = false;
+        if access.sam_constructor {
+            let severity = if self.file.sam_constructor_missing_dependency == Some(true) {
+                Severity::Error
+            } else {
+                Severity::Warning
+            };
+            if let Some(classifier) = access.owner {
+                let label = access_control::owner_display(classifier);
+                self.report_missing_supertypes(access.span, classifier, &label, severity);
+            }
+            return;
+        }
         if let Some(receiver) = access.dispatch_receiver {
             checked.push(receiver);
             let label = access_control::owner_display(receiver);
@@ -394,6 +415,17 @@ impl Checker<'_> {
                 if self.file.infix_calls.contains(&expression.0) {
                     if let Expr::Member { receiver, .. } = self.file.expr(*callee) {
                         span = self.binary_operator_span(expression, *receiver, span);
+                    }
+                }
+                if let Some(ExprLowering::SamConstructor { sam, .. }) =
+                    self.expr_lowers.get(&expression)
+                {
+                    if self.file.sam_constructor_missing_dependency.is_some() {
+                        return Some(SelectedAccess {
+                            owner: Some(sam.internal),
+                            sam_constructor: true,
+                            ..SelectedAccess::at(span)
+                        });
                     }
                 }
                 if let Some(constructor) = self.resolved_constructors.get(&expression) {
@@ -562,6 +594,57 @@ impl Checker<'_> {
             .binary_reference_span(node, self.span(first), operator)
     }
 
+    /// Record a SAM conversion and report a missing dependency supertype of its interface.
+    /// A second record of the same expression keeps the first report: resolution can revisit a
+    /// conversion after the diagnostic is already emitted.
+    pub(super) fn note_sam_conversion(
+        &mut self,
+        expression: ExprId,
+        conversion: ResolvedSamConversion,
+    ) {
+        if self
+            .resolved_sam_conversions
+            .insert(expression, conversion)
+            .is_some()
+        {
+            return;
+        }
+        self.check_sam_conversion_missing_supertypes(expression);
+    }
+
+    /// A SAM conversion whose interface is missing a dependency supertype, at the converted
+    /// expression. The operand of a SAM constructor is reported on the constructor name instead.
+    fn check_sam_conversion_missing_supertypes(&mut self, expression: ExprId) {
+        let Some(policy) = self.file.sam_constructor_missing_dependency else {
+            return;
+        };
+        let Some(conversion) = self.resolved_sam_conversions.get(&expression) else {
+            return;
+        };
+        if self.sam_constructor_operand(expression) {
+            return;
+        }
+        let classifier = conversion.signature.internal;
+        let label = access_control::owner_display(classifier);
+        let severity = if policy {
+            Severity::Error
+        } else {
+            Severity::Warning
+        };
+        self.report_missing_supertypes(self.span(expression), classifier, &label, severity);
+    }
+
+    /// Whether `expression` is the single operand of a SAM constructor call.
+    fn sam_constructor_operand(&self, expression: ExprId) -> bool {
+        self.expr_lowers.iter().any(|(&call, lowering)| {
+            matches!(lowering, ExprLowering::SamConstructor { .. })
+                && matches!(
+                    self.file.expr(call),
+                    Expr::Call { args, .. } if args.len() == 1 && args[0] == expression
+                )
+        })
+    }
+
     pub(super) fn missing_supertype_callee_span(&self, callee: ExprId) -> Span {
         match self.file.expr(callee) {
             Expr::Member { name, .. } => self.member_name_span(callee, name),
@@ -661,6 +744,8 @@ struct SelectedAccess {
     owner: Option<TypeName>,
     extension_receiver: Option<TypeName>,
     constructor: bool,
+    /// The callee is a SAM constructor. Its interface is `owner`.
+    sam_constructor: bool,
     /// The access selected nothing; only its explicit receiver is checked.
     unresolved: bool,
 }
@@ -673,6 +758,7 @@ impl SelectedAccess {
             owner: None,
             extension_receiver: None,
             constructor: false,
+            sam_constructor: false,
             unresolved: false,
         }
     }
