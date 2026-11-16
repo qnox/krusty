@@ -18,7 +18,9 @@ use crate::kt_string::KtString;
 use crate::types::{Ty, TypeName, TypeNameList};
 
 mod checked_klib_facts;
+mod checked_klib_sam;
 pub(crate) use checked_klib_facts::{CheckedKlibDependencyFacts, CheckedKlibTypeFacts};
+pub(crate) use checked_klib_sam::{CheckedKlibSamDeclaration, KlibSamKey};
 mod checked_member_call_edge;
 pub(crate) use checked_member_call_edge::CheckedMemberCallEdge;
 

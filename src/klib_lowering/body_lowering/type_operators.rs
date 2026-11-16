@@ -26,6 +26,7 @@ impl BodyLowering<'_> {
     ) -> Lowered<ExprId> {
         let target = self.semantic(operand)?;
         let op = match operator {
+            KlibIrTypeOperator::SamConversion => return self.sam_conversion(operand, argument, ty),
             KlibIrTypeOperator::ImplicitCast => return self.implicit_cast(target, argument, ty),
             KlibIrTypeOperator::SafeCast => return self.safe_cast(target, argument, ty),
             KlibIrTypeOperator::InstanceOf | KlibIrTypeOperator::NotInstanceOf => {

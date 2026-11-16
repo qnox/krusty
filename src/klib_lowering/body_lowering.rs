@@ -30,6 +30,7 @@ mod loops;
 mod object_literals;
 mod range_membership;
 mod safe_calls;
+mod sam_conversions;
 use safe_calls::NullProvenRead;
 mod string_templates;
 mod try_catch;
@@ -120,6 +121,14 @@ pub(super) struct RangeMembershipHeader {
 
 /// Joins the calls a body makes of public dependency declarations to the functions they invoke.
 pub(super) trait CallLinker {
+    /// Read the checked declaration selected for this serialized SAM target, without lookup.
+    fn sam_declaration(
+        &self,
+        _classifier: &KlibPublicIdSignature,
+    ) -> Lowered<crate::ir::CheckedKlibSamDeclaration> {
+        unsupported("a SAM conversion without a checked declaration")
+    }
+
     /// The same authenticated primitive call shape that dependency planning treats as a leaf.
     /// Template linkers retain their ordinary checked external-call boundary by default.
     fn common_primitive(

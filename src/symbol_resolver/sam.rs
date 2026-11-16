@@ -109,28 +109,8 @@ pub(crate) fn semantic_sam_signature(
         let Some(classifier) = source.classifier(owner) else {
             continue;
         };
-        let mut logical_bindings = classifier_bindings(&classifier, applied);
-        // `in String` checks the converted function at `String`, while its capture-read view is
-        // `Any?`. Keep that distinction only as provenance; `out` and `*` have no such divergence.
-        let capture_read_bindings = logical_bindings
-            .iter()
-            .map(|(name, argument)| {
-                (
-                    crate::types::TyParamName::from(name),
-                    contravariant_capture_read(*argument),
-                )
-            })
-            .collect::<GSigBinds>();
-        for argument in logical_bindings.values_mut() {
-            // A SAM method receives/returns values, never use-site projection syntax. Composed
-            // variance can legitimately leave more than one capture shell here: selecting
-            // `Consumer<in T>` through `Holder<out X>` produces `in (out X)`. Consume the complete
-            // shell so the abstract method is specialized to the value type `X`, rather than
-            // publishing a top-level `out X` parameter into checked FIR.
-            while let Some(projected) = argument.projection_inner() {
-                *argument = projected;
-            }
-        }
+        let (logical_bindings, capture_read_bindings) =
+            sam_application_bindings(&classifier, applied);
         let occurrence_bounds = classifier_type_parameter_bounds(&classifier);
         let specialization = SamCaptureSpecialization {
             logical: &logical_bindings,
@@ -298,6 +278,71 @@ pub(crate) fn semantic_sam_signature(
         parameter_identities,
         type_parameters,
     })
+}
+
+/// Instantiate a previously selected SAM declaration using only its frozen classifier facts.
+/// No member or hierarchy selection occurs at this boundary.
+pub(crate) fn apply_sam_declaration(
+    classifier: &crate::libraries::LibraryType,
+    declaration: &crate::ir::IrSamTarget,
+    applied: Ty,
+) -> Option<crate::ir::IrSamTarget> {
+    if applied.obj_internal()? != declaration.classifier
+        || applied.type_args().len() != classifier.type_params().len()
+    {
+        return None;
+    }
+    let (logical, capture_read) = sam_application_bindings(classifier, applied);
+    let bounds = classifier_type_parameter_bounds(classifier);
+    let mut target = declaration.clone();
+    target.parameters = declaration
+        .parameters
+        .iter()
+        .map(|&p| sam_substitute(p, &bounds, &logical))
+        .collect();
+    target.contravariant_parameters = declaration
+        .parameters
+        .iter()
+        .enumerate()
+        .map(|(i, &p)| {
+            declaration.contravariant_parameters[i]
+                || !crate::assignable::same_flexible_type(
+                    target.parameters[i],
+                    sam_substitute(p, &bounds, &capture_read),
+                )
+        })
+        .collect();
+    target.result = sam_substitute(declaration.result, &bounds, &logical);
+    Some(target)
+}
+
+fn sam_application_bindings(
+    classifier: &crate::libraries::LibraryType,
+    applied: Ty,
+) -> (GSigBinds, GSigBinds) {
+    let mut logical_bindings = classifier_bindings(classifier, applied);
+    // `in String` checks the converted function at `String`, while its capture-read view is
+    // `Any?`. Keep that distinction only as provenance; `out` and `*` have no such divergence.
+    let capture_read_bindings = logical_bindings
+        .iter()
+        .map(|(name, argument)| {
+            (
+                crate::types::TyParamName::from(name),
+                contravariant_capture_read(*argument),
+            )
+        })
+        .collect::<GSigBinds>();
+    for argument in logical_bindings.values_mut() {
+        // A SAM method receives/returns values, never use-site projection syntax. Composed
+        // variance can legitimately leave more than one capture shell here: selecting
+        // `Consumer<in T>` through `Holder<out X>` produces `in (out X)`. Consume the complete
+        // shell so the abstract method is specialized to the value type `X`, rather than
+        // publishing a top-level `out X` parameter into checked FIR.
+        while let Some(projected) = argument.projection_inner() {
+            *argument = projected;
+        }
+    }
+    (logical_bindings, capture_read_bindings)
 }
 
 /// One identity per physical parameter of the selected abstract method.
