@@ -600,6 +600,17 @@ impl KlibDeclarationBodies {
         self.libraries[library].local_class(signature)
     }
 
+    /// The top-level class private to its file that `module` itself serializes under the
+    /// file-local `signature`, with the package of that file.
+    pub(crate) fn module_file_private_class<'a>(
+        &'a self,
+        module: &str,
+        signature: &KlibIrSignature,
+    ) -> Option<(&'a [String], &'a KlibIrClass)> {
+        let library = *self.modules.get(module)?;
+        self.libraries[library].file_private_class(signature)
+    }
+
     /// The file-local function `module` itself serializes under `signature`.
     pub(crate) fn module_local_function<'a>(
         &'a self,

@@ -25,7 +25,7 @@ use crate::ir::{
     ClassId, IrClass, IrConstructorAccess, IrConstructorTarget, IrCtorArg,
     IrCtorParameterProvenance, IrField,
 };
-use crate::klib_libraries::{KlibCalleeOrigin, KlibDeclarationBodies, LocatedClass, LocatedMember};
+use crate::klib_libraries::{KlibDeclarationBodies, LocatedClass, LocatedMember};
 use crate::libraries::{
     KlibBodyClassParameters, KlibDeclarationSignature, KlibDependencyCallable, TypeKind,
 };
@@ -361,7 +361,6 @@ fn supertype_application(
 
 struct AdmittedInterface {
     name: TypeName,
-    signature: KlibIrSignature,
     arguments: Vec<Ty>,
 }
 
@@ -407,6 +406,9 @@ pub(super) struct PreparedLocalClass<'a> {
     /// The same-library superclass the constructor delegates to; `Any` otherwise.
     pub(super) superclass: Option<LocalSuperclass<'a>>,
     pub(super) open: bool,
+    /// How Kotlin names a top-level class private to its file: in its file's package, by its
+    /// declared name. Any other file-local class has no name of its own here.
+    pub(super) naming: Option<crate::ir::IrLocalClassNameProvenance>,
 }
 
 /// A same-library superclass constructor a class's constructor delegates to, and the slot of the
@@ -763,6 +765,7 @@ fn prepare_class<'a>(
         class_name,
         outer,
     } = declaration;
+    let naming = file_private_naming(source.bodies, &key);
     if declaration_modality(class.base.flags).is_abstract() {
         return Err(unsupported("a non-public abstract class"));
     }
@@ -951,6 +954,26 @@ fn prepare_class<'a>(
         outer: outer_instance,
         superclass,
         open: declaration_modality(class.base.flags) != KotlinModality::Final,
+        naming,
+    })
+}
+
+/// The naming provenance of the class `key` names when it is a top-level class private to its
+/// file: rooted in that file's package, with no lexical owner and no ordinal.
+fn file_private_naming(
+    bodies: &KlibDeclarationBodies,
+    key: &LocalIdentity,
+) -> Option<crate::ir::IrLocalClassNameProvenance> {
+    let (package, class) = bodies.module_file_private_class(&key.module, &key.signature)?;
+    let package = package.iter().fold(TypeName::ROOT, |parent, segment| {
+        crate::types::type_name_child(parent, segment)
+    });
+    Some(crate::ir::IrLocalClassNameProvenance {
+        source: crate::ir::IrLocalClassNameRoot::Dependency { package },
+        lexical_owner: None,
+        segments: Box::new([class.name.clone()]),
+        ordinal: None,
+        parents: Box::new([]),
     })
 }
 
@@ -1117,7 +1140,6 @@ fn authenticate_supertypes(
                     }
                     library_superclass = Some(AdmittedInterface {
                         name,
-                        signature: classifier.signature.clone(),
                         arguments: ty.type_args().to_vec(),
                     });
                     supertypes.push(ty);
@@ -1131,7 +1153,6 @@ fn authenticate_supertypes(
                 };
                 interfaces.push(AdmittedInterface {
                     name,
-                    signature: classifier.signature.clone(),
                     arguments: ty.type_args().to_vec(),
                 });
                 supertypes.push(ty);
@@ -1256,7 +1277,10 @@ fn member_overrides(
     function: &KlibIrFunction,
     scope: &MemberScope<'_>,
 ) -> Result<Vec<MemberOverride>, KlibBodyDeclineReason> {
-    let mut overrides = Vec::with_capacity(function.overridden.len());
+    // An override overrides every declaration the ones it names override in turn:
+    // `ArrayAsCollection.iterator` overrides `Collection.iterator` and, through it,
+    // `Iterable.iterator`, which interface dispatch keys by.
+    let mut identities = Vec::<KlibDependencyCallable>::new();
     for symbol in &function.overridden {
         if symbol.kind != KlibIrSymbolKind::Function {
             return Err(unsupported(
@@ -1272,17 +1296,23 @@ fn member_overrides(
             }
             _ => return Err(unsupported("an override of a non-public declaration")),
         };
-        let identity = match scope.bodies.linked_origin(scope.module, &declaration) {
-            KlibCalleeOrigin::Exact(identity) => identity,
-            KlibCalleeOrigin::Missing => {
-                return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+        let closure = scope
+            .bodies
+            .overridden_closure(scope.module, &declaration)
+            .map_err(|_| {
+                KlibBodyDeclineReason::UnsupportedDeclaration(
                     "an override this library does not authenticate",
-                ))
+                )
+            })?;
+        for identity in closure {
+            if !identities.contains(&identity) {
+                identities.push(identity);
             }
-            KlibCalleeOrigin::Ambiguous => {
-                return Err(mismatch("two libraries serialize one overridden function"))
-            }
-        };
+        }
+    }
+    let supertypes = applied_supertypes(scope);
+    let mut overrides = Vec::with_capacity(identities.len());
+    for identity in identities {
         let Some((_, realization)) = scope
             .declarations
             .external_callable_by_dependency(&identity)
@@ -1346,28 +1376,25 @@ fn member_overrides(
                 "an override owner disagrees with its provider contract",
             ));
         }
-        let (owner_name, arguments) = if is_interface {
-            let Some(interface) = scope
-                .interfaces
+        let (owner_name, arguments) = if metadata_owner == crate::types::wk::any() {
+            (metadata_owner, &[][..])
+        } else {
+            // A supertype above the class's written ones is applied as the walk from them
+            // reaches it.
+            let Some((_, applied)) = supertypes
                 .iter()
-                .find(|interface| interface.signature == owner.base.symbol.signature)
+                .find(|(classifier, _)| *classifier == metadata_owner)
             else {
                 return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
                     "an override of a supertype this library does not authenticate",
                 ));
             };
-            (interface.name, interface.arguments.as_slice())
-        } else if metadata_owner == crate::types::wk::any() {
-            (metadata_owner, &[][..])
-        } else if let Some(superclass) = scope
-            .library_superclass
-            .filter(|superclass| superclass.signature == owner.base.symbol.signature)
-        {
-            // A member the library superclass declares, a fake override included, applied as
-            // the class applies its superclass.
-            (superclass.name, superclass.arguments.as_slice())
-        } else {
-            return Err(unsupported("an override of a class member"));
+            let Some((_, arguments)) = applied.non_null().obj_parts() else {
+                return Err(mismatch(
+                    "an overridden supertype is not a class application",
+                ));
+            };
+            (metadata_owner, arguments)
         };
         if !declared.type_parameters.is_empty() || declared.constructor {
             return Err(unsupported(
@@ -1408,6 +1435,25 @@ fn member_overrides(
         });
     }
     Ok(overrides)
+}
+
+/// Every supertype above a class's written interfaces and library superclass, at the
+/// application the walk from them reaches it with.
+fn applied_supertypes(scope: &MemberScope<'_>) -> Vec<(TypeName, Ty)> {
+    let mut supertypes = Vec::<(TypeName, Ty)>::new();
+    for written in scope.interfaces.iter().chain(scope.library_superclass) {
+        let root = Ty::obj_args_name(written.name, &written.arguments);
+        for (classifier, applied, _) in
+            crate::symbol_resolver::applied_hierarchy_through(root, |_, applied| {
+                crate::symbol_resolver::direct_supertypes(scope.declarations, applied)
+            })
+        {
+            if !supertypes.iter().any(|(known, _)| *known == classifier) {
+                supertypes.push((classifier, applied));
+            }
+        }
+    }
+    supertypes
 }
 
 fn bind_interface_parameters(
@@ -1636,8 +1682,10 @@ pub(super) fn construction_target(access: IrConstructorAccess) -> IrConstructorT
 pub(super) fn installed_class(prepared: &PreparedLocalClass<'_>) -> IrClass {
     let mut class = IrClass::synthetic(prepared.classifier);
     // A class private to its enclosing class is a member classifier its public signature names,
-    // as its source declares it; a file-local one has no name of its own here.
-    class.is_source_declared = matches!(prepared.key.signature, KlibIrSignature::Public(_));
+    // as its source declares it, and a top-level class private to its file is named by its
+    // provenance; any other file-local one has no name of its own here.
+    class.is_source_declared =
+        matches!(prepared.key.signature, KlibIrSignature::Public(_)) || prepared.naming.is_some();
     class.supertypes = prepared.supertypes.clone();
     for interface in &prepared.interfaces {
         class.interfaces.push_name(*interface);

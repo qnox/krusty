@@ -988,6 +988,85 @@ fn applied_interface_signature_substitutes_the_supertype() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+const INHERITED_INTERFACE: &str = "\
+package fixture
+interface Root<T> {
+    fun get(): T
+}
+interface View<T> : Root<T> {
+    override fun get(): T
+}
+private class Hidden(private val value: String) : View<CharSequence> {
+    override fun get(): String = value
+}
+fun make(value: String): View<CharSequence> = Hidden(value)
+";
+
+#[test]
+fn a_file_private_class_is_named_and_overrides_the_interfaces_above_its_written_ones() {
+    let Some((directory, libraries)) = produce_library("inherited-interface", INHERITED_INTERFACE)
+    else {
+        return;
+    };
+    let view_get = declared_member(&libraries, "View", "get");
+    let root_get = declared_member(&libraries, "Root", "get");
+    let mut unit = DependencyBodyUnit::default();
+    lower_fixture(
+        &mut unit,
+        &libraries,
+        "make",
+        &Default::default(),
+        &libraries,
+    );
+    validated(unit.ir());
+    let ir = unit.ir();
+    for (owner, id) in [("fixture/View", view_get.id), ("fixture/Root", root_get.id)] {
+        let edge = override_edge(ir, id);
+        assert!(edge.overridden_is_interface, "{owner}");
+        assert_eq!(edge.overridden_owner.render(), owner);
+        assert_eq!(
+            type_name_of(edge.applied_result),
+            "kotlin/CharSequence",
+            "{owner}"
+        );
+        assert_eq!(
+            type_name_of(edge.implementation_result),
+            "kotlin/String",
+            "{owner}"
+        );
+    }
+    let [class] = ir
+        .classes
+        .iter()
+        .enumerate()
+        .filter(|(_, class)| class.fq_name.render().contains("klib-local"))
+        .map(|(id, _)| u32::try_from(id).unwrap())
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("one materialized private class")
+    };
+    assert!(ir.classes[class as usize].is_source_declared);
+    assert_eq!(
+        ir.local_class_name_provenance.get(&class),
+        Some(&crate::ir::IrLocalClassNameProvenance {
+            source: crate::ir::IrLocalClassNameRoot::Dependency {
+                package: crate::types::type_name("fixture"),
+            },
+            lexical_owner: None,
+            segments: Box::new(["Hidden".to_owned()]),
+            ordinal: None,
+            parents: Box::new([]),
+        })
+    );
+    let names = crate::backend::class_names::source_class_names(ir, class)
+        .expect("the private class is named");
+    assert_eq!(
+        (names.qualified.as_str(), names.simple.as_str()),
+        ("fixture.Hidden", "Hidden")
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 struct MarkIdentity {
     id: crate::fir::ExternalCallableId,
     identity: crate::libraries::KlibDependencyCallable,
