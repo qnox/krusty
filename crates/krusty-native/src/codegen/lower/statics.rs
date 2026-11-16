@@ -41,23 +41,6 @@ impl<'a> FileLowering<'a> {
         }
     }
 
-    /// Can this property's initializer tell program start from the moment its owner is touched?
-    ///
-    /// Two cannot. A `const val`'s initializer is a compile-time constant. A delegated property's
-    /// `KProperty` metadata is a property REFERENCE, which is one emitted object per property with
-    /// no state of its own and nothing to allocate — the same value however early it is asked for.
-    /// Running either at program start is indistinguishable from running it with the owner, so the
-    /// placement fact the owner carries has nothing to say about them.
-    fn order_independent(&self, declaration: &IrStatic) -> bool {
-        declaration.is_const
-            || declaration.init.is_none_or(|init| {
-                matches!(
-                    self.ir.expr(init),
-                    IrExpr::Checked(checked_op) if matches!(&**checked_op, IrCheckedOperation::PropertyReference { .. })
-                )
-            })
-    }
-
     /// Declare a slot per top-level property. Declared before any body is compiled, because a
     /// function may read a property declared after it.
     pub(super) fn declare_statics(&mut self) -> Result<(), Unsupported> {
@@ -65,15 +48,8 @@ impl<'a> FileLowering<'a> {
         for (index, declaration) in ir.statics.iter().enumerate() {
             // An owner is a PLACEMENT fact the JVM needs — a companion's `const val` becomes a
             // field of the OUTER class there. There is no facade here for a slot to be placed
-            // differently from, so the owner says nothing about the slot; what it does say is
-            // WHEN the initializer runs: with its class rather than at program start. An
-            // initializer that cannot OBSERVE the difference runs at program start; anything else
-            // waits for its class (`class_statics`).
-            if let Some(owner) = declaration.owner {
-                if !self.order_independent(declaration) {
-                    self.defer_to_class(index as u32, owner)?;
-                }
-            }
+            // differently from, so the owner says nothing about the slot; WHEN its initializer
+            // runs is the class static plan's (`class_statics`).
             if self.carrier(declaration.ty) == Carrier::Void {
                 return Err(declined!(
                     "a `Unit`-typed top-level property (`{}`)",
@@ -115,7 +91,7 @@ impl<'a> FileLowering<'a> {
                 // its initializer.
                 let init = declaration
                     .init
-                    .filter(|_| !self.is_deferred_static(index as u32));
+                    .filter(|_| !self.class_statics.is_deferred(index as u32));
                 (self.statics[index], declaration.ty, init)
             })
             .collect();

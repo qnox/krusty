@@ -1,104 +1,61 @@
-//! Statics a class owns: initialized when the class is first touched, not at program start.
+//! The emitted form of a class's own statics.
 //!
-//! A `companion { … }` block property is stored with its class, and Kotlin runs its initializer
-//! as part of initializing that class: the first construction of the class, the first call of one
-//! of its block functions or accessors, or the first read or write of the storage itself, whichever
-//! comes first. A superclass, and its companion, is initialized before its subclass: each of
-//! those entry points runs the class's activation (`activate_class`), which initializes every
-//! class of the chain root first, its companion object or its own statics. The top-level slots
-//! of [`super::statics`] all run at program start because the file's entry touches the file
-//! first; a class owes no such promise, so an initializer that could observe the difference
-//! runs here, behind a once-only flag.
-//!
-//! The flag is set before the initializers run, as the file initializer's is: an initializer that
-//! reaches back into its own class sees the slot's default, which is what Kotlin does.
+//! Which statics wait for their class, and what each activation point initializes, is
+//! [`krusty::backend::class_statics::ClassStaticPlan`]'s. Here each class of the plan gets
+//! `kt_classinit_<class>`, which runs its statics in declaration order behind a once-only flag,
+//! and each activation point the plan names calls it.
 
 use super::*;
 
 /// The emitted pieces of one class's static initialization.
 pub(super) struct ClassInitializer {
-    /// `kt_classinit_<class>`: runs the initializers below at most once.
+    /// `kt_classinit_<class>`: runs the class's statics at most once.
     function: FuncId,
     /// Set once the initializers have started.
     flag: DataId,
-    /// The class's deferred statics, by index into `IrFile::statics`, in declaration order.
-    statics: Vec<u32>,
 }
 
 impl<'a> FileLowering<'a> {
-    /// Defer an owned static to its class's initializer, declaring that initializer the first
-    /// time the class is named. A class whose initialization has other parts this generator does
-    /// not order — an interface, an enum, an object, a value class, or a class with a companion
-    /// object — still declines.
-    pub(super) fn defer_to_class(
-        &mut self,
-        index: u32,
-        owner: krusty::types::TypeName,
-    ) -> Result<(), Unsupported> {
-        let declined = || declined!("a non-`const` property stored on `{}`", owner.render());
-        let Some(class) = self.ir.class_id_by_name(owner) else {
-            return Err(declined());
-        };
-        let declaration = &self.ir.classes[class as usize];
-        if declaration.is_interface
-            || declaration.is_object
-            || declaration.is_value
-            || declaration.companion_class.is_some()
-            || super::super::super::classes::is_enum(declaration)
-        {
-            return Err(declined());
+    /// Declare the initializer function and flag of every class the plan gives statics.
+    pub(super) fn declare_class_initializers(&mut self) -> Result<(), Unsupported> {
+        let ir = self.ir;
+        let classes: Vec<ClassId> = self
+            .class_statics
+            .classes()
+            .iter()
+            .map(|group| group.class)
+            .collect();
+        for class in classes {
+            let declaration = &ir.classes[class as usize];
+            let base = super::super::super::symbols::c_identifier(&declaration.fq_name());
+            let function =
+                self.declare_local_function(&format!("kt_classinit_{base}"), &[], Ty::Unit)?;
+            let flag = self.declare_local_data(&format!("kt_classinit_done_{base}"), true)?;
+            let mut description = DataDescription::new();
+            description.define(Box::new([0u8]));
+            description.set_align(1);
+            self.module
+                .define_data(flag, &description)
+                .map_err(|error| {
+                    format!("defining the initialization flag of `{base}` ({error})")
+                })?;
+            self.class_initializers
+                .insert(class, ClassInitializer { function, flag });
         }
-        if let Some(initializer) = self.class_initializers.get_mut(&class) {
-            initializer.statics.push(index);
-            return Ok(());
-        }
-        let base = super::super::super::symbols::c_identifier(&declaration.fq_name());
-        let function =
-            self.declare_local_function(&format!("kt_classinit_{base}"), &[], Ty::Unit)?;
-        let flag = self.declare_local_data(&format!("kt_classinit_done_{base}"), true)?;
-        let mut description = DataDescription::new();
-        description.define(Box::new([0u8]));
-        description.set_align(1);
-        self.module
-            .define_data(flag, &description)
-            .map_err(|error| format!("defining the initialization flag of `{base}` ({error})"))?;
-        self.class_initializers.insert(
-            class,
-            ClassInitializer {
-                function,
-                flag,
-                statics: vec![index],
-            },
-        );
         Ok(())
     }
 
-    /// Whether this static waits for its class rather than running at program start.
-    pub(super) fn is_deferred_static(&self, index: u32) -> bool {
-        self.class_initializers
-            .values()
-            .any(|initializer| initializer.statics.contains(&index))
-    }
-
-    /// The function that runs `class`'s own deferred statics, if it has any.
-    pub(super) fn own_class_initializer(&self, class: ClassId) -> Option<FuncId> {
-        self.class_initializers
-            .get(&class)
-            .map(|initializer| initializer.function)
-    }
-
-    /// Define every class initializer declared by [`Self::defer_to_class`].
+    /// Define every class initializer [`Self::declare_class_initializers`] declared.
     pub(super) fn define_class_initializers(&mut self) -> Result<(), Unsupported> {
-        let mut classes: Vec<ClassId> = self.class_initializers.keys().copied().collect();
-        classes.sort_unstable();
-        for class in classes {
-            let initializer = &self.class_initializers[&class];
-            let (function, flag) = (initializer.function, initializer.flag);
-            let declarations: Vec<(DataId, Ty, Option<u32>)> = initializer
+        let ir = self.ir;
+        for position in 0..self.class_statics.classes().len() {
+            let group = &self.class_statics.classes()[position];
+            let class = group.class;
+            let declarations: Vec<_> = group
                 .statics
                 .iter()
                 .map(|&index| {
-                    let declaration = &self.ir.statics[index as usize];
+                    let declaration = &ir.statics[index as usize];
                     (
                         self.statics[index as usize],
                         declaration.ty,
@@ -106,7 +63,9 @@ impl<'a> FileLowering<'a> {
                     )
                 })
                 .collect();
-            let name = format!("{}.<clinit>", self.ir.classes[class as usize].fq_name());
+            let initializer = &self.class_initializers[&class];
+            let (function, flag) = (initializer.function, initializer.flag);
+            let name = format!("{}.<clinit>", ir.classes[class as usize].fq_name());
             let signature = self.signature_of(&[], Ty::Unit)?;
             self.emit_function(function, signature, Ty::Unit, &name, &mut |body, _| {
                 let flag_address = body.data_address(flag);
@@ -151,31 +110,27 @@ impl<'a> FileLowering<'a> {
 }
 
 impl BodyLowering<'_, '_, '_> {
-    /// Run `class`'s own deferred statics here unless they already ran: the entry of its
-    /// constructors, which a subclass reaches through `super(…)` even when it was laid out in
-    /// another file. A construction, a block member call, and a storage access initialize the
-    /// whole class first ([`Self::activate_class`]), superclasses and companions included.
+    /// Run `class`'s own statics here unless they already ran.
     pub(super) fn initialize_own_statics(&mut self, class: ClassId) -> Result<(), Unsupported> {
-        let Some(initializer) = self.file.own_class_initializer(class) else {
-            return Ok(());
-        };
-        let func_ref = self.func_ref(initializer);
+        let function = self.file.class_initializers[&class].function;
+        let func_ref = self.func_ref(function);
         self.emit_call(func_ref, &[])?;
         Ok(())
     }
 
+    /// The constructor entry of `class`: its own statics, when the plan gives it any.
+    pub(super) fn enter_constructor(&mut self, class: ClassId) -> Result<(), Unsupported> {
+        match self.file.class_statics.constructor_entry(class) {
+            Some(class) => self.initialize_own_statics(class),
+            None => Ok(()),
+        }
+    }
+
     /// Initialize the class that owns static `index`, before that static is read or written.
     pub(super) fn initialize_static_owner(&mut self, index: u32) -> Result<(), Unsupported> {
-        // Reading a `const` touches nothing: its value is a compile-time constant.
-        let declaration = &self.file.ir.statics[index as usize];
-        let Some(owner) = declaration.owner.filter(|_| !declaration.is_const) else {
-            return Ok(());
-        };
-        match self.file.ir.class_id_by_name(owner) {
-            Some(class) if self.file.class_initializers.contains_key(&class) => {
-                self.activate_class(class)
-            }
-            _ => Ok(()),
+        match self.file.class_statics.access_activation(index) {
+            Some(class) => self.activate_class(class),
+            None => Ok(()),
         }
     }
 }

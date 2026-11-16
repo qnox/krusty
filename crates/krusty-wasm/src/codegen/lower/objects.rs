@@ -7,6 +7,7 @@
 //! `$Object` for its table. The frontend proved the value is of the class; the cast is what tells
 //! the validator.
 
+use krusty::backend::class_statics::ClassActivationStep;
 use krusty::backend::class_tables::module_slots::PlanKey;
 use krusty::backend::class_tables::{function_key, local_property_target, AnyMember, SlotKey};
 use krusty::backend::interface_identity::member_identity;
@@ -1807,7 +1808,7 @@ pub(super) fn define_class_functions(
                 class: id,
                 ordinal: 0,
             };
-            body.initialize_own_statics(id);
+            body.enter_constructor(id);
             body.primary_constructor(id)?;
             let lowered = body.finish();
             let carriers = constructor_carriers(module, ir, id, &parameters)?;
@@ -1832,7 +1833,7 @@ pub(super) fn define_class_functions(
                 class: id,
                 ordinal: ordinal as u32 + 1,
             };
-            body.initialize_own_statics(id);
+            body.enter_constructor(id);
             body.secondary_constructor(id, ordinal)?;
             let lowered = body.finish();
             let carriers = constructor_carriers(module, ir, id, &parameters)?;
@@ -2580,10 +2581,14 @@ impl Body<'_> {
         }
         self.activate_laid_out(*chain.last().expect("non-empty"))?;
         for &owner in chain.iter().rev() {
-            // A class's own companion-block statics; a class that has them has no companion.
-            self.initialize_own_statics(owner);
-            if Some(owner) != initializing {
-                self.initialize_companion(owner)?;
+            for step in self.class_initializers.plan().activation_steps(owner) {
+                match step {
+                    ClassActivationStep::OwnStatics(class) => self.initialize_own_statics(class),
+                    ClassActivationStep::Companion(class) if Some(class) != initializing => {
+                        self.initialize_companion(class)?;
+                    }
+                    ClassActivationStep::Companion(_) => {}
+                }
             }
         }
         Ok(())

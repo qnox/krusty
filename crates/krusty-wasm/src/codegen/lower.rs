@@ -335,9 +335,10 @@ pub(super) fn lower_file(
             function.ret,
         );
         body.scope = krusty::ir::IrEnclosure::Function(id as FunId);
-        // A block function or accessor is a static member of its class: calling one initializes
-        // the class first.
-        if let Some(class) = ir.companion_blocks.declaring_class(id as FunId) {
+        if let Some(class) = class_initializers
+            .plan()
+            .function_activation(ir, id as FunId)
+        {
             body.activate_class(class, None)?;
         }
         body.initializers = ir.single_assignment_initializers(root);
@@ -406,7 +407,7 @@ pub(super) fn lower_file(
             .iter()
             .zip(&globals)
             .enumerate()
-            .filter(|(index, _)| !class_initializers.is_deferred(*index as u32))
+            .filter(|(index, _)| !class_initializers.plan().is_deferred(*index as u32))
             .map(|(_, static_global)| static_global)
     };
     let initializer = if file_statics().any(|(property, _)| property.init.is_some()) {
@@ -532,7 +533,7 @@ struct FileContext<'a> {
     reach: &'a std::cell::RefCell<FileReach>,
     /// Local delegated-property accessors and the one object each property's convention receives.
     delegates: &'a local_delegates::Prepared,
-    /// The initializer of each class that owns statics.
+    /// The class static plan and the initializer of each class it gives statics.
     class_initializers: &'a class_statics::ClassInitializers,
 }
 
