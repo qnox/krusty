@@ -66,8 +66,9 @@ pub struct FirProgressionClass {
     pub step: Option<super::FirPropertyTarget>,
 }
 
-/// A stdlib function a counted loop calls on its own (`getProgressionLastElement`), as resolution
-/// selected it from the provider's declarations.
+/// A stdlib function kotlinc's lowering calls on its own (a counted loop's
+/// `getProgressionLastElement`, an exhaustive `when`'s `throwNoWhenBranchMatchedException`), as
+/// resolution selected it from the provider's declarations.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FirRuntimeFunction {
     pub function: super::ExternalCallableId,

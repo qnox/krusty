@@ -1,0 +1,66 @@
+// TARGET_BACKEND: JVM_IR
+// Not platform-specific: the Native and wasm backends cannot yet test an object against a class
+// another source module declares (`is K` below), which every program of this shape needs.
+// An exhaustive subject `when` without an `else`, compiled against a sealed interface that gains a
+// subclass before the program runs, throws `NoWhenBranchMatchedException`. From the 2.5
+// API (`NoWhenBranchMatchedExceptionWithMessage`, since API 2.5) the failure passes the subject to
+// `kotlin.internal.throwNoWhenBranchMatchedException`, whose message names it; before, the
+// exception has no message. The stdlib the program runs against is that API.
+// MODULE: m1
+// FILE: m1.kt
+package pkg
+
+sealed interface S
+class K : S
+
+// MODULE: m12
+// FILE: m1.kt
+package pkg
+
+sealed interface S
+class K : S
+class K2 : S {
+    override fun toString(): String = "K2"
+}
+
+// MODULE: m2(m1)
+// FILE: m2.kt
+package pkg
+
+fun sealedValue(s: S): String = when (s) {
+    is K -> "K"
+}
+
+fun boundStatement(s: S, out: Array<String>) {
+    when (val subject = s) {
+        is K -> out[0] = subject.toString()
+    }
+}
+
+fun booleanValue(b: Boolean?): Int = when (b) {
+    true -> 1
+    false -> 2
+    null -> 3
+}
+
+// MODULE: m3(m12, m2)
+// FILE: box.kt
+package pkg
+
+fun failure(subject: String, run: () -> Unit): String? {
+    try {
+        run()
+    } catch (e: Exception) {
+        val expected = if (KotlinVersion.CURRENT.isAtLeast(2, 5)) "No branch matched for subject: $subject" else null
+        return if (e.message == expected) null else "$subject: message ${e.message}, expected $expected"
+    }
+    return "$subject: no exception"
+}
+
+fun box(): String {
+    if (sealedValue(K()) != "K") return "sealed K"
+    if (booleanValue(null) != 3) return "boolean null"
+    failure("K2") { sealedValue(K2()) }?.let { return it }
+    failure("K2") { boundStatement(K2(), arrayOf("")) }?.let { return it }
+    return "OK"
+}

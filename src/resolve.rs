@@ -392,6 +392,7 @@ mod type_parameter_owners;
 use type_parameter_owners::ty_param_names_into;
 mod cyclic_upper_bounds;
 mod resolved_bound_view;
+mod runtime_functions;
 mod type_argument_arity;
 mod uninferred_call_results;
 mod upper_bound_violations;
@@ -7146,7 +7147,7 @@ pub struct TypeInfo {
     /// function rechecks of the same parser expression.
     reflective_callable_references: crate::fx_hash::HashSet<ExprId>,
     /// `when`s the checker proved exhaustive, by an `else` or by covering their subject.
-    exhaustive_whens: crate::fx_hash::HashSet<ExprId>,
+    exhaustive_whens: when_exhaustiveness::ExhaustiveWhens,
     /// What each condition of a subject `when` was checked against (numeric equality plans and
     /// narrowed subject views). Keyed by the condition expression.
     when_subject_plans: when_flow::WhenSubjectPlans,
@@ -30235,7 +30236,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         misfit_callable_references: crate::fx_hash::HashSet::default(),
         checked_calls: Vec::new(),
         checked_call_argument: None,
-        exhaustive_whens: crate::fx_hash::HashSet::default(),
+        exhaustive_whens: when_exhaustiveness::ExhaustiveWhens::default(),
         when_subject_plans: when_flow::WhenSubjectPlans::default(),
         resolved_type_tys: HashMap::default(),
         unresolved_type_segments: HashMap::default(),
@@ -32681,7 +32682,7 @@ struct Checker<'a> {
     /// knows whether it is postponed into a call.
     checked_calls: Vec<ExprId>,
     checked_call_argument: Option<ExprId>,
-    exhaustive_whens: crate::fx_hash::HashSet<ExprId>,
+    exhaustive_whens: when_exhaustiveness::ExhaustiveWhens,
     /// See [`TypeInfo::when_subject_plans`].
     when_subject_plans: when_flow::WhenSubjectPlans,
     resolved_type_tys: HashMap<(u32, u32), Ty>,
@@ -52214,7 +52215,7 @@ impl<'a> Checker<'a> {
                 CompletedFlow::publish_common(self, scope, &completing_flows);
             }
             let result_ty = if exhaustive {
-                self.exhaustive_whens.insert(e);
+                self.record_exhaustive_when(e, has_else, subject.is_some());
                 result.unwrap_or(Ty::Unit)
             } else if value_required {
                 let span = self.span(e);
