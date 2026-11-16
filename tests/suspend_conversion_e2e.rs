@@ -190,55 +190,24 @@ fun box(): String {
 /// parameter, a type parameter with a nullable function bound, a call result and a local `var`,
 /// with a value result and a `Unit` result. Kotlin 2.5 keeps the value `null` (KT-89451); earlier
 /// releases convert it to an adapter whose call yields `null`, or, for a type parameter, throws
-/// `NullPointerException`. kotlinc fixes the expected
-/// observation for the configured release, and krusty must observe the same.
+/// `NullPointerException`. The shared box regressions hold the program once per behaviour, each
+/// with its releases; the one for the configured release must return `OK` under kotlinc and krusty.
 #[test]
 fn a_null_function_value_converts_as_kotlinc_does() {
-    const SRC: &str = r#"
-import kotlin.coroutines.*
-
-suspend fun observe(f: (suspend () -> String?)?): String = if (f == null) "null" else "adapter:" + f()
-suspend fun observeUnit(f: (suspend () -> Unit)?): String = if (f == null) "null" else { f(); "adapter" }
-
-suspend fun parameter(f: (() -> String?)?) = observe(f)
-suspend fun <F : (() -> String?)?> typeParameter(f: F) = observe(f)
-fun nothing(): (() -> String?)? = null
-suspend fun callResult() = observe(nothing())
-suspend fun localVar(): String {
-    var f: (() -> String?)? = null
-    return observe(f)
-}
-suspend fun unitParameter(f: (() -> Unit)?) = observeUnit(f)
-
-fun run(block: suspend () -> String): String {
-    var result: Result<String>? = null
-    block.startCoroutine(Continuation(EmptyCoroutineContext) { result = it })
-    return result!!.fold({ it }, { if (it is NullPointerException) "NPE" else "other" })
-}
-
-fun box(): String = listOf(
-    run { parameter(null) },
-    run { typeParameter(null) },
-    run { callResult() },
-    run { localVar() },
-    run { unitParameter(null) },
-).joinToString(",")
-"#;
-    // Before 2.5 the adapter of a type-parameter value invokes it without a null check.
-    let expected = if krusty::kotlin_version::Quirks::target()
+    let src = if krusty::kotlin_version::Quirks::target()
         .has(krusty::kotlin_version::Quirk::NullFunctionValueConvertsToAdapter)
     {
-        "adapter:null,NPE,adapter:null,adapter:null,adapter"
+        include_str!("box_regressions/NullFunctionValueSuspendConversionAdapter.kt")
     } else {
-        "null,null,null,null,null"
+        include_str!("box_regressions/NullFunctionValueSuspendConversion.kt")
     };
     assert_eq!(
-        common::kotlinc_box_result(SRC),
-        expected,
+        common::kotlinc_box_result(src),
+        "OK",
         "kotlinc's observation"
     );
     assert_eq!(
-        common::expect_box_run_with_stdlib(SRC, "NullFunctionValueSuspendConversion"),
-        expected
+        common::expect_box_run_with_stdlib(src, "NullFunctionValueSuspendConversion"),
+        "OK"
     );
 }
