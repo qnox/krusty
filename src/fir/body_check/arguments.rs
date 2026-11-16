@@ -1735,6 +1735,7 @@ impl BodyFirChecker<'_> {
             has_receiver: sam.has_receiver,
             suspend: sam.suspend,
             source_suspend,
+            requires_object_dispatch: sam.requires_object_dispatch,
             overridden_results: resolved_all(&sam.overridden_results)?,
             dispatch_methods: frames(&sam.dispatch_methods)?,
             default_methods: frames(&sam.default_methods)?,

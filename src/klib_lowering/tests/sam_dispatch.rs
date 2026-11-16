@@ -43,11 +43,13 @@ fn official_sam_dispatch_families_preserve_headers_frames_and_copy_without_body_
     let specialized = method(&libraries, "fixture/Specialized", "apply");
     let defaulted = method(&libraries, "fixture/Defaulted", "apply");
     let note = method(&libraries, "fixture/Defaulted", "note");
+    let printable = method(&libraries, "fixture/Printable", "toString");
     for (name, declarations, defaults, inline) in [
         ("diamond", vec![left, right], vec![], false),
         ("specialized", vec![specialized, left], vec![], false),
         ("defaulted", vec![defaulted], vec![note], false),
         ("inlineSpecialized", vec![specialized, left], vec![], true),
+        ("printable", vec![printable], vec![], false),
     ] {
         let symbols = libraries.symbols(SymbolNamespace::Package(type_name("fixture")), name);
         let [function] = symbols.callables.functions() else {
@@ -75,6 +77,7 @@ fn official_sam_dispatch_families_preserve_headers_frames_and_copy_without_body_
         .unwrap();
         let mut ir = unit.into_ir();
         let (expression, target) = sam(&ir);
+        assert_eq!(target.requires_object_dispatch, name == "printable");
         assert_eq!(
             target
                 .dispatch_methods

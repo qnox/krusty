@@ -44,6 +44,7 @@ pub struct SamSignature {
     pub(crate) context_count: usize,
     pub(crate) has_receiver: bool,
     pub(crate) suspend: bool,
+    pub(crate) requires_object_dispatch: bool,
     /// The distinct own results of the declarations the method overrides, at any depth, before the
     /// call specializes them: a type parameter the call binds to `Int` stays that type parameter.
     /// A target realizes its result and bridge descriptors from these.
@@ -90,6 +91,7 @@ struct CollectedDeclaration {
     depth: u32,
     /// The declaring interface carries a sam-with-receiver annotation.
     receiver_convention: bool,
+    requires_object_dispatch: bool,
     member: LibraryMember,
     params: Vec<Ty>,
     contravariant_params: Vec<bool>,
@@ -244,6 +246,7 @@ pub(crate) fn semantic_sam_signature(
             ret,
             declaration,
             receiver_convention,
+            requires_object_dispatch,
             ..
         } = nearest.into_iter().next()?;
         if abstract_method
@@ -255,6 +258,7 @@ pub(crate) fn semantic_sam_signature(
                 declaration,
                 overridden_results,
                 receiver_convention,
+                requires_object_dispatch,
                 dispatch_methods,
             ))
             .is_some()
@@ -270,6 +274,7 @@ pub(crate) fn semantic_sam_signature(
         declaration,
         overridden_results,
         convention,
+        requires_object_dispatch,
         dispatch_methods,
     ) = abstract_method?;
     let parameter_identities = sam_parameter_identities(&sam)?;
@@ -313,6 +318,7 @@ pub(crate) fn semantic_sam_signature(
         context_count: sam.context_count,
         has_receiver,
         suspend: sam.suspend(),
+        requires_object_dispatch,
         overridden_results,
         dispatch_methods,
         default_methods,
@@ -448,9 +454,10 @@ fn collect_member(
     // (`fun interface F { override fun toString(): String }`).  The declaration at depth zero is
     // then the interface's functional method and must not be erased merely because its signature
     // resembles `Any`.
+    let object_method = is_public_object_method(member);
     if member.visibility != Visibility::Public
         || member.is_classifier_static()
-        || (!retain_direct_kotlin_object_method && is_public_object_method(member))
+        || (!retain_direct_kotlin_object_method && object_method)
     {
         return;
     }
@@ -496,6 +503,7 @@ fn collect_member(
     let collected = CollectedDeclaration {
         depth,
         receiver_convention,
+        requires_object_dispatch: retain_direct_kotlin_object_method && object_method,
         member: member.clone(),
         params: params.clone(),
         contravariant_params,

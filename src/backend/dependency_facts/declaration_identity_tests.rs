@@ -70,6 +70,7 @@ fn sam_value(
             has_receiver: false,
             suspend: false,
             source_suspend: false,
+            requires_object_dispatch: false,
             overridden_results: vec![],
             dispatch_methods: vec![frame(method), frame(alias)],
             default_methods: vec![frame(default)],
