@@ -532,7 +532,7 @@ mod tests {
         let handoff = source_path("src/compiler/backend_handoff.rs");
         let text = fs::read_to_string(&handoff).expect("read checked backend handoff");
         let checked_facts = text
-            .find("record_klib_dependency_facts")
+            .find("record_checked_klib_dependency_facts(")
             .expect("freeze KLIB body checker facts before backend emission");
         let backend_facts = text
             .find("super::builtin_implementations::record_checked")
