@@ -10,11 +10,14 @@ use crate::types::{Ty, TypeName};
 
 /// Check and freeze semantic facts for the body graph reachable from the source file's selected
 /// KLIB declarations. Backends may later choose a target-specific subset, but they never resolve
-/// member hierarchy edges or builtin implementations while doing so.
+/// member hierarchy edges or builtin implementations while doing so. Each member's builtin
+/// implementations include the overrides of the target's `represented` classes below its owner,
+/// as the source handoff records them.
 pub(crate) fn for_checked_klib_bodies<'a>(
     source: &dyn SymbolSource,
     bodies: &crate::klib_libraries::KlibDeclarationBodies,
     roots: impl IntoIterator<Item = crate::libraries::KlibBodyCallable<'a>>,
+    represented: &[TypeName],
 ) -> Result<CheckedKlibDependencyFacts, ExternalCallableId> {
     let mut builtin_implementations = crate::fx_hash::HashMap::default();
     let mut member_edges = crate::fx_hash::HashMap::default();
@@ -70,8 +73,10 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         // its own (`Iterator.next`, `Any.equals`). Its builtin implementations are a fact of the
         // declaration, under the same property-or-function name the source handoff uses.
         if realization.kind == crate::libraries::ExternalCallableKind::Member {
-            let implementations =
-                super::builtin_implementation::for_external_member(source, external)?;
+            let implementations = super::RepresentedOverrides::new(source, represented).complete(
+                external,
+                &super::builtin_implementation::for_external_member(source, external)?,
+            )?;
             match builtin_implementations.entry(external) {
                 std::collections::hash_map::Entry::Occupied(existing)
                     if existing.get() != &implementations =>
