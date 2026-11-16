@@ -96,6 +96,12 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
                 f(*end);
             }
             IrCheckedOperation::IllegalProgressionStep { step } => f(*step),
+            IrCheckedOperation::AtomicField {
+                receiver, operands, ..
+            } => {
+                f(*receiver);
+                operands.iter().for_each(|&operand| f(operand));
+            }
             IrCheckedOperation::RangeContains {
                 value, start, end, ..
             } => {
