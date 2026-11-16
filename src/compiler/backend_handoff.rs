@@ -13,7 +13,6 @@ use crate::diag::{DiagSink, Span};
 use crate::fir::SourceFileId;
 use crate::resolve::PassTwoSymbols;
 
-mod coroutine_runtime;
 mod plugin_handoff;
 
 /// The module-wide facts every file of one emission hands its backend alongside its own IR.
@@ -25,8 +24,7 @@ pub(super) struct ModuleEmission<'a> {
     pub stems: &'a [String],
     /// Where each checked node came from, for a backend to place what it reports.
     pub origins: &'a crate::fir::OriginStore,
-    /// The backend lowers suspend functions with the shared common-IR coroutine passes
-    /// ([`crate::backend::Backend::lowers_coroutines_on_common_ir`]).
+    /// The backend's common-IR preparation policy includes the shared coroutine passes.
     pub common_ir_coroutines: bool,
 }
 
@@ -51,9 +49,9 @@ pub(super) fn checked_ir_file<'a>(
         &classifiers,
     );
     // A suspend function's lowering calls two stdlib declarations the source need not name; select
-    // them now, so they are frozen with the file's other dependency declarations.
+    // them now from the identities resolution stored before backend entry.
     if module.common_ir_coroutines && !ir.suspend_funs.is_empty() {
-        ir.coroutine_runtime = coroutine_runtime::select(symbols.semantic_platform());
+        ir.coroutine_runtime = symbols.coroutine_runtime();
     }
     let mut callables = match CheckedBackendCallables::freeze_with_class_declarations(
         &ir,
@@ -69,32 +67,11 @@ pub(super) fn checked_ir_file<'a>(
             return None;
         }
     };
-    if let Some(dependency_bodies) = symbols.semantic_platform().klib_dependency_body_facts() {
-        let checked = match crate::resolve::for_checked_klib_bodies(
-            symbols.semantic_platform(),
-            dependency_bodies.bodies(),
-            callables.klib_body_callables(),
-        ) {
-            Ok(checked) => checked,
-            Err(identity) => {
-                diags.error(
-                    Span::new(0, 0),
-                    format!(
-                        "internal error: checked KLIB body graph has no exact member facts for {identity:?}"
-                    ),
-                );
-                return None;
-            }
-        };
-        if let Err(identity) = callables.record_klib_dependency_facts(checked) {
-            diags.error(
-                Span::new(0, 0),
-                format!(
-                    "internal error: checked KLIB body graph has conflicting facts for {identity:?}"
-                ),
-            );
-            return None;
-        }
+    if let Err(error) =
+        record_checked_klib_dependency_facts(&mut callables, symbols.semantic_platform())
+    {
+        diags.error(Span::new(0, 0), format!("internal error: {error}"));
+        return None;
     }
     if let Err(identity) = super::builtin_implementations::record_checked(
         &mut callables,
@@ -174,4 +151,94 @@ pub(super) fn checked_ir_file<'a>(
         stems: module.stems,
         origins: module.origins,
     })
+}
+
+/// Check the KLIB body graph reachable from the frozen callables and store its facts, before the
+/// checked callable facts are completed. A refreeze after common preparation checks the graph of
+/// the calls the preparation introduced the same way, and a dependency support unit checks the
+/// graph its own bodies reach.
+pub(super) fn record_checked_klib_dependency_facts(
+    callables: &mut CheckedBackendCallables,
+    platform: &dyn crate::libraries::SemanticPlatform,
+) -> Result<(), String> {
+    let Some(dependency_bodies) = platform.klib_dependency_body_facts() else {
+        return Ok(());
+    };
+    let checked = crate::resolve::for_checked_klib_bodies(
+        platform,
+        dependency_bodies.bodies(),
+        callables.klib_body_callables(),
+    )
+    .map_err(|identity| {
+        format!("checked KLIB body graph has no exact member facts for {identity:?}")
+    })?;
+    callables
+        .record_klib_dependency_facts(checked)
+        .map_err(|identity| {
+            format!("checked KLIB body graph has conflicting facts for {identity:?}")
+        })
+}
+
+/// Run common IR preparations after the target's exact dependency exports have been attached, but
+/// before target lowering computes its emission closure. `provider` remains live here, so the
+/// final callable freeze includes calls introduced by common lowering. Dependency-support units
+/// can use this entry point after their checked unit and exact exports have been constructed.
+pub(super) fn prepare_common_ir(
+    file: &mut CheckedIrFile<'_>,
+    provider: &dyn crate::libraries::SemanticPlatform,
+    preparation: crate::backend::CommonIrPreparation,
+    coroutine_runtime: Option<crate::ir::IrCoroutineRuntime>,
+) -> Result<(), crate::backend::CommonIrPreparationError> {
+    // Resolution selected the coroutine runtime declarations once; a unit whose preparation
+    // lowers a suspend function records that saved selection.
+    if !file.ir.suspend_funs.is_empty() && file.ir.coroutine_runtime.is_none() {
+        file.ir.coroutine_runtime = coroutine_runtime;
+    }
+    crate::backend::counted_loops::realize(&mut file.ir, preparation.counted_loops);
+    crate::backend::enums::publish_constants(&mut file.ir, &mut file.dependency_exports);
+    crate::backend::enums::realize(&mut file.ir, preparation.enums);
+    let classifiers = file.classifiers.module();
+    let module_name = file.module_name;
+    crate::backend::default_arguments::realize(
+        &mut file.ir,
+        &mut file.callables,
+        |function| file.dependency_exports.callable(function).is_some(),
+        |constructor| {
+            classifiers.declares_instance(
+                &crate::backend::instance_links::InstanceEntry::Constructor {
+                    module: module_name.into(),
+                    declaration: constructor,
+                },
+            )
+        },
+    );
+    crate::backend::coroutines::add_continuation_parameters(&mut file.ir)
+        .map_err(crate::backend::CommonIrPreparationError::Suspend)?;
+
+    let plugin_runtime = file.callables.plugin_runtime_bindings();
+    let mut callables = CheckedBackendCallables::freeze(&file.ir, provider).map_err(|error| {
+        crate::backend::CommonIrPreparationError::Invariant(format!(
+            "cannot freeze prepared dependency declarations: {error:?}"
+        ))
+    })?;
+    record_checked_klib_dependency_facts(&mut callables, provider)
+        .map_err(crate::backend::CommonIrPreparationError::Invariant)?;
+    super::builtin_implementations::record_checked(&mut callables, &file.ir, provider).map_err(
+        |identity| {
+            crate::backend::CommonIrPreparationError::Invariant(format!(
+                "prepared IR has no builtin implementation facts for external member {identity:?}"
+            ))
+        },
+    )?;
+    callables
+        .freeze_plugin_runtime_callables(plugin_runtime, |identity| {
+            provider.external_callable(identity)
+        })
+        .map_err(|error| {
+            crate::backend::CommonIrPreparationError::Invariant(format!(
+                "cannot refreeze plugin runtime declaration facts: {error:?}"
+            ))
+        })?;
+    file.callables = callables;
+    Ok(())
 }

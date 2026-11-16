@@ -35,7 +35,7 @@ use declared_capabilities::{
     declares_its_own_comparable, implemented_collections, implemented_dependencies,
     overrides_a_throwable_accessor,
 };
-mod atomic_fields;
+mod atomic_accesses;
 mod functions;
 mod implementor_dispatch;
 mod imported_functions;
@@ -652,22 +652,32 @@ impl<'a> FileLowering<'a> {
         let function = &self.ir.functions[id as usize];
         let mut params = Vec::with_capacity(function.params.len() + 1);
         if let Some(owner) = function.dispatch_receiver {
-            if self.ir.class_id_by_name(owner).is_none() {
-                return Err(declined!(
-                    "a method of `{}`, which is not declared in this file",
-                    owner.render()
-                ));
-            }
             // A value class's member takes the VALUE as `this`; its box reaches it through a
             // bridge. Every other member takes the object, as a reference.
-            params.push(if self.values.is_value_class(owner) {
-                Ty::obj_name(owner)
-            } else {
-                any()
+            params.push(match self.value_receiver(owner) {
+                Some(value) => value,
+                None if self.ir.class_id_by_name(owner).is_some() => any(),
+                None => {
+                    return Err(declined!(
+                        "a method of `{}`, which is not declared in this file",
+                        owner.render()
+                    ))
+                }
             });
         }
         params.extend(super::super::captures::carried_parameters(self.ir, id));
         self.signature_of(&params, function.ret)
+    }
+
+    /// The type a member of `owner` takes its receiver as, when that receiver is a VALUE rather
+    /// than an object: a value class's member takes the unboxed value, and a member of a builtin
+    /// scalar classifier (`Boolean.toString`, whose body a dependency unit lowers) takes the
+    /// scalar itself. Both classifiers are final, so such a member has exactly one body.
+    fn value_receiver(&self, owner: krusty::types::TypeName) -> Option<Ty> {
+        if self.values.is_value_class(owner) {
+            return Some(Ty::obj_name(owner));
+        }
+        krusty::types::builtin_semantic(owner).filter(|ty| ty.scalar_value_repr().is_some())
     }
 
     /// Whether a function declares a REIFIED type parameter.
@@ -934,7 +944,7 @@ impl<'a> FileLowering<'a> {
         // `this`, when there is one, is value slot 0 and the parameters follow it.
         let mut slots: Vec<Ty> = Vec::with_capacity(function.params.len() + 1);
         if let Some(owner) = function.dispatch_receiver {
-            slots.push(Ty::obj_name(owner));
+            slots.push(self.value_receiver(owner).unwrap_or(Ty::obj_name(owner)));
         }
         slots.extend(super::super::captures::carried_parameters(
             self.ir,
@@ -2276,13 +2286,27 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 finally,
                 result,
             } => self.try_catch(body, &catches, finally, result),
-            IrExpr::PluginPlaceholder {
-                plugin: "atomicfu",
-                kind,
-                exprs,
-                data,
-                types,
-            } => self.atomic_field_operation(kind, &exprs, &data, &types),
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::AtomicField {
+                    operation,
+                    receiver,
+                    class,
+                    index,
+                    operands,
+                } = &**checked_op =>
+            {
+                self.atomic_field(*operation, *receiver, *class, *index, operands)
+            }
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::AtomicArrayElement {
+                    operation,
+                    array,
+                    index,
+                    operands,
+                } = &**checked_op =>
+            {
+                self.atomic_array_element(*operation, *array, *index, operands)
+            }
             IrExpr::Return(_)
             | IrExpr::Variable { .. }
             | IrExpr::SetValue { .. }
@@ -2729,7 +2753,8 @@ fn callee_kind(callee: &Callee) -> &'static str {
         Callee::CrossFile { .. } => "cross-file",
         Callee::Module { .. }
         | Callee::ModuleWithDefaults { .. }
-        | Callee::ModuleDefaultEntry { .. } => "same-module",
+        | Callee::ModuleDefaultEntry { .. }
+        | Callee::ModuleConstructorDefaultEntry { .. } => "same-module",
         Callee::External { .. } => "dependency",
         Callee::Static { .. } => "static",
         Callee::Virtual { .. } => "virtual",

@@ -253,6 +253,12 @@ impl LaidOutClasses {
         self.activate_superclass_initializers(ir, callables, classifiers, module);
     }
 
+    /// Whether the file being laid out is a dependency support unit, whose classes are the
+    /// program's.
+    pub(super) fn lays_out_dependencies(&self) -> bool {
+        self.support
+    }
+
     pub(super) fn get(&self, class: TypeName) -> Option<&LaidOutClass> {
         if self.support {
             return self

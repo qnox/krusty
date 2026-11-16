@@ -106,7 +106,6 @@ boxing/boxing9.kt
 boxing/kt84727_if.kt
 boxingOptimization/casts.kt
 boxingOptimization/checkcastAndInstanceOf2.kt
-boxingOptimization/explicitEqualsOnDouble.kt
 boxingOptimization/fold.kt
 boxingOptimization/foldRange.kt
 boxingOptimization/kt19767_2.kt
@@ -146,7 +145,6 @@ bridges/test21.kt
 bridges/test22.kt
 bridges/test23.kt
 bridges/test24.kt
-bridges/test25.kt
 builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
 callableReference/adaptedReferences/boundReferences.kt
 callableReference/adaptedReferences/inlineDefault.kt
@@ -184,7 +182,6 @@ callableReference/adaptedReferences/suspendConversion/withParameters.kt
 callableReference/adaptedReferences/suspendUnitConversion.kt
 callableReference/adaptedReferences/unboundReferences.kt
 callableReference/bound/companionObjectReceiverInheritsFromOuter.kt
-callableReference/bound/kt15446.kt
 callableReference/equality/conversionCombinations.kt
 callableReference/equality/suspendFunctionEquality.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorEquality.kt
@@ -230,7 +227,6 @@ closures/capturedVarsOptimization/withCoroutines.kt
 closures/capturedVarsOptimization/withCoroutinesNoStdLib.kt
 closures/crossinlineLocalDeclaration.kt
 closures/kt47894_inlineFunWithObjectWithNothing.kt
-collectionLiterals/primitiveArrays.kt
 collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
 collections/clashWithInternalMapMethod.kt
@@ -339,7 +335,6 @@ controlflow/for_loops_array_nullable.kt
 controlflow/for_loops_array_side_effects.kt
 controlflow/for_loops_call_order.kt
 controlflow/for_loops_coroutines.kt
-controlflow/for_loops_empty_range.kt
 controlflow/for_loops_errors.kt
 controlflow/for_loops_let_with_nullable.kt
 controlflow/for_loops_nested.kt
@@ -835,7 +830,6 @@ dataObjects/toString.kt
 dataflow/scope1.kt
 dataflow/uninitialized_val.kt
 deadCodeElimination/emptyVariableRange.kt
-defaultArguments/constructor/anonymousObjectAsDefaultParam.kt
 defaultArguments/defaultArgumentsInFunctionWithExpressionAsBody.kt
 defaultArguments/function/defaultLambdaInline.kt
 delegatedProperty/DelegationByFunctionWithEnumUpperBound.kt
@@ -935,7 +929,6 @@ escapeAnalysis/zeroOutObjectOnAlloc.kt
 evaluate/intrinsicConst/charConstructor.kt
 evaluate/intrinsicConst/constTrim.kt
 evaluate/intrinsicConst/equals_after.kt
-evaluate/intrinsicConst/kCallableName.kt
 evaluate/intrinsicConst/lowerAndUpperCase.kt
 evaluate/serialization/typeAnnotation.kt
 evaluate/thisPlusString.kt
@@ -1010,8 +1003,6 @@ functions/localFunctions/definedWithinLambda.kt
 functions/localFunctions/definedWithinLambdaInnerUsage1.kt
 functions/localFunctions/definedWithinLambdaInnerUsage2.kt
 ieee754/equalsNaN_properIeeeComparisons.kt
-ieee754/explicitEqualsCall.kt
-ieee754/safeCall.kt
 increment/augmentedAssignmentWithComplexRhs.kt
 inference/builderInferenceLeakingVariable.kt
 inference/integerLiteralTypeInLamdaReturnType.kt
@@ -1165,8 +1156,6 @@ inlineClass/nestedInlineClasses.kt
 inlineClass/secondaryConstructorWithGenerics.kt
 inlineClasses/anonymousObjectAsDefaultParam.kt
 inlineClasses/anonymousObjectAsDefaultParamFull.kt
-inlineClasses/anonymousObjectAsDefaultParamSingleFile.kt
-inlineClasses/boxReturnValueInLambda/kt27586_1.kt
 inlineClasses/boxReturnValueInLambda/kt27586_2.kt
 inlineClasses/boxReturnValueOnOverride/covariantOverrideListVsMutableList.kt
 inlineClasses/boxReturnValueOnOverride/covariantOverrideListVsMutableListGeneric.kt
@@ -1233,11 +1222,7 @@ inlineClasses/kt27113.kt
 inlineClasses/kt28405.kt
 inlineClasses/kt32793.kt
 inlineClasses/kt44141.kt
-inlineClasses/kt44867.kt
-inlineClasses/kt45991.kt
-inlineClasses/kt50974_resultMultiModule.kt
 inlineClasses/kt70461.kt
-inlineClasses/multifileClass.kt
 inlineClasses/privateConstructorFunInterfaceMultiModule.kt
 inlineClasses/privateConstructorFunInterfaceMultiModuleGeneric.kt
 inlineClasses/propertyDelegation/kt27070.kt
@@ -1250,31 +1235,12 @@ inlineClasses/result/extensionOverride.kt
 inlineClasses/result/inlineMethodOnResult.kt
 inlineClasses/result/lambdaTakesResultThroughBridge.kt
 inlineClasses/resultInlining.kt
-inlineClasses/returnResult/class.kt
-inlineClasses/returnResult/classAnyOverride.kt
-inlineClasses/returnResult/classGenericOverride.kt
-inlineClasses/returnResult/classResultOverride.kt
-inlineClasses/returnResult/interface.kt
-inlineClasses/returnResult/topLevel.kt
 inlineClasses/samWrapperDifferentModule.kt
 inlineClasses/samWrapperDifferentModuleGeneric.kt
-inlineClasses/unboxGenericParameter/funInterface/nullableResult.kt
-inlineClasses/unboxGenericParameter/funInterface/result.kt
-inlineClasses/unboxGenericParameter/funInterface/resultAny.kt
-inlineClasses/unboxGenericParameter/funInterface/resultAnyGeneric.kt
 inlineClasses/unboxGenericParameter/genericArrayInlineClassCast.kt
-inlineClasses/unboxGenericParameter/lambda/nullableResult.kt
-inlineClasses/unboxGenericParameter/lambda/result.kt
-inlineClasses/unboxGenericParameter/lambda/resultAny.kt
-inlineClasses/unboxGenericParameter/lambda/resultAnyGeneric.kt
-inlineClasses/unboxGenericParameter/objectLiteral/nullableResult.kt
-inlineClasses/unboxGenericParameter/objectLiteral/result.kt
-inlineClasses/unboxGenericParameter/objectLiteral/resultAny.kt
-inlineClasses/unboxGenericParameter/objectLiteral/resultAnyGeneric.kt
 inlineClasses/unboxParameterOfSuspendLambdaBeforeInvoke.kt
 inlineClasses/unboxParameterOfSuspendLambdaBeforeInvokeGeneric.kt
 inlineClasses/unboxResultParameterWhenCapturingToCrossinlineLambda.kt
-inlineClasses/valueClassInstanceOfNumberAndComparableInInlineFunction.kt
 inlineEvaluationOrder/argumentOfCall.kt
 inlineEvaluationOrder/argumentOfCallMultipleInlineCalls.kt
 inlineEvaluationOrder/argumentOfInlineCall.kt
@@ -1423,7 +1389,6 @@ multiplatform/k2/basic/overridesOfExpectMembers.kt
 multiplatform/k2/basic/substitutionOverrideInCommonModule.kt
 multiplatform/k2/basic/widerVisibilityInActualClassifier.kt
 multiplatform/k2/defaultArguments/constructor.kt
-multiplatform/k2/defaultArguments/defaultArgumentInDelegatedFunction.kt
 multiplatform/k2/defaultArguments/function.kt
 multiplatform/k2/defaultArguments/inheritedFromCommonClass.kt
 multiplatform/k2/defaultArguments/inheritedFromExpectedClass.kt
@@ -1435,7 +1400,6 @@ multiplatform/k2/defaultArguments/kt67488.kt
 multiplatform/k2/defaultArguments/nestedEnumEntryValue.kt
 multiplatform/k2/defaultArguments/suspend.kt
 multiplatform/k2/defaultArguments/withTypeParameter.kt
-multiplatform/k2/delegation/delegationToExpectInterfaceByExpectFun.kt
 multiplatform/k2/delegation/delegationToExpectInterface_noNewMembers.kt
 multiplatform/k2/enumStaticMethods.kt
 multiplatform/k2/extensionPropertiesOverloads.kt
@@ -1488,7 +1452,6 @@ primitiveTypes/conversions.kt
 primitiveTypes/equalsHashCodeToString.kt
 primitiveTypes/kt13023.kt
 primitiveTypes/kt3517.kt
-primitiveTypes/kt3576.kt
 primitiveTypes/kt79977.kt
 primitiveTypes/kt79977_withIncrementalCompilation.kt
 primitiveTypes/numberToChar/abstractMethodInSuperinterface.kt

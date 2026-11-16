@@ -1,66 +1,14 @@
 //! JVM corpus entry selection from the emitted canonical module boundary.
-
-use super::{box_byte_score, box_reference_classes};
-use krusty::jvm::classreader::parse_class;
-
-/// krusty's emitted classes for one box case: the flat list the JVM runner loads, plus the module
-/// boundaries byte scoring pairs on. Every class is kept once in `flat`; `module_ranges` records
-/// each module's contiguous half-open range into it, in emission order. A single-module topology
-/// holds one range covering every class under [`box_reference_classes::MAIN_MODULE`]; a multi-module
-/// build records one range per module so a class name shared by two modules stays two identities.
-pub(in super::super) struct CompiledClasses {
-    pub(in super::super) flat: Vec<(String, Vec<u8>)>,
-    pub(in super::super) module_ranges: Vec<(String, std::ops::Range<usize>)>,
-}
-
-impl CompiledClasses {
-    /// Wrap a single module's flat class list (ordinary, `// FILE:`, or mixed-Java topology).
-    pub(super) fn single_module(flat: Vec<(String, Vec<u8>)>) -> Self {
-        let range = 0..flat.len();
-        CompiledClasses {
-            module_ranges: vec![(box_reference_classes::MAIN_MODULE.to_string(), range)],
-            flat,
-        }
-    }
-
-    /// Only the final canonical `ModuleUnit` owns the executable box entry, even if its
-    /// range is empty. Dependencies remain in `flat` and their complete scoring ranges.
-    pub(super) fn box_class(&self) -> Option<String> {
-        let (_, range) = self.module_ranges.last()?;
-        find_box_class(self.flat.get(range.clone())?)
-    }
-
-    /// The module-qualified inventory for byte scoring, keyed by `(module, internal name)`.
-    pub(super) fn qualified(&self) -> box_byte_score::QualifiedClasses {
-        let mut out = box_byte_score::QualifiedClasses::new();
-        for (module, range) in &self.module_ranges {
-            for (name, bytes) in &self.flat[range.clone()] {
-                out.insert((module.clone(), name.clone()), bytes.clone());
-            }
-        }
-        out
-    }
-}
-
-/// Find the class that declares `static box()Ljava/lang/String;`.
-pub(super) fn find_box_class(classes: &[(String, Vec<u8>)]) -> Option<String> {
-    for (name, bytes) in classes {
-        if let Ok(ci) = parse_class(bytes) {
-            if ci
-                .method("box", "()Ljava/lang/String;")
-                .is_some_and(|m| m.is_static())
-            {
-                return Some(name.replace('/', "."));
-            }
-        }
-    }
-    None
-}
+//!
+//! The class inventory lives with the shared compile path. This module holds the regression that
+//! the final source module, not a same-named dependency, owns `box()`.
 
 #[cfg(test)]
 mod tests {
-    use super::super::{common, compile_box_case};
-    use super::*;
+    use super::super::super::box_byte_score;
+    use super::super::super::box_jvm_compile::find_box_class;
+    use super::super::super::{box_reference_classes, common};
+    use super::super::compile_box_case;
     use std::collections::BTreeSet;
 
     #[test]
