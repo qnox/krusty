@@ -11,7 +11,7 @@ mod deprecation;
 mod diagnostic_rendering;
 mod intersection;
 pub use intersection::declaration_approximation;
-pub(crate) use intersection::same_component_set;
+pub(crate) use intersection::{same_component_set, same_structure};
 mod overridden_declaration;
 mod qualified_name;
 mod semantic_call_role;

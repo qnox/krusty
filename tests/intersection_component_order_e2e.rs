@@ -19,6 +19,12 @@ fun same(flag: Boolean) {
     val second = listOf(Y(), X())
     val both: List<Zed> = if (flag) first else second
 }
+fun joined(flag: Boolean): Zed {
+    val first = listOf(X(), Y()).first()
+    val second = listOf(Y(), X()).first()
+    val either = if (flag) first else second
+    return either
+}
 ";
     let sources = [("test.kt", source)];
     common::assert_error_blocks_match_kotlinc(&sources, &[]);

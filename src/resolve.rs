@@ -33572,8 +33572,8 @@ fn same_type_class_join(a: Ty, b: Ty) -> Option<Ty> {
             }
             _ => return None,
         },
-        // Non-object shapes (builtin scalars and function types) must agree exactly.
-        (false, false) if an == bn => an,
+        // Non-object shapes must be one type; an intersection compares as its component set.
+        (false, false) if crate::types::same_structure(an, bn) => an,
         // A mixed object/builtin spelling uses the source-level class identity, then retains the
         // non-object shape as the canonical front-end representation.
         (false, true) if same_kotlin_class(an, bn) => an,

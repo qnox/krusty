@@ -114,7 +114,7 @@ fn decompose(ty: Ty, inherited_nullable: bool, out: &mut Vec<Piece>) {
 
 /// Whether two types have one structure, with every intersection inside compared as the set of
 /// its components: `A & B` and `B & A` are one type in two spellings.
-fn same_structure(left: Ty, right: Ty) -> bool {
+pub(crate) fn same_structure(left: Ty, right: Ty) -> bool {
     if left == right {
         return true;
     }
