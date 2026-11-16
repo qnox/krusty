@@ -28,7 +28,9 @@ use super::super::super::objects::{slot_field, REFERENCE};
 use super::super::super::runtime::{Runtime, EQZ32, OR32};
 use super::super::classes::{Accessor, FileClasses};
 use super::super::interface_members::{accessor_types, member_signature};
-use super::super::property_registry::{MemberProperty, MemberPropertyDefinition, TopLevelProperty};
+use super::super::property_registry::{
+    AccessorProperty, MemberProperty, MemberPropertyDefinition, TopLevelProperty,
+};
 use super::{carrier, Body, FileContext, Unsupported, STRING};
 
 /// The heap type of the runtime's `String`, type 1 (see `STRING`).
@@ -955,6 +957,12 @@ impl Body<'_> {
         receiver: Option<u32>,
     ) -> Result<(), Unsupported> {
         if receiver.is_none() {
+            // Another file's property realized through accessors also has a storage record when
+            // its defining file was lowered first; the accessor entry is its access path.
+            if let Some(entry) = self.module_accessor_property(target) {
+                self.code.call(entry.getter);
+                return Ok(());
+            }
             if let Some(storage) = self.top_level_property(target)? {
                 if !storage.direct_read {
                     return Err("a top-level property read that requires an accessor".to_string());
@@ -1021,6 +1029,14 @@ impl Body<'_> {
         value: u32,
     ) -> Result<(), Unsupported> {
         if receiver.is_none() {
+            if let Some(entry) = self.module_accessor_property(target) {
+                let setter = entry
+                    .setter
+                    .ok_or_else(|| "a read-only cross-file property was written".to_string())?;
+                self.value(value, entry.ty)?;
+                self.code.call(setter);
+                return Ok(());
+            }
             if let Some(storage) = self.top_level_property(target)? {
                 if !storage.mutable {
                     return Err("an assignment to an immutable top-level property".to_string());
@@ -1101,6 +1117,14 @@ impl Body<'_> {
             return Err("a cross-file member property disagrees with its module record".into());
         }
         Ok(Some(entry))
+    }
+
+    /// The entries of a receiver-less property another file realizes through its accessors.
+    fn module_accessor_property(&self, target: PropertyId) -> Option<AccessorProperty> {
+        if self.ir.local_property_layouts.contains_key(&target) {
+            return None;
+        }
+        self.properties.accessor(target)
     }
 
     /// The storage selected for a receiver-less property in this or an earlier source file.
