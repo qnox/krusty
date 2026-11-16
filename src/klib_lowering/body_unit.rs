@@ -291,12 +291,21 @@ struct PendingBody<'a> {
     statements: &'a [KlibIrStatement],
     header: FunctionHeader,
     function: FunId,
-    initialization: Option<(
-        crate::ir::ClassId,
-        super::class_initialization::ClassInitialization<'a, 'a>,
-    )>,
+    initialization: Option<(crate::ir::ClassId, PendingInitialization<'a>)>,
     value_member: Option<MemberClass<'a>>,
     local_body: Option<super::same_library_class::LocalBody<'a>>,
+}
+
+/// What a materialized constructor's private initialization function runs.
+enum PendingInitialization<'a> {
+    /// The admitted initialization of the class's own fields and initializers.
+    Class(Box<super::class_initialization::ClassInitialization<'a, 'a>>),
+    /// A secondary constructor's statements after its delegation to the primary constructor,
+    /// whose arguments the class's secondary constructor `secondary` passes.
+    PrimaryDelegation {
+        secondary: usize,
+        arguments: Vec<crate::metadata::klib_ir::tree::KlibIrExprId>,
+    },
 }
 
 /// The declaration of a body this unit emits, and for a value class member, its class.
@@ -892,7 +901,31 @@ impl DependencyBodyUnit {
                 })
             } else {
                 match (&body.initialization, &body.value_member) {
-                    (Some((class, plan)), _) => lowering.initialize_class(*class, plan),
+                    (Some((class, PendingInitialization::Class(plan))), _) => {
+                        lowering.initialize_class(*class, plan)
+                    }
+                    (
+                        Some((
+                            class,
+                            PendingInitialization::PrimaryDelegation {
+                                secondary,
+                                arguments,
+                            },
+                        )),
+                        Some(member),
+                    ) => lowering.delegate_to_primary(
+                        *class,
+                        *secondary,
+                        super::class_headers::declared_receiver(member.contract),
+                        &member.fields,
+                        arguments,
+                        body.statements,
+                    ),
+                    (Some((_, PendingInitialization::PrimaryDelegation { .. })), None) => {
+                        Err(KlibBodyDeclineReason::SignatureMismatch(
+                            "a primary constructor delegation has no materialized class".to_owned(),
+                        ))
+                    }
                     (None, value_member) => match value_member {
                         Some(member) => lowering
                             .reading_through(member.class, &member.fields, member.contract.is_value)
@@ -1913,17 +1946,25 @@ impl<'s> Linker<'_, 's> {
         self.private_members.insert(identity.clone());
         let function = match self.functions.get(identity) {
             Some(&function) => function,
-            None => self.queue(
-                ir,
-                identity,
-                None,
-                arena,
-                declaration,
-                BodyHeader {
-                    header,
-                    value_member: Some(active),
-                },
-            )?,
+            None => {
+                let class = active.class;
+                let function = self.queue(
+                    ir,
+                    identity,
+                    None,
+                    arena,
+                    declaration,
+                    BodyHeader {
+                        header,
+                        value_member: Some(active),
+                    },
+                )?;
+                // It is a member of its class like any other, one no subclass overrides.
+                ir.set_method_visibility(function, crate::types::Visibility::Private);
+                ir.classes[class as usize].methods.push(function);
+                ir.note_class_method(class, function);
+                function
+            }
         };
         let declared = &ir.functions[function as usize];
         let (Some(receiver), params) = (

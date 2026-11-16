@@ -564,11 +564,14 @@ pub(super) fn ordinary_roots<'a>(
             if bodies.function_has_body(selected.identity()) != Some(true) {
                 continue;
             }
-            // A value class's box is materialized by the construction itself.
+            // A value class's box is materialized by the construction itself. Otherwise the
+            // constructor's delegation chain is admitted with the declarations it reaches, as the
+            // closure admits it.
+            let superclasses = superclass_realizations(platform, bodies, selected.identity());
             if (selected
                 .class_contract()
                 .is_some_and(crate::libraries::KlibBodyClassContract::has_unit_box)
-                || callees
+                || with_realized_declarations(callees.clone(), &superclasses)
                     .constructor_initialization_callees(selected.identity(), bodies)
                     .map_err(|reason| format!("an invalid constructor root: {reason:?}"))?
                     .is_some())
