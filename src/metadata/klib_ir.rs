@@ -20,6 +20,7 @@ use super::id_signature::{
 
 #[cfg(test)]
 mod arena_fixtures;
+mod class_index;
 mod field_storage;
 mod symbols;
 pub mod tree;
