@@ -34,18 +34,21 @@ impl BodyLowering<'_> {
         if access.symbol.kind != KlibIrSymbolKind::Function {
             return Err(mismatch("a call target's symbol is not a function"));
         }
-        let callee = match &access.symbol.signature {
-            KlibIrSignature::Public(callee) => callee,
-            KlibIrSignature::FileLocal { .. } => {
-                let linked = match self.object_members.get(&access.symbol.signature) {
+        let signature = &access.symbol.signature;
+        let callee = match signature {
+            KlibIrSignature::Public(callee) if !self.linker.links_privately(signature) => callee,
+            KlibIrSignature::Accessor(accessor) if !self.linker.links_privately(signature) => {
+                return self.accessor_call(accessor, access, ty)
+            }
+            KlibIrSignature::Public(_)
+            | KlibIrSignature::Accessor(_)
+            | KlibIrSignature::FileLocal { .. } => {
+                let linked = match self.object_members.get(signature) {
                     Some(member) => member.linked(),
-                    None => self
-                        .linker
-                        .link_local_function(self.ir, &access.symbol.signature)?,
+                    None => self.linker.link_local_function(self.ir, signature)?,
                 };
                 return self.linked_call(linked, access, ty);
             }
-            KlibIrSignature::Accessor(accessor) => return self.accessor_call(accessor, access, ty),
         };
         if let Some(arity) = function_invocation_arity(callee) {
             if !access.type_arguments.is_empty() {
