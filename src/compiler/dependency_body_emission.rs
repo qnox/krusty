@@ -944,6 +944,20 @@ fn prepare_bodyless_externals(
             bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
         };
         let mut edges = edges;
+        // The objects the body reads are materialized with the members dispatch reaches on them.
+        match emitted_roots::read_object_initializations(
+            platform,
+            bodies,
+            capabilities.callees,
+            &identity,
+            constructor,
+        ) {
+            Ok(initializations) => edges.extend(initializations),
+            Err(error) => {
+                diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                return false;
+            }
+        }
         // A member of a materialized class is lowered with the class its constructors create.
         match emitted_roots::member_class_constructors(
             platform,

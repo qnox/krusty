@@ -809,6 +809,35 @@ pub(super) fn member_object_initialization(
     }
 }
 
+/// The initialization edges of the library objects the body or initialization of `identity`
+/// reads as values, which the unit materializes with every member dispatch reaches on them.
+pub(super) fn read_object_initializations(
+    platform: &dyn SemanticPlatform,
+    bodies: &KlibDeclarationBodies,
+    callees: &crate::klib_lowering::KlibCalleeFacts<'_>,
+    identity: &KlibDependencyCallable,
+    constructor: bool,
+) -> Result<Vec<KlibDependencyCallable>, String> {
+    let objects = if constructor {
+        callees
+            .constructor_initialization_objects(identity, bodies)
+            .map_err(|reason| format!("an invalid class initialization: {reason:?}"))?
+    } else {
+        bodies.emitted_body_objects(identity, crate::klib_lowering::EMITTED_CALL_FORMS)
+    };
+    let mut edges = Vec::new();
+    for class in objects
+        .iter()
+        .filter_map(crate::klib_lowering::object_classifier)
+        .filter_map(|classifier| callees.read_object(classifier))
+    {
+        if let Some(initialization) = object_initialization(platform, bodies, callees, class)? {
+            edges.extend(initialization.callees);
+        }
+    }
+    Ok(edges)
+}
+
 /// The constructors that initialize the ordinary class `class`, when each one's admitted
 /// initialization materializes the class: its primary constructor, or each constructor of a class
 /// without one. Empty when the class is not materialized.
