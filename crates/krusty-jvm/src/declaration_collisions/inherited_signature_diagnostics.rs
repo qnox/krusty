@@ -179,7 +179,33 @@ fn signature(
                 ));
             }
             // A declaration of another file: its declared shape erases as the bridge that
-            // realizes it here would.
+            // realizes it here would, under the JVM name its declaring file gives it. A name this
+            // file cannot spell (a module suffix or a value-class hash) has no signature to
+            // compare.
+            let declaration = ir.referenced_module_callables.get(&callable)?;
+            if crate::internal_names::module_callable_is_mangled(declaration) {
+                return None;
+            }
+            let name = match crate::module_calls::header_jvm_name(&declaration.annotations) {
+                Ok(Some(written)) => written.to_owned(),
+                Ok(None) => name.to_owned(),
+                Err(()) => return None,
+            };
+            let declared = function
+                .declared_parameters
+                .iter()
+                .map(|parameter| parameter.get())
+                .collect::<Vec<_>>();
+            if crate::value_classes::module_member_jvm_name(
+                ir,
+                &name,
+                &declared,
+                &function.declared_result.get(),
+                function.suspend,
+            ) != name
+            {
+                return None;
+            }
             let mut parameters = function
                 .declared_parameters
                 .iter()
@@ -190,7 +216,7 @@ fn signature(
                 parameters.push(Ty::obj("kotlin/coroutines/Continuation"));
                 result = Ty::nullable(Ty::obj("kotlin/Any"));
             }
-            Some((name.to_owned(), method_descriptor(&parameters, result)))
+            Some((name, method_descriptor(&parameters, result)))
         }
     }
 }

@@ -107,3 +107,29 @@ fn a_java_method_that_takes_an_inherited_extensions_receiver_overrides_it() {
         result.krusty_stdout, result.krusty_stderr
     );
 }
+
+/// An `internal` member's JVM name carries the module suffix, so a public declaration of the same
+/// Kotlin name and erasure in a subclass of another file takes a different signature.
+#[test]
+fn an_internal_member_of_another_file_keeps_its_module_name() {
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[
+            (
+                "Base.kt",
+                "open class Base {\n    internal fun take(values: List<String>) {}\n}\n",
+            ),
+            (
+                "Derived.kt",
+                "class Derived : Base() {\n    fun take(values: List<Int>) {}\n}\n",
+            ),
+        ],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_eq!(result.reference_code, 0, "{}", result.reference_stderr);
+    assert_eq!(
+        result.krusty_code, 0,
+        "{}{}",
+        result.krusty_stdout, result.krusty_stderr
+    );
+}
