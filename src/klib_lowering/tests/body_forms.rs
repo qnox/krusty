@@ -1160,21 +1160,13 @@ fn stdlib_built_in_calls_have_the_signed_operands() {
                 super::super::ir_builtins::BuiltinOperator::CheckNotNull => {
                     ("CHECK_NOT_NULL", None)
                 }
-                super::super::ir_builtins::BuiltinOperator::DataClassArrayMember(member) => {
+                super::super::ir_builtins::BuiltinOperator::DataClassArrayMember(_) => {
+                    // Lowering calls the array's content extension; the prewalk must reach it.
                     let call = arena.expr(expr_id(arena, index));
-                    let implied = super::super::array_content_members::implied_callee(arena, call);
-                    match member {
-                        // Hashing reaches `contentHashCode`. Rendering is an intrinsic, so it
-                        // adds no declaration edge.
-                        super::super::ir_builtins::DataClassArrayMember::HashCode => assert!(
-                            implied.is_some(),
-                            "a data class array hash has no content extension edge: {callee:?}"
-                        ),
-                        super::super::ir_builtins::DataClassArrayMember::ToString => assert!(
-                            implied.is_none(),
-                            "a data class array rendering implies a declaration edge: {callee:?}"
-                        ),
-                    }
+                    assert!(
+                        super::super::array_content_members::implied_callee(arena, call).is_some(),
+                        "a data class array member call has no content extension edge: {callee:?}"
+                    );
                     ("data class array member", None)
                 }
             };

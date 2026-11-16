@@ -248,12 +248,8 @@ impl BodyLowering<'_> {
         }))
     }
 
-    /// A data class array member over a primitive array.
-    ///
-    /// Rendering is the content intrinsic (`[1, -1]`), the same rendering a data class uses for an
-    /// array property. The Wasm stdlib's `contentToString` reaches `itoa32`, which that library
-    /// does not serialize, so the operator is not rewritten into that call.
-    /// Hashing stays a call of `contentHashCode`; the prewalk records that same extension.
+    /// A data class array member, as a call of the array's content extension on the operand.
+    /// The prewalk adds the same extension as the call's edge (`array_content_members`).
     fn data_class_array_member(
         &mut self,
         access: &KlibIrMemberAccess,
@@ -265,29 +261,9 @@ impl BodyLowering<'_> {
                 "a data class array member is called with another shape than its declaration's",
             ));
         };
-        let Some(element) = array_content_members::array_element(self.arena, array) else {
-            return unsupported("a data class array member over a non-primitive array");
-        };
-        if member == DataClassArrayMember::ToString {
-            if ty != Ty::String {
-                return Err(mismatch(
-                    "a data class array rendering is typed apart from `String`",
-                ));
-            }
-            let operand = self.expression(array)?;
-            let rendered = self.ir.add_expr(IrExpr::Call {
-                callee: Box::new(Callee::Intrinsic {
-                    operation: IrIntrinsic::GeneratedPropertyArrayToString {
-                        ty: Ty::array(element),
-                    },
-                    ret: Ty::String,
-                }),
-                dispatch_receiver: None,
-                args: vec![operand],
-            });
-            return Ok(self.typed(rendered, Ty::String));
-        }
-        let Some(callee) = array_content_members::content_callee(member, element) else {
+        let Some(callee) = array_content_members::array_element(self.arena, array)
+            .and_then(|element| array_content_members::content_callee(member, element))
+        else {
             return unsupported("a data class array member over a non-primitive array");
         };
         let KlibIrSignature::Public(signature) = &callee.signature else {

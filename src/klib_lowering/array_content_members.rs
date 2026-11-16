@@ -1,9 +1,9 @@
 //! The array content members a data class generates. kotlinc's backends lower the `IrBuiltIns`
-//! operators `dataClassArrayMemberToString` and `dataClassArrayMemberHashCode` to the content of
-//! the argument's array; a KLIB serializes them as calls to the operator, which no library
-//! declares. Body lowering realizes hashing as a call of `contentHashCode`, and the dependency
-//! prewalk adds that same declaration. Rendering is the content intrinsic, not `contentToString`:
-//! the Wasm stdlib's extension reaches `itoa32`, which that library does not serialize.
+//! operators `dataClassArrayMemberToString` and `dataClassArrayMemberHashCode` to the content
+//! members of the argument's array class; a KLIB serializes them as calls to the operator, which
+//! no library declares. Body lowering realizes the call as a call of the `kotlin.collections`
+//! extension (`contentToString`, `contentHashCode`) on the array, and the dependency prewalk adds
+//! the same declaration as the call's edge, so both sides agree on what the body reaches.
 
 use std::sync::OnceLock;
 
@@ -147,9 +147,5 @@ pub(crate) fn implied_callee(
     else {
         return None;
     };
-    // Rendering has no declaration edge. Hashing reaches `contentHashCode`.
-    if member == DataClassArrayMember::ToString {
-        return None;
-    }
     content_callee(member, array_element(arena, operand(access)?)?)
 }
