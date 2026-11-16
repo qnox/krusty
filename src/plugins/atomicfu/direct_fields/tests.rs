@@ -33,14 +33,18 @@ fn evaluate(ir: &IrFile, id: u32, slots: &mut HashMap<u32, i32>, field: &mut i32
             *field = evaluate(ir, *value, slots, field);
             0
         }
-        IrExpr::PluginPlaceholder {
-            plugin: "atomicfu",
-            kind: "exchange",
-            exprs,
-            ..
-        } => {
-            assert_eq!(evaluate(ir, exprs[0], slots, field), 0);
-            let update = evaluate(ir, exprs[2], slots, field);
+        IrExpr::Checked(operation) => {
+            let IrCheckedOperation::AtomicField {
+                operation: AtomicOperation::Exchange,
+                receiver,
+                operands,
+                ..
+            } = &**operation
+            else {
+                panic!("unexpected checked operation in the exchange fragment: {operation:?}");
+            };
+            assert_eq!(evaluate(ir, *receiver, slots, field), 0);
+            let update = evaluate(ir, operands[0], slots, field);
             std::mem::replace(field, update)
         }
         other => panic!("unexpected instruction in the exchange fragment: {other:?}"),

@@ -1163,7 +1163,6 @@ fn emit_pass(
     env.run.lambda_classes_written.borrow_mut().clear();
     env.run.machine_classes.borrow_mut().clear();
     env.run.regenerated_object_names.clear();
-    env.run.when_mappings.borrow_mut().clear();
     env.run.entries_mappings.borrow_mut().clear();
     if !jvm_can_emit(ir) {
         emission_readiness::trace_residual_nodes(ir);
@@ -1182,6 +1181,7 @@ fn emit_pass(
         .flat_map(|c| c.methods.iter().copied())
         .collect();
     let contexts = static_accessors::emission_contexts(ir, &class_member_fids);
+    when_mappings::seed(ir, facade, &contexts, env.run);
     let member_access_bridges = access_bridges::cross_owner_member_calls(
         ir,
         facade,
@@ -3933,13 +3933,7 @@ fn emit_placed_method(
     // A body kept for inlining stays as codegen wrote it, its suspension markers included.
     let marked = placement.is_for_inline_copy()
         || crate::suspend_inline_functions::keeps_marked_body(ir, fid);
-    // Suspend lowering does not preserve source-local expression IDs.
-    e.record_locals = (ir.function_position(fid).decl_line.is_some()
-        || ir.fn_debug_locals.contains(&fid)
-        || ir
-            .generated_function_publication(fid)
-            .is_some_and(|publication| publication.debug.records_locals()))
-        && (!ir.suspend_funs.contains(&fid) || transformed.is_some());
+    e.record_locals = function_debug::body_records_locals(ir, fid, transformed.is_some());
     if instance {
         let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj(owner));
         e.slots.insert(0, (receiver, Ty::obj(owner)));

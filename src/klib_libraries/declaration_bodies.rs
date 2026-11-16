@@ -790,6 +790,23 @@ impl KlibDeclarationBodies {
         found
     }
 
+    /// Whether `identity` is private to its library: a file-local function, or a constructor or
+    /// member of a class private to its enclosing class. No provider publishes it; the library's
+    /// own bodies link it as a file-local declaration.
+    pub(crate) fn is_library_private(&self, identity: &KlibDependencyCallable) -> bool {
+        let signature = match &identity.declaration {
+            KlibDeclarationSignature::FileLocal { .. } => return true,
+            KlibDeclarationSignature::Public(signature) => {
+                KlibIrSignature::Public(signature.clone())
+            }
+            KlibDeclarationSignature::Accessor(signature) => {
+                KlibIrSignature::Accessor(signature.clone())
+            }
+        };
+        self.module_local_function(&identity.module, &signature)
+            .is_some()
+    }
+
     /// The class in `module` that declares the file-local function `signature` directly.
     pub(crate) fn module_class_declaring<'a>(
         &'a self,
@@ -1269,16 +1286,16 @@ fn ir_signature(declaration: &KlibDeclarationSignature) -> KlibIrSignature {
     }
 }
 
-/// The file-local class whose constructor `symbol` names, resolved in `trees`, the decoded trees
+/// The library-private class whose constructor `symbol` names, resolved in `trees`, the decoded trees
 /// whose signature tables numbered the symbol, with the arena that serializes the class and its
 /// constructor.
 fn constructed_local_class<'a>(
     trees: &'a KlibIrModuleTrees,
     symbol: &KlibIrSymbol,
 ) -> Option<(&'a KlibIrArena, &'a KlibIrClass)> {
-    if symbol.kind != KlibIrSymbolKind::Constructor
-        || !matches!(symbol.signature, KlibIrSignature::FileLocal { .. })
-    {
+    // `local_function` answers a file-local constructor and one of a class private to its
+    // enclosing class; a published constructor is not there.
+    if symbol.kind != KlibIrSymbolKind::Constructor {
         return None;
     }
     let (function_arena, function) = trees.local_function(&symbol.signature)?;

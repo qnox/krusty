@@ -804,6 +804,9 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             }
             // Only a target that runs the shared default-argument lowering builds this callee.
             Callee::ModuleDefaultEntry { .. } => unsupported_expression("ModuleDefaultEntry"),
+            Callee::ModuleConstructorDefaultEntry { .. } => {
+                unsupported_expression("ModuleConstructorDefaultEntry")
+            }
             Callee::External { target, .. } => format!(
                 "__krusty_external_{}({})",
                 target.raw(),
