@@ -1205,23 +1205,27 @@ impl Body<'_> {
         self.laid_out_classes.published_structure(&identity)
     }
 
-    /// `x as C`: the value, cast to class `C` of this file or to an interface of the module.
+    /// `x as C`: the value, cast to a class `C` with a physical layout, or to an interface of the
+    /// module or of a library. Kotlin checks the cast, so a value that is no `C` throws the
+    /// runtime `ClassCastException` through the Kotlin exception tag instead of trapping, and,
+    /// with `non_null`, a null throws the Kotlin NPE as any other cast to a non-null type does.
+    /// A class cast then reads the checked reference as the class's structure.
     pub(super) fn cast(&mut self, arg: u32, target: Ty, non_null: bool) -> Result<(), Unsupported> {
+        let tested = target.non_null();
+        let structure = match self.interface_of_type(tested) {
+            Some(_) => None,
+            None => self.class_structure(tested)?,
+        };
         self.value(arg, any())?;
-        if let Some(interface) = self.interface_of_type(target) {
-            let value = self.local(REFERENCE);
-            self.code.local_tee(value);
-            self.interface_test(interface, !non_null);
-            self.code
-                .if_(BlockType::Value(REFERENCE))
-                .local_get(value)
-                .else_()
-                .unreachable()
-                .end();
-        } else {
-            let structure = self
-                .class_structure(target)?
-                .ok_or_else(|| "a class cast without its selected physical layout".to_owned())?;
+        let value = self.local(REFERENCE);
+        self.code.local_tee(value);
+        self.reference_type_test(tested, true)?;
+        self.throw_class_cast_unless()?;
+        self.code.local_get(value);
+        if non_null {
+            self.require_nonnull_reference(REFERENCE)?;
+        }
+        if let Some(structure) = structure {
             self.code.ref_cast(!non_null, HeapType::Concrete(structure));
         }
         Ok(())
@@ -1240,7 +1244,7 @@ impl Body<'_> {
     }
 
     /// The library interface `ty` names, which no file of the program declares.
-    fn library_interface_of_type(&self, ty: Ty) -> Option<TypeName> {
+    pub(super) fn library_interface_of_type(&self, ty: Ty) -> Option<TypeName> {
         let TyKind::Obj(name, _) = ty.non_null().kind() else {
             return None;
         };
