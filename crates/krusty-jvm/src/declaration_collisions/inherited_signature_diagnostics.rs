@@ -64,6 +64,14 @@ pub(super) fn report(ir: &IrFile, facts: &SlotSignatureFacts<'_>, diags: &mut Di
                         continue;
                     }
                     seen.push(signature.clone());
+                    // Two of the class's own methods with one signature are its own platform
+                    // declaration clash, which the declaration checks report; this pass reports
+                    // only a signature an inherited declaration or a bridge takes.
+                    if sharing.iter().all(|&slot| {
+                        family.slots[slot][0].declared_by_classifier && slots[slot][0] == *signature
+                    }) {
+                        continue;
+                    }
                     let Some(listed) = sharing
                         .iter()
                         .map(|&slot| {
