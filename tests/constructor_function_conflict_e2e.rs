@@ -239,3 +239,25 @@ fun h(x: Int) = 2
         ],
     );
 }
+
+/// Two constructors of one class and one shape conflict with each other, each shown against the
+/// other, as a same-shaped function would.
+#[test]
+fn two_constructors_of_one_shape_are_their_class_conflict() {
+    let source = "\
+package p
+class W {
+    constructor(x: Int)
+    constructor(y: Int)
+}
+";
+    assert_errors(
+        &[("test.kt", source)],
+        &[
+            "test.kt:3:5: conflicting overloads:",
+            "| constructor(y: Int): W",
+            "test.kt:4:5: conflicting overloads:",
+            "| constructor(x: Int): W",
+        ],
+    );
+}

@@ -53,7 +53,19 @@ pub(in crate::resolve) fn commit_package_overload_conflicts(
     }
     // A constructor that no function sees reads the complete function inventory, so every
     // constructor registers after every function.
+    // A constructor conflicts with a function and with another constructor of its own class. Two
+    // classifiers of one name are a classifier redeclaration, not an overload conflict.
+    let mut constructor_owners = HashMap::<TopLevelFunctionConflictKey, _>::default();
     for (current, key, hidden, display) in package_constructors(headers, index, table) {
+        let TopLevelFunctionConflictDeclaration::Constructor(owner, _) = current.declaration else {
+            unreachable!("a package constructor names its declaration");
+        };
+        let functions_share_shape = groups.contains(&key) && !constructor_owners.contains_key(&key);
+        if !functions_share_shape
+            && *constructor_owners.entry(key.clone()).or_insert(owner) != owner
+        {
+            continue;
+        }
         groups
             .constructor_displays
             .insert(current.declaration, display);
@@ -70,10 +82,7 @@ pub(in crate::resolve) fn commit_package_overload_conflicts(
             continue;
         }
         let private = headers
-            .stub(match current.declaration {
-                TopLevelFunctionConflictDeclaration::Constructor(owner, _) => owner,
-                _ => unreachable!("a package constructor names its declaration"),
-            })
+            .stub(owner)
             .is_some_and(|stub| stub.visibility.is_private());
         register_top_level_function_conflict(
             source,

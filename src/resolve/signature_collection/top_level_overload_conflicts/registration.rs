@@ -73,6 +73,11 @@ pub(in crate::resolve) struct TopLevelFunctionConflictGroups {
 }
 
 impl TopLevelFunctionConflictGroups {
+    /// Whether a declaration of overload shape `key` has registered.
+    pub(super) fn contains(&self, key: &TopLevelFunctionConflictKey) -> bool {
+        self.indexes.contains_key(key)
+    }
+
     fn get_or_insert(&mut self, key: TopLevelFunctionConflictKey) -> usize {
         if let Some(&index) = self.indexes.get(&key) {
             return index;
