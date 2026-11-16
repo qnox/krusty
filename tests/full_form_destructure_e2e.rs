@@ -29,32 +29,5 @@ Full.kt:4:2: error: the feature \"name based destructuring\" is only available s
 Full.kt:4:9: error: the feature \"name based destructuring\" is only available since language version 2.5
 "
     );
-
-    let root = common::scratch_dir().expect("scratch dir");
-    let dir = root.join("full_form_destructure");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let source = dir.join("Full.kt");
-    std::fs::write(&source, SOURCE).unwrap();
-    let out = dir.join("classes");
-    std::fs::create_dir_all(&out).unwrap();
-    let (code, stderr) = common::kotlinc_compile(&[
-        "-d".to_string(),
-        out.to_string_lossy().into_owned(),
-        source.to_string_lossy().into_owned(),
-    ])
-    .expect("provisioned kotlinc");
-    assert_ne!(code, 0, "{stderr}");
-    let errors = stderr
-        .lines()
-        .filter(|line| line.contains(": error:"))
-        .map(|line| line.split_once(':').map(|(_, rest)| rest).unwrap_or(line))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        errors,
-        vec![
-            "4:2: error: the feature \"name based destructuring\" is only available since language version 2.5",
-            "4:9: error: the feature \"name based destructuring\" is only available since language version 2.5",
-        ]
-    );
+    common::assert_errors_match_kotlinc(&[("Full.kt", SOURCE)], &[]);
 }
