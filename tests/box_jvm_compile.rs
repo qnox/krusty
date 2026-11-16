@@ -17,7 +17,6 @@ use super::box_byte_score;
 use super::box_reference_classes;
 use super::common;
 
-
 /// Time spent compiling single-source cases (ns, accumulated across all files and threads).
 pub(super) static T_EMIT: AtomicU64 = AtomicU64::new(0);
 
