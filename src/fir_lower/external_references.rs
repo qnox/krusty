@@ -50,6 +50,7 @@ impl BodyLowering<'_> {
             semantic_role,
             overridden_declarations,
             suspend: declaration_suspend,
+            inline,
         } = target
         else {
             unreachable!("module references stay on the module materializer")
@@ -212,7 +213,7 @@ impl BodyLowering<'_> {
             semantic_role,
             overridden_declarations: &overridden_declarations,
             suspend: declaration_suspend,
-            inline: crate::fir::InlineKind::None,
+            inline,
             inline_plan: None,
             substitutions,
             extension_receiver_parameter: None,

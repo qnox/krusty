@@ -153,6 +153,18 @@ pub struct DeclarationAnchor {
     pub sibling: u32,
 }
 
+impl DeclarationAnchor {
+    /// The sibling ordinal of the storage property for an anonymous object's capture at
+    /// `capture` in its checked capture list. Counting down from `u32::MAX` keeps it apart from
+    /// the ordinals of the class's own declarations.
+    pub(crate) fn capture_storage_sibling(capture: usize) -> u32 {
+        u32::try_from(capture)
+            .ok()
+            .and_then(|capture| u32::MAX.checked_sub(capture))
+            .expect("too many anonymous-object captures")
+    }
+}
+
 /// Stable structural declaration coordinate. Source order is stored separately in the resolved
 /// module index; no text position is needed to rebind Pass-2 parser units.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -161,6 +173,15 @@ pub struct StableDeclarationAnchor {
     pub owner: Option<DeclarationId>,
     pub kind: DeclarationKind,
     pub sibling: u32,
+}
+
+impl StableDeclarationAnchor {
+    /// The checked capture ordinal a capture-storage property's anchor addresses (see
+    /// [`DeclarationAnchor::capture_storage_sibling`]): the position of its capture in the class's
+    /// constructor capture prefix.
+    pub(crate) fn capture_storage_ordinal(&self) -> usize {
+        (u32::MAX - self.sibling) as usize
+    }
 }
 
 impl From<DeclarationAnchor> for StableDeclarationAnchor {

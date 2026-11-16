@@ -59,6 +59,21 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         semantic_types.extend(selected.params().iter().copied());
         semantic_types.push(selected.ret());
         semantic_types.extend(selected.type_parameters().iter().copied());
+        // Emission lowers a member of an ordinary class with the class its primary constructor
+        // materializes, and closes that constructor's initialization with the member: the
+        // members dispatch reaches on the class included.
+        if let Some(class) = selected.class_contract().filter(|class| {
+            !class.is_value && selected.kind() == crate::libraries::ExternalCallableKind::Member
+        }) {
+            if let Some(primary) = &class.primary_constructor {
+                pending.push(crate::libraries::KlibDependencyCallable {
+                    module: class.module.clone(),
+                    declaration: crate::libraries::KlibDeclarationSignature::Public(
+                        primary.clone(),
+                    ),
+                });
+            }
+        }
         // Emission closes a constructor through the same initialization plan: superclass
         // arguments, field and block initializers, dispatched members, and a materialized
         // superclass constructor. Initializer-root symbols omit the members dispatch reaches,

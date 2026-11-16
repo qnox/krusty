@@ -53,7 +53,6 @@ mod iterators;
 #[cfg(test)]
 mod lambda_tests;
 mod lambdas;
-mod library_constants;
 #[cfg(test)]
 mod local_class_tests;
 mod local_classes;
@@ -1304,7 +1303,7 @@ impl BodyFirChecker<'_> {
         // own: `60 + 1` checks as an `Int` whose value a `Long` const stores.
         let folded_ty = folded.map(|constant| constant.ty);
         let kind = if let Some(constant) = folded {
-            FirExprKind::Constant(library_constants::checked_constant_value(constant))
+            FirExprKind::Constant(super::library_constant_value(constant))
         } else {
             match self.file.expr(expression) {
                 Expr::IntLit(value) => {
@@ -1474,7 +1473,7 @@ impl BodyFirChecker<'_> {
                         // A `const val` referenced by BARE NAME from inside its own classifier. The
                         // checker folds it exactly as it folds a qualified one; there is no property to
                         // read at run time.
-                        FirExprKind::Constant(library_constants::checked_constant_value(constant))
+                        FirExprKind::Constant(super::library_constant_value(constant))
                     } else if let Some(property) = self.source_property_read(expression, None)? {
                         property
                     } else {
@@ -1942,7 +1941,7 @@ impl BodyFirChecker<'_> {
                         // Qualifier/classifier receivers have no entry in this map and remain a plain
                         // constant. Publish the sequencing explicitly in checked FIR so lowering does
                         // not need to rediscover whether the source prefix was a runtime expression.
-                        let constant = library_constants::checked_constant_value(constant);
+                        let constant = super::library_constant_value(constant);
                         if let Some(receiver) = self.info.resolved_constant_receiver(expression) {
                             let receiver_value = self.expression(receiver)?;
                             let receiver_origin = self.expression_origin(receiver)?;

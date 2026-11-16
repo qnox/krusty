@@ -35,6 +35,7 @@ use scope::{ContextReceiver, ContextReceiverKind, FlowExclusion, NarrowPath, Ns}
 mod abstract_obligations;
 mod argument_parameter_mapping;
 mod builtin_implementation;
+mod coroutine_runtime;
 use argument_parameter_mapping::{
     call_argument_parameter_indices, call_argument_parameter_indices_result,
     named_whole_array_varargs,
@@ -2838,6 +2839,7 @@ pub struct SymbolTable {
 pub(crate) struct PassTwoSymbols {
     compilation_id: u64,
     libraries: std::rc::Rc<dyn SemanticPlatform>,
+    coroutine_runtime: Option<crate::ir::IrCoroutineRuntime>,
     native_plugins: crate::plugins::registry::NativePlugins,
 }
 
@@ -2851,6 +2853,11 @@ impl PassTwoSymbols {
         std::rc::Rc::clone(&self.libraries)
     }
 
+    /// The runtime declarations selected by resolution for suspend lowering.
+    pub(crate) fn coroutine_runtime(&self) -> Option<crate::ir::IrCoroutineRuntime> {
+        self.coroutine_runtime
+    }
+
     pub(crate) fn native_plugins(&self) -> &crate::plugins::registry::NativePlugins {
         &self.native_plugins
     }
@@ -2858,9 +2865,11 @@ impl PassTwoSymbols {
 
 impl SymbolTable {
     pub(crate) fn into_pass_two_symbols(self) -> PassTwoSymbols {
+        let coroutine_runtime = coroutine_runtime::selected(&*self.libraries);
         PassTwoSymbols {
             compilation_id: self.compilation_id,
             libraries: std::rc::Rc::from(self.libraries),
+            coroutine_runtime,
             native_plugins: self.native_plugins,
         }
     }
@@ -8581,6 +8590,8 @@ pub enum ExprLowering {
     SamConstructorReference {
         signature: Ty,
         sam: Box<crate::symbol_resolver::SamSignature>,
+        /// The interface's own declared name (`KCallable.name`), when its provider recorded it.
+        interface_name: Option<Box<str>>,
     },
     /// A constructor reference selected from the classifier's shared declaration record. The exact
     /// declaration is independent of whether that record came from this module or a dependency;
@@ -47103,16 +47114,7 @@ impl<'a> Checker<'a> {
     /// An explicit primitive unary-method call is admitted only when overload selection recorded
     /// the exact built-in operation; source/member spellings never manufacture this fact.
     fn integer_constant_provenance(&self, expression: ExprId) -> Option<IntegerConstant> {
-        let semantic = checked_integer_constant(
-            CheckedConstantExpression {
-                file: self.file,
-                expression_types: &self.expr_types,
-                resolved_constants: &self.resolved_constants,
-                resolved_calls: &self.resolved_calls,
-                resolved_operator_calls: &self.resolved_operator_calls,
-            },
-            expression,
-        );
+        let semantic = checked_integer_constant(self.checked_constant_context(), expression);
         semantic.or_else(|| {
             let ExprLowering::BuiltinUnaryCall { operation } = self.expr_lowers.get(&expression)?
             else {
