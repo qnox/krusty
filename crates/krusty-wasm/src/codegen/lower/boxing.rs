@@ -32,6 +32,22 @@ impl Body<'_> {
         Ok(())
     }
 
+    /// Replace the reference on the stack with whether it is a box of the scalar type `tested`
+    /// (or null, when `nullable`): `x is Char` on an `Any?`. Each scalar classifier has its own box
+    /// type, so the test is that type's. `false`, leaving the stack as it is, when `tested` is not
+    /// a scalar this backend boxes.
+    pub(super) fn box_test(&mut self, tested: Ty, nullable: bool) -> Result<bool, Unsupported> {
+        let Some(value) = scalar_carrier(tested)? else {
+            return Ok(false);
+        };
+        let Some(form) = self.runtime.box_form(self.module, tested, value)? else {
+            return Ok(false);
+        };
+        self.code
+            .ref_test(nullable, HeapType::Concrete(form.structure));
+        Ok(true)
+    }
+
     /// `x as Int` or `x as UInt?` on a reference: Kotlin checks the cast, so another type's box
     /// (and, for a non-null target, a null) throws the runtime `ClassCastException` through the
     /// Kotlin exception tag, as kotlinc-wasm's cast does, instead of trapping in the unchecked read

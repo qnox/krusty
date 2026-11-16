@@ -39,3 +39,39 @@ fn erased_optional_source_application_has_no_carrier_presence() {
     assert!(annotations.retains_none());
     assert!(!annotations.declares_metadata_annotations());
 }
+
+#[test]
+fn frozen_resolved_applications_share_checked_retention_partitioning() {
+    for retention in [
+        AnnoRetention::Default,
+        AnnoRetention::Runtime,
+        AnnoRetention::Binary,
+        AnnoRetention::Source,
+    ] {
+        for optional_expectation in [false, true] {
+            let checked = crate::types::AppliedAnnotation {
+                internal: crate::types::type_name("marks/SharedPolicy"),
+                values: Vec::new(),
+                facts: crate::types::AnnotationSemanticFacts {
+                    optional_expectation,
+                    ..Default::default()
+                },
+                written: Box::new(crate::types::WrittenAnnotation {
+                    short_name: "SharedPolicy".into(),
+                    use_site: None,
+                    order: Box::new([]),
+                }),
+                retention,
+                targets: crate::types::AnnotationTargets::DEFAULT,
+                property_sites: None,
+            };
+            let resolved = checked.resolved();
+            let direct = DeclarationAnnotations::from_checked([(
+                &checked,
+                AppliedAnnotation::from(&resolved),
+            )]);
+            let frozen = DeclarationAnnotations::from_resolved([(&resolved, retention)]);
+            assert_eq!(format!("{frozen:?}"), format!("{direct:?}"));
+        }
+    }
+}
