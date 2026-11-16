@@ -401,7 +401,6 @@ closures/closureInsideClosure/propertyAndFunctionNameClash.kt
 closures/closureOnTopLevel1.kt
 closures/closureOnTopLevel2.kt
 closures/closuresAsSingleton.kt
-closures/crossinlineLocalDeclaration.kt
 closures/kt11634_4.kt
 closures/localFunctionInInitBlock.kt
 collectionLiterals/companionBlockOf.kt
