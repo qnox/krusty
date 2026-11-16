@@ -263,10 +263,7 @@ callableReference/callableReferenceOfCompanionConst.kt
 callableReference/callableReferenceOfCompanionProperty.kt
 callableReference/callableReferencetoInnerAndLocal.kt
 callableReference/equality/conversionCombinations.kt
-callableReference/equality/extensionFunctionEquality.kt
 callableReference/equality/kpropertyWithCapturingInequality.kt
-callableReference/equality/lambdaNonEquality.kt
-callableReference/equality/overloadedFunctionEquality.kt
 callableReference/equality/suspendFunctionEquality.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorEquality.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorIsKFunction.kt
@@ -284,7 +281,6 @@ callableReference/function/local/enumExtendsTrait.kt
 callableReference/function/overloadedFunVsVal.kt
 callableReference/function/referenceToCompanionMember.kt
 callableReference/function/sortListOfStrings.kt
-callableReference/genericConstructorReference.kt
 callableReference/generticReferences.kt
 callableReference/kt21014.kt
 callableReference/kt21092a.kt
