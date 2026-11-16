@@ -1396,13 +1396,11 @@ fn member_overrides(
             };
             (metadata_owner, arguments)
         };
-        if !declared.type_parameters.is_empty() || declared.constructor {
-            return Err(unsupported(
-                "an override of a generic or constructor declaration",
-            ));
+        if declared.constructor {
+            return Err(unsupported("an override of a constructor declaration"));
         }
         let mut formals = Vec::new();
-        let declared_types = bind_interface_parameters(owner, |parameter| {
+        let mut declared_types = bind_interface_parameters(owner, |parameter| {
             let formal = Ty::ty_param(
                 crate::types::metadata_type_parameter(&parameter.name),
                 Ty::nullable(Ty::obj("kotlin/Any")),
@@ -1410,6 +1408,19 @@ fn member_overrides(
             formals.push(formal);
             Ok(formal)
         })?;
+        // The overridden declaration's own type parameters stay formals of its signature; only
+        // its class's are applied.
+        for parameter in &declared.type_parameters {
+            let formal = Ty::ty_param(
+                crate::types::metadata_type_parameter(&parameter.name),
+                Ty::nullable(Ty::obj("kotlin/Any")),
+            );
+            if !declared_types.bind(&parameter.base.symbol, formal) {
+                return Err(mismatch(
+                    "an overridden declaration repeats a type parameter",
+                ));
+            }
+        }
         let declared_signature =
             interface_signature(owner_arena, declared, &declared_types, scope.resolve)?;
         if declared_signature.parameters.len() != function.regular_parameters.len() {

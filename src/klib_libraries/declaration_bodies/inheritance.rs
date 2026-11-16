@@ -17,7 +17,8 @@ use crate::metadata::klib_ir::KlibIrSignature;
 impl KlibDeclarationBodies {
     /// The one serialized declaration the fake override `declaration` inherits. Of several
     /// inherited declarations, only one with a body is the implementation it inherits; more than
-    /// one is ambiguous.
+    /// one is ambiguous. When none has a body, the fake override is abstract and stands for the
+    /// most specific of them.
     pub(super) fn inherited_origin(
         &self,
         body_module: &str,
@@ -40,6 +41,7 @@ impl KlibDeclarationBodies {
                     .collect::<Vec<_>>();
                 match implemented.as_slice() {
                     [one] => KlibCalleeOrigin::Exact((*one).clone()),
+                    [] => self.most_specific(body_module, several),
                     _ => KlibCalleeOrigin::Ambiguous,
                 }
             }
@@ -97,6 +99,78 @@ impl KlibDeclarationBodies {
         Ok(found)
     }
 
+    /// The most specific of the bodyless `inherited` declarations, as kotlinc's fake-override
+    /// builder selects it: the first, in inheritance order, whose result classifier is a
+    /// subclassifier of every other's.
+    /// `AbstractMutableCollection.iterator` is `MutableCollection.iterator`, whose
+    /// `MutableIterator` result refines `AbstractCollection.iterator`'s `Iterator`.
+    fn most_specific(
+        &self,
+        body_module: &str,
+        inherited: &[KlibDependencyCallable],
+    ) -> KlibCalleeOrigin {
+        let results = inherited
+            .iter()
+            .map(|identity| {
+                let (arena, function) = self.function(identity)?;
+                match arena.ty(function.return_type) {
+                    KlibIrType::Simple { classifier, .. } => match &classifier.signature {
+                        KlibIrSignature::Public(signature) => Some(signature.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            })
+            .collect::<Option<Vec<_>>>();
+        let Some(results) = results else {
+            return KlibCalleeOrigin::Ambiguous;
+        };
+        // Of several equally specific declarations, such as `AbstractCollection.size` and
+        // `List.size`, kotlinc keeps the first it inherits.
+        inherited
+            .iter()
+            .zip(&results)
+            .find(|(_, result)| {
+                results
+                    .iter()
+                    .all(|other| self.is_subclassifier(body_module, result, other))
+            })
+            .map_or(KlibCalleeOrigin::Ambiguous, |(one, _)| {
+                KlibCalleeOrigin::Exact(one.clone())
+            })
+    }
+
+    /// Whether the serialized classifier `sub` is `sup` or lists it among its supertypes,
+    /// directly or through them.
+    fn is_subclassifier(
+        &self,
+        body_module: &str,
+        sub: &KlibPublicIdSignature,
+        sup: &KlibPublicIdSignature,
+    ) -> bool {
+        let mut pending = vec![sub.clone()];
+        let mut visited = HashSet::default();
+        while let Some(current) = pending.pop() {
+            if current == *sup {
+                return true;
+            }
+            if !visited.insert(current.clone()) {
+                continue;
+            }
+            let Ok(Some((arena, class))) = self.declaring_class_of(body_module, &current) else {
+                continue;
+            };
+            for &supertype in &class.supertypes {
+                if let KlibIrType::Simple { classifier, .. } = arena.ty(supertype) {
+                    if let KlibIrSignature::Public(supertype) = &classifier.signature {
+                        pending.push(supertype.clone());
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Every serialized declaration the fake override `declaration` inherits, through each
     /// direct supertype of its declaring class until a serialized declaration is reached.
     fn inherited(
@@ -105,9 +179,11 @@ impl KlibDeclarationBodies {
         declaration: &KlibDeclarationSignature,
     ) -> Result<Vec<KlibDependencyCallable>, ()> {
         let mut found = Vec::new();
-        let mut pending = vec![declaration.clone()];
+        // Breadth first, each class's supertypes in their declared order: the order kotlinc's
+        // fake-override builder meets the inherited declarations in.
+        let mut pending = std::collections::VecDeque::from([declaration.clone()]);
         let mut visited = HashSet::default();
-        while let Some(declaration) = pending.pop() {
+        while let Some(declaration) = pending.pop_front() {
             if !visited.insert(declaration.clone()) {
                 continue;
             }

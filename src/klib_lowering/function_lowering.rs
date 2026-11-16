@@ -73,6 +73,25 @@ pub(super) struct FunctionHeader {
 }
 
 impl FunctionHeader {
+    /// The formals this header bound for `function`'s own type parameters, with their bounds.
+    pub(super) fn own_formals(
+        &self,
+        function: &KlibIrFunction,
+    ) -> Vec<(crate::types::TyParamName, Vec<Ty>)> {
+        function
+            .type_parameters
+            .iter()
+            .filter_map(|parameter| {
+                let formal = self.type_parameters.bound(&parameter.base.symbol)?;
+                let TyKind::TyParam(name, _) = formal.kind() else {
+                    return None;
+                };
+                let bounds = self.type_parameters.declared_bounds(name.as_str())?;
+                Some((name, bounds.to_vec()))
+            })
+            .collect()
+    }
+
     pub(super) fn result(&self) -> Ty {
         self.ret
     }

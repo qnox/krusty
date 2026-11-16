@@ -21,7 +21,7 @@ use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignatu
 use crate::metadata::klib_ir::tree::{
     KlibIrArguments, KlibIrExprId, KlibIrExprKind, KlibIrMemberAccess,
 };
-use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbolKind};
+use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 use crate::types::{EqualityMode, Ty, TyKind};
 
 use super::super::decline::KlibBodyDeclineReason;
@@ -464,10 +464,20 @@ impl BodyLowering<'_> {
                     }
                     _ => None,
                 };
-                membership.map_or_else(
-                    || unsupported("a `!in` of another form than a membership in a range literal"),
-                    Ok,
-                )
+                if let Some(membership) = membership {
+                    return Ok(membership);
+                }
+                // Any other `!in` negates the `contains` call the membership is.
+                let negates_membership = matches!(
+                    &expression.kind,
+                    KlibIrExprKind::Call { access, .. }
+                        if access.origin.as_deref() == Some("NOT_IN")
+                );
+                if !negates_membership {
+                    return Err(mismatch("a `!in` negates no membership call"));
+                }
+                let operand = self.operand(operand, Ty::Boolean)?;
+                Ok(self.ir.add_negation(operand))
             }
             Some(_) => unsupported("a negation of another form than `!`, `!=` or `!==`"),
         }
@@ -544,6 +554,91 @@ impl BodyLowering<'_> {
     }
 
     /// A call of a dependency function, which the unit lowers too.
+    /// `super.member(…)`: the implementation the qualifier's own member declares, called on this
+    /// instance without dispatch. Only a member this unit emits has an implementation to call.
+    pub(super) fn super_call(
+        &mut self,
+        qualifier: &KlibIrSymbol,
+        access: &KlibIrMemberAccess,
+        ty: Ty,
+    ) -> Lowered<ExprId> {
+        let (KlibIrSymbolKind::Class, KlibIrSignature::Public(class)) =
+            (qualifier.kind, &qualifier.signature)
+        else {
+            return unsupported("a `super` call through a non-public qualifier");
+        };
+        let (KlibIrSymbolKind::Function, KlibIrSignature::Public(callee)) =
+            (access.symbol.kind, &access.symbol.signature)
+        else {
+            return unsupported("a `super` call of a property accessor or non-public member");
+        };
+        let owner = callee.declaration().segments();
+        if callee.package() != class.package()
+            || owner.split_last().map(|(_, owner)| owner) != Some(class.declaration().segments())
+        {
+            return Err(mismatch(
+                "a `super` call's member is not declared by its qualifier",
+            ));
+        }
+        let qualifier = super::super::klib_types::classifier_name(class)?;
+        if self
+            .ir
+            .class_id_by_name(qualifier)
+            .is_none_or(|class| self.ir.classes[class as usize].is_interface)
+        {
+            return unsupported("a `super` call through a class this unit does not materialize");
+        }
+        let linked = self.linker.link(self.ir, callee)?;
+        if !matches!(linked.callee, Callee::Local(_)) {
+            return unsupported("a `super` call of a member this unit does not emit");
+        }
+        self.call_linked(linked, access, ty, Dispatch::Super(qualifier))
+    }
+
+    /// The nonvirtual call of `function`, the method this unit emits for the qualifier's member,
+    /// on `receiver`: the dependency member it implements is the `super` call's declaration.
+    fn super_callee(
+        &self,
+        function: crate::ir::FunId,
+        qualifier: crate::types::TypeName,
+        receiver: ExprId,
+    ) -> Lowered<Callee> {
+        let mut implemented = self
+            .ir
+            .dependency_methods
+            .iter()
+            .filter(|(_, &method)| method == function)
+            .map(|(&declaration, _)| declaration);
+        let (Some(declaration), None) = (implemented.next(), implemented.next()) else {
+            return Err(mismatch(
+                "a `super` call's member is not exactly one method of its class",
+            ));
+        };
+        let dispatch_owner = self
+            .lowered_type(receiver)
+            .kotlin_class_internal()
+            .ok_or_else(|| mismatch("a `super` call's receiver is not a class instance"))?;
+        let declared = &self.ir.functions[function as usize];
+        Ok(Callee::Super {
+            qualifier,
+            owner: qualifier,
+            dispatch_owner,
+            enclosing_dispatch: false,
+            kind: crate::ir::IrSuperCallKind::Function,
+            name: declared.name.clone(),
+            params: declared.params.clone(),
+            ret: declared.ret,
+            interface: false,
+            realization: crate::libraries::MemberRealization::Dispatch,
+            descriptor: String::new(),
+            declaration: Some(crate::fir::ResolvedFunctionOverrideTarget::External(
+                declaration,
+            )),
+            defaults: Vec::new(),
+            source_member: None,
+        })
+    }
+
     fn dependency_call(
         &mut self,
         callee: &KlibPublicIdSignature,
@@ -559,6 +654,16 @@ impl BodyLowering<'_> {
         linked: LinkedCallee,
         access: &KlibIrMemberAccess,
         ty: Ty,
+    ) -> Lowered<ExprId> {
+        self.call_linked(linked, access, ty, Dispatch::Overridable)
+    }
+
+    fn call_linked(
+        &mut self,
+        linked: LinkedCallee,
+        access: &KlibIrMemberAccess,
+        ty: Ty,
+        dispatch: Dispatch,
     ) -> Lowered<ExprId> {
         let linked = self.substituted(linked, access)?;
         let operands = self.call_operands(
@@ -593,6 +698,12 @@ impl BodyLowering<'_> {
                 defaults: operands.omitted.into_boxed_slice(),
             };
         }
+        if let Dispatch::Super(qualifier) = dispatch {
+            let (Callee::Local(function), Some(receiver)) = (&callee, operands.receiver) else {
+                return unsupported("a `super` call leaving arguments to their defaults");
+            };
+            callee = self.super_callee(*function, qualifier, receiver)?;
+        }
         let (dispatch_receiver, args) = (operands.receiver, operands.args);
         let singleton_dispatch = linked.singleton_dispatch;
         let external = match &callee {
@@ -602,6 +713,7 @@ impl BodyLowering<'_> {
         // A member dispatch reaches on an instance of a class this unit materializes, which a
         // subclass may override, is called through the class's dispatch table.
         let overridable = match (&callee, dispatch_receiver) {
+            _ if dispatch != Dispatch::Overridable => None,
             (Callee::Local(function), Some(receiver)) => self
                 .ir
                 .overridable_method(*function)
@@ -1129,6 +1241,14 @@ struct CalleeShape<'a> {
     class_type_parameters: &'a [String],
     /// Whether each parameter declares a default a call may leave it to.
     parameter_defaults: &'a [bool],
+}
+
+/// Whether a call of an overridable member of a class this unit materializes dispatches through
+/// the class's table, or is a `super` call through the qualifier's own implementation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dispatch {
+    Overridable,
+    Super(crate::types::TypeName),
 }
 
 /// A call's lowered dispatch receiver and arguments, with the receiver type, parameters and

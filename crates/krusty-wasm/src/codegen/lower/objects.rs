@@ -929,7 +929,11 @@ impl Body<'_> {
                 params,
                 ret,
                 ..
-            } => self.dependency_super_call(*target, params.len(), *ret, receiver, args),
+            } => match self.ir.dependency_methods.get(target) {
+                // The dependency member is a method of a class this file materializes.
+                Some(&function) => self.direct_member_call(function, receiver, args),
+                None => self.dependency_super_call(*target, params.len(), *ret, receiver, args),
+            },
             Callee::Super { .. } => Err("a `super` call to a library member".to_string()),
             _ => Err("a member call through this calling convention".to_string()),
         }

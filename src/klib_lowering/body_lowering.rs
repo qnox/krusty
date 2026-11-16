@@ -494,17 +494,19 @@ impl<'a> BodyLowering<'a> {
                 super_qualifier,
             } => {
                 let ty = self.ty(expression, "call")?;
-                if super_qualifier.is_some() {
-                    return unsupported("a `super` call");
-                }
-                let lowered =
-                    match super::range_membership::range_literal_membership(arena, expression) {
+                if let Some(qualifier) = super_qualifier {
+                    (self.super_call(qualifier, access, ty)?, ty)
+                } else {
+                    let lowered = match super::range_membership::range_literal_membership(
+                        arena, expression,
+                    ) {
                         Some(membership) => self.range_literal_membership(membership, ty, false)?,
                         None => None,
                     };
-                match lowered {
-                    Some(lowered) => (lowered, ty),
-                    None => (self.call(access, ty)?, ty),
+                    match lowered {
+                        Some(lowered) => (lowered, ty),
+                        None => (self.call(access, ty)?, ty),
+                    }
                 }
             }
             KlibIrExprKind::Return { target, value } => {
@@ -604,6 +606,7 @@ impl<'a> BodyLowering<'a> {
             } if matches!(
                 origin.as_str(),
                 "INLINE_ARGS_CONTAINER"
+                    | "ARGUMENTS_REORDERING_FOR_CALL"
                     | "WHEN"
                     | "POSTFIX_INCR"
                     | "POSTFIX_DECR"
@@ -632,8 +635,9 @@ impl<'a> BodyLowering<'a> {
                 statements,
                 origin: Some(origin),
             } if origin == "OBJECT_LITERAL" => return self.object_literal(statements),
-            KlibIrExprKind::Block { .. } => {
-                return unsupported("a block of a compiler-introduced form")
+            KlibIrExprKind::Block { origin, .. } => {
+                eprintln!("ZZBLOCK {origin:?}");
+                return unsupported("a block of a compiler-introduced form");
             }
             KlibIrExprKind::Composite { .. } => return unsupported("a composite block"),
             KlibIrExprKind::ReturnableBlock {
