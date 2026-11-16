@@ -2393,8 +2393,15 @@ impl UnitCheckpoint {
     fn restore(self, unit: &mut DependencyBodyUnit) {
         let first = self.0.restore(&mut unit.ir);
         unit.functions.retain(|_, function| *function < first);
-        unit.classes
-            .retain(|_, class| (*class as usize) < unit.ir.classes.len());
+        // A constructor this lowering declared published its identity, even when it joined a
+        // class materialized before.
+        let constructors = &unit.constructors;
+        unit.classes.retain(|identity, class| {
+            (*class as usize) < unit.ir.classes.len()
+                && constructors
+                    .get(identity)
+                    .is_none_or(|constructor| constructor.initializer < first)
+        });
         let classes = &unit.classes;
         unit.constructors.retain(|identity, constructor| {
             constructor.initializer < first && classes.contains_key(identity)
