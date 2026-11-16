@@ -951,7 +951,7 @@ impl<'a> BodyLowering<'a> {
         getter: &KlibIrFunction,
         fun: FunId,
         owner: TypeName,
-        record: crate::klib_lowering::same_library_class::MemberOverride,
+        record: super::super::same_library_class::MemberOverride,
         interface: bool,
         ty: Ty,
     ) -> Lowered<()> {

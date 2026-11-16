@@ -7,6 +7,8 @@ use crate::fx_hash::HashMap as FxHashMap;
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TyKind, TypeName};
 
+use crate::assignable::applied_hierarchy_through;
+
 thread_local! {
     /// Owned projection lists. These are hierarchy results, not `Ty::Obj` argument slices, so they
     /// stay in this map and are freed when the compilation drops it.
@@ -174,45 +176,6 @@ pub(crate) fn direct_supertypes(source: &dyn SymbolSource, ty: Ty) -> Vec<Ty> {
 /// core owns the transitive walk and generic substitution for every declaration origin.
 pub(crate) fn applied_hierarchy(source: &dyn SymbolSource, root: Ty) -> Vec<(TypeName, Ty, usize)> {
     applied_hierarchy_through(root, |_, applied| direct_supertypes(source, applied))
-}
-
-/// The breadth-first applied hierarchy above `root`, `root` itself first at depth 0, where
-/// `parents` answers an applied classifier's direct supertypes. Each classifier appears once, at
-/// its first application; one declaring no supertype has `kotlin.Any`'s.
-pub(crate) fn applied_hierarchy_through(
-    root: Ty,
-    mut parents: impl FnMut(TypeName, Ty) -> Vec<Ty>,
-) -> Vec<(TypeName, Ty, usize)> {
-    let Some(internal) = root.kotlin_class_internal() else {
-        return Vec::new();
-    };
-    let mut pending = std::collections::VecDeque::from([(internal, root, 0)]);
-    let mut seen = crate::fx_hash::HashSet::default();
-    let mut hierarchy = Vec::new();
-    while let Some((owner, applied, depth)) = pending.pop_front() {
-        if !seen.insert(owner) {
-            continue;
-        }
-        hierarchy.push((owner, applied, depth));
-        let parents = with_implicit_any(owner, parents(owner, applied));
-        pending.extend(
-            parents
-                .into_iter()
-                .filter_map(|parent| Some((parent.kotlin_class_internal()?, parent, depth + 1))),
-        );
-    }
-    hierarchy
-}
-
-/// A classifier's direct supertypes including Kotlin's implicit root: one that declares no
-/// supertype still inherits `kotlin.Any`'s members, and an override of `toString`, `equals` or
-/// `hashCode` overrides that declaration.
-pub(crate) fn with_implicit_any(owner: TypeName, mut parents: Vec<Ty>) -> Vec<Ty> {
-    let any = crate::types::wk::any();
-    if parents.is_empty() && owner != any {
-        parents.push(Ty::obj_name(any));
-    }
-    parents
 }
 
 /// Apply a runtime subtype named without source arguments to the generic arguments already known on
