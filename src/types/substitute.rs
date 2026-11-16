@@ -443,44 +443,71 @@ pub(crate) fn ty_map_symbols(ty: Ty, rebuild: &dyn Fn(Ty, Ty) -> Ty) -> Ty {
     }
 }
 
-/// `ty` with each occurrence that `replace` maps rebuilt as its replacement, outermost first. A
-/// replaced occurrence is not searched again.
-pub(crate) fn ty_replace(ty: Ty, replace: &dyn Fn(Ty) -> Option<Ty>) -> Ty {
-    if let Some(replacement) = replace(ty) {
-        return replacement;
-    }
-    let map = |ty: Ty| ty_replace(ty, replace);
-    match ty.kind() {
-        TyKind::Fun(signature) => Ty::fun_with_shape(
-            signature
-                .params
-                .iter()
-                .map(|parameter| map(*parameter))
-                .collect(),
-            map(signature.ret),
-            signature.context_count,
-            signature.has_receiver,
-            signature.suspend,
-        ),
-        TyKind::DefinitelyNotNull(inner) => Ty::from(TyKind::DefinitelyNotNull(map(inner))),
-        TyKind::Nullable(inner) => Ty::nullable(map(inner)),
-        TyKind::PlatformNullable(inner) => Ty::platform_nullable(map(inner)),
-        TyKind::MutabilityFlexible(inner) => Ty::mutability_flexible(map(inner)),
-        TyKind::InProjection(inner) => Ty::in_projection(map(inner)),
-        TyKind::OutProjection(inner) => Ty::out_projection(map(inner)),
-        TyKind::StarProjection(inner) => Ty::star_projection(map(inner)),
-        TyKind::RawProjection(inner) => Ty::raw_projection(map(inner)),
-        TyKind::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
-            name,
-            &arguments
-                .iter()
-                .map(|argument| map(*argument))
-                .collect::<Vec<_>>(),
-        ),
-        TyKind::Intersection(parts) => {
-            Ty::intersection(&parts.iter().map(|part| map(*part)).collect::<Vec<_>>())
+/// `specialized` with each position where `declared` names a type parameter that `replacement`
+/// maps rebuilt as that replacement. `specialized` is `declared` after substitution, so the two
+/// share their shape down to those positions; wherever the shapes part, `specialized` is kept.
+/// Walking the declaration keeps two parameters that were given the same type apart.
+pub(crate) fn ty_replace_formals_along(
+    declared: Ty,
+    specialized: Ty,
+    replacement: &dyn Fn(&str) -> Option<Ty>,
+) -> Ty {
+    let along = |declared: Ty, specialized: Ty| {
+        ty_replace_formals_along(declared, specialized, replacement)
+    };
+    match (declared.kind(), specialized.kind()) {
+        (TyKind::TyParam(name, _) | TyKind::Var(name, _), _) => {
+            replacement(name.as_str()).unwrap_or(specialized)
         }
-        _ => ty,
+        (TyKind::Nullable(declared), TyKind::Nullable(specialized)) => {
+            Ty::nullable(along(declared, specialized))
+        }
+        (TyKind::PlatformNullable(declared), TyKind::PlatformNullable(specialized)) => {
+            Ty::platform_nullable(along(declared, specialized))
+        }
+        (TyKind::MutabilityFlexible(declared), TyKind::MutabilityFlexible(specialized)) => {
+            Ty::mutability_flexible(along(declared, specialized))
+        }
+        (TyKind::DefinitelyNotNull(declared), TyKind::DefinitelyNotNull(specialized)) => {
+            Ty::from(TyKind::DefinitelyNotNull(along(declared, specialized)))
+        }
+        (TyKind::InProjection(declared), TyKind::InProjection(specialized)) => {
+            Ty::in_projection(along(declared, specialized))
+        }
+        (TyKind::OutProjection(declared), TyKind::OutProjection(specialized)) => {
+            Ty::out_projection(along(declared, specialized))
+        }
+        (TyKind::Obj(declared_name, declared_arguments), TyKind::Obj(name, arguments))
+            if declared_name == name
+                && !arguments.is_empty()
+                && declared_arguments.len() == arguments.len() =>
+        {
+            Ty::obj_args_name(
+                name,
+                &declared_arguments
+                    .iter()
+                    .zip(arguments.iter())
+                    .map(|(declared, specialized)| along(*declared, *specialized))
+                    .collect::<Vec<_>>(),
+            )
+        }
+        (TyKind::Fun(declared), TyKind::Fun(signature))
+            if declared.params.len() == signature.params.len() =>
+        {
+            Ty::fun_with_shape(
+                declared
+                    .params
+                    .iter()
+                    .zip(signature.params.iter())
+                    .map(|(declared, specialized)| along(*declared, *specialized))
+                    .collect(),
+                along(declared.ret, signature.ret),
+                signature.context_count,
+                signature.has_receiver,
+                signature.suspend,
+            )
+        }
+        _ => specialized,
     }
 }
 

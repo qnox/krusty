@@ -331,23 +331,19 @@ impl TypeInfo {
             .and_then(|call| call.reified_runtimes.get(&ordinal).copied())
     }
 
-    /// Each type argument inferred to an intersection, paired with its approximation. A parameter
-    /// type the resolver specialized with the intersection reaches checked FIR as the
-    /// approximation, the type kotlinc's IR gives that parameter.
-    pub(crate) fn published_call_type_argument_approximations(
+    /// The approximation of slot `ordinal` when it was inferred to an intersection. A parameter
+    /// type the resolver specialized with that slot reaches checked FIR with the approximation in
+    /// its place, the type kotlinc's IR gives that parameter.
+    pub(crate) fn published_call_type_argument_approximation(
         &self,
         expression: ExprId,
-    ) -> impl Iterator<Item = (Ty, Ty)> + '_ {
+        ordinal: usize,
+    ) -> Option<Ty> {
         self.selected_generic_calls
-            .get(&expression)
-            .into_iter()
-            .flat_map(|call| {
-                call.published_intersections
-                    .iter()
-                    .filter_map(|(ordinal, published)| {
-                        Some(((*call.arguments.get(*ordinal)?)?, *published))
-                    })
-            })
+            .get(&expression)?
+            .published_intersections
+            .get(&ordinal)
+            .copied()
     }
 
     pub(crate) fn resolved_call_type_argument_bounds(
