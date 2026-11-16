@@ -145,7 +145,6 @@ bridges/test21.kt
 bridges/test22.kt
 bridges/test23.kt
 bridges/test24.kt
-bridges/test25.kt
 builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
 callableReference/adaptedReferences/boundReferences.kt
 callableReference/adaptedReferences/inlineDefault.kt
@@ -337,7 +336,6 @@ controlflow/for_loops_array_nullable.kt
 controlflow/for_loops_array_side_effects.kt
 controlflow/for_loops_call_order.kt
 controlflow/for_loops_coroutines.kt
-controlflow/for_loops_empty_range.kt
 controlflow/for_loops_errors.kt
 controlflow/for_loops_let_with_nullable.kt
 controlflow/for_loops_nested.kt
@@ -1232,7 +1230,6 @@ inlineClasses/kt28405.kt
 inlineClasses/kt32793.kt
 inlineClasses/kt44141.kt
 inlineClasses/kt70461.kt
-inlineClasses/multifileClass.kt
 inlineClasses/privateConstructorFunInterfaceMultiModule.kt
 inlineClasses/privateConstructorFunInterfaceMultiModuleGeneric.kt
 inlineClasses/propertyDelegation/kt27070.kt

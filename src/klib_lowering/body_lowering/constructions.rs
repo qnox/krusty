@@ -163,12 +163,15 @@ impl BodyLowering<'_> {
         } = self.constructor_operands(access, constructor_type_arguments, ty)?;
         match declaration.semantic_role {
             Some(crate::types::SemanticCallRole::KotlinArrayAllocation) => {
-                if declaration.classifier != crate::types::wk::array()
-                    || !ty.is_reference_array()
-                    || ty.type_args().len() != 1
-                    || params != [Ty::Int]
-                    || !defaults.is_empty()
-                {
+                // The allocated type is the constructed class's application: `Array<T>` with its
+                // one element type, or the primitive array class itself.
+                let allocates = if declaration.classifier == crate::types::wk::array() {
+                    ty.is_reference_array() && ty.type_args().len() == 1
+                } else {
+                    ty == Ty::obj_name(declaration.classifier)
+                        && crate::types::prim_array_element(declaration.classifier).is_some()
+                };
+                if !allocates || params != [Ty::Int] || !defaults.is_empty() {
                     return Err(mismatch(
                         "an array allocation has another constructor shape",
                     ));
