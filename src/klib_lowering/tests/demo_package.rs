@@ -87,6 +87,10 @@ pub(super) enum T {
     ArrayPBesideS,
     /// `() -> Int`, serialized as `kotlin.Function0<Int>`.
     Function0Int,
+    /// `(CharSequence) -> Unit`, serialized as `kotlin.Function1<CharSequence, Unit>`.
+    Function1CharSequenceUnit,
+    /// `(Any) -> Unit`, serialized as `kotlin.Function1<Any, Unit>`.
+    Function1AnyUnit,
     /// `CharSequence?`.
     NullableCharSequence,
 }
@@ -130,6 +134,7 @@ impl T {
             | T::ArrayPBesideS => "Array",
             T::CharSequence | T::NullableCharSequence => "CharSequence",
             T::Function0Int => "Function0",
+            T::Function1CharSequenceUnit | T::Function1AnyUnit => "Function1",
             T::P | T::Q | T::PBoundingR | T::R | T::PBesideS | T::S => {
                 unreachable!("a type parameter is not a class")
             }
@@ -145,20 +150,22 @@ impl T {
         }
     }
 
-    /// The type argument of a generic class type.
-    fn argument(self) -> Option<T> {
+    /// The type arguments of a generic class type.
+    fn arguments(self) -> &'static [T] {
         match self {
-            T::ListString => Some(T::String),
-            T::ListNullableAny => Some(T::NullableAny),
-            T::ArrayP => Some(T::P),
-            T::ArrayOutString => Some(T::String),
-            T::ArrayOutNullableAny => Some(T::NullableAny),
-            T::ArrayQ => Some(T::Q),
-            T::ArrayOutInt => Some(T::Int),
-            T::ArrayPBoundingR => Some(T::PBoundingR),
-            T::ArrayPBesideS => Some(T::PBesideS),
-            T::Function0Int => Some(T::Int),
-            _ => None,
+            T::ListString => &[T::String],
+            T::ListNullableAny => &[T::NullableAny],
+            T::ArrayP => &[T::P],
+            T::ArrayOutString => &[T::String],
+            T::ArrayOutNullableAny => &[T::NullableAny],
+            T::ArrayQ => &[T::Q],
+            T::ArrayOutInt => &[T::Int],
+            T::ArrayPBoundingR => &[T::PBoundingR],
+            T::ArrayPBesideS => &[T::PBesideS],
+            T::Function0Int => &[T::Int],
+            T::Function1CharSequenceUnit => &[T::CharSequence, T::Unit],
+            T::Function1AnyUnit => &[T::Any, T::Unit],
+            _ => &[],
         }
     }
 
@@ -221,8 +228,11 @@ impl T {
 
     /// The type parameter this type names, itself or as its type argument.
     fn mentioned_formal(self) -> Option<Formal> {
-        self.formal()
-            .or_else(|| self.argument().and_then(T::mentioned_formal))
+        self.formal().or_else(|| {
+            self.arguments()
+                .iter()
+                .find_map(|argument| argument.mentioned_formal())
+        })
     }
 
     pub(super) fn nullable(self) -> bool {
@@ -248,12 +258,12 @@ impl T {
         KotlinType::Class {
             internal: format!("{}/{}", self.package(), self.class()),
             args: self
-                .argument()
+                .arguments()
+                .iter()
                 .map(|argument| match self.variance() {
                     KlibIrVariance::Out => KotlinType::OutProjection(Box::new(argument.kotlin())),
                     _ => argument.kotlin(),
                 })
-                .into_iter()
                 .collect(),
             nullable: self.nullable(),
             shape: KotlinFunctionTypeShape::default(),
@@ -506,12 +516,12 @@ impl Body {
             return id;
         }
         let arguments = ty
-            .argument()
-            .map(|argument| KlibIrTypeArgument::Type {
+            .arguments()
+            .iter()
+            .map(|&argument| KlibIrTypeArgument::Type {
                 variance: ty.variance(),
                 ty: self.ty(argument),
             })
-            .into_iter()
             .collect();
         let id = self.arena.push_type(ty.klib_applied(arguments));
         self.types.push((ty, id));

@@ -94,6 +94,10 @@ mod tests {
 
     #[test]
     fn klib_primitive_iterator_next_is_a_native_dependency_capability() {
+        assert_eq!(
+            operation_plan(CompilerIntrinsic::PrimitiveIteratorNext),
+            Some(DependencyOperation::PrimitiveIteratorNext)
+        );
         for &target in NativeTarget::ALL {
             assert!(CraneliftBackend::new(target)
                 .realizes_dependency_intrinsic(CompilerIntrinsic::PrimitiveIteratorNext));

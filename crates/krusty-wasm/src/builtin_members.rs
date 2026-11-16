@@ -136,7 +136,7 @@ enum Operation {
 /// (`super::codegen` realizes those at the builder's receiver).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BuilderMember {
-    /// `append(CharSequence?)`: the value's string, or `"null"`.
+    /// `append(CharSequence?)`, as the target declares it (`crate::char_sequence_appends`).
     AppendCharSequence,
     /// `append(Char)`.
     AppendChar,
@@ -446,9 +446,8 @@ impl Runtime {
                 let builders = &self.string_builders;
                 match builder {
                     BuilderMember::AppendCharSequence => {
-                        code.local_get(1)
-                            .call(self.object_strings.any_to_string)
-                            .call(builders.append_string);
+                        let append = self.append_char_sequence(module)?;
+                        code.local_get(1).call(append);
                     }
                     BuilderMember::AppendChar => {
                         code.local_get(1).call(builders.append_char);

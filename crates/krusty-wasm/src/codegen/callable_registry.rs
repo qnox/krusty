@@ -111,6 +111,10 @@ impl CallableRegistry {
             Some(InstanceEntry::Constructor { .. }) => {
                 Err("a constructor without its declaring file's entry".to_owned())
             }
+            Some(InstanceEntry::ConstructorDefaults { .. }) => Err(
+                "a constructor's default-argument entry without its declaring file's entry"
+                    .to_owned(),
+            ),
             None => Ok(()),
         }
     }
@@ -162,6 +166,25 @@ impl CallableRegistry {
                     }
                     return Ok(None);
                 }
+                // A member of a local or anonymous class is reachable from no other file, and an
+                // inline function that declares the class clones it into each file it is expanded
+                // into, where the clone realizes the template's callables again. Each file binds
+                // those identities to its own clone, never to an earlier file's.
+                let file_local = ir.functions[function]
+                    .dispatch_receiver
+                    .and_then(|owner| ir.class_id_by_name(owner))
+                    .is_some_and(|class| ir.local_class_name_provenance.contains_key(&class));
+                if file_local {
+                    for target in &targets {
+                        if self
+                            .module
+                            .get(target)
+                            .is_some_and(|&index| wasm.function_is_defined(index))
+                        {
+                            self.module.remove(target);
+                        }
+                    }
+                }
                 let mut reserved = targets
                     .iter()
                     .filter_map(|target| self.module.get(target).copied())
@@ -183,8 +206,6 @@ impl CallableRegistry {
                             .to_string(),
                     );
                 }
-                // An inline template's local class is cloned into each file it is spliced into,
-                // and every clone realizes the template's callables again.
                 if wasm.function_is_defined(index) || !declared.insert(index) {
                     return Err("a callable realized by two functions".to_string());
                 }
@@ -1156,6 +1177,71 @@ mod tests {
     }
 
     #[test]
+    fn a_defined_callable_is_rebound_only_by_a_local_class_clone() {
+        fn realizing_file(callable: CallableId, local_owner: bool) -> IrFile {
+            let mut ir = IrFile::default();
+            let owner = type_name("demo/make$1");
+            let class = ir.add_class(krusty::ir::IrClass::synthetic(owner));
+            if local_owner {
+                ir.local_class_name_provenance.insert(
+                    class,
+                    krusty::ir::IrLocalClassNameProvenance {
+                        source: krusty::ir::IrLocalClassNameRoot::Source(
+                            krusty::ir::IrModuleSource {
+                                source: krusty::fir::SourceFileId::from_raw(1),
+                                package: type_name("demo"),
+                            },
+                        ),
+                        lexical_owner: None,
+                        segments: Box::new([]),
+                        ordinal: Some(1),
+                        parents: Box::new([]),
+                    },
+                );
+            }
+            let mut run = function("run", None);
+            run.is_static = false;
+            run.dispatch_receiver = Some(owner);
+            let run = ir.add_fun(run);
+            ir.checked_callable_functions.insert(callable, run);
+            ir
+        }
+        fn defined_by_an_earlier_file(callable: CallableId) -> (CallableRegistry, Module, u32) {
+            let mut registry = CallableRegistry::default();
+            let mut wasm = Module::default();
+            registry.enter_source_module("app");
+            let earlier = registry.module_index(callable, &mut wasm);
+            let ty = wasm.func_type(Vec::new(), Vec::new());
+            wasm.define(
+                earlier,
+                Function {
+                    ty,
+                    locals: Vec::new(),
+                    code: Code::default(),
+                },
+            );
+            (registry, wasm, earlier)
+        }
+
+        let callable = CallableId::from_raw(0);
+        let (mut registry, mut wasm, _) = defined_by_an_earlier_file(callable);
+        assert_eq!(
+            registry.declare_file(&realizing_file(callable, false), &mut wasm, &[]),
+            Err("a callable realized by two functions".to_string())
+        );
+
+        let (mut registry, mut wasm, earlier) = defined_by_an_earlier_file(callable);
+        let realized = registry
+            .declare_file(&realizing_file(callable, true), &mut wasm, &[])
+            .expect("a file's clone of a local class realizes its own members");
+        let [Some(clone)] = realized[..] else {
+            panic!("the clone's member is realized once: {realized:?}");
+        };
+        assert_ne!(clone, earlier);
+        assert_eq!(registry.module_index(callable, &mut wasm), clone);
+    }
+
+    #[test]
     fn inherited_default_entry_is_keyed_by_provider_and_calls_the_actual_function() {
         let target = CallableId::from_raw(1);
         let provider = CallableId::from_raw(2);
@@ -1182,6 +1268,7 @@ mod tests {
         krusty::backend::default_arguments::realize(
             &mut caller,
             &mut krusty::backend::CheckedBackendCallables::default(),
+            |_| false,
             |_| false,
         );
         let calls = registry
@@ -1228,6 +1315,7 @@ mod tests {
         krusty::backend::default_arguments::realize(
             &mut declaration,
             &mut krusty::backend::CheckedBackendCallables::default(),
+            |_| false,
             |_| false,
         );
         let entry = declaration.default_entries[&function];
@@ -1313,6 +1401,7 @@ mod tests {
             &mut caller,
             &mut krusty::backend::CheckedBackendCallables::default(),
             |_| false,
+            |_| false,
         );
         let calls = registry
             .file_calls(
@@ -1378,6 +1467,7 @@ mod tests {
         krusty::backend::default_arguments::realize(
             &mut declaration,
             &mut krusty::backend::CheckedBackendCallables::default(),
+            |_| false,
             |_| false,
         );
         let entry = declaration.default_entries[&function];

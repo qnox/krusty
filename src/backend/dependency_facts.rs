@@ -21,7 +21,7 @@ use crate::fx_hash::HashMap;
 use std::collections::hash_map::Entry;
 
 pub use crate::fir::BuiltinImplementation;
-use crate::fir::{ExternalCallableId, ExternalPropertyId};
+use crate::fir::{CharSequenceProtocol, ExternalCallableId, ExternalPropertyId};
 pub use crate::libraries::CompilerIntrinsic as BackendCompilerIntrinsic;
 pub use crate::libraries::DependencyGetterSignature;
 /// A dependency classifier a target may represent itself
@@ -475,10 +475,13 @@ mod tests {
             "kotlin/CharSequence",
         )));
         assert!(fact.builtin_implementations.is_empty());
-        let mut graph = crate::fir::CheckedKlibDependencyFacts::default();
-        graph
-            .builtin_implementations
-            .insert(identity, expected.clone());
+        let mut graph_implementations = HashMap::default();
+        graph_implementations.insert(identity, expected.clone());
+        let graph = crate::ir::CheckedKlibDependencyFacts::new(
+            graph_implementations,
+            HashMap::default(),
+            None,
+        );
         callables
             .record_klib_dependency_facts(graph)
             .expect("an uninitialized frozen slot is not contradictory evidence");
@@ -508,10 +511,8 @@ mod tests {
             callables.callables[&identity].builtin_implementations,
             expected
         );
-        let conflicting_graph = crate::fir::CheckedKlibDependencyFacts {
-            builtin_implementations: selected,
-            ..Default::default()
-        };
+        let conflicting_graph =
+            crate::ir::CheckedKlibDependencyFacts::new(selected, HashMap::default(), None);
         assert_eq!(
             callables.record_klib_dependency_facts(conflicting_graph),
             Err(identity)
@@ -799,12 +800,13 @@ pub struct CheckedBackendCallables {
     member_declarations: HashMap<ExternalCallableId, KlibDependencyCallable>,
     properties: HashMap<ExternalPropertyId, BackendPropertyFact>,
     /// The checker-owned immutable snapshot of this file's reached KLIB declarations.
-    klib_dependency_facts: crate::fir::CheckedKlibDependencyFacts,
+    klib_dependency_facts: crate::ir::CheckedKlibDependencyFacts,
     singleton_dispatches: HashMap<crate::ir::ExprId, SingletonDispatch>,
     singleton_selections: HashMap<ExternalCallableId, Vec<SingletonEdge>>,
     /// The runtime declarations native plugins selected at the handoff for their generated code,
     /// with the parameters a plugin's transform appended to each.
     plugin_runtime: HashMap<ExternalCallableId, Box<[Ty]>>,
+    char_sequence_protocol: Option<CharSequenceProtocol>,
 }
 
 impl CheckedBackendCallables {
@@ -821,17 +823,26 @@ impl CheckedBackendCallables {
             })
     }
 
+    /// The runtime declarations native plugins selected, to reapply their ABI annotations after a
+    /// common lowering rewrites IR and the checked dependency view is rebuilt.
+    pub(crate) fn plugin_runtime_bindings(&self) -> Vec<(ExternalCallableId, Box<[Ty]>)> {
+        self.plugin_runtime
+            .iter()
+            .map(|(&identity, appended)| (identity, appended.clone()))
+            .collect()
+    }
+
     /// Store the checked graph before completing the source callable facts. Only another checked
     /// graph is evidence at this stage: freshly frozen callable implementation slots are empty.
     /// Source-vs-graph consistency is checked when actual selected implementations are recorded.
     pub(crate) fn record_klib_dependency_facts(
         &mut self,
-        facts: crate::fir::CheckedKlibDependencyFacts,
+        facts: crate::ir::CheckedKlibDependencyFacts,
     ) -> Result<(), ExternalCallableId> {
-        for (&identity, implementations) in &facts.builtin_implementations {
+        for (&identity, implementations) in facts.builtin_implementations() {
             if self
                 .klib_dependency_facts
-                .builtin_implementations
+                .builtin_implementations()
                 .get(&identity)
                 .is_some_and(|previous| previous != implementations)
             {
@@ -842,12 +853,18 @@ impl CheckedBackendCallables {
         Ok(())
     }
 
-    pub(crate) fn klib_dependency_facts(&self) -> &crate::fir::CheckedKlibDependencyFacts {
+    pub(crate) fn klib_builtin_implementations(
+        &self,
+    ) -> &HashMap<ExternalCallableId, Box<[BuiltinImplementation]>> {
+        self.klib_dependency_facts.builtin_implementations()
+    }
+
+    pub(crate) fn klib_dependency_facts(&self) -> &crate::ir::CheckedKlibDependencyFacts {
         &self.klib_dependency_facts
     }
 
-    pub(crate) fn klib_type_hierarchy(&self) -> Option<&crate::fir::CheckedKlibTypeFacts> {
-        self.klib_dependency_facts.type_hierarchy.as_ref()
+    pub(crate) fn klib_type_hierarchy(&self) -> Option<&crate::ir::CheckedKlibTypeFacts> {
+        self.klib_dependency_facts.type_hierarchy()
     }
 
     /// Whether native plugins selected `identity` at the handoff for the code they generate.
@@ -989,48 +1006,10 @@ impl CheckedBackendCallables {
     ) -> Result<Self, DependencyFactError> {
         let referenced = references::referenced_dependencies(ir);
         let mut facts = Self::default();
-        let mut callable = |identity| provider.external_callable(identity);
         for property in referenced.properties {
-            let realization = provider
-                .external_property(property)
-                .ok_or(DependencyFactError::UnknownProperty(property))?;
-            let compile_time_constant = realization
-                .compile_time_constant
-                .as_ref()
-                .map(|constant| {
-                    crate::ir::IrConst::from_library_constant(constant)
-                        .ok_or(DependencyFactError::InvalidPropertyConstant(property))
-                })
-                .transpose()?;
-            let owner = facts
-                .freeze_callable(realization.getter, &mut callable)?
-                .physical_owner;
-            let getter = provider
-                .external_callable(realization.getter)
-                .ok_or(DependencyFactError::UnknownCallable(realization.getter))?
-                .callable;
-            let result = getter
-                .generic_sig
-                .as_ref()
-                .map(|signature| signature.ret)
-                .or(getter.declared_ret)
-                .unwrap_or(getter.ret);
-            if let Some(setter) = realization.setter {
-                facts.freeze_callable(setter, &mut callable)?;
-            }
-            facts.properties.insert(
-                property,
-                BackendPropertyFact {
-                    name: realization.name.into_boxed_str(),
-                    getter: realization.getter,
-                    setter: realization.setter,
-                    owner,
-                    result,
-                    declares_value_class_storage: realization.declares_value_class_storage,
-                    compile_time_constant,
-                },
-            );
+            facts.freeze_property(property, provider)?;
         }
+        let callable = |identity| provider.external_callable(identity);
         facts.freeze_callables(referenced.callables, callable)?;
         let mut singleton_dispatches = ir
             .external_singleton_dispatches
@@ -1066,6 +1045,77 @@ impl CheckedBackendCallables {
         Ok(facts)
     }
 
+    /// Freeze the dependency property `property` with its accessors.
+    fn freeze_property(
+        &mut self,
+        property: ExternalPropertyId,
+        provider: &dyn SymbolSource,
+    ) -> Result<(), DependencyFactError> {
+        let mut callable = |identity| provider.external_callable(identity);
+        let realization = provider
+            .external_property(property)
+            .ok_or(DependencyFactError::UnknownProperty(property))?;
+        let compile_time_constant = realization
+            .compile_time_constant
+            .as_ref()
+            .map(|constant| {
+                crate::ir::IrConst::from_library_constant(constant)
+                    .ok_or(DependencyFactError::InvalidPropertyConstant(property))
+            })
+            .transpose()?;
+        let owner = self
+            .freeze_callable(realization.getter, &mut callable)?
+            .physical_owner;
+        let getter = provider
+            .external_callable(realization.getter)
+            .ok_or(DependencyFactError::UnknownCallable(realization.getter))?
+            .callable;
+        let result = getter
+            .generic_sig
+            .as_ref()
+            .map(|signature| signature.ret)
+            .or(getter.declared_ret)
+            .unwrap_or(getter.ret);
+        if let Some(setter) = realization.setter {
+            self.freeze_callable(setter, &mut callable)?;
+        }
+        self.properties.insert(
+            property,
+            BackendPropertyFact {
+                name: realization.name.into_boxed_str(),
+                getter: realization.getter,
+                setter: realization.setter,
+                owner,
+                result,
+                declares_value_class_storage: realization.declares_value_class_storage,
+                compile_time_constant,
+            },
+        );
+        Ok(())
+    }
+
+    /// Freeze the `CharSequence` members resolution selected for a target whose `StringBuilder`
+    /// reads an appended sequence through them
+    /// ([`crate::backend::Backend::appends_char_sequences_by_index`]); no source call need name
+    /// them.
+    pub(crate) fn freeze_char_sequence_protocol(
+        &mut self,
+        protocol: CharSequenceProtocol,
+        provider: &dyn SymbolSource,
+    ) -> Result<(), DependencyFactError> {
+        self.freeze_property(protocol.length, provider)?;
+        let mut callable = |identity| provider.external_callable(identity);
+        self.freeze_callable(protocol.get, &mut callable)?;
+        self.char_sequence_protocol = Some(protocol);
+        Ok(())
+    }
+
+    /// The `CharSequence` members the handoff froze for a target that appends a sequence through
+    /// them; `None` for every other target.
+    pub fn char_sequence_protocol(&self) -> Option<CharSequenceProtocol> {
+        self.char_sequence_protocol
+    }
+
     /// Copy checker-produced builtin implementation facts for every selected external member.
     /// A missing identity is an incomplete frontend handoff and must fail closed.
     pub fn record_checked_builtin_implementations(
@@ -1086,7 +1136,7 @@ impl CheckedBackendCallables {
             };
             if self
                 .klib_dependency_facts
-                .builtin_implementations
+                .builtin_implementations()
                 .get(&identity)
                 .is_some_and(|graph| graph != selected)
             {
@@ -1233,24 +1283,6 @@ impl CheckedBackendCallables {
     /// is not one of this file's.
     pub fn callable(&self, identity: ExternalCallableId) -> Option<&BackendCallableFact> {
         self.callables.get(&identity)
-    }
-
-    /// The exact external members referenced by this checked IR unit, in stable identity order.
-    pub(crate) fn external_member_identities(&self) -> Vec<ExternalCallableId> {
-        let mut identities = self
-            .callables
-            .iter()
-            .filter_map(|(&identity, callable)| {
-                (callable.kind == ExternalCallableKind::Member
-                    && matches!(
-                        callable.declaration_owner,
-                        Some(SemanticCallableOwner::Classifier(_))
-                    ))
-                .then_some(identity)
-            })
-            .collect::<Vec<_>>();
-        identities.sort_unstable_by_key(|identity| identity.raw());
-        identities
     }
 
     /// The fact for a dependency property identity this file's IR holds. `None` means the identity

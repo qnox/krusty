@@ -7,7 +7,7 @@ use super::super::array_content_members;
 use super::super::ir_builtins::{
     BuiltinCallDisposition, BuiltinOperator, BuiltinRelation, DataClassArrayMember,
 };
-use super::super::klib_types::function_invocation_arity;
+use super::super::klib_types::{classifier_name, function_invocation_arity, member_owner};
 use super::{
     mismatch, unsupported, BodyLowering, LinkedAccessor, LinkedAccessorTarget, LinkedCallee,
     Lowered,
@@ -25,6 +25,15 @@ use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 use crate::types::{EqualityMode, Ty, TyKind};
 
 use super::super::decline::KlibBodyDeclineReason;
+
+/// How a call of a member reaches its implementation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CallDispatch {
+    /// Through the receiver's dispatch table when a subclass may override the member.
+    Virtual,
+    /// To the declared implementation itself: a `super` call through the qualifier.
+    Direct(crate::types::TypeName),
+}
 
 impl BodyLowering<'_> {
     /// A call of a compiler built-in operator or of a dependency function. A built-in operator
@@ -50,6 +59,12 @@ impl BodyLowering<'_> {
                 return self.linked_call(linked, access, ty);
             }
         };
+        if let Some(operation) = self.linker.atomic_field(callee)? {
+            return self.atomic_field(operation, access, ty);
+        }
+        if let Some(operation) = self.linker.atomic_array_element(callee)? {
+            return self.atomic_array_element(operation, access, ty);
+        }
         if let Some(arity) = function_invocation_arity(callee) {
             if !access.type_arguments.is_empty() {
                 return Err(mismatch(
@@ -115,7 +130,7 @@ impl BodyLowering<'_> {
             access,
             ty,
             CalleeShape {
-                receiver: Some(primitive.receiver),
+                receiver: primitive.receiver,
                 params: &primitive.params,
                 ret: primitive.ret,
                 context_count: 0,
@@ -123,14 +138,21 @@ impl BodyLowering<'_> {
                 parameter_defaults: &[],
             },
         )?;
-        let receiver = operands
-            .receiver
-            .expect("a validated primitive has dispatch");
+        // An array factory is the array its one vararg argument packs, as checked FIR lowers a
+        // source call of it to an array literal. Every other primitive is a member operation.
+        let (Some(receiver), Some(receiver_type)) = (operands.receiver, primitive.receiver) else {
+            return match (primitive.operation, operands.args.as_slice()) {
+                (CommonPrimitive::ArrayLiteral, &[array]) => Ok(self.typed(array, operands.ret)),
+                _ => Err(mismatch(
+                    "a member primitive is called without its dispatch receiver",
+                )),
+            };
+        };
         Ok(match primitive.operation {
             CommonPrimitive::Unary(operation) => {
                 // Match checked FIR's selected promotion before unary realization. In particular,
                 // negate is an IEEE unary operation, never subtraction from positive zero.
-                let operand = if primitive.receiver == primitive.ret {
+                let operand = if receiver_type == primitive.ret {
                     receiver
                 } else {
                     self.coercion(receiver, primitive.ret)
@@ -163,11 +185,33 @@ impl BodyLowering<'_> {
                 )))
             }
             // A numeric conversion, as checked FIR lowers the source conversion.
+            CommonPrimitive::ArrayLiteral => {
+                return Err(mismatch(
+                    "an array factory is called with a dispatch receiver",
+                ))
+            }
             CommonPrimitive::Conversion => self.ir.add_expr(IrExpr::TypeOp {
                 op: crate::ir::IrTypeOp::ImplicitCoercion,
                 arg: receiver,
                 type_operand: primitive.ret,
             }),
+            // The character at the index, as checked FIR lowers a source `String.get` call.
+            CommonPrimitive::StringGet => {
+                let &[index] = operands.args.as_slice() else {
+                    return Err(mismatch(
+                        "a string read is called with another shape than its declaration's",
+                    ));
+                };
+                let read = self.ir.add_expr(IrExpr::Call {
+                    callee: Box::new(Callee::Intrinsic {
+                        operation: IrIntrinsic::StringGet,
+                        ret: Ty::Char,
+                    }),
+                    dispatch_receiver: Some(receiver),
+                    args: vec![index],
+                });
+                self.typed(read, Ty::Char)
+            }
             // `compareTo` of a builtin scalar, as checked FIR lowers a call of it: the comparison
             // at the provider's common carrier, the operands promoted to a numeric carrier first.
             CommonPrimitive::Compare { operand } => {
@@ -185,7 +229,7 @@ impl BodyLowering<'_> {
                         lowering.coercion(value, operand)
                     }
                 };
-                let receiver = promote(self, receiver, primitive.receiver);
+                let receiver = promote(self, receiver, receiver_type);
                 let other = promote(self, other, other_type);
                 let relational_operator = matches!(
                     access.origin.as_deref(),
@@ -217,7 +261,7 @@ impl BodyLowering<'_> {
                     IrCheckedOperation::RangeConstruction {
                         operation,
                         start: receiver,
-                        start_type: primitive.receiver,
+                        start_type: receiver_type,
                         end,
                         end_type,
                         result: primitive.ret,
@@ -553,50 +597,48 @@ impl BodyLowering<'_> {
         })
     }
 
-    /// A call of a dependency function, which the unit lowers too.
-    /// `super.member(…)`: the implementation the qualifier's own member declares, called on this
-    /// instance without dispatch. Only a member this unit emits has an implementation to call.
+    /// `super<Q>.f(…)`: the qualifier's own implementation of `f`, called on the receiver without
+    /// dispatch, as checked FIR lowers a source `super` call. The KLIB names the member through
+    /// the qualifier, so the callee must be a member `Q` declares, and only an implementation this
+    /// unit lowers is reached directly: no override of a subclass may replace it.
     pub(super) fn super_call(
         &mut self,
         qualifier: &KlibIrSymbol,
         access: &KlibIrMemberAccess,
         ty: Ty,
     ) -> Lowered<ExprId> {
-        let (KlibIrSymbolKind::Class, KlibIrSignature::Public(class)) =
+        let (KlibIrSymbolKind::Class, KlibIrSignature::Public(qualifier)) =
             (qualifier.kind, &qualifier.signature)
         else {
-            return unsupported("a `super` call through a non-public qualifier");
+            return Err(mismatch("a `super` qualifier is not a public class"));
         };
         let (KlibIrSymbolKind::Function, KlibIrSignature::Public(callee)) =
             (access.symbol.kind, &access.symbol.signature)
         else {
-            return unsupported("a `super` call of a property accessor or non-public member");
+            return unsupported("a `super` call of a member without a public signature");
         };
-        let owner = callee.declaration().segments();
-        if callee.package() != class.package()
-            || owner.split_last().map(|(_, owner)| owner) != Some(class.declaration().segments())
-        {
+        if member_owner(callee)? != classifier_name(qualifier)? {
             return Err(mismatch(
-                "a `super` call's member is not declared by its qualifier",
+                "a `super` call names a member its qualifier does not declare",
             ));
-        }
-        let qualifier = super::super::klib_types::classifier_name(class)?;
-        if self
-            .ir
-            .class_id_by_name(qualifier)
-            .is_none_or(|class| self.ir.classes[class as usize].is_interface)
-        {
-            return unsupported("a `super` call through a class this unit does not materialize");
         }
         let linked = self.linker.link(self.ir, callee)?;
         if !matches!(linked.callee, Callee::Local(_)) {
-            return unsupported("a `super` call of a member this unit does not emit");
+            return unsupported("a `super` call of a member this unit does not implement");
         }
-        self.call_linked(linked, access, ty, Dispatch::Super(qualifier))
+        if linked.receiver.is_none() {
+            return Err(mismatch("a `super` call names a member without a receiver"));
+        }
+        if !self.linker.declares_implementation(callee)? {
+            return Err(mismatch("a `super` call names an abstract member"));
+        }
+        let qualifier = classifier_name(qualifier)?;
+        self.linked_call_with(linked, access, ty, CallDispatch::Direct(qualifier))
     }
 
-    /// The nonvirtual call of `function`, the method this unit emits for the qualifier's member,
-    /// on `receiver`: the dependency member it implements is the `super` call's declaration.
+    /// The call without dispatch of `function`, the method this unit emits for the `qualifier`'s
+    /// member, on `receiver`: the dependency member it implements is the `super` call's
+    /// declaration.
     fn super_callee(
         &self,
         function: crate::ir::FunId,
@@ -639,6 +681,7 @@ impl BodyLowering<'_> {
         })
     }
 
+    /// A call of a dependency function, which the unit lowers too.
     fn dependency_call(
         &mut self,
         callee: &KlibPublicIdSignature,
@@ -655,15 +698,17 @@ impl BodyLowering<'_> {
         access: &KlibIrMemberAccess,
         ty: Ty,
     ) -> Lowered<ExprId> {
-        self.call_linked(linked, access, ty, Dispatch::Overridable)
+        self.linked_call_with(linked, access, ty, CallDispatch::Virtual)
     }
 
-    fn call_linked(
+    /// [`Self::linked_call`], with the dispatch the call site names: a `super` call reaches the
+    /// qualifier's implementation itself, never a subclass's override.
+    fn linked_call_with(
         &mut self,
         linked: LinkedCallee,
         access: &KlibIrMemberAccess,
         ty: Ty,
-        dispatch: Dispatch,
+        dispatch: CallDispatch,
     ) -> Lowered<ExprId> {
         let linked = self.substituted(linked, access)?;
         let operands = self.call_operands(
@@ -698,13 +743,17 @@ impl BodyLowering<'_> {
                 defaults: operands.omitted.into_boxed_slice(),
             };
         }
-        if let Dispatch::Super(qualifier) = dispatch {
-            let (Callee::Local(function), Some(receiver)) = (&callee, operands.receiver) else {
-                return unsupported("a `super` call leaving arguments to their defaults");
-            };
-            callee = self.super_callee(*function, qualifier, receiver)?;
-        }
         let (dispatch_receiver, args) = (operands.receiver, operands.args);
+        // A backend calls a method with a dispatch slot through it, so a `super` call of one
+        // names the dependency member the method implements, which is called without dispatch.
+        if let (CallDispatch::Direct(qualifier), Callee::Local(function), Some(receiver)) =
+            (dispatch, &callee, dispatch_receiver)
+        {
+            let function = *function;
+            if self.ir.overridable_method(function).is_some() {
+                callee = self.super_callee(function, qualifier, receiver)?;
+            }
+        }
         let singleton_dispatch = linked.singleton_dispatch;
         let external = match &callee {
             Callee::External { target, .. } => Some(*target),
@@ -713,7 +762,7 @@ impl BodyLowering<'_> {
         // A member dispatch reaches on an instance of a class this unit materializes, which a
         // subclass may override, is called through the class's dispatch table.
         let overridable = match (&callee, dispatch_receiver) {
-            _ if dispatch != Dispatch::Overridable => None,
+            _ if matches!(dispatch, CallDispatch::Direct(_)) => None,
             (Callee::Local(function), Some(receiver)) => self
                 .ir
                 .overridable_method(*function)
@@ -1241,14 +1290,6 @@ struct CalleeShape<'a> {
     class_type_parameters: &'a [String],
     /// Whether each parameter declares a default a call may leave it to.
     parameter_defaults: &'a [bool],
-}
-
-/// Whether a call of an overridable member of a class this unit materializes dispatches through
-/// the class's table, or is a `super` call through the qualifier's own implementation.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Dispatch {
-    Overridable,
-    Super(crate::types::TypeName),
 }
 
 /// A call's lowered dispatch receiver and arguments, with the receiver type, parameters and

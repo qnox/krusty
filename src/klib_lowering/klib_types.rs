@@ -271,7 +271,7 @@ fn type_argument(
 
 /// The classifier a type-use annotation constructs, when its constructor is a public declaration
 /// with a valid identity path.
-fn annotation_classifier(annotation: &KlibIrAnnotation) -> Option<TypeName> {
+pub(super) fn annotation_classifier(annotation: &KlibIrAnnotation) -> Option<TypeName> {
     let symbol = &annotation.access.symbol;
     if symbol.kind != KlibIrSymbolKind::Constructor {
         return None;

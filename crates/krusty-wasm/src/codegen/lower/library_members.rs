@@ -1,7 +1,8 @@
 //! Calls of a library classifier's member that dispatch through the program
 //! (`crate::interface_dispatch`): an interface's member no dependency publishes a body for
-//! (`CharSequence.length` on a `CharSequence`), and a class's member that builtin classes override
-//! (`Number.toLong()` on a `Number`).
+//! (`CharSequence.length` on a `CharSequence`), a class's member that builtin classes override
+//! (`Number.toLong()` on a `Number`), and an abstract member of a library class
+//! (`IntIterator.nextInt()` on an `IntIterator`), which the program's subclasses implement.
 //!
 //! The member is named by its KLIB identity, which a class of the program implementing it records
 //! its override under (`super::super::interface_members`); the builtin classes' implementations
@@ -12,7 +13,7 @@
 //! even when a concrete member also has an executable export, preserving virtual overrides.
 
 use krusty::backend::interface_identity::property_member_identity;
-use krusty::backend::{BackendCallableFact, CheckedBackendCallables};
+use krusty::backend::{BackendCallableFact, BackendPropertyFact, CheckedBackendCallables};
 use krusty::libraries::ExternalCallableKind;
 use krusty::libraries::MemberRealization;
 use krusty::types::{SemanticCallableOwner, TypeName};
@@ -123,7 +124,9 @@ pub(in crate::codegen) fn dispatches_through_library_member(
         && fact.compiler_operation().is_none()
         && fact.dependency_callable.is_some()
         && library_member_owner(fact).is_some()
-        && (fact.owner_is_interface || !fact.builtin_implementations.is_empty())
+        && (fact.owner_is_interface
+            || !fact.builtin_implementations.is_empty()
+            || is_abstract_class_member(fact))
         && any_members::call_member(ir, callables, expression).is_none()
 }
 
@@ -133,6 +136,26 @@ struct LibraryMember {
     identity: Vec<u8>,
     role: MemberRole,
     name: String,
+    /// Whether the member is `KCallable.name`, which every callable-reference object answers.
+    reference_name: bool,
+}
+
+/// Whether `property` is `KCallable.name`, which every callable-reference object implements
+/// (`crate::callable_references`).
+fn is_reference_name(property: &BackendPropertyFact) -> bool {
+    &*property.name == "name" && property.owner.matches("kotlin/reflect/KCallable")
+}
+
+/// Whether `fact` is an abstract member of a library class: no body of its own runs, only the
+/// overrides the receiver's class and its superclasses supply, as an interface's member.
+pub(in crate::codegen) fn is_abstract_class_member(fact: &BackendCallableFact) -> bool {
+    !fact.owner_is_interface
+        && fact.kind == ExternalCallableKind::Member
+        && fact.member_realization == MemberRealization::Dispatch
+        && library_member_owner(fact).is_some()
+        && fact
+            .klib_body_declaration_modifiers
+            .is_some_and(|modifiers| modifiers.is_abstract())
 }
 
 impl Body<'_> {
@@ -143,7 +166,7 @@ impl Body<'_> {
         node: &IrExpr,
     ) -> Option<Result<(), Unsupported>> {
         // A function's overrides are named by the function, an accessor's by its property.
-        let (target, receiver, args, role, property) = match node {
+        let (target, receiver, args, (property, role)) = match node {
             IrExpr::Call {
                 callee,
                 dispatch_receiver: Some(receiver),
@@ -165,8 +188,7 @@ impl Body<'_> {
                     *target,
                     *receiver,
                     args.as_slice(),
-                    MemberRole::Function,
-                    None,
+                    (None, MemberRole::Function),
                 )
             }
             IrExpr::Checked(operation) => {
@@ -175,22 +197,18 @@ impl Body<'_> {
                 if !access.dispatches() || access.callable.is_member_extension() {
                     return None;
                 }
-                let (krusty::ir::IrCheckedOperation::ExternalPropertyRead { target, .. }
-                | krusty::ir::IrCheckedOperation::ExternalPropertyWrite { target, .. }) =
-                    &**operation
-                else {
-                    return None;
-                };
                 (
                     access.target,
                     receiver,
                     access.arguments,
-                    if access.writes() {
-                        MemberRole::Setter
-                    } else {
-                        MemberRole::Getter
-                    },
-                    Some(*target),
+                    (
+                        Some(access.property),
+                        if access.writes() {
+                            MemberRole::Setter
+                        } else {
+                            MemberRole::Getter
+                        },
+                    ),
                 )
             }
             _ => return None,
@@ -226,7 +244,17 @@ impl Body<'_> {
                 }),
             );
         }
-        if role == MemberRole::Setter {
+        // A library member call reads a property only through its checked property read.
+        if role == MemberRole::Setter
+            || (property.is_some()
+                && !matches!(
+                    node,
+                    IrExpr::Checked(operation) if matches!(
+                        &**operation,
+                        krusty::ir::IrCheckedOperation::ExternalPropertyRead { .. }
+                    )
+                ))
+        {
             return None;
         }
         let published = self.calls.external(target).is_some();
@@ -236,7 +264,7 @@ impl Body<'_> {
         // A function's identity names a function, and an accessor's a property.
         let identity = library_member_identity(fact, role)?;
         let name = match property {
-            Some(property) => self.callables.property(property)?.name.to_string(),
+            Some(property) => property.name.to_string(),
             None => fact.name.clone(),
         };
         Some(self.library_member_call(
@@ -246,6 +274,7 @@ impl Body<'_> {
                 identity,
                 role,
                 name,
+                reference_name: property.is_some_and(is_reference_name),
             },
             receiver,
             args,
@@ -292,6 +321,8 @@ impl Body<'_> {
         }
     }
 
+    /// A call through the library member `fact` declares, the getter of `property` when there is
+    /// one.
     fn library_member_call(
         &mut self,
         id: u32,
@@ -304,6 +335,7 @@ impl Body<'_> {
             identity,
             role,
             name,
+            reference_name,
         } = member;
         let params = fact.declared_params.as_deref().unwrap_or(&fact.params);
         let result = fact.declared_ret.unwrap_or(fact.ret);
@@ -318,6 +350,13 @@ impl Body<'_> {
             &identity,
             signature.clone(),
         )?;
+        // The builder's `append(CharSequence?)` reads the appended sequence through the checked
+        // `CharSequence` members on a target that copies its units.
+        if fact.builtin_implementations.iter().any(|implementation| {
+            super::string_builders::is_string_builder_type(implementation.receiver)
+        }) {
+            self.record_char_sequence_reads()?;
+        }
         self.runtime.builtin_member(
             self.module,
             self.classifiers,
@@ -326,15 +365,27 @@ impl Body<'_> {
             &signature,
             &fact.builtin_implementations,
         )?;
+        if reference_name {
+            self.runtime.reference_name_member(self.module, member)?;
+        }
         if let Some(step) = super::array_lists::iterator_step(&fact) {
+            use super::array_lists::IteratorStep;
+            use crate::list_iterator_ends::EndedStep;
             let lists = &self.runtime.array_lists;
             let function = match step {
-                super::array_lists::IteratorStep::HasNext => lists.has_next,
-                super::array_lists::IteratorStep::Next => lists.next,
-                super::array_lists::IteratorStep::HasPrevious => lists.has_previous,
-                super::array_lists::IteratorStep::Previous => lists.previous,
-                super::array_lists::IteratorStep::NextIndex => lists.next_index,
-                super::array_lists::IteratorStep::PreviousIndex => lists.previous_index,
+                IteratorStep::HasNext => lists.has_next,
+                IteratorStep::HasPrevious => lists.has_previous,
+                IteratorStep::NextIndex => lists.next_index,
+                IteratorStep::PreviousIndex => lists.previous_index,
+                IteratorStep::Next | IteratorStep::Previous => {
+                    let ended = if matches!(step, IteratorStep::Next) {
+                        EndedStep::Next
+                    } else {
+                        EndedStep::Previous
+                    };
+                    self.runtime
+                        .checked_list_iterator_step(self.module, self.classifiers, ended)?
+                }
             };
             self.runtime.objects.interfaces.implement_representation(
                 member,

@@ -29,7 +29,7 @@ pub(super) struct CaptureField {
 }
 
 /// An object literal's delegation to a superclass constructor: the operands evaluated where the
-/// object is constructed, the constructor's parameters and the constructor itself.
+/// object is constructed, the constructor's declared parameters and the constructor itself.
 struct SuperclassForwards {
     operands: Vec<(ExprId, Ty)>,
     params: Vec<Ty>,
@@ -52,8 +52,12 @@ impl SuperclassForwards {
 
 /// The fields an object literal's properties with storage add after its captured values.
 struct ObjectStorage<'a> {
+    /// The serialized declaration of the object's class.
+    declaring: &'a KlibIrSymbol,
     first_index: u32,
     fields: Vec<(&'a KlibIrSymbol, Ty, bool)>,
+    /// The object's properties with a backing field, each with that field.
+    properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
 }
 
 /// A member an object literal declares, which its own bodies call.
@@ -248,8 +252,10 @@ impl<'a> BodyLowering<'a> {
             &supertypes,
             &capture_fields,
             &ObjectStorage {
+                declaring: &class.base.symbol,
                 first_index: capture_count,
                 fields: storage,
+                properties: super::super::class_storage::backed_properties(&class.members),
             },
         )?;
         self.initialize_object(class_id, owner, &capture_fields, &stored)?;
@@ -462,7 +468,10 @@ impl<'a> BodyLowering<'a> {
             .zip(operands.params.iter().copied());
         Ok(SuperclassForwards {
             operands: pairs.collect(),
-            params: operands.params,
+            // The superclass constructor's own declared frame, as a source class records it: a
+            // backend couples it to the constructor's physical frame, while each operand above is
+            // carried at its type in this object's instantiation.
+            params: operands.declaration.declared_parameters().to_vec(),
             target: IrConstructorTarget {
                 ordinal,
                 access: crate::ir::IrConstructorAccess::Unrestricted,
@@ -787,8 +796,10 @@ impl<'a> BodyLowering<'a> {
         }
         let fields = super::instance_storage::InstanceStorageFrame::object_member(
             class,
+            storage.declaring,
             storage.first_index,
             storage.fields.iter().copied(),
+            storage.properties.clone(),
             Ty::obj_name(owner),
         );
         Ok(MemberFrame {
@@ -940,7 +951,7 @@ impl<'a> BodyLowering<'a> {
         getter: &KlibIrFunction,
         fun: FunId,
         owner: TypeName,
-        record: crate::klib_lowering::same_library_class::MemberOverride,
+        record: super::super::same_library_class::MemberOverride,
         interface: bool,
         ty: Ty,
     ) -> Lowered<()> {

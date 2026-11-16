@@ -50,27 +50,27 @@ pub(super) enum KlibCalleeFact<'facts, 'callable> {
 }
 
 /// Shared name retained for the checked member-call edge consumed by KLIB body lowering.
-pub(crate) type CallEdge = crate::fir::CheckedMemberCallEdge;
+pub(crate) type CallEdge = crate::ir::CheckedMemberCallEdge;
 
 impl<'a> KlibCalleeFacts<'a> {
     /// Copy checker-produced semantic facts for the selected KLIB dependency graph.
     pub(crate) fn with_checked_dependency_facts(
         mut self,
-        checked: &'a crate::fir::CheckedKlibDependencyFacts,
+        checked: &'a crate::ir::CheckedKlibDependencyFacts,
     ) -> Self {
         self.builtin_implementation_facts.extend(
             checked
-                .builtin_implementations
+                .builtin_implementations()
                 .iter()
                 .map(|(&id, facts)| (id, facts.clone())),
         );
         self.member_edges.extend(
             checked
-                .member_edges
+                .member_edges()
                 .iter()
                 .map(|(id, edge)| (id.clone(), edge.clone())),
         );
-        if let Some(hierarchy) = checked.type_hierarchy.as_ref() {
+        if let Some(hierarchy) = checked.type_hierarchy() {
             self.class_type_oracle = Some(hierarchy);
         }
         self
@@ -176,6 +176,11 @@ impl<'a> KlibCalleeFacts<'a> {
                 "a callable reference has no unique provider declaration".to_owned(),
             )),
         }
+    }
+
+    /// The class hierarchy the checker froze for the selected bodies, when it froze one.
+    pub(super) fn class_type_oracle(&self) -> Option<&'a dyn crate::assignable::TypeOracle> {
+        self.class_type_oracle
     }
 
     #[cfg(test)]
@@ -396,16 +401,6 @@ impl<'a> KlibCalleeFacts<'a> {
         super::decline::KlibBodyDeclineReason,
     > {
         super::class_initialization::object_initialization_objects(class, bodies, self)
-    }
-
-    /// The overrides with bodies of the value class declaring the member `selected`, each with
-    /// the declarations it overrides.
-    pub(crate) fn value_class_overrides(
-        &self,
-        selected: crate::libraries::KlibBodyCallable<'_>,
-        bodies: &crate::klib_libraries::KlibDeclarationBodies,
-    ) -> Result<Vec<super::ValueClassOverride>, super::decline::KlibBodyDeclineReason> {
-        super::class_initialization::value_class_overrides(selected, bodies)
     }
 
     /// The members dispatch reaches of the object `class`.

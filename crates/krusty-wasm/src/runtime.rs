@@ -17,6 +17,7 @@
 //! segment with `array.new_data`.
 
 mod exception_classes;
+mod floating_strings;
 mod object_equality;
 mod object_strings;
 mod root_any;
@@ -32,6 +33,7 @@ use super::boxes::Boxes;
 use super::builtin_instances::BuiltinInstances;
 use super::builtin_members::BuiltinMembers;
 use super::callable_references::CallableReferences;
+use super::char_sequence_appends::CharSequenceAppends;
 use super::class_tokens::{ClassTokens, TokenRuntime};
 use super::encode::{
     BlockType, Code, CompositeType, FieldType, Function, HeapType, Module, StorageType, ValType,
@@ -62,6 +64,8 @@ pub(super) struct Runtime {
     pub(super) string_equals: u32,
     /// `String.compareTo(String)`, once a call needs it.
     string_compare: Option<u32>,
+    /// `Double.toString()` and `Float.toString()`, once a conversion needs them.
+    floating_strings: floating_strings::FloatingStrings,
     pub(super) object_equals: u32,
     pub(super) string_concat: u32,
     pub(super) string_of_i32: u32,
@@ -79,6 +83,8 @@ pub(super) struct Runtime {
     pub(super) identity: IdentityObjects,
     /// `kotlin.text.StringBuilder`, which the runtime lays out.
     pub(super) string_builders: StringBuilders,
+    /// `StringBuilder.append(CharSequence?)`, as the target declares it.
+    pub(super) char_sequence_appends: CharSequenceAppends,
     /// `kotlin.collections.ArrayList`, which the runtime lays out.
     pub(super) array_lists: ArrayLists,
     /// Kotlin's `hashCode()` rules.
@@ -180,6 +186,7 @@ impl Runtime {
             arrays,
             string_equals: module.declare(),
             string_compare: None,
+            floating_strings: Default::default(),
             object_equals,
             string_concat,
             string_of_i32: module.declare(),
@@ -195,6 +202,9 @@ impl Runtime {
             objects,
             identity,
             string_builders,
+            char_sequence_appends: CharSequenceAppends::new(
+                host.target() == crate::target::WasmTarget::Wasi,
+            ),
             array_lists,
             hashing,
             class_tokens,

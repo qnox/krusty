@@ -584,6 +584,7 @@ impl FileClasses {
                         interfaces: self.tables.interface_tables.implemented[id as usize].clone(),
                         interface_entries: self.tables.interface_tables.members[id as usize]
                             .clone(),
+                        members: self.tables.members[id as usize].clone(),
                     },
                     interface_bodies: self.interface_bodies[id as usize].clone(),
                     dependency_implementations: self.dependency_implementations[id as usize]
@@ -895,19 +896,31 @@ pub(super) fn declare(
                     class.fq_name()
                 ))
             }
-            Some(Err(_)) | None => module.subtype(SubType {
-                composite: table_struct(
-                    &slot_types[id as usize],
-                    objects.itable,
-                    objects.type_infos.ty,
-                ),
-                supertype: Some(match (parent, laid_out_parent) {
-                    (Some(parent), _) => parent.table_type.expect("a superclass has a table type"),
-                    (None, Some(superclass)) => superclass.table_type,
-                    (None, None) => objects.function_table,
-                }),
-                open: true,
-            }),
+            Some(Err(_)) | None => {
+                let mut declare = || {
+                    module.subtype(SubType {
+                        composite: table_struct(
+                            &slot_types[id as usize],
+                            objects.itable,
+                            objects.type_infos.ty,
+                        ),
+                        supertype: Some(match (parent, laid_out_parent) {
+                            (Some(parent), _) => {
+                                parent.table_type.expect("a superclass has a table type")
+                            }
+                            (None, Some(superclass)) => superclass.table_type,
+                            (None, None) => objects.function_table,
+                        }),
+                        open: true,
+                    })
+                };
+                // A dependency class is the whole program's, whichever module plans it next.
+                if laid_out.lays_out_dependencies() {
+                    module_tables.dependency(class.fq_name, &slot_types[id as usize], declare)?
+                } else {
+                    declare()
+                }
+            }
         };
         let form = &mut forms[id as usize];
         form.structure = Some(structure);

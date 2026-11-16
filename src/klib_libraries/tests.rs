@@ -410,6 +410,50 @@ fn a_companion_extension_reverse_joins_by_its_exact_module_and_signature() {
     assert_eq!(signed.module.as_deref(), Some("stdlib"));
 }
 
+#[test]
+fn a_private_external_reverse_joins_by_its_public_identity_but_names_nothing() {
+    let mut external = function(
+        "rangeEquals",
+        Some(class("kotlin/String", false)),
+        vec![class("kotlin/Int", false)],
+    );
+    external.visibility = Visibility::Private;
+    external.is_external = true;
+    let mut bodyful = function("rangeHelper", None, vec![class("kotlin/Int", false)]);
+    bodyful.visibility = Visibility::Private;
+    let module = "stdlib".to_owned();
+    let identity = |declaration: &KotlinFunction| crate::libraries::KlibDependencyCallable {
+        module: module.clone(),
+        declaration: expected_signature(&["kotlin", "text"], declaration),
+    };
+    let (external_identity, bodyful_identity) = (identity(&external), identity(&bodyful));
+    let inventory = inventory::PackageInventory::from_package_inputs(vec![(
+        segments(&["kotlin", "text"]),
+        package_of(vec![external, bodyful]),
+        true,
+        false,
+        Some(module.clone()),
+    )])
+    .expect("the private declarations are signable");
+
+    let (placement, signed) = inventory
+        .dependency_function(&external_identity)
+        .expect("a private external is serialized under its public identity");
+    assert_eq!(
+        placement,
+        crate::libraries::CallablePlacement::Package(type_name("kotlin/text"))
+    );
+    assert_eq!(signed.declaration.name, "rangeEquals");
+    assert_eq!(signed.module.as_deref(), Some("stdlib"));
+    // A bodyful private function has a file-local identity; no public one joins it.
+    assert!(inventory.dependency_function(&bodyful_identity).is_none());
+    // Neither is a candidate of its package: only its own file may call it.
+    let text = type_name("kotlin/text");
+    assert_eq!(inventory.functions(text, "rangeEquals").count(), 0);
+    assert_eq!(inventory.functions(text, "rangeHelper").count(), 0);
+    assert_eq!(inventory.all_functions().count(), 0);
+}
+
 fn single_function(libraries: &KlibLibraries, package: &str, name: &str) -> FunctionInfo {
     let symbols = libraries.symbols(SymbolNamespace::Package(type_name(package)), name);
     assert!(symbols.classifier.is_none());
@@ -1469,3 +1513,4 @@ mod implementation_inventory;
 mod properties;
 mod serialized_references;
 mod shared_inline_trees;
+mod top_level_storage;

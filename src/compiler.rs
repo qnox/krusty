@@ -457,6 +457,7 @@ fn emit_analyzed_into<B: Backend>(
         if diags.has_errors() {
             continue;
         }
+        let common_ir_preparation = backend.common_ir_preparation();
         let Some(mut file) = backend_handoff::checked_ir_file(
             CompletedSourceIr {
                 local_storage_owners: capture_storage::source_owners(&ir, &index, source_id),
@@ -470,8 +471,9 @@ fn emit_analyzed_into<B: Backend>(
                 text: source.text(),
                 stems,
                 origins: source_map.origins(),
-                common_ir_coroutines: backend.lowers_coroutines_on_common_ir(),
+                common_ir_coroutines: common_ir_preparation.is_some(),
                 dispatched_classes: &dispatched_classes,
+                char_sequences_by_index: backend.appends_char_sequences_by_index(),
             },
             diags,
         ) else {
@@ -480,6 +482,18 @@ fn emit_analyzed_into<B: Backend>(
         before_target(&mut file, diags);
         if diags.has_errors() {
             continue;
+        }
+        if let Some(preparation) = common_ir_preparation {
+            if let Err(error) = backend_handoff::prepare_common_ir(
+                &mut file,
+                symbols.semantic_platform(),
+                preparation,
+                symbols.coroutine_runtime(),
+                &dispatched_classes,
+            ) {
+                backend.report_common_ir_preparation_error(&error, diags);
+                continue;
+            }
         }
         // A target emitting library bodies builds a range class it does not lay out through the
         // library's own declaration, which support emission below then selects.
@@ -887,7 +901,7 @@ fn check_body_group(
             current = owner;
         }
     }
-    let info = crate::resolve::check_selected_declarations_in_pass_two(
+    let mut info = crate::resolve::check_selected_declarations_in_pass_two(
         crate::resolve::SourceFileUnit {
             file: active_file,
             file_index: raw_source as u32,
@@ -926,6 +940,22 @@ fn check_body_group(
             Span::new(0, 0),
             format!(
                 "internal error: checked local signatures were not publishable: {declarations:?}"
+            ),
+        );
+        return None;
+    }
+    // The body-local override plans published above can name external declarations no checked
+    // selection reached; freeze their builtin implementation facts with the unit's own.
+    if let Err(identity) = crate::resolve::record_override_edges(
+        &mut info.builtin_implementations,
+        index,
+        symbols.semantic_platform(),
+        raw_source as u32,
+    ) {
+        diags.error(
+            Span::new(0, 0),
+            format!(
+                "internal error: selected external member has incomplete builtin implementation facts: {identity:?}"
             ),
         );
         return None;

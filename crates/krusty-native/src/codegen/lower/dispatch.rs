@@ -255,7 +255,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// A call of one exact method of a class this file declares. The method is the callee's
-    /// function, and the slot is that function's own slot.
+    /// function, and the slot is that function's own slot. A dependency class's method that no
+    /// table dispatches (a final member) has no slot, and the call runs the method itself.
     pub(super) fn own_class_member(
         &mut self,
         function: krusty::ir::FunId,
@@ -263,6 +264,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         receiver: u32,
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
+        if self.file.model.is_direct(function) {
+            return self.direct_method_call(function, receiver, args);
+        }
         let class = self.file.ir.class_id_by_name(owner).ok_or_else(|| {
             declined!(
                 "a member of `{}` this file does not declare",

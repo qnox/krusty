@@ -85,7 +85,7 @@ impl KlibDeclarationBodies {
                 continue;
             };
             for symbol in &function.overridden {
-                let overridden = crate::klib_libraries::member_signature(&symbol.signature)
+                let overridden = member_signature(&symbol.signature)
                     .ok_or("an override names a declaration that is not a member")?;
                 for overridden in self.overridden_declarations(&identity.module, &overridden)? {
                     if !found.contains(&overridden) {
@@ -179,9 +179,7 @@ impl KlibDeclarationBodies {
                 .iter()
                 .flat_map(|member| member_functions(interface_arena, member))
             {
-                let Some(member) =
-                    crate::klib_libraries::member_signature(&function.base.symbol.signature)
-                else {
+                let Some(member) = member_signature(&function.base.symbol.signature) else {
                     continue;
                 };
                 let Some(inherited) = as_member_of(&member, signature) else {

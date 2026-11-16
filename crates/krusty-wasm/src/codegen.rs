@@ -128,23 +128,33 @@ impl Backend for WasmBackend {
         true
     }
 
-    fn lowers_coroutines_on_common_ir(&self) -> bool {
-        true
+    fn capability_decline(&self, construct: &str) -> String {
+        format!("{DECLINE_PREFIX}{construct} yet")
+    }
+
+    fn common_ir_preparation(&self) -> Option<krusty::backend::CommonIrPreparation> {
+        Some(krusty::backend::CommonIrPreparation {
+            counted_loops: COUNTED_LOOPS,
+            enums: krusty::backend::enums::Contract::KotlinWasm,
+        })
     }
 
     fn numbers_slots(&self) -> bool {
         true
     }
 
-    /// The runtime lays out text, its builders and its exception classes itself: a library
-    /// body of one of their members reads a layout this target does not have, and a library
-    /// class extending one of the exceptions delegates to the runtime's constructor.
+    /// The runtime lays out text, its builders, its exception classes and `Unit`'s one instance
+    /// itself: a library body of one of their members reads a layout this target does not have,
+    /// a library class extending one of the exceptions delegates to the runtime's constructor,
+    /// and a library body's `Unit` value is the runtime's, as a source reference of it is.
     fn represents_dependency_classifier(
         &self,
         classifier: krusty::backend::DependencyClassifier,
     ) -> bool {
-        // `Unit`'s value is the runtime's own, as a source reference of it is.
+        // `Unit`'s value is the runtime's own, as a source reference of it is. Every enum
+        // constant is laid out with the runtime's `kotlin.Enum` base, so its members are too.
         classifier == krusty::types::wk::string()
+            || classifier == krusty::types::wk::kotlin_enum()
             || classifier == krusty::types::wk::unit()
             || lower::is_string_builder(classifier)
             || lower::is_array_list(classifier)
@@ -162,11 +172,25 @@ impl Backend for WasmBackend {
         ]
     }
 
+    /// The WASI stdlib's `StringBuilder.append(CharSequence?)` copies the sequence's `length`
+    /// indexed `Char`s; the JS one appends its `toString` (`crate::string_builders`).
+    fn appends_char_sequences_by_index(&self) -> bool {
+        self.target == WasmTarget::Wasi
+    }
+
     fn realizes_dependency_intrinsic(
         &self,
         operation: krusty::backend::BackendCompilerIntrinsic,
     ) -> bool {
         lower::is_direct_operation(operation)
+    }
+
+    /// An array classifier's `storage` property is this target's own array storage.
+    fn realizes_dependency_getter(
+        &self,
+        signature: krusty::backend::DependencyGetterSignature<'_>,
+    ) -> bool {
+        lower::realizes_storage_getter(signature)
     }
 
     fn emitted_constructor_initializer(
@@ -223,24 +247,6 @@ impl Backend for WasmBackend {
             decline(state, "a `main` that takes its arguments".to_string());
             return Vec::new();
         }
-        krusty::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
-        // Before default arguments: a constant leaving constructor arguments out is then an
-        // ordinary construction for that lowering.
-        krusty::backend::enums::publish_constants(&mut file.ir, &mut file.dependency_exports);
-        krusty::backend::enums::realize(&mut file.ir, krusty::backend::enums::Contract::KotlinWasm);
-        krusty::backend::default_arguments::realize(
-            &mut file.ir,
-            &mut file.callables,
-            |function| file.dependency_exports.callable(function).is_some(),
-        );
-        // After default arguments, so a `$default` entry's call of the declaration is the one
-        // that gains the continuation, and before dispatch entries, which copy the signature.
-        if let Err(declined) =
-            krusty::backend::coroutines::add_continuation_parameters(&mut file.ir)
-        {
-            decline(state, declined.construct().to_string());
-            return Vec::new();
-        }
         krusty::backend::construction_entries::publish_constructors(
             &mut file.ir,
             (file.module_name, file.classifiers.module()),
@@ -294,8 +300,9 @@ impl Backend for WasmBackend {
                 &started.classes,
             );
             state.slot_plan = Some((file.module_name.to_owned(), plan));
-            // The table types are built from the plan, so they are that module's too.
-            started.tables = module_tables::ModuleTables::with_published(
+            // The table types are built from the plan, so they are that module's too, except a
+            // dependency class's, which is the whole program's.
+            started.tables.enter_plan(
                 file.classifiers.module().classes(),
                 &file.classifiers,
                 &started.classes,
@@ -455,10 +462,33 @@ mod tests {
     mod reference_array_size;
 
     use super::{WasmBackend, WasmTarget};
-    use krusty::backend::{Artifact, Entry};
+    use krusty::backend::{Artifact, Backend, CommonIrPreparationError, Entry};
     use krusty::diag::DiagSink;
     use krusty::libraries::EmptySymbolSource;
     use krusty::source::SourceInput;
+
+    /// A suspend shape common preparation cannot lower is this backend's capability decline,
+    /// reported with the prefix the box lanes classify declines by, never as an internal error.
+    #[test]
+    fn a_common_preparation_suspend_decline_is_a_wasm_capability_decline() {
+        let backend = WasmBackend::new(WasmTarget::Js);
+        let mut diags = DiagSink::new();
+        backend.report_common_ir_preparation_error(
+            &CommonIrPreparationError::Suspend(
+                krusty::backend::coroutines::ContinuationDecline::Suspends,
+            ),
+            &mut diags,
+        );
+        let messages = diags
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            ["krusty: the wasm backend does not support a suspend function that suspends yet"]
+        );
+    }
 
     /// Compile `sources`, the file stemmed `Main` first and then `Other1`, `Other2`, …, into a
     /// program starting in `entry`.
@@ -522,15 +552,33 @@ mod tests {
             "{}a `toString` of `kotlin.Any?` reaching an object another file creates yet",
             super::DECLINE_PREFIX
         )];
+        let other = "fun interface Supplier { fun get(): Int }\n\
+                     fun converted(): String { class Maker { fun make() = Supplier { 1 } }\n\
+                     return show(Maker().make()) }";
+        for target in WasmTarget::ALL {
+            for sources in [[show, other], [other, show]] {
+                let (outputs, diagnostics) = compile_program(target, Entry::Box, &sources);
+                assert_eq!(diagnostics, expected, "{sources:?}");
+                assert!(outputs.is_empty());
+            }
+        }
+    }
+
+    /// A floating box prints its value, so another file boxing one leaves an erased `toString`
+    /// compilable.
+    #[test]
+    fn an_erased_to_string_prints_another_files_floating_box() {
+        let show = "fun show(value: Any?): String = value.toString()\n\
+                    fun box(): String = \"OK\"";
         for other in [
             "fun double(): String = show(1.5)",
-            "fun interface Supplier { fun get(): Int }\nfun converted(): String = show(Supplier { 1 })",
+            "fun float(): String = show(1.5f)",
         ] {
             for target in WasmTarget::ALL {
                 for sources in [[show, other], [other, show]] {
                     let (outputs, diagnostics) = compile_program(target, Entry::Box, &sources);
-                    assert_eq!(diagnostics, expected, "{sources:?}");
-                    assert!(outputs.is_empty());
+                    assert_eq!(diagnostics, Vec::<String>::new(), "{sources:?}");
+                    assert!(!outputs.is_empty(), "{sources:?}");
                 }
             }
         }
@@ -551,12 +599,14 @@ mod tests {
         }
     }
 
-    /// A function value converted to a `fun interface` is an instance of it with no `toString`
-    /// body, so rendering a value of that interface declines.
+    /// A function value converted to a `fun interface` inside a local class is an instance of a
+    /// wrapper class whose name this target does not model (`crate::function_value_names`), so
+    /// rendering a value of that interface declines.
     #[test]
     fn a_fun_interface_to_string_declines_on_a_converted_function_value() {
         let source = "fun interface Supplier { fun get(): Int }\n\
-                      fun box(): String { val supplier = Supplier { 1 }\n\
+                      fun box(): String { class Maker { fun make() = Supplier { 1 } }\n\
+                      val supplier = Maker().make()\n\
                       return if (\"$supplier\" == \"\") \"empty\" else \"OK\" }";
         for target in WasmTarget::ALL {
             let (outputs, diagnostics) = compile(target, source);
@@ -588,11 +638,12 @@ mod tests {
 
     /// A `var` can be assigned anything after its initializer, so rendering it still declines
     /// while the file creates a function value with no `toString` body, one converted to a
-    /// `fun interface`.
+    /// `fun interface` inside a local class.
     #[test]
     fn an_erased_to_string_of_a_reassigned_var_declines() {
         let source = "fun interface Supplier { fun get(): Int }\n\
-                      fun box(): String { val supplier = Supplier { 1 }\n\
+                      fun box(): String { class Maker { fun make() = Supplier { 1 } }\n\
+                      val supplier = Maker().make()\n\
                       var message: Any = \"O\"\n\
                       if (supplier.get() == 2) message = supplier\n\
                       return \"$message\" + \"K\" }";
@@ -771,9 +822,9 @@ mod tests {
     }
 
     #[test]
-    fn a_local_class_cloned_from_another_files_inline_template_declines_by_name() {
-        // Backend contract: the clone realizes the template's callables a second time, which no
-        // Wasm function can carry twice.
+    fn a_local_class_cloned_from_another_files_inline_template_compiles_in_each_file() {
+        // Backend contract: the clone realizes the template's callables a second time, and each
+        // file binds them to its own clone's functions.
         for target in WasmTarget::ALL {
             let (outputs, diagnostics) = compile_program(
                 target,
@@ -784,11 +835,8 @@ mod tests {
                      inline fun make(): String = object : I { override fun run() = \"O\" }.run()",
                 ],
             );
-            assert_eq!(outputs, Vec::<Artifact>::new());
-            assert_eq!(
-                diagnostics,
-                ["krusty: the wasm backend does not support a callable realized by two functions yet"]
-            );
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(outputs.len(), 2);
         }
     }
 

@@ -33,10 +33,6 @@ pub struct IrLambdaClass {
     /// implementation's lambda-origin record. `None` means kotlinc's unlabeled `<this>` spelling;
     /// a backend formats a present label at the local-variable boundary.
     pub extension_receiver_label: Option<String>,
-    /// The inline function whose default argument this lambda implements. The JVM realization
-    /// records it before replacing the lambda expression; emission uses it for the `$default`
-    /// enclosure, source map, and metadata ABI flag without searching the rewritten body.
-    pub inline_default_owner: Option<FunId>,
     /// The function whose `$default` stub builds this lambda as a default argument value, inline
     /// or not: the class's `EnclosingMethod` is that stub.
     pub default_stub_owner: Option<FunId>,

@@ -1,5 +1,6 @@
 use super::{Checker, CheckerScope, ExprLowering, ResolvedEnumEntry};
 use crate::ast::ExprId;
+use crate::symbol_resolver::ScopedValue;
 use crate::types::{Ty, TypeName};
 
 impl Checker<'_> {
@@ -56,22 +57,80 @@ impl Checker<'_> {
         }
     }
 
-    /// Enum entries and static members exported by a classifier star import (`import Game.*`) use
-    /// the classifier as their import scope; treating every star path as a package loses this rung.
-    pub(super) fn explicitly_imported_enum_entry(&self, name: &str) -> Option<(TypeName, String)> {
-        let mut entries = self
-            .function_import_scope
-            .explicit_targets(name)
-            .into_iter()
-            .filter_map(|(namespace, declared_name)| {
-                let crate::symbol_source::SymbolNamespace::Classifier(owner) = namespace else {
-                    return None;
-                };
-                self.classifier_has_enum_entry(owner, &declared_name)
-                    .then_some((owner, declared_name))
-            })
-            .collect::<Vec<_>>();
-        (entries.len() == 1).then(|| entries.pop()).flatten()
+    /// Read `name` as the enum entry an import rung offers. The nearest rung offering a value for
+    /// the name decides: one enum entry binds, and an entry tied with any other value of that rung
+    /// (another enum's entry, a static field, a top-level property) is kotlinc's ambiguity. A rung
+    /// offering only properties is left to property selection, which owns their context arguments.
+    pub(super) fn read_imported_enum_entry(
+        &mut self,
+        expression: ExprId,
+        name: &str,
+    ) -> Option<Ty> {
+        let mut values = self.resolver().nearest_scope_level_values(name);
+        let mut seen = Vec::new();
+        values.retain(|value| match value {
+            ScopedValue::EnumEntry { owner, name } => {
+                let fresh = !seen.contains(&(*owner, name.clone()));
+                seen.push((*owner, name.clone()));
+                fresh
+            }
+            ScopedValue::Property(_) => true,
+        });
+        if !values
+            .iter()
+            .any(|value| matches!(value, ScopedValue::EnumEntry { .. }))
+        {
+            return None;
+        }
+        if let [ScopedValue::EnumEntry { owner, name }] = values.as_slice() {
+            let owner = *owner;
+            self.record_enum_entry(expression, owner, &name.clone());
+            return Some(Ty::obj_name(owner));
+        }
+        let mut message = "overload resolution ambiguity between candidates:".to_string();
+        for value in &values {
+            message.push('\n');
+            message.push_str(&self.scoped_value_display(value));
+        }
+        self.diags.error(self.span(expression), message);
+        Some(Ty::Error)
+    }
+
+    /// kotlinc's rendering of one candidate value: `enum entry SOME: SomeEnum`, a platform
+    /// declaration's own label (`static field SOME: String`), or `val SOME: Int`. A candidate list
+    /// renders a platform type by its lower bound.
+    fn scoped_value_display(&self, value: &ScopedValue) -> String {
+        match value {
+            ScopedValue::EnumEntry { owner, name } => {
+                let ty = Ty::obj_name(*owner);
+                format!(
+                    "enum entry {name}: {}",
+                    self.diagnostic_type_name(ty, &[ty])
+                )
+            }
+            ScopedValue::Property(property) => {
+                let ty = property.ty.platform_lower_bound();
+                property
+                    .getter
+                    .external_property_identity
+                    .and_then(|identity| {
+                        self.libraries.external_property_diagnostic_label(
+                            identity,
+                            &property.name,
+                            ty,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        let keyword = if property.setter.is_some() {
+                            "var"
+                        } else {
+                            "val"
+                        };
+                        let ty = self.diagnostic_type_name(ty, &[ty]);
+                        format!("{keyword} {}: {ty}", property.name)
+                    })
+            }
+        }
     }
 
     /// The synthetic classifier property on the owner the scope tower already selected.
@@ -95,33 +154,5 @@ impl Checker<'_> {
             },
         );
         Some(ty)
-    }
-
-    pub(super) fn star_imported_enum_entry(
-        &self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-    ) -> Option<TypeName> {
-        let mut selected = None;
-        for import in self
-            .file
-            .import_paths
-            .iter()
-            .filter(|import| import.wildcard)
-        {
-            let Some(owner) = self.select_classifier(scope, &import.path()).found() else {
-                continue;
-            };
-            let is_entry = self.classifier_has_enum_entry(owner, name);
-            if !is_entry {
-                continue;
-            }
-            match selected {
-                None => selected = Some(owner),
-                Some(previous) if previous == owner => {}
-                Some(_) => return None,
-            }
-        }
-        selected
     }
 }
