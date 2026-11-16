@@ -982,7 +982,12 @@ pub(super) fn declare(
                 bridges: &mut bridges,
             },
         );
-        let instantiable = !(class.is_abstract || class.is_sealed);
+        // A materialized value-class storage layout is not an object this target constructs
+        // when the checked declaration is carried by a runtime scalar/array representation.
+        // That representation supplies its own Any members; the unused shell must not publish
+        // instances whose ordinary class table lacks those bodies.
+        let instantiable = !(class.is_abstract || class.is_sealed)
+            && super::lower::runtime_value_declaration(class.fq_name, classifiers)?.is_none();
         let functions_here = match resolved {
             Ok(functions_here) => functions_here,
             // A class with no instances of its own needs its entries only for a later file
