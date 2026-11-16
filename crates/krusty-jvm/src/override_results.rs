@@ -250,6 +250,22 @@ pub(super) fn realizes_overrides(ir: &IrFile, class: usize) -> bool {
             .contains_key(&u32::try_from(class).expect("class index"))
 }
 
+/// Whether `class` realizes the members that `declaration` declares: it is that class, or an inline
+/// expansion's copy of it, directly or through an earlier copy. A copy's property override edges
+/// still name the declaration's checked property, whose declaring class is the source.
+pub(super) fn realizes_members_of(ir: &IrFile, class: usize, declaration: u32) -> bool {
+    let mut current = u32::try_from(class).expect("class index");
+    loop {
+        if current == declaration {
+            return true;
+        }
+        let Some(specialization) = ir.specialized_anonymous_classes.get(&current) else {
+            return false;
+        };
+        current = specialization.source;
+    }
+}
+
 /// Choose the wrapper as the JVM result of every override whose scalar result stands over a
 /// reference-returning overridden slot. Common IR is read, never changed.
 pub(super) fn box_scalar_override_results(
