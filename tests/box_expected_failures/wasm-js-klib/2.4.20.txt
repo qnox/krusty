@@ -1228,7 +1228,6 @@ delegatedProperty/valByMapDelegatedProperty.kt
 delegatedProperty/valInInnerClass.kt
 delegatedProperty/varInInnerClass.kt
 delegation/delegationDifferentModule.kt
-delegation/delegationDifferentModule2.kt
 delegation/ifWithCallableReferenceInLazy.kt
 delegation/kt30102_comparable.kt
 delegation/kt44199.kt
