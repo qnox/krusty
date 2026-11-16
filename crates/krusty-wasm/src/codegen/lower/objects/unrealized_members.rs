@@ -24,7 +24,7 @@ use krusty::types::{Ty, TyKind};
 
 use super::super::super::super::boxes::box_prints;
 use super::super::super::super::encode::ValType;
-use super::super::super::super::function_value_names::named_shape;
+use super::super::super::super::function_value_names::function_value_name;
 use super::super::super::any_member_reach::Receiver;
 use super::{carrier, Body, Unsupported};
 
@@ -196,8 +196,9 @@ fn converts_function_values(ir: &IrFile) -> bool {
 }
 
 /// Whether a reference of `ir` can hold a runtime object whose `toString` has no body: a floating
-/// box, which only a floating value the file emits becomes, or a function value kotlinc-wasm does
-/// not name for its shape, which only a lambda or a callable reference the file emits creates.
+/// box, which only a floating value the file emits becomes, or a function value whose class name
+/// `function_value_names` does not model, which only a lambda or a callable reference the file
+/// emits creates.
 pub(in super::super) fn holds_unprinted_values(ir: &IrFile) -> bool {
     krusty::ir::emitted_body_roots(ir)
         .into_iter()
@@ -205,7 +206,7 @@ pub(in super::super) fn holds_unprinted_values(ir: &IrFile) -> bool {
         .any(|expression| {
             let node = ir.expr(expression);
             matches!(node, IrExpr::Lambda { .. } | IrExpr::CallableReference(_))
-                && named_shape(node, ir.checked_type(expression)).is_none()
+                && function_value_name(ir, expression, ir.checked_type(expression)).is_none()
                 || ir
                     .checked_type(expression)
                     .and_then(|ty| box_prints(ty.non_null()))
