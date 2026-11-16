@@ -128,7 +128,7 @@ impl CraneliftBackend {
 #[derive(Default)]
 pub struct CodegenModule {
     #[cfg(feature = "test-support")]
-    driver_entries: krusty::fx_hash::HashSet<krusty::fir::CallableId>,
+    driver_entries: krusty::fx_hash::HashSet<krusty::ir::CallableId>,
     /// The file that declared `main`, so a second one is an error rather than two entry points.
     entry_file: Option<String>,
     /// The prebuilt runtime's defined symbols, read by the first file that needs them.

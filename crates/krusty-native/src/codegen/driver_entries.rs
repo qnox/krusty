@@ -2,7 +2,7 @@
 
 /// One frontend-selected source declaration and the C fixture's explicit link name.
 pub struct DriverEntry {
-    pub callable: krusty::fir::CallableId,
+    pub callable: krusty::ir::CallableId,
     pub symbol: String,
 }
 
