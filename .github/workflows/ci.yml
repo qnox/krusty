@@ -411,6 +411,11 @@ jobs:
         with:
           path: target/cache/kotlin-native/${{ steps.max-version.outputs.version }}
           key: ${{ steps.kotlin-native.outputs.cache-primary-key }}
+      # The session test compiles against the embedder. This is the Maven the plugin jobs
+      # install; a missing install fails that test.
+      - uses: stCarolas/setup-maven@12eb41b233df95d49b0c11fc1b5bc8312e5d4ce0 # v5.1
+        with:
+          maven-version: '3.9.11'
       - name: coverage gate
         id: coverage
         env:

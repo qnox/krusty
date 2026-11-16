@@ -17,8 +17,6 @@ use super::box_byte_score;
 use super::box_reference_classes;
 use super::common;
 
-#[path = "box_jvm_compile/rejection_report.rs"]
-mod rejection_report;
 
 /// Time spent compiling single-source cases (ns, accumulated across all files and threads).
 pub(super) static T_EMIT: AtomicU64 = AtomicU64::new(0);
@@ -57,14 +55,15 @@ fn emitted(
                 .filter(|diagnostic| diagnostic.severity == krusty::diag::Severity::Error)
                 .map(|diagnostic| diagnostic.msg.clone())
                 .collect(),
-            report: rejection_report::render(
+            report: crate::common::source_set_compile::compiler_diagnostics::render_rejection(
                 module,
                 inputs
                     .iter()
                     .zip(stems)
                     .map(|(input, stem)| (input.kind, stem.as_str(), input.text)),
                 diags,
-            ),
+            )
+            .unwrap_or_default(),
         });
     }
     Ok(outputs
@@ -272,7 +271,8 @@ pub(super) fn compile_multifile(
     cp_jars: &[std::path::PathBuf],
     jdk_modules: Option<&std::path::Path>,
 ) -> Compiled<Vec<(String, Vec<u8>)>> {
-    // Split on `// FILE: name.kt` markers (the preamble before the first marker is directives).
+    // Split on `// FILE: name.kt` markers; the text before the first marker joins the first
+    // declared file, Kotlin or Java, as Kotlin's test infrastructure keeps it.
     // `.java` blocks are collected separately: javac compiles them first (in-process, via the
     // persistent JavaRunner) and their classes join krusty's classpath as an in-memory overlay,
     // mirroring how kotlinc's test infra makes Java sources visible to the Kotlin compile.
@@ -316,15 +316,24 @@ pub(super) fn compile_multifile(
                     kotlin: &blocks,
                     common: 0,
                     java: &java_blocks,
+                    compiled_java: &[],
                 };
                 return compile_kotlin_first(src, sources, cp_jars, jdk_modules);
             }
         }
     }
 
-    // Case-wide directives live in the preamble before the first `// FILE:`, so each unit's
-    // arguments are read from the whole case.
-    let compiled = compile_blocks(src, &blocks, cp_jars, &[], jdk_modules, None, &java_classes);
+    // Case-wide directives may sit anywhere in the case, so each unit's arguments are read from
+    // the whole case. The Java javac compiled still carries the unit's leading directives.
+    let sources = UnitSources {
+        module: box_reference_classes::MAIN_MODULE,
+        kotlin: &blocks,
+        common: 0,
+        java: &[],
+        compiled_java: &java_blocks,
+    };
+    let compiled =
+        compile_blocks_mixed(src, sources, cp_jars, &[], jdk_modules, None, &java_classes);
     let mut out = compiled?;
     out.extend(java_classes);
     Ok(out)
@@ -388,6 +397,7 @@ pub(super) fn compile_blocks(
             kotlin: blocks,
             common: 0,
             java: &[],
+            compiled_java: &[],
         },
         cp_jars,
         friend_paths,
@@ -407,6 +417,9 @@ struct UnitSources<'a> {
     kotlin: &'a [(String, String)],
     common: usize,
     java: &'a [(String, String)],
+    /// The unit's Java sources javac already compiled: not compiler inputs, but the module's
+    /// leading directives may travel with one of them, and they still configure the unit.
+    compiled_java: &'a [(String, String)],
 }
 
 /// Compile one unit of `case` under the command line its directives select ([`unit_options`]).
@@ -424,14 +437,20 @@ fn compile_blocks_mixed(
         kotlin: blocks,
         common,
         java: java_blocks,
+        compiled_java,
     } = sources;
     let report = |phase: &str| {
         if let Some(progress) = progress {
             progress(phase);
         }
     };
-    let mut options =
-        unit_options(case, blocks.iter().map(|(_, source)| source.as_str())).map_err(harness)?;
+    // The module's leading directives travel with its first declared file, which may be Java.
+    let unit = blocks
+        .iter()
+        .chain(java_blocks)
+        .chain(compiled_java)
+        .map(|(_, source)| source.as_str());
+    let mut options = unit_options(case, unit).map_err(harness)?;
     // A folded `dependsOn` chain is a multiplatform compilation even when the fixture does not
     // repeat the feature as a `// LANGUAGE:` directive. The common/platform source roles already
     // carry that topology into the frontend; enable the matching project feature on the exact
@@ -623,6 +642,7 @@ fn compile_module_units(
             kotlin: files,
             common: m.common_file_count,
             java: &[],
+            compiled_java: &[],
         };
         let report = |phase: &str| progress(&format!("module {}: {phase}", m.name));
         let moddir = tmp.join(&m.name);
@@ -665,7 +685,10 @@ fn compile_module_units(
                         // loses them (measured: -95 box passes).
                         compile_blocks_mixed(
                             src,
-                            kotlin_only,
+                            UnitSources {
+                                compiled_java: java_files,
+                                ..kotlin_only
+                            },
                             &cp,
                             &friend_paths,
                             jdk_modules,
