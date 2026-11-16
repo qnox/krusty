@@ -75,9 +75,12 @@ pub(super) fn authenticate(
         raw_function_header(Some(selected), HeaderPurpose::External, arena, function)?
     };
     let (params, ret, context_count, extension, receiver) = header.linked_signature();
-    let selected_extension = selected
-        .generic_signature()
-        .is_some_and(|signature| signature.receiver.is_some());
+    // A top-level extension is selected as one; a generic signature records the receiver of
+    // any other extension, a member extension among them.
+    let selected_extension = selected.kind() == crate::libraries::ExternalCallableKind::Extension
+        || selected
+            .generic_signature()
+            .is_some_and(|signature| signature.receiver.is_some());
     if extension != selected_extension {
         return Err(KlibBodyDeclineReason::SignatureMismatch(
             "the accessor receiver role differs from its selected declaration".to_owned(),
