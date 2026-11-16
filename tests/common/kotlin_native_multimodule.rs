@@ -20,13 +20,17 @@ use super::reference_recording_support::{kotlin_native_root, recorded};
 /// are assigned to their original fragments and its refinement edges are preserved.
 pub fn kotlin_native_multimodule_box(source: &str) -> Option<String> {
     let recorded_source = [("modules.kt", source)];
-    let fingerprint_arguments = ["native-module-graph-v5-qualified-box-entry".to_string()];
+    let arguments = case_arguments(source);
+    // The case's arguments ride the key, so a case whose directives select some is recorded apart
+    // from the invocation that once compiled it without them.
+    let mut fingerprint_arguments = vec!["native-module-graph-v5-qualified-box-entry".to_string()];
+    fingerprint_arguments.extend(arguments.iter().cloned());
     let files = recorded(
         CompilationTarget::Native,
         "multimodule-program",
         &recorded_source,
         &fingerprint_arguments,
-        |work| kotlin_native_multimodule_live(work, source),
+        |work| kotlin_native_multimodule_live(work, source, &arguments),
     )?;
     let stdout = files
         .get("stdout")
@@ -40,6 +44,24 @@ pub fn kotlin_native_multimodule_box(source: &str) -> Option<String> {
         "a multimodule box program prints exactly one result frame"
     );
     Some(answer.to_string())
+}
+
+/// The kotlinc-native arguments the case's directives select for every unit, as the single-module
+/// KLIB reference passes them: the case-wide compiler configuration, the JVM properties it implies,
+/// and the reference-only arguments.
+fn case_arguments(source: &str) -> Vec<String> {
+    let target = krusty::conformance::TestTarget::Native;
+    let configuration = krusty::conformance::platform_compiler_configuration(source, target)
+        .expect("the kotlinc-native multimodule oracle requires valid compiler directives");
+    let mut arguments = configuration.arguments.clone();
+    arguments.extend(krusty::conformance::reference_jvm_properties(
+        configuration.arguments.iter().map(String::as_str),
+    ));
+    arguments.extend(
+        krusty::conformance::reference_only_kotlinc_arguments_for_target(source, target)
+            .expect("the kotlinc-native multimodule oracle requires valid reference directives"),
+    );
+    arguments
 }
 
 #[derive(Clone)]
@@ -58,7 +80,11 @@ struct NativeFragmentGraph<'a> {
     stdlib: &'a Path,
 }
 
-fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<String, Vec<u8>>> {
+fn kotlin_native_multimodule_live(
+    work: &Path,
+    source: &str,
+    arguments: &[String],
+) -> Option<BTreeMap<String, Vec<u8>>> {
     let native_root = kotlin_native_root()?;
     let compiler = native_root.join("bin/kotlinc-native");
     let stdlib = native_root.join("klib/common/stdlib");
@@ -67,7 +93,11 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
         "the Kotlin/Native distribution has no stdlib KLIB at {}",
         stdlib.display()
     );
-    let modules = krusty::conformance::split_modules(source)
+    // The reference test runner expands the case's source placeholders for the Native backend
+    // before it compiles any unit.
+    let prepared =
+        krusty::conformance::prepare_test_source(source, krusty::conformance::TestTarget::Native);
+    let modules = krusty::conformance::split_modules(&prepared)
         .expect("the kotlinc-native multimodule oracle requires a valid // MODULE: graph");
     let units = krusty::conformance::module_units(&modules);
     assert!(
@@ -180,6 +210,8 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
                 stdlib: &stdlib,
             },
         );
+
+        command.args(arguments);
 
         let klib = unit_root.join(format!("{}.klib", unit.name));
         if final_unit {
