@@ -99,7 +99,24 @@ pub(crate) fn builtin_overrides(
     name: &str,
     identity: ExternalCallableId,
 ) -> Vec<BuiltinOverride> {
-    let subtypes = builtin_subtypes(source, owner);
+    overrides_by(
+        source,
+        builtin_subtypes(source, owner),
+        owner,
+        name,
+        identity,
+    )
+}
+
+/// What each of `subtypes`, every one a proper subtype of `owner`, runs for `owner`'s member
+/// `name` the provider published as `identity`.
+fn overrides_by(
+    source: &dyn SymbolSource,
+    subtypes: Vec<Ty>,
+    owner: TypeName,
+    name: &str,
+    identity: ExternalCallableId,
+) -> Vec<BuiltinOverride> {
     if subtypes.is_empty() {
         return Vec::new();
     }
@@ -123,7 +140,35 @@ pub(crate) fn builtin_implementation_facts(
     name: &str,
     identity: ExternalCallableId,
 ) -> Box<[crate::fir::BuiltinImplementation]> {
-    builtin_overrides(source, owner, name, identity)
+    implementation_facts(builtin_overrides(source, owner, name, identity))
+}
+
+/// What each of `classes` runs for `owner`'s member `name` the provider published as
+/// `identity`, for the classes among them below `owner`. These are dependency classes a target
+/// lays out in a representation of its own (`kotlin.text.StringBuilder` on Wasm) and dispatches a
+/// call of a supertype's member on itself, as it does for a builtin class; the frontend freezes
+/// their overrides from the same member hierarchy.
+pub(crate) fn represented_implementation_facts(
+    source: &dyn SymbolSource,
+    classes: &[TypeName],
+    owner: TypeName,
+    name: &str,
+    identity: ExternalCallableId,
+) -> Vec<crate::fir::BuiltinImplementation> {
+    let subtypes = classes
+        .iter()
+        .copied()
+        .filter(|&class| is_proper_subclassifier(source, class, owner))
+        .map(Ty::obj_name)
+        .collect();
+    implementation_facts(overrides_by(source, subtypes, owner, name, identity)).into_vec()
+}
+
+/// The handoff form of `overrides`, consumed by checked IR and backends.
+fn implementation_facts(
+    overrides: Vec<BuiltinOverride>,
+) -> Box<[crate::fir::BuiltinImplementation]> {
+    overrides
         .into_iter()
         .map(|implementation| {
             let declaration = implementation.declaration.map(|declaration| {
@@ -151,13 +196,22 @@ pub(crate) fn builtin_subtypes(source: &dyn SymbolSource, owner: TypeName) -> Ve
     REPRESENTED_BUILTINS
         .into_iter()
         .filter(|builtin| {
-            builtin.kotlin_class_internal().is_some_and(|classifier| {
-                supertype_preorder(source, classifier)
-                    .get(&owner)
-                    .is_some_and(|&visit| visit > 0)
-            })
+            builtin
+                .kotlin_class_internal()
+                .is_some_and(|classifier| is_proper_subclassifier(source, classifier, owner))
         })
         .collect()
+}
+
+/// Whether `owner` is a supertype of `classifier` other than itself.
+fn is_proper_subclassifier(
+    source: &dyn SymbolSource,
+    classifier: TypeName,
+    owner: TypeName,
+) -> bool {
+    supertype_preorder(source, classifier)
+        .get(&owner)
+        .is_some_and(|&visit| visit > 0)
 }
 
 /// `owner`'s own member `name` the provider published as `identity`: a function, or the property

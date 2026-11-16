@@ -34,7 +34,6 @@ annotations/instances/repeatableInstantiation.kt
 annotations/instances/typeAliasesAndGenericsInterop.kt
 annotations/instances/unsignedAndBooleanArrays.kt
 annotations/instances/withDefaults.kt
-annotations/selfReferentialAnnotation.kt
 arithmetic/basic_charConversions.kt
 arithmetic/basic_charCornerCases.kt
 arithmetic/basic_compareIntToFloat.kt
@@ -403,7 +402,6 @@ closures/closureOnTopLevel2.kt
 closures/closuresAsSingleton.kt
 closures/kt11634_4.kt
 closures/localFunctionInInitBlock.kt
-collectionLiterals/companionBlockOf.kt
 collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
 collections/addCollectionStubWithCovariantOverride.kt
@@ -498,7 +496,6 @@ controlStructures/forInArrayWithIndex/forInArrayOfObjectArrayWithIndex.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexContinuesAsUnmodified.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNameBasedDestructuringShortForm.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNotDestructured.kt
-controlStructures/forInCharSequence.kt
 controlStructures/forInCharSequenceMut.kt
 controlStructures/forInCharSequenceWithIndex/forInCharSeqWithIndexStops.kt
 controlStructures/forInCharSequenceWithIndex/forInCharSequenceWithIndexCheckSideEffects.kt
