@@ -8,7 +8,6 @@
 //! type `Left & Right`.
 
 use crate::types::TyKind;
-use std::cmp::Ordering;
 
 use super::{Ty, TypeName, TypeVariance};
 
@@ -47,10 +46,7 @@ pub(super) fn canonical(parts: &[Ty]) -> Ty {
     let all_nullable = pieces.iter().all(|piece| piece.nullable);
     let mut cores = Vec::new();
     for piece in pieces {
-        if !cores
-            .iter()
-            .any(|core| structural_cmp(*core, piece.core) == Ordering::Equal)
-        {
+        if !cores.iter().any(|core| same_structure(*core, piece.core)) {
             cores.push(piece.core);
         }
     }
@@ -116,80 +112,52 @@ fn decompose(ty: Ty, inherited_nullable: bool, out: &mut Vec<Piece>) {
     }
 }
 
-fn structural_cmp(left: Ty, right: Ty) -> Ordering {
-    structural_rank(left)
-        .cmp(&structural_rank(right))
-        .then_with(|| match (left.kind(), right.kind()) {
-            (TyKind::Obj(left_name, left_args), TyKind::Obj(right_name, right_args)) => {
-                type_name_cmp(left_name, right_name)
-                    .then_with(|| slice_cmp(&left_args, &right_args, structural_cmp))
-            }
-            (TyKind::Fun(left), TyKind::Fun(right)) => left
-                .suspend
-                .cmp(&right.suspend)
-                .then(left.has_receiver.cmp(&right.has_receiver))
-                .then(left.context_count.cmp(&right.context_count))
-                .then_with(|| slice_cmp(&left.params, &right.params, structural_cmp))
-                .then_with(|| structural_cmp(left.ret, right.ret)),
-            (TyKind::Nullable(left), TyKind::Nullable(right))
-            | (TyKind::PlatformNullable(left), TyKind::PlatformNullable(right))
-            | (TyKind::InProjection(left), TyKind::InProjection(right))
-            | (TyKind::OutProjection(left), TyKind::OutProjection(right))
-            | (TyKind::StarProjection(left), TyKind::StarProjection(right))
-            | (TyKind::RawProjection(left), TyKind::RawProjection(right))
-            | (TyKind::DefinitelyNotNull(left), TyKind::DefinitelyNotNull(right)) => {
-                structural_cmp(left, right)
-            }
-            (TyKind::TyParam(left_name, left_bound), TyKind::TyParam(right_name, right_bound))
-            | (TyKind::Var(left_name, left_bound), TyKind::Var(right_name, right_bound)) => {
-                left_name
-                    .cmp(&right_name)
-                    .then_with(|| structural_cmp(left_bound, right_bound))
-            }
-            (TyKind::Intersection(left), TyKind::Intersection(right)) => {
-                slice_cmp(&left, &right, structural_cmp)
-            }
-            _ => Ordering::Equal,
-        })
-}
-
-fn structural_rank(ty: Ty) -> u8 {
-    match ty.kind() {
-        TyKind::Unit => 0,
-        TyKind::Obj(_, _) => 1,
-        TyKind::Null => 2,
-        TyKind::Nothing => 3,
-        TyKind::Error => 4,
-        TyKind::Pending => 5,
-        TyKind::Fun(_) => 6,
-        TyKind::Nullable(_) => 7,
-        TyKind::PlatformNullable(_) => 8,
-        TyKind::InProjection(_) => 9,
-        TyKind::OutProjection(_) => 10,
-        TyKind::StarProjection(_) => 11,
-        TyKind::TyParam(_, _) => 12,
-        TyKind::DefinitelyNotNull(_) => 13,
-        TyKind::Intersection(_) => 14,
-        TyKind::RawProjection(_) => 15,
-        TyKind::MutabilityFlexible(_) => 16,
-        TyKind::Var(_, _) => 17,
+/// Whether two types have one structure, with every intersection inside compared as the set of
+/// its components: `A & B` and `B & A` are one type in two spellings.
+fn same_structure(left: Ty, right: Ty) -> bool {
+    if left == right {
+        return true;
+    }
+    let all_same = |left: &[Ty], right: &[Ty]| {
+        left.len() == right.len() && left.iter().zip(right).all(|(l, r)| same_structure(*l, *r))
+    };
+    match (left.kind(), right.kind()) {
+        (TyKind::Obj(left_name, left_args), TyKind::Obj(right_name, right_args)) => {
+            left_name == right_name && all_same(&left_args, &right_args)
+        }
+        (TyKind::Fun(left), TyKind::Fun(right)) => {
+            left.suspend == right.suspend
+                && left.has_receiver == right.has_receiver
+                && left.context_count == right.context_count
+                && all_same(&left.params, &right.params)
+                && same_structure(left.ret, right.ret)
+        }
+        (TyKind::Nullable(left), TyKind::Nullable(right))
+        | (TyKind::PlatformNullable(left), TyKind::PlatformNullable(right))
+        | (TyKind::InProjection(left), TyKind::InProjection(right))
+        | (TyKind::OutProjection(left), TyKind::OutProjection(right))
+        | (TyKind::StarProjection(left), TyKind::StarProjection(right))
+        | (TyKind::RawProjection(left), TyKind::RawProjection(right))
+        | (TyKind::DefinitelyNotNull(left), TyKind::DefinitelyNotNull(right))
+        | (TyKind::MutabilityFlexible(left), TyKind::MutabilityFlexible(right)) => {
+            same_structure(left, right)
+        }
+        (TyKind::TyParam(left_name, left_bound), TyKind::TyParam(right_name, right_bound))
+        | (TyKind::Var(left_name, left_bound), TyKind::Var(right_name, right_bound)) => {
+            left_name == right_name && same_structure(left_bound, right_bound)
+        }
+        (TyKind::Intersection(left), TyKind::Intersection(right)) => {
+            same_component_set(&left, &right, same_structure)
+        }
+        _ => false,
     }
 }
 
-fn type_name_cmp(left: TypeName, right: TypeName) -> Ordering {
-    left.name_id().0.cmp(&right.name_id().0)
-}
-
-fn slice_cmp(left: &[Ty], right: &[Ty], cmp: fn(Ty, Ty) -> Ordering) -> Ordering {
-    left.len().cmp(&right.len()).then_with(|| {
-        left.iter()
-            .zip(right)
-            .find_map(|(left, right)| match cmp(*left, *right) {
-                Ordering::Equal => None,
-                order => Some(order),
-            })
-            .unwrap_or(Ordering::Equal)
-    })
+/// Whether two intersections have the same components: every component of each has an equal one
+/// in the other, so neither side may match two of its components to one of the other's.
+pub(crate) fn same_component_set(left: &[Ty], right: &[Ty], same: impl Fn(Ty, Ty) -> bool) -> bool {
+    let covered = |from: &[Ty], to: &[Ty]| from.iter().all(|&a| to.iter().any(|&b| same(a, b)));
+    left.len() == right.len() && covered(left, right) && covered(right, left)
 }
 
 /// The denotable type a public declaration publishes for an intersection.
@@ -270,7 +238,7 @@ fn approximate_argument(
     }
     if arguments
         .iter()
-        .all(|argument| structural_cmp(*argument, arguments[0]) == Ordering::Equal)
+        .all(|argument| same_structure(*argument, arguments[0]))
     {
         return Some(arguments[0]);
     }
@@ -313,7 +281,7 @@ fn approximate_functions(
             .collect::<Vec<_>>();
         if at_index
             .iter()
-            .all(|parameter| structural_cmp(*parameter, at_index[0]) == Ordering::Equal)
+            .all(|parameter| same_structure(*parameter, at_index[0]))
         {
             params.push(at_index[0]);
         } else {
@@ -341,10 +309,7 @@ fn covariant_join(
 ) -> Option<Ty> {
     let mut unique = Vec::new();
     for ty in types.iter().copied() {
-        if !unique
-            .iter()
-            .any(|seen| structural_cmp(*seen, ty) == Ordering::Equal)
-        {
+        if !unique.iter().any(|seen| same_structure(*seen, ty)) {
             unique.push(ty);
         }
     }
@@ -400,6 +365,25 @@ mod tests {
                 panic!("expected an intersection, got {other:?}")
             }
         }
+    }
+
+    #[test]
+    fn components_that_differ_only_in_a_nested_order_are_one_component() {
+        let a = Ty::obj("demo/A");
+        let b = Ty::obj("demo/B");
+        let first = Ty::obj_args("demo/I", &[Ty::intersection(&[a, b])]);
+        let second = Ty::obj_args("demo/I", &[Ty::intersection(&[b, a])]);
+        assert_eq!(Ty::intersection(&[first, second]), first);
+    }
+
+    #[test]
+    fn a_component_set_needs_a_match_for_every_component_on_both_sides() {
+        let same = |left: Ty, right: Ty| left == right;
+        let (i, j, k) = (Ty::obj("demo/I"), Ty::obj("demo/J"), Ty::obj("demo/K"));
+        assert!(super::same_component_set(&[i, j], &[j, i], same));
+        assert!(!super::same_component_set(&[i, i], &[i, j], same));
+        assert!(!super::same_component_set(&[i, j], &[i, i], same));
+        assert!(!super::same_component_set(&[i, j], &[i, k], same));
     }
 
     #[test]
