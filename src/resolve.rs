@@ -50729,9 +50729,6 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                if let Some(ty) = self.read_imported_enum_entry(e, &n) {
-                    return self.set(e, ty);
-                }
                 let lexical_classes = self.lexical_source_class_names();
                 let enum_entry_owner = lexical_classes.iter().copied().find(|owner| {
                     self.resolved_type_name(*owner)
@@ -50823,6 +50820,9 @@ impl<'a> Checker<'a> {
                 }
                 if let Some(property) = self.lexical_associated_property(&n) {
                     let ty = self.record_associated_property(Some(e), property, true);
+                    return self.set(e, ty);
+                }
+                if let Some(ty) = self.read_imported_enum_entry(e, &n) {
                     return self.set(e, ty);
                 }
                 if self
