@@ -110,6 +110,27 @@ pub enum IrCheckedOperation {
         end: ExprId,
         negated: bool,
     },
+    /// One atomic access to the instance field `index` of `class` on `receiver`, which the
+    /// target stdlib declares as an intrinsic over a property reference to that field. The field
+    /// coordinate is the checked identity; `operands` follow [`crate::libraries::AtomicOperation`]
+    /// and are evaluated after the receiver, in order. The target realizes the instruction.
+    AtomicField {
+        operation: crate::libraries::AtomicOperation,
+        receiver: ExprId,
+        class: crate::ir::ClassId,
+        index: u32,
+        operands: Vec<ExprId>,
+    },
+    /// One atomic access to the element `index` of `array`, which the target stdlib declares as an
+    /// intrinsic over that array. `operands` follow [`crate::libraries::AtomicOperation`] and are
+    /// the array's element; the array, the index and then each operand are evaluated in order.
+    /// The target realizes the instruction.
+    AtomicArrayElement {
+        operation: crate::libraries::AtomicOperation,
+        array: ExprId,
+        index: ExprId,
+        operands: Vec<ExprId>,
+    },
     /// `step`'s failure on a step that is not positive: an `IllegalArgumentException` whose
     /// message is `Step must be positive, was: $step.`.
     IllegalProgressionStep { step: ExprId },

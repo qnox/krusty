@@ -318,10 +318,14 @@ struct BodyHeader<'a> {
 /// body reads through its receiver, in declaration order, and the provider's authenticated class
 /// contract. A value class has exactly one field, its value.
 #[derive(Clone)]
-struct MemberClass<'a> {
+pub(super) struct MemberClass<'a> {
     class: crate::ir::ClassId,
-    fields: Vec<&'a KlibIrField>,
-    contract: &'a crate::libraries::KlibBodyClassContract,
+    /// The serialized declaration of `class`.
+    pub(super) declaring: &'a KlibIrSymbol,
+    pub(super) fields: Vec<&'a KlibIrField>,
+    /// The class's properties with a backing field, each with that field.
+    pub(super) properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
+    pub(super) contract: &'a crate::libraries::KlibBodyClassContract,
 }
 
 impl DependencyBodyUnit {
@@ -917,8 +921,7 @@ impl DependencyBodyUnit {
                     ) => lowering.delegate_to_primary(
                         *class,
                         *secondary,
-                        super::class_headers::declared_receiver(member.contract),
-                        &member.fields,
+                        member,
                         arguments,
                         body.statements,
                     ),
@@ -929,7 +932,13 @@ impl DependencyBodyUnit {
                     }
                     (None, value_member) => match value_member {
                         Some(member) => lowering
-                            .reading_through(member.class, &member.fields, member.contract.is_value)
+                            .reading_through(
+                                member.class,
+                                member.declaring,
+                                &member.fields,
+                                member.properties.clone(),
+                                member.contract.is_value,
+                            )
                             .body(body.statements),
                         None => lowering.body(body.statements),
                     }
@@ -992,6 +1001,24 @@ struct Linker<'u, 's> {
 }
 
 impl<'s> CallLinker for Linker<'_, 's> {
+    fn atomic_field(
+        &self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<Option<crate::libraries::AtomicOperation>, KlibBodyDeclineReason> {
+        Ok(self
+            .linked_identity(callee)
+            .and_then(|identity| self.sources.intrinsics.atomic_field(&identity)))
+    }
+
+    fn atomic_array_element(
+        &self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<Option<crate::libraries::AtomicOperation>, KlibBodyDeclineReason> {
+        Ok(self
+            .linked_identity(callee)
+            .and_then(|identity| self.sources.intrinsics.atomic_array_element(&identity)))
+    }
+
     fn common_primitive(
         &self,
         signature: &KlibDeclarationSignature,
@@ -1008,6 +1035,17 @@ impl<'s> CallLinker for Linker<'_, 's> {
         self.primitive_at(signature, false, |facts, identity, bodies| {
             facts.range_literal_bounds(identity, bodies)
         })
+    }
+
+    fn declares_implementation(
+        &self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<bool, KlibBodyDeclineReason> {
+        let identity = self.callee_identity(callee)?;
+        self.sources
+            .bodies
+            .function_has_body(&identity)
+            .ok_or_else(|| KlibBodyDeclineReason::UnsupportedCallee(Box::new(callee.clone())))
     }
 
     fn range_membership_header(
@@ -1961,17 +1999,24 @@ impl<'s> Linker<'_, 's> {
         self.private_members.insert(identity.clone());
         let function = match self.functions.get(identity) {
             Some(&function) => function,
-            None => self.queue(
-                ir,
-                identity,
-                None,
-                arena,
-                declaration,
-                BodyHeader {
-                    header,
-                    value_member: Some(active),
-                },
-            )?,
+            None => {
+                let class = active.class;
+                let function = self.queue(
+                    ir,
+                    identity,
+                    None,
+                    arena,
+                    declaration,
+                    BodyHeader {
+                        header,
+                        value_member: Some(active),
+                    },
+                )?;
+                // It is a member of its class like any other, one no subclass overrides.
+                ir.set_method_visibility(function, crate::types::Visibility::Private);
+                register_class_method(ir, class, function);
+                function
+            }
         };
         let declared = &ir.functions[function as usize];
         let (Some(receiver), params) = (
@@ -2004,7 +2049,12 @@ impl<'s> Linker<'_, 's> {
         candidate: KlibBodyCallable<'s>,
     ) -> Result<bool, KlibBodyDeclineReason> {
         if is_receiver_member(candidate, self.sources.bodies, self.sources.callees) {
-            return Ok(true);
+            // A member realizing one of `kotlin.Any`'s stays the target's, as the closure froze it.
+            return Ok(!self
+                .sources
+                .callees
+                .member_edge(candidate.identity())
+                .is_some_and(super::CallEdge::realizes_any_member));
         }
         let Some(class) = candidate
             .class_contract()
@@ -2023,23 +2073,29 @@ impl<'s> Linker<'_, 's> {
             )?
             .is_some());
         }
-        let Some(primary) = &class.primary_constructor else {
-            return Ok(false);
-        };
-        let identity = KlibDependencyCallable {
-            module: class.module.clone(),
-            declaration: KlibDeclarationSignature::Public(primary.clone()),
-        };
-        let Some(KlibCalleeFact::Selected(constructors)) = self.sources.callees.get(&identity)
+        // Every instance a member is called on was created by one of the constructors that
+        // initialize the class, so the unit materializes the class only when each of them does.
+        let Some(constructors) =
+            super::class_initialization::initializing_constructors(class, self.sources.bodies)
         else {
             return Ok(false);
         };
-        Ok(super::class_initialization::plan(
-            constructors[0],
-            self.sources.bodies,
-            self.sources.callees,
-        )?
-        .is_some())
+        for identity in &constructors {
+            let Some(KlibCalleeFact::Selected(selected)) = self.sources.callees.get(identity)
+            else {
+                return Ok(false);
+            };
+            if super::class_initialization::plan(
+                selected[0],
+                self.sources.bodies,
+                self.sources.callees,
+            )?
+            .is_none()
+            {
+                return Ok(false);
+            }
+        }
+        Ok(!constructors.is_empty())
     }
 
     /// A call of a member of a class this unit does not materialize, through the member's
@@ -2271,7 +2327,8 @@ impl<'s> Linker<'_, 's> {
         if let Some(&declared) = self.functions.get(identity) {
             return Ok(declared);
         }
-        self.queue(
+        let class = value_member.as_ref().map(|member| member.class);
+        let declared = self.queue(
             ir,
             identity,
             selected,
@@ -2281,7 +2338,11 @@ impl<'s> Linker<'_, 's> {
                 header,
                 value_member,
             },
-        )
+        )?;
+        if let Some(class) = class {
+            register_class_method(ir, class, declared);
+        }
+        Ok(declared)
     }
 
     /// Declare `function` with `header` and queue its body.
@@ -2376,6 +2437,15 @@ fn private_class_member_header<'b>(
         member.types,
     )?;
     Ok((member.arena, member.function, header))
+}
+
+/// Record `function` as a method of the materialized `class`, once. A member no class table
+/// numbers (a final or private one) still belongs to its class, so a call of it runs it directly.
+fn register_class_method(ir: &mut IrFile, class: crate::ir::ClassId, function: FunId) {
+    if !ir.classes[class as usize].methods.contains(&function) {
+        ir.classes[class as usize].methods.push(function);
+        ir.note_class_method(class, function);
+    }
 }
 
 /// The statements of the body `function` serializes.
@@ -2509,8 +2579,15 @@ impl UnitCheckpoint {
     fn restore(self, unit: &mut DependencyBodyUnit) {
         let first = self.0.restore(&mut unit.ir);
         unit.functions.retain(|_, function| *function < first);
-        unit.classes
-            .retain(|_, class| (*class as usize) < unit.ir.classes.len());
+        // A constructor this lowering declared published its identity, even when it joined a
+        // class materialized before.
+        let constructors = &unit.constructors;
+        unit.classes.retain(|identity, class| {
+            (*class as usize) < unit.ir.classes.len()
+                && constructors
+                    .get(identity)
+                    .is_none_or(|constructor| constructor.initializer < first)
+        });
         let classes = &unit.classes;
         unit.constructors.retain(|identity, constructor| {
             constructor.initializer < first && classes.contains_key(identity)
@@ -2552,6 +2629,17 @@ fn parameter_defaults(declaration: &KlibIrFunction) -> Vec<bool> {
 }
 
 impl Linker<'_, '_> {
+    /// The exact declaration a call of `callee` from the active module links to, if one does.
+    fn linked_identity(&self, callee: &KlibPublicIdSignature) -> Option<KlibDependencyCallable> {
+        match self.sources.bodies.linked_origin(
+            &self.active_module,
+            &KlibDeclarationSignature::Public(callee.clone()),
+        ) {
+            KlibCalleeOrigin::Exact(identity) => Some(identity),
+            KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
+        }
+    }
+
     /// The primitive `select` reads for the declaration a call of `signature` names, unless the
     /// call is an exact declaration edge.
     fn primitive_at(

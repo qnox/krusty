@@ -1,7 +1,9 @@
 //! Declaration-owned instance field coordinates shared by constructor and member bodies.
 
 use super::*;
-use crate::ir::ClassId;
+use crate::ir::{ClassId, IrCheckedOperation};
+use crate::libraries::AtomicOperation;
+use crate::metadata::klib_ir::tree::KlibIrMemberAccess;
 
 #[cfg(test)]
 mod tests;
@@ -26,8 +28,12 @@ struct Field<'a> {
 #[derive(Clone)]
 pub(super) struct InstanceStorageFrame<'a> {
     class: ClassId,
+    /// The serialized declaration of `class`, which declares every one of `fields`.
+    declaring: &'a KlibIrSymbol,
     receiver: Option<Ty>,
     fields: Vec<Field<'a>>,
+    /// A member's class properties with a backing field: the property, then that field.
+    properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
     access: Access,
 }
 
@@ -44,6 +50,7 @@ impl<'a> InstanceStorageFrame<'a> {
     ) -> Self {
         Self {
             class,
+            declaring: &plan.header.class.base.symbol,
             receiver: Some(super::super::class_headers::declared_receiver(
                 plan.header.contract,
             )),
@@ -58,34 +65,39 @@ impl<'a> InstanceStorageFrame<'a> {
                     final_: plan.storage.fields[index].final_,
                 })
                 .collect(),
+            properties: Vec::new(),
             access: Access::Initializer,
         }
     }
 
     pub(super) fn local_initializer(
         class: ClassId,
+        declaring: &'a KlibIrSymbol,
         receiver: Ty,
         fields: &[super::super::same_library_class::LocalStoredField<'a>],
     ) -> Self {
-        Self::local(class, receiver, fields, Access::Initializer)
+        Self::local(class, declaring, receiver, fields, Access::Initializer)
     }
 
     pub(super) fn local_member(
         class: ClassId,
+        declaring: &'a KlibIrSymbol,
         receiver: Ty,
         fields: &[super::super::same_library_class::LocalStoredField<'a>],
     ) -> Self {
-        Self::local(class, receiver, fields, Access::Member)
+        Self::local(class, declaring, receiver, fields, Access::Member)
     }
 
     fn local(
         class: ClassId,
+        declaring: &'a KlibIrSymbol,
         receiver: Ty,
         fields: &[super::super::same_library_class::LocalStoredField<'a>],
         access: Access,
     ) -> Self {
         Self {
             class,
+            declaring,
             receiver: Some(receiver),
             fields: fields
                 .iter()
@@ -97,20 +109,25 @@ impl<'a> InstanceStorageFrame<'a> {
                     final_: field.final_,
                 })
                 .collect(),
+            properties: Vec::new(),
             access,
         }
     }
 
-    /// A member body of `class`, reading its receiver's fields, each with its declared type and
-    /// finality. A value class member's one field is its value, which it never writes.
+    /// A member body of `class`, the class `declaring` declares, reading its receiver's fields,
+    /// each with its declared type and finality, and the `properties` those fields back. A value
+    /// class member's one field is its value, which it never writes.
     pub(super) fn member(
         class: ClassId,
+        declaring: &'a KlibIrSymbol,
         fields: impl IntoIterator<Item = (&'a KlibIrSymbol, Ty, bool)>,
+        properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
         receiver: Option<Ty>,
         value: bool,
     ) -> Self {
         Self {
             class,
+            declaring,
             receiver,
             fields: fields
                 .into_iter()
@@ -122,6 +139,7 @@ impl<'a> InstanceStorageFrame<'a> {
                     final_,
                 })
                 .collect(),
+            properties,
             access: if value {
                 Access::ValueReadOnly
             } else {
@@ -134,11 +152,13 @@ impl<'a> InstanceStorageFrame<'a> {
     /// `fields` its properties with storage declare, from `first_index`.
     pub(super) fn object_member(
         class: ClassId,
+        declaring: &'a KlibIrSymbol,
         first_index: u32,
         fields: impl IntoIterator<Item = (&'a KlibIrSymbol, Ty, bool)>,
+        properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
         receiver: Ty,
     ) -> Self {
-        let mut frame = Self::member(class, fields, Some(receiver), false);
+        let mut frame = Self::member(class, declaring, fields, properties, Some(receiver), false);
         for field in &mut frame.fields {
             field.index += first_index;
         }
@@ -198,9 +218,13 @@ impl<'a> BodyLowering<'a> {
         Ok(self.typed(store, Ty::Unit))
     }
 
+    /// A field access, whose super qualifier, when it has one, names the class through which it
+    /// reaches the field. Every field the frame stores is its own class's, so a qualifier names
+    /// that class; one naming a superclass reaches storage this frame does not own.
     pub(super) fn initialized_field(
         &mut self,
         symbol: &KlibIrSymbol,
+        super_qualifier: Option<&KlibIrSymbol>,
         receiver: Option<KlibIrExprId>,
         value: Option<KlibIrExprId>,
         ty: Ty,
@@ -212,6 +236,13 @@ impl<'a> BodyLowering<'a> {
                 "a field read"
             });
         };
+        if super_qualifier.is_some_and(|qualifier| qualifier != frame.declaring) {
+            return unsupported(if value.is_some() {
+                "a superclass field write"
+            } else {
+                "a superclass field read"
+            });
+        }
         if value.is_some() && matches!(frame.access, Access::ValueReadOnly) {
             return unsupported("a field write");
         }
@@ -261,6 +292,96 @@ impl<'a> BodyLowering<'a> {
                 })
             }
         };
+        Ok(self.typed(lowered, ty))
+    }
+
+    /// The target stdlib's atomic access `operation` through a reference to a property of this
+    /// member's class: the same access to the property's backing field, on the reference's one
+    /// bound receiver. The reference is not a value and its accessor lambdas are not called; the
+    /// operands follow, in order, after that receiver.
+    pub(super) fn atomic_field(
+        &mut self,
+        operation: AtomicOperation,
+        access: &KlibIrMemberAccess,
+        ty: Ty,
+    ) -> Lowered<ExprId> {
+        let arguments = super::calls::arguments(access);
+        let [Some(reference), operands @ ..] = arguments.as_slice() else {
+            return Err(mismatch("an atomic field access has no property reference"));
+        };
+        let reference = *reference;
+        let operands = operands.iter().copied().collect::<Option<Vec<_>>>();
+        let Some(operands) = operands.filter(|operands| operands.len() == operation.operands())
+        else {
+            return Err(mismatch(
+                "an atomic field access has another shape than its declaration's",
+            ));
+        };
+        let KlibIrExprKind::RichPropertyReference {
+            bound_values,
+            reflection_target: Some(property),
+            setter: Some(_),
+            ..
+        } = &self.arena.expr(reference).kind
+        else {
+            return unsupported(
+                "an atomic field access through another receiver than a property reference",
+            );
+        };
+        let &[bound] = bound_values.as_slice() else {
+            return unsupported(
+                "an atomic access through a property reference without one bound receiver",
+            );
+        };
+        let Some(frame) = self
+            .instance_storage
+            .as_ref()
+            .filter(|frame| matches!(frame.access, Access::Member))
+        else {
+            return unsupported("an atomic field access outside a member of its class");
+        };
+        let mut backing = frame
+            .properties
+            .iter()
+            .filter(|(declared, _)| *declared == property);
+        let (Some(&(_, field)), None) = (backing.next(), backing.next()) else {
+            return Err(mismatch(
+                "an atomic field access names a property outside its member's class",
+            ));
+        };
+        let field = frame.field(field)?;
+        let (class, receiver_ty) = (frame.class, frame.receiver);
+        if field.final_ && operation != AtomicOperation::Load {
+            return Err(mismatch("an atomic field access writes a final field"));
+        }
+        let result = match operation {
+            AtomicOperation::Store => Ty::Unit,
+            AtomicOperation::CompareAndSet => Ty::Boolean,
+            AtomicOperation::Load
+            | AtomicOperation::Exchange
+            | AtomicOperation::CompareAndExchange
+            | AtomicOperation::FetchAndAdd => field.ty,
+        };
+        if ty != result {
+            return Err(mismatch(
+                "an atomic field access disagrees with its field's storage type",
+            ));
+        }
+        let receiver_ty = receiver_ty.ok_or_else(|| mismatch("a class member has no receiver"))?;
+        let receiver = self.operand(bound, receiver_ty)?;
+        let operands = operands
+            .into_iter()
+            .map(|operand| self.operand(operand, field.ty))
+            .collect::<Lowered<Vec<_>>>()?;
+        let lowered =
+            self.ir
+                .add_expr(IrExpr::Checked(Box::new(IrCheckedOperation::AtomicField {
+                    operation,
+                    receiver,
+                    class,
+                    index: field.index,
+                    operands,
+                })));
         Ok(self.typed(lowered, ty))
     }
 }

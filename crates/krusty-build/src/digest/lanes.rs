@@ -46,6 +46,11 @@ pub(super) fn digest_equal(messages: &[&[u8]]) -> Vec<[u8; 32]> {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+// Coverage counters inside the round loops made this kernel about 200 times slower: an instrumented
+// `krusty compilation-fingerprint` took 11 s to digest its own binary instead of 0.06 s, and the
+// coverage job's one real-compile test spent 218 s fingerprinting. `digest_lanes` is the same
+// rounds as plain loops and stays instrumented; the tests pin this kernel against the scalar digest.
+#[cfg_attr(coverage_nightly, coverage(off))]
 unsafe fn digest_avx2(lanes: &[&[u8]; LANES], length: usize) -> [Words; 8] {
     use std::arch::x86_64::*;
 

@@ -46,7 +46,7 @@ ci: lint coverage-gate
 # Lint gate (enforced locally + in CI + by the pre-commit hook): formatting must be clean, and
 # clippy must introduce NO new findings beyond the frozen baseline (clippy-baseline.tsv). Existing
 # findings are tolerated; any new one fails. Identical behaviour everywhere — it's plain cargo + sh.
-lint: versioning-tests release-tests legacy-ratchet-tests reference-cache-tests outcome-set-merge-tests fmt-check legacy-baseline-check clippy-baseline-check
+lint: versioning-tests runner-profile-tests release-tests legacy-ratchet-tests reference-cache-tests outcome-set-merge-tests fmt-check legacy-baseline-check clippy-baseline-check
 
 # The CI step that drops kotlinc reference inventories no recent run read, before master saves them.
 reference-cache-tests:
@@ -55,6 +55,10 @@ reference-cache-tests:
 # Cheap release-version contracts, without a compiler build or reference-toolchain download.
 versioning-tests:
     bash scripts/test-versioning.sh
+
+# The CI runner profile's machine and contention report, against stand-in /proc and /sys trees.
+runner-profile-tests:
+    bash scripts/test-runner-profile.sh
 
 # The release job's signing key id selection, against keys generated in a throwaway keyring, its
 # Maven Central upload, against a stand-in Gradle build and Central Portal, and the Gradle wrapper
@@ -358,7 +362,7 @@ klib-semantics VERSION=`just max-version`:
 
 # Provision the Kotlin codegen/box conformance corpus into one cached dir (target/cache/box-corpus/<ver>/) and
 # print the path to compiler/testData/codegen/box. The same checkout carries the command-line corpus,
-# compiler/testData/cli, beside it. Blobless + sparse clone of just that directory at
+# compiler/testData/cli, and the diagnostics test data, compiler/testData/diagnostics, beside it. Blobless + sparse clone of just that directory at
 # the matching tag — small and idempotent (no-op once present, cheap to cache). Mirrors `kotlinc`:
 # the conformance test FAILS (not skips) without it, so the harness provisions it rather than
 # silently skipping. The same checkout carries JetBrains' mock JDK,
@@ -402,8 +406,9 @@ box-corpus VERSION=`just max-version`:
         git -C "$root" sparse-checkout set compiler/testData/codegen/box "$mock_dir" $cli_dirs $bytecode_dirs "${selection_dirs[@]}" >&2
     }
     # Kotlin's command-line test corpus (`.args`/`.out` pairs) and the third-party annotation
-    # sources some of its cases put on the classpath; kotlin_cli_jvm_conformance runs it.
-    cli_dirs="compiler/testData/cli third-party/annotations third-party/java8-annotations third-party/jsr305"
+    # sources some of its cases put on the classpath; kotlin_cli_jvm_conformance runs it. Its
+    # diagnostics test data, which kotlin_diagnostics_jvm_conformance scores by false accepts.
+    cli_dirs="compiler/testData/cli third-party/annotations third-party/java8-annotations third-party/jsr305 compiler/testData/diagnostics/tests compiler/testData/diagnostics/testsWithStdLib compiler/testData/diagnostics/helpers"
     # Kotlin's bytecode-shape corpora: instruction-count expectations over textified class files
     # (bytecodeText) and whole-class declaration listings (bytecodeListing);
     # kotlin_bytecode_text_conformance and kotlin_bytecode_listing_conformance run them.
@@ -456,9 +461,9 @@ box-corpus VERSION=`just max-version`:
         exit 1
     fi
     if [ -n "$mock_dir" ]; then
-        # A cache provisioned before the mock JDK, the CLI corpus, the bytecode corpora or the
-        # generator sources were needed: extend it rather than accept it.
-        echo "adding the mock JDK, CLI corpus, bytecode corpora and generator sources to Kotlin v${ver}…" >&2
+        # A cache provisioned before the mock JDK, the CLI corpus, the diagnostics test data, the
+        # bytecode corpora or the generator sources were needed: extend it rather than accept it.
+        echo "adding the mock JDK, CLI corpus, diagnostics test data, bytecode corpora and generator sources to Kotlin v${ver}…" >&2
         git -C "$root" sparse-checkout add "$mock_dir" $cli_dirs $bytecode_dirs "${selection_dirs[@]}" >&2 \
             || { echo "failed to extend the v${ver} corpus checkout" >&2; exit 1; }
     else
@@ -583,7 +588,7 @@ test-all *ARGS:
 # Build the krusty-build library test binary and print its path. Gradle lanes run this prebuilt
 # binary; they do not compile krusty again.
 #
-# CI builds this right after `just conformance-bin-and-cli`, and must reuse that build's krusty.
+# CI builds this right after `just tool-test-bin`, and must reuse that build's krusty.
 # Selecting krusty-cli's binary here keeps the Native backend in the graph: without it bumpalo
 # (under zopfli) loses Cranelift's `allocator-api2` feature and krusty, which links zopfli,
 # compiled a second time (484 s of a 1157 s build). krusty-build's own dev-dependencies add the
@@ -618,13 +623,15 @@ conformance-bin:
     set -euo pipefail
     scripts/cargo-test-binary.sh conformance --test conformance
 
-# CI's tool-bins job: the conformance binary and the `krusty` CLI (target/gate/krusty) from one
-# Cargo invocation. The CLI alone resolves libc, object and once_cell without the features the
-# root package's dev-dependencies add, so building the two apart compiled krusty twice.
-conformance-bin-and-cli:
+# CI's tool-bins job: the conformance and e2e binaries and the `krusty` CLI (target/gate/krusty)
+# from one Cargo invocation, printing the TARGET test binary (`conformance` or `e2e`). The CLI alone
+# resolves libc, object and once_cell without the features the root package's dev-dependencies
+# add, so building them apart compiled krusty twice. The same selection again only prints the
+# other target: Cargo finds nothing to rebuild.
+tool-test-bin TARGET:
     #!/usr/bin/env bash
     set -euo pipefail
-    scripts/cargo-test-binary.sh --build conformance -p krusty-cli -p krusty --test conformance --bin krusty
+    scripts/cargo-test-binary.sh --build "{{TARGET}}" -p krusty-cli -p krusty --test conformance --test e2e --bin krusty
 
 # Run the codegen/box conformance suite and print the case report "<pct> <passed> <applicable>":
 # applicable cases whose box() returns "OK". The same run's JVM byte report "<pct> <matched> <total>",
@@ -682,6 +689,14 @@ conformance-regressions BIN VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
     bash scripts/conformance-regressions.sh "{{BIN}}" "{{VERSION}}"
+
+# Run the diagnostics test data lane (kotlinc's diagnostics cases, scored by false accepts) with the
+# binary from `conformance-bin`. Ordinary runs ignore it; CI runs this for the newest supported
+# Kotlin. Bless with KRUSTY_BLESS_DIAGNOSTICS_EXPECTATIONS=1. A sibling `krusty` next to BIN is the CLI.
+diagnostics-conformance BIN VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bash scripts/diagnostics-conformance.sh "{{BIN}}" "{{VERSION}}"
 
 # Run focused Native conformance tests only after provisioning the exact Native distribution whose
 # stdlib KLIB owns their semantics. The corpus itself remains in `native-conformance-run`.

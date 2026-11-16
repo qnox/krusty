@@ -20,8 +20,7 @@ EXCLUDE=(
 )
 
 set -euo pipefail
-# This producer owns the workflow output channel; tests and nested coverage runs do not.
-declare +x coverage_github_output="${GITHUB_OUTPUT:-}"
+# Tests and nested coverage runs never write the workflow output channel.
 unset GITHUB_OUTPUT
 export PATH="$HOME/.cargo/bin:$PATH"
 cd "$(dirname "$0")/.."
@@ -132,27 +131,7 @@ run_phase() {
 # Cargo's human progress stays on stderr while its machine-readable artifact stream goes to the
 # temporary file. The executable query finds the test binaries without a second Cargo invocation.
 read_test_executables() {
-  jq -r '
-    def package_is($name):
-      test("(^|[/# ])" + $name + "([#@ ]|$)");
-    select(.reason == "compiler-artifact" and .profile.test == true and .executable != null)
-    | . as $artifact
-    | ($artifact.package_id | tostring) as $package
-    | ($artifact.target.kind | join(",")) as $kind
-    | if ($package | package_is("krusty-lsp")) or ($package | package_is("krusty-toolchain")) then
-        $artifact.executable
-      elif (($package | package_is("krusty-cli")) or ($package | package_is("krusty-jvm"))
-          or ($package | package_is("krusty-native"))
-          or ($package | package_is("krusty-wasm")))
-          and $kind == "lib" then
-        $artifact.executable
-      elif ($package | package_is("krusty"))
-          and ($kind == "lib" or ($kind == "test" and $artifact.target.name == "e2e")) then
-        $artifact.executable
-      else
-        empty
-      end
-  '
+  jq -r -f scripts/own-test-binaries.jq
 }
 phase_begin build-compiler
 compiler_json="$(mktemp)"
@@ -302,8 +281,3 @@ jq -s '
 
 echo "coverage summary ($summary_out):" >&2
 jq -r 'to_entries[] | "  \(.key | (. + "         ")[0:10])  \(.value.percent*100|round/100)%  (\(.value.covered)/\(.value.count))"' "$summary_out" >&2
-
-# Publish the selected executable only after the workload and reports succeed.
-if [ -n "$coverage_github_output" ]; then
-  printf 'compiler_e2e_binary=%s\n' "$e2e_bin" >> "$coverage_github_output"
-fi
