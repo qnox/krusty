@@ -1657,7 +1657,6 @@ inlineClasses/propertyDelegation/kt27070Generic.kt
 inlineClasses/referToPropertyInCompanionObjectOfInlineClass.kt
 inlineClasses/referToPropertyInCompanionObjectOfInlineClassGeneric.kt
 inlineClasses/removeInInlineCollectionOfInlineClassAsInt.kt
-inlineClasses/result/directCall2.kt
 inlineClasses/result/doubleOverride.kt
 inlineClasses/result/extensionOverride.kt
 inlineClasses/result/inlineMethodOnResult.kt
@@ -1932,7 +1931,6 @@ object/initialization1.kt
 object/method_call.kt
 objectExpression/expr1.kt
 objectExpression/expr3.kt
-objectIntrinsics/objects.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/anonymousObjectInPropertyInitializer.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromAnonymousObjectInNestedClass.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlock.kt
