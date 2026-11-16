@@ -202,6 +202,13 @@ impl Body<'_> {
             &identity,
             signature.clone(),
         )?;
+        // The builder's `append(CharSequence?)` reads the appended sequence through the checked
+        // `CharSequence` members on a target that copies its units.
+        if fact.builtin_implementations.iter().any(|implementation| {
+            super::string_builders::is_string_builder_type(implementation.receiver)
+        }) {
+            self.record_char_sequence_reads()?;
+        }
         self.runtime.builtin_member(
             self.module,
             member,

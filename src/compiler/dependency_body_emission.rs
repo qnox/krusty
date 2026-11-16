@@ -440,6 +440,15 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         };
+        if backend.appends_char_sequences_by_index() {
+            if let Err(error) = super::char_sequence_protocol::freeze(&mut callables, platform) {
+                diags.error(
+                    Span::new(0, 0),
+                    format!("internal error: cannot freeze the CharSequence members: {error:?}"),
+                );
+                return Vec::new();
+            }
+        }
         if let Err(identity) = super::builtin_implementations::record_checked(
             &mut callables,
             unit.ir(),

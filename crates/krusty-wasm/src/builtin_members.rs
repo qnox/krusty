@@ -112,7 +112,7 @@ enum Operation {
 /// (`super::codegen` realizes those at the builder's receiver).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BuilderMember {
-    /// `append(CharSequence?)`: the value's string, or `"null"`.
+    /// `append(CharSequence?)`, as the target declares it (`crate::char_sequence_appends`).
     AppendCharSequence,
     /// `append(Char)`.
     AppendChar,
@@ -307,24 +307,18 @@ impl Runtime {
                     .local_get(1)
                     .array_get_u(self.chars);
             }
-            (Receiver::StringBuilder, Operation::Builder(builder)) => {
-                let builders = &self.string_builders;
-                match builder {
-                    BuilderMember::AppendCharSequence => {
-                        code.local_get(1)
-                            .call(self.object_strings.any_to_string)
-                            .call(builders.append_string);
-                    }
-                    BuilderMember::AppendChar => {
-                        code.local_get(1).call(builders.append_char);
-                    }
-                    BuilderMember::Length => {
-                        code.call(builders.length);
-                    }
-                    BuilderMember::Get => {
-                        code.local_get(1).call(builders.get);
-                    }
-                }
+            (Receiver::StringBuilder, Operation::Builder(BuilderMember::AppendCharSequence)) => {
+                let append = self.append_char_sequence(module)?;
+                code.local_get(1).call(append);
+            }
+            (Receiver::StringBuilder, Operation::Builder(BuilderMember::AppendChar)) => {
+                code.local_get(1).call(self.string_builders.append_char);
+            }
+            (Receiver::StringBuilder, Operation::Builder(BuilderMember::Length)) => {
+                code.call(self.string_builders.length);
+            }
+            (Receiver::StringBuilder, Operation::Builder(BuilderMember::Get)) => {
+                code.local_get(1).call(self.string_builders.get);
             }
             _ => return Err("a builtin implementation of another representation".to_string()),
         }

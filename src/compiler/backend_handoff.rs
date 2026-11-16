@@ -30,6 +30,9 @@ pub(super) struct ModuleEmission<'a> {
     /// The dependency classes whose supertype members the backend dispatches itself
     /// ([`crate::backend::Backend::dispatched_dependency_classes`]).
     pub dispatched_classes: &'a [crate::types::TypeName],
+    /// The backend appends a `CharSequence` to a `StringBuilder` through its `length` and `get`
+    /// ([`crate::backend::Backend::appends_char_sequences_by_index`]).
+    pub char_sequences_by_index: bool,
 }
 
 /// Freeze `ir`'s backend view, or report an internal error when a dependency identity the IR holds
@@ -67,6 +70,17 @@ pub(super) fn checked_ir_file<'a>(
             return None;
         }
     };
+    if module.char_sequences_by_index {
+        if let Err(error) =
+            super::char_sequence_protocol::freeze(&mut callables, symbols.semantic_platform())
+        {
+            diags.error(
+                Span::new(0, 0),
+                format!("internal error: cannot freeze the CharSequence members: {error:?}"),
+            );
+            return None;
+        }
+    }
     if let Some(dependency_bodies) = symbols.semantic_platform().klib_dependency_body_facts() {
         let checked = match crate::resolve::for_checked_klib_bodies(
             symbols.semantic_platform(),

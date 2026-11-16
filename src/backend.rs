@@ -35,7 +35,8 @@ pub use dependency_call_shape::{DeclaredOperandRoles, DependencyCallShape, Depen
 pub use dependency_facts::referenced_dependencies;
 pub use dependency_facts::{
     BackendCallableFact, BackendCompilerIntrinsic, BackendPropertyFact, BackendSemanticCallRole,
-    CheckedBackendCallables, DependencyClassifier, DependencyFactError, DependencyGetterSignature,
+    CharSequenceProtocol, CheckedBackendCallables, DependencyClassifier, DependencyFactError,
+    DependencyGetterSignature,
 };
 pub(crate) use dependency_metadata::has_standalone_dependency_code;
 pub use dependency_metadata::KlibDependencyCallable;
@@ -179,6 +180,14 @@ pub trait Backend {
     /// member hierarchy ([`crate::backend::BuiltinImplementation`]).
     fn dispatched_dependency_classes(&self) -> Vec<DependencyClassifier> {
         Vec::new()
+    }
+
+    /// Whether this target's `StringBuilder` appends a `CharSequence` by reading its `length` and
+    /// each indexed `Char` (Kotlin/Wasm WASI) rather than by rendering it with `toString`
+    /// (Kotlin/Wasm JS). The handoff then freezes those `CharSequence` members for the target to
+    /// call ([`CheckedBackendCallables::char_sequence_protocol`]).
+    fn appends_char_sequences_by_index(&self) -> bool {
+        false
     }
 
     /// How common lowering realizes calls to same-module inline functions for this backend. A
