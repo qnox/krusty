@@ -124,3 +124,93 @@ fn prefix_lookahead_is_replayed_before_the_remaining_stream() {
     );
     assert_eq!(diagnostics.diags.len(), 0);
 }
+
+/// The header every reader of `source` publishes: the token reader over physical and grammar
+/// tokens, the name stream and the syntax parser agree on the same import list.
+fn assert_header_parity(source: &str, expected: &[(&str, bool, Option<&str>)]) {
+    let mut diagnostics = DiagSink::new();
+    let tokens = crate::lexer::lex(source, &mut diagnostics);
+    let header = from_tokens(source, &tokens);
+    assert_eq!(
+        header
+            .imports
+            .iter()
+            .map(|item| (
+                item.path.as_str(),
+                item.wildcard,
+                item.imported_name.as_deref()
+            ))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    let names = crate::lexer::lex_name_tokens(source, &mut diagnostics);
+    assert_eq!(
+        names
+            .iter()
+            .filter(|item| item.kind == crate::lexer::NameTokenKind::Import)
+            .map(|item| item.span.lo)
+            .collect::<Vec<_>>(),
+        header.import_starts
+    );
+    let grammar_tokens = tokens
+        .iter()
+        .filter(|item| item.kind != K::Newline)
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        from_tokens(source, &grammar_tokens).import_starts,
+        header.import_starts
+    );
+    let file = crate::parser::parse(source, &tokens, &mut diagnostics);
+    assert_eq!(
+        file.import_paths
+            .iter()
+            .map(|item| (
+                item.path(),
+                item.wildcard,
+                item.imported_name().map(str::to_owned)
+            ))
+            .collect::<Vec<_>>(),
+        expected
+            .iter()
+            .map(|&(path, wildcard, name)| (path.to_owned(), wildcard, name.map(str::to_owned)))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        diagnostics.diags.len(),
+        0,
+        "{}",
+        diagnostics.render("test.kt", source)
+    );
+}
+
+#[test]
+fn a_qualified_import_continues_across_a_newline_before_its_dot() {
+    assert_header_parity(
+        "import q\n.Shown\nimport r.Other\nfun use(x: Shown) = x\n",
+        &[
+            ("q.Shown", false, Some("Shown")),
+            ("r.Other", false, Some("Other")),
+        ],
+    );
+    assert_header_parity(
+        "import q\n    .inner\n    .Shown as Alias\nimport r.*\nfun use(x: Alias) = x\n",
+        &[("q.inner.Shown", false, Some("Alias")), ("r", true, None)],
+    );
+}
+
+#[test]
+fn a_file_annotation_spans_newlines_around_its_colon_and_type_dots() {
+    assert_header_parity(
+        "@file\n:\nSuppress(\"unused\")\nimport q.Shown\nfun use(x: Shown) = x\n",
+        &[("q.Shown", false, Some("Shown"))],
+    );
+    assert_header_parity(
+        "@file:\n    kotlin\n    .Suppress(\"unused\")\npackage demo\nimport q.Shown\nimport r.Other\n",
+        &[("q.Shown", false, Some("Shown")), ("r.Other", false, Some("Other"))],
+    );
+    assert_header_parity(
+        "@file\n:[Suppress(\"unused\")]\nimport q.Shown\n",
+        &[("q.Shown", false, Some("Shown"))],
+    );
+}

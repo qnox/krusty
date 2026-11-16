@@ -132,18 +132,41 @@ impl<F: FnMut() -> Token> Cursor<'_, F> {
         }
     }
 
-    // Keep the parser's qualified-path consumption, including a trailing dot before `*`.
+    /// How many newline tokens follow from `ahead` on.
+    fn newlines_at(&mut self, ahead: usize) -> usize {
+        let mut count = 0;
+        while self.peek(ahead + count).kind == K::Newline {
+            count += 1;
+        }
+        count
+    }
+
+    fn skip(&mut self, count: usize) {
+        for _ in 0..count {
+            self.bump();
+        }
+    }
+
+    /// A qualified identifier, `simpleIdentifier {NL* "." simpleIdentifier}`: a newline may come
+    /// before a dot, never after one. Keeps the parser's trailing dot before `*`.
     fn path(&mut self) -> Vec<String> {
         let mut path = Vec::new();
         if self.peek(0).kind == K::Ident {
             let token = self.bump();
             path.push(token.text(self.source).to_owned());
-            while self.peek(0).kind == K::Dot {
-                self.bump();
-                if self.peek(0).kind == K::Ident {
+            loop {
+                let before = self.newlines_at(0);
+                if self.peek(before).kind != K::Dot {
+                    break;
+                }
+                if self.peek(before + 1).kind == K::Ident {
+                    self.skip(before + 1);
                     let token = self.bump();
                     path.push(token.text(self.source).to_owned());
                 } else {
+                    if before == 0 {
+                        self.bump();
+                    }
                     break;
                 }
             }
@@ -151,17 +174,19 @@ impl<F: FnMut() -> Token> Cursor<'_, F> {
         path
     }
 
+    /// `@file NL* : NL* ([ annotations ] | annotation)`, whose classifier is a user type with
+    /// `NL* . NL*` between its segments.
     fn file_annotation(&mut self) -> bool {
         let target = self.peek(1);
-        if self.peek(0).kind != K::At
-            || !bare(self.source, target, "file")
-            || self.peek(2).kind != K::Colon
-        {
+        if self.peek(0).kind != K::At || !bare(self.source, target, "file") {
             return false;
         }
-        self.bump();
-        self.bump();
-        self.bump();
+        let before_colon = self.newlines_at(2);
+        if self.peek(2 + before_colon).kind != K::Colon {
+            return false;
+        }
+        self.skip(3 + before_colon);
+        self.newlines();
         if self.peek(0).kind == K::LBracket {
             return self.group();
         }
@@ -173,10 +198,12 @@ impl<F: FnMut() -> Token> Cursor<'_, F> {
             if self.peek(0).kind == K::Lt && !self.group() {
                 return false;
             }
-            if self.peek(0).kind != K::Dot {
+            let before_dot = self.newlines_at(0);
+            if self.peek(before_dot).kind != K::Dot {
                 break;
             }
-            self.bump();
+            self.skip(before_dot + 1);
+            self.newlines();
             if self.peek(0).kind != K::Ident {
                 return false;
             }
