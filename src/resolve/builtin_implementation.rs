@@ -126,22 +126,6 @@ pub(super) fn for_checked_unit(checker: &Checker<'_>) -> Result<Facts, ExternalC
                     }
                 }
             }
-            // A member slot's declarations are compared by the header a target realizes for them.
-            for family in index
-                .function_slot_families(declaration)
-                .into_iter()
-                .flatten()
-            {
-                for function in family.slots.iter().flatten() {
-                    if let crate::fir::ResolvedFunctionOverrideTarget::External(identity) =
-                        function.target
-                    {
-                        selected
-                            .entry(identity)
-                            .or_insert_with(|| (function.owner, family.name.clone()));
-                    }
-                }
-            }
             for edge in index.property_overrides(declaration) {
                 for (target, owner) in [
                     (edge.implementation, edge.implementation_owner),
