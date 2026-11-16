@@ -41,13 +41,12 @@ fun run(block: suspend () -> String): Any? =
         "NPE"
     }
 
-fun observations(): String = listOf(
-    run { parameter(null) },
-    run { typeParameter(null) },
-    run { callResult() },
-    run { localVar() },
-    run { unitParameter(null) },
-).joinToString(",")
+fun observations(): String =
+    "${run { parameter(null) }}" + "," +
+        "${run { typeParameter(null) }}" + "," +
+        "${run { callResult() }}" + "," +
+        "${run { localVar() }}" + "," +
+        "${run { unitParameter(null) }}"
 
 fun box(): String {
     val observed = observations()
