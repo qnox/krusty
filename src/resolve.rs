@@ -42028,7 +42028,7 @@ impl<'a> Checker<'a> {
                 // call-facing view filters them. Properties and property overrides are checked by
                 // their own declaration path; this loop owns functions only.
                 let receiver = scope.this_ty().unwrap_or(Ty::obj_name(internal));
-                let direct_supertypes = crate::symbol_resolver::with_implicit_any(
+                let direct_supertypes = crate::assignable::with_implicit_any(
                     internal,
                     <Self as crate::assignable::TypeOracle>::direct_supertypes(self, receiver),
                 );

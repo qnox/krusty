@@ -845,7 +845,7 @@ impl DependencyBodyUnit {
         sources: Sources<'a>,
         seed: impl FnOnce(&mut Linker<'_, 'a>, &mut IrFile) -> Result<T, KlibBodyDeclineReason>,
     ) -> Result<T, KlibBodyDecline> {
-        let (first_class, declarations) = (self.ir.classes.len(), sources.declarations);
+        let (first_class, classes) = (self.ir.classes.len(), sources.callees.class_type_oracle());
         let mut pending = VecDeque::new();
         let mut linker = Linker {
             functions: &mut self.functions,
@@ -961,7 +961,7 @@ impl DependencyBodyUnit {
             })?;
             self.ir.functions[body.function as usize].body = Some(lowered);
         }
-        super::class_hierarchies::publish(&mut self.ir, first_class, declarations)
+        super::class_hierarchies::publish(&mut self.ir, first_class, classes)
             .map_err(|reason| KlibBodyDecline::new(identity.declaration.clone(), reason))?;
         Ok(root)
     }
