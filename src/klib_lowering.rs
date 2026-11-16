@@ -45,7 +45,9 @@ pub(crate) use body_unit::{
 };
 pub(crate) use callee_facts::CallEdge;
 pub use callee_facts::KlibCalleeFacts;
-pub(crate) use class_initialization::delegated_superclass_constructor;
+pub(crate) use class_initialization::{
+    delegated_superclass_constructor, initializing_constructors,
+};
 pub(crate) use closure_forms::emitted_closure_function;
 
 /// The serialized forms common body lowering realizes without the declaration edges they name.

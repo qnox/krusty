@@ -273,16 +273,17 @@ pub(super) fn declarations(
             return Err(format!("a transitive KLIB body has no supported ordinary declaration contract: {identity:?}"));
         }
         if emits_body {
-            // A member of an ordinary class is called on an instance its primary constructor
-            // created, which materializes the class.
-            if let Some(primary) = selected
+            // A member of an ordinary class is called on an instance one of the constructors
+            // that initialize the class created, which materializes the class.
+            if let Some(class) = selected
                 .class_contract()
                 .filter(|class| !class.is_value && selected.kind() == ExternalCallableKind::Member)
-                .map(|class| ordinary_class_constructor(platform, bodies, &facts, class))
-                .transpose()?
-                .flatten()
             {
-                pending.push_back((primary, None));
+                pending.extend(
+                    ordinary_class_constructors(platform, bodies, &facts, class)?
+                        .into_iter()
+                        .map(|constructor| (constructor, None)),
+                );
             }
             let member_class = selected
                 .class_contract()
@@ -470,41 +471,45 @@ fn is_materialized_class_member(
     if class.is_value {
         return Ok(true);
     }
-    Ok(ordinary_class_constructor(platform, bodies, callees, class)?.is_some())
+    Ok(!ordinary_class_constructors(platform, bodies, callees, class)?.is_empty())
 }
 
-/// The primary constructor of the ordinary class `class`, when its admitted initialization
-/// materializes the class.
-fn ordinary_class_constructor(
+/// The constructors that initialize the ordinary class `class`, when each one's admitted
+/// initialization materializes the class: its primary constructor, or each constructor of a class
+/// without one. Empty when the class is not materialized.
+fn ordinary_class_constructors(
     platform: &dyn SemanticPlatform,
     bodies: &KlibDeclarationBodies,
     callees: &crate::klib_lowering::KlibCalleeFacts<'_>,
     class: &crate::libraries::KlibBodyClassContract,
-) -> Result<Option<KlibDependencyCallable>, String> {
-    let Some(primary) = class.primary_constructor.clone() else {
-        return Ok(None);
+) -> Result<Vec<KlibDependencyCallable>, String> {
+    let Some(constructors) = crate::klib_lowering::initializing_constructors(class, bodies) else {
+        return Ok(Vec::new());
     };
-    let identity = KlibDependencyCallable {
-        module: class.module.clone(),
-        declaration: crate::libraries::KlibDeclarationSignature::Public(primary),
-    };
-    let Some((_, realization)) = platform.external_callable_by_dependency(&identity) else {
-        return Ok(None);
-    };
-    let Some(constructor) = realization.klib_body_callable() else {
-        return Ok(None);
-    };
-    // A class whose constructor has no serialized declaration, such as one of a module compiled
-    // from source alongside, is realized from its own declarations, never materialized from a KLIB.
-    if bodies.function_has_body(&identity).is_none() {
-        return Ok(None);
+    for identity in &constructors {
+        let Some((_, realization)) = platform.external_callable_by_dependency(identity) else {
+            return Ok(Vec::new());
+        };
+        let Some(constructor) = realization.klib_body_callable() else {
+            return Ok(Vec::new());
+        };
+        // A class whose constructor has no serialized declaration, such as one of a module
+        // compiled from source alongside, is realized from its own declarations, never
+        // materialized from a KLIB.
+        if bodies.function_has_body(identity).is_none() {
+            return Ok(Vec::new());
+        }
+        let superclasses = superclass_realizations(platform, bodies, identity);
+        let admitted =
+            with_realized_declarations(callees.with_declaration(constructor), &superclasses)
+                .constructor_initialization_callees(identity, bodies)
+                .map_err(|reason| format!("an invalid class initialization: {reason:?}"))?
+                .is_some();
+        if !admitted {
+            return Ok(Vec::new());
+        }
     }
-    let superclasses = superclass_realizations(platform, bodies, &identity);
-    let admitted = with_realized_declarations(callees.with_declaration(constructor), &superclasses)
-        .constructor_initialization_callees(&identity, bodies)
-        .map_err(|reason| format!("an invalid class initialization: {reason:?}"))?
-        .is_some();
-    Ok(admitted.then_some(identity))
+    Ok(constructors)
 }
 
 /// The realizations of the superclass constructors a class's primary constructor `identity`
@@ -547,19 +552,19 @@ fn with_realized_declarations<'a>(
     facts
 }
 
-/// The primary constructor which materializes the ordinary class declaring the member
-/// `identity`, which every instance the member is called on was created by.
-pub(super) fn member_class_constructor(
+/// The constructors which materialize the ordinary class declaring the member `identity`, one
+/// of which created every instance the member is called on. Empty when no unit materializes it.
+pub(super) fn member_class_constructors(
     platform: &dyn SemanticPlatform,
     bodies: &KlibDeclarationBodies,
     callees: &crate::klib_lowering::KlibCalleeFacts<'_>,
     identity: &KlibDependencyCallable,
-) -> Result<Option<KlibDependencyCallable>, String> {
+) -> Result<Vec<KlibDependencyCallable>, String> {
     let Some((_, realization)) = platform.external_callable_by_dependency(identity) else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let Some(selected) = realization.klib_body_callable() else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     match selected.class_contract() {
         Some(class)
@@ -567,9 +572,9 @@ pub(super) fn member_class_constructor(
                 && class.emits_members()
                 && selected.kind() == ExternalCallableKind::Member =>
         {
-            ordinary_class_constructor(platform, bodies, callees, class)
+            ordinary_class_constructors(platform, bodies, callees, class)
         }
-        _ => Ok(None),
+        _ => Ok(Vec::new()),
     }
 }
 

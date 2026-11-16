@@ -9,22 +9,47 @@ pub(in super::super) fn realize_array_constructor(
     shape: &LibraryType,
     member: &mut LibraryMember,
 ) {
-    if !compiler_builtin_owner
-        || owner != crate::types::wk::array()
-        || shape.kind != TypeKind::Class
+    if !compiler_builtin_owner || !is_size_constructor(member, owner) {
+        return;
+    }
+    if owner == crate::types::wk::array() {
+        realize_reference_array_constructor(shape, member);
+    } else if is_primitive_array_class(owner, shape) && member.generic_sig.is_none() {
+        member.semantic_role = Some(SemanticCallRole::KotlinArrayAllocation);
+    }
+}
+
+/// `<init>(size: Int)` of `owner`, with nothing else a plain allocation could not honour.
+fn is_size_constructor(member: &LibraryMember, owner: TypeName) -> bool {
+    member.owner == Some(owner)
+        && member.name == "<init>"
+        && member.params == [Ty::Int]
+        && member.ret == Ty::Unit
+        && member.context_count == 0
+        && member.call_sig.vararg_index.is_none()
+        && !member.call_sig.param_defaults.contains(&true)
+        && !member.suspend()
+        && !member.is_operator()
+        && !member.is_infix()
+}
+
+/// A compiler-provided specialized array of a signed primitive (`IntArray`, ...): a final,
+/// non-generic, top-level class. An unsigned array is a value class over one of these, and its
+/// constructor is that class's ordinary constructor.
+fn is_primitive_array_class(owner: TypeName, shape: &LibraryType) -> bool {
+    crate::types::prim_array_element(owner).is_some_and(|element| !element.is_unsigned())
+        && shape.kind == TypeKind::Class
+        && shape.value_declaration.is_none()
+        && shape.own_type_parameter_count == 0
+        && shape.type_params().is_empty()
+        && shape.outer_instance.is_none()
+}
+
+fn realize_reference_array_constructor(shape: &LibraryType, member: &mut LibraryMember) {
+    if shape.kind != TypeKind::Class
         || shape.own_type_parameter_count != 1
         || shape.type_params().len() != 1
         || shape.outer_instance.is_some()
-        || member.owner != Some(owner)
-        || member.name != "<init>"
-        || member.params != [Ty::Int]
-        || member.ret != Ty::Unit
-        || member.context_count != 0
-        || member.call_sig.vararg_index.is_some()
-        || member.call_sig.param_defaults.contains(&true)
-        || member.suspend()
-        || member.is_operator()
-        || member.is_infix()
     {
         return;
     }
@@ -139,5 +164,50 @@ mod tests {
             );
             assert_eq!(constructor.semantic_role, None);
         }
+    }
+
+    #[test]
+    fn a_signed_primitive_array_size_constructor_is_an_allocation() {
+        let primitive = |owner: TypeName| {
+            let mut shape = LibraryType::declaration_header();
+            shape.kind = TypeKind::Class;
+            let mut constructor =
+                LibraryMember::new("<init>".into(), vec![Ty::Int], Ty::Unit, String::new());
+            constructor.owner = Some(owner);
+            (shape, constructor)
+        };
+        for element in [Ty::Int, Ty::Long, Ty::Boolean, Ty::Char, Ty::Double] {
+            let owner = Ty::array(element).obj_internal().unwrap();
+            let (shape, mut constructor) = primitive(owner);
+            let mut untrusted = constructor.clone();
+            realize_array_constructor(owner, false, &shape, &mut untrusted);
+            assert_eq!(untrusted.semantic_role, None);
+            realize_array_constructor(owner, true, &shape, &mut constructor);
+            assert_eq!(
+                constructor.semantic_role,
+                Some(SemanticCallRole::KotlinArrayAllocation),
+                "{element:?}"
+            );
+        }
+        let int_array = Ty::array(Ty::Int).obj_internal().unwrap();
+        let (shape, original) = primitive(int_array);
+        let mut initializing = original.clone();
+        initializing.params.push(Ty::obj("kotlin/Function1"));
+        let mut long_size = original.clone();
+        long_size.params = vec![Ty::Long];
+        for mut constructor in [initializing, long_size] {
+            realize_array_constructor(int_array, true, &shape, &mut constructor);
+            assert_eq!(constructor.semantic_role, None);
+        }
+        let mut nested = shape.clone();
+        nested.outer_instance = Some(crate::types::type_name("kotlin/Outer"));
+        let mut constructor = original.clone();
+        realize_array_constructor(int_array, true, &nested, &mut constructor);
+        assert_eq!(constructor.semantic_role, None);
+        // An unsigned array is a value class over a signed one; its constructor is its own.
+        let unsigned = Ty::array(Ty::UInt).obj_internal().unwrap();
+        let (shape, mut constructor) = primitive(unsigned);
+        realize_array_constructor(unsigned, true, &shape, &mut constructor);
+        assert_eq!(constructor.semantic_role, None);
     }
 }
