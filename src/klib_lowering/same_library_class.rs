@@ -76,6 +76,8 @@ pub(super) struct LocalStoredField<'a> {
 /// The initializer frame queued for a file-local class.
 pub(super) struct LocalInitialize<'a> {
     pub(super) class: ClassId,
+    /// The serialized declaration of `class`.
+    pub(super) declaring: &'a KlibIrSymbol,
     pub(super) receiver_symbol: &'a KlibIrSymbol,
     pub(super) receiver_ty: Ty,
     pub(super) fields: Vec<LocalStoredField<'a>>,
@@ -85,6 +87,8 @@ pub(super) struct LocalInitialize<'a> {
 /// The field frame of one member of a file-local class.
 pub(super) struct LocalMemberFields<'a> {
     pub(super) class: ClassId,
+    /// The serialized declaration of `class`.
+    pub(super) declaring: &'a KlibIrSymbol,
     pub(super) receiver: Ty,
     pub(super) fields: Vec<LocalStoredField<'a>>,
 }
@@ -374,6 +378,8 @@ pub(super) struct PreparedLocalClass<'a> {
     /// The declared bounds of each class type parameter, in its order.
     pub(super) class_type_parameter_bounds: Vec<Vec<Ty>>,
     pub(super) constructor_symbol: &'a KlibIrSymbol,
+    /// The serialized declaration of the class.
+    pub(super) declaring: &'a KlibIrSymbol,
     pub(super) arena: &'a KlibIrArena,
     pub(super) receiver_symbol: &'a KlibIrSymbol,
     pub(super) receiver_ty: Ty,
@@ -750,6 +756,7 @@ fn prepare_class<'a>(
         class_type_parameters,
         class_type_parameter_bounds,
         constructor_symbol: &function.base.symbol,
+        declaring: &class.base.symbol,
         arena,
         receiver_symbol: &receiver.base.symbol,
         receiver_ty: self_type,

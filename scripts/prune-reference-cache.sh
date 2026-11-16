@@ -4,9 +4,10 @@
 #   scripts/prune-reference-cache.sh <cache dir> <max age in days> [<read-since file>]
 #
 # Each entry of target/cache/ref-classes is a directory named by its input fingerprint and
-# published with an OK or FAILED marker; tests/box_reference_classes.rs refreshes the marker's
-# modification time on every read. An entry whose marker is older than the age limit belongs to a
-# case, input or salt no recent run looked up, so it goes. A directory without a marker is an
+# published with an OK or REJECTED marker. FAILED is the previous rejection marker: nothing reads
+# it, and it ages out like any other unread entry. tests/box_reference_classes.rs refreshes the
+# marker's modification time on every read. An entry whose marker is older than the age limit
+# belongs to a case, input or salt no recent run looked up, so it goes. A directory without a marker is an
 # abandoned staging tree from a cut-short publish and goes too. A run that stopped early leaves
 # the entries it never reached alone: they are dropped only once they stay unread for the whole
 # age limit.
@@ -41,7 +42,7 @@ for entry in "$cache"/*/; do
   [ -d "$entry" ] || continue
   entry=${entry%/}
   marker=
-  for name in OK FAILED; do
+  for name in OK REJECTED FAILED; do
     if [ -f "$entry/$name" ]; then
       marker=$entry/$name
       break
