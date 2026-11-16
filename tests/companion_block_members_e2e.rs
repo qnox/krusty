@@ -1211,3 +1211,24 @@ fn library_value_class_block_members_use_their_realized_names() {
     .expect("reference kotlinc is provisioned");
     assert_eq!(result, "OK");
 }
+
+/// An ordinary class's block function whose result is a value class, called from another file:
+/// the call names the method its declaration emits.
+#[test]
+fn ordinary_class_block_function_returning_a_value_class_runs_from_another_file() {
+    const DECLARING: &str = "@JvmInline\n\
+        value class W(val value: Int)\n\
+        class C {\n\
+        \x20   companion {\n\
+        \x20       fun makes(): W = W(1)\n\
+        \x20   }\n\
+        }\n";
+    const USING: &str = "fun box(): String = if (C.makes().value == 1) \"OK\" else \"fail\"\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            ("C.kt", &format!("{LANGUAGE}{DECLARING}")),
+            ("Main.kt", &format!("{LANGUAGE}{USING}")),
+        ],
+        "SeparateFileOrdinaryBlockValueResult",
+    );
+}

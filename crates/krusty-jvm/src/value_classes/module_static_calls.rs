@@ -78,8 +78,7 @@ pub(super) fn realize(
                             krusty::ir::IrStaticPlacement::Package => None,
                         })
                         .is_some_and(|owner| module_value_classes.contains_key(&owner)),
-                    file: callable.owner.is_none()
-                        && callable.placement == krusty::ir::IrStaticPlacement::Package,
+                    file: callable.owner.is_none(),
                     module_default_call,
                     semantic_default,
                 },
